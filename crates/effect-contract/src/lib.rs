@@ -1665,7 +1665,7 @@ impl<'a> EffectProcessBlock<'a> {
     /// cut-off: the effect would apply `Left p v` and refuse `Right p v`, the witness would still
     /// hold, and the mono collapse would render the left channel's state for the right one. A
     /// window equal to the capacity cannot stage a span the effect refuses on capacity. A smaller
-    /// one would be sound for the pair but is refused too: it drops records the queue admitted.
+    /// one would be sound for the pair but is refused too: it would drop a cell the lane read.
     ///
     /// # Errors
     ///

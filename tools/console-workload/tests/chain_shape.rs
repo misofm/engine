@@ -1500,11 +1500,12 @@ fn re_equal_designed_words_after_a_one_channel_retarget_never_re_engage() {
                 ));
             }
             if block == SWITCH + 2 {
-                // The words agree again: both channels are given the value the left one has.
+                // The words agree again: the right channel is given the value the left one has
+                // (a `PerLane` parameter has no `Both` cell, so a both-channel edit is a pair).
                 assert!(runtime.push_parameter(
                     channel,
                     0,
-                    effect_contract::ParameterChannel::Both,
+                    effect_contract::ParameterChannel::Right,
                     -24.0,
                 ));
             }

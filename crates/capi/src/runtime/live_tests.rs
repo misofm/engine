@@ -1785,6 +1785,8 @@ fn upsert(
 /// fed the same source, with its effect producers.
 struct LaneReference {
     reference: Reference,
+    /// The plan's gate handle: the effects' values are cells, written under a stamp of it.
+    gate: engine::realtime::PlanRevisionGate,
     effects: Vec<host_core::EffectControlProducer>,
 }
 
@@ -1792,7 +1794,7 @@ impl LaneReference {
     fn new(document: &str) -> Self {
         let caps = prepare_caps(limits());
         let compiled = host_core::compile_host_session(document, &caps).expect("lane compile");
-        let (host, handles) = prepare_host_runtime_with_live_lanes(
+        let (mut host, handles) = prepare_host_runtime_with_live_lanes(
             &compiled,
             &caps,
             &HostLiveControlRequest {
@@ -1804,7 +1806,12 @@ impl LaneReference {
             &host_core::LiveValuesSuperseded::default(),
         )
         .expect("lane prepare");
+        let gate = host
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
         Self {
+            gate,
             reference: Reference {
                 plan: host.plan,
                 sources: host.sources,
@@ -1826,8 +1833,8 @@ impl LaneReference {
         channel: effect_contract::ParameterChannel,
         value: f32,
     ) {
-        let producer = self
-            .effects
+        let Self { effects, gate, .. } = self;
+        let producer = effects
             .iter_mut()
             .find(|producer| &*producer.track_id == track_id && &*producer.effect_id == effect_id)
             .expect("effect producer");
@@ -1837,13 +1844,45 @@ impl LaneReference {
             .iter()
             .position(|parameter| parameter.id.0 == parameter_id)
             .expect("declared parameter") as u32;
-        producer
-            .try_push(effect_contract::EffectControlRecord::Parameter {
+        Self::write_cell(
+            producer,
+            gate,
+            effect_contract::EffectControlRecord::Parameter {
                 parameter_index,
                 channel,
                 value,
-            })
-            .expect("reference effect queue room");
+            },
+        );
+    }
+
+    /// One transaction on `producer`: stamp the next revision on the plan's gate, write `record`
+    /// to its cell, publish the revision.
+    fn write_cell(
+        producer: &mut host_core::EffectControlProducer,
+        gate: &mut engine::realtime::PlanRevisionGate,
+        record: effect_contract::EffectControlRecord,
+    ) {
+        let revision = gate.last_published() + 1;
+        let stamp = gate.stamp(revision).expect("a legal revision");
+        producer
+            .write(stamp, record)
+            .expect("the reference effect has a cell for the record");
+        gate.publish(revision);
+    }
+
+    /// One record to the instance `effect_id` of `track_id`.
+    fn write(
+        &mut self,
+        track_id: &str,
+        effect_id: &str,
+        record: effect_contract::EffectControlRecord,
+    ) {
+        let Self { effects, gate, .. } = self;
+        let producer = effects
+            .iter_mut()
+            .find(|producer| &*producer.track_id == track_id && &*producer.effect_id == effect_id)
+            .expect("effect producer");
+        Self::write_cell(producer, gate, record);
     }
 }
 
@@ -2085,175 +2124,6 @@ fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
     assert_eq!(parameter_readback(&mut rebuilt), after);
 }
 
-/// The value each eligible parameter is set to: a live (`Block`), continuous parameter's
-/// midpoint, or its minimum when the midpoint is its default.
-fn eligible_values(
-    descriptor: &effect_contract::EffectDescriptor,
-) -> Vec<(u32, session::ParameterUnit, f32)> {
-    use effect_contract::{AutomationRate, ParameterDomain, ParameterUnit as Unit};
-    descriptor
-        .parameters
-        .iter()
-        .filter(|parameter| {
-            parameter.automatable
-                && parameter.automation_rate == AutomationRate::Block
-                && parameter.domain == ParameterDomain::Continuous
-        })
-        .map(|parameter| {
-            let (minimum, maximum) = (
-                parameter.minimum.expect("continuous minimum"),
-                parameter.maximum.expect("continuous maximum"),
-            );
-            let middle = 0.5 * (minimum + maximum);
-            let value = if middle == parameter.default_value {
-                minimum
-            } else {
-                middle
-            };
-            let unit = match parameter.unit {
-                Unit::Db => session::ParameterUnit::Db,
-                Unit::Hz => session::ParameterUnit::Hz,
-                Unit::Milliseconds => session::ParameterUnit::Milliseconds,
-                Unit::Samples => session::ParameterUnit::Samples,
-                Unit::Linear => session::ParameterUnit::Linear,
-                Unit::Ratio => session::ParameterUnit::Ratio,
-            };
-            (parameter.id.0, unit, value)
-        })
-        .collect()
-}
-
-fn effect_room(rig: &Rig, epoch: Epoch, track_id: &str, effect_id: &str) -> usize {
-    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
-    let epoch = match epoch {
-        Epoch::Current => snapshot.provider_epoch,
-        Epoch::Pending => *snapshot
-            .pending_provider_epochs
-            .last()
-            .expect("a pending candidate"),
-    };
-    snapshot
-        .effect_rooms
-        .iter()
-        .find(|(row_epoch, track, effect, _)| {
-            *row_epoch == epoch && &**track == track_id && &**effect == effect_id
-        })
-        .map(|&(.., room)| room)
-        .expect("effect producer")
-}
-
-/// #1264 gate 4. Red if a transaction whose records for one instance outnumber its queue's whole
-/// capacity returns `BACKPRESSURE` (forever: no render ever makes room for it) instead of taking
-/// the structural path; the boundary case, records equal to the capacity, stays live.
-#[test]
-fn an_effect_edit_larger_than_its_queue_rebuilds() {
-    let document = with_model(&long_session(10, 48_000), |model| {
-        let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
-        multiband.id = StableId::parse("mb").expect("multiband");
-        multiband.identity = session::EffectIdentity::Native {
-            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
-        };
-        multiband.params.clear();
-        multiband.bypass = false;
-        model.tracks[0].inserts.effects.push(multiband);
-    });
-    let descriptor = compile_children(&document, limits(), None)
-        .expect("multiband session")
-        .session
-        .test_providers()
-        .test_effects()
-        .iter()
-        .find(|producer| &*producer.effect_id == "mb")
-        .expect("multiband producer")
-        .descriptor;
-    let values = eligible_values(descriptor);
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert!(2 * values.len() > depth, "enough live per-lane parameters");
-    let edits = |count: usize| {
-        values[..count]
-            .iter()
-            .map(|&(parameter_id, unit, value)| {
-                upsert(
-                    "eq0",
-                    session::RackName::Inserts,
-                    "mb",
-                    parameter_id,
-                    session::ParameterChannel::Both,
-                    unit,
-                    value,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    // `depth / 2` per-lane parameters on both lanes: exactly the queue's capacity, live.
-    let mut rig = Rig::new(&document);
-    rig.step();
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "mb"), depth);
-    assert_eq!(rig.apply(&edits(depth / 2)), crate::RESULT_OK);
-    assert_eq!(rig.summary().3, 0, "a full-capacity edit is live");
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "mb"), 0);
-    drop(rig);
-
-    // One more parameter: it could never fit, so it rebuilds, and pushes nothing.
-    let mut rig = Rig::new(&document);
-    rig.step();
-    let (revision, ..) = rig.summary();
-    let larger = edits(depth / 2 + 1);
-    assert_eq!(rig.apply(&larger), crate::RESULT_OK);
-    let (after, _, _, pending) = rig.summary();
-    assert_eq!(
-        (after, pending),
-        (revision + 1, 1),
-        "a rebuild prepares a candidate"
-    );
-    assert_eq!(
-        effect_room(&rig, Epoch::Current, "eq0", "mb"),
-        depth,
-        "the rendering plan got no record"
-    );
-    assert_eq!(effect_room(&rig, Epoch::Pending, "eq0", "mb"), depth);
-}
-
-/// #1264 D3. Red if the room check skips the effect queues: a 17th single-record edit with no
-/// render between would be acked and then fail to push. A full effect lane is typed backpressure
-/// before anything changes, and a retry after one render succeeds.
-#[test]
-fn a_full_effect_lane_refuses_before_anything_changes() {
-    use session::{ParameterChannel, ParameterUnit, RackName};
-    let mut rig = Rig::new(&effect_session(10, 48_000));
-    rig.step();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    let threshold = |value: f32| {
-        [upsert(
-            "eq0",
-            RackName::Inserts,
-            "comp",
-            1,
-            ParameterChannel::Left,
-            ParameterUnit::Db,
-            value,
-        )]
-    };
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&threshold(-21.0 - edit as f32)),
-            crate::RESULT_OK,
-            "edit {edit}"
-        );
-    }
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), 0);
-    let before = refusal_state(&rig);
-    assert_eq!(rig.apply(&threshold(-40.0)), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure".to_vec());
-    assert_eq!(refusal_state(&rig), before);
-    assert_eq!(rig.summary().3, 0, "no rebuild");
-    rig.step();
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth);
-    assert_eq!(rig.apply(&threshold(-40.0)), crate::RESULT_OK);
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth - 1);
-}
-
 // Issue #1265: parametric EQ parameter edits through prepared targets.
 
 /// The nine-track EQ fixture at `sample_rate_hz`, with a source long enough for a whole run, an
@@ -2366,10 +2236,20 @@ impl LaneReference {
                 .expect("declared parameter") as u32;
             producer.edit_owner(index, channel, value).expect("edit");
         }
+        let revision = self.gate.last_published() + 1;
+        let stamp = self.gate.stamp(revision).expect("a legal revision");
+        let producer = self
+            .effects
+            .iter_mut()
+            .find(|producer| &*producer.track_id == track_id && &*producer.effect_id == effect_id)
+            .expect("EQ producer");
         producer
-            .publish_candidate_targets(base, &targets)
+            .publish_candidate_targets(stamp, base, &targets)
             .expect("reference publication");
-        producer.commit_owner().expect("reference commit");
+        self.gate.publish(revision);
+        self.eq_producer(track_id, effect_id)
+            .commit_owner()
+            .expect("reference commit");
     }
 }
 
@@ -2498,19 +2378,40 @@ fn owner_phase(rig: &Rig, track_id: &str, effect_id: &str) -> (u64, String) {
         .expect("EQ owner")
 }
 
-/// #1265 gate 3. Red if a refused transaction leaves an EQ owner begun or published: a fader
-/// lane's backpressure after the EQ owner's preflight, a full EQ lane, and a full EQ lane behind
-/// another begun owner each leave every owner, queue and the model as they were, and the retry
-/// after a render commits.
+/// How many writes an effect instance's bypass cell, parameter cells, then target cells, have
+/// taken in the current or the pending epoch (#1345 D1).
+fn effect_writes(rig: &Rig, epoch: Epoch, track_id: &str, effect_id: &str) -> Vec<u64> {
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let epoch = match epoch {
+        Epoch::Current => snapshot.provider_epoch,
+        Epoch::Pending => *snapshot
+            .pending_provider_epochs
+            .last()
+            .expect("a pending candidate"),
+    };
+    snapshot
+        .effect_cells
+        .iter()
+        .find(|(row_epoch, track, effect, _)| {
+            *row_epoch == epoch && &**track == track_id && &**effect == effect_id
+        })
+        .map(|(.., writes)| writes.clone())
+        .expect("effect producer")
+}
+
+/// #1265 gate 3, on cells (#1345 D5, D7). Red if a transaction refused after its EQ owners were
+/// begun leaves an owner begun or published, a target cell written, or the model changed: two
+/// owners are begun and preflighted (EQ edits on eq0 and on eq1), the commit is refused at the
+/// last fallible step, and every owner, every effect cell and the model are as they were; the
+/// retry commits both.
 #[test]
-fn a_refused_eq_transaction_leaves_its_owner_idle() {
+fn a_refused_eq_transaction_leaves_its_owners_idle_and_writes_no_cell() {
     use session::{ParameterChannel, ParameterUnit, RackName};
     let mut rig = Rig::new(&eq_session(48_000));
     rig.step();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    let gain = |value: f32| {
+    let gain = |track: &str, value: f32| {
         upsert(
-            "eq0",
+            track,
             RackName::Console,
             "eq",
             4,
@@ -2519,149 +2420,54 @@ fn a_refused_eq_transaction_leaves_its_owner_idle() {
             value,
         )
     };
-
-    // Each band-1 left gain edit designs one target: sixteen fill eq0's EQ lane, and the
-    // seventeenth is typed backpressure that changes nothing.
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&[gain(-1.0 - edit as f32)]),
-            crate::RESULT_OK,
-            "edit {edit}"
-        );
-    }
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 0);
+    let transaction = [
+        gain("eq0", 3.0),
+        gain("eq1", -20.0),
+        bypass_edit("eq1", RackName::Console, "eq", true),
+    ];
     let before = (refusal_state(&rig), effect_owners(&rig));
-    assert_eq!(rig.apply(&[gain(-20.0)]), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
-    assert_eq!(rig.summary().3, 0, "no rebuild");
-    rig.step();
-    assert_eq!(rig.apply(&[gain(-20.0)]), crate::RESULT_OK);
-    assert_eq!(
-        owner_phase(&rig, "eq0", "eq"),
-        (1 + depth as u64, "Idle".to_owned())
+    let cells = (
+        effect_writes(&rig, Epoch::Current, "eq0", "eq"),
+        effect_writes(&rig, Epoch::Current, "eq1", "eq"),
     );
-    drop(rig);
-
-    // Two begun owners (#1265 verdict MINOR 1): EQ edits on eq0 and on eq1 while eq1's EQ lane
-    // is full. eq0's owner is begun and preflighted before eq1's refuses, and both are discarded.
-    let mut rig = Rig::new(&eq_session(48_000));
-    rig.step();
-    let eq1_gain = |value: f32| {
-        upsert(
-            "eq1",
-            RackName::Console,
-            "eq",
-            4,
-            ParameterChannel::Left,
-            ParameterUnit::Db,
-            value,
-        )
-    };
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&[eq1_gain(-1.0 - edit as f32)]),
-            crate::RESULT_OK,
-            "eq1 edit {edit}"
-        );
-    }
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq1", "eq"), 0);
-    let before = (refusal_state(&rig), effect_owners(&rig));
-    let rooms = (
-        effect_room(&rig, Epoch::Current, "eq0", "eq"),
-        effect_room(&rig, Epoch::Current, "eq1", "eq"),
+    assert!(cells.0.iter().chain(&cells.1).all(|writes| *writes == 0));
+    crate::ffi::test_set_structural_faults(
+        rig.session,
+        [Some(TestStructuralFaultPhase::BeforeLivePush), None],
     );
-    let transaction = [gain(3.0), eq1_gain(-20.0)];
     assert_eq!(rig.apply(&transaction), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
     assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
     assert_eq!(
         (
-            effect_room(&rig, Epoch::Current, "eq0", "eq"),
-            effect_room(&rig, Epoch::Current, "eq1", "eq"),
+            effect_writes(&rig, Epoch::Current, "eq0", "eq"),
+            effect_writes(&rig, Epoch::Current, "eq1", "eq"),
         ),
-        rooms
+        cells,
+        "no target cell took a write"
     );
     assert_eq!(owner_phase(&rig, "eq0", "eq"), (0, "Idle".to_owned()));
-    assert_eq!(
-        owner_phase(&rig, "eq1", "eq"),
-        (depth as u64, "Idle".to_owned())
-    );
-    rig.step();
+    assert_eq!(owner_phase(&rig, "eq1", "eq"), (0, "Idle".to_owned()));
+    assert_eq!(rig.summary().3, 0, "no rebuild");
+
     assert_eq!(rig.apply(&transaction), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the retry is live");
     assert_eq!(owner_phase(&rig, "eq0", "eq"), (1, "Idle".to_owned()));
-    assert_eq!(
-        owner_phase(&rig, "eq1", "eq"),
-        (1 + depth as u64, "Idle".to_owned())
+    assert_eq!(owner_phase(&rig, "eq1", "eq"), (1, "Idle".to_owned()));
+    let written = (
+        effect_writes(&rig, Epoch::Current, "eq0", "eq"),
+        effect_writes(&rig, Epoch::Current, "eq1", "eq"),
     );
-}
-
-/// #1265 gate 4. Red if an EQ edit whose designed targets outnumber its queue's whole capacity
-/// returns `BACKPRESSURE` (forever) instead of taking the structural path; one whose targets fit
-/// stays live. The queue is capped at four by `maximum_automation_spans_per_block`.
-#[test]
-fn an_eq_edit_designing_more_targets_than_its_queue_rebuilds() {
-    use effect_contract::ParameterChannel::Both;
-    use session::{ParameterChannel, ParameterUnit, RackName};
-    let document = eq_session(48_000);
-    let small = CompileLimits {
-        maximum_automation_spans_per_block: 4,
-        ..limits()
-    };
-    // Band gains on both lanes: band 1's lanes differ (two targets), bands 2-4 share one each.
-    let gains = [4, 20, 36, 52];
-    let seeds = LaneReference::new(&document).eq_seeds("eq0", "eq");
-    let edits = |bands: usize| {
-        // Per lane: the fixture sets band 1's gain per lane, so a `Both` entry would duplicate it.
-        gains[..bands]
-            .iter()
-            .flat_map(|&parameter_id| {
-                [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
-                    upsert(
-                        "eq0",
-                        RackName::Console,
-                        "eq",
-                        parameter_id,
-                        channel,
-                        ParameterUnit::Db,
-                        -5.0,
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    let designed = |bands: usize| {
-        let edits: Vec<EqEdit> = gains[..bands]
-            .iter()
-            .map(|&parameter_id| (parameter_id, Both, -5.0))
-            .collect();
-        designed_eq_targets(48_000, &seeds, &edits).len()
-    };
-    assert_eq!((designed(3), designed(4)), (4, 5));
-
-    let mut rig = Rig::with_limits(&document, small);
-    rig.step();
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
-    assert_eq!(rig.apply(&edits(3)), crate::RESULT_OK);
-    assert_eq!(rig.summary().3, 0, "four targets are live");
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 0);
-    drop(rig);
-
-    let mut rig = Rig::with_limits(&document, small);
-    rig.step();
-    let (revision, ..) = rig.summary();
-    let owners = effect_owners(&rig);
-    assert_eq!(rig.apply(&edits(4)), crate::RESULT_OK);
-    let (after, _, _, pending) = rig.summary();
-    assert_eq!((after, pending), (revision + 1, 1), "five targets rebuild");
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
-    assert_eq!(effect_room(&rig, Epoch::Pending, "eq0", "eq"), 4);
-    let current: Vec<_> = effect_owners(&rig)
-        .into_iter()
-        .filter(|owner| owner.0 == owners[0].0)
-        .collect();
-    assert_eq!(current, owners, "the rendering plan's owners are untouched");
+    assert_eq!(
+        written.0.iter().sum::<u64>(),
+        1,
+        "eq0's left gain wrote one target cell"
+    );
+    assert_eq!(
+        written.1.iter().sum::<u64>(),
+        2,
+        "eq1's left gain wrote one target cell and its bypass one bypass cell"
+    );
+    assert_eq!(written.1[0], 1, "the bypass cell is the first");
 }
 
 /// #1265 gate 5. Red if the parameter readback keeps an EQ value's old state after a live edit,
@@ -2804,6 +2610,236 @@ fn live_effect_bypass_edits_render_like_a_rebuild() {
     }
 }
 
+/// Gate 1 of #1345: a paused host sends forty edits that change only the left channel of a
+/// compressor's threshold (a `PerLane` parameter, so one `Left` cell), then forty edits of one EQ
+/// band's gain on both channels (a `Both` target, so two cells), and none is refused for room or
+/// turned into a rebuild. One render applies the last of each, so the output equals a twin that
+/// made only the last of each, and `COUNTERS_GET` reports `LIVE_VALUES_SUPERSEDED` as 117: the 39
+/// writes the threshold cell lost, and the 39 each of the two target cells that a later write
+/// replaced before a block read them (#1312 D2's per-cell unit).
+///
+/// Test value: red if an effect lane is still a bounded queue (the seventeenth edit refuses or
+/// rebuilds), or if the counter misses a parameter cell or counts a `Both` target once.
+#[test]
+fn forty_effect_edits_of_each_kind_before_one_block_are_all_accepted_and_the_last_is_heard() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = with_model(&eq_session(48_000), |model| {
+        let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        for track in &mut model.tracks {
+            let mut compressor = template.clone();
+            compressor.id = StableId::parse("comp").expect("compressor");
+            compressor.identity = session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            };
+            compressor.params.clear();
+            compressor.bypass = false;
+            track.inserts.effects.push(compressor);
+        }
+    });
+    let threshold = |value: f32| {
+        upsert(
+            "eq0",
+            RackName::Inserts,
+            "comp",
+            1,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            value,
+        )
+    };
+    // A both-channel gain edit is one upsert per lane, which designs one `Both` target: two cells.
+    let gain = |value: f32| {
+        [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
+            upsert(
+                "eq0",
+                RackName::Console,
+                "eq",
+                4,
+                channel,
+                ParameterUnit::Db,
+                value,
+            )
+        })
+    };
+    let threshold_at = |edit: usize| -10.0 - edit as f32 * 0.5;
+    let gain_at = |edit: usize| 1.0 + edit as f32 * 0.25;
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    let mut quiet = Rig::new(&document);
+    rig.step();
+    twin.step();
+    quiet.step();
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    let (revision, _, epoch, _) = rig.summary();
+    for edit in 0..40 {
+        assert_eq!(
+            rig.apply(&[threshold(threshold_at(edit))]),
+            crate::RESULT_OK,
+            "threshold edit {edit}"
+        );
+    }
+    for edit in 0..40 {
+        assert_eq!(
+            rig.apply(&gain(gain_at(edit))),
+            crate::RESULT_OK,
+            "gain edit {edit}"
+        );
+    }
+    let (after, after_epoch, pending) = {
+        let summary = rig.summary();
+        (summary.0, summary.2, summary.3)
+    };
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 80, epoch, 0),
+        "eighty live revisions and no plan prepared"
+    );
+    // The threshold lane's `Left` cell took forty writes and its `Right` cell none; the gain's two
+    // target cells took forty each. (The first entry of each row is the bypass cell: no write.)
+    let comp = effect_writes(&rig, Epoch::Current, "eq0", "comp");
+    assert_eq!(comp.iter().sum::<u64>(), 40, "{comp:?}");
+    assert_eq!(comp.iter().filter(|writes| **writes != 0).count(), 1);
+    let eq = effect_writes(&rig, Epoch::Current, "eq0", "eq");
+    assert_eq!(eq.iter().sum::<u64>(), 80, "{eq:?}");
+    assert_eq!(eq.iter().filter(|writes| **writes == 40).count(), 2);
+
+    assert_eq!(twin.apply(&[threshold(threshold_at(39))]), crate::RESULT_OK);
+    assert_eq!(twin.apply(&gain(gain_at(39))), crate::RESULT_OK);
+    // The counter is the render side's: nothing has been read yet.
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    let blocks = u64::from(rig.latency()) / rig.quantum as u64 + 4;
+    let mut audible = false;
+    for block in 0..blocks {
+        let heard = rig.step();
+        assert_eq!(
+            bits(&heard),
+            bits(&twin.step()),
+            "block {block}: the last edit of each kind is heard"
+        );
+        audible |= bits(&heard) != bits(&quiet.step());
+        if block == 0 {
+            assert_eq!(
+                rig.counter(protocol::CounterId::LiveValuesSuperseded),
+                39 + 2 * 39
+            );
+        }
+    }
+    assert!(
+        audible,
+        "the edits change the output against an unedited run"
+    );
+    assert_eq!(
+        rig.counter(protocol::CounterId::LiveValuesSuperseded),
+        117,
+        "39 + 2 x 39, in the per-cell unit"
+    );
+    assert_eq!(twin.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    // Nothing is pending now: another block replaces nothing.
+    rig.step();
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 117);
+}
+
+/// Gate 2 of #1345: one transaction lifts a compressor's bypass and changes its threshold. Both
+/// are cells of one revision, so they land in one block: the C ABI plan renders, bit for bit, what
+/// a host-core plan with every live lane renders when it is given the bypass cell and the
+/// threshold cells before the same block.
+///
+/// Two controls make the bits mean something: a plan given only the lifted bypass, and one given
+/// only the new threshold, each render differently from the plan that got both.
+///
+/// Test value: an effect lane that applies the bypass cell and the parameter cells of one
+/// revision in different blocks, or ignores one of them (the output would equal a control's, or
+/// differ from the reference's, by the block of difference). Mutation (PR evidence): skip the
+/// bypass cell's read in `EffectControlLane::stage`.
+#[test]
+fn a_bypass_lifted_beside_a_parameter_renders_like_the_browsers_lane() {
+    use effect_contract::{
+        EffectControlRecord::Bypass, ParameterChannel::Left, ParameterChannel::Right,
+    };
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        let label = format!("{sample_rate_hz} Hz");
+        let document = with_model(&effect_session(10, sample_rate_hz), |model| {
+            let compressor = model.tracks[0]
+                .inserts
+                .effects
+                .iter_mut()
+                .find(|effect| effect.id.as_str() == "comp")
+                .expect("compressor");
+            compressor.bypass = true;
+        });
+        let model = parse_session_json(&document).expect("model");
+        let first = model.tracks[0].id.as_str();
+        let mut rig = Rig::new(&document);
+        let mut both = LaneReference::new(&document);
+        let mut lift_only = LaneReference::new(&document);
+        let mut threshold_only = LaneReference::new(&document);
+        for block in 0..window(rig.latency(), 0, rig.quantum) {
+            let live = bits(&rig.step());
+            for (name, reference) in [
+                ("both", &mut both),
+                ("lift only", &mut lift_only),
+                ("threshold only", &mut threshold_only),
+            ] {
+                assert_eq!(
+                    live,
+                    bits(&reference.reference.step()),
+                    "{label}: {name}, warm-up {block}"
+                );
+            }
+        }
+        let edits = [
+            bypass_edit(first, RackName::Inserts, "comp", false),
+            upsert(
+                first,
+                RackName::Inserts,
+                "comp",
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Db,
+                -40.0,
+            ),
+        ];
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+        let (after, _, after_epoch, pending) = rig.summary();
+        assert_eq!(
+            (after, after_epoch, pending),
+            (revision + 1, epoch, 0),
+            "{label}: one live revision and no plan prepared"
+        );
+        for reference in [&mut both, &mut threshold_only] {
+            reference.push(first, "comp", 1, Left, -40.0);
+            reference.push(first, "comp", 1, Right, -40.0);
+        }
+        for reference in [&mut both, &mut lift_only] {
+            reference.write(first, "comp", Bypass(false));
+        }
+
+        let (mut differs_from_lift, mut differs_from_threshold) = (false, false);
+        for block in 0..12 {
+            let live = bits(&rig.step());
+            let expected = both.reference.step();
+            assert!(
+                expected.iter().any(|sample| *sample != 0.0),
+                "{label}: block {block} carries signal"
+            );
+            assert_eq!(
+                live,
+                bits(&expected),
+                "{label}: block {block} after the edit"
+            );
+            differs_from_lift |= live != bits(&lift_only.reference.step());
+            differs_from_threshold |= live != bits(&threshold_only.reference.step());
+        }
+        assert!(
+            differs_from_lift && differs_from_threshold,
+            "{label}: the lifted bypass and the new threshold are each audible"
+        );
+        assert_eq!(rig.summary().2, 0, "{label}: the first epoch still renders");
+    }
+}
+
 /// #1266 D2 on the EQ, at one rate.
 fn live_eq_bypass_pcm_shape(sample_rate_hz: u32) {
     use effect_contract::ParameterChannel::Left;
@@ -2833,10 +2869,11 @@ fn live_eq_bypass_pcm_shape(sample_rate_hz: u32) {
     ];
     assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
     assert_eq!(rig.summary().3, 0, "{label}: live");
-    lanes
-        .eq_producer("eq0", "eq")
-        .try_push(effect_contract::EffectControlRecord::Bypass(true))
-        .expect("reference bypass");
+    lanes.write(
+        "eq0",
+        "eq",
+        effect_contract::EffectControlRecord::Bypass(true),
+    );
     lanes.publish_eq("eq0", "eq", &[(4, Left, 3.0)]);
     for block in 0..12 {
         assert_eq!(
@@ -2855,47 +2892,6 @@ fn a_live_eq_bypass_beside_a_gain_change_renders_like_the_browsers_lane() {
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
         live_eq_bypass_pcm_shape(sample_rate_hz);
     }
-}
-
-/// #1266 D2, the acked-batch question. Red if the room check counts an EQ's targets without its
-/// `Bypass` record: with room for the targets alone, the bypass would be pushed and the
-/// publication would then fail after the transaction was admitted. It is typed backpressure
-/// instead, before anything changes, and a retry after one render succeeds.
-#[test]
-fn an_eq_bypass_and_targets_without_room_for_both_refuse_before_anything_changes() {
-    use session::{ParameterChannel, ParameterUnit, RackName};
-    let mut rig = Rig::new(&eq_session(48_000));
-    rig.step();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    let gain = |value| {
-        upsert(
-            "eq0",
-            RackName::Console,
-            "eq",
-            4,
-            ParameterChannel::Left,
-            ParameterUnit::Db,
-            value,
-        )
-    };
-    // One left-lane band gain designs one target: fill the queue to one free slot.
-    for step in 1..depth {
-        assert_eq!(rig.apply(&[gain(step as f32 / 8.0)]), crate::RESULT_OK);
-    }
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 1);
-    let before = refusal_state(&rig);
-    let owners = effect_owners(&rig);
-    let edits = [
-        bypass_edit("eq0", RackName::Console, "eq", true),
-        gain(-3.0),
-    ];
-    assert_eq!(rig.apply(&edits), crate::RESULT_BACKPRESSURE);
-    assert_eq!(refusal_state(&rig), before, "the refusal changes nothing");
-    assert_eq!(effect_owners(&rig), owners, "every owner is left as it was");
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 1);
-    rig.step();
-    assert_eq!(rig.apply(&edits), crate::RESULT_OK);
-    assert_eq!(rig.summary().3, 0, "the retry is live");
 }
 
 /// #1266 gate 3, decision 14 F4. Red if the C ABI acks a multiband compressor bypass change, in
@@ -2982,53 +2978,6 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
             "bypass {bypass}: the change is audible"
         );
     }
-}
-
-/// #1266 verdict MINOR 1. Red if the over-capacity check leaves an EQ's `Bypass` record out of the
-/// count: a bypass beside edits whose designed targets exactly fill the queue could never fit, so
-/// it must rebuild, never return an endless `BACKPRESSURE`.
-#[test]
-fn an_eq_bypass_beside_targets_filling_its_queue_rebuilds() {
-    use session::{ParameterChannel, ParameterUnit, RackName};
-    let document = eq_session(48_000);
-    let small = CompileLimits {
-        maximum_automation_spans_per_block: 4,
-        ..limits()
-    };
-    // Bands 1-3 gains on both lanes design four targets (gate 4), filling the queue of four.
-    let mut edits: Vec<SessionEdit> = [4, 20, 36]
-        .iter()
-        .flat_map(|&parameter_id| {
-            [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
-                upsert(
-                    "eq0",
-                    RackName::Console,
-                    "eq",
-                    parameter_id,
-                    channel,
-                    ParameterUnit::Db,
-                    -5.0,
-                )
-            })
-        })
-        .collect();
-    edits.insert(0, bypass_edit("eq0", RackName::Console, "eq", true));
-    let mut rig = Rig::with_limits(&document, small);
-    rig.step();
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
-    let (revision, ..) = rig.summary();
-    assert_eq!(
-        rig.apply(&edits),
-        crate::RESULT_OK,
-        "admitted, not backpressure"
-    );
-    let (after, _, _, pending) = rig.summary();
-    assert_eq!(
-        (after, pending),
-        (revision + 1, 1),
-        "a bypass and four targets rebuild"
-    );
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
 }
 
 // Issue #1335: stored automation on an effect parameter the plan keeps prepared.

@@ -103,13 +103,6 @@
           "admitted": 0,
           "appliedAtSample": "256"
         },
-        "flood": {
-          "result": 6,
-          "reason": 8,
-          "rejectedIndex": 0,
-          "admitted": 0,
-          "appliedAtSample": "256"
-        },
         "unknownParameter": {
           "result": 1,
           "reason": 5,

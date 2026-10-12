@@ -95,8 +95,27 @@ fn live_controls(leg: Leg) -> HostLiveControlRequest {
 
 struct Session {
     prepared: PreparedHost,
+    /// The plan's gate handle: live values are cells, written under a stamp of it.
+    gate: engine::realtime::PlanRevisionGate,
     handles: HostLiveControlHandles,
     block: usize,
+}
+
+/// One transaction: write `record` to the addressed effect's cell under a stamp of the plan's
+/// gate and publish the revision.
+fn write_cell(session: &mut Session, track_id: &str, record: EffectControlRecord) {
+    let Session { handles, gate, .. } = session;
+    let producer = handles
+        .effect_controls
+        .iter_mut()
+        .find(|producer| producer.track_id.as_ref() == track_id)
+        .expect("a control channel");
+    let revision = gate.last_published() + 1;
+    let stamp = gate.stamp(revision).expect("a legal revision");
+    producer
+        .write(stamp, record)
+        .expect("the compressor has a cell for the record");
+    gate.publish(revision);
 }
 
 fn prepare(leg: Leg) -> Session {
@@ -104,7 +123,7 @@ fn prepare(leg: Leg) -> Session {
 }
 
 fn prepare_from(document: &str, leg: Leg) -> Session {
-    let (_session, prepared, handles) =
+    let (_session, mut prepared, handles) =
         prepare_host_session_with_live_controls(document, &caps(), &live_controls(leg))
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -114,8 +133,13 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
         prepared.report.effect_bank_scratch_bytes > 0,
         "the cohort planner bound at least one homogeneous bank on this host"
     );
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     Session {
         prepared,
+        gate,
         handles,
         block: 0,
     }
@@ -167,12 +191,8 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
     let applied_at = (session.block * QUANTUM) as u64;
     for producer in session.handles.effect_controls.iter_mut() {
         producer
-            .try_push(EffectControlRecord::Observe {
-                tap_index: 0,
-                armed,
-                window_blocks,
-            })
-            .expect("room in the bounded queue");
+            .try_push_observe(0, armed, window_blocks)
+            .expect("room in the observation queue");
     }
     applied_at
 }
@@ -437,20 +457,16 @@ fn the_first_window_at_or_after_applied_at_sample_reflects_the_command() {
     // One batch, drained by one `stage` call at the top of one block: the threshold retarget and
     // the window it lands in share a timeline by construction rather than by two clocks agreeing.
     let applied_at = (session.block * QUANTUM) as u64;
-    let producer = session
-        .handles
-        .effect_controls
-        .iter_mut()
-        .find(|producer| producer.track_id.as_ref() == "comp0")
-        .expect("a control channel");
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-        producer
-            .try_push(EffectControlRecord::Parameter {
+        write_cell(
+            &mut session,
+            "comp0",
+            EffectControlRecord::Parameter {
                 parameter_index: THRESHOLD_INDEX,
                 channel,
                 value: -30.0,
-            })
-            .expect("room");
+            },
+        );
     }
 
     // Collect every window boundary from here on, so tiling is checked rather than assumed.
@@ -662,7 +678,7 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         observation_taps: 4,
         master_track: Some(0),
     };
-    let (_session, prepared, handles) =
+    let (_session, mut prepared, handles) =
         prepare_host_session_with_live_controls(DYNAMIC_SESSION, &caps(), &request).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
@@ -670,8 +686,13 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         prepared.report.effect_bank_scratch_bytes, 0,
         "a single track cannot fill a cohort, so this is the per-node scalar path"
     );
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     let mut session = Session {
         prepared,
+        gate,
         handles,
         block: 0,
     };
@@ -692,20 +713,16 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
     let mut published = Vec::new();
     for window in 0..BLOCKS / WINDOW_BLOCKS as usize {
         if window * WINDOW_BLOCKS as usize == RETARGET_BLOCK {
-            let producer = session
-                .handles
-                .effect_controls
-                .iter_mut()
-                .find(|producer| producer.track_id.as_ref() == "comp0")
-                .expect("a control channel");
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-                producer
-                    .try_push(EffectControlRecord::Parameter {
+                write_cell(
+                    &mut session,
+                    "comp0",
+                    EffectControlRecord::Parameter {
                         parameter_index: THRESHOLD_INDEX,
                         channel,
                         value: -30.0,
-                    })
-                    .expect("room");
+                    },
+                );
             }
         }
         let _ = render(&mut session, WINDOW_BLOCKS as usize);

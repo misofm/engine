@@ -266,9 +266,9 @@ pub struct TestTransactionSnapshot<Row> {
     /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
     /// matrix)`. A cell's count is its write sequence (#1312 D3).
     pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
-    /// How many writes every effect producer's parameter cells, then target cells, have taken,
-    /// current epoch first, then each pending candidate: `(epoch, strip ID, effect instance ID,
-    /// writes per cell)`. A cell's count is its write sequence (#1345 D1).
+    /// How many writes every effect producer's bypass cell, parameter cells, then target cells,
+    /// have taken, current epoch first, then each pending candidate: `(epoch, strip ID, effect
+    /// instance ID, writes per cell)`. A cell's count is its write sequence (#1345 D1).
     pub effect_cells: Vec<(u64, Box<str>, Box<str>, Vec<u64>)>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value

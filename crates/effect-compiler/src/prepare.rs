@@ -815,14 +815,19 @@ impl EffectControlProducer {
     ///
     /// A record the lane has no cell for is refused here: a parameter that is not `Block`-rate or
     /// whose channel does not match its policy, a parameter of a prepared-target owner (its
-    /// parameters ride its targets), a target outside the owner's slots, an observation
-    /// subscription (it rides the queue, [`Self::try_push_observe`]). The transaction that
-    /// writes preflights every record before its first write (D15-2 condition 3).
+    /// parameters ride its targets), an observation subscription (it rides the queue,
+    /// [`Self::try_push_observe`]), and any prepared target: a target reaches its cells only
+    /// through the owner's transaction ([`Self::publish_candidate_targets`]), so no caller can
+    /// bypass the candidate and revision admission. The transaction that writes preflights every
+    /// record before its first write (D15-2 condition 3).
     ///
     /// # Errors
     ///
     /// [`EffectWriteRefusal`].
     pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectWriteRefusal> {
+        if matches!(record, EffectControlRecord::PreparedTarget(_)) {
+            return Err(EffectWriteRefusal::Target);
+        }
         self.writer.check(&record)
     }
 
@@ -839,6 +844,7 @@ impl EffectControlProducer {
         stamp: LiveStamp<'_>,
         record: EffectControlRecord,
     ) -> Result<(), EffectWriteRefusal> {
+        self.preflight(record)?;
         self.writer.write(stamp, record)
     }
 

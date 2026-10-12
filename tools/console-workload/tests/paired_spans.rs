@@ -1,11 +1,13 @@
-//! Issue #1004: the mono collapse survives a both-channel write that arrives as two records.
+//! Issue #1004, on decision 15's cells (issue #1345): the mono collapse survives a both-channel
+//! write that arrives as two records.
 //!
 //! The web host lowers a `PerLane` parameter's "both channels" command to a `Left` record and a
-//! `Right` record, and before this issue each one cleared the lane's `LIVE` witness term at the
-//! drain, so the first compressor or limiter touch on a mono stem retired its whole bank's collapse
-//! for the rest of the plan. `EffectControlLane::stage` now defers a one-channel parameter record
-//! to the end of its drain and keeps `LIVE` when the drain's staged spans pair (the drain-level
-//! rule and its exhaustive model are `crates/effect-contract/tests/paired_spans.rs`).
+//! `Right` record, and before #1004 each one cleared the lane's `LIVE` witness term at the drain,
+//! so the first compressor or limiter touch on a mono stem retired its whole bank's collapse for
+//! the rest of the plan. Each record is a write to its own cell now, and `EffectControlLane::stage`
+//! folds the witness from the cells' final contents: two cells applied in one block with equal
+//! words are one both-channel write and keep `LIVE`, for parameters and for EQ targets alike (the
+//! drain-level rule and its exhaustive model are `crates/effect-contract/tests/paired_spans.rs`).
 //!
 //! That is sound only if a kept drain leaves the two channels in bit-equal state, so this file is
 //! the rendered proof, in four parts:
@@ -34,17 +36,18 @@ use console_workload::{ObservationArm, PlanConfig, SessionRuntime, Workload};
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, ChannelSymmetryWitness,
-    EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectDescriptor,
-    EffectProcessBlock, EffectProgramKey, EffectQuality, EffectTargetError, EffectTargetRequest,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffect, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessBlockError, ResetKind, ResponseAnalysisError,
-    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, default_initial_values,
+    EffectBankProcessBlock, EffectCellWriter, EffectControlLane, EffectControlRecord,
+    EffectDescriptor, EffectLaneShape, EffectLaneSpec, EffectProcessBlock, EffectProgramKey,
+    EffectQuality, EffectTargetError, EffectTargetRequest, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ObservationSample, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectBank,
+    PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+    ProcessBlockError, ResetKind, ResponseAnalysisError, ResponseSnapshotRequest,
+    ResponseSnapshotSummary, SeamSide, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, default_initial_values, effect_control_lane,
 };
-use engine::realtime::{LiveSnapshot, Producer, QueueGeneration, RenderError, bounded_spsc};
+use engine::realtime::{GatePin, LiveValuesSuperseded, RenderError, RevisionGate};
 use lane::Backend;
 use rack::{
     AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage,
@@ -53,8 +56,8 @@ use rack::{
 
 const RATE: u32 = 48_000;
 const FRAMES: u32 = 128;
-/// Live-control queue depth per lane, and the automation capacity every bank is prepared with, so
-/// the staging window is exactly the queue (preparation refuses a deeper queue in production).
+/// The automation capacity every bank is prepared with, which is its staging window. It holds
+/// every live cell of every effect here (the compressor's fourteen are the most).
 const QUEUE: usize = 16;
 
 const EQ: &str = "miso.parametric-eq";
@@ -446,7 +449,8 @@ struct Slot {
     bank: SharedBank,
     /// The bank's program key, from its bind result: the bank holds no metadata (issue #1461).
     key: EffectProgramKey,
-    producers: Vec<Producer<EffectControlRecord>>,
+    /// One cell writer per lane.
+    producers: Vec<EffectCellWriter>,
 }
 
 /// One production chain over real banks: `slots` console effect stages and a seam-side fader.
@@ -454,6 +458,29 @@ struct Rig {
     chain: BankChain,
     slots: Vec<Slot>,
     lanes: usize,
+    /// The chain's revision gate: every write is a transaction stamped on it and published, and
+    /// every block reads under its snapshot.
+    gate: RevisionGate,
+    pin: GatePin,
+}
+
+impl Rig {
+    /// `records` as one transaction on one lane: preflight each, stamp the next revision, write
+    /// them all, publish.
+    fn write(&mut self, slot: usize, lane: usize, records: &[EffectControlRecord]) {
+        let writer = &mut self.slots[slot].producers[lane];
+        for record in records {
+            writer
+                .check(record)
+                .expect("the lane has a cell for the record");
+        }
+        let revision = self.pin.last_published() + 1;
+        let stamp = self.pin.stamp(revision).expect("a legal revision");
+        for record in records {
+            writer.write(stamp, *record).expect("preflighted");
+        }
+        self.pin.publish(&self.gate, revision);
+    }
 }
 
 impl Rig {
@@ -468,27 +495,33 @@ impl Rig {
             } = bind(*fx, width)?;
             let bound = metadata.clone();
             let metadata = metadata.program_key;
+            let descriptor = factory(fx.id()).descriptor();
+            let target_slots = factory(fx.id())
+                .target_preparation()
+                .map_or(0, |capability| capability.target_slots());
+            let shape = || EffectLaneShape::from_descriptor(descriptor, target_slots);
             assert!(
-                metadata.automation_capacity as usize >= QUEUE,
-                "{}: the staging window must hold the whole queue",
+                metadata.automation_capacity as usize >= shape().parameter_cells(),
+                "{}: the staging window must hold every live cell",
                 fx.id()
             );
             let latency = usize::try_from(metadata.latency.0).expect("latency");
             let shared = SharedBank(Arc::new(Mutex::new(Shared { bank, report: None })));
             let mut producers = Vec::new();
+            let superseded = LiveValuesSuperseded::new();
             let control: Vec<Option<EffectControlLane>> = (0..lanes)
                 .map(|_| {
-                    let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
-                        core::num::NonZeroUsize::new(QUEUE).expect("depth"),
-                        QueueGeneration(0),
+                    let (writer, lane) = effect_control_lane(
+                        EffectLaneSpec {
+                            shape: shape(),
+                            bypass: false,
+                            observation_depth: 0,
+                        },
+                        &superseded,
                     )
-                    .expect("queue");
-                    producers.push(producer);
-                    Some(if *fx == Fx::Eq {
-                        EffectControlLane::new_with_target_staging(consumer, false)
-                    } else {
-                        EffectControlLane::new(consumer, false)
-                    })
+                    .expect("a lane");
+                    producers.push(writer);
+                    Some(lane)
                 })
                 .collect();
             let stage = LiveControlEffectBankStage::new(
@@ -527,10 +560,13 @@ impl Rig {
         chain.arm_mono_collapse(true);
         chain.force_mono_collapse_off(forced_dual);
         assert!(chain.can_collapse(), "every slot has a one-plane body");
+        let (gate, pin) = RevisionGate::pair(0);
         Some(Self {
             chain,
             slots,
             lanes,
+            gate,
+            pin,
         })
     }
 }
@@ -599,14 +635,8 @@ impl EqOwner {
 /// One thing a scenario does between two blocks, to both rigs alike.
 #[derive(Clone, Copy, Debug)]
 enum Write {
-    /// One live-control parameter record into one lane's queue.
+    /// One live-control parameter record into one lane's cell.
     Record {
-        slot: usize,
-        lane: usize,
-        record: EffectControlRecord,
-    },
-    /// A record the producer must refuse because the queue is full.
-    Refused {
         slot: usize,
         lane: usize,
         record: EffectControlRecord,
@@ -979,10 +1009,11 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
 
         if fx == Fx::Eq {
             // VERIFY-AUTOMATION F1, through the real EQ owner: left-only 4.5 dB, both 1.5 dB,
-            // right-only 4.5 dB in one drain. The FIFO is `[L A, Both C, R A]`, and it leaves the
-            // channels at C and A: it must retire, and it must render the dual bits.
+            // right-only 4.5 dB written before one block. The writes are `[L A, Both C, R A]`,
+            // and the cells end with the channels at C and A: it must retire, and it must render
+            // the dual bits.
             let mut scenario = Scenario::new(
-                format!("{label}: the F1 target FIFO on slot {slot}"),
+                format!("{label}: the F1 target cells on slot {slot}"),
                 12,
                 Expect::RetiredAt(WRITE),
             )
@@ -997,12 +1028,13 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
             out.push(scenario);
 
             // The same symmetric edit made the harness's way, one owner transaction per channel:
-            // two one-channel targets with equal words. The channels end equal, and the rule
-            // (spans only) still retires: targets are never deferred.
+            // two one-channel targets with equal words, in two cells. The channels end equal, so
+            // the block applies them as one both-channel target and keeps the collapse (#1345
+            // D3): the witness folds from the cells' final contents.
             let mut scenario = Scenario::new(
                 format!("{label}: per-channel EQ owner edits on slot {slot}"),
                 12,
-                Expect::RetiredAt(WRITE),
+                Expect::Kept,
             );
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 one_channel(&mut scenario, WRITE, (slot, fx), 2, EQ_GAIN, channel, 4.5);
@@ -1048,20 +1080,6 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
                 WRITE,
                 record(slot, 2, parameter + 1, ParameterChannel::Right, value),
             );
-            out.push(scenario);
-
-            // A `Both` span on a `PerLane` parameter is refused on both channels by every launch
-            // effect, so it needs no twin and moves nothing; the pair beside it is kept.
-            let mut scenario = Scenario::new(
-                format!("{label}: a Both span beside a pair on slot {slot}"),
-                12,
-                Expect::Kept,
-            );
-            scenario.at(
-                WRITE,
-                record(slot, 0, other, ParameterChannel::Both, other_low),
-            );
-            both_channel(&mut scenario, WRITE, slot, fx, 0, parameter, value);
             out.push(scenario);
         }
 
@@ -1118,40 +1136,28 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
             .filter(|(_, parameter)| parameter.automatable)
             .map(|(index, parameter)| (index as u32, parameter.default_value))
             .collect::<Vec<_>>();
-        // A queue at capacity: sixteen records of pairs fill it, the seventeenth is refused at
-        // the producer, and the drain pairs everything that was admitted.
+        // More writes than any queue could hold: every parameter's pair written four times over
+        // before one block. A cell has no capacity to overflow, the last pair of each parameter
+        // is what is read, and the drain pairs them all.
         let mut scenario = Scenario::new(
-            format!("{label}: a queue at capacity holding only pairs"),
+            format!("{label}: a long run of pairs before one block"),
             10,
             Expect::Kept,
         );
-        for pair in 0..QUEUE / 2 {
+        for pair in 0..4 * QUEUE {
             let (parameter, value) = parameters[pair % parameters.len()];
             both_channel(&mut scenario, WRITE, slot, fx, 0, parameter, value);
         }
-        scenario.at(
-            WRITE,
-            Write::Refused {
-                slot,
-                lane: 0,
-                record: EffectControlRecord::Parameter {
-                    parameter_index: 0,
-                    channel: ParameterChannel::Left,
-                    value: parameters[0].1,
-                },
-            },
-        );
         out.push(scenario);
 
-        // A queue at capacity that refuses the second half of a pair: the drain sees a lone
-        // write and retires. The refusal is at the producer, before anything is acknowledged.
+        // The same run ending in a lone half: the block sees a pair and a lone write and retires.
         let mut scenario = Scenario::new(
-            format!("{label}: a queue at capacity refusing the second half of a pair"),
+            format!("{label}: a long run of pairs ending in a lone half"),
             10,
             Expect::RetiredAt(WRITE),
         )
         .asymmetric();
-        for pair in 0..QUEUE / 2 - 1 {
+        for pair in 0..4 * QUEUE {
             let (parameter, value) = parameters[pair % parameters.len()];
             both_channel(&mut scenario, WRITE, slot, fx, 0, parameter, value);
         }
@@ -1160,23 +1166,7 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
         let moved = if parameters[0].1 == low { high } else { low };
         scenario.at(
             WRITE,
-            record(slot, 0, parameter, ParameterChannel::Both, moved),
-        );
-        scenario.at(
-            WRITE,
             record(slot, 0, parameter, ParameterChannel::Left, moved),
-        );
-        scenario.at(
-            WRITE,
-            Write::Refused {
-                slot,
-                lane: 0,
-                record: EffectControlRecord::Parameter {
-                    parameter_index: parameter,
-                    channel: ParameterChannel::Right,
-                    value: moved,
-                },
-            },
         );
         out.push(scenario);
     }
@@ -1205,20 +1195,7 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
             match *write {
                 Write::Record { slot, lane, record } => {
                     for rig in [&mut collapsing, &mut reference] {
-                        rig.slots[slot].producers[lane]
-                            .try_push(record)
-                            .unwrap_or_else(|_| {
-                                panic!("{}: block {block}: queue full", scenario.name)
-                            });
-                    }
-                }
-                Write::Refused { slot, lane, record } => {
-                    for rig in [&mut collapsing, &mut reference] {
-                        assert!(
-                            rig.slots[slot].producers[lane].try_push(record).is_err(),
-                            "{}: the queue must be at capacity",
-                            scenario.name
-                        );
+                        rig.write(slot, lane, &[record]);
                     }
                 }
                 Write::EqEdit {
@@ -1228,14 +1205,14 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
                     channel,
                     value,
                 } => {
-                    for target in owners[slot].edit(lane, parameter, channel, value) {
-                        for rig in [&mut collapsing, &mut reference] {
-                            rig.slots[slot].producers[lane]
-                                .try_push(EffectControlRecord::PreparedTarget(target))
-                                .unwrap_or_else(|_| {
-                                    panic!("{}: block {block}: queue full", scenario.name)
-                                });
-                        }
+                    // One owner transaction: every target the edit designs, written together.
+                    let targets: Vec<EffectControlRecord> = owners[slot]
+                        .edit(lane, parameter, channel, value)
+                        .into_iter()
+                        .map(EffectControlRecord::PreparedTarget)
+                        .collect();
+                    for rig in [&mut collapsing, &mut reference] {
+                        rig.write(slot, lane, &targets);
                     }
                 }
                 Write::Reset { slot, kind } => {
@@ -1276,23 +1253,15 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
         let mut reference_planes = collapsing_planes.clone();
         let before = collapsing.chain.collapses();
         let first_sample = block * u64::from(FRAMES);
+        let snapshot = collapsing.gate.snapshot();
         collapsing
             .chain
-            .run(
-                &mut collapsing_planes,
-                FRAMES,
-                first_sample,
-                LiveSnapshot::ALL,
-            )
+            .run(&mut collapsing_planes, FRAMES, first_sample, snapshot)
             .expect("collapsing render");
+        let snapshot = reference.gate.snapshot();
         reference
             .chain
-            .run(
-                &mut reference_planes,
-                FRAMES,
-                first_sample,
-                LiveSnapshot::ALL,
-            )
+            .run(&mut reference_planes, FRAMES, first_sample, snapshot)
             .expect("reference render");
         let mono = collapsing.chain.collapses() > before;
         collapsed.push(mono);
@@ -1456,11 +1425,13 @@ fn the_chained_strip_renders_the_dual_bits_in_every_scenario() {
 }
 
 /// Every order of a mixed drain on the chained strip: one-channel, `Both` and paired writes in
-/// one drain, across the EQ's target FIFO and the compressor's and the limiter's spans.
+/// one block, across the EQ's target cells and the compressor's and the limiter's parameter
+/// cells.
 ///
-/// The expected answer is computed from the records, independently of the drain: a drain keeps
-/// the collapse exactly when it carries no one-channel target and every one-channel parameter
-/// write's final value is matched, by bits, by the other channel's final value.
+/// The expected answer is computed from the records, independently of the drain: a block keeps
+/// the collapse exactly when, for every EQ target slot written and every parameter written on
+/// one channel, the final value of the left cell equals the final value of the right cell by
+/// bits and both were written.
 #[test]
 fn every_order_of_a_mixed_drain_keeps_the_collapse_exactly_where_the_rule_does() {
     const WRITE: u64 = 3;
@@ -1517,13 +1488,25 @@ fn every_order_of_a_mixed_drain_keeps_the_collapse_exactly_where_the_rule_does()
                         6,
                         Expect::Kept,
                     );
-                    // The EQ's records interleave the spans' in the lane order the queue sees,
-                    // but each effect has its own queue, so only the per-queue order matters.
+                    // Each effect has its own cells, so only the order within an effect matters.
                     let mut owner = EqOwner::new(width.lanes() as usize);
-                    let mut one_channel_target = false;
+                    // The latest designed words per `(slot, channel)` cell: a `Both` target
+                    // writes both of the slot's cells.
+                    let mut cells: BTreeMap<
+                        (u32, u32),
+                        [u32; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                    > = BTreeMap::new();
                     for (channel, gain) in &eq_order {
                         for target in owner.edit(1, EQ_GAIN, *channel, *gain) {
-                            one_channel_target |= target.channel.writes_one_channel();
+                            let sides: &[ParameterChannel] =
+                                if target.channel == ParameterChannel::Both {
+                                    &[ParameterChannel::Left, ParameterChannel::Right]
+                                } else {
+                                    core::slice::from_ref(&target.channel)
+                                };
+                            for side in sides {
+                                cells.insert((target.slot, *side as u32), target.words);
+                            }
                         }
                         scenario.at(
                             WRITE,
@@ -1537,9 +1520,25 @@ fn every_order_of_a_mixed_drain_keeps_the_collapse_exactly_where_the_rule_does()
                         );
                     }
                     for (slot, parameter, channel, value) in &span_order {
-                        scenario.at(WRITE, record(*slot, 1, *parameter, *channel, *value));
+                        // A `PerLane` parameter has no `Both` cell: a both-channel command is a
+                        // `Left` and a `Right` write, as `into_effect_records` makes of one.
+                        let sides: &[ParameterChannel] = if *channel == ParameterChannel::Both {
+                            &[ParameterChannel::Left, ParameterChannel::Right]
+                        } else {
+                            core::slice::from_ref(channel)
+                        };
+                        for side in sides {
+                            scenario.at(WRITE, record(*slot, 1, *parameter, *side, *value));
+                        }
                     }
-                    let keeps = !one_channel_target
+                    // A slot keeps the collapse when the block applies both of its cells with
+                    // equal words.
+                    let eq_keeps = cells.keys().map(|(slot, _)| *slot).all(|slot| {
+                        cells.get(&(slot, ParameterChannel::Left as u32))
+                            == cells.get(&(slot, ParameterChannel::Right as u32))
+                            && cells.contains_key(&(slot, ParameterChannel::Left as u32))
+                    });
+                    let keeps = eq_keeps
                         && (1..=2).all(|slot| {
                             model_pairs(
                                 span_order
@@ -1569,7 +1568,13 @@ fn every_order_of_a_mixed_drain_keeps_the_collapse_exactly_where_the_rule_does()
 fn model_pairs(atoms: impl Iterator<Item = (u32, ParameterChannel, f32)>) -> bool {
     let mut last: BTreeMap<(u32, u32), u32> = BTreeMap::new();
     for (parameter, channel, value) in atoms {
-        last.insert((parameter, channel as u32), value.to_bits());
+        if channel == ParameterChannel::Both {
+            for side in [ParameterChannel::Left, ParameterChannel::Right] {
+                last.insert((parameter, side as u32), value.to_bits());
+            }
+        } else {
+            last.insert((parameter, channel as u32), value.to_bits());
+        }
     }
     last.iter().all(|((parameter, channel), bits)| {
         let twin = match *channel {
@@ -1852,13 +1857,16 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                 }
                 Subject::Scalar(_) => "scalar",
             };
-            let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
-                core::num::NonZeroUsize::new(QUEUE).expect("depth"),
-                QueueGeneration(0),
+            let (mut producer, mut control) = effect_control_lane(
+                EffectLaneSpec {
+                    shape: EffectLaneShape::from_descriptor(descriptor, 0),
+                    bypass: false,
+                    observation_depth: 0,
+                },
+                &LiveValuesSuperseded::new(),
             )
-            .expect("queue");
-            let mut producer = producer;
-            let mut control = EffectControlLane::new(consumer, false);
+            .expect("a lane");
+            let (gate, mut pin) = RevisionGate::pair(0);
             let mut staging = vec![
                 PreparedAutomationSpan {
                     kind: AutomationSpanKind::Point,
@@ -1869,7 +1877,7 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                     start_value: 0.0,
                     end_value: 0.0,
                 };
-                QUEUE
+                control.parameter_cells().max(2)
             ];
             let mut block = 0_u64;
             for _ in 0..4 {
@@ -1885,16 +1893,23 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
             let mut refused = 0;
             for (index, parameter) in &live {
                 for value in twin_values(parameter) {
+                    let revision = pin.last_published() + 1;
+                    let stamp = pin.stamp(revision).expect("a legal revision");
                     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                         producer
-                            .try_push(EffectControlRecord::Parameter {
-                                parameter_index: *index,
-                                channel,
-                                value,
-                            })
-                            .expect("room");
+                            .write(
+                                stamp,
+                                EffectControlRecord::Parameter {
+                                    parameter_index: *index,
+                                    channel,
+                                    value,
+                                },
+                            )
+                            .expect("a cell for the record");
                     }
-                    let staged = control.stage(&mut staging, block * u64::from(FRAMES), None);
+                    pin.publish(&gate, revision);
+                    let staged =
+                        control.stage(&mut staging, block * u64::from(FRAMES), gate.snapshot());
                     assert_eq!(staged.staged, 2);
                     assert!(
                         control.symmetry().holds(ChannelSymmetryWitness::LIVE),
@@ -2111,7 +2126,7 @@ fn push(runtime: &mut SessionRuntime, channel: usize, write: Push) {
             runtime.push_parameter(channel, parameter, side, value)
         }
     };
-    assert!(ok, "the bounded control queue refused {write:?}");
+    assert!(ok, "the effect lane refused {write:?}");
 }
 
 const fn effect_of(write: Push) -> &'static str {
@@ -2258,7 +2273,7 @@ fn a_one_channel_write_or_a_near_pair_retires_exactly_its_cohort() {
     const BLOCKS: u64 = 16;
     const SWITCH: u64 = 6;
     let value = -24.0_f32;
-    let cases: [(&str, Vec<(u64, Push)>); 7] = [
+    let cases: [(&str, Vec<(u64, Push)>); 6] = [
         (
             "left-only compressor",
             vec![(
@@ -2356,13 +2371,6 @@ fn a_one_channel_write_or_a_near_pair_retires_exactly_its_cohort() {
                     SWITCH,
                     Push::One(COMPRESSOR, COMPRESSOR_RATIO, ParameterChannel::Right, 3.0),
                 ),
-            ],
-        ),
-        (
-            "per-channel EQ owner edits (two one-channel targets)",
-            vec![
-                (SWITCH, Push::One(EQ, EQ_GAIN, ParameterChannel::Left, 4.5)),
-                (SWITCH, Push::One(EQ, EQ_GAIN, ParameterChannel::Right, 4.5)),
             ],
         ),
     ];

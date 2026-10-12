@@ -572,8 +572,9 @@ impl EffectCellWriter {
         resources
     }
 
-    /// Test-only: how many writes each parameter cell has taken, then each target cell, in cell
-    /// order. Valid while no write is in flight, which a quiescent test thread guarantees.
+    /// Test-only: how many writes the bypass cell has taken, then each parameter cell, then each
+    /// target cell, in cell order. Valid while no write is in flight, which a quiescent test
+    /// thread guarantees.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
@@ -583,10 +584,13 @@ impl EffectCellWriter {
         }
         let reader = CellReader::new();
         let cells = &*self.cells;
-        cells
-            .parameters
-            .iter()
-            .map(|cell| count(reader.peek_unread(cell)))
+        core::iter::once(count(reader.peek_unread(&cells.bypass)))
+            .chain(
+                cells
+                    .parameters
+                    .iter()
+                    .map(|cell| count(reader.peek_unread(cell))),
+            )
             .chain(
                 cells
                     .targets

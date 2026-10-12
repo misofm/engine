@@ -2865,7 +2865,6 @@ impl RaceEdits {
 struct RaceCounts {
     live: u64,
     structural: u64,
-    live_backpressure: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
     retries: u64,
@@ -2891,8 +2890,6 @@ const RACE_WEDGE_BLOCKS: u64 = 256;
 /// One submission's outcome in the race.
 enum Submitted {
     Committed,
-    /// `RESULT_BACKPRESSURE` with `control.live.backpressure`.
-    LiveBackpressure,
     /// `RESULT_BACKPRESSURE` with `control.plan.backpressure`.
     PlanBackpressure,
     /// `RESULT_OK` with the protocol's own `Backpressure` status.
@@ -2970,10 +2967,6 @@ impl RaceControl<'_> {
             (RESULT_BACKPRESSURE, _) => {
                 // SAFETY: This thread is the session's only control caller.
                 match unsafe { last_error_c(self.session) }.as_slice() {
-                    b"control.live.backpressure" => {
-                        self.counts.live_backpressure += 1;
-                        Submitted::LiveBackpressure
-                    }
                     b"control.plan.backpressure" => {
                         self.counts.plan_backpressure += 1;
                         Submitted::PlanBackpressure
@@ -3307,10 +3300,6 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         let counts = race_live_edits(run);
         assert_eq!(counts.structural, RACE_EDITS / 8 + 2, "run {run}");
         assert!(counts.live >= RACE_EDITS - RACE_EDITS / 8, "run {run}");
-        assert_eq!(
-            counts.live_backpressure, 0,
-            "run {run}: a fader, mute or pan edit is never refused for room"
-        );
         assert!(counts.plan_backpressure >= 1, "run {run}");
         // Every admitted structural transaction swapped in exactly one plan, and no live edit
         // swapped in one of its own: a live edit that silently rebuilt is counted here.
@@ -3320,7 +3309,6 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         );
         total.live += counts.live;
         total.structural += counts.structural;
-        total.live_backpressure += counts.live_backpressure;
         total.plan_backpressure += counts.plan_backpressure;
         total.event_backpressure += counts.event_backpressure;
         total.retries += counts.retries;

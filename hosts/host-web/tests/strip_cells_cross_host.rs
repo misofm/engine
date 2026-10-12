@@ -9,17 +9,22 @@ use control_plane::{
     CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, SourceSubmission,
     compile_children,
 };
+use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel as ContractChannel};
 use engine::realtime::PlanarBufferMut;
+use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
 use host_web::{
-    AudioWorkletEngineHost, COMMAND_FADER_DB, COMMAND_PAN, COMMAND_RECORD_BYTES, RESULT_OK,
-    WebBootOptions,
+    ABI_VERSION, AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_PAN,
+    COMMAND_RECORD_BYTES, RACK_INSERTS, RESULT_OK, WebBootOptions,
 };
 use protocol::{
     CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
     DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
     SessionRevision, TypedCommandFrame,
 };
-use session::{DualMonoFader, MatrixOrPan, StableId, canonical_session_json, parse_session_json};
+use session::{
+    DualMonoFader, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit, RackName, StableId,
+    canonical_session_json, parse_session_json,
+};
 
 /// The browser harness's one-track identity session, whose source is `fixture-source`.
 const SESSION_DOCUMENT: &str = include_str!("browser-v1/session.json");
@@ -335,6 +340,241 @@ fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
         control.superseded(),
         3,
         "two fader cells and the matrix cell"
+    );
+    assert_eq!(
+        browser.status().live_values_superseded,
+        control.superseded(),
+        "the browser status reports the count the C ABI reports"
+    );
+    assert_eq!(untouched.status().live_values_superseded, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Effect cells (#1345)
+// ---------------------------------------------------------------------------------------------
+
+/// The browser command fixture (an identity session with one parametric EQ insert whose band 1 is a
+/// low shelf), with a compressor insert after the EQ. Its source is `fixture-source`.
+fn effect_document() -> String {
+    let mut model =
+        parse_session_json(include_str!("browser-v1/command-session.json")).expect("fixture");
+    model.sources[0].frames = 8_192;
+    let mut compressor = model.tracks[0].inserts.effects[0].clone();
+    compressor.id = StableId::parse("comp").expect("compressor ID");
+    compressor.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse("miso.compressor").expect("compressor identity"),
+    };
+    compressor.params.clear();
+    model.tracks[0].inserts.effects.push(compressor);
+    canonical_session_json(&model).expect("canonical effect session")
+}
+
+impl ControlPlane {
+    fn new_with(document: &str) -> Self {
+        let CompiledChildren { session, plan } =
+            compile_children::<Adapter>(document, limits(), None).expect("control-plane compile");
+        Self {
+            session,
+            plan,
+            block: 0,
+            request: 100,
+            revision: 1,
+        }
+    }
+
+    /// Several edits as one committed transaction.
+    fn apply_all(&mut self, edits: &[SessionEdit]) {
+        self.send(
+            CommandPayload::SessionTransactionApply(edits),
+            ExpectedRevision::Exact(SessionRevision(self.revision)),
+        );
+        self.revision += 1;
+    }
+}
+
+fn browser_host_for(document: &str) -> AudioWorkletEngineHost {
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            require_sample_rate_hz: RATE,
+            require_quantum_frames: QUANTUM as u32,
+            source_ring_frames: 1_024,
+            live_control_command_queue_records: 16,
+            ..WebBootOptions::explicit_defaults()
+        },
+    )
+    .unwrap_or_else(|failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())))
+}
+
+/// One compressor parameter edit as the control plane takes it.
+fn compressor_edit(parameter_id: u32, channel: ParameterChannel, value: f32) -> SessionEdit {
+    SessionEdit::UpsertEffectParam {
+        track_id: StableId::parse("track").expect("track ID"),
+        rack_name: RackName::Inserts,
+        effect_id: StableId::parse("comp").expect("compressor ID"),
+        param: EffectParam {
+            parameter_id,
+            channel,
+            unit: ParameterUnit::Db,
+            value,
+        },
+    }
+}
+
+/// One compressor parameter edit as the browser takes it: insert 1, one record in its own
+/// submission. `channel` is the wire byte (0 left, 1 right, 2 both).
+fn browser_compressor_edit(
+    host: &mut AudioWorkletEngineHost,
+    parameter_id: u32,
+    channel: u8,
+    value: f32,
+) {
+    let record =
+        &mut host.command_staging_mut().expect("command staging")[..COMMAND_RECORD_BYTES as usize];
+    record.fill(0);
+    record[0] = u8::try_from(COMMAND_EFFECT_PARAM).expect("frozen kind");
+    record[1] = RACK_INSERTS;
+    record[2] = channel;
+    // Track 0, effect index 1 (the compressor follows the EQ), the parameter id.
+    record[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
+    record[24..28].copy_from_slice(&value.to_le_bytes());
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+}
+
+/// One EQ band-1 gain edit on both lanes as the browser takes it: the record, the designed target
+/// in the companion, and the prepared submission.
+fn browser_eq_gain(host: &mut AudioWorkletEngineHost, value: f32) {
+    let record =
+        &mut host.command_staging_mut().expect("command staging")[..COMMAND_RECORD_BYTES as usize];
+    record.fill(0);
+    record[0] = u8::try_from(COMMAND_EFFECT_PARAM).expect("frozen kind");
+    record[1] = RACK_INSERTS;
+    record[2] = 2;
+    record[12..16].copy_from_slice(&4_u32.to_le_bytes());
+    record[24..28].copy_from_slice(&value.to_le_bytes());
+    assert_eq!(
+        host.copy_eq_target_config(0, u32::from(RACK_INSERTS), 0),
+        RESULT_OK
+    );
+    let config = host.eq_target_config().expect("EQ target config");
+    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
+    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+    let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        let offset = 32 + index * 4;
+        *seed = f32::from_bits(u32::from_le_bytes(
+            config[offset..offset + 4].try_into().expect("seed"),
+        ));
+    }
+    let mut targets = [effect_contract::PreparedEffectTarget {
+        slot: 0,
+        channel: ContractChannel::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, count) = EqTargetPreparer::new(
+        host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ target preparer")
+    .prepare(
+        RATE,
+        &seeds,
+        &[EqTargetEdit {
+            parameter_id: 4,
+            channel: ContractChannel::Both,
+            value,
+        }],
+        &mut targets,
+    )
+    .expect("prepared EQ target");
+    assert_eq!(count, 1, "one edit touches one EQ section");
+    let companion = host.prepared_companion_mut().expect("prepared companion");
+    companion.fill(0);
+    companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
+    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
+    companion[8..16].copy_from_slice(&generation.to_le_bytes());
+    companion[16..20].copy_from_slice(&(count as u32).to_le_bytes());
+    let entry = &mut companion[24..104];
+    entry[4..8].copy_from_slice(&u32::from(RACK_INSERTS).to_le_bytes());
+    entry[16..24].copy_from_slice(&base_revision.to_le_bytes());
+    entry[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
+    entry[28..32].copy_from_slice(&2_u32.to_le_bytes());
+    for (index, word) in targets[0].words.iter().enumerate() {
+        let offset = 32 + index * 4;
+        entry[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(host.submit_prepared_commands(1, 104), RESULT_OK);
+}
+
+/// Two compressor parameter edits and one EQ band-gain edit between two blocks, then eight blocks:
+/// the same PCM from both hosts and the same count of replaced writes from both (decision 15,
+/// #1345 gate 5).
+///
+/// The edits are a compressor threshold on the left lane, the same threshold again (which replaces
+/// the first in the `Left` cell: one replaced write), and the EQ's band-1 gain on both lanes (a
+/// `Both` target: two cells, each written once, none replaced). So both hosts count 1.
+///
+/// Test value: the two hosts staging effect cells differently -- the browser writing a `Both`
+/// target into one channel cell, applying a replaced threshold, or counting a replaced write the
+/// control plane does not -- which breaks the cross-host bit-identity of effect edits that no
+/// per-host test sees, because each host agrees with itself.
+///
+/// Red mutation: make the browser's prepared target write only its left cell -> its PCM differs.
+#[test]
+fn both_hosts_drain_two_parameter_edits_and_one_eq_gain_edit_alike() {
+    let document = effect_document();
+    let mut control = ControlPlane::new_with(&document);
+    let mut browser = browser_host_for(&document);
+    let mut untouched = browser_host_for(&document);
+
+    // The first block runs before the edits, so the lanes' cells are unwritten.
+    let mut control_blocks = vec![control.step()];
+    let mut browser_blocks = vec![browser_step(&mut browser, 0)];
+    let mut untouched_blocks = vec![browser_step(&mut untouched, 0)];
+
+    for threshold in [-30.0, -24.0] {
+        control.apply(compressor_edit(1, ParameterChannel::Left, threshold));
+        browser_compressor_edit(&mut browser, 1, 0, threshold);
+    }
+    control.apply_all(&[SessionEdit::UpsertEffectParam {
+        track_id: StableId::parse("track").expect("track ID"),
+        rack_name: RackName::Inserts,
+        effect_id: StableId::parse("eq").expect("EQ ID"),
+        param: EffectParam {
+            parameter_id: 4,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Db,
+            value: -9.0,
+        },
+    }]);
+    browser_eq_gain(&mut browser, -9.0);
+    assert_eq!(control.superseded(), 0, "nothing has been read yet");
+    assert_eq!(browser.status().live_values_superseded, 0);
+
+    for block in 1..=BLOCKS_AFTER_EDITS {
+        control_blocks.push(control.step());
+        browser_blocks.push(browser_step(&mut browser, block));
+        untouched_blocks.push(browser_step(&mut untouched, block));
+    }
+
+    for (block, (control_pcm, browser_pcm)) in
+        control_blocks.iter().zip(&browser_blocks).enumerate()
+    {
+        assert_eq!(
+            bits(control_pcm),
+            bits(browser_pcm),
+            "block {block}: the two hosts render the same bits"
+        );
+    }
+    assert_ne!(
+        bits(&browser_blocks[1]),
+        bits(&untouched_blocks[1]),
+        "the edits are audible, or the comparison proves nothing"
+    );
+    assert_eq!(
+        control.superseded(),
+        1,
+        "the replaced threshold write; the Both target's two cells are written once each"
     );
     assert_eq!(
         browser.status().live_values_superseded,

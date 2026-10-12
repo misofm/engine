@@ -1156,9 +1156,9 @@ pub struct LiveControlEffectBankStage {
     /// One control lane per bank lane: a live channel, a channel-less lane that carries a
     /// session bypass (issue #1087), or `None` for a lane neither applies to.
     lanes: Box<[Option<EffectControlLane>]>,
-    /// The observation queue of each lane, taken out of its lane at bind so that the drain loop
-    /// holds each pop in its own body (decision 15, #1345 D8). `None` for a lane without one.
-    observe_queues: Box<[Option<Consumer<EffectControlRecord>>]>,
+    /// The observation queue of each lane that has one, with the lane's index, taken out of the
+    /// lane at bind so that the drain loop holds each pop in its own body (decision 15, #1345 D8).
+    observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]>,
     /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
     /// lane has a live channel (issue #1087).
     ///
@@ -1290,11 +1290,13 @@ impl LiveControlEffectBankStage {
         {
             return Err(RackError::AutomationWindow);
         }
-        let observe_queues: Box<[Option<Consumer<EffectControlRecord>>]> = lanes
+        let observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]> = lanes
             .iter_mut()
-            .map(|lane| {
+            .enumerate()
+            .filter_map(|(index, lane)| {
                 lane.as_mut()
                     .and_then(EffectControlLane::take_observe_queue)
+                    .map(|queue| (index, queue))
             })
             .collect();
         Ok(Self {
@@ -1524,18 +1526,18 @@ impl LiveControlEffectBankStage {
         self.staged_spans = packed;
         let mut observations = self.observations.as_deref_mut();
         let mut unbound = 0_u64;
-        for (index, queue) in self.observe_queues.iter_mut().enumerate() {
-            let mut available = queue.as_ref().map_or(0, Consumer::available_at_entry);
+        for (index, queue) in self.observe_queues.iter_mut() {
+            let mut available = queue.available_at_entry();
             while available != 0 {
                 available -= 1;
-                let Some(Ok(record)) = queue.as_mut().map(Consumer::try_pop) else {
+                let Ok(record) = queue.try_pop() else {
                     // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep
                     // the drain bounded if a malformed test double violates that invariant.
                     break;
                 };
                 let observation = observations
                     .as_deref_mut()
-                    .and_then(|lanes| lanes.get_mut(index))
+                    .and_then(|lanes| lanes.get_mut(*index))
                     .and_then(Option::as_mut);
                 if !apply_observe(record, first_sample, observation) {
                     unbound = unbound.saturating_add(1);

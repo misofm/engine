@@ -366,7 +366,7 @@ async function runBackend(modulePath, expectedBackend, sessionDocument, source) 
 ///
 /// The fixture is identity apart from one dynamic-rack parametric EQ whose band 1 is a low shelf,
 /// so a constant input renders to that same constant until a command moves it. Ten blocks; one
-/// matrix retarget, three refusals, a smoothed pan, a windowed fader move, a windowed mute, an
+/// matrix retarget, two refusals, a smoothed pan, a windowed fader move, a windowed mute, an
 /// effect parameter on both lanes, a live bypass, and one batch that releases the mute and the
 /// bypass together across two different destination queues. The digest is a statement about
 /// *when* each of those took effect, not merely that they did.
@@ -427,11 +427,9 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
   reports.matrix = submitCommands(control, [matrix]);
   step(1);
   reports.unknownTrack = submitCommands(control, [{ ...matrix, trackIndex: 5 }]);
-  // A flood of bypass records, which stay a queue: a matrix or fader value is a latest-target
-  // cell with no room to overfill (#1312).
-  reports.flood = submitCommands(
-    control, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => bypassOn),
-  );
+  // No flood: every matrix, fader, input, send and effect value is a latest-target cell with no
+  // room to overfill (#1312, #1345, #1346, #1347), and this fixture's EQ declares no tap for a
+  // subscription queue to hold.
   reports.unknownParameter = submitCommands(control, [unknownParameter]);
   step(2);
   reports.pan = submitCommands(control, [pan]);

@@ -707,9 +707,9 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
     records
 }
 
-/// Pushes one record and says whether the lane took it. A fader, matrix or input write is a cell
-/// write and always lands; a queue lane (effect) answers the same on every arm, because every arm
-/// has seen the same records.
+/// Writes one record and says whether the lane took it. A fader, matrix or input write is a cell
+/// write and always lands; an effect lane takes the records it has a cell for and refuses the
+/// others, the same on every arm, because every arm has seen the same records.
 fn push(arm: &mut Arm, record: Live) -> bool {
     let Arm { handles, gate, .. } = arm;
     match record {
@@ -731,7 +731,12 @@ fn push(arm: &mut Arm, record: Live) -> bool {
             });
             true
         }
-        Live::Effect(index, record) => handles.effect_controls[index].try_push(record).is_ok(),
+        Live::Effect(index, record) => {
+            // A record the lane has no cell for is refused, on every arm alike.
+            let producer = &mut handles.effect_controls[index];
+            producer.preflight(record).is_ok()
+                && gate.write_published(|stamp| producer.write(stamp, record).is_ok())
+        }
     }
 }
 

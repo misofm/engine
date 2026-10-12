@@ -4,8 +4,8 @@
 //! `miso_engine_v1_submit_command` (#1258 gate 2, D3), cycling through five kinds: a mute toggle
 //! on one track, a pan move on another, a compressor threshold change (#1264), a parametric EQ
 //! band gain change (#1265) and a compressor bypass toggle (#1266). So the audited render drains
-//! non-empty fader and matrix lanes, effect parameter records, designed EQ targets and a live
-//! bypass record. Each edit and each event dequeue runs on this thread outside the audited scope;
+//! non-empty fader and matrix cells, effect parameter cells, designed EQ target cells and a live
+//! bypass cell. Each edit and each event dequeue runs on this thread outside the audited scope;
 //! only the render call is inside it, one scope per call.
 //!
 //! After the first call, one structural transaction (#1273 deliverable 3) adds a muted track, so

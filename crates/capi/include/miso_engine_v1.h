@@ -46,26 +46,24 @@ extern "C" {
  * value (its fader, its effects), any edit while the session declares a VCA, the mute of a track
  * that a follows_mute send reads, a fader outside its domain or effect parameters that
  * preparation refuses (refused as MISO_ENGINE_V1_COMPILE_REJECTED with the same diagnostic as
- * before), and every other field. A committed live fader, mute or pan or matrix value reaches
- * render no later than the first block whose render call begins after
+ * before), and every other field. A committed live value (fader, mute, pan or matrix, effect
+ * parameter, effect bypass or parametric EQ) reaches render no later than the first block whose render call begins after
  * miso_engine_v1_submit_command returns or, while a replacement plan is pending, at that plan's
- * adoption, which the watermark reports. Every such value of one transaction takes effect in the
- * same block, and the watermark names that block's first sample; it is heard up to
+ * adoption, which the watermark reports. Every such value of one transaction takes effect in
+ * the same block, and the watermark names that block's first sample; it is heard up to
  * latency_samples later. These values are held in latest-target cells, not queues: a host sends
- * any number of fader, mute or pan edits between two render calls, a paused host included, and
- * none is refused for room. A later value for the same lane committed before that block replaces
- * the earlier one. The counter LIVE_VALUES_SUPERSEDED (protocol counter 16, read with
- * COUNTERS_GET) counts, per cell, each write to a plan that render adopts which the block
- * covering it does not apply because a later write to the same cell exists. A Both record writes
- * two cells and counts in each. A write to a candidate that is withdrawn, and a value on a lane
- * that a swap restarts, are not counted; no value is lost either way. A live effect value rides
- * a queue until issue 1345 moves it to the same cells: it may apply one block earlier, so the
- * effect values of one transaction can take effect up to one quantum apart, and a transaction
- * with both fader and effect values can see its effect values land one block before its
- * fader values. Each effect's lane holds the smaller of 16 and its automation capacity; an effect
- * edit that could never fit its lane rebuilds. Past an effect lane's room the edit returns MISO_ENGINE_V1_BACKPRESSURE with the diagnostic
- * "control.live.backpressure", the session and its revision are unchanged, and the host retries
- * after a render call. An acknowledged live edit is never dropped. A live edit commits the same response and the same
+ * any number of fader, mute, pan, effect parameter, effect bypass or parametric EQ edits between
+ * two render calls, a paused host included, and none is refused for room. A later value for the
+ * same lane committed before that block replaces the earlier one. The counter
+ * LIVE_VALUES_SUPERSEDED (protocol counter 16, read with COUNTERS_GET) counts, per cell, each
+ * write to a plan that render adopts which the block covering it does not apply because a later
+ * write to the same cell exists. A Both record writes two cells and counts in each. A write to a
+ * candidate that is withdrawn, and a value on a lane that a swap restarts, are not counted; no
+ * value is lost either way. An effect's bypass, its parameters (one cell per channel for a
+ * per-lane parameter, one for a shared one) and a parametric EQ's prepared targets are cells of
+ * that effect's lane; a block applies the bypass first, then the parameters in parameter order,
+ * then the targets, all under the one snapshot that covers the fader values. An acknowledged live
+ * edit is never dropped. A live edit commits the same response and the same
  * reliable events as a replacement, so the host drains the reliable event lane after each edit
  * either way. After either one the host goes on submitting every source the transaction left
  * unchanged, with no seek; after a replacement it acts only on a source the transaction added,
@@ -84,10 +82,8 @@ extern "C" {
  * it. The watermark is never early: a revision is in effect no later than the block it names.
  * first_sample is the start of the first block that begins after the commit's last write, so at
  * most one block after the submit returns (while a replacement plan is pending: the block that
- * adopts it). A live value of that revision can apply earlier, in any block that
- * ran between the submit's first push and its revision store. One transaction's values can
- * spread across those blocks until issues 1502, 1503, 1504, 1312 and 1345 have all landed,
- * which together make it exact. A replacement plan renders from first_sample. A host that
+ * adopts it). Every live value of that revision takes effect together, in the block that
+ * first_sample names. A replacement plan renders from first_sample. A host that
  * renders nothing completes nothing: a paused host's revisions stay pending until render
  * resumes. The watermark is a level, not a queue: render overwrites it, so a host that polls it
  * late still reads the newest revision, and the counters still count every revision.

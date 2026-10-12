@@ -365,6 +365,8 @@ fn source_sample(channel: u64, frame: u64) -> f32 {
 
 struct Console {
     prepared: PreparedHost,
+    /// The plan's gate handle: live values are cells, written under a stamp of it.
+    gate: engine::realtime::PlanRevisionGate,
     handles: HostLiveControlHandles,
     /// `limiters[t]` indexes `handles.effect_controls` for track `t`'s limiter.
     limiters: Vec<usize>,
@@ -380,7 +382,7 @@ fn refused(failure: &PrepareDiagnostics) -> ! {
 
 fn prepare(backend: Backend) -> Console {
     let compiled = compile_host_session(&session(backend), &caps()).unwrap_or_else(|f| refused(&f));
-    let (prepared, handles) = prepare_host_runtime_with_live_controls_backend(
+    let (mut prepared, handles) = prepare_host_runtime_with_live_controls_backend(
         &compiled,
         &caps(),
         &live_controls(),
@@ -431,8 +433,13 @@ fn prepare(backend: Backend) -> Console {
                 .unwrap_or_else(|| panic!("track {track}'s limiter has an observation handle"))
         })
         .collect();
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     Console {
         prepared,
+        gate,
         handles,
         limiters,
         compressors,
@@ -489,10 +496,27 @@ fn placement(console: &Console, backend: Backend) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn push(handles: &mut HostLiveControlHandles, channel: usize, record: EffectControlRecord) {
-    handles.effect_controls[channel]
-        .try_push(record)
-        .unwrap_or_else(|_| panic!("room in control channel {channel}'s queue"));
+/// One transaction on channel `channel`: a subscription goes to its observation queue, any other
+/// record to its cell under a stamp of the plan's gate.
+fn push(console: &mut Console, channel: usize, record: EffectControlRecord) {
+    let producer = &mut console.handles.effect_controls[channel];
+    if let EffectControlRecord::Observe {
+        tap_index,
+        armed,
+        window_blocks,
+    } = record
+    {
+        producer
+            .try_push_observe(tap_index, armed, window_blocks)
+            .unwrap_or_else(|_| panic!("room in control channel {channel}'s queue"));
+        return;
+    }
+    let revision = console.gate.last_published() + 1;
+    let stamp = console.gate.stamp(revision).expect("a legal revision");
+    producer
+        .write(stamp, record)
+        .unwrap_or_else(|_| panic!("a cell in control channel {channel}"));
+    console.gate.publish(revision);
 }
 
 /// What the run saw, besides its digest.
@@ -511,14 +535,12 @@ fn run(backend: Backend) -> Run {
     let mut readings = Vec::with_capacity(BLOCKS);
     // Before block 0, so both land at its first sample.
     for track in 0..TRACKS {
+        let channel = console.compressors[track];
+        push(&mut console, channel, EffectControlRecord::Bypass(true));
+        let channel = console.limiters[track];
         push(
-            &mut console.handles,
-            console.compressors[track],
-            EffectControlRecord::Bypass(true),
-        );
-        push(
-            &mut console.handles,
-            console.limiters[track],
+            &mut console,
+            channel,
             EffectControlRecord::Observe {
                 tap_index: 0,
                 armed: true,
@@ -531,9 +553,10 @@ fn run(backend: Backend) -> Run {
         for retarget in RETARGETS.iter().filter(|retarget| retarget.block == block) {
             for track in retarget.tracks.clone() {
                 for &channel in retarget.channels {
+                    let limiter = console.limiters[track];
                     push(
-                        &mut console.handles,
-                        console.limiters[track],
+                        &mut console,
+                        limiter,
                         EffectControlRecord::Parameter {
                             parameter_index: retarget.parameter,
                             channel,

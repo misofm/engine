@@ -422,7 +422,15 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         .max()
         .unwrap_or(0);
     let shared_factory = handles.effect_controls[0].owner().unwrap().factory();
+    // Each EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells, and
+    // none for parameters (its parameters ride its targets): the EQ has six target slots.
+    let writer_array = (2
+        * 6
+        * size_of::<engine::realtime::CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>(
+        )) as u64;
     for producer in &handles.effect_controls {
+        payload += writer_array;
+        largest_owned = largest_owned.max(writer_array);
         let owner = producer.owner().expect("live EQ owner");
         assert!(std::sync::Arc::ptr_eq(shared_factory, owner.factory()));
         for bytes in [

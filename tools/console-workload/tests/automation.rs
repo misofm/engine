@@ -343,12 +343,13 @@ mod mixing {
         assert!(restated[0] <= quiet[0]);
     }
 
-    /// The EQ is pushed as the SDK pushes it. A harness-only lowering -- one owner edit per
-    /// channel, as `push_parameter` would make of a Left then a Right -- designs two one-channel
-    /// targets and retires the collapse of every bank it touches (VERIFY-AUTOMATION F2), which is
-    /// the loss the row must not measure. The `Both` edit keeps it.
+    /// The EQ is pushed as the SDK pushes it: a Left edit then a Right edit, as two
+    /// `push_parameter` calls. Both landing before a block reads them keep the collapse, because
+    /// the target cells hold the latest word per channel and the block sees two equal words
+    /// (VERIFY-AUTOMATION F2, issue #1345). A block that runs between the two edits reads one
+    /// channel changed and retires the collapse of every bank it touches for that block.
     #[test]
-    fn the_eq_lowering_keeps_the_collapse_and_the_harness_only_lowering_would_not() {
+    fn the_eq_lowering_keeps_the_collapse_when_a_pair_lands_in_one_block() {
         let backend = Backend::current();
         let eq_both = MixingArm::prepare(Arm::Restated, Some(Effect::Eq), backend);
         let quiet = MixingArm::prepare(Arm::Quiet, None, backend);
@@ -357,19 +358,26 @@ mod mixing {
             quiet.runtime.bank_collapse_counters(),
             "a Both EQ restatement keeps every cohort collapsed"
         );
-        let mut split = SessionRuntime::build_with_dispatch(
+        let [kept, cohorts] = quiet.runtime.bank_collapse_counters();
+        let mut together = SessionRuntime::build_with_dispatch(
             mixing_automation::WORKLOAD,
             mixing_automation::CONFIG,
             backend,
         );
-        let automation = MixingAutomation::resolve(&split).expect("controls");
-        for control in automation
+        let mut apart = SessionRuntime::build_with_dispatch(
+            mixing_automation::WORKLOAD,
+            mixing_automation::CONFIG,
+            backend,
+        );
+        let automation = MixingAutomation::resolve(&together).expect("controls");
+        let eq_controls: Vec<_> = automation
             .controls()
             .iter()
             .filter(|control| control.control.effect == Effect::Eq)
-        {
+            .collect();
+        for control in &eq_controls {
             for side in [ParameterChannel::Left, ParameterChannel::Right] {
-                assert!(split.push_parameter(
+                assert!(together.push_parameter(
                     control.channel,
                     control.control.parameter_index,
                     side,
@@ -378,14 +386,37 @@ mod mixing {
             }
         }
         for block in 0..mixing_automation::PREROLL_BLOCKS {
-            split.render(block).expect("render");
+            together.render(block).expect("render");
         }
-        let [kept, cohorts] = quiet.runtime.bank_collapse_counters();
-        let [split_kept, _] = split.bank_collapse_counters();
+        let [together_kept, _] = together.bank_collapse_counters();
         assert_eq!(
-            split_kept,
-            kept - 3 * mixing_automation::PREROLL_BLOCKS,
-            "two one-channel EQ edits retire the three EQ cohorts of the {cohorts}"
+            together_kept, kept,
+            "a Left and a Right edit before one block keep all {cohorts} cohorts collapsed"
+        );
+        for control in &eq_controls {
+            assert!(apart.push_parameter(
+                control.channel,
+                control.control.parameter_index,
+                ParameterChannel::Left,
+                control.base
+            ));
+        }
+        apart.render(0).expect("render");
+        for control in &eq_controls {
+            assert!(apart.push_parameter(
+                control.channel,
+                control.control.parameter_index,
+                ParameterChannel::Right,
+                control.base
+            ));
+        }
+        for block in 1..mixing_automation::PREROLL_BLOCKS {
+            apart.render(block).expect("render");
+        }
+        let [apart_kept, _] = apart.bank_collapse_counters();
+        assert!(
+            apart_kept < kept,
+            "a block between the edits retires a collapse ({apart_kept} of {kept} kept)"
         );
     }
 }
