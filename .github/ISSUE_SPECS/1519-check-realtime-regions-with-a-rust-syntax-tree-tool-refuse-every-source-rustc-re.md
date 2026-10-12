@@ -41,6 +41,7 @@ resolve.
     file, relative to the invoking file's directory, whose `proc_macro2` tokens (comments dropped) are
     literals and punctuation only;
   - (c) an identifier `include` in a `use` item.
+  - (d) (Root Amendment 2) A `mod` item, inline or out of line, written anywhere under the roots (macro token trees included), whose name (r# included), compared case-insensitively, equals a directory name the walk skips, is refused. The skip list is read from the walk's own constant (walk.rs), so the rule follows it by construction. Such a module makes rustc resolve child modules and `#[path]` values inside a directory the walk does not read.
   `include_str!` and `include_bytes!` produce a literal and stay allowed.
 - D2. In #1443 D1 rule 3, the sentence becomes: "D8 refuses every other `#[path]` (every `path` in
   `cfg_attr` arguments or in a macro token tree, and every `$p` metavariable, included) and every
@@ -65,10 +66,34 @@ Root's text, verbatim (it closes the three open items that attempt 1 reproduced;
 > 4. include_str!/include_bytes! stay allowed outside macro token trees. Inside a macro token tree, refuse them too, but only after the implementer measures the real tree. If any real site has include_str!/include_bytes! (or their identifiers) inside a macro token tree, do NOT refuse them. Report the sites to me first.
 > Each rule gets a refused case with a test-value sentence and a mutation, re-measured to zero refusals on the real tree. Reading `path` and `include` to cover the r# forms is correct; keep it. Matching `if !(..)` as a macro shape is harmless over-refusal, so record it as such.
 
+## Root Amendment 2 (2026-10-12)
+
+Root's text, verbatim (it adds D1 (d) above, and gives the manifest-target-path rule to this issue by a named exception to the authorized paths):
+
+> Both close direct written forms under the reviewed threat model, so they apply that model and are not new policy.
+>
+> MAJOR-1, the rule text for D1, new item (d):
+> "(d) A `mod` item, inline or out of line, written anywhere under the roots (macro token trees included), whose name (r# included), compared case-insensitively, equals a directory name the walk skips, is refused. The skip list is read from the walk's own constant (walk.rs), so the rule follows it by construction. Such a module makes rustc resolve child modules and `#[path]` values inside a directory the walk does not read."
+> - Correct #1438's false note "Neither holds a compiled .rs file" in the same commit.
+> - Cases (refused): `mod target { #[path = "x.rs"] mod y; }`; `mod r#target;`; `mod node_modules { mod y; }`; a case-variant `mod Target;`. Each case gets its test-value sentence. Mutations: drop (d) (red), and compare case-sensitively (the case-variant row is red).
+> - Measure: 0 real refusals expected.
+>
+> Spec problem 2, manifest target paths: give it to #1519 attempt 3, by named exception in scripts/check-workspace-policy.sh (the same file as #1442's manifest rule; the later slice rebases).
+> - The rule: every `path =` under `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]` and `[[bench]]`, and every `build =`, in every workspace Cargo.toml, must be a relative path inside its package directory, with no `..` component and no component that the realtime walk skips.
+> - One self-test case per table kind that turns red when the check is dropped.
+> - Measure: the 13 real keys stay accepted.
+>
+> MINOR-1, MINOR-2 and the NITs (from /home/bl/misofm/submix-verdicts/1519-attempt2.md): fold them into attempt 3. If attempt 3 fails only on the manifest rule, split that rule into its own slice; do not let it sink #1519.
+
+The named exception: the manifest-target-path rule is written in `scripts/check-workspace-policy.sh` (the file that holds #1442's
+manifest rule) and its self-test cases in `scripts/test-workspace-policy.sh`. Those two files are authorized for this rule only.
+
 ## Authorized paths
 
 `tools/realtime-policy/**`, this spec, and only the sentences and lines named in D2 and D3 of the #1442,
 #1443, #1446 and #1438 specs.
+Root Amendment 2 adds, by named exception, `scripts/check-workspace-policy.sh` and `scripts/test-workspace-policy.sh` for the
+manifest-target-path rule only, and the one #1438 sentence it corrects.
 
 ## Cases (each refused) and their test value
 

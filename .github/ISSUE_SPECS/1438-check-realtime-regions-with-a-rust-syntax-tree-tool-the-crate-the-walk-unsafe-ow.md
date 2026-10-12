@@ -161,8 +161,9 @@ from `:440` on move down by one.
   Gate 6 holds the shipped artifacts unchanged.
 - **D3. The walk fails closed (C11).**
   - **Scan roots.** The walk visits `crates`, `hosts` and `tools` under the root. It skips
-    exactly the directories named `target` or `node_modules`. Neither holds a compiled `.rs`
-    file, and the skip is the tool's only ignore rule. It considers every other regular file whose
+    exactly the directories named `target` or `node_modules`. The walk reads no `.rs` file under
+    them; rustc can reach them only through a `mod` item named like them, which #1519 D1 (d) refuses, and the skip
+    is the tool's only ignore rule. It considers every other regular file whose
     name ends in `.rs`.
   - **Each of these is a finding, never a skip:**
     - a scan root that does not exist or is not a directory;
