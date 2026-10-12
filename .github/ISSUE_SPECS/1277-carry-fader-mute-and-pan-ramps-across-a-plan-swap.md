@@ -87,7 +87,9 @@ then structural edit" (D15-7, carry then retarget).
 - **D6. Restart set.** `PreparedHost` gains `restarted_strips()`: the strip IDs present in both
   plans for which at least one owner failed D4 for a prepared difference, sorted. Added strips are
   not in it. *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it,
-  and the later carry slices add their families' restarts to it.
+  and the later carry slices add their families' restarts to it. Amended by the Amendment (root,
+  2026-10-12): inserts that cannot carry restart, below: a strip whose surviving insert lane cannot
+  carry is also in it.
 - **D7. Lane state.** Each of the fader/mute stage, the matrix stage and the fused stage gets a
   fixed-size, plain-data lane state: current gains, ramp targets and positions (`remaining`), and
   the matrix ramp state. Each bank gets `export_lane` and `import_lane`. Import re-syncs derived
@@ -440,3 +442,18 @@ a named exception. The other named exception on this branch, the 7 lines of
   tests stay green, which is why the case was missing); reverted, all six green.
 - **MINOR 2.** The Attempt 3 record above now states the per-family behaviour.
 - **NIT 3.** The two doc lines over 100 characters (`live_delta.rs`, `prepare.rs`) are rewrapped.
+
+## Amendment (root, 2026-10-12): inserts that cannot carry restart
+
+Root's ruling of 2026-10-12 that an insert's strip is not in `restarted_strips()` (attempt 2,
+MINOR 1; #1277 D6 as first read; #1324 Context) is reversed. Until #1281/#1282 give inserts a
+carry, a strip whose surviving insert lane cannot carry across the swap is in `restarted_strips()`.
+Its insert restarts at rest, and #1324 D1 ducks it when it lands. #1281/#1282 remove a strip from
+that set when their carry covers it. It follows #1324's reviewed Hazards ("duck-swapped ... no
+click") and D15-9; it is not new policy.
+
+D6's set is therefore the union of the owners that failed D4, #1279's console slots and chain
+changes, and the strips with a surviving insert whose lane cannot carry. Implemented in
+`crates/host-core/src/prepare.rs` (`resolve_effect_carry`) with the test
+`a_surviving_insert_restarts_its_strip_at_{eight,four}_lanes`; the record is #1279's "Root
+follow-up, 2026-10-12".

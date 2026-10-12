@@ -180,9 +180,10 @@ Design.
   or changes identity); `resolve_effect_carry` (lane half: row in both plans, `same`, equal layout);
   the restart set is the union with #1277's; the move table and scratch are charged against the
   graph cap, the scratch against the named-allocation cap.
-- Owners are console slots only. An insert is a chain member (its addition restarts the strip), but
-  its own lane, banked or per node, is #1281 and #1282; making it an owner here would list every
-  strip with an insert as restarted.
+- Owners are console slots only for the carry: an insert's own lane, banked or per node, is carried
+  by #1281 and #1282. (Superseded by the Amendment (root, 2026-10-12): inserts that cannot carry
+  restart. The text here said that listing every strip with an insert would be wrong; root ruled
+  that is the right behaviour until those slices land.)
 
 Deviations from the spec text, each forced:
 
@@ -282,12 +283,13 @@ the test, records the open reading, and takes the NITs. No production behaviour 
   Defect it defends: a feed under which one effect's state at the swap equals its state at rest, so
   that effect's carry is not heard. With the old feed restored the test fails by name on the gate
   ("gate at the swap holds state its rest does not"); with the new feed all six pass.
-- **MINOR 1 (inserts and `restarted_strips()`).** An insert is a chain member and not an owner. Its
-  lane, banked or per node, starts at rest on every swap until #1281 and #1282, so a strip whose
-  only restarted state is an insert is not in `restarted_strips()` and is not ducked. This follows
-  #1277 D6 (later slices add their families' restarts). #1324 must know it: until #1281 and #1282,
-  a strip with a stateful insert restarts that insert at rest and is not in the set. The rustdoc of
-  `restarted_strips` now says so. Root is asked to confirm the reading.
+- **MINOR 1 (inserts and `restarted_strips()`). Superseded by the Amendment (root, 2026-10-12): inserts
+  that cannot carry restart; the ruling 3 reading below is reversed.** An insert is a chain member
+  and not an owner. Its lane, banked or per node, starts at rest on every swap until #1281 and
+  #1282, so a strip whose only restarted state is an insert is not in `restarted_strips()` and is
+  not ducked. This follows #1277 D6 (later slices add their families' restarts). #1324 must know
+  it: until #1281 and #1282, a strip with a stateful insert restarts that insert at rest and is not
+  in the set. The rustdoc of `restarted_strips` now says so. Root is asked to confirm the reading.
 - **NIT 1.** The five over-wide doc lines are rewrapped (`effect-contract/src/lib.rs` three,
   `host-core/src/prepare.rs` one, `host-core/tests/successor_swap.rs` one). The rewrap of the
   `effect-contract/src/lib.rs` lines left one new 121-column line (see Batch follow-ups); the only
@@ -364,3 +366,40 @@ eight-lane `a_strip_behind_an_effect_still_carries` doc). The remaining added li
 columns are the two realtime policy shell lines and one 101-column call in
 `host-core/tests/successor_swap.rs` (a function path rustfmt cannot split); none is a doc or
 comment line. Docs and comments only; no code changed.
+
+### Amendment (root, 2026-10-12): inserts that cannot carry restart
+
+Root's ruling of 2026-10-12 that an insert's strip is not in `restarted_strips()` (attempt 2,
+MINOR 1; #1277 D6 as first read; #1324 Context) is reversed. Until #1281/#1282 give inserts a
+carry, a strip whose surviving insert lane cannot carry across the swap is in `restarted_strips()`.
+Its insert restarts at rest, and #1324 D1 ducks it when it lands. #1281/#1282 remove a strip from
+that set when their carry covers it. It follows #1324's reviewed Hazards ("duck-swapped ... no
+click") and D15-9; it is not new policy.
+
+This replaces the "ruling 3" text of attempt 2 (MINOR 1, and the "Owners" bullet of attempt 1), which
+said an insert's strip is not in `restarted_strips()`. Gate 3's second case (an added insert) is
+unchanged: that strip was already listed for its changed chain.
+
+### Root follow-up, 2026-10-12
+
+Implements the amendment above. Branch `codex/d15-stream-a2`.
+
+- `ChainJoin` gains `surviving_inserts`: the IDs of the inserts a strip has in both models. An
+  insert's owner key is (strip, `RackId::Dynamic`, insert ID), the console owners' key shape.
+  `resolve_effect_carry` lists a strip when any surviving insert's owner key is not among the keys
+  its moves carried. No insert lane has a carry yet, so today that is every strip with a surviving
+  insert; #1281 and #1282 add an insert's key to the carried keys when their move covers its lane,
+  which removes that insert from the test with no other change. The `restarted_strips` rustdoc
+  states the rule (the sentence saying inserts are not listed is gone).
+- Test: `a_surviving_insert_restarts_its_strip_at_{eight,four}_lanes`. A structural swap (B adds a
+  muted first-sorting track) of a session with an unchanged transparent compressor insert on `eq3`
+  and `eq5`: `restarted_strips()` is exactly `[eq3, eq5]`, and the swapped run equals a fresh B on
+  every block (the console state of every strip carried). Defect it defends: a join that leaves a
+  strip with a surviving insert out of the restart set, so #1324 does not duck its restarted
+  insert; no existing test has an unchanged insert across a swap. Mutation: the insert term of the
+  `restart |=` in `resolve_effect_carry` forced to `false` turns the eight-lane test red
+  (`left: [], right: ["eq3", "eq5"]`); reverted, green.
+- Existing exact `restarted_strips()` expectations: none changed; the `host-core` suites (65
+  `successor_swap` tests, 9 ignored at four lanes on x86-64-v3), `capi` and `console-workload` pass
+  unmodified. The fixtures that expect an empty list clear the inserts first (`successor_swap.rs`
+  lines 63 and 883), and the cases with inserts present already listed the strip.

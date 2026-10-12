@@ -21,8 +21,9 @@ never leaves it muted.
   layout equal. Successor preparation: `SuccessorBase { inventory, committed, revision }`
   (`crates/host-core/src/prepare.rs:641-647`), `prepare_host_runtime_with_live_lanes_successor`
   (`:818`).
-- Until #1281 and #1282, an insert starts at rest on every swap, and its strip is not in
-  `restarted_strips()` (#1277 D6; root ruling, 2026-10-12).
+- Until #1281 and #1282, a strip whose surviving insert lane cannot carry is in
+  `restarted_strips()`: its insert restarts at rest on the swap and D1 ducks it (#1277 D6, #1279;
+  root amendment, 2026-10-12).
 - The classifier sends these edits to a rebuild: `LiveRebuild::Structure` for insert order,
   identity, quality, link mode and every other non-value field, `Prepared` for a non-`Block`
   parameter, `PreparedBypass` for the delay and the multiband (`crates/host-core/src/live_delta.rs:118-147`,

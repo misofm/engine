@@ -570,10 +570,11 @@ impl PreparedHost {
     /// stage in different forms or attach different control kinds, or a console slot has no
     /// effect bank lane without live control in both plans. A strip whose effect chain changed (an
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
-    /// listed too, even when its remaining owners carry (D15-9). Sorted. Added strips are not
-    /// listed, and neither is any strip of a plan prepared without a predecessor. An insert is a
-    /// chain member and not an owner, so its lane starts at rest on every swap until #1281 and
-    /// #1282 (#1277 D6), and a strip whose only restarted state is an insert is not listed.
+    /// listed too, even when its remaining owners carry (D15-9). A strip whose surviving insert
+    /// (an insert present in both plans' chains) has a lane that does not carry is listed as well:
+    /// its insert starts at rest on the swap, and no insert lane carries until #1281 and #1282
+    /// (root amendment of 2026-10-12 to #1277 D6 and #1279). Sorted. Added strips are not
+    /// listed, and neither is any strip of a plan prepared without a predecessor.
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
@@ -2805,6 +2806,10 @@ struct ChainJoin<'a> {
     chain_changed: bool,
     /// The strip's console slots in the successor's model.
     owners: Vec<ConsoleOwnerJoin<'a>>,
+    /// The IDs of the inserts the strip has in both models (the surviving inserts), in the
+    /// successor's chain order. An insert's owner key is the strip, [`graph::RackId::Dynamic`]
+    /// and this ID.
+    surviving_inserts: Vec<&'a str>,
 }
 
 impl ChainJoin<'_> {
@@ -2874,8 +2879,9 @@ fn committed_chain<'a>(
 /// `committed` also has, whether its effect chain changed and which console slots keep every
 /// prepared value.
 ///
-/// An insert is not an owner of this slice (its lane carries with #1281 and #1282), but an insert
-/// added, removed or reordered changes the chain. A strip whose kind changed has no counterpart:
+/// An insert added, removed or reordered changes the chain, and an insert present in both models
+/// is recorded as a surviving insert, an owner whose lane the lane half resolves (it carries with
+/// #1281 and #1282). A strip whose kind changed has no counterpart:
 /// its chain is changed and no slot carries.
 fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<ChainJoin<'a>> {
     let committed_slots = console_slots(committed);
@@ -2896,6 +2902,7 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
                     id,
                     chain_changed: true,
                     owners: Vec::new(),
+                    surviving_inserts: Vec::new(),
                 });
             }
             continue;
@@ -2933,6 +2940,11 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
             id,
             chain_changed: console_changed || inserts_changed,
             owners,
+            surviving_inserts: inserts
+                .iter()
+                .filter(|insert| before_inserts.iter().any(|before| before.id == insert.id))
+                .map(|insert| insert.id.as_str())
+                .collect(),
         });
     }
     joins
@@ -2953,8 +2965,11 @@ struct EffectCarry {
 /// A slot carries when no prepared value of it differs and both plans hold it as a lane of an
 /// effect bank stage with no live control lane, with equal layouts (prepared bypass, latency, state
 /// sizes and state layout version). A lane of a stage with a live control lane or a lowered bypass
-/// has no row: it does not carry here (#1280) and its strip restarts. A strip with a slot that does
-/// not carry, or whose chain changed, is listed in `restarted`.
+/// has no row: it does not carry here (#1280) and its strip restarts. A surviving insert carries
+/// when its owner key (strip, [`graph::RackId::Dynamic`], insert ID) is among the keys carried:
+/// no insert lane has a carry until #1281 and #1282, which add their keys to `carried` when their
+/// move covers the lane (root amendment, 2026-10-12). A strip with a slot or a surviving insert
+/// that does not carry, or whose chain changed, is listed in `restarted`.
 fn resolve_effect_carry(
     predecessor: &PlanStateInventory,
     joins: &[ChainJoin<'_>],
@@ -2963,6 +2978,8 @@ fn resolve_effect_carry(
     let mut carry = EffectCarry::default();
     for join in joins {
         let mut restart = join.chain_changed;
+        // The owner keys of this strip that carry: (rack, effect ID).
+        let mut carried: Vec<(graph::RackId, &str)> = Vec::new();
         for owner in &join.owners {
             let rows = effect_lane_row(own, join.id, owner.rack, owner.slot)
                 .zip(predecessor.effect_lane(join.id, owner.rack, owner.slot));
@@ -2973,10 +2990,15 @@ fn resolve_effect_carry(
                         successor: own.location,
                         predecessor: before.location,
                     });
+                    carried.push((owner.rack, owner.slot));
                 }
                 _ => restart = true,
             }
         }
+        restart |= join
+            .surviving_inserts
+            .iter()
+            .any(|insert| !carried.contains(&(graph::RackId::Dynamic, insert)));
         if restart {
             carry.restarted.push(join.id.into());
         }
@@ -3087,6 +3109,7 @@ mod tests {
         let join = |same| super::ChainJoin {
             id: "eq0",
             chain_changed: false,
+            surviving_inserts: Vec::new(),
             owners: vec![super::ConsoleOwnerJoin {
                 rack: graph::RackId::Simd1,
                 slot: SLOT,

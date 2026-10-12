@@ -4315,6 +4315,57 @@ fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes(
     an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
 }
 
+/// Root amendment of 2026-10-12 to #1277 D6 and #1279: no insert lane carries yet (#1281, #1282),
+/// so a strip whose insert survives the swap restarts that insert at rest and is in
+/// `restarted_strips()`, while a strip without an insert is not. A structural swap adds a muted
+/// track to a session whose `eq3` and `eq5` each hold an unchanged insert: the list is exactly
+/// those two, and every console slot of every strip still carries (the insert is transparent, so
+/// the swapped run equals a fresh B on every block only if the console state continued and the
+/// restarted insert changes no sample).
+fn a_surviving_insert_restarts_its_strip(backend: Backend) {
+    let mut with_inserts = console_session(false, &ALL_SLOTS);
+    for strip in ["eq3", "eq5"] {
+        track_mut(&mut with_inserts, strip)
+            .inserts
+            .effects
+            .push(transparent_insert());
+    }
+    let b_model = with_muted_track(with_inserts.clone());
+    let a = Session::compile(with_inserts);
+    let b = Session::compile(b_model);
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from("eq3"), Box::<str>::from("eq5")],
+        "{backend:?}: the strips with a surviving insert, and no other"
+    );
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every console slot carried, and the restarted insert is transparent"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_surviving_insert_restarts_its_strip_at_eight_lanes() {
+    a_surviving_insert_restarts_its_strip(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_surviving_insert_restarts_its_strip_at_four_lanes() {
+    a_surviving_insert_restarts_its_strip(Backend::Simd4);
+}
+
 /// `model` without console slot `slot`: its declaration and every strip's entry.
 fn without_console_slot(mut model: SessionModel, slot: &str) -> SessionModel {
     model
