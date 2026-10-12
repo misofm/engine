@@ -201,7 +201,15 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   observationMap(): Promise<ObservationMap>;
   /** Read one bounded non-consuming batch from the current prepared owner. */
   readObservations(selections: readonly ObservationSelection[]): Promise<readonly ObservationReadResult[]>;
-  /** Subscribe to bounded resident observation rows; browser delivery is off-render. */
+  /**
+   * Subscribe to bounded resident observation rows; browser delivery is off-render.
+   *
+   * A subscribe, update or close refused with `backpressure` (an earlier subscription of the same
+   * tap is not yet drained) waits for the context's next render and is sent again. The wait is
+   * bounded by `requestDeadlineMs` (5,000 ms by default) and ends in the same typed `backpressure`
+   * error, so a context that does not render never holds the caller. Any other refusal is thrown
+   * at once.
+   */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
   /** Subscribe to one selected track response; browser delivery is off-render. */
   subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription>;
@@ -993,16 +1001,34 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         liveControls: getLiveControls,
-        // The audio thread renders on its own, so a subscription refused because an earlier one is
-        // not yet drained waits for the host's render count to move and is sent again.
-        nextRender: async () => {
-          const started = (await host.status()).renderedQuanta;
-          for (;;) {
-            await new Promise<void>((resolve) => setTimeout(resolve, 4));
-            if (closed) return;
-            const current = await host.status();
-            if (current.renderedQuanta > started) return;
-          }
+        // The audio thread renders on its own clock, so a subscription refused with backpressure
+        // (an earlier one is not yet drained) may wait for the host's render count to move and be
+        // sent again. The wait is bounded by the engine's request deadline and ends in the same
+        // typed refusal, so a context that does not render never holds the caller.
+        renderWait: {
+          boundMs: options.requestDeadlineMs ?? 5_000,
+          next: (timeoutMs) => new Promise<boolean>((resolve, reject) => {
+            let settled = false;
+            let poll: ReturnType<typeof setTimeout> | undefined;
+            const finish = (rendered: boolean, error?: unknown): void => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(limit);
+              if (poll !== undefined) clearTimeout(poll);
+              if (error === undefined) resolve(rendered); else reject(error);
+            };
+            const limit = setTimeout(() => finish(false), timeoutMs);
+            void (async () => {
+              const started = (await host.status()).renderedQuanta;
+              for (;;) {
+                await new Promise<void>((tick) => { poll = setTimeout(tick, 4); });
+                if (settled) return;
+                if (closed) return finish(false);
+                const current = await host.status();
+                if (current.renderedQuanta > started) return finish(true);
+              }
+            })().catch((error: unknown) => finish(false, error));
+          }),
         },
         responseRead: readTrackResponse,
         ...(preparedSpectrum === undefined ? {} : {

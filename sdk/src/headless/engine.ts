@@ -119,8 +119,6 @@ export class OfflineEngine {
   #booted: Uint8Array | undefined;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
-  /** Callers of the owner's `nextRender`, resolved by the next `render()`, a reload or `dispose()`. */
-  #renderWaiters: Array<() => void> = [];
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
   readonly #spectrumLimits: SpectrumSubscriptionLimits | undefined;
 
@@ -222,8 +220,9 @@ export class OfflineEngine {
    * Subscribe to bounded resident observation rows; values are refreshed by `pump()`.
    *
    * An effect's observation queue holds one subscription per tap until a block drains it. A
-   * subscribe, update or close that finds the slot taken by an earlier one waits for the next
-   * `render()` and then goes through, so a caller that awaits it must render from elsewhere.
+   * subscribe, update or close that finds the slot taken by an earlier one is refused at once with
+   * the typed, retryable `backpressure` error. It never waits: this engine renders only when the
+   * caller does, so the caller calls `render()` and submits again.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
@@ -323,15 +322,7 @@ export class OfflineEngine {
   }
 
   render(actualFrames?: number): { readonly left: Float32Array; readonly right: Float32Array } {
-    const block = this.#boundary.render(actualFrames ?? this.shape().quantumFrames);
-    this.#releaseRenderWaiters();
-    return block;
-  }
-
-  #releaseRenderWaiters(): void {
-    const waiters = this.#renderWaiters;
-    this.#renderWaiters = [];
-    for (const release of waiters) release();
+    return this.#boundary.render(actualFrames ?? this.shape().quantumFrames);
   }
 
   submitCommands(records: Uint8Array, count: number): CommandReport {
@@ -347,7 +338,6 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
-    this.#releaseRenderWaiters();
     // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
     this.#session = undefined;
     this.#booted = undefined;
@@ -359,7 +349,6 @@ export class OfflineEngine {
 
   dispose(): void {
     this.#observationSubscriptions?.invalidate(true);
-    this.#releaseRenderWaiters();
     this.#boundary.dispose();
   }
 
@@ -368,9 +357,6 @@ export class OfflineEngine {
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
       liveControls: () => this.liveControls(),
-      // An offline engine renders only when called, so a subscription refused because an earlier
-      // one is not yet drained resumes at the next `render()` call.
-      nextRender: () => new Promise<void>((resolve) => { this.#renderWaiters.push(resolve); }),
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),

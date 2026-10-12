@@ -121,8 +121,8 @@ export interface ObservationSubscription {
   pump(): Promise<ObservationSubscriptionNotification | undefined>;
   /**
    * Replace the selections and the window. A window change on a tap this handle alone holds is one
-   * re-arm. Like `close()`, it waits for a render when an earlier subscription still holds the
-   * tap's queue slot.
+   * re-arm. Like `close()`, it is refused with a typed, retryable `backpressure` error when an
+   * earlier subscription still holds the tap's queue slot and no render has drained it yet.
    */
   update(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt>;
   close(): Promise<void>;
@@ -141,13 +141,21 @@ export interface ObservationSubscriptionTransport {
   readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
   liveControls(): MaybePromise<EngineLiveControls>;
   /**
-   * Resolves once the engine has rendered a block after this call. An effect's observation queue
-   * holds one subscription per declared tap and a render drains it, so a submission refused with
-   * `backpressure` (records of an earlier submission are not yet drained) is retried after this
-   * resolves, the flow-control policy of the live-control writer. Absent, the refusal is thrown.
-   * It must also resolve, without a render, when the engine is disposed or replaced.
+   * A transport whose renders run on their own clock (a browser's audio thread) lets a managed
+   * submission that was refused with `backpressure` wait for a render and be sent again. A
+   * transport whose caller drives the renders leaves this absent: the refusal is thrown at once,
+   * typed and retryable, and the caller renders and submits again.
    */
-  readonly nextRender?: () => Promise<void>;
+  readonly renderWait?: {
+    /** The longest one managed submission waits for renders, across all of its resends. */
+    readonly boundMs: number;
+    /**
+     * Resolves `true` once the engine has rendered a block after this call, and `false` when
+     * `timeoutMs` passes first or the engine is closed or replaced. It never waits longer than
+     * `timeoutMs`.
+     */
+    next(timeoutMs: number): Promise<boolean>;
+  };
   /** Optional live-response capture/evaluation seam owned by the same lifetime. */
   readonly responseRead?: (
     request: TrackResponseQuery,
@@ -877,6 +885,8 @@ export class ObservationSubscriptionOwner {
     const managedSubmit = (liveControls as EngineLiveControls & {
       readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
     } | undefined)?.submitManaged;
+    const wait = this.#transport.renderWait;
+    let deadline: number | undefined;
     for (let attempt = 0; ; attempt += 1) {
       this.#assertEpoch(epoch);
       const report = managedSubmit === undefined
@@ -884,14 +894,22 @@ export class ObservationSubscriptionOwner {
         : await managedSubmit.call(liveControls, ...edits);
       if (report.ok) return report;
       // A submission names each tap once, so a refusal for room means a record of an earlier
-      // submission still holds the tap's slot. A render drains it: wait for one and send again.
-      // Anything else, a malformed or unbound request included, never succeeds on retry.
-      const nextRender = this.#transport.nextRender;
-      if (report.reasonName !== "backpressure" || nextRender === undefined
+      // submission still holds the tap's slot, and a render drains it. That refusal alone is flow
+      // control: it is typed and retryable. Anything else, a malformed or unbound request
+      // included, never succeeds on resend and is thrown at once.
+      if (report.reasonName !== "backpressure" || wait === undefined
           || attempt >= MAXIMUM_ADMISSION_RETRIES) {
         throw commandFailure("observation transaction was refused", report);
       }
-      await nextRender.call(this.#transport);
+      // Renders on their own clock: wait for one within the bound, then send the same edits again.
+      // When the bound passes without a render the refusal stands, so a context that does not
+      // render ends in the typed error and never in an endless wait.
+      deadline ??= Date.now() + wait.boundMs;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw commandFailure("observation transaction was refused", report);
+      const rendered = await wait.next(remaining);
+      this.#assertEpoch(epoch);
+      if (!rendered) throw commandFailure("observation transaction was refused", report);
     }
   }
 

@@ -5,7 +5,9 @@ import { before, describe, test } from "node:test";
 
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { MisoEngineError } from "../src/core/errors.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
+import { createEngine } from "../src/browser/engine.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
@@ -252,52 +254,76 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     }
   });
 
-  test("a close that follows a subscribe with no render between them waits for the render", async () => {
+  // #1345 gate 6 bullet 3, headless. The engine renders only when the caller does, so a managed
+  // submission whose tap slot an earlier submission still holds is refused at once with the typed,
+  // retryable `backpressure` error. It does not wait for a render that only the caller can make.
+  async function refusedAtOnce(operation) {
+    const outcome = await Promise.race([
+      operation().then(() => ({ settled: "resolved" }), (error) => ({ settled: "rejected", error })),
+      new Promise((resolve) => setTimeout(() => resolve({ settled: "pending" }), 1_000)),
+    ]);
+    assert.equal(outcome.settled, "rejected", "the refusal is immediate, not a wait for a render");
+    assert.ok(outcome.error instanceof MisoEngineError);
+    assert.equal(outcome.error.code, "backpressure");
+    return outcome.error;
+  }
+
+  test("an awaited close before any render is refused with typed backpressure; a render and a retry succeed", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
       liveControls: { commandQueueRecords: 64, observationTaps: 4 },
     });
     try {
-      // The subscribe's record still holds the tap's one queue slot, so the close's disarm is
-      // refused for room. The owner holds it until a render drains the slot, then sends it.
       const handle = await engine.subscribeObservations({
         selections: [selection("comp", "both")], windowBlocks: 2,
       });
-      let closed = false;
-      const closing = handle.close().then(() => { closed = true; });
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      assert.equal(closed, false, "the close waits for a block, it is not dropped");
+      // The exact sequence that hung: `await handle.close()` before the caller renders.
+      await refusedAtOnce(() => handle.close());
+      // The refusal admitted nothing and released the owner: the handle is open and another
+      // owner operation is not "already in flight".
+      await handle.pump();
       feed(engine, 0); engine.render();
-      await closing;
-      // The close's disarm now holds the slot in turn, so the next subscribe waits for a block too.
-      const subscribing = engine.subscribeObservations({
-        selections: [selection("comp", "both")], windowBlocks: 2,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.notEqual(engine.readObservations([selection("comp", "both")])[0].status, "unarmed",
+        "the refused close did not disarm the tap");
+      await handle.close();
       feed(engine, 1); engine.render();
-      const again = await subscribing;
-      feed(engine, 2); engine.render();
-      assert.notEqual(engine.readObservations([selection("comp", "both")])[0].status, "unarmed");
-      await again.close();
-      feed(engine, 3); engine.render();
       assert.equal(engine.readObservations([selection("comp", "both")])[0].status, "unarmed");
     } finally {
       engine.dispose();
     }
   });
 
-  test("a refused subscription that nothing renders for ends when the engine is disposed", async () => {
+  test("a subscribe or update before the slot is drained is refused with typed backpressure and changes nothing", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
       liveControls: { commandQueueRecords: 64, observationTaps: 4 },
     });
-    const handle = await engine.subscribeObservations({
-      selections: [selection("comp", "both")], windowBlocks: 2,
-    });
-    const closing = handle.close();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    engine.dispose();
-    await assert.rejects(closing, /owner changed|stale|closed/);
+    const comp = selection("comp", "both");
+    try {
+      const handle = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
+      feed(engine, 0); engine.render();
+      // The update's record takes the slot; a second operation before a render is refused.
+      await handle.update({ selections: [comp], windowBlocks: 4 });
+      await refusedAtOnce(() => handle.update({ selections: [comp], windowBlocks: 6 }));
+      assert.equal(handle.configuration.windowBlocks, 4, "a refused update leaves the handle as it was");
+      await refusedAtOnce(() => handle.close());
+      feed(engine, 1); engine.render();
+      // Retried after a render, the same update goes through.
+      const receipt = await handle.update({ selections: [comp], windowBlocks: 6 });
+      assert.equal(receipt.configuration.windowBlocks, 6);
+      feed(engine, 2); engine.render();
+      await handle.close();
+      // The close's disarm now holds the slot, so a subscribe before the next render is refused too.
+      await refusedAtOnce(() => engine.subscribeObservations({ selections: [comp], windowBlocks: 2 }));
+      feed(engine, 3); engine.render();
+      assert.equal(engine.readObservations([comp])[0].status, "unarmed");
+      const again = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
+      feed(engine, 4); engine.render();
+      assert.notEqual(engine.readObservations([comp])[0].status, "unarmed");
+      assert.equal(again.configuration.windowBlocks, 2);
+    } finally {
+      engine.dispose();
+    }
   });
 
   test("invalidates a handle at headless replacement", async () => {
@@ -444,5 +470,145 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       }, { maximumBindings: 257 }),
       /maximumBindings.*256/,
     );
+  });
+});
+
+// #1345 gate 6 bullet 3, browser. No browser runs here, so the engine is the real browser entry
+// (`createEngine`) over a scripted host that models the effect's one-slot observation queue: a
+// command is admitted while the slot is free, refused with backpressure while an earlier command
+// still holds it, and a render (`renderedQuanta` moving) frees it. The context renders on its own
+// clock, which the test controls; the CI browser legs run the same case against the worklet.
+describe("issue 1345 -- the browser engine waits for a render, within a bound", () => {
+  const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
+
+  function slotHost() {
+    const log = { commands: [], statusCalls: 0 };
+    let rendered = 0n;
+    let slotFull = false;
+    let nextMalformed = false;
+    const ack = (result, reason, admitted) => ({
+      tag: "miso.ack.v1", requestId: 1, result, reason, rejectedIndex: 0, admitted,
+      appliedAtSample: rendered * 128n, records: new Uint8Array(0),
+    });
+    const host = {
+      async sessionMap() {
+        return {
+          tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"],
+          sources: [], metersAttached: false, submixes: [], routes: [], vcas: [],
+        };
+      },
+      async command(request) {
+        log.commands.push({ at: rendered, kinds: request.commands.map((command) => command.kind) });
+        if (nextMalformed) { nextMalformed = false; return ack(1, 1, 0); }
+        if (slotFull) return ack(6, 8, 0);
+        slotFull = true;
+        return ack(0, 0, request.commands.length);
+      },
+      async observationMap() {
+        return {
+          tag: "miso.observationmap.v1", requestId: 1, result: 0,
+          bindings: [{
+            trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
+            nativeEffectId: "miso.compressor", tapIds: [1],
+          }],
+        };
+      },
+      async readObservations(request) {
+        return {
+          tag: "miso.observationread.v1", requestId: 1, result: 0,
+          rows: request.selections.map((address) => ({
+            ...address, status: 2, sampleRateHz: 48_000, firstSample: 0n, endSample: 0n,
+            sequence: 0n, blocks: 0, leftPresent: 0, rightPresent: 0, left: 0, right: 0,
+          })),
+        };
+      },
+      async status() {
+        log.statusCalls += 1;
+        return { tag: "miso.status.v1", result: 0, state: 2, renderedQuanta: rendered };
+      },
+      async dispose() {},
+    };
+    return {
+      host,
+      log,
+      render() { rendered += 1n; slotFull = false; },
+      refuseNextAsMalformed() { nextMalformed = true; },
+    };
+  }
+
+  async function browserEngine(rig, extra = {}) {
+    return createEngine({
+      document: "opaque",
+      scratchBoot: async () => SHAPE,
+      createContext: () => ({
+        sampleRate: 48_000, renderQuantumSize: 128, state: "suspended",
+        audioWorklet: { async addModule() {} }, async close() {},
+      }),
+      createHost: async () => rig.host,
+      policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 0, observationTaps: 4, masterTrackPlusOne: 0 } },
+      ...extra,
+    });
+  }
+
+  const request = { selections: [selection("comp", "both")], windowBlocks: 2 };
+
+  test("a close whose slot is taken waits for the context to render and goes through", async () => {
+    const rig = slotHost();
+    const engine = await browserEngine(rig);
+    try {
+      const handle = await engine.subscribeObservations(request);
+      const closing = handle.close();
+      setTimeout(() => rig.render(), 30);
+      await closing;
+      // Subscribe, the refused close, and the same close sent again after the render.
+      assert.deepEqual(rig.log.commands.map((entry) => entry.at), [0n, 0n, 1n]);
+      assert.equal(rig.log.commands[1].kinds[0], rig.log.commands[2].kinds[0]);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("a suspended context ends the wait in typed backpressure at the deadline, and the polling stops", async () => {
+    const rig = slotHost();
+    const engine = await browserEngine(rig, { requestDeadlineMs: 80 });
+    try {
+      const handle = await engine.subscribeObservations(request);
+      const started = Date.now();
+      const outcome = await Promise.race([
+        handle.close().then(() => "resolved", (error) => error),
+        new Promise((resolve) => setTimeout(() => resolve("still waiting"), 2_000)),
+      ]);
+      assert.ok(outcome instanceof MisoEngineError, `ended with ${String(outcome)}`);
+      assert.equal(outcome.code, "backpressure");
+      assert.ok(Date.now() - started >= 70, "it waited for the context before it gave up");
+      // The wait left nothing polling the host.
+      const calls = rig.log.statusCalls;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal(rig.log.statusCalls, calls);
+      // Nothing was admitted by the refusal; once the context renders the same close goes through.
+      rig.render();
+      await handle.close();
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("a refusal that is not backpressure rejects at once and is never sent again", async () => {
+    const rig = slotHost();
+    const engine = await browserEngine(rig, { requestDeadlineMs: 2_000 });
+    try {
+      const handle = await engine.subscribeObservations(request);
+      rig.refuseNextAsMalformed();
+      const started = Date.now();
+      await assert.rejects(() => handle.close(), (error) => {
+        assert.ok(error instanceof MisoEngineError);
+        assert.equal(error.code, "invalidArgument");
+        return true;
+      });
+      assert.ok(Date.now() - started < 500, "a malformed refusal does not wait for a render");
+      assert.equal(rig.log.commands.length, 2, "the subscribe and the one refused close, no resend");
+    } finally {
+      await engine.close();
+    }
   });
 });
