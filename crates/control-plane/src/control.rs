@@ -178,7 +178,7 @@ pub enum TestStructuralFaultPhase {
     BeforeProtocolCommit,
     /// The protocol commit itself returns `Err` (issue #1273 gate 3).
     ProtocolCommit,
-    /// The live arm, after every fallible check and before its first push (#1257 D7).
+    /// The live arm, after every fallible check and before its first write (#1257 D7).
     BeforeLivePush,
 }
 

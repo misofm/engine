@@ -893,7 +893,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // A subscription rides the effect's own command queue, so capacity without one has no delivery
+    // A subscription is a live command, so capacity without a control channel has no delivery
     // path; a master designation with no capacity would report a number nothing produces.
     if ((options.liveControlObservationTaps !== 0n && options.liveControlCommandQueueRecords === 0n)
         || (options.liveControlMasterTrackPlusOne !== 0n

@@ -304,8 +304,8 @@ the deleted test.
 *Defect only the old test could catch: none found.* Mutations in `Plan::render_inner`
 (`crates/engine/src/realtime/plan.rs`), each run with both tests (debug, `plan_swap_race`):
 - snapshot taken after the executor rendered (#1314 M14; the render uses an earlier snapshot, the
-  report the later one): both tests red at block 0 (the old one "advanced to edit 1 in a block that
-  did not apply it", the new one "in a block that does not show it"), three runs of three;
+  report the later one): both tests red at block 0 in each of three runs (the old one "advanced to edit 1 in
+  a block that did not apply it", the new one "in a block that does not show it");
 - the block renders under `LiveSnapshot::ALL`: the old test stayed green in both runs, the new one
   red ("block 14 shows a new state, but the watermark (revision 53) did not advance at it"; block 230
   in the second run).

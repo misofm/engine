@@ -71,10 +71,10 @@
 //
 // ## Application timing is exact
 //
-// Every live-control stage -- matrix/pan, fader/mute, and each driven effect -- takes its pending
-// control at the top of the block, before it touches a sample: the fader, mute, pan or matrix and
-// effect stages read their cells under the block's one snapshot, and an effect stage also drains
-// its observation queue. `appliedAtSample` on the
+// Every live-control stage -- input, matrix/pan, fader/mute, send, and each driven effect -- takes
+// its pending control at the top of the block, before it touches a sample: the input, fader, mute,
+// pan or matrix, send and effect stages read their cells under the block's one snapshot, and an
+// effect stage also drains its observation queue. `appliedAtSample` on the
 // acknowledgement is the first sample of the next rendered block, when the target is applied.
 // Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
 // target at A+64; a response captured after A reports the accepted target, not an in-ramp curve.
@@ -345,9 +345,9 @@ export const enum MisoCommandReason {
   Domain = 6,
   /// Well formed and correctly addressed; this ABI version cannot apply that kind.
   UnsupportedKind = 7,
-  /// An effect's bounded observation queue had no room for the `ObserveSubscribe` records the
-  /// submission queues because earlier submissions are not yet drained; nothing was admitted, and
-  /// a render clears it. The reason is also returned with the internal result
+  /// An effect's bounded observation queue had no room for the `ObserveSubscribe` or
+  /// `ObserveUnsubscribe` records the submission queues because earlier submissions are not yet
+  /// drained; nothing was admitted, and a render clears it. The reason is also returned with the internal result
   /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
   /// revision past the gate's ceiling); that batch wrote nothing. Fader, mute, pan or matrix,
   /// input trim, polarity and filter, live-send, and effect parameter, bypass and prepared-target
@@ -817,8 +817,8 @@ export interface MisoWebBootOptions {
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`,
-  /// because a subscription rides the effect's own observation queue.
+  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`: a
+  /// subscription is a live command, and a session with no control channel accepts none.
   liveControlObservationTaps: bigint;
   /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
   /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
@@ -876,7 +876,12 @@ export interface MisoStatus {
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
   /// The session's count of live values that a later committed value replaced before a block
-  /// applied them (decision 15, D15-2). The same count the C ABI reports through `COUNTERS_GET`.
+  /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). For one script of
+  /// strip fader, mute and pan edits that stages at most one write per cell in a submission it
+  /// equals the C ABI's count. It does not for a script the two hosts stage differently: the
+  /// browser also counts the extra writes one submission makes to one cell (send edits in wire
+  /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
+  /// writing no cell, for input, route, VCA and submix edits.
   readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
 }

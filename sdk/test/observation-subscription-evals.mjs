@@ -477,7 +477,8 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
 // (`createEngine`) over a scripted host that models the effect's one-slot observation queue: a
 // command is admitted while the slot is free, refused with backpressure while an earlier command
 // still holds it, and a render (`renderedQuanta` moving) frees it. The context renders on its own
-// clock, which the test controls; the CI browser legs run the same case against the worklet.
+// clock, which the test controls. The CI browser legs do not run this case against the real
+// worklet yet; that is #1530's work.
 describe("issue 1345 -- the browser engine waits for a render, within a bound", () => {
   const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
 

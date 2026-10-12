@@ -1313,8 +1313,13 @@ pub struct WebStatus {
     /// The session's `live_values_superseded` count (decision 15, D15-2): the writes to live
     /// values that a later committed value replaced before the block that would have applied them,
     /// summed over every cell the session holds (a `Both` record counts in each channel cell).
-    /// Loaded after every rendered block, so it is never behind the last one, and equal to what the
-    /// C ABI's `COUNTERS_GET` reports for the same script.
+    /// Loaded after every rendered block, so it is never behind the last one. It counts in the
+    /// C ABI's unit (`COUNTERS_GET`): each read adds the writes it replaced. For one script of
+    /// strip fader, mute and pan edits that stages at most one write per cell in a submission, it
+    /// equals the C ABI's count. It does not for a script the two hosts stage differently: the
+    /// browser also counts the extra writes one submission makes to one cell (send edits in wire
+    /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
+    /// writing no cell, for input, route, VCA and submix edits.
     pub live_values_superseded: u64,
     /// Required-zero expansion words.
     pub reserved: [u64; 3],
@@ -1547,9 +1552,9 @@ struct ReadyOwnership {
     /// never moved while a stamp is open: every revision stamped here is published in the same
     /// admission.
     plan_gate: engine::realtime::PlanRevisionGate,
-    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
-    /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
-    /// reaches its cells and its observation queue with one index and no search. The producer's
+    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense slot
+    /// order [`ReadyOwnership::effect_slot`] computes (a staged command's `queue_slot`), so an
+    /// addressed command reaches its cells and its observation queue with one index and no search. The producer's
     /// parameter, bypass and EQ-target values are latest-target cells (#1345); only an
     /// observation subscription is a queue record.
     effect_controls: Box<[Option<EffectControlProducer>]>,
@@ -3290,8 +3295,8 @@ impl AudioWorkletEngineHost {
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
                 self.status.live_values_superseded = ready.live_values_superseded.get();
-                // Issue #137 D1: the matrix stage drained every control queue at the top of this
-                // block, so the exact free-slot count is the whole capacity again. Command-free
+                // Issue #137 D1: every effect stage drained its observation queue at the top of
+                // this block, so the exact free-slot count is the whole capacity again. Command-free
                 // blocks have no counters to clear and skip the dense write pass entirely.
                 if ready.has_in_flight_commands {
                     #[cfg(test)]
@@ -5495,13 +5500,6 @@ fn admit_commands_staged(
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             for (lanes, db) in ready.vcas.fader_delta(strip).into_iter().flatten() {
-                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                    return Err(refuse(
-                        COMMAND_REASON_UNSUPPORTED_KIND,
-                        vca_fader_first_wire_index as usize,
-                    ));
-                };
-                *wanted = wanted.saturating_add(1);
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -5554,13 +5552,6 @@ fn admit_commands_staged(
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             for (lanes, muted) in ready.solo.strip_delta(strip).into_iter().flatten() {
-                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                    return Err(refuse(
-                        COMMAND_REASON_UNSUPPORTED_KIND,
-                        count.saturating_sub(1),
-                    ));
-                };
-                *wanted = wanted.saturating_add(1);
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -6500,7 +6491,7 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.abi_version",
         ));
     }
-    // Issue #143: observation capacity requires a command queue to carry the subscription, and a
+    // Issue #143: observation capacity requires a control channel to carry the subscription, and a
     // master designation must be a plausible track index. The session-level range check is the
     // facade's; this one only refuses what cannot be a track index at all.
     if options.reserved0 != 0 {

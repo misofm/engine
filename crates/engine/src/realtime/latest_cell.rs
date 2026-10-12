@@ -684,7 +684,7 @@ pub struct SharedAllocation<T> {
 /// #1312 D2): `live_values_superseded`.
 ///
 /// One per session, shared by every plan the session prepares and by every kind of lane that holds
-/// cells (strips #1312 and #1346, routes #1347). Render is its only writer, with a load, a
+/// cells (strips #1312 and #1346, routes #1347, effects #1345). Render is its only writer, with a load, a
 /// saturating add and a store (never a read-modify-write: a plan swap hands render from one plan
 /// to the next on the same single render thread, so two writers never overlap); control reads it.
 /// A clone shares the count.
@@ -708,17 +708,17 @@ impl LiveValuesSuperseded {
         )
         .expect("a count allocation's size fits u64")
     }
+}
 
+// REALTIME_POLICY_BEGIN
+impl LiveValuesSuperseded {
     /// The writes counted so far: a relaxed load. Control reads it for the counters, and render
     /// reads it after each block to publish it in the browser's status (#1399).
     #[must_use]
     pub fn get(&self) -> u64 {
         self.0.load(core::sync::atomic::Ordering::Relaxed)
     }
-}
 
-// REALTIME_POLICY_BEGIN
-impl LiveValuesSuperseded {
     /// Render: add `count` replaced writes. Saturating. A load and a store, not a read-modify-write,
     /// because render is the count's only writer. The method is private to this module, so the only
     /// caller is [`CellReader::read_counted`], which render's drains call: only a cell read writes
