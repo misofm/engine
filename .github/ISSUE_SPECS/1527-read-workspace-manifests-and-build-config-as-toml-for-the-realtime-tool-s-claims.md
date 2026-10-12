@@ -484,6 +484,6 @@ records any difference in the Attempt record.
   manifest: 0 refusals.
 - Gate 5 (test value): each new row carries its sentence from the cases.
 - Gate 6 (replaces the original): `cargo test --locked -p realtime-policy` passes with the new doctest rows,
-  `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh` still pass
+  `cargo run --locked --release -q -p realtime-policy` still passes (the awk gate is deleted by #1446)
   on the real tree, and `cargo fmt --check` and `cargo clippy -p realtime-policy --all-targets -- -D warnings`
   exit 0.
