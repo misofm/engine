@@ -616,6 +616,10 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 38 | #1481 | Make the nightly vectorization report pass on main and report its failures | — | — |
 | 39 | #1489 | Correct the realtime dependency policy's unsafe-ownership statements | — | H #1488 (preferred; else its D-M2 exception clause) |
 | 40 | #1496 | Prove that every export the worklets call after construction is render-locked | #1446 | H #1488, H #1492 |
+| 41 | #1527 | Read workspace manifests and build config as TOML for the realtime tool's claims | #1519, #1442 (either order with #1446) | — |
+
+**#1527 (root, 2026-10-12)** runs after #1519 and #1442 and in either order with #1446 (neither depends on the
+other); it takes over #1442's dependency-key manifest rule, which #1442's attempt-3 verdict failed.
 
 **#1444 waits for B #1345 (Amendment 1): accepted by root, 2026-10-05**, in place of the earlier
 "not ordered against #1345" for this one slice.

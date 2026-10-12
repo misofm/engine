@@ -967,3 +967,19 @@ R2 are #1519's and limit 4; N1-N3 need `${` or `feature(`, which R4 refuses (C13
    names no class.
 5. `scripts/test-realtime-policy.sh`'s awk-era base tree still holds the `.map(Consumer::try_pop)` live.rs twin; the awk gate accepts
    it and C2 deletes the script.
+
+## Verdict (attempt 3, `/home/bl/misofm/submix-verdicts/1442-attempt3.md`, range `09edb4bb8..7d586f674`)
+
+Findings: M1 (MAJOR): five families of written `Cargo.toml` forms give a dependency the extern name `core`, `std` or
+`alloc`, Cargo accepts each, and the awk manifest rule in `scripts/check-workspace-policy.sh` says `ok`: inline tables,
+dotted keys, whitespace around the dots of a header, quoted table names, and escapes in a quoted key. m1: the module
+documentation in `tools/realtime-policy/src/drain/trusted.rs:37-39` gives registry crates limit 3 (they are #1438
+Hazards limit 1). m2: the comments at `trusted.rs:13-15` and `drain/mod.rs:69-71` say the scan refuses an import, but
+`pub use crate::loops::try_pop;` passes (q) as the spec allows. NIT: `scripts/test-workspace-policy.sh` is edited and the
+Authorized paths name only `scripts/check-workspace-policy.sh`; the row `try-pop-by-value-on-a-reference-impl` stayed
+though the spec said to delete it. The verdict found no BLOCKER or MAJOR in the Rust tool part: gates 1 to 5, the parity,
+the fuzz counts and the Amendment-4 mutations reproduce.
+
+Root close text: "Attempt 3 FAIL (M1, manifest rule only). Budget spent; no attempt 4. Root rescope (2026-10-12): the dependency-key manifest rule moves to #1527. The remaining scope has no BLOCKER or MAJOR (attempt-3 verdict)."
+
+Root ratified the `scripts/test-workspace-policy.sh` edit (disclosed in the attempt-3 record above).

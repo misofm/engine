@@ -412,6 +412,7 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
   1. code outside the workspace source: registry crates as `Cargo.lock` pins them (their macros, proc macros, traits and types), the compiler and the standard library;
   2. type-level behaviour the tool cannot read, wherever the type is defined: auto-deref through a `Deref`/`DerefMut` impl (#1440 Hazards, a.3), and which impl a method call resolves to;
   3. a limit that a slice's spec lists for a later slice of this program to close (#1441 D4), until that slice lands.
+     Staged for #1527 (root ruling, 2026-10-12): a dependency key that gives a crate the extern name `core`, `std` or `alloc` in a TOML form the line-based manifest rule cannot read (inline tables, dotted keys, spaced header dots, quoted table names, escaped keys); a workspace member or path dependency outside the scan roots; a compiler crate attribute injected through `RUSTFLAGS` or `RUSTDOCFLAGS`, or through the `.cargo` config (`rustdocflags`, `include`, an `@argfile`). Each form is staged for #1527.
   4. Macro metaprogramming (owner decision, 2026-10-11): an identifier, item name, path, attribute or
 file path that a macro expansion builds from parts — a `macro_rules!`/`macro` fragment or `tt`
 substituted into an item, attribute, `use` or call position, a metavariable expression (`${..}`),
@@ -419,7 +420,7 @@ an attribute or derive macro. The tool judges every written token, inside macro 
 the rules the tool applies to written tokens in that place, and refuses each direct form those rules
 name: D1 (a) (#1519) refuses every `path` in a written attribute inside a macro token tree, whatever
 its value; B2a-D2 refuses every `try_pop` token in a macro token tree in a region. It does not model what
-an expansion assembles; the written gates `${`, `feature(` and `proc_macro*` stay refused. Code written to defeat the tool this way is outside its claim.
+an expansion assembles; the written gates `${`, `feature(` and `proc_macro*` stay refused. Code written to defeat the tool this way is outside its claim. Limit 4 also covers a compiler flag that a script or workflow assembles at run time from parts (root ruling, 2026-10-12, #1527 D7).
   (Placement: item 4 was added by root's ruling of 2026-10-12 (rj3-e), which records the owner's decision of 2026-10-11. Q is the pair `try_pop`, `available_at_entry`, defined in #1442 root Amendment 4. The other three limits are unchanged.)
   A verifier finding inside one of these limits is recorded in the issue's evidence and is not a FAIL. Only a root ruling adds or widens a limit; an implementer or a verifier cannot. A documentation or record sentence that claims more than the tool does is a finding as usual.
 
