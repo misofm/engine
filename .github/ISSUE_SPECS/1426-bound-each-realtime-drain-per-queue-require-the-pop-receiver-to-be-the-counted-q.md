@@ -192,8 +192,7 @@ after the cell slices.
 **Decisions, as amended.**
 - **D1 stands, in syntax-tree terms.** For every pop that the tool judges against a counted
   innermost loop (tool B1a-D8), three things must hold:
-  1. The pop's receiver equals that loop's counted receiver, token for token, after one trailing
-     `.as_ref()` or `.as_mut()` is stripped from each. The counted receiver comes from either:
+  1. The pop's receiver equals that loop's counted receiver, token for token. The counted receiver comes from either:
      - the count binding (tool B1a-D6), through an alias where there is one;
      - the header path of `for P in 0..<path>.available_at_entry()`.
   2. The root identifier of each receiver resolves to the same binding, through the tool's one
@@ -282,8 +281,7 @@ after the cell slices.
        (item 3). The spare's records then pop under the first queue's count;
      - `pop_receiver_swapped_before_loop`: `let available = control.available_at_entry();
        core::mem::swap(control, other); for _ in 0..available { control.try_pop() .. }` (item 3).
-   - **Still accepted:** the `stage` twin (`as_ref` count, `as_mut().map(Consumer::try_pop)` pop,
-     alias count), the `drain_controls` twin, the route-drain twin (field paths of `self` beside
+   - **Still accepted:** the `drain_controls` twin, the route-drain twin (field paths of `self` beside
      the receiver `self.control.consumer`), and B1a-D8b's two accepted per-queue cases (the meter
      poll's shape first).
 3. **Red on revert (PR evidence).** Run the tool at this change's parent with this change's cases.
@@ -293,8 +291,6 @@ after the cell slices.
    drain, so `pop_receiver_unreadable_call` is new red here.
 4. **Mutations (PR evidence).** Apply each alone:
    - (a) the receiver comparison always true: the D1 cases are red;
-   - (b) the `as_mut`/`as_ref` strip removed: the `stage` twin is red. If `live.rs:366` still pops
-     on `main` at implementation time, gate 1 also fails there. Otherwise record its removal;
    - (c) the header-path receiver ignored: `pop_receiver_differs_header` is red;
    - (d) spelling compared without binding resolution: `pop_receiver_rebound` is red;
    - (f) item 3 not checked: `pop_receiver_swapped_with_spare` and
@@ -319,7 +315,6 @@ after the cell slices.
 - The two `swapped` cases are red if the receiver is compared by identity but its place can be
   replaced between the count and the pop: the drain then pops another queue under this queue's
   count, which no identity case reaches.
-- The twins keep mutation (b)'s defence after #1345 removes the real `stage` drain.
 
 **Dependencies, as amended.**
 - After (same stream): #1418 (Amendment 1), which comes after the whole J tool batch is on `main`

@@ -817,3 +817,153 @@ have the 17 locals renamed in a production-adjacent change, which flips one acce
 - The scripts/test-realtime-policy.sh base tree still holds the awk-era `drain_lane_pairs` closure (outside this
   slice's paths; the awk accepts it until C2 deletes the script).
 
+
+## Attempt record (attempt 3, the last; J batch branch `codex/d15-stream-j3`, base `09edb4bb8`)
+
+Commits: `0761d16d9` (rules, cases, manifest rule) and the evidence commit that holds this record. Edits:
+`tools/realtime-policy/**`, this spec, `scripts/check-workspace-policy.sh` with `scripts/test-workspace-policy.sh`
+(the manifest rule, the named exception of root Amendment 4), and, by the coordinator's later instruction, the
+superseded `as_mut`/`as_ref` strip lines of #1426 (below). No production code, `Cargo.toml` or `Cargo.lock` change;
+`live.rs` is untouched.
+
+**What changed (root Amendment 4 as written; no rule text is mine).**
+- R1, R1b. `called_in_place` allows a `try_pop` path only as the callee of a call. `shapes::direct_entry` reads only
+  `<recv>.available_at_entry()[.min(<cap>)]`. The `<fields>.as_mut()` receiver code, `Place` use in `mod.rs` and the
+  `map_or` count form are deleted.
+- `src/drain/trusted.rs` is rewritten: (q) one written `fn` token each for `try_pop` and `available_at_entry` in
+  `crates/engine/src/realtime/spsc.rs` (a per-name set, so a second in that file is refused), every other Q identifier
+  not after `.` or `::` refused; (s) F2 for `debug_assert` only; (u) `macro_use` except the group of `#[macro_use]`
+  followed by `mod`; (n) `no_implicit_prelude`; (d) unchanged; (f) R4: `feature` before a `(` group and `$` before a
+  `{` group. Deleted: rule (a)/(b)/(c) code, the name-emitting set, its transitive closure, the rename tracking,
+  `defines_a_name`, `imported_names`, `TRUSTED`, `MacroDef`, `Invocation`.
+- B1a-D7: `tree::is_debug_assert` takes a single-identifier macro path with no leading `::`.
+- R3. `mod.rs` `read_scope` replaces `read_span`: a `let`'s scope is the whole block that holds it from its `{`; a
+  parameter's the `fn` body; a pattern's its node. Both the item scan (`items::names_item`, now over the scope's leaves
+  and not the region's) and D10's macro/attributed-item check use it. `Ctx::names_item`, `Ctx::leaves` and
+  `RegionNodes::bounds` (dead) are deleted.
+- R5. `a_decrement_that_a_body_let_has_rebound_is_refused` (`u19-swapped`) is deleted; `a_decrement_after_a_continue_is_refused`
+  (C15) replaces it. The probe `u19` stays accepted in the corpus.
+- The manifest rule: `check-workspace-policy.sh` scans every tracked `Cargo.toml` (comments stripped) for a key
+  `core`/`std`/`alloc` (bare, quoted or dotted) in a `[*dependencies]` table and for a `[*dependencies.core|std|alloc]`
+  header. `test-workspace-policy.sh` has four refused mutations and one accepted lookalike case.
+- The base fixture `tests/fixtures/base/crates/effect-contract/src/live.rs.txt` holds the review's tested rewrite
+  (`if let Some(control) = self.control.as_mut() { let available = control.available_at_entry(); .. control.try_pop() .. }`);
+  the two ported rows anchored on `remaining -= 1;` are re-anchored for the new indent.
+- Module documentation of `drain/mod.rs`, `trusted.rs` and four sibling modules state D1 to D3 as amended, the whole-scope
+  rule, and limit 4 with the three earlier limits (and nothing else).
+
+**Deleted tests** (superseded; each in the same commit): `a_user_trait_with_a_map_in_a_nested_module_is_refused`,
+`a_definition_import_or_rename_of_map_or_as_mut_is_refused`, `a_try_pop_taken_by_value_on_a_reference_impl_is_refused`
+(C4's rows hold it), `a_map_name_that_a_macro_makes_is_refused`, `a_name_passed_to_an_inner_name_emitting_macro_is_refused`,
+`a_name_emitting_macro_invoked_through_a_rename_is_refused`, six `.map(<path>)` rows of the function-value test (the
+iterator, `repeat`, `cycle`, `as_ref`, call-result and extra-argument rows) and the `map-argument-*` rows of
+`a_function_value_called_in_place_is_judged_by_its_loops`. The row `item-macro-before-the-count` is deleted from the accepted
+rows (r14 is its refused case, R3): its test comment said an item before the `let` cannot shadow it, which D9 now says is false.
+`a_region_that_ends_in_a_deeper_block_is_refused` expects the drain class beside the boundary class (R3 sees the `const`
+the boundary rule was alone in seeing) and keeps a no-pop twin so that only the boundary rule can refuse it.
+
+**Real tree (re-measured).** `cargo run --locked --release -q -p realtime-policy` refuses exactly
+`crates/effect-contract/src/live.rs:366` (`let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop)`), the
+form #1345 rewrites. This is expected until J rebases onto #1345; I did not touch `live.rs`. With the review's tested
+rewrite (`rj3d-probes/live.rs.rewritten`) copied over `live.rs` for one run and restored, the tool prints
+`realtime policy: ok (94 marked regions in 26 files)`: every other rule refuses nothing. `bash scripts/check-realtime-policy.sh`
+(the awk gate) prints `realtime policy: ok (94 marked regions in 26 files)`. Release run 1.44 s (attempt 2: 1.31 s). Not tuned.
+
+**Gates.**
+1. Real tree: above.
+2. `cargo test --locked -p realtime-policy`: 183 passed (180 on the base `09edb4bb8`).
+3. Parity (throwaway script outside the repository: base tree + each of the 120 committed probes, awk under gawk and the
+   release tool): the tool equals the expected class set of every file name. Awk and tool differ on the same 10 as attempt 2,
+   all named: a06, a07, b02, n09, e11 (D1), e07 (D2), v14 and v14b (SP-4), n06 (Option A), u19 (awk over-refuses). Corpus 89
+   refused + 31 accepted, as attempt 2.
+4. Fuzz (throwaway): fz_1-4 and fz_11-14 hold 3767 regions: 3762 refused with the drain class, 1 parse failure (`fz_2` s125),
+   4 accepted (`fz_1` s249, `fz_3` s63, `fz_11` s170, `fz_14` s229: the pop is in a bare block after the loop). fz_21 and fz_22:
+   800 regions, 106 refused with the drain class (58 + 48, #1441's D10; the same numbers as attempt 2, so R3 moves none),
+   694 accepted. Identical to attempt 2.
+5. Mutations: below.
+6. Shipped artifacts: unchanged (no production, `Cargo.toml` or `Cargo.lock` change).
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `bash scripts/check-workspace-policy.sh`, `bash scripts/test-workspace-policy.sh`, `bash scripts/check-realtime-policy.sh` and
+   `bash scripts/test-realtime-policy.sh` exit 0.
+
+**Mutations** (each alone, by a harness outside the repository that patches the source, runs `cargo test` and the debug tool on
+the real tree, and restores the file; 183 green after every restore). "Real tree" is the tool on the pre-#1345 tree: it
+refuses `live.rs:366` under every mutation, as it does unmutated; any additional site is named.
+- M1 (root 1) `.map(<path>)` on `<fields>.as_mut()` allowed again: `a_function_value_that_pops_is_refused_unless_it_is_a_callee`,
+  row `map-path-on-as-mut` (C1) only.
+- M2 (root 2) the `map_or(0, <Type>::available_at_entry)` count restored: `the_map_or_count_form_is_not_a_count` (C2) only.
+- M3 (root 3) (q) allows any `fn try_pop(&mut self`: `a_definition_of_try_pop_outside_the_queue_is_refused`, row
+  `try-pop-looping-on-a-ring` (C4), and `a_second_definition_in_the_defining_file_is_refused` (the allowance consumes no count).
+- M3b (coordinator's item 1) the "one per name" count dropped (`defined.insert` always true):
+  `a_second_definition_in_the_defining_file_is_refused` only.
+- M4 (root 4) `available_at_entry` not in Q: `a_definition_of_available_at_entry_outside_the_queue_is_refused` (C5) and the
+  second-definition test.
+- M9 D7 matches the last path segment: `a_debug_assert_spelled_as_a_path_is_not_taken_at_its_word` (C10) only.
+- M10a (u) dropped: `macro_use_is_refused_except_on_a_module`, its three refused rows. M10b the exemption dropped: the same
+  test (accepted half) and `the_trusted_names_in_their_allowed_forms_pass`; the real tree also refuses `crates/math/src/lib.rs:52`.
+- M11 (n) dropped: `no_implicit_prelude_is_refused`.
+- M12 `feature(` matched only as the first token of its group: row `cfg-attr-feature` of
+  `feature_enabling_and_metavariable_expressions_are_refused`. M12b the `$ {` rule dropped: row `metavariable-expression`.
+- M13a (root 13, first half) the scope of a `let` runs from the `let` to the end of the statement that holds the pop (today's
+  D10 span): rows `r13-unit-struct-before-the-let` and `r14-macro-made-struct-before-the-let` of
+  `an_item_or_macro_in_the_scope_of_a_read_binding_refuses_the_drain`, and nothing else.
+- M13b (root 13, second half) the item scan reads the region's leaves only: rows r04, r07, r09, r05, r11, `pq_norounds_2`
+  and r13 of the same test (r14 stays green: D10 still sees its macro), and
+  `a_region_that_ends_in_a_deeper_block_is_refused`.
+- M14 (root 14) the first-statement rule relaxed to the first binary statement: `a_decrement_after_a_continue_is_refused` (C15)
+  only; the 182 other tests stay green, as the review found.
+- Carried over from attempt 2 (the same mutations, re-run): F2 dropped: 4 tests (`proc-macro-fn` stays green); F2 and (d)
+  dropped: those plus `a_proc_macro_named_debug_assert_is_refused`; (d) dropped alone: `a_proc_macro_that_a_macro_makes_is_refused`;
+  any `try_pop` path value allowed: the function-value test; closures transparent: 4 tests; macro token trees allowed: 2 tests;
+  `debug_assert` always trusted: 4 tests.
+- Manifest rule (`test-workspace-policy.sh`, one mutation of the rule each): the check dropped, the header form dropped, the key
+  form dropped, the dotted-key form dropped: the corresponding `sysroot-*` row reports `policy mutation unexpectedly passed`;
+  every table read as a dependency table: the lookalike case (`[package.metadata.notes] core = ..`) fails.
+
+**Test value (one sentence per new or rewritten test).**
+- `a_function_value_that_pops_is_refused_unless_it_is_a_callee` (row `map-path-on-as-mut`, C1): red if `.map(<path>)` on
+  `<fields>.as_mut()` is accepted again, which no other row reaches now that the `.map` allowance has no receiver variants.
+- `the_map_or_count_form_is_not_a_count` (C2): red if the `map_or(0, <Type>::available_at_entry)` count is accepted again.
+- `a_definition_of_try_pop_outside_the_queue_is_refused` (C4) and `..available_at_entry..` (C5): red if a written definition of
+  either name outside `spsc.rs` is allowed (t2, t7).
+- `a_second_definition_in_the_defining_file_is_refused`: red if the allowance in `spsc.rs` is not one `fn` per name.
+- `a_debug_assert_spelled_as_a_path_is_not_taken_at_its_word` (C10, t6): red if the `debug_assert!` exemption matches the last
+  path segment.
+- `macro_use_is_refused_except_on_a_module` (C11): red if (u) is dropped; its accepted half is red if the `#[macro_use] mod`
+  exemption is dropped (the real `crates/math/src/lib.rs:52`).
+- `no_implicit_prelude_is_refused` (C12): red if (n) is dropped.
+- `feature_enabling_and_metavariable_expressions_are_refused` (C13): red if `feature(` is matched only as `#![feature(` or
+  `${` is not refused.
+- `an_item_or_macro_in_the_scope_of_a_read_binding_refuses_the_drain` (C14): red if the scan stops at the region (r04, r05, r07,
+  r09, r11, `pq_norounds_2`) or if a `let`'s scope starts at the `let` (r13, r14); the controls (`pq_norounds_1`, r04 with no
+  struct) are red if the rule over-refuses.
+- `a_decrement_after_a_continue_is_refused` (C15): red if `while_bounds` accepts a decrement that is not the body's first
+  statement; `while-decrement-not-first` stays green under that defect.
+- `the_trusted_names_in_their_allowed_forms_pass` (rewritten): red if the scan refuses a `.try_pop()` or `.available_at_entry()`
+  call, a `Consumer::try_pop(c)` callee, a longer name that starts like a trusted one, `#[macro_use] mod`, a plain `feature` word
+  or a `$` metavariable.
+
+**Measured for the coordinator's item 2 (the `as_mut`/`as_ref` strip).** Nothing in the tool or in a kept case needs the strip
+now that `.map` is withdrawn: the only code that stripped `as_mut()` from a receiver was `called_in_place` (deleted); `per_queue`
+and `count` match receivers by their own grammar and never name `as_mut` or `as_ref` as a method. On the real tree the only
+multi-line `.as_ref()`/`.as_mut()` receiver chain beside an `available_at_entry` or a `try_pop` is `live.rs:349-352` and `:366`,
+which #1345 rewrites to `control.available_at_entry()` and `control.try_pop()`. So #1426's D1 strip and its gate-4 mutation (b)
+are deleted from that spec (the amended D1 item 1, the mutation (b) line, the "Still accepted" `stage` twin and the last test-value
+bullet). I left the original, pre-amendment sections of #1426 as they are: the amended sections replace them.
+
+**Limit-4 evidence (recorded, none a FAIL).** Run on the base tree with each probe appended, release tool:
+t1, t3a, t3b, t4 and the t3 drain pass (the name or path is built by expansion); t2, t5, t6 and t7 are refused (t2/t7 by (q), t5 by
+R1b, t6 by D7). The stable `path` splice vectors (V3, V4, V8, W3, R1/R2) and the nightly vectors N1-N3 were not re-run here: V3 to
+R2 are #1519's and limit 4; N1-N3 need `${` or `feature(`, which R4 refuses (C13).
+
+**Deviations and open items.**
+1. Gate 1 refuses `live.rs:366` until J rebases onto #1345 (root Amendment 4, expected). The post-rebase claim is measured with the
+   review's rewrite copied over `live.rs` for one run, not on the rebased tree.
+2. The real-tree statement for gate 5 ("the real tree must pass") is likewise pre-rebase: every mutation run shows the same single
+   refusal, plus `math:52` under M10b.
+3. R3 reads each binding's scope; the union of the spans for D10's macro/attribute check is kept as in attempt 2 (a macro anywhere
+   in the union of the read bindings' scopes), which can only refuse more.
+4. A hit of the trusted-name scan is a standalone finding of the drain class at the identifier (as attempt 2, deviation 5); the spec
+   names no class.
+5. `scripts/test-realtime-policy.sh`'s awk-era base tree still holds the `.map(Consumer::try_pop)` live.rs twin; the awk gate accepts
+   it and C2 deletes the script.
