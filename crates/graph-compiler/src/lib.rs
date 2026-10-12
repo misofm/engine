@@ -3081,9 +3081,11 @@ mod tests {
 
     #[test]
     fn effect_control_resource_uses_independent_queue_and_owner_arithmetic() {
-        // Keep the expected bytes in this test independent of `effect_control_resource`: the
-        // queue helper, the lane layout and the target FIFO are the witnesses, while the report
-        // only supplies the final graph deltas and cap boundary.
+        // Keep the expected bytes in this test independent of `effect_control_resource`: a lane's
+        // heap is its own accounting, which `tests/bypass_resources.rs` holds to the audited
+        // allocator (`a_lanes_own_accounting_is_what_the_allocator_sees`), and the owners around
+        // it are sized here from their types, while the report only supplies the final graph
+        // deltas and cap boundary.
         let model = queued_eq_model();
         let registry = launch_native_effect_registry().expect("launch registry");
         let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
@@ -3187,16 +3189,15 @@ mod tests {
             if banked && controlled != 0 {
                 assert_eq!(8 % bank_width, 0, "EQ fixture fills complete banks");
                 let banks = controlled.div_ceil(bank_width) as u64;
-                // The bank's lane array, and beside it the array of the lanes' observation queues,
-                // which the bank takes out of its lanes at bind.
+                // The bank's lane array. Beside it the bank keeps a `(lane index, queue)` entry for
+                // each lane that has an observation queue; these lanes are built with none
+                // (`observation_depth: 0`), so the table is empty and allocates nothing. The
+                // tapped table is held to the allocator in `tests/bypass_resources.rs`.
                 let bank_bytes = (bank_width * size_of::<Option<EffectControlLane>>()) as u64;
-                let queue_bytes = (bank_width
-                    * size_of::<Option<engine::realtime::Consumer<EffectControlRecord>>>())
-                    as u64;
                 expected_total = expected_total
-                    .checked_add((bank_bytes + queue_bytes) * banks)
+                    .checked_add(bank_bytes * banks)
                     .expect("bank owner arithmetic");
-                expected_largest = expected_largest.max(bank_bytes).max(queue_bytes);
+                expected_largest = expected_largest.max(bank_bytes);
                 // `LiveControlEffectBankStage` in place of `EffectBankStage`: its growth, one
                 // lane's staging window, the packed window of every lane, and the AoSoA shunt.
                 let stage = size_of::<rack::LiveControlEffectBankStage>();
@@ -3456,12 +3457,24 @@ mod tests {
                 lane.check_window(entry.metadata.automation_capacity as usize),
                 Ok(())
             );
-            let cell = size_of::<effect_contract::EffectLaneResources>();
-            assert!(cell > 0);
-            assert!(
-                lane.retained_resources().total_bytes
-                    >= (cells * size_of::<engine::realtime::CellReader>()) as u64,
-                "the lane retains at least one reader for each live parameter cell"
+            // The real attachment path builds the lane the descriptor's shape asks for and nothing
+            // more: the same heap as a lane built directly from that shape.
+            let (_writer, direct) = effect_contract::effect_control_lane(
+                effect_contract::EffectLaneSpec {
+                    shape: effect_contract::EffectLaneShape::from_descriptor(
+                        entry.factory.descriptor(),
+                        0,
+                    ),
+                    bypass: entry.bank_preparation.bypass,
+                    observation_depth: 0,
+                },
+                &engine::realtime::LiveValuesSuperseded::new(),
+            )
+            .expect("a lane");
+            assert_eq!(
+                lane.retained_resources(),
+                direct.retained_resources(),
+                "the attached compressor lane retains what its shape alone needs"
             );
         }
     }

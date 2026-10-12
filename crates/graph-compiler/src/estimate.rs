@@ -277,6 +277,7 @@ pub(crate) fn effect_control_resource(
         let mut has_control = false;
         let mut live = false;
         let mut shunted = false;
+        let mut queued_lanes = 0_u64;
         for member in &bank.members {
             let rack = match member.rack {
                 RackId::Simd1 => EffectRack::Simd1,
@@ -289,6 +290,7 @@ pub(crate) fn effect_control_resource(
                 has_control = true;
                 live |= control.has_channel();
                 shunted |= control.has_channel() || control.bypassed();
+                queued_lanes += u64::from(control.has_observe_queue());
             }
         }
         if has_control {
@@ -300,10 +302,13 @@ pub(crate) fn effect_control_resource(
                 >())
                 .ok()?,
             )?;
-            let queue_array = lanes.checked_mul(
-                u64::try_from(core::mem::size_of::<
-                    Option<engine::realtime::Consumer<effect_contract::EffectControlRecord>>,
-                >())
+            // `rack::LiveControlEffectBankStage::new` keeps `(lane index, queue)` for each lane
+            // that has an observation queue, and nothing for a lane that has none.
+            let queue_array = queued_lanes.checked_mul(
+                u64::try_from(core::mem::size_of::<(
+                    usize,
+                    engine::realtime::Consumer<effect_contract::EffectControlRecord>,
+                )>())
                 .ok()?,
             )?;
             total = total.checked_add(lane_array)?.checked_add(queue_array)?;

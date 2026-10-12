@@ -1034,21 +1034,20 @@ impl EffectControlLane {
         first_sample: u64,
         mut observation: Option<&mut ObservationLane>,
     ) -> u32 {
-        let available = self
-            .observe
-            .as_ref()
-            .map_or(0, Consumer::available_at_entry);
         let mut unbound = 0_u32;
-        let mut remaining = available;
-        while remaining != 0 {
-            remaining -= 1;
-            let Some(Ok(record)) = self.observe.as_mut().map(Consumer::try_pop) else {
-                // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
-                // drain bounded if a malformed test double violates that invariant.
-                break;
-            };
-            if !apply_observe(record, first_sample, observation.as_deref_mut()) {
-                unbound = unbound.saturating_add(1);
+        if let Some(observe) = self.observe.as_mut() {
+            let available = observe.available_at_entry();
+            let mut remaining = available;
+            while remaining != 0 {
+                remaining -= 1;
+                let Ok(record) = observe.try_pop() else {
+                    // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
+                    // drain bounded if a malformed test double violates that invariant.
+                    break;
+                };
+                if !apply_observe(record, first_sample, observation.as_deref_mut()) {
+                    unbound = unbound.saturating_add(1);
+                }
             }
         }
         unbound
