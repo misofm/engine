@@ -27,6 +27,17 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-n
 /// Frames per render block and per submitted source chunk.
 const QUANTUM: u32 = 128;
 
+/// The fewest thin-sweep revision stores (of 320) that must return within 1/16 of the commit's own
+/// duration of a render call's start for the two-strip race to count. That stretch is about where a
+/// commit's cell writes come before a strip's drain and its publish after the block's snapshot, the
+/// window in which a drain that reads outside the snapshot is caught, and it follows the commit's
+/// cost, not the call's length. Measured counts, `taskset -c 0-3`, 12 runs each: quiet release 118
+/// to 140, debug 23 to 35; two busy-loop processes on the CPUs, release 120 to 142, debug 28 to 39;
+/// four of them (every CPU taken), release 8 to 31 and debug 1 to 6. So 10 passes a quiet or
+/// half-loaded 4-CPU runner with a margin of 2 in debug and 12 in release, and refuses the debug
+/// runs of a runner whose CPUs are all taken.
+const THIN_FLOOR: u64 = 10;
+
 /// Held for the whole of every timing-sensitive race test in this file. Each race spins at least
 /// two threads and guards itself against vacuity with an overlap count, so two races at once
 /// starve each other's overlap on a machine with few cores (a 4-CPU runner), and the test harness
@@ -1009,7 +1020,8 @@ struct LiveControl<'a> {
     /// `from + (to - from) * (n / len % PHASES) / PHASES`.
     windows: &'static [(i64, i64)],
     /// The sweep whose stores are timed against the render call they landed in, if any: a
-    /// store counts in `early` when the submit call returned within the call's first 1/16.
+    /// store counts in `early` when the submit call returned within 1/16 of the commit's own
+    /// duration (`commit_nanos`) of the call's start.
     timed_sweep: Option<usize>,
     timed: u64,
     early: u64,
@@ -1078,9 +1090,14 @@ impl LiveControl<'_> {
                 if self.timed_sweep == Some(sweep) {
                     self.timed += 1;
                     let call = self.gate.render_began.load(Ordering::SeqCst);
-                    let length = self.gate.render_nanos.load(Ordering::Acquire);
-                    // A render call that began after the store is not the call it landed in.
-                    self.early += u64::from(stored >= call && stored - call < length / 16);
+                    // A render call that began after the store is not the call it landed in. The
+                    // window is scaled by the commit, not by the call: a defect needs the commit's
+                    // first cell write before a strip's drain and its publish after the block's
+                    // snapshot, which is a stretch of about the commit's cost, in debug as in
+                    // release. The call's length is no measure of it (1/16 of a debug call is
+                    // about ten times that stretch).
+                    self.early +=
+                        u64::from(stored >= call && stored - call < self.commit_nanos / 16);
                 }
                 self.overlapped += u64::from(inside);
                 self.committed += 1;
@@ -1233,9 +1250,10 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
 /// or publishing the watermark a block late, turns the third assertion red; the one-way test
 /// accepts both. Half of the commits sweep their revision store across the whole render call, as
 /// the one-way test does, and half across the call's first few percent, where a store lands after
-/// the snapshot and before the strips' drains. The run refuses to pass unless at least an
-/// eighth of the thin sweep's stores landed in that first 1/16 as well as a tenth of all stores
-/// landing inside a call.
+/// the snapshot and before the strips' drains. The run refuses to pass unless at least
+/// [`THIN_FLOOR`] of the thin sweep's stores landed within 1/16 of a commit's duration of a call's
+/// start, the stretch in which a commit's cell writes and its publish straddle a block's snapshot
+/// and drains, as well as a tenth of all stores landing inside a call.
 #[test]
 fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
     let _race = one_race_at_a_time();
@@ -1355,14 +1373,15 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
         overlapped > EDITS / 10,
         "vacuous: {overlapped} of {EDITS} revision stores fell inside a render call"
     );
-    // The thin sweep aims half its stores (a 4/64 window of the 8/64 span) at the call's first
-    // 1/16, between the block's snapshot and the strips' drains, which is where a drain that reads
-    // outside the snapshot is caught. Measured with the stores timed at their submit call's return:
-    // 150 to 167 of 320 in debug and 66 to 126 in release, on 32, 4 and 2 CPUs. A run below an
-    // eighth of the thin stores (40) did not sweep that window and says nothing about the defect.
+    // The thin sweep aims about one phase in 16 of its stores into the stretch of 1/16 of a commit
+    // after the call's start, and the rest reach it by jitter. A store counted here returned
+    // within that stretch of the call's start, which is where a drain that reads outside the
+    // snapshot is caught. The count follows the commit's cost, so it is small by nature (see
+    // `THIN_FLOOR` for the measurements); a run below the floor did not sweep that stretch and
+    // says nothing about the defect, so it fails loudly.
     assert!(
-        early >= timed / 8,
-        "vacuous: {early} of {timed} thin-sweep revision stores landed in the first 1/16 of a \
-         render call"
+        early >= THIN_FLOOR,
+        "vacuous: {early} of {timed} thin-sweep revision stores returned within 1/16 of a \
+         commit's duration of their render call's start, fewer than {THIN_FLOOR}"
     );
 }
