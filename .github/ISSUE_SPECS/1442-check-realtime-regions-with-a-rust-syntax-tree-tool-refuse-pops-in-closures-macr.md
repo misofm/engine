@@ -983,3 +983,15 @@ the fuzz counts and the Amendment-4 mutations reproduce.
 Root close text: "Attempt 3 FAIL (M1, manifest rule only). Budget spent; no attempt 4. Root rescope (2026-10-12): the dependency-key manifest rule moves to #1527. The remaining scope has no BLOCKER or MAJOR (attempt-3 verdict)."
 
 Root ratified the `scripts/test-workspace-policy.sh` edit (disclosed in the attempt-3 record above).
+
+## Follow-up to the attempt-3 verdict (m1, m2, the NIT; root accepted, 2026-10-12)
+
+- m1: `tools/realtime-policy/src/drain/trusted.rs` now says registry crates are limit 1.
+- m2: the comments in `trusted.rs` and `drain/mod.rs` now say that a written definition or rename of the two queue names
+  is refused and that an import by a `::` path, such as `pub use crate::loops::try_pop;`, is not (the spec's (q) allows it).
+- NIT: the row `try-pop-by-value-on-a-reference-impl` is deleted from `a_definition_of_try_pop_outside_the_queue_is_refused`
+  (the array is now 3 rows). No mutation depended on it: its defect (a `&self`-only (b)) is gone with (b), and
+  `try-pop-looping-on-a-ring` still turns the test red when (q) is dropped.
+- `scripts/check-workspace-policy.sh`: the awk dependency-key rule stays; its comment now says "partial; see #1527".
+- Re-run: `cargo test --locked -p realtime-policy` 186 passed; fmt, clippy `-D warnings`, `scripts/check-workspace-policy.sh`
+  and `scripts/test-workspace-policy.sh` pass; the release tool on the tree refuses exactly `crates/effect-contract/src/live.rs:366`.

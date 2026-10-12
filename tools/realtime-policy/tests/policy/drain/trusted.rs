@@ -62,15 +62,10 @@ fn accepted(name: &str, text: &str) {
 /// example if (q) keeps the old rule that allowed any `fn try_pop(&mut self`.
 #[test]
 fn a_definition_of_try_pop_outside_the_queue_is_refused() {
-    let rows: [(&'static str, &'static str, &'static str); 4] = [
+    let rows: [(&'static str, &'static str, &'static str); 3] = [
         (
             "try-pop-looping-on-a-ring",
             "trait Spin {\n    fn try_pop(&mut self) -> Result<u32, ()>;\n}\nimpl Spin for Ring {\n    fn try_pop(&mut self) -> Result<u32, ()> {\n        while self.n > 0 {\n            self.n -= 1;\n        }\n        Ok(1)\n    }\n}\n",
-            "fn try_pop",
-        ),
-        (
-            "try-pop-by-value-on-a-reference-impl",
-            "impl Pop for &Queue {\n    fn try_pop(self) -> Result<u8, ()> {\n        Err(())\n    }\n}\n",
             "fn try_pop",
         ),
         (

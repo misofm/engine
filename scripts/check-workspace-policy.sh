@@ -260,6 +260,8 @@ while IFS= read -r manifest_path; do
     }' "$manifest_path"
     (( CAPTURE_STATUS == 0 )) || execution_failure "comment stripping $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
     stripped_manifest="$CAPTURE_OUT"
+    # This rule is partial; see #1527. The line-based reader does not read inline tables, dotted keys, spaced
+    # header dots, quoted table names or escaped keys; #1527 replaces it with a TOML reader.
     # #1442 (root Amendment 4): a dependency key `core`, `std` or `alloc` (or a table header
     # `[dependencies.core]`) makes Cargo pass `--extern core=..`, which redirects the prelude's
     # `core` for the whole crate. The package-name rule above does not see it. Only dependency

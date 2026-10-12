@@ -68,8 +68,9 @@
 //!   `<recv>.map_or(0, <Type>::available_at_entry)` count form is withdrawn for the same reason.
 //! - **Trusted names (D2, D3).** The rule trusts `try_pop`, `available_at_entry` and
 //!   `debug_assert!` to mean what they mean in the queue and in the standard library. [`trusted`]
-//!   reads every `.rs` file under the roots and refuses a written definition, import or rename of
-//!   the two queue names outside the one `fn` of each in `crates/engine/src/realtime/spsc.rs`, a
+//!   reads every `.rs` file under the roots and refuses a written definition or rename of the two
+//!   queue names (an import by a `::` path, such as `pub use crate::loops::try_pop;`, is not
+//!   refused) outside the one `fn` of each in `crates/engine/src/realtime/spsc.rs`, a
 //!   `debug_assert` that withdraws the trust, `macro_use` (except `#[macro_use] mod`),
 //!   `no_implicit_prelude`, `feature(..)`, a `${..}` metavariable expression and any `proc_macro`
 //!   identifier.

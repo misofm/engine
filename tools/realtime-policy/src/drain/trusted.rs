@@ -11,7 +11,10 @@
 //! - **(q)** A `Q` identifier (`try_pop`, `available_at_entry`; bare or `r#`) that does not directly
 //!   follow `.` or `::`, except exactly one written `fn` token for each of the two, in
 //!   `crates/engine/src/realtime/spsc.rs`. A second definition in that file is refused, and so is
-//!   every other written definition, import, binding or field.
+//!   every other written definition of either name (a `fn`, binding, field, label, macro, braced
+//!   import or `use .. as` rename). An import by a `::` path, such as `pub use crate::loops::try_pop;`, is not
+//!   refused: it can only name a written definition that this rule refuses, a registry item
+//!   (limit 1) or an expansion (limit 4).
 //! - **(s)** A `debug_assert` identifier (bare or `r#`) that a `!` does not directly follow (F2). It
 //!   is a shadow: no file's `debug_assert!` is then taken at its word, and a count named in one is
 //!   refused everywhere, as in any other macro. One rule covers `macro_rules! debug_assert`,
@@ -35,7 +38,7 @@
 //! macro expansion builds from parts (a `fn $n` made by a `macro_rules!` fragment, a `tt` that
 //! carries `fn`, a macro made by a macro) are limit 4 of the threat model (#1438 Hazards, owner
 //! decision of 2026-10-11): the scan judges every written token and does not model an expansion. A
-//! registry crate's macros and proc macros, and the standard library, are limit 3 (code outside the
+//! registry crate's macros and proc macros, and the standard library, are limit 1 (code outside the
 //! workspace).
 
 use std::collections::BTreeSet;
