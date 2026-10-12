@@ -565,7 +565,44 @@ impl SessionEdit {
             | Self::SetRouteMute { ramp_samples, .. }
             | Self::SetRouteFollowsMute { ramp_samples, .. }
             | Self::SetVcaFader { ramp_samples, .. } => *ramp_samples,
-            _ => None,
+            // Listed one by one on purpose: a new edit must be classified here, as in
+            // `record_edit_ramps`, so a variant that gains a `ramp_samples` field cannot lose it.
+            Self::SetSessionId { .. }
+            | Self::SetSampleRateHz { .. }
+            | Self::SetQuantumFrames { .. }
+            | Self::SetRenderProfile { .. }
+            | Self::SetOutputProfile { .. }
+            | Self::SetControlSmoothing { .. }
+            | Self::UpsertSource { .. }
+            | Self::RemoveSource { .. }
+            | Self::SetSourceContent { .. }
+            | Self::UpsertTrack { .. }
+            | Self::RemoveTrack { .. }
+            | Self::SetTrackSourceAssignment { .. }
+            | Self::SetTrackRack { .. }
+            | Self::SetTrackEffectOrder { .. }
+            | Self::PutTrackEffect { .. }
+            | Self::RemoveTrackEffect { .. }
+            | Self::SetEffectIdentity { .. }
+            | Self::SetEffectQuality { .. }
+            | Self::SetEffectBypass { .. }
+            | Self::SetEffectSidechain { .. }
+            | Self::UpsertEffectParam { .. }
+            | Self::RemoveEffectParam { .. }
+            | Self::UpsertOutput { .. }
+            | Self::RemoveOutput { .. }
+            | Self::UpsertRoute { .. }
+            | Self::RemoveRoute { .. }
+            | Self::SetRouteSource { .. }
+            | Self::SetRouteDestination { .. }
+            | Self::UpsertSubmix { .. }
+            | Self::RemoveSubmix { .. }
+            | Self::UpsertAutomation { .. }
+            | Self::RemoveAutomation { .. }
+            | Self::SetAutomationTarget { .. }
+            | Self::SetAutomationSegments { .. }
+            | Self::UpsertVca { .. }
+            | Self::RemoveVca { .. } => None,
         }
     }
 }

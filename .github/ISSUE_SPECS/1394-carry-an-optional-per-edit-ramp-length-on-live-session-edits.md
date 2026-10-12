@@ -90,7 +90,12 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   way (attempt 2, after verdict M1): `RemoveTrack`, `RemoveSubmix`, `RemoveRoute` and `RemoveVca` clear
   their target; `PutTrackEffect` and `RemoveTrackEffect` clear their `Effect` target; `SetTrackRack`
   clears every `Effect` entry of that strip and rack. The match over `SessionEdit` is exhaustive, so
-  a new edit must be classified.
+  a new edit must be classified. Root ruling (2026-10-12): the clearing on `PutTrackEffect` and
+  `SetTrackRack` follows D3's own rule, because both rewrite the effect's `link_mode` with no
+  length; the clearing on the five removals (`RemoveTrack`, `RemoveSubmix`, `RemoveRoute`,
+  `RemoveVca`, `RemoveTrackEffect`) is ratified (behaviour-neutral hygiene: no record length reads
+  it today). `SessionEdit::ramp_samples()` is exhaustive too, so a variant that gains a length
+  field cannot lose it.
 - **D4. Transaction.** `prepare_transaction` builds `EditRamps` beside the candidate model and
   stores it in `PreparedSessionTransaction`, exposed as `edit_ramps(&self) -> &EditRamps`. A value
   above the candidate's `sample_rate_hz` (1000 ms, the bound of #1054 D1) refuses the transaction
@@ -140,6 +145,9 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 - `crates/control-plane/src/control.rs` (the `commit_live` call only),
   `crates/capi/src/runtime/live_tests.rs` (tests only), `docs/C_ABI_V1_QUALIFICATION.md`
 - Field additions only (deliverable 3), in any file that builds one of D1's variants
+- Root ruling (2026-10-12), a named exception: `crates/session/src/model.rs`, the `PartialOrd` and
+  `Ord` derives on `RackName` (declaration order Inserts < Builtins < Console, equal to the wire-code
+  order), so `EditRamps` keys hold the typed rack. No behaviour changes.
 
 ## Non-goals
 
@@ -375,3 +383,24 @@ re-run. `protocol` is compiled into the browser module, so the worklet chain ran
 --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
 --artifacts` (32 red mutations, every budget met), `check-scalar-oracle-absent.py --wasm`,
 `test-web-audioworklet.sh` (rc 0, nothing left in its TMPDIR).
+
+**Batch follow-ups** (stream E2 batch, after the verdicts
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1394-attempt1.md` (FAIL, M1 fixed in attempt 2)
+and `1394-attempt2.md` (PASS) and the probe `1394-attempt1-probe.rs`).
+
+- *Root rulings (2026-10-12), recorded in the spec text above:* D3's clearing rules (put and rack edits by
+  D3's own rule, the five removals ratified); the `RackName` derives as a named exception in Authorized
+  paths. Gate 7's command already carries `control-provider` (attempt 2's fix; checked, 34 tests ran then
+  and 35 now with #1365).
+- *m-a:* `SetVcaFader`'s two rows (`VcaFader`, `VcaMute`, target `Vca`) were pinned by no test. A `SetVcaFader`
+  entry is now in `every_live_value_edit_records_its_rows_on_its_target`, and in its "bare edit records
+  nothing" leg. Defect it catches that no other test does: a `SetVcaFader` that records one row only, which
+  the VCA-row slice would then read as a missing mute length.
+- *n-a:* `SessionEdit::ramp_samples()` no longer ends in `_ => None`; every non-length variant is listed, so
+  a new edit fails to compile until it is classified (as `record_edit_ramps` already does).
+- *Mutation runs* (defect applied, run, restored; `-p protocol --features test-support`):
+  - record `&[EditRampRow::VcaFader]` only for `SetVcaFader`: RED
+    `every_live_value_edit_records_its_rows_on_its_target` (the only red test of the `edit_ramps` file;
+    before this follow-up the same mutation was green in the whole crate); green after the revert.
+  - remove the `RemoveVca` arm from `ramp_samples()`: `protocol` fails to compile (`E0004`,
+    `RemoveVca` not covered); green after the revert.

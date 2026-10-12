@@ -232,6 +232,15 @@ fn every_live_value_edit_records_its_rows_on_its_target() {
             EditRampTarget::Route(route.id.clone()),
             vec![EditRampRow::RouteMatrix],
         ),
+        (
+            SessionEdit::SetVcaFader {
+                vca_id: id("grp"),
+                fader: model.vcas[0].fader.clone(),
+                ramp_samples: Some(11),
+            },
+            EditRampTarget::Vca(id("grp")),
+            vec![EditRampRow::VcaFader, EditRampRow::VcaMute],
+        ),
     ];
     for (edit, target, rows) in edits_and_rows {
         let expected: Vec<_> = rows.iter().map(|row| (target.clone(), *row, 11)).collect();
@@ -250,7 +259,8 @@ fn every_live_value_edit_records_its_rows_on_its_target() {
             | SessionEdit::SetConsole { ramp_samples, .. }
             | SessionEdit::SetRouteMute { ramp_samples, .. }
             | SessionEdit::SetRouteFollowsMute { ramp_samples, .. }
-            | SessionEdit::SetRouteChannelMatrix { ramp_samples, .. } => *ramp_samples = None,
+            | SessionEdit::SetRouteChannelMatrix { ramp_samples, .. }
+            | SessionEdit::SetVcaFader { ramp_samples, .. } => *ramp_samples = None,
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(recorded(&store, &[bare]), vec![]);
