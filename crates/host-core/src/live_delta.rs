@@ -133,13 +133,13 @@ pub enum LiveRebuild {
 /// 1. [`LiveRebuild::Vca`] if either model declares a VCA.
 /// 2. [`LiveRebuild::Structure`] if the track IDs differ, by count or pairwise in order.
 /// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
-///    output-profile IDs, `control_smoothing`, stored automation, and every track's fader, pan/matrix, console-entry
-///    `params` and `bypass`, and insert `params` and `bypass` copied from `current`, has
-///    canonical JSON bytes other than `current`'s. An effect's identity, quality, link mode and
-///    sidechain, the insert order, the console slot set and every submix field stay compared
-///    (a submix strip's bypass stays structural, #1053 G1). Bytes,
-///    never `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit
-///    from `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
+///    output-profile IDs, `control_smoothing`, stored automation, and every track's fader,
+///    pan/matrix, console-entry `params` and `bypass`, and insert `params` and `bypass` copied
+///    from `current`, has canonical JSON bytes other than `current`'s. An effect's identity,
+///    quality, link mode and sidechain, the insert order, the console slot set and every submix
+///    field stay compared (a submix strip's bypass stays structural, #1053 G1). Bytes, never
+///    `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit from
+///    `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
 /// 4. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
 ///    [`effect_automation_diagnostics`] refuses one of `next`'s automations: one whose `inserts`
 ///    or `console` target parameter is not automatable or whose `automation_rate` is not `Block`

@@ -130,7 +130,9 @@ ordinary session transaction" holds.
    test's boundary row (`controller/tests.rs:327-328`) passes at 47 and 46.
 7. **Commands:**
    - `cargo test --locked -p protocol --features test-support`, `cargo test --locked -p capi`,
-     `cargo test --locked -p host-core --features test-support --test live_delta`,
+     `cargo test --locked -p host-core --features test-support,control-provider --test live_delta`
+     (root ruling, 2026-10-12: without `control-provider` the test file is `cfg`ed out and the
+     command runs 0 tests),
      `cargo test --locked -p conformance`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `bash scripts/check-protocol-control-policy.sh`, `bash scripts/check-host-core-policy.sh`,
@@ -146,8 +148,11 @@ ordinary session transaction" holds.
 - Gate 3 turns red if the mask misses the key, so the edit rebuilds and resets the source rings.
 - Gate 4 turns red if `LiveRamps` is read from the pre-commit model, so the edit takes effect one
   transaction late.
-- Gate 5 turns red if the classifier treats the key as structure, or uses the old length in the
-  same transaction.
+- Gate 5 turns red if the classifier treats a set, a change or a clear of the key as structure, or
+  if it does not forward the ramps it is given to its records. It cannot see a caller that builds
+  those ramps from the pre-commit model, because `classify_live_delta` takes them as an argument;
+  gate 4 catches the old length in the same transaction (root ruling, 2026-10-12, correcting the
+  earlier sentence).
 
 ## Dependencies
 
@@ -248,7 +253,7 @@ intended files); the full suites below ran after the last revert.
 
 **Open items.** None for this slice. The browser has no transaction API for the edit (non-goal; #1309).
 
-## Amendment 1 (root, 2026-10-12)
+## Amendment 1 note (attempt 2, under root's 2026-10-12 ruling)
 
 Stream E2 asked whether host-web's cached ramp table must be refreshed when this edit lands. The
 table is `SessionRamps` (`LiveRamps::for_session` plus one pan window per strip), built once in
@@ -262,3 +267,20 @@ fresh `SessionRamps`. The issue that adds the first browser path to commit a mod
 drop `SessionRamps` (the classifier resolves an absent length with `LiveRamps::resolve` over the
 committed model, #1394 D5) or refresh it on every model-only commit, and it must add a test that goes
 red without that. Until then a cached table cannot go stale.
+
+**Batch follow-ups** (stream E2 batch, after the PASS verdict
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1365-attempt1.md`).
+
+- *MINOR 1:* gate 7's host-core command carries `control-provider` (root ruling, 2026-10-12).
+- *Gate 5's test-value sentence* is corrected (NIT 2, root ruling, 2026-10-12): gate 4 catches the old
+  length in the same transaction; gate 5 catches a classifier that treats the key as structure.
+- *NIT 1:* three over-long lines are wrapped (`crates/capi/src/runtime/live_tests.rs` doc of
+  `model_only_edits_commit_without_a_plan_rebuild`; `crates/host-core/src/live_delta.rs` step 3 of the
+  classifier doc; `docs/C_ABI_V1_QUALIFICATION.md` the model-only item). Comments and prose only.
+- The Amendment 1 note about `SessionRamps` is relabelled "Amendment 1 note (attempt 2, under root's
+  2026-10-12 ruling)"; root confirms its content. The duty it names is now in #1382's spec.
+- *Mutation run* (the sentence's claim, tested): `commit_live` builds `LiveRamps::for_session` from the
+  pre-commit model. RED: `a_control_smoothing_edit_makes_the_next_mute_a_step` and
+  `a_control_smoothing_edit_gives_the_next_unmute_its_ramp` (gate 4, `-p capi`); GREEN: gate 5's
+  `a_control_smoothing_edit_is_live_and_its_lengths_govern_the_same_transactions_records`. File restored.
+  The doc wraps change no code.

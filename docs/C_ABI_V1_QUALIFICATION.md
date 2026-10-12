@@ -356,13 +356,12 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Model-only (#1260, #1365).** A delta that changes only fields no prepared plan reads -- the
   session ID, the render profile's `id`, the output profile's `id`, the stored `automation` table
   and `control_smoothing` (the `SetControlSmoothing` edit, which sets the lengths or clears them
-  to the default table) -- is live with no records: it commits through the same admission and protocol predicates, emits
-  the same response and `SESSION_COMMITTED`, and the running plan, its source rings and its effect
-  state continue untouched. It may ride with fader, mute and pan edits, and the records of the same
-  transaction ramp over the new `control_smoothing` lengths; a ramp already in flight keeps the
-  length it started with. The automation term holds
-  only while no host renders stored automation (#1058); every other profile field stays
-  structural.
+  to the default table) -- is live with no records: it commits through the same admission and
+  protocol predicates, emits the same response and `SESSION_COMMITTED`, and the running plan, its
+  source rings and its effect state continue untouched. It may ride with fader, mute and pan
+  edits, and the records of the same transaction ramp over the new `control_smoothing` lengths; a
+  ramp already in flight keeps the length it started with. The automation term holds only while no
+  host renders stored automation (#1058); every other profile field stays structural.
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a

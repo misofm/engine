@@ -2087,9 +2087,10 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
 }
 
 /// #1260 gate 2, #1365 gate 3: a session ID, render-profile ID, output-profile ID, stored
-/// automation or `control_smoothing` edit commits one revision with one `SESSION_COMMITTED`, shows in the snapshot, and leaves the running
-/// plan, its source ring and its output untouched: the host keeps feeding with no seek, and every
-/// block is bit-identical to an uninterrupted render of the original session.
+/// automation or `control_smoothing` edit commits one revision with one `SESSION_COMMITTED`, shows
+/// in the snapshot, and leaves the running plan, its source ring and its output untouched: the
+/// host keeps feeding with no seek, and every block is bit-identical to an uninterrupted render of
+/// the original session.
 ///
 /// Test value: red if a model-only edit still rebuilds the plan (a new provider epoch or a pending
 /// candidate, a source-ring reset that needs a seek, or a silent block), or if the classifier's
