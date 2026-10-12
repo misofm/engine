@@ -605,23 +605,107 @@ async function resumeThroughClick(context, what) {
   }
 }
 
+/// How often `resumeUntil` asks the host for its status while it waits, and how long one such
+/// request may stay unanswered before the poll counts as unanswered.
+const STALL_POLL_INTERVAL_MS = 250;
+const STALL_POLL_TIMEOUT_MS = 1_000;
+
+/// The signature of a stall that `resumeUntil` records (root ruling, 2026-10-12, decision 15 stream B
+/// batch 3). It is `full` only if a stalled render is the whole of the evidence: the context says it
+/// is "running", its clock (`currentTime`) and the engine's `renderedQuanta` are the same at the
+/// resume and at the timeout, the processor answered at least two status requests inside the window
+/// and its last render result is 0. The status replies come from the processor's own port handler,
+/// which runs in the same JS agent as `process()`: an answered reply proves `process()` was not on
+/// the stack, so a context that "ran" and rendered nothing is a context that was not pulling its
+/// graph. Only a failure with a full signature may be listed as a browser exemption; CI still fails
+/// by name and never retries. `atResume` and `atTimeout` are `sampleContext` records (or `null`
+/// when the sample was not answered); `replyIds` are the request ids of the answered status
+/// requests in the window, in order.
+export function classifyStallSignature({ atResume, atTimeout, repliesSent, replyIds }) {
+  const running = (sample) => sample?.contextState === "running";
+  const lastResult = (sample) => sample?.status?.lastResult;
+  // The host status carries `renderedQuanta` as a `bigint`; the signature carries it as a decimal
+  // string so it serializes.
+  const quanta = (sample) => sample?.status?.renderedQuanta === undefined
+    ? null
+    : String(sample.status.renderedQuanta);
+  const answered = replyIds.length;
+  const full = running(atResume) && running(atTimeout)
+    && typeof atResume.currentTime === "number" && atResume.currentTime === atTimeout.currentTime
+    && quanta(atResume) !== null && quanta(atResume) === quanta(atTimeout)
+    && answered >= 2
+    && lastResult(atResume) === RESULT_OK && lastResult(atTimeout) === RESULT_OK;
+  return {
+    state: atTimeout?.contextState ?? null,
+    stateAtResume: atResume?.contextState ?? null,
+    currentTimeAtResume: atResume?.currentTime ?? null,
+    currentTimeAtTimeout: atTimeout?.currentTime ?? null,
+    renderedQuantaAtResume: quanta(atResume),
+    renderedQuantaAtTimeout: quanta(atTimeout),
+    repliesSent,
+    repliesAnswered: answered,
+    replyIds: answered === 0 ? [] : [replyIds[0], replyIds[answered - 1]],
+    lastResult: lastResult(atTimeout) ?? null,
+    lastResultAtResume: lastResult(atResume) ?? null,
+    full,
+  };
+}
+
+/// One bounded `describe()`: the sample, or `null` if it threw or stayed unanswered for
+/// `STALL_POLL_TIMEOUT_MS`. A reply that arrives after the bound is dropped without an unhandled
+/// rejection.
+async function boundedSample(describe) {
+  const pending = describe();
+  pending.catch(() => {});
+  let timer;
+  const unanswered = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), STALL_POLL_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([pending, unanswered]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /// Resume `context` through a trusted click and wait until `condition` holds, for at most
 /// `AUDIO_STEP_TIMEOUT_MS`. There is no recovery: a context that does not pull its graph is a named
 /// failure of the gate, never a retry (root, 2026-10-12; a script `suspend()` then `resume()` hung
 /// the whole page in 3 of 8 runs of the minimal repro, `/tmp/claude-1002/b2diag/drv5.out`). The
 /// failure carries `describe()` sampled twice across the window, right after the resume and at the
 /// timeout, so a stalled clock (`currentTime`) and a stalled render count (`renderedQuanta`) show as
-/// equal samples.
+/// equal samples. While it waits it also asks for the host status every `STALL_POLL_INTERVAL_MS`
+/// (each request bounded), and the failure carries the `stallSignature` of
+/// [`classifyStallSignature`]. The polls change no pass condition and no bound.
 async function resumeUntil(context, condition, what, describe) {
   await resumeThroughClick(context, what);
   const started = performance.now();
   const atResume = await describe();
+  let lastPoll = started;
+  let repliesSent = 0;
+  const replyIds = [];
+  const poll = async () => {
+    repliesSent += 1;
+    const sample = await boundedSample(describe);
+    if (sample?.status !== undefined) replyIds.push(sample.status.requestId);
+    return sample;
+  };
   while (!(await condition())) {
-    if (performance.now() - started > AUDIO_STEP_TIMEOUT_MS) {
-      throw new Error(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
+    const now = performance.now();
+    if (now - started > AUDIO_STEP_TIMEOUT_MS) {
+      const atTimeout = await poll();
+      const error = new Error(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
         atResume,
-        atTimeout: await describe(),
+        atTimeout,
       })}`);
+      error.stallSignature = classifyStallSignature({ atResume, atTimeout, repliesSent, replyIds });
+      throw error;
+    }
+    if (now - lastPoll >= STALL_POLL_INTERVAL_MS) {
+      await poll();
+      lastPoll = performance.now();
     }
     await delay(4);
   }
@@ -1096,9 +1180,12 @@ export async function runQualification() {
     );
   } catch (error) {
     const diagnostic = await diagnoseReady(observationDocument);
-    throw new Error(`observation qualification failed: ${diagnosticJson({
+    const failure = new Error(`observation qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
+    // The structured stall signature rides on the failure so `run.mjs` prints and classifies it.
+    if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
+    throw failure;
   }
   let stall;
   try {

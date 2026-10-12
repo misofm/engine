@@ -807,6 +807,41 @@ function mutate(result, mutation) {
   return copy;
 }
 
+/// The stall signature (`classifyStallSignature`, root ruling 2026-10-12) is `full` only when all of
+/// its conditions hold. A full record is held full, and each condition removed alone, from an
+/// otherwise full record, must give `full: false`, so a record missing any one condition can never
+/// be listed as an exemption.
+async function stallSignatureProofs() {
+  const { classifyStallSignature } = await import("./qualification.js");
+  const sample = (requestId) => ({
+    contextState: "running",
+    currentTime: 0.021333333333333333,
+    status: { requestId, lastResult: 0, renderedQuanta: 8n },
+  });
+  const full = { atResume: sample(39), atTimeout: sample(2282), repliesSent: 3, replyIds: [40, 100, 2282] };
+  const signature = classifyStallSignature(full);
+  assert.equal(signature.full, true, "stall-signature: the full record was not classified full");
+  assert.deepEqual(signature.replyIds, [40, 2282]);
+  assert.equal(signature.repliesAnswered, 3);
+  const without = {
+    "context state not running at the timeout": { atTimeout: { ...sample(2282), contextState: "suspended" } },
+    "context state not running at the resume": { atResume: { ...sample(39), contextState: "interrupted" } },
+    "currentTime moved": { atTimeout: { ...sample(2282), currentTime: 0.0426 } },
+    "renderedQuanta moved": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, renderedQuanta: 9n } } },
+    "one status reply": { replyIds: [2282] },
+    "no status reply": { replyIds: [] },
+    "last result not 0": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, lastResult: 6 } } },
+    "timeout sample unanswered": { atTimeout: null },
+  };
+  for (const [missing, change] of Object.entries(without)) {
+    assert.equal(
+      classifyStallSignature({ ...full, ...change }).full,
+      false,
+      `stall-signature: a record without ${missing} was classified full`,
+    );
+  }
+}
+
 function mutationProofs(browserName, result) {
   const mutations = result.sdkResponse === null
     ? MUTATIONS.filter((mutation) => !mutation.startsWith("sdk-"))
@@ -997,6 +1032,12 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       result.resumes.planned = plan.length;
       result.resumes.clicksPerformed = clicksPerformed;
     }
+    const stallSignature = result.qualificationError?.value?.stallSignature;
+    if (stallSignature !== undefined) {
+      // A bounded render wait timed out. The signature is what classifies the failure (full means a
+      // context that said "running" and rendered nothing while the processor still answered).
+      process.stdout.write(`${browserName}: stall-signature: ${JSON.stringify(stallSignature)}\n`);
+    }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
@@ -1073,6 +1114,8 @@ async function main() {
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
     process.stdout.write(`artifact set: the exact ${served}-file shipped set is pinned\n`);
+    await stallSignatureProofs();
+    process.stdout.write("stall signature: each missing condition gives full=false\n");
   }
 
   // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version

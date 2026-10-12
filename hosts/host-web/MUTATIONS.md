@@ -151,6 +151,21 @@ self-test mutations of the real result, each required to fail with `<browser>: r
 | `resume-clicks-missing` | `resumes.clicksPerformed` one fewer than declared | `resume-clicks`: the harness did not click exactly the declared controls |
 | `resume-clicks-extra` | `resumes.clicksPerformed` one more than declared | the same gate |
 
+**The stall signature (root ruling, 2026-10-12, stream B batch 3).** A `stall timeout` failure carries a
+structured `stallSignature` (`classifyStallSignature` in `qualification.js`), and `run.mjs` prints it as
+`<browser>: stall-signature: {...}` and keeps it in the failure's `qualificationError.value`. It is
+`full: true` only if the context state is "running" at the resume and at the timeout, `currentTime` and
+`renderedQuanta` are equal at both, at least two status replies were answered in the window (polled every
+250 ms, each bounded to 1 s; the processor answers from its port handler, so an answered reply shows
+`process()` was not on the stack) and `lastResult` is 0 at both. `--self-test-mutations` also runs
+`stallSignatureProofs()` once: a full record must stay full and each of eight records, each missing one
+condition (state not running at the timeout or the resume, `currentTime` moved, `renderedQuanta` moved,
+one reply, no reply, `lastResult` 6, unanswered timeout sample), must give `full: false`.
+Applied to the classifier in the working tree (red; reverted: green): dropping the `renderedQuanta`
+equality gives `a record without renderedQuanta moved was classified full`; `answered >= 2` -> `>= 1`
+gives `a record without one status reply ...`; dropping the `lastResult` test at the timeout gives
+`a record without last result not 0 ...`.
+
 *Page-level checks (not committed; chromium and webkit, no busy loops):* with the first
 `resumeThroughClick` replaced by a direct `context.resume()`, both browsers go red as `resume timeout at
 the replayed region to render (click)` (the harness waits for the first control, the page offers the next

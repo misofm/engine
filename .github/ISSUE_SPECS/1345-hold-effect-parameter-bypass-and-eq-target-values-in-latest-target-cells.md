@@ -1008,6 +1008,37 @@ in `logs/summary` rows (`bar.txt`).
    `stall timeout at the replayed region to render`, `contextState` `running`, `currentTime`
    0.0213 and `renderedQuanta` 8 at both samples (`logs/t1-webkit.log`): the clock did not move after the
    second resume.
+4. *The full stall signature (root's ruling, 2026-10-12; Sonnet 5.5; logs in `/tmp/claude-1002/b3sig/logs/`).*
+   Only a failure with the whole signature may later be listed as a WebKit exemption for B3's merge bar
+   (CI still fails by name, no retry). `resumeUntil` now asks the host status every 250 ms while it
+   waits (each request bounded to 1 s; pass conditions, the 10 s bound and the absence of retries are
+   unchanged) and throws the named stall failure with `stallSignature = {state, stateAtResume,
+   currentTimeAtResume, currentTimeAtTimeout, renderedQuantaAtResume, renderedQuantaAtTimeout,
+   repliesSent, repliesAnswered, replyIds: [first, last], lastResult, lastResultAtResume, full}`. Sources:
+   `state` is `context.state`, `currentTime*` is `context.currentTime`, `renderedQuanta*`, `lastResult` and
+   the reply ids (`requestId`) come from the `miso.status.v1` reply of `host.status()` (the worklet answers
+   it from its own port handler, `web/miso-engine-v1-audio-worklet.js:1076`, so an answered reply shows
+   `process()` was not on the stack). `full` is true only if the state is "running" and `lastResult` is 0
+   at both samples, `currentTime` and `renderedQuanta` are equal at both, and `repliesAnswered >= 2`.
+   `run.mjs` prints `<browser>: stall-signature: {...}` and the structure is in the result's
+   `qualificationError.value.stallSignature`. The observation catch copies the field onto its rethrown
+   error. *Test value:* `stallSignatureProofs()` (in `--self-test-mutations`) is red if the classifier
+   calls a record `full` that lacks any one of the conditions, which would list a slow or starved render
+   (clock moving, or the processor not answering) as the stalled-clock failure, and no other test sees the
+   classifier. *Mutations (apply: red; revert: green):* dropping the `renderedQuanta` equality, `>= 2` ->
+   `>= 1`, and dropping the `lastResult` test each fail `stall-signature: a record without <condition>
+   was classified full`. A forced stall (replay target `+ 100000000` blocks, not committed) on chromium
+   prints `full:false` with the clock and render count moving (`logs/plumb-chromium.log`), which shows the
+   plumbing from the page to the printed line. The first draft compared `renderedQuanta` as a string
+   but the status carries a `bigint`, so no real record could be full; the real run below caught it.
+   *Runs* (CI browser command, source-bundle mode, `sdk/dist` absent, private pulse sink, unloaded, three
+   per browser): chromium 3 of 3 pass, firefox 3 of 3 pass, webkit 2 of 3 pass. The one webkit failure
+   (run 1, `logs/run1-webkit.log`, kept as `logs/full-signature-webkit.log`) is a real full signature:
+   `{"state":"running","stateAtResume":"running","currentTimeAtResume":0.018666666666666668,
+   "currentTimeAtTimeout":0.018666666666666668,"renderedQuantaAtResume":"7","renderedQuantaAtTimeout":"7",
+   "repliesSent":40,"repliesAnswered":40,"replyIds":[95,2264],"lastResult":0,"lastResultAtResume":0,
+   "full":true}` at `the replayed region to render`. Gates: `cargo fmt --all -- --check`,
+   `check-workspace-policy.sh` and `test-web-audioworklet.sh` pass.
 
 **MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
 (`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four
