@@ -474,9 +474,9 @@ pub fn builtin_parameter_lattice_points(
 }
 
 /// The issue that makes the strip input section's values (trim, polarity, HPF, LPF) live on every
-/// host: decision 14 rules them live and decision 17 slice S5 builds the path. `0` until root
-/// numbers that issue (numbered by root); its last step flips these rows to `Live`.
-pub const STRIP_INPUT_SLICE: u32 = 0;
+/// host: decision 14 rules them live and decision 17 slice S5 (#1556) builds the path; its last
+/// step flips these rows to `Live`.
+pub const STRIP_INPUT_SLICE: u32 = 1556;
 
 const STRIP_INPUT_REOPEN: &str =
     "The strip input slice (decision 17, S5) builds the live path and flips this row to live.";
