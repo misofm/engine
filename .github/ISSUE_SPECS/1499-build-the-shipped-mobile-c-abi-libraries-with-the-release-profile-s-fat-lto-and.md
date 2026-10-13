@@ -182,7 +182,7 @@ corrected. Device linking, packaging and size budgets are successors (see "Succe
 6. **Existing gates.** `cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh`,
    `python3 -B scripts/check-release-shape.py` (and `--self-test`), the router and its self-test,
    `cargo clippy --locked --workspace --all-targets -- -D warnings`, the C ABI caller audit
-   (`pcm_digest` `cb10fbface44a3a4` or the base's) and the browser module digest (the base's) exit 0
+   (the same `pcm_digest` as on the base commit) and the browser module digest (the base's) exit 0
    or match.
 
 *Test value.* D4's check is red when a shipped mobile library is built without fat LTO (for
