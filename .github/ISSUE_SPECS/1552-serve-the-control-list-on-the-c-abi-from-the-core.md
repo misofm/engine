@@ -142,4 +142,14 @@ Commands: `cargo test --locked -p host-core --all-features`,
   `EncodeError::InvalidField`, and only a row count above 256 or a frame bound as `LimitExceeded`;
   the controller trims on the second and answers the first as `INTERNAL`, since no page size
   repairs the provider's defect. The trim estimate multiplies in `u64`.
+- **Raised C ABI reference ceilings (batch 2 review fold).** `crates/capi/tests/resource_lifecycle.rs`
+  moved `capi_retained_bytes` 282,432 -> 554,240 and `largest_named_allocation_bytes` 99,840 ->
+  278,912, at both lane widths (#1551 raised them to 386,112 and 161,600 for the effect-parameter
+  catalog's wire rows; #1552 raised them again). The cause is structural, not tuning: the catalog now holds every
+  control of the session (the nine tracks' builtins, console EQs, own rows and routes, the session
+  rows, and a header before each owner and section: 932 entries of 272 bytes) where it held the
+  effect parameters alone, so the one catalog allocation went 146,880 -> 253,504 bytes and C ABI
+  retained 351,003 -> 503,819 (x86-64). Each ceiling is the measured value plus 10 percent, rounded
+  up to 64, as every ceiling in that table is. #TBD1 (shared descriptors and small rows) is the
+  successor that removes the per-entry copy and lowers them.
 
