@@ -638,6 +638,8 @@ needs nothing from #1443 (fourth review, BLOCKER-1).
 #1446, #1443, #1444) is accepted, and the whole set lands in one J batch with the #1448 guard
 commit: local checkpoint commits per slice, one push at the batch boundary. The batch boundary
 therefore follows #1447, #1448, #1449 and #1345 (Amendment 1) on `main`.
+(Root note of 2026-10-13, under stream J's "Depends on" above: #1443 and #1444 run in a follow-up J
+batch after J3 merges, so "the whole set" here means J3 plus that batch.)
 - **#1418 and #1426 are outside the batch** (root, 2026-10-05). They start when the batch is on
   `main`, so they come after #1444 and after #1345.
 - **Cost.** All nine tool issues stay unpushed until #1345 lands. On stream B's table after batch
