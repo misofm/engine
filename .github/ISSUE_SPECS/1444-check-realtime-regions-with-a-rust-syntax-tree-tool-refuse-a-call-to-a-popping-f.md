@@ -288,3 +288,4 @@ Delivery mode: feature sprint (no mutation runs, short note). Re-measured on the
   with the three hits above and nothing else. After the rename (root ruling below) gate 1 passes at
   `e9255f196`: `ok (126 marked regions in 27 files)`.
 - Root ruling 2026-10-13 (D3): the three cell-reader methods in crates/builtins-compiler/src/lib.rs are renamed from `drain` to `apply_latest`. They read latest-target cells and pop no queue since #1346 and #1312. This is a rename only, with no behaviour change.
+- Root rescope (2026-10-13, feature sprint mode): MAJOR-1 (hoisted function values outside a let initializer) and MAJOR-2 (loops, closures and path values inside macro token trees) move to #<successor>. The remaining scope has no other BLOCKER or MAJOR (batch review).
