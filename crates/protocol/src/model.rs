@@ -839,23 +839,18 @@ impl RampRecorder<'_> {
     }
 }
 
-/// The sample rate at which [`control_ramp_row`] asks the control core for a row: a row's motion
-/// does not depend on the rate.
-const MOTION_SAMPLE_RATE_HZ: u32 = 48_000;
-
 /// The `(target, row)` of the recorded ramp length that a write to `address` decides (#1553 D4),
 /// or `None` for a row whose ramp is fixed (its kernel owns it, and `controls::check` has refused
 /// an explicit length) or that has no ramp row. The row is the one the control's descriptor names,
 /// so the table of which control ramps lives in the control core and nowhere else.
 fn control_ramp_row(address: &controls::ControlAddress) -> Option<(EditRampTarget, EditRampRow)> {
     use controls::{LiveRampRow, Motion, Owner};
-    let descriptor = controls::row_descriptor(
+    let Motion::Ramp(ramp_row) = controls::row_motion(
         address.owner.kind(),
         address.section.kind(),
         address.control,
-        MOTION_SAMPLE_RATE_HZ,
-    )?;
-    let Motion::Ramp(ramp_row) = descriptor.motion else {
+    )?
+    else {
         return None;
     };
     // No wildcard: a new live ramp row must be classified here.

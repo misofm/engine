@@ -4,7 +4,7 @@ use session::SessionModel;
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
-use crate::descriptor::{ControlDescriptor, Lanes, check};
+use crate::descriptor::{ControlDescriptor, Lanes, Motion, check};
 use crate::effective::{EffectiveStrip, MonitorOverlay, effective};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
@@ -84,6 +84,20 @@ pub fn list(
     }
     session_rows::push_rows(&mut rows, model);
     rows.into_iter()
+}
+
+/// How the non-effect row `control` of `section` of `owner` moves, with no sample rate: the
+/// motion of a row (a ramp row or a fixed ramp) does not depend on the rate, so a caller that
+/// needs only the ramp row asks this and not [`row_descriptor`] at a placeholder rate. The same
+/// rows and `None` cases as [`row_descriptor`].
+#[must_use]
+pub fn row_motion(owner: OwnerKind, section: SectionKind, control: u32) -> Option<Motion> {
+    match (owner, section) {
+        (OwnerKind::Strip, SectionKind::Builtins) => {
+            builtin_rows::row(control).map(|row| row.ramp.map_or(Motion::Fixed, Motion::Ramp))
+        }
+        _ => row_descriptor(owner, section, control, 0).map(|descriptor| descriptor.motion),
+    }
 }
 
 /// The descriptor of one non-effect row at `sample_rate`, without a model: for a host that checks

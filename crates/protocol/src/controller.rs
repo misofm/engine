@@ -3346,8 +3346,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         let mut command_len = 0_usize;
         for id in 1_u16..=13 {
             let enabled = match id {
-                // `0x0004` and `0x0005` are retired and never advertised.
-                4 | 5 => false,
+                // The retired IDs are never advertised.
+                id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
                 3 => session_transactions,
                 7 => features.transport,
                 8 => features.transport && features.transport_events,

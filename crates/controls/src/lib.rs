@@ -60,5 +60,5 @@ pub use error::ControlError;
 pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
-pub use registry::{ControlRow, get, list, row_descriptor, set};
+pub use registry::{ControlRow, get, list, row_descriptor, row_motion, set};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};

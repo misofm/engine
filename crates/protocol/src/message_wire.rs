@@ -3229,7 +3229,9 @@ fn control_row_is_valid(limits: crate::ProtocolLimits, row: &ControlRow) -> bool
         && rebuild_only == row.reopen.is_some()
         && (row.reason == Some(ControlReason::RuledLiveNotBuilt)) == row.reason_issue.is_some()
         && (!row.automatable
-            || (row.class == ControlClass::Live && row.scope == ControlScope::Model))
+            || (row.class == ControlClass::Live
+                && row.scope == ControlScope::Model
+                && row.family != ControlFamily::Setting))
 }
 
 fn control_list_page_is_valid(limits: crate::ProtocolLimits, page: &ControlListPage) -> bool {
