@@ -50,9 +50,10 @@ pub struct SessionControlProviderResources {
 /// of every control row.
 ///
 /// Handles count from 1 in list order, so an entry's handle is its index plus one and no handle
-/// is stored twice. `values` holds the committed value of each entry, in step with `entries`, and
-/// is the only copy that a commit refreshes: the `value` inside a stored control row is the value
-/// at preparation and is never read.
+/// is stored twice. `values` holds the committed value of each entry, in step with `entries`; the
+/// `value` inside a stored control row is always `0.0`, so that two catalogs' entries compare equal
+/// exactly when their addresses, headers and descriptors do (a page fills the value in from
+/// `values`).
 pub struct ControlCatalog {
     entries: Vec<ControlEntry>,
     values: Vec<f32>,
@@ -226,46 +227,18 @@ impl SessionControlProvider {
     }
 
     /// Publish one fully prepared catalog, committed as session revision `revision`, without
-    /// allocation or failure (the old one drops here, on the control thread).
+    /// allocation or failure (the old one drops here, on the control thread). A live commit
+    /// publishes the catalog of the committed model as well, which refreshes every value.
     ///
-    /// The structure epoch advances by one when the new catalog's address sequence (the header
-    /// and control addresses, in order) differs from the current one, and stays when it does
-    /// not: a rebuild that changes only a value keeps every handle.
+    /// The structure epoch advances by one when the new catalog's entries differ from the current
+    /// ones in anything but a value: an address, a header or any control row's descriptor (a
+    /// `matrix_mode` switch flips `active` on live). A client therefore never holds a stale
+    /// descriptor under a current epoch. A commit that changes only values keeps the epoch.
     pub fn replace_session_catalog(&mut self, catalog: ControlCatalog, revision: u64) {
-        let same = self.catalog.entries.len() == catalog.entries.len()
-            && self
-                .catalog
-                .entries
-                .iter()
-                .zip(&catalog.entries)
-                .all(|(current, next)| current.address == next.address);
-        if !same {
+        if self.catalog.entries != catalog.entries {
             self.structure_epoch = self.structure_epoch.saturating_add(1);
         }
         self.catalog = catalog;
-        self.revision = revision;
-    }
-
-    /// Refresh every control row's value from the committed model after a commit that kept the
-    /// catalog (a live commit), and move the page revision to `revision`. `values` is
-    /// [`committed_control_values`] of the committed model: one value per control row, in list
-    /// order, so it lines up with the catalog's control rows because a live commit never changes
-    /// the address sequence. Allocation-free.
-    pub fn refresh_committed(&mut self, values: impl Iterator<Item = f32>, revision: u64) {
-        let mut values = values;
-        for (entry, slot) in self.catalog.entries.iter().zip(&mut self.catalog.values) {
-            if matches!(entry.body, ControlBody::Control(_)) {
-                let Some(value) = values.next() else {
-                    debug_assert!(false, "the committed model lists fewer controls");
-                    break;
-                };
-                *slot = value;
-            }
-        }
-        debug_assert!(
-            values.next().is_none(),
-            "the committed model lists more controls than the catalog holds"
-        );
         self.revision = revision;
     }
 
@@ -552,16 +525,6 @@ impl ControlProvider for SessionControlProvider {
     }
 }
 
-/// The committed value of every control of `model`, in list order: what
-/// [`SessionControlProvider::refresh_committed`] reads after a live commit. The iterator owns its
-/// rows, so it outlives the borrow of the model.
-pub fn committed_control_values(
-    model: &SessionModel,
-    sample_rate: u32,
-) -> impl Iterator<Item = f32> + use<> {
-    controls::list(model, &MonitorOverlay::default(), sample_rate).map(|row| row.value)
-}
-
 impl ControlCatalog {
     /// Build the catalog of `model` at `sample_rate`: one `controls::list` pass with the owner and
     /// section headers inserted, every allocation reserved up front.
@@ -782,7 +745,7 @@ fn wire_address(
     })
 }
 
-/// The wire row of one control: its descriptor and its value at preparation. `effect` is the
+/// The wire row of one control: its descriptor, with the value left at `0.0`. `effect` is the
 /// contract of the effect section the row is in, which gives an effect parameter's own ramp.
 fn control_row(
     row: &controls::ControlRow,
@@ -894,7 +857,8 @@ fn control_row(
             controls::Family::Setting => ControlFamily::Setting,
         },
         active: descriptor.active,
-        value: row.value,
+        // The committed value lives in the catalog's `values`.
+        value: 0.0,
     })
 }
 
@@ -1489,7 +1453,7 @@ mod tests {
 
         // A live-style commit: the values move, the handles and the epoch do not.
         controls::set(&mut model, &address, -6.0, None, RATE).expect("set the fader");
-        provider.refresh_committed(committed_control_values(&model, RATE), 2);
+        provider.replace_session_catalog(ControlCatalog::build(&model, RATE).expect("catalog"), 2);
         let after = whole_list(&mut provider, 256);
         assert_eq!(provider.structure_epoch(), 1);
         assert_eq!(
@@ -1516,14 +1480,49 @@ mod tests {
         let same = ControlCatalog::build(&model, RATE).expect("catalog");
         provider.replace_session_catalog(same, 3);
         assert_eq!(provider.structure_epoch(), 1);
+        // A switch to matrix mode flips `active` on the pan and matrix rows and no address: the
+        // epoch still advances, since a client's descriptors would be stale.
+        let mode = controls::list(&model, &MonitorOverlay::default(), RATE)
+            .find(|row| {
+                row.descriptor.name == "matrix_mode"
+                    && row.address.owner
+                        == Owner::Strip(session::StableId::parse("eq0").expect("ID"))
+            })
+            .expect("the mode row")
+            .address;
+        controls::set(&mut model, &mode, 1.0, None, RATE).expect("switch to matrix");
+        let before_switch = whole_list(&mut provider, 256);
+        provider.replace_session_catalog(ControlCatalog::build(&model, RATE).expect("catalog"), 4);
+        assert_eq!(provider.structure_epoch(), 2, "a descriptor changed");
+        let after_switch = whole_list(&mut provider, 256);
+        let active = |list: &[ControlEntry]| {
+            list.iter()
+                .map(|entry| match &entry.body {
+                    ControlBody::Control(row) => row.active,
+                    _ => true,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(active(&before_switch), active(&after_switch));
+        assert_eq!(
+            before_switch
+                .iter()
+                .map(|entry| &entry.address)
+                .collect::<Vec<_>>(),
+            after_switch
+                .iter()
+                .map(|entry| &entry.address)
+                .collect::<Vec<_>>(),
+            "only descriptors moved"
+        );
         model.tracks.pop();
         let changed = ControlCatalog::build(&model, RATE).expect("catalog");
-        provider.replace_session_catalog(changed, 4);
-        assert_eq!(provider.structure_epoch(), 2);
+        provider.replace_session_catalog(changed, 5);
+        assert_eq!(provider.structure_epoch(), 3);
         assert_eq!(
             provider
                 .control_list(&ControlListRequest {
-                    structure_epoch: 1,
+                    structure_epoch: 2,
                     after_handle: 0,
                     limit: 1,
                     owner: None,

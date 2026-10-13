@@ -239,10 +239,13 @@ catalog is `host_core::ControlCatalog`, built from the compiled session's `contr
 owner header before each owner's rows and a section header before each section's, each entry at its
 handle (from 1, in list order) and its committed value beside it. The list therefore covers every
 control of the session (strips, builtins, console slots, inserts, routes, VCAs and the session's
-own rows), and can never disagree with what `controls` validates. Every commit refreshes the
-values from the committed model, a live one through one `controls::list` pass, so a derived row
-follows its inputs; a rebuild commit replaces the catalog. `structure_epoch` starts at 1 and
-advances by one when a replacement catalog's address sequence differs from the current one; a
+own rows), and can never disagree with what `controls` validates. Every commit replaces the
+catalog with the committed model's (a live commit builds it before its first write and publishes it
+after the commit), so values are re-read through `controls::list` and a derived row follows its
+inputs. `structure_epoch` starts at 1 and
+advances by one on every commit, live or rebuild, after which the address sequence, a header or any
+control row's descriptor (every field except `value`) differs from the previous catalog (a live
+`matrix_mode` switch flips `active` and so advances it; a fader move does not); a
 request that names another epoch is `REVISION_CONFLICT` with `control.list.stale`. The page
 `revision` is the committed session revision. A page holds at most `limit` rows and fewer when its
 response would exceed the endpoint's response bound (the page then is not the end of the list).

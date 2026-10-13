@@ -1352,9 +1352,10 @@ where
     /// a cell write on every instance, the EQ's included: render reads the bypass cell first and
     /// the parameter and target cells after it (#1345 D3).
     ///
-    /// It never reserves a plan, adds a report row or replaces the provider catalog. After the
-    /// commit it refreshes the catalog's values from the committed model, so the control list
-    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3).
+    /// It never reserves a plan or adds a report row. It builds the committed model's control
+    /// catalog before the first write and publishes it after the commit, so the control list
+    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3), and its structure
+    /// epoch advances if a descriptor changed.
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
         let next = transaction.compiled().normalized_model();
@@ -1371,6 +1372,14 @@ where
         if let Err(error) = self.live_admission(&prepared) {
             return LiveCommit::Done(Err(error));
         }
+
+        // 1b. The catalog of the committed model, built before anything is written, so that the
+        // commit's last steps cannot fail for room (#1552 D3).
+        let catalog =
+            match host_core::ControlCatalog::build(next, transaction.compiled().sample_rate().0) {
+                Ok(catalog) => catalog,
+                Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
+            };
 
         // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7). The delta and the
         // producer table are both in canonical track order, so the search resumes where the last
@@ -1577,17 +1586,13 @@ where
                 .expect("the owner's targets were published");
         }
         drop(owners);
-        // The catalog keeps its handles, since a live commit never changes the address sequence;
-        // every committed value is read back from the model through one `controls::list` pass
-        // (decision 17, #1552 D3), so a derived row's value follows too.
-        let session = self.controller.session();
-        let values = host_core::committed_control_values(
-            session.compiled().normalized_model(),
-            session.compiled().sample_rate().0,
-        );
+        // The catalog of the committed model replaces the current one (decision 17, #1552 D3): the
+        // values are read back through the same pass a rebuild uses, so a derived row follows its
+        // inputs, and the structure epoch advances if any descriptor changed (a `matrix_mode`
+        // switch flips `active`). Nothing here allocates or fails.
         self.controller
             .provider_mut()
-            .refresh_committed(values, revision);
+            .replace_session_catalog(catalog, revision);
         // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
         // that carries its content, the newest epoch's (#1502 D6), which is the routing the
         // producers were chosen by, so the cells a commit writes and the gate that reveals them

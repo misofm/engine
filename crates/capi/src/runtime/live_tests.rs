@@ -4024,8 +4024,8 @@ fn the_c_abi_lists_every_control_of_the_session_in_pages() {
         .collect::<Vec<_>>();
     assert_eq!(owner_headers, expected_owners);
 
-    // Every control row follows its owner's header and its section's header, and the controls
-    // are the controls of the committed model, with its values.
+    // Every control row follows its owner's header and its section's header. (That the rows are
+    // the committed model's controls, with its values, is host-core's catalog test.)
     let mut owner = None;
     let mut section = None;
     for entry in &whole {
@@ -4053,14 +4053,6 @@ fn the_c_abi_lists_every_control_of_the_session_in_pages() {
             }
         }
     }
-    let listed = whole
-        .iter()
-        .filter_map(|entry| control_of(entry).map(|row| row.value.to_bits()))
-        .collect::<Vec<_>>();
-    let committed = host_core::committed_control_values(&model, model.sample_rate_hz)
-        .map(f32::to_bits)
-        .collect::<Vec<_>>();
-    assert_eq!(listed, committed);
     for kind in [
         protocol::ControlSection::Own,
         protocol::ControlSection::Builtins,
@@ -4231,4 +4223,85 @@ fn automation_is_admitted_for_an_effect_parameter_and_refused_for_any_other_row(
             "handle {handle}"
         );
     }
+}
+
+/// #1552: a live commit that changes a descriptor advances the structure epoch, and one that changes
+/// values only does not. A `matrix_mode` switch is live and flips `active` on the strip's pan and
+/// matrix rows without moving an address.
+///
+/// Red if a client keeps a current epoch while holding a descriptor that the commit changed (the
+/// list still says a matrix row is inactive), or if a fader move invalidates the client's list.
+#[test]
+fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
+    let document = effect_session(10, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (before, epoch, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+
+    assert_eq!(rig.apply(&[left_db_edit("eq0", -3.0)]), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "a fader move is live");
+    let (_, same, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(same, epoch, "values moved, no descriptor did");
+
+    let MatrixOrPan::Pan {
+        smoothing_samples, ..
+    } = model.tracks[0].matrix_or_pan
+    else {
+        panic!("the fixture's tracks pan");
+    };
+    assert_eq!(
+        rig.apply(&[SessionEdit::SetTrackMatrixOrPan {
+            track_id: model.tracks[0].id.clone(),
+            matrix_or_pan: MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples,
+            },
+            ramp_samples: None,
+        }]),
+        crate::RESULT_OK
+    );
+    assert_eq!(rig.summary().3, 0, "a mode switch is live");
+    let (after, switched, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(switched, epoch + 1);
+    let active = |list: &[protocol::ControlEntry]| {
+        list.iter()
+            .filter(|entry| entry.address.owner_id.as_deref() == Some("eq0"))
+            .filter_map(|entry| control_of(entry).map(|row| (row.name.clone(), row.active)))
+            .collect::<Vec<_>>()
+    };
+    let (old, new) = (active(&before), active(&after));
+    assert_ne!(old, new, "the list shows the new `active` flags");
+    assert!(
+        old.iter().any(|(name, active)| name == "pan" && *active)
+            && new.iter().any(|(name, active)| name == "pan" && !*active)
+            && new
+                .iter()
+                .any(|(name, active)| name == "matrix_ll" && *active),
+        "pan went inactive and the matrix active"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .map(|entry| &entry.address)
+            .collect::<Vec<_>>(),
+        after.iter().map(|entry| &entry.address).collect::<Vec<_>>(),
+        "no address moved"
+    );
+    let stale = protocol::ControlListRequest {
+        structure_epoch: epoch,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
+    };
+    let request = rig.next_request();
+    assert_eq!(
+        control_list_c(rig.session, request, &stale)
+            .err()
+            .map(|(status, _)| status),
+        Some(protocol::StatusCode::RevisionConflict)
+    );
 }
