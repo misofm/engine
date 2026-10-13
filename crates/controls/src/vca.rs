@@ -5,9 +5,7 @@ use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, SessionModel, StableId, Vca};
 
 use crate::address::{Owner, Section};
-use crate::descriptor::{
-    BASE, ControlDescriptor, EFFECTIVE_SLICE, Lanes, Motion, ruled_live_not_built,
-};
+use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::registry::{ControlRow, Resolved, push_control};
@@ -15,9 +13,6 @@ use crate::{ControlKind, Family, LiveRampRow, Taper};
 
 const OFFSET_DB: u32 = 1;
 const MUTE: u32 = 2;
-
-const REOPEN: &str = "The effective-value slice (decision 17, S7a) builds the live path and \
-     flips this row to live.";
 
 /// One row of the VCA table.
 pub(crate) struct VcaRow {
@@ -29,10 +24,11 @@ pub(crate) struct VcaRow {
     write: fn(&mut Vca, Side, f32),
 }
 
-/// What a VCA row starts from. A VCA's fader is stored per lane, so its rows are per lane.
+/// What a VCA row starts from. A VCA's fader is stored per lane, so its rows are per lane. A VCA
+/// has no render cell: a change reaches render as its members' effective fader and mute (#1558),
+/// so the family is the strip level's.
 const VCA_BASE: ControlDescriptor = ControlDescriptor {
     lanes: Lanes::PerLane,
-    class: ruled_live_not_built(EFFECTIVE_SLICE, REOPEN),
     family: Family::StripLevel,
     ..BASE
 };

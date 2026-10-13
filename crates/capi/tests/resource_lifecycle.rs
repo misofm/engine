@@ -2621,6 +2621,47 @@ fn race_session() -> String {
             lane.delay_samples = 0;
         }
     }
+    // #1558: two nested VCAs over the first tracks, and a pre-fader send from the last track into a
+    // bus, following that track's mute.
+    let ids: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    let vca = |name: &str, members: Vec<StableId>| session::Vca {
+        id: StableId::parse(name).expect("stable id"),
+        fader: session::DualMonoFader {
+            left_db: 0.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+        members,
+    };
+    let inner = vca("rv0", ids[..2].to_vec());
+    let outer = vca("rv1", vec![inner.id.clone(), ids[3].clone()]);
+    model.vcas = vec![inner, outer];
+    let bus = StableId::parse("race-bus").expect("stable id");
+    model
+        .submixes
+        .push(session::Submix::unity(bus.clone(), &model.console));
+    let last = ids.last().expect("a track").clone();
+    let send = model
+        .routes
+        .iter_mut()
+        .find(|route| matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == last))
+        .expect("the last track's route");
+    let mut out = send.clone();
+    send.id = StableId::parse("race-send").expect("stable id");
+    send.destination = session::RouteDestination::SubmixInput {
+        submix_id: bus.clone(),
+    };
+    send.follows_mute = true;
+    if let session::RouteSource::Track { tap, .. } = &mut send.source {
+        *tap = session::SendTap::PreFader;
+    }
+    out.id = StableId::parse("race-bus-main").expect("stable id");
+    out.source = session::RouteSource::Submix {
+        submix_id: bus,
+        tap: session::SendTap::PostPan,
+    };
+    model.routes.push(out);
     session::canonical_session_json(&model).expect("canonical race session")
 }
 
@@ -2649,6 +2690,11 @@ struct RaceEdits {
     tracks: Vec<StableId>,
     faders: Vec<session::DualMonoFader>,
     source: session::Source,
+    /// The two VCAs of [`race_session`], as the committed model holds them (#1558).
+    vcas: Vec<session::Vca>,
+    /// Whether the race send follows its source's mute, and whether VCA `rv-extra` exists.
+    follows: bool,
+    extra: bool,
 }
 
 impl RaceEdits {
@@ -2662,6 +2708,73 @@ impl RaceEdits {
                 .map(|track| track.fader.clone())
                 .collect(),
             source: model.sources[0].clone(),
+            vcas: model.vcas.clone(),
+            follows: true,
+            extra: false,
+        }
+    }
+
+    /// The live VCA, membership and follow edit of round `round` (#1558): an offset, a left-lane
+    /// mute, a member joining or leaving, the send's `follows_mute` toggled, and a VCA added and
+    /// removed again. The right lane of every VCA stays unmuted, so the final mix carries signal.
+    fn vca_edit(&mut self, round: u64) -> SessionEdit {
+        match round % 5 {
+            0 => {
+                let vca = &mut self.vcas[0];
+                vca.fader.left_db = -1.0 - 0.25 * (round % 7) as f32;
+                vca.fader.right_db = vca.fader.left_db - 0.5;
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            1 => {
+                let vca = &mut self.vcas[1];
+                vca.fader.left_mute = !vca.fader.left_mute;
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            2 => {
+                let vca = &mut self.vcas[0];
+                if vca.members.len() == 2 {
+                    vca.members.push(self.tracks[2].clone());
+                } else {
+                    vca.members.pop();
+                }
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            3 => {
+                self.follows = !self.follows;
+                SessionEdit::SetControl {
+                    address: protocol::control_core::ControlAddress {
+                        owner: protocol::control_core::Owner::Route(
+                            StableId::parse("race-send").expect("stable id"),
+                        ),
+                        section: protocol::control_core::Section::Own,
+                        control: 7,
+                        lane: protocol::control_core::Lane::Both,
+                    },
+                    value: f32::from(u8::from(self.follows)),
+                    ramp_samples: None,
+                }
+            }
+            _ => {
+                self.extra = !self.extra;
+                if self.extra {
+                    SessionEdit::UpsertVca {
+                        vca: session::Vca {
+                            id: StableId::parse("rv-extra").expect("stable id"),
+                            fader: session::DualMonoFader {
+                                left_db: -3.0,
+                                right_db: -3.0,
+                                left_mute: false,
+                                right_mute: false,
+                            },
+                            members: vec![self.tracks[5].clone()],
+                        },
+                    }
+                } else {
+                    SessionEdit::RemoveVca {
+                        vca_id: StableId::parse("rv-extra").expect("stable id"),
+                    }
+                }
+            }
         }
     }
 
@@ -2685,6 +2798,10 @@ impl RaceEdits {
                     frames: self.source.frames,
                 },
             );
+        }
+        // Every fourth live edit is a VCA, membership or follow edit (#1558).
+        if index % 8 == 3 {
+            return (true, self.vca_edit(index / 8));
         }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
@@ -2747,8 +2864,9 @@ struct RaceCounts {
 /// The last structural edit is edit 151, so the run ends with four live edits that commit while
 /// its candidate is pending or just swapped in, and no later rebuild re-prepares their values
 /// from the committed model: a live edit lost to the retiring plan stays lost in the final block.
-/// They are a pan (152) and three mutes (153-155), of which 153 and 155 flip a value and push a
-/// record; 154 repeats its track's value and commits with no record.
+/// They are a pan (152), two mutes (153, 154) and a VCA edit (155: `rv-extra` added), of which 153
+/// flips a value and pushes a record; 154 repeats its track's value and commits with no record.
+/// Every eighth edit from 3 on is a VCA, membership or follow edit (#1558).
 const RACE_EDITS: u64 = 156;
 const RACE_EDITS_PER_BLOCK: u64 = 3;
 /// Render blocks after an edit's first refusal beyond which another refusal fails the run, as
@@ -3155,7 +3273,9 @@ fn paused_bursts(
 }
 
 /// #1258 gate 1: live fader, mute and pan edits, several per render period, and a structural edit
-/// every eighth, against a plan rendering on another thread, twenty times.
+/// every eighth, against a plan rendering on another thread, twenty times. #1558 adds VCA offsets
+/// and mutes, VCA membership, VCAs added and removed, and a send's `follows_mute` to the live
+/// edits: none rebuilds, none allocates or frees on render, and the final block equals a fresh plan.
 ///
 /// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from

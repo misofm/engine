@@ -382,7 +382,7 @@ A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients
 the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
 live revision through `SET_CONTROL` or the per-kind route edits; no plan is prepared and the plan
 epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
-for decision 14's fold reason, at any tap, and `follows_mute` stays a rebuild until #1558. **A
+for decision 14's fold reason, at any tap. **A
 route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
 (`controls::live_lanes`), so a C ABI plan with a route into a submix attaches one latest-target
 cell per such route (`graph::route_control_resources`, charged in `capi_retained_bytes` and
@@ -406,6 +406,40 @@ A plan with no route into a submix attaches none and renders as before.
   upper bound; the producer table and route IDs are observed exactly by `resource_lifecycle`.
 - **Rendering.** The route lane adds no latency or tail, and no render block allocates or frees
   (gated by `send_values_are_live_and_render_the_prepared_plan_bits`).
+
+
+## Live VCAs and follows (#1558)
+
+A VCA's offset and mute, a VCA's members, a VCA added or removed, a mute that a send follows, and a
+send's `follows_mute` are value-only (decision 17, S7a). `miso_engine_v1_submit_command` commits a
+change of them as a live revision through `SET_CONTROL` or the per-kind edits (`UpsertVca`,
+`RemoveVca`, `SetTrackFader`, ...); no plan is prepared and the plan epoch does not move. A VCA has
+no render cell: a change reaches render as its members' effective fader and mute records, and a
+follow as the route's record, because the classifier diffs the effective values of the committed
+and the prospective model (`controls::effective`, the function preparation reads), never the raw
+fader, mute or VCA fields. A strip muted by its VCA whose own mute then toggles moves nothing, and a
+VCA move that leaves every member clamped at +24 dB writes nothing.
+
+- **Ramps.** A level record of a lane the strip's own value moved takes the strip's own edit and
+  row (`fader_db`, `mute`); else the first reaching VCA, in ascending VCA-ID order, whose offset or
+  mute moved on the lane, with that VCA's edit length; else the `VcaOffset` or `VcaMute` row's
+  session length (a membership change, a VCA added or removed). A send whose gate moved takes the
+  send's own `mute` or `follows_mute` edit when one of them moved, else the length of its source
+  strip's `Mute` record, so a strip and the sends that follow it ramp together.
+- **Row set.** A VCA added or removed adds or removes its four rows (`offset_db` and `mute`, left
+  and right), so the commit advances the control list's `structure_epoch`; a member change, an
+  offset or a mute keeps it.
+- **Counts.** A live edit over `maximum_vcas` (or any other count cap) is refused like a compile:
+  `COMPILE_REJECTED` with `host.resource.count`, and the model, the revision and every cell are
+  unchanged.
+- **Successors.** A rebuild that also changes a VCA or a followed mute carries each strip's fader
+  and mute stage and retargets it to its effective value (#1277 D5). The sends it prepares start at
+  their gate; carrying a send's ramp across a plan swap is #1284.
+- **Rendering.** After the ramp, a live edit renders the bits of a plan prepared from the
+  committed session; gated at four rates in `live_tests` and under 20 races of
+  `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`, which add VCA
+  offsets, mutes, membership, VCAs added and removed and `follows_mute` toggles to its live edits,
+  with zero render allocations and frees.
 
 ## Value-only track edits on the running plan (#1257)
 
@@ -445,8 +479,7 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
   bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
   bypass edits" below.
-- **Rebuild.** Everything else replaces the plan exactly as before: any edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
-  reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
+- **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
   `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
 - **Timing (#1053 D2, #1312).** A committed fader, mute or pan/matrix value reaches render no
   later than the first block whose render call begins after the submit returns or, while a

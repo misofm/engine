@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 use common::{RATE, fixture, id, route_own, row_of, strip_builtin, strip_own};
 use controls::{
-    ControlAddress, ControlClass, ControlRow, ControlScope, EFFECTIVE_SLICE, Lane, Owner,
-    RebuildReason, Section, list,
+    ControlAddress, ControlClass, ControlRow, ControlScope, Lane, Owner, RebuildReason, Section,
+    list,
 };
 
 /// How a row is listed: once as `both`, or as `left` and `right`.
@@ -142,20 +142,14 @@ fn classes_match_decision_14() {
         reason(class(&model, &strip_builtin("vocal", 11, Lane::Left))),
         RebuildReason::NewMemory
     );
-    // A send into the submix is live (#1557); `follows_mute` waits for the effective slice.
-    for control in 1..=6 {
+    // A send into the submix is live (#1557), `follows_mute` (#1558) included.
+    for control in 1..=7 {
         assert_eq!(
             class(&model, &route_own("send", control)),
             ControlClass::Live,
             "send {control}"
         );
     }
-    assert_eq!(
-        reason(class(&model, &route_own("send", 7))),
-        RebuildReason::RuledLiveNotBuilt {
-            issue: EFFECTIVE_SLICE
-        }
-    );
     // A route into the output keeps the fold, whatever its tap.
     for route in ["post-fader-out", "pre-fader-out", "bus-out"] {
         for control in 1..=6 {
@@ -169,7 +163,7 @@ fn classes_match_decision_14() {
         assert!(!row_of(&model, &route_own(route, 7)).descriptor.active);
     }
     assert!(row_of(&model, &route_own("send", 7)).descriptor.active);
-    // VCA rows wait for the effective slice.
+    // VCA rows are live (#1558), per lane.
     for control in [1, 2] {
         for lane in [Lane::Left, Lane::Right] {
             let address = ControlAddress {
@@ -178,12 +172,7 @@ fn classes_match_decision_14() {
                 control,
                 lane,
             };
-            assert_eq!(
-                reason(class(&model, &address)),
-                RebuildReason::RuledLiveNotBuilt {
-                    issue: EFFECTIVE_SLICE
-                }
-            );
+            assert_eq!(class(&model, &address), ControlClass::Live);
         }
     }
     // Strip own rows: mode and solo are live, the effective values are derived.
@@ -242,6 +231,8 @@ fn automatable_is_exactly_the_live_model_value_rows() {
         "hpf_hz",
         "lpf_hz",
         "gain_db",
+        "follows_mute",
+        "offset_db",
         "fader_db",
         "mute",
         "pan",

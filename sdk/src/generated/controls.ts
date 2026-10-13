@@ -995,11 +995,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1558,
-        "reopen": "The effective-value slice (decision 17, S7a) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -1088,11 +1088,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripLevel",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1558,
-      "reopen": "The effective-value slice (decision 17, S7a) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     },
     {
       "control": 2,
@@ -1123,11 +1123,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripLevel",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1558,
-      "reopen": "The effective-value slice (decision 17, S7a) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     }
   ],
   "sessionOwn": [

@@ -480,9 +480,9 @@ pub struct LiveEpochResources {
 ///   `retained_bytes`;
 /// - **capi:** the newest plan's `control_retained_bytes`, plus the current epoch's `epoch_retained`
 ///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
-///   term includes a provider catalog (`catalog_retained_bytes`) that the live arm never builds,
-///   because it never replaces the catalog: a conservative overcount, kept so that the term is the
-///   same one a rebuild charges;
+///   term includes a provider catalog (`catalog_retained_bytes`), which a live commit replaces by
+///   the committed model's (#1552 D3), so the term is the same one a rebuild charges; a VCA added
+///   live adds its rows to that catalog, bounded by `maximum_vcas` (#1558 D6);
 /// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
 ///   newest epoch's capi `largest` and the compiled models' largest allocation.
 ///

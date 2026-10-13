@@ -11,9 +11,7 @@ use session::{
 };
 
 use crate::address::{Owner, Section};
-use crate::descriptor::{
-    BASE, ControlDescriptor, EFFECTIVE_SLICE, Lanes, Motion, ruled_live_not_built,
-};
+use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control};
@@ -28,9 +26,6 @@ const MATRIX_RR: u32 = 6;
 const FOLLOWS_MUTE: u32 = 7;
 /// The own-row ID of `effective_gate`.
 const EFFECTIVE_GATE: u32 = 64;
-
-const FOLLOW_REOPEN: &str = "The effective-value slice (decision 17, S7a) builds the live path \
-     and flips this row to live.";
 
 /// A route into the output keeps the single-master route fold, and a live route never folds
 /// (decision 14, rule 3, optimisation; decision 13 O9).
@@ -182,7 +177,6 @@ pub(crate) static ROWS: [RouteRow; 8] = [
             taper: Taper::Stepped,
             lattice: ParameterLattice::indices(),
             motion: Motion::Ramp(LiveRampRow::SendFollowsMute),
-            class: ruled_live_not_built(EFFECTIVE_SLICE, FOLLOW_REOPEN),
             ..ROUTE_BASE
         },
         // A route into the output carries `false` (#1218): the row does not apply.

@@ -5,6 +5,7 @@
 //!
 //! - [`any_solo`]: whether some soloable strip is soloed;
 //! - [`effective_strip`]: one strip's fader, mute and VCA mute;
+//! - [`effective_follow`]: the part of one route's gate that its source strip's mute causes;
 //! - [`effective_gate`]: one route's gate, per source lane.
 //!
 //! [`effective_into`] is a loop over them, [`effective`] builds the inputs of a model and calls it,
@@ -64,6 +65,9 @@ pub struct EffectiveRoute {
     /// Per source lane (index = source lane): the route's mute, or its follow gate on a muted lane
     /// of its source strip. A gated lane zeroes that source lane's matrix column.
     pub gate: [bool; 2],
+    /// Per source lane: the part of the gate that following causes, `follows_mute` on a muted lane
+    /// of the source strip. The graph keeps it apart from the route's own mute (`graph::RouteGate`).
+    pub follow: [bool; 2],
 }
 
 /// Every effective value of a session. Strips are in [`SessionModel::strips`] order and routes in
@@ -175,16 +179,30 @@ pub fn effective_strip(
     out
 }
 
-/// One route's gate per source lane: `mute || (follows_mute && source.mute[lane])`. `source` is
-/// the route's source strip, from [`effective_strip`].
+/// The part of one route's gate that following causes, per source lane:
+/// `follows_mute && source.mute[lane]`. `source` is the route's source strip, from
+/// [`effective_strip`].
+#[must_use]
+pub fn effective_follow(
+    inputs: &impl EffectiveInputs,
+    route: usize,
+    source: &EffectiveStrip,
+) -> [bool; 2] {
+    let route = inputs.route(route);
+    [0, 1].map(|lane| route.follows_mute && source.mute[lane])
+}
+
+/// One route's gate per source lane: `mute || (follows_mute && source.mute[lane])`, the route's
+/// own mute or [`effective_follow`]. `source` is the route's source strip, from
+/// [`effective_strip`].
 #[must_use]
 pub fn effective_gate(
     inputs: &impl EffectiveInputs,
     route: usize,
     source: &EffectiveStrip,
 ) -> [bool; 2] {
-    let route = inputs.route(route);
-    [0, 1].map(|lane| route.mute || (route.follows_mute && source.mute[lane]))
+    let mute = inputs.route(route).mute;
+    effective_follow(inputs, route, source).map(|follow| mute || follow)
 }
 
 /// Compute every effective value into `out`. Never allocates.
@@ -217,6 +235,7 @@ fn fill(inputs: &impl EffectiveInputs, out: &mut Effective) {
         let source = out.strips.get(source).copied().unwrap_or_default();
         *slot = EffectiveRoute {
             gate: effective_gate(inputs, route, &source),
+            follow: effective_follow(inputs, route, &source),
         };
     }
 }

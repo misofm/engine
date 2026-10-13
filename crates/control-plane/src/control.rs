@@ -1378,7 +1378,8 @@ where
     /// It never reserves a plan or adds a report row. It builds the committed model's control
     /// catalog before the first write and publishes it after the commit, so the control list
     /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3), and its structure
-    /// epoch advances if a descriptor changed.
+    /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
+    /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
         let next = transaction.compiled().normalized_model();
@@ -1680,6 +1681,17 @@ where
 
     /// The live admission's inputs, read from the report table and the epochs (#1053 D8).
     fn live_admission(&self, prepared: &ObservedPreparedToken) -> Result<(), CommandError> {
+        // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
+        // function, the same diagnostic, and nothing is committed on a refusal.
+        host_core::check_counts(
+            prepared
+                .get()
+                .prospective_session()
+                .compiled()
+                .normalized_model(),
+            &prepare_caps(self.limits),
+        )
+        .map_err(|diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)))?;
         let models = compiled_model_admission(
             self.controller.session().compiled(),
             prepared.get().prospective_session().compiled(),

@@ -3210,14 +3210,13 @@ fn with_vca(mut model: SessionModel, track: &str, db: f32) -> SessionModel {
 /// The strip beside [`MOVED`] in the predecessor's first bank at either width, which carries.
 const CARRIED: &str = "eq1";
 
-/// #1312 D2: `live_values_superseded` counts the writes a carry drain replaces on lanes that
-/// carry, and none on a lane the swap restarts, whichever lanes share their bank. B adds a VCA
-/// over [`MOVED`], a prepared difference that restarts its fader stage. In the split form the
-/// matrix stage of [`MOVED`] still carries; in the fused form the strip carries neither stage.
-/// [`CARRIED`] carries both stages from the same predecessor bank at four and at eight lanes.
-/// Three fader writes sit unread in [`MOVED`]'s cells and three fader and three
-/// pan writes in [`CARRIED`]'s when the swap block hands over.
-fn a_restarting_lane_does_not_count_its_replaced_writes(backend: Backend, form: Form) {
+/// #1312 D2: `live_values_superseded` counts the writes a carry drain replaces on every lane that
+/// carries, whichever lanes share their bank. B adds a VCA over [`MOVED`], a live difference
+/// (#1558): its stage carries and is retargeted, so its writes are counted like [`CARRIED`]'s, in
+/// the split form and in the fused one. Three fader writes sit unread in [`MOVED`]'s cells and
+/// three fader and three pan writes in [`CARRIED`]'s when the swap block hands over. The count of a
+/// stage that restarts instead (an input lane, `a_restarting_input_lane_...`) stays zero.
+fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
     let a = Session::compile(strip_state_session());
     let b = Session::compile(with_vca(
         with_muted_track(strip_state_session()),
@@ -3259,76 +3258,130 @@ fn a_restarting_lane_does_not_count_its_replaced_writes(backend: Backend, form: 
             backend,
         );
         assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?} {form:?}");
-        assert_eq!(
-            run.restarted,
-            vec![Box::<str>::from(MOVED)],
-            "{backend:?} {form:?}: exactly the moved strip restarts"
+        assert!(
+            run.restarted.is_empty(),
+            "{backend:?} {form:?}: a VCA added over a strip restarts nothing: {:?}",
+            run.restarted
         );
         run
     };
-    let restarting = run(&[MOVED]);
+    let moved = run(&[MOVED]);
     let carried = run(&[CARRIED]);
     let both = run(&[MOVED, CARRIED]);
-    assert_eq!(
-        restarting.carry_superseded, 0,
-        "{backend:?} {form:?}: writes to a restarting lane are not counted"
-    );
     // Three writes to a cell replace two; a Both fader write fills the left and the right cell,
     // and the pan write fills the one matrix cell: two cells of the fader and one of the pan.
+    assert_eq!(
+        moved.carry_superseded,
+        2 * 2,
+        "{backend:?} {form:?}: the retargeted lane counts the writes its drain replaced"
+    );
     assert_eq!(
         carried.carry_superseded,
         2 * 2 + 2,
         "{backend:?} {form:?}: a carried lane counts the writes its drain replaced"
     );
     assert_eq!(
-        both.carry_superseded, carried.carry_superseded,
-        "{backend:?} {form:?}: the restarting lane adds nothing to its bank-mate's count"
+        both.carry_superseded,
+        moved.carry_superseded + carried.carry_superseded,
+        "{backend:?} {form:?}: the counts of two lanes of one bank add"
     );
 }
 
 #[test]
-fn a_restarting_lane_does_not_count_its_replaced_writes_at_four_lanes() {
+fn a_carried_lane_counts_its_replaced_writes_at_four_lanes() {
     for form in forms() {
-        a_restarting_lane_does_not_count_its_replaced_writes(Backend::Simd4, form);
+        a_carried_lane_counts_its_replaced_writes(Backend::Simd4, form);
     }
 }
 
 #[cfg(target_feature = "avx2")]
 #[test]
-fn a_restarting_lane_does_not_count_its_replaced_writes_at_eight_lanes() {
+fn a_carried_lane_counts_its_replaced_writes_at_eight_lanes() {
     for form in forms() {
-        a_restarting_lane_does_not_count_its_replaced_writes(Backend::Simd8, form);
+        a_carried_lane_counts_its_replaced_writes(Backend::Simd8, form);
     }
 }
 
-/// Gate 5: B adds a VCA with a +3 dB offset over X. A VCA is a prepared difference until #1247, so
-/// X's stage starts at rest at the new effective value and `restarted_strips()` is exactly `[X]`,
-/// on a live plan, which has the cells a live difference would retarget. #1247 rewrites this gate
-/// when VCA changes become live.
-fn a_prepared_change_restarts_the_stage(backend: Backend, form: Form) {
-    let a = Session::compile(strip_state_session());
+/// #1558 D4 (was #1276's gate 5, when a VCA was a prepared difference): B adds a VCA with a +3 dB
+/// offset over X. X's stage carries and is retargeted to the effective value, over the `VcaOffset`
+/// row's session length, and `restarted_strips()` is empty. Run 1 prepares B from A's base. Run 2
+/// writes the same effective records to A just before the swap and prepares B from a base that
+/// already holds them. The runs are bit-identical in every block. Red if the join compares X's own
+/// fader (no difference, so no retarget) or still prepares a strip under a VCA.
+fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: Form) {
+    let before = strip_state_session();
+    let a = Session::compile(before.clone());
     let b_model = with_vca(with_muted_track(strip_state_session()), MOVED, 3.0);
     let b = Session::compile(b_model);
+    // X's effective fader: its own plus the offset, on each lane.
+    let own = [-1.0, -2.0];
+    let effective = [own[0] + 3.0, own[1] + 3.0];
+    let moved = with_fader(strip_state_session(), MOVED, effective);
     let feed = feed_for_strips();
-    let reference = cell_run(&b, form, None, &feed, &[], backend);
-    let without = cell_run(
-        &Session::compile(with_muted_track(strip_state_session())),
-        form,
-        None,
-        &feed,
-        &[],
-        backend,
-    );
-    assert!(
-        first_cell_difference(&reference, &without).is_some(),
-        "{backend:?} {form:?}: the offset is audible"
-    );
-    let run = cell_run(
+    let fader_samples = LiveRamps::for_session(&moved).for_row(LiveRampRow::VcaOffset);
+    assert_ne!(fader_samples, 0, "the default table ramps a VCA offset");
+    let writes: Vec<CellWrite> = [
+        (BuiltinLaneSelector::Left, effective[0]),
+        (BuiltinLaneSelector::Right, effective[1]),
+    ]
+    .into_iter()
+    .map(|(lanes, db)| CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes,
+            db,
+            smoothing_samples: fader_samples,
+        }),
+    })
+    .collect();
+    let no_ramps = EditRamps::new();
+    let retargeted = cell_run(
         &a,
         form,
         Some(Swap {
             to: &b,
-            committed: &a.model,
+            committed: &before,
+            form,
+            successor_writes: &[],
+            edit_ramps: &no_ramps,
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    let written = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+            edit_ramps: &no_ramps,
+        }),
+        &feed,
+        &writes,
+        backend,
+    );
+    assert_eq!(retargeted.carry, CarryOutcome::Carried);
+    assert!(
+        retargeted.restarted.is_empty(),
+        "{backend:?} {form:?}: {:?}",
+        retargeted.restarted
+    );
+    assert_eq!(
+        first_cell_difference(&retargeted, &written),
+        None,
+        "{backend:?} {form:?}: the retarget is the live record"
+    );
+    // Not vacuous: the offset is audible after the swap.
+    let without = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &Session::compile(with_muted_track(strip_state_session())),
+            committed: &before,
             form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
@@ -3337,33 +3390,25 @@ fn a_prepared_change_restarts_the_stage(backend: Backend, form: Form) {
         &[],
         backend,
     );
-    assert_eq!(run.carry, CarryOutcome::Carried);
-    assert_eq!(
-        run.restarted,
-        vec![Box::<str>::from(MOVED)],
-        "{backend:?} {form:?}: exactly X restarts"
-    );
-    // The blocks before the swap are A's, without the offset; from the swap block on, X's stage
-    // renders exactly what B's fresh plan does.
-    assert_eq!(
-        run.blocks[SWAP_BLOCK..],
-        reference.blocks[SWAP_BLOCK..],
-        "{backend:?} {form:?}: X's stage starts at rest at the new effective value"
+    assert_ne!(
+        retargeted.blocks[SWAP_BLOCK + 1],
+        without.blocks[SWAP_BLOCK + 1],
+        "{backend:?} {form:?}: the VCA offset is audible"
     );
 }
 
 #[test]
-fn a_prepared_change_restarts_the_stage_at_four_lanes() {
+fn a_vca_added_over_a_strip_retargets_its_carried_stage_at_four_lanes() {
     for form in forms() {
-        a_prepared_change_restarts_the_stage(Backend::Simd4, form);
+        a_vca_added_over_a_strip_retargets_its_carried_stage(Backend::Simd4, form);
     }
 }
 
 #[cfg(target_feature = "avx2")]
 #[test]
-fn a_prepared_change_restarts_the_stage_at_eight_lanes() {
+fn a_vca_added_over_a_strip_retargets_its_carried_stage_at_eight_lanes() {
     for form in forms() {
-        a_prepared_change_restarts_the_stage(Backend::Simd8, form);
+        a_vca_added_over_a_strip_retargets_its_carried_stage(Backend::Simd8, form);
     }
 }
 
@@ -3400,18 +3445,20 @@ fn with_send_through_submix(
     model
 }
 
-/// A mute change on a track that a `follows_mute` route follows is refused by the classifier
-/// (`LiveRebuild::FollowedMute`), so by D3 it is a prepared difference: the strip's stage does not
-/// carry, starts at rest at the new mute, and the strip is exactly the restart set. The same
-/// change with no route that follows it is live and carries. Red if the join treats the followed
-/// mute as live: X would carry, be written a mute retarget and drop out of the restart set (then
-/// the carried stage ramps the mute (#1054) while the following route, prepared fresh, steps).
-fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
+/// A mute change on a track that a `follows_mute` route follows is a live difference like any other
+/// (#1558 D4): the strip's stage carries and is retargeted over the session's mute length, and the
+/// strip is not in the restart set, whether or not a route follows it. The following route is
+/// prepared from the successor's model, so it is gated from the swap block on, in both runs. Run 1
+/// prepares B from A's base; run 2 writes the same mute record to A just before the swap and
+/// prepares B from a base that already holds it; the runs are bit-identical. Red if the join still
+/// treats the followed mute as prepared: X would restart at rest at the new mute and drop the ramp
+/// a live mute record has.
+fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form: Form) {
     let a_model =
         |follows_mute| with_send_through_submix(strip_state_session(), MOVED, follows_mute);
     let b_model = |follows_mute| with_mute(with_muted_track(a_model(follows_mute)), MOVED, true);
     let feed = feed_for_strips();
-    let run_for = |follows_mute| {
+    for follows_mute in [true, false] {
         let (a, b) = (
             Session::compile(a_model(follows_mute)),
             Session::compile(b_model(follows_mute)),
@@ -3431,73 +3478,58 @@ fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
             &[],
             backend,
         );
-        (run, reference)
-    };
-    let (run, reference) = run_for(true);
-    assert_eq!(run.carry, CarryOutcome::Carried);
-    assert_eq!(
-        run.restarted,
-        vec![Box::<str>::from(MOVED)],
-        "{backend:?} {form:?}: exactly the followed strip restarts"
-    );
-    assert_eq!(
-        run.blocks[SWAP_BLOCK..],
-        reference.blocks[SWAP_BLOCK..],
-        "{backend:?} {form:?}: the followed strip starts at rest at its new mute"
-    );
-    // The control: with no route following the mute, the same change is live and carries. The
-    // retarget ramps over the session's mute length (#1054 D4), so it sounds like the live mute
-    // record written to the predecessor, and unlike a mute prepared at rest.
-    let (run, reference) = run_for(false);
-    assert!(
-        run.restarted.is_empty(),
-        "{backend:?} {form:?}: {:?}",
-        run.restarted
-    );
-    let (a, b) = (
-        Session::compile(a_model(false)),
-        Session::compile(b_model(false)),
-    );
-    let moved = with_mute(a_model(false), MOVED, true);
-    let mute_samples = LiveRamps::for_session(&moved).for_row(LiveRampRow::Mute);
-    assert_ne!(mute_samples, 0, "the default table ramps a mute");
-    let written = cell_run(
-        &a,
-        form,
-        Some(Swap {
-            to: &b,
-            committed: &moved,
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert!(
+            run.restarted.is_empty(),
+            "{backend:?} {form:?} follows {follows_mute}: {:?}",
+            run.restarted
+        );
+        // The retarget ramps over the session's mute length (#1054 D4), so it sounds like the live
+        // mute record written to the predecessor, and unlike a mute prepared at rest.
+        let moved = with_mute(a_model(follows_mute), MOVED, true);
+        let mute_samples = LiveRamps::for_session(&moved).for_row(LiveRampRow::Mute);
+        assert_ne!(mute_samples, 0, "the default table ramps a mute");
+        let written = cell_run(
+            &a,
             form,
-            successor_writes: &[],
-            edit_ramps: &EditRamps::new(),
-        }),
-        &feed,
-        &[CellWrite {
-            block: SWAP_BLOCK,
-            strip: MOVED,
-            record: CellRecord::Fader(mute_both(true, mute_samples)),
-        }],
-        backend,
-    );
-    assert_eq!(
-        run.blocks[SWAP_BLOCK..],
-        written.blocks[SWAP_BLOCK..],
-        "{backend:?} {form:?}: a live mute carries and retargets over the session's mute ramp"
-    );
-    assert_ne!(
-        run.blocks[SWAP_BLOCK..],
-        reference.blocks[SWAP_BLOCK..],
-        "{backend:?} {form:?}: the mute ramp is audible, not a step"
-    );
+            Some(Swap {
+                to: &b,
+                committed: &moved,
+                form,
+                successor_writes: &[],
+                edit_ramps: &EditRamps::new(),
+            }),
+            &feed,
+            &[CellWrite {
+                block: SWAP_BLOCK,
+                strip: MOVED,
+                record: CellRecord::Fader(mute_both(true, mute_samples)),
+            }],
+            backend,
+        );
+        assert_eq!(
+            run.blocks[SWAP_BLOCK..],
+            written.blocks[SWAP_BLOCK..],
+            "{backend:?} {form:?} follows {follows_mute}: a live mute carries and retargets over \
+             the session's mute ramp"
+        );
+        // A strip whose only route follows its mute is silent at the swap block either way; the
+        // ramp is heard on the strip that nothing follows.
+        if !follows_mute {
+            assert_ne!(
+                run.blocks[SWAP_BLOCK..],
+                reference.blocks[SWAP_BLOCK..],
+                "{backend:?} {form:?}: the mute ramp is audible, not a step"
+            );
+        }
+    }
 }
 
-/// D4 decides per stage: when X's followed mute changes and X's pan changes too, the fader/mute
-/// stage restarts (X is in the restart set, at rest at the new mute) and the matrix stage still
-/// carries and is retargeted. The reference writes the pan record to A just before the swap, as
-/// gate 4 does, so the fader/mute stage restarts identically in both runs and only the matrix
-/// carry is compared. Split form only: the fused stage carries both halves or neither (D9).
-/// Red if the followed mute also makes the matrix family prepared: the matrix stage then restarts
-/// at the new pan, and the pan ramp the carry continues is lost.
+/// When X's followed mute changes and X's pan changes too (#1558 D4), both stages carry and are
+/// retargeted: nothing restarts. The reference writes the pan record to A just before the swap, as
+/// gate 4 does, so the mute retarget is identical in both runs and the matrix carry is what is
+/// compared. Split form only. Red if the followed mute makes the matrix family prepared: the matrix
+/// stage then restarts at the new pan, and the pan ramp the carry continues is lost.
 fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     let form = Form::Split;
     let before = with_send_through_submix(strip_state_session(), MOVED, true);
@@ -3548,19 +3580,15 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     );
     assert_eq!(run.carry, CarryOutcome::Carried);
     assert_eq!(reference.carry, CarryOutcome::Carried);
-    assert_eq!(
-        run.restarted,
-        vec![Box::<str>::from(MOVED)],
-        "{backend:?}: the followed mute restarts X's fader/mute stage"
-    );
-    assert_eq!(
-        reference.restarted, run.restarted,
-        "{backend:?}: the reference restarts the same stage"
+    assert!(
+        run.restarted.is_empty() && reference.restarted.is_empty(),
+        "{backend:?}: the followed mute restarts nothing: {:?}",
+        run.restarted
     );
     assert_eq!(
         first_cell_difference(&run, &reference),
         None,
-        "{backend:?}: X's matrix stage carries and is retargeted"
+        "{backend:?}: X's matrix stage carries and is retargeted, with its fader/mute stage"
     );
     // Not vacuous: the pan ramp is audible after the swap, so a matrix stage that restarts at the
     // new pan sounds different.
@@ -3581,20 +3609,21 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     assert_ne!(unmoved.blocks[SWAP_BLOCK + 1], run.blocks[SWAP_BLOCK + 1]);
 }
 
-/// The fused form of the second case: the fused stage is one unit (D9), so when X's followed
-/// mute changes and X's pan changes too, the whole stage restarts. X is exactly the restart set
-/// and every block from the swap on equals a fresh B (X at rest at the new mute and the new pan).
-/// Red if the matrix half of the fused stage carries while its fader half restarts: the carried
-/// half ramps to the new pan where a fresh B starts at it.
-fn a_followed_mute_change_restarts_the_fused_stage_whole(backend: Backend) {
+/// The fused form of the second case: the fused stage is one unit (D9), and a followed mute with a
+/// pan change carries and retargets both halves (#1558 D4). Nothing restarts, and every block from
+/// the swap on equals the run that writes both records to A just before the swap. Red if the
+/// fused stage restarts, or only one half of it is retargeted.
+fn a_followed_mute_change_retargets_the_fused_stage_whole(backend: Backend) {
     let form = Form::Fused;
     let before = with_send_through_submix(strip_state_session(), MOVED, true);
     let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
-    let mut model = with_muted_track(moved);
+    let mut model = with_muted_track(moved.clone());
     track_mut(&mut model, MOVED).fader.left_mute = true;
+    let mut written_model = moved;
+    track_mut(&mut written_model, MOVED).fader.left_mute = true;
     let (a, b) = (Session::compile(before.clone()), Session::compile(model));
     let feed = feed_for_strips();
-    let reference = cell_run(&b, form, None, &feed, &[], backend);
+    let mute_samples = LiveRamps::for_session(&written_model).for_row(LiveRampRow::Mute);
     let run = cell_run(
         &a,
         form,
@@ -3609,28 +3638,57 @@ fn a_followed_mute_change_restarts_the_fused_stage_whole(backend: Backend) {
         &[],
         backend,
     );
+    let written = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &written_model,
+            form,
+            successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
+        }),
+        &feed,
+        &[
+            CellWrite {
+                block: SWAP_BLOCK,
+                strip: MOVED,
+                record: CellRecord::Fader(TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: true,
+                    smoothing_samples: mute_samples,
+                }),
+            },
+            CellWrite {
+                block: SWAP_BLOCK,
+                strip: MOVED,
+                record: CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
+            },
+        ],
+        backend,
+    );
     assert_eq!(run.carry, CarryOutcome::Carried);
-    assert_eq!(
-        run.restarted,
-        vec![Box::<str>::from(MOVED)],
-        "{backend:?}: the followed mute restarts X's whole fused stage"
+    assert!(
+        run.restarted.is_empty(),
+        "{backend:?}: the followed mute restarts nothing: {:?}",
+        run.restarted
     );
     assert_eq!(
-        run.blocks[SWAP_BLOCK..],
-        reference.blocks[SWAP_BLOCK..],
-        "{backend:?}: X's fused stage starts at rest, both halves"
+        first_cell_difference(&run, &written),
+        None,
+        "{backend:?}: X's fused stage carries and is retargeted, both halves"
     );
 }
 
 #[test]
-fn a_followed_mute_change_restarts_the_fused_stage_whole_at_four_lanes() {
-    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd4);
+fn a_followed_mute_change_retargets_the_fused_stage_whole_at_four_lanes() {
+    a_followed_mute_change_retargets_the_fused_stage_whole(Backend::Simd4);
 }
 
 #[cfg(target_feature = "avx2")]
 #[test]
-fn a_followed_mute_change_restarts_the_fused_stage_whole_at_eight_lanes() {
-    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd8);
+fn a_followed_mute_change_retargets_the_fused_stage_whole_at_eight_lanes() {
+    a_followed_mute_change_retargets_the_fused_stage_whole(Backend::Simd8);
 }
 
 #[test]
@@ -3645,17 +3703,17 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_eight_lanes() {
 }
 
 #[test]
-fn a_followed_mute_change_restarts_the_stage_at_four_lanes() {
+fn a_followed_mute_change_carries_and_retargets_the_stage_at_four_lanes() {
     for form in forms() {
-        a_followed_mute_change_restarts_the_stage(Backend::Simd4, form);
+        a_followed_mute_change_carries_and_retargets_the_stage(Backend::Simd4, form);
     }
 }
 
 #[cfg(target_feature = "avx2")]
 #[test]
-fn a_followed_mute_change_restarts_the_stage_at_eight_lanes() {
+fn a_followed_mute_change_carries_and_retargets_the_stage_at_eight_lanes() {
     for form in forms() {
-        a_followed_mute_change_restarts_the_stage(Backend::Simd8, form);
+        a_followed_mute_change_carries_and_retargets_the_stage(Backend::Simd8, form);
     }
 }
 

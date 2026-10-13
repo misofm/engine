@@ -59,7 +59,8 @@
 //! still more than a quantum. The browser therefore bounds the pairs at boot (#1245: at most 256
 //! VCAs and 16,384 pairs, refused `web.vca.maximum_vcas` and `web.vca.reach_pairs`), where the
 //! worst batch measured 0.15 ms natively. The C ABI caps VCAs and tracks at preparation
-//! (`maximum_vcas`, `maximum_tracks`, #1243) and keeps no live VCA state until #1247.
+//! (`maximum_vcas`, `maximum_tracks`, #1243) and keeps no live VCA state: it composes VCAs and
+//! follows by diffing committed models through `controls::effective` (#1558 D9).
 //!
 //! # Preconditions
 //!
