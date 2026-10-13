@@ -14,7 +14,7 @@ use engine::realtime::PlanarBufferMut;
 use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
 use host_web::{
     ABI_VERSION, AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_PAN,
-    COMMAND_RECORD_BYTES, RACK_INSERTS, RESULT_OK, WebBootOptions,
+    COMMAND_RECORD_BYTES, RACK_INSERTS, RESULT_OK, SESSION_DEFAULT_RAMP, WebBootOptions,
 };
 use protocol::{
     CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
@@ -251,8 +251,12 @@ fn browser_command(host: &mut AudioWorkletEngineHost, kind: u32, channel: u8, va
     // `rack` is not applicable (255); the track is strip 0.
     record[1] = 255;
     record[2] = channel;
+    // The fader edits carry no length on either host: the control plane's transaction has no
+    // `ramp_samples` and the browser's record says so, and both resolve the session's own.
     let smoothing = if kind == COMMAND_PAN {
         PAN_SMOOTHING
+    } else if kind == COMMAND_FADER_DB {
+        SESSION_DEFAULT_RAMP
     } else {
         0
     };
@@ -305,6 +309,7 @@ fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
                 left_mute: false,
                 right_mute: false,
             },
+            ramp_samples: None,
         });
         browser_command(&mut browser, COMMAND_FADER_DB, 2, [fader_db, 0.0, 0.0, 0.0]);
         control.apply(SessionEdit::SetTrackMatrixOrPan {
@@ -314,6 +319,7 @@ fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
                 right: pan[1],
                 smoothing_samples: PAN_SMOOTHING,
             },
+            ramp_samples: None,
         });
         browser_command(&mut browser, COMMAND_PAN, 255, [pan[0], pan[1], 0.0, 0.0]);
     }

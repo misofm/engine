@@ -1981,6 +1981,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             inventory: &current_host.prepared.inventory,
             committed: current_host.store.compiled().normalized_model(),
             revision: 1,
+            edit_ramps: &session::EditRamps::new(),
         },
         None,
         &host_core::LiveValuesSuperseded::default(),
@@ -2192,6 +2193,7 @@ fn eq0_fader_edit(left_db: f32) -> SessionEdit {
             left_mute: false,
             right_mute: false,
         },
+        ramp_samples: None,
     }
 }
 
@@ -2823,6 +2825,21 @@ fn race_session() -> String {
 /// The largest pan smoothing the race edits use: one quantum (D1).
 const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
 
+/// The blocks after the last edit that a live ramp may still be settling in: the plan's latency
+/// plus the longest ramp a race edit can start -- a pan's one quantum, or the session's own fader,
+/// mute or pan ramp (#1054: the race session says `default`) -- in quanta, and one more.
+fn race_settle_blocks(latency: u64, document: &str) -> u64 {
+    let ramps = session::parse_session_json(document)
+        .expect("race session")
+        .control_smoothing_samples();
+    let longest = ramps
+        .fader
+        .max(ramps.mute)
+        .max(ramps.pan)
+        .max(RACE_MAX_SMOOTHING);
+    (latency + u64::from(longest)).div_ceil(QUANTUM as u64) + 1
+}
+
 /// The control thread's edit sequence: a live fader, pan or mute edit on each of the nine tracks
 /// in turn, and every eighth edit a structural one that renders identically (D2: a new content
 /// string on the source, which the race never reads by content).
@@ -2878,6 +2895,7 @@ impl RaceEdits {
                 SessionEdit::SetTrackFader {
                     track_id,
                     fader: fader.clone(),
+                    ramp_samples: None,
                 }
             }
             1 => SessionEdit::SetTrackMatrixOrPan {
@@ -2887,6 +2905,7 @@ impl RaceEdits {
                     right: 1.0 - 0.0625 * ((index * 5) % 13) as f32,
                     smoothing_samples: 16 * (1 + (index % 8) as u32),
                 },
+                ramp_samples: None,
             },
             _ => {
                 let fader = &mut self.faders[track];
@@ -2899,6 +2918,7 @@ impl RaceEdits {
                 SessionEdit::SetTrackFader {
                     track_id,
                     fader: fader.clone(),
+                    ramp_samples: None,
                 }
             }
         };
@@ -3220,7 +3240,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
         feed.restart(session)
             .unwrap_or_else(|failure| panic!("run {run}: {failure}"));
         let latency = resources_c(plan).latency_samples;
-        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        let settle = race_settle_blocks(latency, &document);
         for _ in 0..settle {
             fed_render_c(session, plan, &mut feed, block);
             block += 1;
@@ -3243,7 +3263,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
         let (session, plan) = compile_c(&final_document, &limits());
         assert_eq!(resources_c(plan).latency_samples, latency);
         let mut feed = ConstantFeed::new();
-        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        let settle = race_settle_blocks(latency, &final_document);
         let mut last = Vec::new();
         for block in 0..=settle {
             last = fed_render_c(session, plan, &mut feed, block);
@@ -3302,6 +3322,7 @@ fn paused_bursts(
         let edit = SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: edits.faders[0].clone(),
+            ramp_samples: None,
         };
         match control.submit_once(&edit, true)? {
             Submitted::Committed => {}

@@ -104,6 +104,7 @@ impl Session {
                 inventory,
                 committed,
                 revision: SUCCESSOR_REVISION,
+                edit_ramps: &session::EditRamps::new(),
             },
             backend,
         )

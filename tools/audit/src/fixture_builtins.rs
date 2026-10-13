@@ -5132,7 +5132,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"dc19e091f9fd80c43ad26e837f7f2221d41b6b6a9a6f055a380afa43c6d72330\""),
+            benchmark_field_pair("session_template_sha256", "\"4c5756345cf92a4f3eda91cd931081560a9d05eb891a4ddc2a37c5a13852e6fb\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5352,7 +5352,12 @@ mod tests {
             // 1088 -> 1136: its control consumers hold the input cell reader, 88 bytes, in place
             // of the 40-byte input ring consumer). The allocation counts do not move. No PCM,
             // meter, response or benchmark fixture moved.
-            "28f109c918b027b20d5b4cce6a6b0a7ec7c3b8be5eb7bd6f8a1daae82b93e9d0",
+            //
+            // Re-pinned by issue #1054 (D1a): root key `control_smoothing` added, `default`, so
+            // `canonical.json` and the two `prepare_256_tracks` workloads naming it move, by the
+            // `session_template_sha256` of `canonical.json`. No PCM, meter, response or resource
+            // fixture moved.
+            "3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
 The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
-session transaction contains all 46 allocated `SessionEditOpcode` values), all 11 successful
+session transaction contains all 47 allocated `SessionEditOpcode` values), all 11 successful
 responses, all 18 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`ab357b6c432f9755`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`8eb4cc8d075a4355`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -28,6 +28,11 @@ unchanged.
 Issue #1241 re-pinned it from `95c1ceb68e44f6e2`: the VCA message (`id` 1, `fader` 2, repeated
 `members` 3), and the transaction appends `UpsertVca`, `RemoveVca` and `SetVcaFader`
 (`0x0700`-`0x0702`), so it carries 46 edits; the frame count is unchanged.
+Issue #1394 re-pinned it from `ab357b6c432f9755`: #1394 appends optional `ramp_samples` to the
+live-value edits, and the corpus's `SetTrackFader` sets it, so that edit's bytes grow; the frame
+and edit counts are unchanged.
+Issue #1365 re-pinned it from `5429f052592101ef`: #1365 appends `SetControlSmoothing` (`0x0008`),
+so the transaction carries 47 edits; the frame count is unchanged.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

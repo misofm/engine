@@ -31,8 +31,8 @@ use graph::{
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
-    CompileCaps, CompiledSession, MatrixOrPan, SessionModel, StripKind, StripRef, compile_session,
-    parse_session_json,
+    CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, MatrixOrPan,
+    SessionModel, StripKind, StripRef, compile_session, parse_session_json,
 };
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
@@ -798,6 +798,10 @@ pub struct SuccessorBase<'a> {
     /// `1 <= revision <= GATE_REVISION_MAX`; a preparation refuses any other with
     /// `host.successor.revision` before it allocates. It has no neutral value.
     pub revision: u64,
+    /// The ramp lengths the transaction's edits gave their rows (#1394 D2): a carry retarget
+    /// takes its length from here as the classifier's record of the same edit would, else from
+    /// the session's `control_smoothing`. Transaction metadata; [`EditRamps::new`] is "none".
+    pub edit_ramps: &'a EditRamps,
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -1552,7 +1556,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_strips = live_controls.control_queue_depth.is_some();
     let strip_joins: Vec<StripJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_strips(base.committed, model, live_strips),
+        Some(base) => join_strips(base.committed, model, live_strips, base.edit_ramps),
     };
     // Issue #1279 D1: how each strip's console slots and effect chain differ between the
     // predecessor's base and this model, resolved against the plans' lanes once this plan is
@@ -2396,29 +2400,141 @@ fn strip_stage_row<'a>(
         .map(|index| &rows[index])
 }
 
-/// The ramp lengths, in samples, that live fader and mute records carry (#1053 D3).
+/// The ramp lengths, in samples, that live records carry: the session's `control_smoothing` keys
+/// (`fader_ms`, `mute_ms`, `pan_ms`) rounded once by [`SessionModel::control_smoothing_samples`]
+/// (#1054 D4, decision 15 D15-1).
 ///
-/// Pan and matrix records do not take theirs from here: they carry the post-commit model's own
-/// `smoothing_samples`.
+/// Every live row reads its length through [`Self::for_row`]; no row has a separate default. The
+/// table of which row uses which key is [`LiveRampRow`]'s, and `docs/SESSION_SCHEMA_V1.md` has it
+/// too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveRamps {
-    /// The ramp of a `FaderDb` record.
+    /// The `fader_ms` key: the ramp of a `FaderDb` record.
     pub fader_samples: u32,
-    /// The ramp of a `Mute` record.
+    /// The `mute_ms` key: the ramp of a `Mute` record.
     pub mute_samples: u32,
+    /// The `pan_ms` key: the ramp of a pan or matrix record whose post-commit model carries no
+    /// `smoothing_samples` of its own.
+    pub pan_samples: u32,
+    /// The `fader_ms` key, read by the detector link glide (#1371).
+    pub link_samples: u32,
+}
+
+/// One live row, and with it the `control_smoothing` key its ramp length comes from (#1054 D3).
+///
+/// | key | rows |
+/// |---|---|
+/// | `fader_ms` | fader dB, input trim, send gain, VCA offset, detector link glide |
+/// | `mute_ms` | mute, solo, polarity invert (twice `mute_ms`), send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade |
+/// | `pan_ms` | pan, matrix, send matrix |
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveRampRow {
+    /// A strip's fader dB. Key `fader_ms`.
+    Fader,
+    /// A strip's input trim. Key `fader_ms`.
+    InputTrim,
+    /// A send's gain. Key `fader_ms`.
+    SendGain,
+    /// A VCA's fader offset. Key `fader_ms`.
+    VcaOffset,
+    /// The detector link glide. Key `fader_ms`.
+    LinkGlide,
+    /// A strip's mute. Key `mute_ms`.
+    Mute,
+    /// A strip's solo, which reaches render as a mute record. Key `mute_ms`.
+    Solo,
+    /// A strip's polarity invert: twice the `mute_ms` ramp, because a flip from `+1` to `-1` over
+    /// the mute's own length clicks about 6 dB more than the mute (#1055, `FINDINGS.md` 9.2).
+    PolarityInvert,
+    /// A send's mute. Key `mute_ms`.
+    SendMute,
+    /// A send's `follows_mute` toggle. Key `mute_ms`.
+    SendFollowsMute,
+    /// A VCA's mute. Key `mute_ms`.
+    VcaMute,
+    /// The effect bypass crossfade (#1341), the one row with no per-edit length. Key `mute_ms`.
+    BypassCrossfade,
+    /// A strip's pan. Key `pan_ms`.
+    Pan,
+    /// A strip's raw matrix. Key `pan_ms`.
+    Matrix,
+    /// A send's channel matrix. Key `pan_ms`.
+    SendMatrix,
 }
 
 impl LiveRamps {
-    /// The ramps a session's live fader and mute records carry.
-    ///
-    /// #1053 D3: zero (a step) until #1054 derives it from the session's `controlSmoothing`. A
-    /// step is bit-exact to the value a rebuild of the committed model bakes.
+    /// The ramps a session's live records carry: its `control_smoothing` keys, or the researched
+    /// default table when it says `default`, rounded at the session's sample rate (#1054 D2).
     #[must_use]
     pub fn for_session(model: &SessionModel) -> Self {
-        let _ = model;
+        let samples = model.control_smoothing_samples();
         Self {
-            fader_samples: 0,
-            mute_samples: 0,
+            fader_samples: samples.fader,
+            mute_samples: samples.mute,
+            pan_samples: samples.pan,
+            link_samples: samples.fader,
+        }
+    }
+
+    /// The ramp length of one live row: its key's field, and twice `mute_samples` for
+    /// [`LiveRampRow::PolarityInvert`] (at most 192,000 samples at 1000 ms and 96 kHz, inside the
+    /// trim kernel's exact `f32` countdown, `2^24`).
+    #[must_use]
+    pub const fn for_row(self, row: LiveRampRow) -> u32 {
+        match row {
+            LiveRampRow::Fader
+            | LiveRampRow::InputTrim
+            | LiveRampRow::SendGain
+            | LiveRampRow::VcaOffset => self.fader_samples,
+            LiveRampRow::LinkGlide => self.link_samples,
+            LiveRampRow::Mute
+            | LiveRampRow::Solo
+            | LiveRampRow::SendMute
+            | LiveRampRow::SendFollowsMute
+            | LiveRampRow::VcaMute
+            | LiveRampRow::BypassCrossfade => self.mute_samples,
+            LiveRampRow::PolarityInvert => self.mute_samples.saturating_mul(2),
+            LiveRampRow::Pan | LiveRampRow::Matrix | LiveRampRow::SendMatrix => self.pan_samples,
+        }
+    }
+
+    /// The length one record carries: the edit's own ramp when its transaction gave one (an
+    /// explicit 0 included, which steps that edit), else the row's session length
+    /// ([`Self::for_row`]). An edit's length is kept as given, so an absent polarity length is
+    /// twice `mute_samples` and an explicit one is not doubled (#1394 D5).
+    ///
+    /// Every record length goes through here; no record path reads a field directly.
+    #[must_use]
+    pub const fn resolve(self, row: LiveRampRow, edit_ramp: Option<u32>) -> u32 {
+        match edit_ramp {
+            Some(samples) => samples,
+            None => self.for_row(row),
+        }
+    }
+}
+
+/// The per-edit ramp lengths of one strip's three record rows, looked up once from the
+/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)` and
+/// `(Strip, Matrix)` entries. `None` is "the edit gave no length": the session's applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StripEditRamps {
+    fader: Option<u32>,
+    mute: Option<u32>,
+    matrix: Option<u32>,
+}
+
+impl StripEditRamps {
+    /// The lengths the transaction gave strip `id`'s rows. The common transaction carries none:
+    /// then no lookup key is built.
+    pub(crate) fn of(edit_ramps: &EditRamps, id: &session::StableId) -> Self {
+        if edit_ramps.is_empty() {
+            return Self::default();
+        }
+        let target = EditRampTarget::Strip(id.clone());
+        Self {
+            fader: edit_ramps.get(&target, EditRampRow::Fader),
+            mute: edit_ramps.get(&target, EditRampRow::Mute),
+            matrix: edit_ramps.get(&target, EditRampRow::Matrix),
         }
     }
 }
@@ -2445,6 +2561,7 @@ pub(crate) fn fader_records(
     before: &session::DualMonoFader,
     after: &session::DualMonoFader,
     ramps: LiveRamps,
+    edit: StripEditRamps,
 ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
     let gain = |db| {
         checked_fader_gain(db)
@@ -2468,7 +2585,7 @@ pub(crate) fn fader_records(
         push(TrackFaderRecord::FaderDb {
             lanes,
             db: db_after[lane],
-            smoothing_samples: ramps.fader_samples,
+            smoothing_samples: ramps.resolve(LiveRampRow::Fader, edit.fader),
         });
     }
     let mute_changed = [0, 1].map(|lane| mutes_before[lane] != mutes_after[lane]);
@@ -2476,7 +2593,7 @@ pub(crate) fn fader_records(
         push(TrackFaderRecord::Mute {
             lanes,
             muted: mutes_after[lane],
-            smoothing_samples: ramps.mute_samples,
+            smoothing_samples: ramps.resolve(LiveRampRow::Mute, edit.mute),
         });
     }
     Ok(fader)
@@ -2486,8 +2603,8 @@ pub(crate) fn fader_records(
 /// `model` sends from the track (#1053 G2).
 ///
 /// The classifier refuses such a delta (`LiveRebuild::FollowedMute`): the route's own mute must
-/// step with the source's, and a live mute record would ramp only the source's stage once #1054
-/// gives mutes a ramp. A successor's join asks the same predicate (#1277 D3), so a strip whose
+/// step with the source's, and a live mute record ramps only the source's stage (#1054). A
+/// successor's join asks the same predicate (#1277 D3), so a strip whose
 /// followed mute changes is prepared, not carried. `model` is the post-change model.
 pub(crate) fn followed_mute_changes(
     before: &session::DualMonoFader,
@@ -2513,6 +2630,8 @@ pub(crate) fn followed_mute_changes(
 pub(crate) fn matrix_record(
     before: &MatrixOrPan,
     after: &MatrixOrPan,
+    ramps: LiveRamps,
+    edit: StripEditRamps,
 ) -> Result<Option<TrackControlRecord>, OutOfDomain> {
     let bits = |matrix: builtins::Matrix2x2| {
         [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
@@ -2522,7 +2641,20 @@ pub(crate) fn matrix_record(
     Ok(
         (bits(matrix_before) != bits(matrix_after)).then_some(TrackControlRecord {
             matrix: matrix_after,
-            smoothing_samples: smoothing_after,
+            // #1394 D5: the edit's own ramp; else #1054 D5, the post-commit model's own window if
+            // it has one, else the session's `pan_ms` ramp. A pan and a raw matrix share the
+            // row's key.
+            smoothing_samples: if edit.matrix.is_none() && smoothing_after != 0 {
+                smoothing_after
+            } else {
+                ramps.resolve(
+                    match after {
+                        MatrixOrPan::Pan { .. } => LiveRampRow::Pan,
+                        MatrixOrPan::Matrix { .. } => LiveRampRow::Matrix,
+                    },
+                    edit.matrix,
+                )
+            },
         }),
     )
 }
@@ -2660,6 +2792,7 @@ fn join_strips<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
     live: bool,
+    edit_ramps: &EditRamps,
 ) -> Vec<StripJoin<'a>> {
     let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
     let committed_effective = vca_in_play.then(|| committed.effective_strip_faders());
@@ -2693,8 +2826,11 @@ fn join_strips<'a>(
         // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
         // family prepared. The classifier refuses a whole delta, but that does not turn the other
         // stage's own live change into a prepared one.
-        let fader_records = fader_records(&before, &after, ramps);
-        let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan);
+        // A retarget is the record of the same edit, so it carries the length that edit gave its
+        // row (#1394 D6), else the session's.
+        let edit = StripEditRamps::of(edit_ramps, strip.id);
+        let fader_records = fader_records(&before, &after, ramps, edit);
+        let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
         let fader_live = live_family
             && fader_records.is_ok()
             && !followed_mute_changes(before_fader, strip.fader, model, id);

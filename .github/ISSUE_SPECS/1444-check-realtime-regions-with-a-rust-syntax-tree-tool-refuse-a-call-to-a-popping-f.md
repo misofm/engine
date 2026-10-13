@@ -234,7 +234,8 @@ outside the repository.
 - After (other streams): stream B #1345 (Amendment 1), which marks the rack bank loop in a shape
   this rule accepts.
 - Before: #1418 (Amendment 1) and #1426 (Amendment 1), which start once the whole J batch is on
-  `main`.
+  `main`. ("Whole J batch" means J3 plus the follow-up J batch that carries this issue and #1443: root note
+  of 2026-10-13 in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`, stream J's "Depends on".)
 
 ## Standing rules for the implementer
 

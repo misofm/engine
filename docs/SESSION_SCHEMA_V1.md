@@ -37,8 +37,8 @@ refuse.
 
 The schema requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
-`output_profile`, `sources`, `console`, `tracks`, `submixes`, `vcas`, `outputs`, `routes`, and
-`automation`. Every
+`output_profile`, `sources`, `console`, `tracks`, `submixes`, `vcas`, `control_smoothing`,
+`outputs`, `routes`, and `automation`. Every
 object rejects unknown keys and every field is explicit, including empty arrays and
 `"sidechain": { "kind": "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
 and memory budget are host policy and are not session-document fields.
@@ -88,10 +88,55 @@ and a `follows_mute` route reads its source's effective mute. A member's own fad
 against its domain, unclamped (`builtin.gain.domain` at its own `fader.<lane>_db`). On the wire
 the VCA message carries `id` 1, `fader` 2 and the repeated `members` 3.
 
+`control_smoothing` (#1054, decision 15 D15-1) is the session's live-ramp setting: one required
+tagged object, in the schema's "nothing set is spelled out" shape, like `"sidechain": { "kind":
+"none" }`. Its `kind` is one of:
+
+- `{ "kind": "default" }`: the session uses the default table below. No other key is allowed
+  (`schema.unknown_field` at the key).
+- `{ "kind": "explicit", "mute_ms": .., "fader_ms": .., "pan_ms": .. }`: all three required, in
+  that order, each a finite `f32` with `0 <= ms <= 1000` (`numeric.out_of_schema_range` at
+  `$.control_smoothing.<key>` outside it). `0` and `-0.0` are legal and mean the hard switch that
+  sample-exact edits and bit-comparison tests use; `-0.0` keeps its canonical spelling.
+
+A missing `control_smoothing` key is `schema.missing_field`, a non-object `schema.wrong_type`, an
+unknown `kind` `schema.invalid_enum`, and an unknown key `schema.unknown_field`. The model field is
+`SessionModel::control_smoothing: Option<ControlSmoothing>` (`None` is `default`).
+
+*Default table.* `session::CONTROL_SMOOTHING_DEFAULT` holds the researched defaults of #1055
+(`docs/handoffs/control-smoothing-defaults/FINDINGS.md`, sections 1 and 9): `mute_ms` 10, `fader_ms`
+20, `pan_ms` 20. A blinded listening result (#1388) can change these values and nothing else. They
+keep `pan_ms >= 2 x mute_ms`, so a matrix coefficient that crosses zero (below) clicks no more than a
+mute. *Rounding.* `SessionModel::control_smoothing_samples()` is the one conversion, and every
+host calls it: a length becomes `floor(f64(ms) * f64(sample_rate_hz) / 1000 + 1/2)` sample frames,
+evaluated in `f64` from the `f32` value (round half up; 5 ms at 44.1 kHz is 221). At the four launch
+rates 10 ms is 441 / 480 / 882 / 960 samples and 20 ms is 882 / 960 / 1764 / 1920.
+
+*Which key a live row uses.* One table; a live row ramps over its key's length, and a row not yet
+live on a host reads the same table when it lands:
+
+| key | rows |
+|---|---|
+| `fader_ms` | fader dB, input trim, send gain, VCA offset, detector link glide |
+| `mute_ms` | mute, solo, polarity invert (twice `mute_ms`), send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade |
+| `pan_ms` | pan, matrix, send matrix |
+
+*Polarity invert* is a derived rule on the `mute_ms` key, not a fourth key: it ramps over twice the
+mute length (20 ms at the defaults). A flip from `+1` to `-1` over the mute's own length clicks
+about 6 dB more than the mute, and over twice that length it clicks as the mute does (#1055,
+`FINDINGS.md` 9.2). *Matrix coefficients through zero.* A raw matrix coefficient (in `[-1, 1]`) or a
+send matrix coefficient (any finite value) that crosses zero is a polarity flip of that path on the
+`pan_ms` ramp; at the defaults `pan_ms` is twice `mute_ms`, so it clicks as the mute does, and a
+session whose explicit `pan_ms` is below twice its `mute_ms` gets a louder crossing.
+
+On the wire the `control_smoothing` record carries `kind` 1 (`default` 1, `explicit` 2), then, for
+`explicit`, `mute_ms` 2, `fader_ms` 3 and `pan_ms` 4.
+
 The root field registry is `schema_version` 1, `session_id` 2, `revision` 3, `sample_rate_hz` 4,
 `quantum_frames` 5, `render_profile` 6, `output_profile` 7, `sources` 9, `tracks` 10, `submixes`
-11, `outputs` 12, `routes` 13, `automation` 14, `console` 15 and `vcas` 16. Root field 8 was
-`limits` (removed in `04d291dd`); it is retired and never reallocated.
+11, `outputs` 12, `routes` 13, `automation` 14, `console` 15 and `vcas` 16 and
+`control_smoothing` 17. Root field 8 was `limits` (removed in `04d291dd`); it is retired and never
+reallocated.
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
 submixes, VCAs and outputs share the graph-entity namespace; routes, automations, console slots (across

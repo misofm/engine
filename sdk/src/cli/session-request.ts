@@ -1,7 +1,7 @@
 import type { EffectId } from "../generated/catalog.ts";
 import { MisoUsageError } from "../core/errors.ts";
 import { effect, session } from "../core/session.ts";
-import type { SessionBuilder } from "../core/session.ts";
+import type { ControlSmoothingOptions, SessionBuilder } from "../core/session.ts";
 import type {
   AutomationSpec,
   ConsoleEntrySpec,
@@ -501,16 +501,28 @@ function automation(value: unknown, path: string): AutomationSpec {
 /** Decode and translate one strict V1 authoring request through the public SDK builder. */
 export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   const root = record(value, "$");
-  keys(root, ["schemaVersion", "session", "sources", "console", "tracks", "submixes", "vcas", "outputs", "routes", "automation"], ["schemaVersion", "session"], "$");
+  keys(root, ["schemaVersion", "session", "sources", "console", "tracks", "submixes", "vcas", "outputs", "routes", "automation", "controlSmoothing"], ["schemaVersion", "session"], "$");
   if (root.schemaVersion !== 1) fail("$.schemaVersion", "expected 1");
   const options = record(root.session, "$.session");
   keys(options, ["id", "sampleRateHz", "revision", "quantumFrames"], ["id", "sampleRateHz"], "$.session");
 
+  // The live-ramp lengths, in milliseconds (#1364 D4). The builder checks the bounds.
+  let controlSmoothing: ControlSmoothingOptions | undefined;
+  if (root.controlSmoothing !== undefined) {
+    const raw = record(root.controlSmoothing, "$.controlSmoothing");
+    keys(raw, ["muteMs", "faderMs", "panMs"], ["muteMs", "faderMs", "panMs"], "$.controlSmoothing");
+    controlSmoothing = {
+      muteMs: number(raw.muteMs, "$.controlSmoothing.muteMs"),
+      faderMs: number(raw.faderMs, "$.controlSmoothing.faderMs"),
+      panMs: number(raw.panMs, "$.controlSmoothing.panMs"),
+    };
+  }
   let builder = session({
     id: string(options.id, "$.session.id"),
     sampleRateHz: number(options.sampleRateHz, "$.session.sampleRateHz") as 48_000,
     ...(options.revision === undefined ? {} : { revision: requestU64(options.revision, "$.session.revision") }),
     ...(options.quantumFrames === undefined ? {} : { quantumFrames: number(options.quantumFrames, "$.session.quantumFrames") }),
+    ...(controlSmoothing === undefined ? {} : { controlSmoothing }),
   });
   for (const [index, value] of optionalArray(root, "sources").entries()) {
     const path = `$.sources[${index}]`;

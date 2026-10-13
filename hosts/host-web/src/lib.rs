@@ -33,11 +33,11 @@ use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime}
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
-    InputFilterEditErrorKind, LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState,
-    LiveVcaState, PrepareDiagnostics, PrepareRejection, PreparedHost, RouteControlError,
-    RouteControlProducer, RouteControlRecord, STRIP_LIVE_QUEUE_DEPTH, SourceControlError,
-    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
+    InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps, LiveRouteMuteFollow,
+    LiveRouteState, LiveVcaState, PrepareDiagnostics, PrepareRejection, PreparedHost,
+    RouteControlError, RouteControlProducer, RouteControlRecord, STRIP_LIVE_QUEUE_DEPTH,
+    SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
+    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -594,6 +594,15 @@ pub const RESPONSE_RESULT_BYTES: u32 = size_of::<WebResponseResult>() as u32;
 
 /// Exact byte size of one staged `miso.command.v1` record.
 pub const COMMAND_RECORD_BYTES: u32 = 48;
+/// The `smoothing_samples` word that means "no length given" (issue #1364 D1; decision 15 D15-1).
+///
+/// A ramped record whose word is this value is admitted with the session's own length for its
+/// row: the `control_smoothing` keys, or the researched default table, rounded at the session's
+/// sample rate (`host_core::LiveRamps`). Every other value, `0` (a step) included, is the length
+/// itself. The sentinel is not a length: it never reaches the render plane, and a kind that
+/// carries no ramp (input filters, bypass) refuses it as `MALFORMED`, as it refuses any non-zero
+/// word.
+pub const SESSION_DEFAULT_RAMP: u32 = u32::MAX;
 /// Largest number of records one `miso.command.v1` submission may stage.
 ///
 /// The staging buffer is allocated at preparation for exactly this many records, so a submission
@@ -1531,6 +1540,83 @@ impl PreparedSpectrumCapture {
     }
 }
 
+/// The ramp lengths an absent per-edit length resolves to (issue #1364 D2).
+///
+/// Computed once, on the control thread, from the session this host prepared: the
+/// `control_smoothing` table ([`LiveRamps::for_session`]) and, for each strip, the window a pan or
+/// matrix record takes (#1054 D5). Admission reads it to replace [`SESSION_DEFAULT_RAMP`]; the
+/// render path never sees it.
+struct SessionRamps {
+    live: LiveRamps,
+    /// One entry per strip, the tracks then the submixes: the strip's own `smoothing_samples` when
+    /// the prepared session gives its pan or matrix a non-zero window, else `live.pan_samples`.
+    strip_pan: Box<[u32]>,
+}
+
+impl SessionRamps {
+    /// `None` when the table cannot be reserved.
+    fn try_new(model: &session::SessionModel) -> Option<Self> {
+        let live = LiveRamps::for_session(model);
+        let mut strip_pan = Vec::new();
+        strip_pan
+            .try_reserve_exact(model.tracks.len() + model.submixes.len())
+            .ok()?;
+        for matrix_or_pan in model
+            .tracks
+            .iter()
+            .map(|track| &track.matrix_or_pan)
+            .chain(model.submixes.iter().map(|submix| &submix.matrix_or_pan))
+        {
+            let window = match matrix_or_pan {
+                session::MatrixOrPan::Pan {
+                    smoothing_samples, ..
+                }
+                | session::MatrixOrPan::Matrix {
+                    smoothing_samples, ..
+                } => *smoothing_samples,
+            };
+            strip_pan.push(if window != 0 {
+                window
+            } else {
+                live.pan_samples
+            });
+        }
+        Some(Self {
+            live,
+            strip_pan: strip_pan.into_boxed_slice(),
+        })
+    }
+
+    /// Bytes this table retains beyond the struct itself.
+    fn retained_bytes(&self) -> u64 {
+        (self.strip_pan.len() * size_of::<u32>()) as u64
+    }
+
+    /// The length a record of `row` carries for `word`: the session's own for the sentinel, else
+    /// the word.
+    const fn resolve(&self, row: LiveRampRow, word: u32) -> u32 {
+        if word == SESSION_DEFAULT_RAMP {
+            self.live.for_row(row)
+        } else {
+            word
+        }
+    }
+
+    /// [`Self::resolve`] for a strip's pan or matrix record (#1054 D5): the sentinel becomes the
+    /// strip's own window when its prepared pan or matrix has one, else the `pan_ms` length. A
+    /// strip index past the table is the `pan_ms` length; admission refuses such a record next.
+    fn resolve_strip_pan(&self, strip: usize, word: u32) -> u32 {
+        if word == SESSION_DEFAULT_RAMP {
+            self.strip_pan
+                .get(strip)
+                .copied()
+                .unwrap_or(self.live.pan_samples)
+        } else {
+            word
+        }
+    }
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
@@ -1601,6 +1687,8 @@ struct ReadyOwnership {
     /// transaction shadow, committed or rolled back with `solo` and `routes`. Empty -- and
     /// allocated nothing -- for a session without VCAs or without live controls.
     vcas: LiveVcaState,
+    /// Issue #1364 D2: what an absent ramp length resolves to, computed once at preparation.
+    ramps: SessionRamps,
     /// Observation subscriptions admitted per effect queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every live-control
@@ -4201,7 +4289,7 @@ fn validate_builtin_target_set(
 /// | 4 | u32 | `track_index` into the canonical normalized track order |
 /// | 8 | u32 | `effect_index`: a console slot's index in slot order, or an insert's index |
 /// | 12 | u32 | `parameter_id` from the effect contract |
-/// | 16 | u32 | `smoothing_samples`, the ramp window for a retarget |
+/// | 16 | u32 | `smoothing_samples`, the ramp window for a retarget, or [`SESSION_DEFAULT_RAMP`] (`0xFFFF_FFFF`) for the session's own length |
 /// | 20 | u32 | required zero |
 /// | 24..40 | 4 x f32 | `value0..value3` |
 /// | 40 | u64 | required zero |
@@ -4282,6 +4370,39 @@ impl CommandRecord {
             smoothing_samples: word(16),
             values,
         })
+    }
+
+    /// Replace an absent ramp length with the session's own (issue #1364 D2), before any check of
+    /// the record. Only the twelve ramped kinds read the word as a length; every other kind keeps
+    /// it, so a sentinel on input filters or bypass is the non-zero word they refuse as
+    /// `MALFORMED`, exactly as before. A finite length, `0` included, is kept.
+    ///
+    /// The row each kind reads is #1054 D3's: fader, trim, send gain and VCA offset the fader
+    /// key; mute, solo, send mute and VCA mute the mute key; polarity twice the mute key; pan,
+    /// matrix and send matrix the pan key, with a strip's own pan or matrix window first. A
+    /// `follows_mute` send record takes the ramp of the strip mute record that moved it, which
+    /// this resolves, so it follows the mute key too.
+    fn with_session_ramp(mut self, ramps: &SessionRamps) -> Self {
+        let row = match self.kind {
+            COMMAND_PAN | COMMAND_MATRIX => {
+                self.smoothing_samples =
+                    ramps.resolve_strip_pan(self.track_index as usize, self.smoothing_samples);
+                return self;
+            }
+            COMMAND_FADER_DB => LiveRampRow::Fader,
+            COMMAND_TRIM_DB => LiveRampRow::InputTrim,
+            COMMAND_MUTE => LiveRampRow::Mute,
+            COMMAND_SOLO => LiveRampRow::Solo,
+            COMMAND_POLARITY_INVERT => LiveRampRow::PolarityInvert,
+            COMMAND_ROUTE_GAIN_DB => LiveRampRow::SendGain,
+            COMMAND_ROUTE_MUTE => LiveRampRow::SendMute,
+            COMMAND_ROUTE_MATRIX => LiveRampRow::SendMatrix,
+            COMMAND_VCA_FADER_DB => LiveRampRow::VcaOffset,
+            COMMAND_VCA_MUTE => LiveRampRow::VcaMute,
+            _ => return self,
+        };
+        self.smoothing_samples = ramps.resolve(row, self.smoothing_samples);
+        self
     }
 
     fn into_input_filter_edit(self) -> Result<InputFilterEdit, u32> {
@@ -4988,7 +5109,9 @@ fn admit_commands_staged(
     let mut vca_fader_smoothing = 0_u32;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
-        let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
+        let command = CommandRecord::decode(record)
+            .map_err(|reason| refuse(reason, index))?
+            .with_session_ramp(&ready.ramps);
         let track = command.track_index as usize;
         // Issue #1222 D2: the index word is read by kind. A send kind's is a live-route index,
         // checked against the live routes in its own arm below, and a VCA kind's a VCA index
@@ -7226,19 +7349,29 @@ fn compile_ready(
     } else {
         LiveVcaState::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?
     };
-    let vca_retained = vcas.retained_bytes();
-    let vca_largest = vcas.largest_allocation_bytes();
+    // Issue #1364 D2: the session's ramp table and the per-strip pan windows, computed here, once,
+    // on the control thread, and charged like the other retained tables.
+    let ramps =
+        SessionRamps::try_new(model).ok_or_else(|| fixed_diagnostic("web.resource.allocation"))?;
+    let live_state_retained = vcas
+        .retained_bytes()
+        .checked_add(ramps.retained_bytes())
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let live_state_largest = vcas.largest_allocation_bytes().max(ramps.retained_bytes());
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
-        .checked_add(vca_retained)
+        .checked_add(live_state_retained)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_retained_bytes = report
         .bridge_retained_bytes
-        .checked_add(vca_retained)
+        .checked_add(live_state_retained)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.largest_bridge_allocation_bytes =
-        report.largest_bridge_allocation_bytes.max(vca_largest);
-    report.largest_named_allocation_bytes = report.largest_named_allocation_bytes.max(vca_largest);
+    report.largest_bridge_allocation_bytes = report
+        .largest_bridge_allocation_bytes
+        .max(live_state_largest);
+    report.largest_named_allocation_bytes = report
+        .largest_named_allocation_bytes
+        .max(live_state_largest);
     // Three per-strip bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity, each
     // `T + S` long since issue #1213 D1; the effect band follows and covers every strip, and the
     // live send band follows it (issue #1222 D4).
@@ -7424,6 +7557,7 @@ fn compile_ready(
         )?,
         solo,
         vcas,
+        ramps,
         route_controls,
         routes,
         in_flight: boxed_zero_u32(queue_count)?,

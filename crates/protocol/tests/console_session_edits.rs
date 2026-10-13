@@ -57,7 +57,7 @@ fn document(revision: u64, console: &str, a: &str, b: &str) -> String {
           "sources": [ {{ "id": "voice", "content": "blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea", "channels": 2, "bit_depth": "32f", "frames": "48000" }} ],
           "console": {console},
           "tracks": [ {}, {} ],
-          "submixes": [], "vcas": [], "outputs": [ {{ "id": "main-out" }} ],
+          "submixes": [], "vcas": [], "control_smoothing": {{ "kind": "default" }}, "outputs": [ {{ "id": "main-out" }} ],
           "routes": [ {}, {} ], "automation": [] }}"#,
         track("a", a, EQ_INSERT),
         track("b", b, ""),
@@ -263,6 +263,7 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
                     true,
                     vec![param(1, ParameterChannel::Both, ParameterUnit::Db, 0.0)],
                 )],
+                ramp_samples: None,
             }],
             document(
                 8,
@@ -283,6 +284,7 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
                     )],
                     post_insert: Vec::new(),
                 },
+                ramp_samples: None,
             }],
             document(
                 8,
@@ -304,14 +306,17 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
                             LinkMode::Maximum,
                         )],
                     },
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("a"),
                     console: vec![eq_entry(), limiter_entry.clone()],
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("b"),
                     console: vec![eq_entry(), limiter_entry.clone()],
+                    ramp_samples: None,
                 },
             ],
             document(
@@ -329,14 +334,17 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
                         pre_insert: Vec::new(),
                         post_insert: Vec::new(),
                     },
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("a"),
                     console: Vec::new(),
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("b"),
                     console: Vec::new(),
+                    ramp_samples: None,
                 },
             ],
             document(8, &console(&[], &[]), &entries(&[]), &entries(&[])),
@@ -348,6 +356,7 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
                     pre_insert: Vec::new(),
                     post_insert: vec![eq_slot()],
                 },
+                ramp_samples: None,
             }],
             document(
                 8,
@@ -499,6 +508,7 @@ fn structural_and_declaration_edits(
                 rack_name,
                 effect_id: id("eq"),
                 link_mode: LinkMode::Maximum,
+                ramp_samples: None,
             },
         ),
         (
@@ -590,14 +600,17 @@ fn a_slot_set_change_that_skips_a_track_refuses_whole() {
                         pre_insert: vec![eq_slot(), comp()],
                         post_insert: Vec::new(),
                     },
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("a"),
                     console: vec![eq_entry(), comp_entry()],
+                    ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
                     track_id: id("b"),
                     console: vec![eq_entry(), comp_entry()],
+                    ramp_samples: None,
                 },
             ],
         )
@@ -669,10 +682,12 @@ fn a_slot_set_change_that_skips_a_track_refuses_whole() {
         let model = store.compiled().normalized_model().clone();
         let change = SessionEdit::SetConsole {
             console: case.console.clone(),
+            ramp_samples: None,
         };
         let rewrite = |track: &str| SessionEdit::SetTrackConsole {
             track_id: id(track),
             console: case.rewritten.clone(),
+            ramp_samples: None,
         };
         let skipped = through_the_wire(&[change.clone(), rewrite("a")]);
         let error = store
@@ -745,11 +760,13 @@ fn a_slot_set_change_that_skips_a_submix_refuses_whole() {
     };
     let mut edits = vec![SessionEdit::SetConsole {
         console: console.clone(),
+        ramp_samples: None,
     }];
     for track in ["a", "b"] {
         edits.push(SessionEdit::SetTrackConsole {
             track_id: id(track),
             console: vec![eq_entry(), comp_entry()],
+            ramp_samples: None,
         });
     }
     let skipped = through_the_wire(&edits);
@@ -824,6 +841,7 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
         let edits = through_the_wire(&[SessionEdit::SetTrackConsole {
             track_id: id("a"),
             console,
+            ramp_samples: None,
         }]);
         let error = store
             .apply_transaction(ExpectedRevision::Exact(store.revision()), &edits)
@@ -864,6 +882,7 @@ fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
     let follow = |follows_mute| SessionEdit::SetRouteFollowsMute {
         route_id: id("a-out"),
         follows_mute,
+        ramp_samples: None,
     };
 
     let refused = through_the_wire(&[follow(true)]);

@@ -26,12 +26,14 @@ use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
-use session::{Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json};
+use session::{
+    EditRamps, Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json,
+};
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
-pub use crate::prepare::LiveRamps;
-use crate::prepare::{fader_records, followed_mute_changes, matrix_record};
+use crate::prepare::LiveRamps;
+use crate::prepare::{StripEditRamps, fader_records, followed_mute_changes, matrix_record};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -131,13 +133,13 @@ pub enum LiveRebuild {
 /// 1. [`LiveRebuild::Vca`] if either model declares a VCA.
 /// 2. [`LiveRebuild::Structure`] if the track IDs differ, by count or pairwise in order.
 /// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
-///    output-profile IDs, stored automation, and every track's fader, pan/matrix, console-entry
-///    `params` and `bypass`, and insert `params` and `bypass` copied from `current`, has
-///    canonical JSON bytes other than `current`'s. An effect's identity, quality, link mode and
-///    sidechain, the insert order, the console slot set and every submix field stay compared
-///    (a submix strip's bypass stays structural, #1053 G1). Bytes,
-///    never `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit
-///    from `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
+///    output-profile IDs, `control_smoothing`, stored automation, and every track's fader,
+///    pan/matrix, console-entry `params` and `bypass`, and insert `params` and `bypass` copied
+///    from `current`, has canonical JSON bytes other than `current`'s. An effect's identity,
+///    quality, link mode and sidechain, the insert order, the console slot set and every submix
+///    field stay compared (a submix strip's bypass stays structural, #1053 G1). Bytes, never
+///    `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit from
+///    `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
 /// 4. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
 ///    [`effect_automation_diagnostics`] refuses one of `next`'s automations: one whose `inserts`
 ///    or `console` target parameter is not automatable or whose `automation_rate` is not `Block`
@@ -165,9 +167,16 @@ pub enum LiveRebuild {
 ///    capability [`EqTargetPreparer`] does not accept is [`LiveRebuild::Prepared`], and a design
 ///    refusal is [`LiveRebuild::Domain`].
 ///
-/// The session ID, the two profile IDs and the stored automation are model-only: no prepared plan
-/// reads them (#1260), so a delta that changes only them is live with no records, once step 4 has
-/// accepted the automation's targets. Masking
+/// The session ID, the two profile IDs, the stored automation and `control_smoothing` are
+/// model-only: no prepared plan reads them (#1260, #1365), so a delta that changes only them is
+/// live with no records, once step 4 has accepted the automation's targets. `control_smoothing`'s
+/// only reader is [`LiveRamps::for_session`], which the caller evaluates on `next`: the records
+/// of the same transaction use the new lengths, and a ramp already in flight keeps its own. A
+/// preparation that bakes a ramp length into a plan (a transition decided at preparation) reads
+/// the key at that preparation only, so a later edit still governs only later transitions. The
+/// first such slice is a successor's carry retarget (#1277 D5): its fader, mute and matrix records
+/// are written to the successor's cells at preparation, with the lengths of the successor's own
+/// model (and the transaction's per-edit lengths, #1394 D6). Masking
 /// `automation` is correct only while no host renders stored automation: the first issue that
 /// renders it (#1058) must remove it from the mask, or an automation edit would commit without
 /// reaching the running plan.
@@ -179,6 +188,11 @@ pub enum LiveRebuild {
 /// lane that stays muted still gets its record, so the stage remembers the gain for a later
 /// unmute. An effect record is emitted only for a resolved value whose bits change: a `Both`
 /// value rewritten as equal per-lane values gives none.
+///
+/// A record's ramp length is [`LiveRamps::resolve`]'s: the length the transaction's own edit gave
+/// the record's `(strip, row)` in `edit_ramps` (an explicit 0 included), else the session's
+/// `ramps` for the row (#1394 D5, D6). A pan or matrix record without an edit length takes the
+/// post-commit model's own non-zero `smoothing_samples` before the session's `pan_ms` (#1054 D5).
 ///
 /// No smoothing window is checked: host-core preparation passes `maximum_smoothing_samples:
 /// u32::MAX` and the render setters accept any `u32` window. If preparation ever gets a finite
@@ -202,6 +216,7 @@ pub fn classify_live_delta<'a>(
     current: &SessionModel,
     next: &'a SessionModel,
     ramps: LiveRamps,
+    edit_ramps: &EditRamps,
 ) -> Result<LiveDelta<'a>, LiveRebuild> {
     if !current.vcas.is_empty() || !next.vcas.is_empty() {
         return Err(LiveRebuild::Vca);
@@ -221,6 +236,8 @@ pub fn classify_live_delta<'a>(
     masked.session_id = current.session_id.clone();
     masked.render_profile.id = current.render_profile.id.clone();
     masked.output_profile.id = current.output_profile.id.clone();
+    // #1365 D4: read only by `LiveRamps::for_session`, never by a prepared plan.
+    masked.control_smoothing = current.control_smoothing;
     // #1260 D2: correct only while no host renders stored automation (#1058). The first issue
     // that renders it must drop this line.
     masked.automation = current.automation.clone();
@@ -262,9 +279,10 @@ pub fn classify_live_delta<'a>(
 
     let mut delta = LiveDelta::default();
     for (before, after) in current.tracks.iter().zip(&next.tracks) {
-        let fader =
-            fader_records(&before.fader, &after.fader, ramps).map_err(|_| LiveRebuild::Domain)?;
-        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan)
+        let edit = StripEditRamps::of(edit_ramps, &after.id);
+        let fader = fader_records(&before.fader, &after.fader, ramps, edit)
+            .map_err(|_| LiveRebuild::Domain)?;
+        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan, ramps, edit)
             .map_err(|_| LiveRebuild::Domain)?;
         if followed_mute_changes(&before.fader, &after.fader, next, after.id.as_str()) {
             return Err(LiveRebuild::FollowedMute);

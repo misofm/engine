@@ -33,6 +33,11 @@ session.workspace = true
 math.workspace = true
 
 [dev-dependencies]
+# Dev-only (#1364 gate 3): `tests/control_smoothing_parity.rs` links the C ABI beside this host and
+# feeds both the same session and the same edits with no per-edit length, encoded with `protocol`
+# (below). Never linked into the browser artifact: a dev-dependency does not reach `-p host-web`'s
+# release build.
+capi.workspace = true
 # Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060).
 lane.workspace = true
 # Dev-only: `tests/strip_cells_cross_host.rs` drives the control plane the C ABI embeds beside the

@@ -23,6 +23,7 @@ import {
   effect,
   session,
 } from "../src/core/session.ts";
+import { sessionBuilderFromRequest } from "../src/cli/session-request.ts";
 import { writeCanonicalSessionDocument } from "../src/internal/session-json.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
@@ -1355,3 +1356,144 @@ function richSession() {
       segments: [{ shape: "linear", startSample: 0n, endSample: 4_800n, startValue: -3, endValue: 0 }],
     });
 }
+
+describe("issue 1364 -- the builder authors controlSmoothing", () => {
+  const smoothed = (controlSmoothing) =>
+    session({ id: "ramp.eval", sampleRateHz: 48_000, revision: 1, controlSmoothing })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .output("out")
+      .route({
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+
+  /** The `control_smoothing` block of the engine-written full-surface corpus document. */
+  async function rustBlock() {
+    const manifest = JSON.parse(await readFile(
+      new URL("../../fixtures/session-canonical/v1/canonical-writer-corpus.json", import.meta.url),
+      "utf8",
+    ));
+    const text = manifest.documents.find((entry) => entry.id === "canonical-full-surface").canonical;
+    const start = text.indexOf('  "control_smoothing": {');
+    const end = text.indexOf("  },\n", start) + "  },\n".length;
+    assert.ok(start > 0 && end > start, "the Rust-written corpus document has an explicit block");
+    return text.slice(start, end);
+  }
+
+  test("an explicit controlSmoothing round-trips into the model and to the Rust writer's canonical bytes", async () => {
+    // Red if the builder drops the option (the model says `default`), reorders the keys, or spells
+    // a length otherwise than the engine's writer does (`-0.0`, `12.5`, `1000.0`).
+    const built = smoothed({ muteMs: -0, faderMs: 12.5, panMs: 1000 });
+    assert.deepEqual(built.toJSON().control_smoothing, {
+      kind: "explicit",
+      mute_ms: -0,
+      fader_ms: 12.5,
+      pan_ms: 1000,
+    });
+    assert.ok(Object.is(built.toJSON().control_smoothing.mute_ms, -0), "-0 keeps its sign");
+    assert.ok(built.toJson().includes(await rustBlock()), "the block is the Rust writer's bytes");
+    if (asset !== undefined) {
+      assert.equal((await validate(built, { asset })).ok, true);
+    }
+  });
+
+  test("an omitted controlSmoothing writes { \"kind\": \"default\" }, and the key is never left out", () => {
+    // Red if the builder omits the key when unset (V1 has no optional fields) or writes `explicit`.
+    const built = smoothed(undefined);
+    assert.deepEqual(built.toJSON().control_smoothing, { kind: "default" });
+    assert.match(
+      built.toJson(),
+      /\n  "control_smoothing": \{\n    "kind": "default"\n  \},\n  "outputs": \[/,
+    );
+  });
+
+  test("a length outside [0, 1000] ms, a non-finite one, or a malformed object is refused at its path", async () => {
+    // Red if the upper bound drifts (1000.5 accepted), the lower bound is dropped, `NaN` passes the
+    // finite check, or a missing or unknown key is tolerated. The engine refuses the same
+    // documents with the same code.
+    const lengths = { muteMs: 10, faderMs: 20, panMs: 20 };
+    for (const [name, value] of [
+      ["panMs", 1000.5],
+      ["muteMs", -0.5],
+      ["faderMs", 1e9],
+    ]) {
+      assert.throws(
+        () => smoothed({ ...lengths, [name]: value }),
+        (error) => {
+          assert.ok(error instanceof MisoUsageError);
+          assert.equal(error.diagnosticCode, "numeric.out_of_schema_range", `${name} ${value}`);
+          assert.match(error.message, new RegExp(`^session\\(\\)\\.controlSmoothing\\.${name}:`));
+          return true;
+        },
+      );
+    }
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => smoothed({ ...lengths, faderMs: value }),
+        /session\(\)\.controlSmoothing\.faderMs: expected a finite number/,
+      );
+    }
+    assert.throws(() => smoothed({ muteMs: 1, faderMs: 1 }), /controlSmoothing\.panMs: a length in milliseconds is required/);
+    assert.throws(
+      () => smoothed({ ...lengths, panMS: 1 }),
+      (error) => error.diagnosticCode === "schema.unknown_field" && /controlSmoothing\.panMS/.test(error.message),
+    );
+    assert.throws(() => smoothed(null), /controlSmoothing: expected an object/);
+    assert.throws(() => smoothed([1, 2, 3]), /controlSmoothing: expected an object/);
+    for (const edge of [0, 1000]) {
+      smoothed({ muteMs: edge, faderMs: edge, panMs: edge });
+    }
+    if (asset !== undefined) {
+      const model = mutableModel(smoothed(lengths).toJSON());
+      for (const value of [1000.5, -0.5]) {
+        model.control_smoothing.pan_ms = value;
+        const outcome = await validate(JSON.stringify(model), { asset });
+        assert.equal(outcome.ok, false, `the engine refuses ${value}`);
+        assert.equal(outcome.diagnostics[0]?.code, "numeric.out_of_schema_range");
+      }
+      model.control_smoothing.pan_ms = 1000;
+      assert.equal((await validate(JSON.stringify(model), { asset })).ok, true);
+    }
+  });
+
+  test("a strict request with controlSmoothing builds the session the builder builds, and an unknown key inside it is refused", () => {
+    // Red if the request decoder drops the root key (the session says `default`), passes it with
+    // other lengths, or lets a misspelled key through.
+    const base = {
+      schemaVersion: 1,
+      session: { id: "ramp.eval", sampleRateHz: 48_000, revision: 1 },
+      sources: [{ id: "stem", spec: { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A } }],
+      tracks: [{ id: "t", spec: { source: "stem" } }],
+      outputs: ["out"],
+      routes: [{
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      }],
+    };
+    const lengths = { muteMs: 5, faderMs: 15, panMs: 25 };
+    assert.equal(
+      sessionBuilderFromRequest({ ...base, controlSmoothing: lengths }).toJson(),
+      smoothed(lengths).toJson(),
+    );
+    assert.equal(
+      sessionBuilderFromRequest(base).toJson(),
+      smoothed(undefined).toJson(),
+      "an omitted request key is the default table",
+    );
+    assert.throws(
+      () => sessionBuilderFromRequest({ ...base, controlSmoothing: { ...lengths, panMS: 25 } }),
+      (error) => error.message === "$.controlSmoothing.panMS: unknown key",
+    );
+    assert.throws(
+      () => sessionBuilderFromRequest({ ...base, controlSmoothing: { muteMs: 5, faderMs: 15 } }),
+      (error) => error.message === "$.controlSmoothing.panMs: required key is missing",
+    );
+    assert.throws(
+      () => sessionBuilderFromRequest({ ...base, controlSmoothing: { ...lengths, panMs: "25" } }),
+      (error) => error.message === "$.controlSmoothing.panMs: expected a number",
+    );
+  });
+});

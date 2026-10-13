@@ -440,6 +440,12 @@ mod tests {
             vca("master", -3.5, true, &["vocal", "mix", "group"]),
             vca("group", -144.0, false, &["vocal"]),
         ];
+        // The explicit `control_smoothing` spelling (#1054): `-0.0` keeps its sign, 1000 is the bound.
+        model.control_smoothing = Some(crate::ControlSmoothing {
+            mute_ms: -0.0,
+            fader_ms: 12.5,
+            pan_ms: 1000.0,
+        });
         canonical_session_json(&model).expect("full tagged surface canonicalizes")
     }
 

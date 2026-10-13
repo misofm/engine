@@ -768,6 +768,7 @@ fn pair_command(request_id: u64, revision: u64, edit: u64) -> Vec<u8> {
             left_mute: false,
             right_mute: false,
         },
+        ramp_samples: None,
     });
     let mut bytes = vec![0_u8; 4_096];
     let len = ProtocolCodec::default()

@@ -5,6 +5,7 @@ import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
+import { laneEditSmoothingWord } from "../internal/ramp.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
   MisoAudioWorkletHost,
@@ -26,7 +27,7 @@ function browserCommand(edit: LaneEdit): MisoCommand {
     trackIndex: edit.trackIndex,
     effectIndex: edit.effectIndex ?? 0,
     parameterId: edit.parameterId ?? 0,
-    smoothingSamples: edit.smoothingSamples ?? 0,
+    smoothingSamples: laneEditSmoothingWord(edit),
     values: [...edit.values],
   };
 }

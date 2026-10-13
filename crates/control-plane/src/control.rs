@@ -1153,6 +1153,9 @@ where
                         inventory: &self.newest_providers().inventory,
                         committed: self.controller.session().compiled().normalized_model(),
                         revision,
+                        // #1394 D6: a carry retarget is the record of the transaction's own
+                        // edit, so it takes that edit's ramp length.
+                        edit_ramps: prepared.get().prospective_session().edit_ramps(),
                     }),
                     &mut InputBoundCache::with_seed(&self.newest_providers().bound_seed),
                     &self.live_values_superseded,
@@ -1353,15 +1356,13 @@ where
     /// commit it sets each live effect value in the catalog in place, so the parameter readback
     /// reports what a rebuild's catalog would (#1264 D4, #1265 D3).
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
-        let next = prepared
-            .get()
-            .prospective_session()
-            .compiled()
-            .normalized_model();
+        let transaction = prepared.get().prospective_session();
+        let next = transaction.compiled().normalized_model();
         let Ok(delta) = host_core::classify_live_delta(
             self.controller.session().compiled().normalized_model(),
             next,
             host_core::LiveRamps::for_session(next),
+            transaction.edit_ramps(),
         ) else {
             return LiveCommit::Rebuild(prepared);
         };

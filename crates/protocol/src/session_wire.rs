@@ -338,16 +338,23 @@ fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
 fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), EncodeError> {
     let spec = schema::session::payload_spec(edit.opcode());
     let fields = spec.fields;
-    let count = match edit {
-        SessionEdit::SetTrackEffectOrder { effect_ids, .. } => {
+    // #1394 D1: a live-value edit's optional `ramp_samples` is the payload's last field.
+    let ramp_field = schema::session::ramp_samples_field(edit.opcode());
+    let ramp = (ramp_field, usize::from(edit.ramp_samples().is_some()));
+    let count = match (edit, ramp) {
+        (SessionEdit::SetTrackEffectOrder { effect_ids, .. }, _) => {
             spec.field_count(&[(fields[2], effect_ids.len())])?
         }
-        SessionEdit::SetAutomationSegments { segments, .. } => {
+        (SessionEdit::SetAutomationSegments { segments, .. }, _) => {
             spec.field_count(&[(fields[1], segments.len())])?
         }
-        SessionEdit::SetTrackConsole { console, .. } => {
-            spec.field_count(&[(fields[1], console.len())])?
+        (SessionEdit::SetControlSmoothing { control_smoothing }, _) => {
+            spec.field_count(&[(fields[0], usize::from(control_smoothing.is_some()))])?
         }
+        (SessionEdit::SetTrackConsole { console, .. }, (Some(ramp_field), present)) => {
+            spec.field_count(&[(fields[1], console.len()), (ramp_field, present)])?
+        }
+        (_, (Some(ramp_field), present)) => spec.field_count(&[(ramp_field, present)])?,
         _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
@@ -363,8 +370,15 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
         }
-        SessionEdit::SetConsole { console } => {
+        SessionEdit::SetConsole { console, .. } => {
             tx_message(sink, fields[0], |v| tx_console(v, console))
+        }
+        SessionEdit::SetControlSmoothing { control_smoothing } => {
+            // Absent clears the key; there is no empty message to mean it.
+            match control_smoothing {
+                Some(lengths) => tx_message(sink, fields[0], |v| tx_control_smoothing(v, lengths)),
+                None => Ok(()),
+            }
         }
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
@@ -396,7 +410,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             tx_u8(sink, fields[2], *left_source_channel)?;
             tx_u8(sink, fields[3], *right_source_channel)
         }
-        SessionEdit::SetTrackBuiltins { track_id, builtins } => {
+        SessionEdit::SetTrackBuiltins {
+            track_id, builtins, ..
+        } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_builtins(v, builtins))
         }
@@ -492,6 +508,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             rack_name,
             effect_id,
             link_mode,
+            ..
         } => tx_effect_edit_scalar(
             sink,
             fields,
@@ -531,18 +548,23 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
                 schema::session_parameter_channel_wire(*channel),
             )
         }
-        SessionEdit::SetTrackFader { track_id, fader } => {
+        SessionEdit::SetTrackFader {
+            track_id, fader, ..
+        } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_fader(v, fader))
         }
         SessionEdit::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
+            ..
         } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_matrix_or_pan(v, matrix_or_pan))
         }
-        SessionEdit::SetTrackConsole { track_id, console } => {
+        SessionEdit::SetTrackConsole {
+            track_id, console, ..
+        } => {
             tx_id(sink, fields[0], track_id)?;
             for entry in console {
                 tx_message(sink, fields[1], |v| tx_console_entry(v, entry))?;
@@ -573,21 +595,25 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetRouteChannelMatrix {
             route_id,
             channel_matrix,
+            ..
         } => {
             tx_id(sink, fields[0], route_id)?;
             tx_message(sink, fields[1], |v| tx_channel_matrix(v, channel_matrix))
         }
-        SessionEdit::SetRouteGainDb { route_id, gain_db } => {
+        SessionEdit::SetRouteGainDb {
+            route_id, gain_db, ..
+        } => {
             tx_id(sink, fields[0], route_id)?;
             tx_f32(sink, fields[1], *gain_db)
         }
-        SessionEdit::SetRouteMute { route_id, mute } => {
+        SessionEdit::SetRouteMute { route_id, mute, .. } => {
             tx_id(sink, fields[0], route_id)?;
             tx_bool(sink, fields[1], *mute)
         }
         SessionEdit::SetRouteFollowsMute {
             route_id,
             follows_mute,
+            ..
         } => {
             tx_id(sink, fields[0], route_id)?;
             tx_bool(sink, fields[1], *follows_mute)
@@ -615,10 +641,14 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         }
         SessionEdit::UpsertVca { vca } => tx_message(sink, fields[0], |v| tx_vca(v, vca)),
         SessionEdit::RemoveVca { vca_id } => tx_id(sink, fields[0], vca_id),
-        SessionEdit::SetVcaFader { vca_id, fader } => {
+        SessionEdit::SetVcaFader { vca_id, fader, .. } => {
             tx_id(sink, fields[0], vca_id)?;
             tx_message(sink, fields[1], |v| tx_fader(v, fader))
         }
+    }?;
+    match (ramp_field, edit.ramp_samples()) {
+        (Some(ramp_field), Some(samples)) => tx_u32(sink, ramp_field, samples),
+        _ => Ok(()),
     }
 }
 
@@ -865,6 +895,30 @@ fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
     tx_message(sink, schema::session::effect::SIDECHAIN, |v| {
         tx_sidechain(v, &value.sidechain)
     })
+}
+fn tx_control_smoothing(
+    sink: &mut dyn Sink,
+    value: &session::ControlSmoothing,
+) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::control_smoothing::SPEC.field_count(&[])?,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::MUTE_MS,
+        value.mute_ms,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::FADER_MS,
+        value.fader_ms,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::PAN_MS,
+        value.pan_ms,
+    )
 }
 fn tx_fader(sink: &mut dyn Sink, value: &DualMonoFader) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::fader::SPEC.field_count(&[])?)?;
@@ -1179,6 +1233,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         .nested_value(one_spec!(message, schema::session::edit::PAYLOAD)?)?
         .schema_spec(schema::session::payload_spec(opcode))?;
     let fields = schema::session::payload_spec(opcode).fields;
+    // #1394 D1: absent stays `None`; it is never read as 0, which is a legal explicit length.
+    let ramp_samples = match schema::session::ramp_samples_field(opcode) {
+        Some(field) => payload
+            .optional_one(field.id, field.wire.raw())?
+            .map(read_u32_exact)
+            .transpose()?,
+        None => None,
+    };
     match opcode {
         crate::SessionEditOpcode::SetSessionId => Ok(SessionEdit::SetSessionId {
             session_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1201,6 +1263,13 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         }),
         crate::SessionEditOpcode::SetConsole => Ok(SessionEdit::SetConsole {
             console: parse_console(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
+            ramp_samples,
+        }),
+        crate::SessionEditOpcode::SetControlSmoothing => Ok(SessionEdit::SetControlSmoothing {
+            control_smoothing: payload
+                .optional_one(fields[0].id, fields[0].wire.raw())?
+                .map(|bytes| parse_control_smoothing(payload.nested_value(bytes)?))
+                .transpose()?,
         }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1232,6 +1301,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::SetTrackBuiltins => Ok(SessionEdit::SetTrackBuiltins {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             builtins: parse_builtins(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetTrackRack => Ok(SessionEdit::SetTrackRack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1299,6 +1369,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 rack_name,
                 effect_id,
                 link_mode: parse_link(read_u8_exact(one_spec!(payload, fields[3])?)?)?,
+                ramp_samples,
             })
         }
         crate::SessionEditOpcode::SetEffectSidechain => {
@@ -1333,18 +1404,21 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::SetTrackFader => Ok(SessionEdit::SetTrackFader {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetTrackMatrixOrPan => Ok(SessionEdit::SetTrackMatrixOrPan {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             matrix_or_pan: parse_matrix_or_pan(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetTrackConsole => Ok(SessionEdit::SetTrackConsole {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             console: values_spec!(payload, fields[1])?
                 .map(|value| parse_console_entry(payload.nested_value(value)?))
                 .collect::<Result<Vec<_>, _>>()?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEdit::UpsertSubmix {
             submix: parse_submix(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1379,18 +1453,22 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
             channel_matrix: parse_channel_matrix(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEdit::SetRouteGainDb {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             gain_db: read_f32_exact(one_spec!(payload, fields[1])?)?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetRouteMute => Ok(SessionEdit::SetRouteMute {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             mute: parse_bool(one_spec!(payload, fields[1])?)?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::SetRouteFollowsMute => Ok(SessionEdit::SetRouteFollowsMute {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             follows_mute: parse_bool(one_spec!(payload, fields[1])?)?,
+            ramp_samples,
         }),
         crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEdit::UpsertAutomation {
             automation: parse_automation(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1417,6 +1495,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::SetVcaFader => Ok(SessionEdit::SetVcaFader {
             vca_id: stable_id(one_spec!(payload, fields[0])?)?,
             fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
+            ramp_samples,
         }),
     }
 }
@@ -1692,6 +1771,24 @@ fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
         sidechain: parse_sidechain(
             message.nested_value(one_spec!(message, schema::session::effect::SIDECHAIN)?)?,
         )?,
+    })
+}
+/// One explicit `control_smoothing` (#1365 D2): all three lengths present, each finite and in
+/// `[0, CONTROL_SMOOTHING_MS_MAXIMUM]`. `-0.0` is a legal zero, as in the session grammar.
+fn parse_control_smoothing(message: Message<'_>) -> Result<session::ControlSmoothing, DecodeError> {
+    let message = message.schema_spec(&schema::session::control_smoothing::SPEC)?;
+    let length = |spec: schema::FieldSpec| -> Result<f32, DecodeError> {
+        let value = read_f32_exact(one_spec!(message, spec)?)?;
+        if (0.0..=session::CONTROL_SMOOTHING_MS_MAXIMUM).contains(&value) {
+            Ok(value)
+        } else {
+            Err(DecodeError::InvalidTlv)
+        }
+    };
+    Ok(session::ControlSmoothing {
+        mute_ms: length(schema::session::control_smoothing::MUTE_MS)?,
+        fader_ms: length(schema::session::control_smoothing::FADER_MS)?,
+        pan_ms: length(schema::session::control_smoothing::PAN_MS)?,
     })
 }
 fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {

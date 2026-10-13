@@ -1,6 +1,8 @@
 import { CATALOG } from "../generated/catalog.ts";
 import type { BuiltinParameter, EffectDescriptor, EffectId } from "../generated/catalog.ts";
 import { MisoUsageError } from "./errors.ts";
+import { normalizeControlSmoothing } from "../internal/control-smoothing.ts";
+import { CODE, f32, fail, freeze, knownKeys, nameList } from "../internal/validation.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type {
   AutomationSpec,
@@ -109,9 +111,26 @@ export interface SessionModel extends ModelRecord {
   readonly tracks: readonly ModelRecord[];
   readonly submixes: readonly ModelRecord[];
   readonly vcas: readonly ModelRecord[];
+  readonly control_smoothing: ModelRecord;
   readonly outputs: readonly ModelRecord[];
   readonly routes: readonly ModelRecord[];
   readonly automation: readonly ModelRecord[];
+}
+
+/**
+ * The ramp lengths of a session's live mute, fader and pan edits, in milliseconds (#1364 D4;
+ * decision 15 D15-1). Each is a finite number in `[0, 1000]`; `0` is a hard step.
+ *
+ * `muteMs` is the mute, solo, send-mute, `follows_mute` and VCA-mute ramp, and twice it the
+ * polarity-invert ramp. `faderMs` is the fader, input-trim, send-gain and VCA-offset ramp. `panMs`
+ * is the pan, matrix and send-matrix ramp. A live edit that gives no `smoothingSamples` ramps over
+ * these, rounded to samples at the session's rate, or over the engine's default table (10, 20 and
+ * 20 ms) when the session sets none.
+ */
+export interface ControlSmoothingOptions {
+  readonly muteMs: number;
+  readonly faderMs: number;
+  readonly panMs: number;
 }
 
 export interface SessionOptions {
@@ -122,6 +141,11 @@ export interface SessionOptions {
   readonly revision?: number | bigint;
   /** Nonzero. Defaults to 128, the quantum every launch host actually renders. */
   readonly quantumFrames?: number;
+  /**
+   * The session's live-ramp lengths. Omitted, the document says `{ "kind": "default" }` and the
+   * engine uses its researched default table; the key itself is never left out.
+   */
+  readonly controlSmoothing?: ControlSmoothingOptions;
 }
 
 const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
@@ -203,47 +227,6 @@ export const EFFECT_LINK_MODES: Readonly<Record<EffectId, readonly LinkMode[]>> 
   "miso.true-peak-limiter": Object.freeze(["dual_mono", "maximum"] as const),
 });
 
-/** The engine's diagnostic codes for the refusals the builder makes in front of it. */
-const CODE = Object.freeze({
-  unknownField: "schema.unknown_field",
-  invalidEnum: "schema.invalid_enum",
-  invalidId: "id.invalid",
-  duplicateId: "id.duplicate",
-  missingEntity: "reference.missing_entity",
-  entryOrder: "console.entry_order",
-  entryMissing: "console.entry_missing",
-  ineligibleEffect: "console.slot.ineligible_effect",
-  wrongType: "schema.wrong_type",
-  qualityUnsupported: "effect.quality.unsupported",
-  linkModeUnsupported: "effect.link_mode.unsupported",
-  outOfRange: "numeric.out_of_schema_range",
-} as const);
-
-function fail(path: string, message: string, code?: string): never {
-  throw new MisoUsageError(`${path}: ${message}`, code);
-}
-
-/** Refuse any own key outside `allowed`, as the engine refuses an unknown member. */
-function knownKeys(value: object, allowed: ReadonlySet<string>, path: string, what: string): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) {
-      fail(
-        `${path}.${key}`,
-        `${what} has no '${key}'; its keys are ${nameList([...allowed])}`,
-        CODE.unknownField,
-      );
-    }
-  }
-}
-
-function freeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value as Record<string, unknown>)) freeze(child);
-  }
-  return value;
-}
-
 function asciiCompare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -310,20 +293,6 @@ function linkMode(effectId: EffectId, value: unknown, path: string): LinkMode {
 }
 
 /**
- * Round a caller's `f64` to the `f32` the document will actually carry.
- *
- * The rounding happens here rather than at emit time so that `toJSON()` reports the value the
- * engine will see. A gate that compared unrounded inputs would call two sessions equal that render
- * differently, and one that compared the *text* would be comparing the speller.
- */
-function f32(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) fail(path, "expected a finite number");
-  const rounded = Math.fround(value);
-  if (!Number.isFinite(rounded)) fail(path, "value is outside the finite f32 domain");
-  return rounded;
-}
-
-/**
  * A route's gain domain in dB, inclusive: a copy of the engine's `session::ROUTE_GAIN_DB_MINIMUM`
  * and `ROUTE_GAIN_DB_MAXIMUM` (issue #1237 D1), held to the engine by `sdk/test/builder-evals.mjs`.
  */
@@ -373,13 +342,6 @@ function effectDescriptor(effectId: string, path: string): EffectDescriptor {
   const found = CATALOG.effects.find((candidate) => candidate.id === effectId);
   if (found === undefined) fail(path, `unknown native effect '${effectId}'`);
   return found;
-}
-
-/** `'a', 'b' and 'c'` -- the candidate list a refusal quotes back. */
-function nameList(names: readonly string[]): string {
-  const quoted = names.map((name) => `'${name}'`);
-  if (quoted.length <= 1) return quoted.join("");
-  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
 }
 
 /**
@@ -655,6 +617,8 @@ interface NormalizedOptions {
   readonly revision: bigint;
   readonly sampleRateHz: SessionSampleRateHz;
   readonly quantumFrames: number;
+  /** The `control_smoothing` record, `default` or `explicit` (#1364 D4). */
+  readonly controlSmoothing: ModelRecord;
 }
 
 interface SourceEntry {
@@ -1043,7 +1007,13 @@ export function session(options: SessionOptions): SessionBuilder {
     0xffff_ffff,
   );
   return new SessionBuilder(freeze({
-    options: { sessionId, revision, sampleRateHz: options.sampleRateHz, quantumFrames },
+    options: {
+      sessionId,
+      revision,
+      sampleRateHz: options.sampleRateHz,
+      quantumFrames,
+      controlSmoothing: normalizeControlSmoothing(options.controlSmoothing, "session().controlSmoothing"),
+    },
     sources: [],
     console: undefined,
     tracks: [],
@@ -1698,6 +1668,8 @@ function normalize(state: BuilderState): SessionModel {
     tracks,
     submixes,
     vcas,
+    // #1054: every session says its live-ramp lengths, `default` or `explicit` (#1364 D4).
+    control_smoothing: options.controlSmoothing,
     outputs,
     routes,
     automation,

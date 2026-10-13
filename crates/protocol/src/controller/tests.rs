@@ -321,11 +321,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     let mut limited = controller(8, 1);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
-    // `SetTrackConsole`, #1216 appended `SetRouteMute`, #1218 `SetRouteFollowsMute` and #1241
-    // the three VCA edits, so the boundary this row exists to probe is now 45. A smaller number
-    // still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 46);
-    limited.config.maximum_transaction_edits = 45;
+    // `SetTrackConsole`, #1216 appended `SetRouteMute`, #1218 `SetRouteFollowsMute`, #1241 the
+    // three VCA edits and #1365 `SetControlSmoothing`, so the boundary this row exists to probe
+    // is now 46. A smaller number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 47);
+    limited.config.maximum_transaction_edits = 46;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,
@@ -1462,6 +1462,7 @@ fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
             edits: &[SessionEdit::SetTrackFader {
                 track_id: session::StableId::parse("vocal").expect("stable ID"),
                 fader,
+                ramp_samples: None,
             }],
         },
     };
@@ -1530,6 +1531,54 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
     assert_eq!(decoded.diagnostics.len(), 1);
     assert_eq!(decoded.diagnostics[0].code, "session.edit.not_found");
     assert_eq!(decoded.diagnostics[0].operation_index, Some(0));
+}
+
+/// #1394 D4: a per-edit ramp length above one second of the committed rate is refused on the wire
+/// as `session.edit.ramp_out_of_range` at that edit's `edits[i]` path, and nothing commits.
+///
+/// Red if the controller maps `RampOutOfRange` to another code (the typed error is covered by the
+/// store's own test, the wire spelling by this one only), reports the wrong operation index or
+/// path, or commits the refused transaction.
+#[test]
+fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
+    let mut controller = controller(4, 1);
+    let fader = controller.session().compiled().normalized_model().tracks[0]
+        .fader
+        .clone();
+    let response = controller.process(ControllerRequest {
+        request_id: id(1),
+        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+        canonical_bytes: b"ramp-out-of-range",
+        command: ControlCommand::SessionTransactionApply {
+            edits: &[
+                SessionEdit::SetSessionId {
+                    session_id: session::StableId::parse("renamed").expect("stable ID"),
+                },
+                SessionEdit::SetTrackFader {
+                    track_id: session::StableId::parse("vocal").expect("stable ID"),
+                    fader,
+                    ramp_samples: Some(u32::MAX),
+                },
+            ],
+        },
+    });
+    assert_eq!(response.status, StatusCode::ValidationFailed);
+    let decoded = ProtocolCodec::default()
+        .decode_non_ok_payload(response.payload(), 2)
+        .expect("typed edit error");
+    assert_eq!(decoded.omitted_diagnostics, 0);
+    assert_eq!(decoded.diagnostics.len(), 1);
+    let diagnostic = &decoded.diagnostics[0];
+    assert_eq!(diagnostic.code, "session.edit.ramp_out_of_range");
+    assert_eq!(
+        diagnostic.path,
+        vec![
+            crate::PathSegment::Field("edits".to_owned()),
+            crate::PathSegment::Index(1),
+        ]
+    );
+    assert_eq!(diagnostic.operation_index, Some(1));
+    assert_eq!(controller.session().revision(), SessionRevision(7));
 }
 
 /// Decision 12's retired and refused codes, one conformance row each (#1094): every row's frame,
@@ -1628,6 +1677,7 @@ fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
     let snapshot = endpoint.session().canonical_snapshot().to_owned();
     let edits = [SessionEdit::SetConsole {
         console: console.clone(),
+        ramp_samples: None,
     }];
     let input = full_command(
         1,
@@ -1669,10 +1719,14 @@ fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
         params: Vec::new(),
     });
     let whole = [
-        SessionEdit::SetConsole { console },
+        SessionEdit::SetConsole {
+            console,
+            ramp_samples: None,
+        },
         SessionEdit::SetTrackConsole {
             track_id: track,
             console: entries,
+            ramp_samples: None,
         },
     ];
     let response = process_full_command(
@@ -2051,6 +2105,7 @@ fn decoded_track_edit_reaches_same_atomic_session_store() {
     let edits = [SessionEdit::SetTrackFader {
         track_id: session::StableId::parse("vocal").expect("ID"),
         fader,
+        ramp_samples: None,
     }];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
@@ -2085,6 +2140,7 @@ fn decoded_route_edit_reaches_same_atomic_session_store() {
     let edits = [SessionEdit::SetRouteGainDb {
         route_id: session::StableId::parse("to-main").expect("ID"),
         gain_db: -1.0,
+        ramp_samples: None,
     }];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),

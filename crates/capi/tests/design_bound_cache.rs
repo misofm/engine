@@ -273,6 +273,7 @@ fn builtins_edit(document: &str, index: usize, hpf_hz: Option<f32>) -> SessionEd
     SessionEdit::SetTrackBuiltins {
         track_id: track.id.clone(),
         builtins,
+        ramp_samples: None,
     }
 }
 
@@ -503,6 +504,7 @@ fn builtins_like(document: &str, index: usize, from: usize, hpf_hz: f32) -> Sess
     SessionEdit::SetTrackBuiltins {
         track_id: model.tracks[index].id.clone(),
         builtins,
+        ramp_samples: None,
     }
 }
 

@@ -89,7 +89,18 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetOutputProfile {
             output_profile: session.output_profile.clone(),
         },
-        SessionEdit::SetConsole { console },
+        SessionEdit::SetConsole {
+            console,
+            ramp_samples: None,
+        },
+        // #1365: three different lengths, so a field cannot be read as its neighbour.
+        SessionEdit::SetControlSmoothing {
+            control_smoothing: Some(session::ControlSmoothing {
+                mute_ms: 5.0,
+                fader_ms: 15.0,
+                pan_ms: 25.0,
+            }),
+        },
         SessionEdit::UpsertSource {
             source: source.clone(),
         },
@@ -118,6 +129,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetTrackBuiltins {
             track_id: track_id.clone(),
             builtins: track.builtins.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
@@ -163,6 +175,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
@@ -186,14 +199,17 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: track.fader.clone(),
+            ramp_samples: Some(480),
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
             matrix_or_pan: track.matrix_or_pan.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackConsole {
             track_id: track_id.clone(),
             console: track_console,
+            ramp_samples: None,
         },
         SessionEdit::UpsertSubmix { submix },
         SessionEdit::RemoveSubmix {
@@ -227,21 +243,25 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetRouteChannelMatrix {
             route_id: route.id.clone(),
             channel_matrix: route.channel_matrix.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetRouteGainDb {
             route_id: route.id.clone(),
             gain_db: route.gain_db,
+            ramp_samples: None,
         },
         // #1216: the route's on/off switch, encoded on (the upserted route carries field 6 off).
         SessionEdit::SetRouteMute {
             route_id: route.id.clone(),
             mute: true,
+            ramp_samples: None,
         },
         // #1218: the follow switch, encoded on (the upserted route carries field 7 off). A codec
         // value: a store would refuse it on this output route, and the corpus is never applied.
         SessionEdit::SetRouteFollowsMute {
             route_id: route.id.clone(),
             follows_mute: true,
+            ramp_samples: None,
         },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
@@ -283,6 +303,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
                 left_mute: true,
                 right_mute: false,
             },
+            ramp_samples: None,
         },
     ]
 }
@@ -532,6 +553,7 @@ fn rack_addressed_edits(
                 rack_name,
                 effect_id: effect_id.clone(),
                 link_mode: LinkMode::Maximum,
+                ramp_samples: None,
             },
         ),
         (
@@ -734,7 +756,12 @@ pub enum ConformanceDecoder {
 /// opcode `0x0507` (`SetRouteFollowsMute`) appended, 43 edits. The frame count stays 46.
 /// Issue #1241 repinned it from `95c1ceb68e44f6e2`: the VCA message, and opcodes `0x0700`-`0x0702`
 /// (`UpsertVca`, `RemoveVca`, `SetVcaFader`) appended, 46 edits. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xab35_7b6c_432f_9755;
+/// Issue #1394 repinned it from `ab357b6c432f9755`: #1394 appends optional `ramp_samples` to the
+/// live-value edits, and the corpus's `SetTrackFader` sets it (480). Absent bytes are unchanged, so
+/// that one edit is the whole move; the frame count and the edit count stay 46.
+/// Issue #1365 repinned it from `5429f052592101ef`: #1365 appends `SetControlSmoothing` (`0x0008`),
+/// 47 edits, one per allocated opcode. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x8eb4_cc8d_075a_4355;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

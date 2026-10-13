@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { CommandKindName, CommandReasonName } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
+import { laneEditSmoothingWord } from "../internal/ramp.ts";
 
 /**
  * The live-control writer (issue #243, adopted ruling 5462139867 finding 5).
@@ -55,9 +56,23 @@ export interface LaneEdit {
   /** A console slot's index in the session's slot order, or an insert's index on its track. */
   readonly effectIndex?: number;
   readonly parameterId?: number;
-  readonly smoothingSamples?: number;
+  /**
+   * The edit's ramp length in samples, or the length the kind reads as its word.
+   *
+   * Omitted, a ramped kind (`pan`, `matrix`, `faderDb`, `mute`, `solo`, `trimDb`,
+   * `polarityInvert`, the three route kinds, `vcaFaderDb`, `vcaMute`) ramps over the session's
+   * own length for that kind (`controlSmoothing`, or the default table at the session's sample
+   * rate): the encoders write {@link SESSION_DEFAULT_RAMP} and the engine resolves it. An
+   * explicit value overrides it and `0` is a hard step. `4294967295` is refused with a
+   * `MisoUsageError`: it is {@link SESSION_DEFAULT_RAMP}, not a length. Every other kind (bypass,
+   * input filters, effect parameters, observation) has no session ramp: omitted, its word is `0`,
+   * and an explicit value is carried as given.
+   */
+  readonly smoothingSamples?: number | undefined;
   readonly values: readonly [number, number, number, number];
 }
+
+export { SESSION_DEFAULT_RAMP } from "../internal/ramp.ts";
 
 export interface FlushOutcome {
   /** Records the engine admitted. A refusal admits nothing: the batch is one transaction. */
@@ -159,7 +174,7 @@ export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
     view.setUint32(base + offsetOf("trackIndex"), edit.trackIndex, true);
     view.setUint32(base + offsetOf("effectIndex"), edit.effectIndex ?? 0, true);
     view.setUint32(base + offsetOf("parameterId"), edit.parameterId ?? 0, true);
-    view.setUint32(base + offsetOf("smoothingSamples"), edit.smoothingSamples ?? 0, true);
+    view.setUint32(base + offsetOf("smoothingSamples"), laneEditSmoothingWord(edit), true);
     const values = offsetOf("values");
     edit.values.forEach((value, slot) => {
       view.setFloat32(base + values + slot * 4, value, true);
@@ -215,9 +230,13 @@ export class LiveControlWriter {
    * Stage one edit, superseding any pending edit for the same address.
    *
    * This is where a drag stops being a backlog: a hundred intermediate positions of one fader
-   * collapse to one pending record, and the one that survives is the latest.
+   * collapse to one pending record, and the one that survives is the latest. An edit whose
+   * `smoothingSamples` is not a length (`4294967295`, or not a `u32`) throws a `MisoUsageError`.
    */
   stage(edit: LaneEdit): void {
+    // A ramp length the encoder would refuse is refused here, so it never sits in the pending map
+    // and fails every later flush.
+    laneEditSmoothingWord(edit);
     const key = coalescingKey(edit);
     if (this.#pending.has(key)) this.#coalesced += 1;
     // Delete before set so a superseded edit also moves to the back of the insertion order: the

@@ -11,6 +11,7 @@ import type { CommandReport, SessionMap } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
+import { checkedRampLength } from "../internal/ramp.ts";
 import type { LaneEdit } from "./writer.ts";
 
 /**
@@ -26,6 +27,12 @@ export type LiveControlRack = "console" | "inserts";
 export type LiveControlChannel = "left" | "right" | "both";
 
 export interface SmoothingOptions {
+  /**
+   * The ramp length in samples. Omitted, the edit ramps over the session's own length for its
+   * kind (`controlSmoothing`, or the default table at the session's sample rate). An explicit
+   * value overrides it, and `0` is a hard step. `4294967295` is refused: it is
+   * {@link SESSION_DEFAULT_RAMP}, not a length.
+   */
   readonly smoothingSamples?: number;
 }
 
@@ -116,7 +123,15 @@ export type LiveControlSubmit = (
   edits: readonly LaneEdit[],
 ) => CommandReport | Promise<CommandReport>;
 
-/** Optional owner hook used to serialize observation edits with managed subscriptions. */
+/**
+ * Optional owner hook used to serialize observation edits with managed subscriptions.
+ *
+ * The hook sees the edits as the builders made them. A ramped-kind builder edit given no explicit
+ * `smoothingSamples` shows `smoothingSamples` as `undefined`: the encoder resolves the absent
+ * length (the session's ramp for a ramped kind, `0` for the others), not the builder. A bypass or
+ * input-filter edit also shows `undefined` and encodes `0`. An effect-parameter edit shows the
+ * length it was given, or `0`, and an observation edit shows its window.
+ */
 export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
   managed?: boolean,
@@ -295,8 +310,14 @@ function u32(value: number, name: string): number {
   return value;
 }
 
-function smoothing(options: SmoothingOptions): number {
-  return u32(options.smoothingSamples ?? 0, "smoothingSamples");
+/**
+ * The ramp length of a ramped edit as the builder records it: the given length, checked, or
+ * `undefined` when none was given (D1, D3 of #1364). An absent length is resolved to the
+ * session-default word where the edit is encoded (`laneEditSmoothingWord` in `src/internal/ramp.ts`),
+ * for a hand-written `LaneEdit` as well as for this builder's, so the two cannot disagree.
+ */
+function smoothing(options: SmoothingOptions): number | undefined {
+  return checkedRampLength(options.smoothingSamples);
 }
 
 type RuntimeParameterOptions = {
@@ -402,7 +423,7 @@ function trackEdit(
     readonly channel?: number;
     readonly effectIndex?: number;
     readonly parameterId?: number;
-    readonly smoothingSamples?: number;
+    readonly smoothingSamples?: number | undefined;
     readonly values?: readonly [number, number, number, number];
   } = {},
 ): LaneEdit {
@@ -413,7 +434,9 @@ function trackEdit(
     channel: options.channel ?? NONE,
     effectIndex: options.effectIndex ?? 0,
     parameterId: options.parameterId ?? 0,
-    smoothingSamples: options.smoothingSamples ?? 0,
+    // Left absent when none was given: the encoder writes 0 for a kind that carries no ramp and
+    // the session-default word for a ramped one.
+    smoothingSamples: options.smoothingSamples,
     values: options.values ?? values(),
   });
 }
@@ -536,6 +559,11 @@ const NO_LAYOUT = "this engine was not booted from a session the SDK built, so t
 /**
  * Every live edit a strip -- a track or a submix -- shares. Methods build data and never mutate
  * the engine. `TrackEdits` adds `solo`; `SubmixEdits` adds nothing.
+ *
+ * `pan`, `matrix`, `faderDb`, `mute`, `trimDb` and `polarityInvert` ramp. Without
+ * `smoothingSamples` they ramp over the session's own length for the edit's kind
+ * (`controlSmoothing`, or the default table); an explicit `smoothingSamples`, `0` included,
+ * overrides it. The input filters (`hpfHz`, `lpfHz`, `filters`) and `bypass` carry no ramp.
  */
 export abstract class StripEdits {
   /** The record's index word: a strip index, the tracks then the submixes. */
@@ -751,7 +779,7 @@ export class SubmixEdits extends StripEdits {
 
 /**
  * A live send's edits (issue #1223 D4): its gain, its mute and its 2x2 matrix, each over an
- * optional `smoothingSamples`. `routeIndex` is the send's live-route index, its position in
+ * optional `smoothingSamples` (omitted, the session's own length for the kind). `routeIndex` is the send's live-route index, its position in
  * `SessionMap.routes`; `LiveControlEdits.route(id)` computes it. The record's `rack` and
  * `channel` are not applicable (`255`). The engine holds the gain and the matrix to the prepared
  * route's domain and refuses a value outside it with `domain`.
@@ -794,7 +822,8 @@ export class RouteEdits {
 
 /**
  * A VCA's live edits (issue #1246 D4): its per-lane fader offset and mute, built exactly as a
- * strip's `faderDb` and `mute` are, over an optional lane and `smoothingSamples`. `vcaIndex` is
+ * strip's `faderDb` and `mute` are, over an optional lane and `smoothingSamples` (omitted, the
+ * session's own length for the kind). `vcaIndex` is
  * the VCA's position in `SessionMap.vcas`; `LiveControlEdits.vca(id)` computes it. The record's
  * `rack` is not applicable (`255`). A VCA has no audio path: the engine adds the offset to every
  * member's own fader, and its mute mutes every member.

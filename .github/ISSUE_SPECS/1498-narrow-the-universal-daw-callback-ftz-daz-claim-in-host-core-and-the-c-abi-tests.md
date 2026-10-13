@@ -78,7 +78,7 @@ FTZ and DAZ set. No code, test logic or emitted byte changes.
    attempt.
 2. **No codegen change.** The C ABI caller audit (`./target/release/audit capi`, after
    `cargo build --locked --release -p audit -p bench -p capi -p session-validator`) reports
-   `pcm_digest` `cb10fbface44a3a4` (or the base's value), 0 allocations, 0 syscalls; the browser
+   the same `pcm_digest` as on the base commit, 0 allocations, 0 syscalls; the browser
    module digest equals the base's (`scripts/build-web-audioworklet.sh --named-twin`).
 3. **Existing gates.** `cargo fmt --all -- --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --locked
    -p host-core --no-deps`, `cargo test --locked -p capi` (the doc comment is on a test; it must

@@ -177,6 +177,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
         SessionEdit::SetTrackBuiltins {
             track_id: track_id.clone(),
             builtins: track.builtins.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
@@ -222,6 +223,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
@@ -245,10 +247,12 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
         SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: track.fader.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
             matrix_or_pan: track.matrix_or_pan.clone(),
+            ramp_samples: None,
         },
         SessionEdit::UpsertSubmix {
             submix: Submix::unity(id("drums"), &session.console),
@@ -279,18 +283,22 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
         SessionEdit::SetRouteChannelMatrix {
             route_id: route.id.clone(),
             channel_matrix: route.channel_matrix.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetRouteGainDb {
             route_id: route.id.clone(),
             gain_db: route.gain_db,
+            ramp_samples: None,
         },
         SessionEdit::SetRouteMute {
             route_id: route.id.clone(),
             mute: true,
+            ramp_samples: None,
         },
         SessionEdit::SetRouteFollowsMute {
             route_id: route.id.clone(),
             follows_mute: true,
+            ramp_samples: None,
         },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
@@ -808,6 +816,7 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         SessionEdit::SetTrackBuiltins {
             track_id: track_id.clone(),
             builtins: full_track.builtins.clone(),
+            ramp_samples: None,
         },
     ];
     for (rack_name, rack) in [
@@ -884,18 +893,21 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
             rack_name: RackName::Console,
             effect_id: native.id.clone(),
             link_mode: LinkMode::DualMono,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
             rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
             link_mode: LinkMode::Maximum,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
             rack_name: RackName::Builtins,
             effect_id: high.id.clone(),
             link_mode: LinkMode::Average,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
@@ -935,10 +947,12 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: full_track.fader.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
             matrix_or_pan: full_track.matrix_or_pan.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id,
@@ -949,6 +963,7 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
                 rr: 1.0,
                 smoothing_samples: 32,
             },
+            ramp_samples: None,
         },
     ]);
     let bytes = encode(&edits);
@@ -1100,26 +1115,31 @@ fn console_declaration_and_track_entry_opcodes_round_trip_canonically() {
     let edits = vec![
         SessionEdit::SetConsole {
             console: full.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetConsole {
             console: session::Console {
                 pre_insert: Vec::new(),
                 post_insert: full.post_insert.clone(),
             },
+            ramp_samples: None,
         },
         SessionEdit::SetConsole {
             console: session::Console {
                 pre_insert: Vec::new(),
                 post_insert: Vec::new(),
             },
+            ramp_samples: None,
         },
         SessionEdit::SetTrackConsole {
             track_id: id("vocal"),
             console: entries,
+            ramp_samples: None,
         },
         SessionEdit::SetTrackConsole {
             track_id: id("vocal"),
             console: Vec::new(),
+            ramp_samples: None,
         },
     ];
     let bytes = encode(&edits);
@@ -1435,18 +1455,22 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
                 rl: 0.5,
                 rr: 1.0,
             },
+            ramp_samples: None,
         },
         SessionEdit::SetRouteGainDb {
             route_id: route.id.clone(),
             gain_db: -1.5,
+            ramp_samples: None,
         },
         SessionEdit::SetRouteMute {
             route_id: route.id.clone(),
             mute: true,
+            ramp_samples: None,
         },
         SessionEdit::SetRouteFollowsMute {
             route_id: route.id.clone(),
             follows_mute: true,
+            ramp_samples: None,
         },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
@@ -1771,6 +1795,7 @@ fn vca_edits_round_trip_and_members_decode_empty() {
             SessionEdit::SetVcaFader {
                 vca_id: vca.id.clone(),
                 fader,
+                ramp_samples: None,
             },
             SessionEdit::RemoveVca {
                 vca_id: vca.id.clone(),
@@ -1829,4 +1854,160 @@ fn vca_edits_round_trip_and_members_decode_empty() {
         })
     );
     assert_eq!(parse(&["not a stable id"]), Err(DecodeError::InvalidTlv));
+}
+
+/// Every live-value edit, with the ramp length set to `ramp`. The 64-opcode corpus predates the
+/// console and VCA edits, so those three are built here.
+fn live_value_edits_with_ramp(ramp: Option<u32>) -> Vec<SessionEdit> {
+    let session = parse_session_json(include_str!(
+        "../../../../fixtures/session/v1/canonical.json"
+    ))
+    .expect("fixture");
+    let mut edits = all_opcode_edits_64();
+    edits.retain(|edit| schema::session::ramp_samples_field(edit.opcode()).is_some());
+    edits.extend([
+        SessionEdit::SetConsole {
+            console: session.console.clone(),
+            ramp_samples: None,
+        },
+        SessionEdit::SetTrackConsole {
+            track_id: session.tracks[0].id.clone(),
+            console: session.tracks[0].console.clone(),
+            ramp_samples: None,
+        },
+        SessionEdit::SetVcaFader {
+            vca_id: id("drums"),
+            fader: session.tracks[0].fader.clone(),
+            ramp_samples: None,
+        },
+    ]);
+    for edit in &mut edits {
+        match edit {
+            SessionEdit::SetConsole { ramp_samples, .. }
+            | SessionEdit::SetTrackBuiltins { ramp_samples, .. }
+            | SessionEdit::SetEffectLinkMode { ramp_samples, .. }
+            | SessionEdit::SetTrackFader { ramp_samples, .. }
+            | SessionEdit::SetTrackMatrixOrPan { ramp_samples, .. }
+            | SessionEdit::SetTrackConsole { ramp_samples, .. }
+            | SessionEdit::SetRouteChannelMatrix { ramp_samples, .. }
+            | SessionEdit::SetRouteGainDb { ramp_samples, .. }
+            | SessionEdit::SetRouteMute { ramp_samples, .. }
+            | SessionEdit::SetRouteFollowsMute { ramp_samples, .. }
+            | SessionEdit::SetVcaFader { ramp_samples, .. } => *ramp_samples = ramp,
+            other => panic!("{other:?} has no ramp_samples field"),
+        }
+    }
+    edits
+}
+
+/// #1394 gate 1: each of the eleven live-value edits round-trips with `ramp_samples` absent, an
+/// explicit 0 and 96000 (one second at the highest launch rate), and the three encodings differ.
+///
+/// Red if the encoder and the decoder disagree on the optional field (a wrong field ID or wire
+/// type, a dropped field count), or if an absent field decodes as 0: an explicit 0 steps the edit
+/// and an absent one means the session default, so they must stay different edits.
+#[test]
+fn live_value_edits_round_trip_their_optional_ramp_length() {
+    let codec = ProtocolCodec::default();
+    let mut encodings = Vec::new();
+    for ramp in [None, Some(0), Some(96_000)] {
+        let edits = live_value_edits_with_ramp(ramp);
+        assert_eq!(edits.len(), 11, "every live-value opcode is in the corpus");
+        assert!(edits.iter().all(|edit| edit.ramp_samples() == ramp));
+        let bytes = encode(&edits);
+        let decoded = codec
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("live-value edits decode");
+        assert_eq!(decoded.edits, edits, "ramp {ramp:?}");
+        assert!(decoded.edits.iter().all(|edit| edit.ramp_samples() == ramp));
+        assert_eq!(encode(&decoded.edits), bytes, "ramp {ramp:?} re-encodes");
+        encodings.push(bytes);
+    }
+    assert!(
+        encodings[0] != encodings[1] && encodings[1] != encodings[2],
+        "absent, 0 and 96000 are three different encodings"
+    );
+}
+
+/// #1365 gate 1: `SetControlSmoothing` with `Some` lengths (a zero, a negative zero and the 1000 ms
+/// bound included) and with `None` encodes and decodes to the same edit and re-encodes to the same
+/// bytes, and the two encodings differ. A message missing one of its three lengths, a negative
+/// length, 1000.5 and a non-finite length are refused at decode, whether the message is parsed
+/// alone or sits in a decoded transaction.
+///
+/// Red if the encoder and the decoder disagree on the optional field or on a length's field ID,
+/// if `None` is read as an empty or default message, if a partial message is completed with a
+/// default, or if a length outside `[0, 1000]` is accepted and left to a later validation.
+#[test]
+fn set_control_smoothing_round_trips_and_decode_refuses_a_partial_or_out_of_range_message() {
+    let codec = ProtocolCodec::default();
+    let lengths = |mute_ms, fader_ms, pan_ms| session::ControlSmoothing {
+        mute_ms,
+        fader_ms,
+        pan_ms,
+    };
+    let mut encodings = Vec::new();
+    for control_smoothing in [
+        Some(lengths(5.0, 15.0, 25.0)),
+        Some(lengths(0.0, -0.0, 1000.0)),
+        None,
+    ] {
+        let edits = [SessionEdit::SetControlSmoothing { control_smoothing }];
+        let bytes = encode(&edits);
+        let decoded = codec
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("SetControlSmoothing decodes");
+        assert_eq!(decoded.edits, edits, "{control_smoothing:?}");
+        assert_eq!(
+            encode(&decoded.edits),
+            bytes,
+            "{control_smoothing:?} re-encodes"
+        );
+        encodings.push(bytes);
+    }
+    assert!(encodings[0] != encodings[1] && encodings[1] != encodings[2]);
+
+    // The three fields of one message, hand-built so a field can be left out.
+    let f32_field = |id: u16, value: f32| (id, WIRE_F32, true, value.to_le_bytes().to_vec());
+    let parse = |fields: Vec<(u16, u8, bool, Vec<u8>)>| {
+        parse_control_smoothing(Message::nested(&raw_message(fields)).expect("nested"))
+    };
+    assert_eq!(
+        parse(vec![
+            f32_field(1, 5.0),
+            f32_field(2, 15.0),
+            f32_field(3, 25.0)
+        ]),
+        Ok(lengths(5.0, 15.0, 25.0))
+    );
+    for missing in 1..=3_u16 {
+        let fields = (1..=3_u16)
+            .filter(|id| *id != missing)
+            .map(|id| f32_field(id, 5.0))
+            .collect();
+        assert!(parse(fields).is_err(), "field {missing} missing");
+    }
+    for refused in [-0.001, 1000.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for position in 1..=3_u16 {
+            let fields = (1..=3_u16)
+                .map(|id| f32_field(id, if id == position { refused } else { 5.0 }))
+                .collect();
+            assert_eq!(
+                parse(fields),
+                Err(DecodeError::InvalidTlv),
+                "{refused} in field {position}"
+            );
+        }
+        // The encoder writes what it is given; the decoder of a whole transaction refuses it.
+        let bytes = encode(&[SessionEdit::SetControlSmoothing {
+            control_smoothing: Some(lengths(5.0, refused, 25.0)),
+        }]);
+        assert_eq!(
+            codec
+                .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .err(),
+            Some(DecodeError::InvalidTlv),
+            "{refused} in a transaction"
+        );
+    }
 }

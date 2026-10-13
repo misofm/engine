@@ -85,7 +85,7 @@ macro_rules! key_module { ($name:ident,$doc:literal;$($field:tt)*) => {#[doc=$do
 #[rustfmt::skip]
 pub mod keys {
  use super::FieldKey;
- key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
+ key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,CONTROL_SMOOTHING="control_smoothing":17,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
  key_module!(console,"Session console fields (decision 12).";PRE_INSERT="pre_insert":1,POST_INSERT="post_insert":2);
  key_module!(console_slot,"Console slot declaration fields.";SLOT="slot":1,IDENTITY="identity":2,QUALITY="quality":3,LINK_MODE="link_mode":4);
  key_module!(console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,PARAMS="params":3);
@@ -110,6 +110,8 @@ pub mod keys {
  // Root field 8 was `limits` (removed in 04d291dd); it is retired and never reallocated. `vcas`
  // is appended as 16 (#1240).
  key_module!(vca,"VCA group fields (#1240).";ID="id":1,FADER="fader":2,MEMBERS="members":3);
+ // `control_smoothing` is appended as root field 17 (#1054); field 8 stays retired.
+ key_module!(control_smoothing,"Control-smoothing fields (#1054).";KIND="kind":1,MUTE_MS="mute_ms":2,FADER_MS="fader_ms":3,PAN_MS="pan_ms":4);
  key_module!(output,"Output fields.";ID="id":1);
  key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5,MUTE="mute":6,FOLLOWS_MUTE="follows_mute":7);
  key_module!(route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3);
@@ -216,10 +218,10 @@ mod walk {
     }
 
     records! {
-        SessionModel=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.vcas.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
+        SessionModel=>session |s,v,o,f| [(9+s.sources.len()+s.tracks.len()+s.submixes.len()+s.vcas.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
           v.u32(f::SCHEMA_VERSION,s.schema_version),v.id(f::SESSION_ID,&s.session_id),v.u64(f::REVISION,s.revision),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),v.u32(f::QUANTUM_FRAMES,s.quantum_frames),
           s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),
-          sorted_array(f::SOURCES,&s.sources,o,v),s.console.record(Some(f::CONSOLE),o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),sorted_array(f::VCAS,&s.vcas,o,v),
+          sorted_array(f::SOURCES,&s.sources,o,v),s.console.record(Some(f::CONSOLE),o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),sorted_array(f::VCAS,&s.vcas,o,v),s.control_smoothing.record(Some(f::CONTROL_SMOOTHING),o,v),
           sorted_array(f::OUTPUTS,&s.outputs,o,v),sorted_array(f::ROUTES,&s.routes,o,v),sorted_array(f::AUTOMATION,&s.automation,o,v)
         }
         RenderProfile=>render_profile |s,v,_o,f| [2] {v.id(f::ID,&s.id),v.token(f::MODE,token(s.mode.token(),s.mode.wire()))}
@@ -281,6 +283,12 @@ mod walk {
         [Self::Pan { left, right, smoothing_samples }]=>4 {v.wire_tag(token("pan",1)),v.f32(f::LEFT,*left),v.f32(f::RIGHT,*right),v.u32(f::PAN_SMOOTHING,*smoothing_samples)}
         [Self::Matrix { ll, lr, rl, rr, smoothing_samples }]=>6 {
           v.wire_tag(token("matrix",2)),v.f32(f::LL,*ll),v.f32(f::LR,*lr),v.f32(f::RL,*rl),v.f32(f::RR,*rr),v.u32(f::MATRIX_SMOOTHING,*smoothing_samples)
+        }
+      }
+      Option<ControlSmoothing> => control_smoothing |v,f,_o| {
+        [None]=>1 {v.token(f::KIND,token("default",1))}
+        [Some(ControlSmoothing { mute_ms, fader_ms, pan_ms })]=>4 {
+          v.token(f::KIND,token("explicit",2)),v.f32(f::MUTE_MS,*mute_ms),v.f32(f::FADER_MS,*fader_ms),v.f32(f::PAN_MS,*pan_ms)
         }
       }
       RouteSource=>route_source |v,f,_o| {

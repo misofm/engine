@@ -111,7 +111,7 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     let mut second = model.sources[0].clone();
     second.id = session::StableId::parse("alpha-source").expect("id");
     model.sources.insert(0, second);
-    let expected_root = 8
+    let expected_root = 9
         + model.sources.len()
         + model.tracks.len()
         + model.submixes.len()
@@ -123,6 +123,13 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     let mut declared = Trace::default();
     model.visit(WalkOrder::Declared, &mut declared).unwrap();
     assert_eq!(declared.records[0], (None, expected_root as u32));
+    // #1054: `control_smoothing` is a record of its own, one field for `default` (its kind).
+    assert!(
+        declared
+            .records
+            .contains(&(Some(keys::session::CONTROL_SMOOTHING), 1)),
+        "a default control_smoothing declares one wire field"
+    );
     assert!(
         declared.records.contains(&(None, 8)),
         "a track with no console entries has eight wire fields"
@@ -367,6 +374,7 @@ fn vca_root_field_is_sixteen_and_members_are_id_items() {
             ("tracks", 10),
             ("submixes", 11),
             ("vcas", 16),
+            ("control_smoothing", 17),
             ("outputs", 12),
             ("routes", 13),
             ("automation", 14),

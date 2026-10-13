@@ -1,11 +1,11 @@
 //! Explicit typed walk over a strict, spanned JSON value tree.
 use crate::{
-    Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
-    DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
-    DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
-    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel,
-    Sidechain, SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track,
-    Vca,
+    Automation, AutomationSegment, AutomationTarget, CONTROL_SMOOTHING_MS_MAXIMUM, ChannelBuiltins,
+    ChannelMatrix, ControlSmoothing, Diagnostic, DiagnosticCode,
+    DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect,
+    EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack, RenderProfile, Route,
+    RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Sidechain,
+    SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track, Vca,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     json_preflight,
     model::ClosedToken,
@@ -729,6 +729,7 @@ fn parse_root(
             "tracks",
             "submixes",
             "vcas",
+            "control_smoothing",
             "outputs",
             "routes",
             "automation",
@@ -747,6 +748,13 @@ fn parse_root(
     let tracks = parse_list(parser, table, "tracks", &path, parse_track);
     let submixes = parse_list(parser, table, "submixes", &path, parse_submix);
     let vcas = parse_list(parser, table, "vcas", &path, parse_vca);
+    let control_smoothing = parse_record(
+        parser,
+        table,
+        "control_smoothing",
+        &path,
+        parse_control_smoothing,
+    );
     let outputs = parse_list(parser, table, "outputs", &path, parse_output);
     let routes = parse_list(parser, table, "routes", &path, parse_route);
     let automation = parse_list(parser, table, "automation", &path, parse_automation);
@@ -763,6 +771,7 @@ fn parse_root(
         tracks,
         submixes,
         vcas,
+        control_smoothing,
         outputs,
         routes,
         automation,
@@ -780,6 +789,7 @@ fn parse_root(
             Some(tracks),
             Some(submixes),
             Some(vcas),
+            Some(control_smoothing),
             Some(outputs),
             Some(routes),
             Some(automation),
@@ -796,6 +806,7 @@ fn parse_root(
             tracks,
             submixes,
             vcas,
+            control_smoothing,
             outputs,
             routes,
             automation,
@@ -1166,6 +1177,52 @@ fn parse_param(
         unit: unit?,
         value: value?,
     })
+}
+
+/// `control_smoothing` (#1054): `{ "kind": "default" }` is `None`; `{ "kind": "explicit", "mute_ms",
+/// "fader_ms", "pan_ms" }` is `Some`, each length an `f32` in `[0, CONTROL_SMOOTHING_MS_MAXIMUM]`.
+fn parse_control_smoothing(
+    parser: &mut Parser,
+    table: TableRef<'_>,
+    path: DiagnosticPath,
+) -> Option<Option<ControlSmoothing>> {
+    parser.keys(table, &["kind", "mute_ms", "fader_ms", "pan_ms"], &path);
+    match parser.token(table, "kind", &path)? {
+        "default" => {
+            for key in ["mute_ms", "fader_ms", "pan_ms"] {
+                parser.reject_key(
+                    table,
+                    key,
+                    path.key(key),
+                    "a default control_smoothing cannot contain a length",
+                );
+            }
+            Some(None)
+        }
+        "explicit" => {
+            let mut length = |key: &'static str| {
+                parser.bounded(table, key, &path, 0.0, CONTROL_SMOOTHING_MS_MAXIMUM)
+            };
+            let mute_ms = length("mute_ms");
+            let fader_ms = length("fader_ms");
+            let pan_ms = length("pan_ms");
+            Some(Some(ControlSmoothing {
+                mute_ms: mute_ms?,
+                fader_ms: fader_ms?,
+                pan_ms: pan_ms?,
+            }))
+        }
+        _ => {
+            parser.error_field(
+                table,
+                "kind",
+                &path,
+                DiagnosticCode::InvalidEnum,
+                "expected default or explicit",
+            );
+            None
+        }
+    }
 }
 
 fn parse_sidechain(
