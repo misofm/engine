@@ -166,3 +166,9 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   `docs/CONTROL_PROTOCOL_CONFORMANCE.md`, `fuzz/corpus/complete-schema-manifest.md` and the fault
   injection search strings of `scripts/check-protocol-wasm-parity.sh` (which still named the value
   from before #1551).
+- **D12. Ramp conflict (batch 2 review fold).** Several `SET_CONTROL` rows share one `(target,
+  row)` ramp key, so "last edit decides" would let the later edit silently set the earlier one's
+  length. One transaction that resolves two different lengths for one key through `SET_CONTROL`
+  (an explicit length against another, or against none) is refused at the later edit with the new
+  code `control.ramp.conflict` (`ControlError::RampConflict`, path `edits[i]`), before any write;
+  equal lengths agree. A per-kind edit is not a control write and keeps its last-edit-decides rule.

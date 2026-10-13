@@ -572,9 +572,10 @@ fn set_control_records_the_row_its_address_names() {
             0.0,
             Some(7),
         ),
-        // The second track's fader is set, then set again without a length.
+        // The second track's fader is set by address, then rewritten by the per-kind edit without
+        // a length: the per-kind edit is not a control write, so the last edit decides.
         set_control(builtin("second", FADER_DB, Lane::Both), 0.0, Some(5)),
-        set_control(builtin("second", FADER_DB, Lane::Both), 0.0, None),
+        fader(&store, "second", None),
     ];
     let entries = recorded(&store, &edits);
     let expected = vec![
@@ -682,6 +683,79 @@ fn a_refused_set_control_refuses_the_whole_transaction() {
             )
             .is_ok()
     );
+    assert_eq!(store.revision(), revision);
+    assert_eq!(store.canonical_snapshot(), before);
+}
+
+/// Batch 2 review fold item 1: several `SET_CONTROL` rows share one ramp key, and one transaction
+/// that gives the key two lengths (an explicit one against another, or against none) is refused
+/// at the later edit with `control.ramp.conflict` and nothing is written; equal lengths agree; a
+/// per-kind edit keeps its last-edit-decides behaviour.
+///
+/// Red if the later control silently decides the length of the earlier one (the left fader at 480
+/// samples would then ramp the right at the session default), or if equal lengths are refused.
+#[test]
+fn two_controls_that_share_a_ramp_row_must_agree_on_its_length() {
+    let store = store();
+    let revision = store.revision();
+    let before = store.canonical_snapshot();
+    let prepare =
+        |edits: &[SessionEdit]| store.prepare_transaction(ExpectedRevision::Exact(revision), edits);
+    let conflict = |index: usize| SessionStoreError::Edit {
+        operation_index: index,
+        error: SessionEditError::Control(ControlError::RampConflict),
+    };
+    let left = |ramp| set_control(builtin("vocal", FADER_DB, Lane::Left), -1.0, ramp);
+    let right = |ramp| set_control(builtin("vocal", FADER_DB, Lane::Right), -2.0, ramp);
+    // An explicit length against none, in either order, and against another explicit length.
+    assert_eq!(
+        prepare(&[left(Some(480)), right(None)]).err(),
+        Some(conflict(1))
+    );
+    assert_eq!(
+        prepare(&[left(None), right(Some(480))]).err(),
+        Some(conflict(1))
+    );
+    assert_eq!(
+        prepare(&[left(Some(480)), right(Some(240))]).err(),
+        Some(conflict(1))
+    );
+    // The same control twice with two lengths shares its own key.
+    assert_eq!(
+        prepare(&[left(Some(480)), left(Some(240))]).err(),
+        Some(conflict(1))
+    );
+    // The pan and the matrix rows share the matrix key; trim and polarity share the input key.
+    assert_eq!(
+        prepare(&[
+            set_control(builtin("vocal", PAN, Lane::Both), 0.25, Some(9)),
+            set_control(builtin("vocal", PAN, Lane::Both), 0.5, None),
+        ])
+        .err(),
+        Some(conflict(1))
+    );
+    // Equal lengths agree, and the recorded length is the shared one.
+    let prepared = prepare(&[left(Some(480)), right(Some(480))]).expect("equal lengths agree");
+    assert_eq!(
+        prepared.edit_ramps().entries(),
+        vec![(strip("vocal"), EditRampRow::Fader, 480)]
+    );
+    assert!(prepare(&[left(None), right(None)]).is_ok());
+    // A different key of the same strip is independent.
+    assert!(
+        prepare(&[
+            left(Some(480)),
+            set_control(builtin("vocal", MUTE, Lane::Left), 1.0, None)
+        ])
+        .is_ok()
+    );
+    // A per-kind edit between the two is not a control write: the last edit decides.
+    assert!(prepare(&[left(Some(480)), fader(&store, "vocal", None), right(None)]).is_ok());
+    // An upsert of the strip clears its lengths, control writes included.
+    let upsert = SessionEdit::UpsertTrack {
+        track: vocal(&store).clone(),
+    };
+    assert!(prepare(&[left(Some(480)), upsert, right(None)]).is_ok());
     assert_eq!(store.revision(), revision);
     assert_eq!(store.canonical_snapshot(), before);
 }

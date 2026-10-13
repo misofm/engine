@@ -26,6 +26,11 @@ pub enum ControlError {
     /// `control.monitor`: [`set`](crate::set) was asked to write a monitor row (solo). A monitor
     /// value lives in the overlay, which is not a session mutation; the overlay writes it.
     Monitor,
+    /// `control.ramp.conflict`: one transaction gave two controls that share one ramp row two
+    /// different ramp lengths (an explicit length against another, or against none, which means
+    /// the session's `control_smoothing`). The row can carry one length, so the later edit is
+    /// refused rather than silently deciding for both.
+    RampConflict,
 }
 
 impl ControlError {
@@ -40,6 +45,7 @@ impl ControlError {
             Self::Domain => "control.domain",
             Self::RampFixed => "control.ramp.fixed",
             Self::Monitor => "control.monitor",
+            Self::RampConflict => "control.ramp.conflict",
         }
     }
 }

@@ -191,6 +191,10 @@ model), refuses, before any write, with:
   enumeration choice, a rate-keyed frequency above its rate bound;
 - `control.ramp.fixed`: an explicit `ramp_samples` on a row whose ramp is fixed (an ack must not
   hide an ignored field).
+- `control.ramp.conflict`: two controls that share one ramp row (the fader's lanes, the pan and the
+  matrix rows, trim and polarity, a route's mute and follows-mute) got two different lengths in one
+  transaction, an explicit one against another or against none (batch 2 review fold; refused at the
+  later edit, before any write).
 
 Values are not snapped to the step lattice (as today for session values). A value equal to the
 committed value is accepted and changes nothing (#1315's rule: its commanded state holds).

@@ -4844,9 +4844,18 @@ mod set_control {
                 "ramp above the rate",
                 vec![
                     good.clone(),
-                    set(builtin(name, FADER_DB, Lane::Both), -3.0, Some(48_001)),
+                    set(builtin(name, PAN, Lane::Both), 0.25, Some(48_001)),
                 ],
                 "session.edit.ramp_out_of_range",
+                1,
+            ),
+            (
+                "ramp conflict",
+                vec![
+                    good.clone(),
+                    set(builtin(name, FADER_DB, Lane::Both), -3.0, Some(480)),
+                ],
+                "control.ramp.conflict",
                 1,
             ),
         ];
