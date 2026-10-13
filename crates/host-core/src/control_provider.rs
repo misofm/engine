@@ -3,19 +3,20 @@
 use std::sync::Arc;
 
 use effect_compiler::{EffectPreparedEntry, EffectRack};
+use effect_contract::control::RebuildReason;
 use effect_contract::{
     AutomationRate, ParameterChannel as PreparedChannel, ParameterChannelPolicy, ParameterDomain,
     ParameterMapping, ParameterUnit,
 };
 use protocol::{
-    ControlProvider, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
-    CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterAutomationRate, ParameterChannel, ParameterDescriptor,
-    ParameterDomain as ProtocolDomain, ParameterHandle, ParameterMapping as ProtocolMapping,
-    ParameterMetadataPage, ParameterMetadataRequest, ParameterProviderError, ParameterRack,
-    ParameterStatePage, ParameterStateRecord, ParameterStateRequest, ParameterUnit as ProtocolUnit,
-    ParameterValueKind, SampleTime, TelemetryConfiguration, TelemetryCounters, TransportSetRequest,
-    TransportSnapshot, TransportState,
+    ControlAddress, ControlBody, ControlClass, ControlEntry, ControlFamily, ControlKind,
+    ControlListPage, ControlListRequest, ControlOwnerKind, ControlProvider, ControlReason,
+    ControlRow, ControlScope, ControlSection, ControlStatePage, ControlTaper,
+    ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue, CountersRequest,
+    Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EnumChoice,
+    ParameterChannel, ParameterHandle, ParameterProviderError, ParameterRack,
+    ParameterUnit as ProtocolUnit, SampleTime, TelemetryConfiguration, TelemetryCounters,
+    TransportSetRequest, TransportSnapshot, TransportState,
 };
 
 /// The counters the provider holds itself: the two telemetry counters, the canceled-automation
@@ -44,16 +45,19 @@ pub struct SessionControlProviderResources {
 }
 
 /// Fully allocated replacement catalog prepared before a structural commit is published.
+///
+/// The rows are the effect parameters of the compiled session as control rows, keyed by handle:
+/// the automation domain check reads them (`control_row`) and the live path keeps their values
+/// (`set_parameter_value`). The listed catalog, built from `controls::list`, replaces them
+/// (#1552); until then `control_list` and `control_state` answer `NotFound`.
 pub struct PreparedSessionControlCatalog {
-    parameter_metadata: Vec<ParameterDescriptor>,
-    parameter_state: Vec<ParameterStateRecord>,
+    rows: Vec<ControlEntry>,
 }
 
 /// Production control provider whose catalog and state are derived from a compiled session.
 pub struct SessionControlProvider {
     sample_source: Arc<dyn PlanSampleSource>,
-    parameter_metadata: Vec<ParameterDescriptor>,
-    parameter_state: Vec<ParameterStateRecord>,
+    rows: Vec<ControlEntry>,
     counter_snapshot: Vec<CounterValue>,
     diagnostics: Vec<Diagnostic>,
     diagnostic_live: Vec<bool>,
@@ -69,43 +73,40 @@ impl SessionControlProvider {
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
     ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
-        let descriptor_count = catalog.parameter_metadata.len();
+        let row_count = catalog.rows.len();
         let mut enum_count = 0_usize;
         let mut string_bytes = 0_usize;
         let mut largest_string = 0_u64;
         let mut largest_enum = 0_u64;
-        for descriptor in &catalog.parameter_metadata {
-            enum_count = enum_count
-                .checked_add(descriptor.enum_choices.len())
+        let mut charge = |value: &str| -> Result<(), SessionControlProviderError> {
+            string_bytes = string_bytes
+                .checked_add(value.len())
                 .ok_or(SessionControlProviderError)?;
-            largest_enum = largest_enum.max(bytes::<EnumChoice>(descriptor.enum_choices.len())?);
-            for value in [
-                descriptor.track_id.as_str(),
-                descriptor.effect_id.as_str(),
-                descriptor.display_name.as_deref().unwrap_or_default(),
-                descriptor.display_unit.as_deref().unwrap_or_default(),
-            ] {
-                string_bytes = string_bytes
-                    .checked_add(value.len())
+            largest_string = largest_string
+                .max(u64::try_from(value.len()).map_err(|_| SessionControlProviderError)?);
+            Ok(())
+        };
+        for entry in &catalog.rows {
+            charge(entry.address.owner_id.as_deref().unwrap_or_default())?;
+            charge(entry.address.slot_id.as_deref().unwrap_or_default())?;
+            if let ControlBody::Control(row) = &entry.body {
+                enum_count = enum_count
+                    .checked_add(row.choices.len())
                     .ok_or(SessionControlProviderError)?;
-                largest_string = largest_string
-                    .max(u64::try_from(value.len()).map_err(|_| SessionControlProviderError)?);
-            }
-            for choice in &descriptor.enum_choices {
-                string_bytes = string_bytes
-                    .checked_add(choice.label.len())
-                    .ok_or(SessionControlProviderError)?;
-                largest_string = largest_string.max(
-                    u64::try_from(choice.label.len()).map_err(|_| SessionControlProviderError)?,
-                );
+                largest_enum = largest_enum.max(bytes::<EnumChoice>(row.choices.len())?);
+                charge(&row.name)?;
+                charge(&row.display_name)?;
+                charge(&row.display_unit)?;
+                charge(row.reopen.as_deref().unwrap_or_default())?;
+                for choice in &row.choices {
+                    charge(&choice.label)?;
+                }
             }
         }
-        let metadata_bytes = bytes::<ParameterDescriptor>(descriptor_count)?;
-        let state_bytes = bytes::<ParameterStateRecord>(descriptor_count)?;
+        let metadata_bytes = bytes::<ControlEntry>(row_count)?;
         let enum_bytes = bytes::<EnumChoice>(enum_count)?;
         let catalog_retained_bytes = metadata_bytes
-            .checked_add(state_bytes)
-            .and_then(|value| value.checked_add(enum_bytes))
+            .checked_add(enum_bytes)
             .and_then(|value| {
                 u64::try_from(string_bytes)
                     .ok()
@@ -131,7 +132,6 @@ impl SessionControlProvider {
             catalog_retained_bytes,
             fixed_retained_bytes,
             largest_allocation_bytes: metadata_bytes
-                .max(state_bytes)
                 .max(largest_enum)
                 .max(largest_string)
                 .max(diagnostics_bytes)
@@ -154,8 +154,7 @@ impl SessionControlProvider {
     ) -> Result<Self, SessionControlProviderError> {
         let mut provider = Self {
             sample_source,
-            parameter_metadata: Vec::new(),
-            parameter_state: Vec::new(),
+            rows: Vec::new(),
             counter_snapshot: Vec::new(),
             diagnostics: Vec::new(),
             diagnostic_live: Vec::new(),
@@ -195,17 +194,14 @@ impl SessionControlProvider {
     pub fn prepare_session(
         entries: &[EffectPreparedEntry],
     ) -> Result<PreparedSessionControlCatalog, SessionControlProviderError> {
-        let (metadata, state) = build_parameter_catalog(entries)?;
         Ok(PreparedSessionControlCatalog {
-            parameter_metadata: metadata,
-            parameter_state: state,
+            rows: build_parameter_catalog(entries)?,
         })
     }
 
     /// Publish one fully prepared revision-scoped catalog without allocation or failure.
     pub fn replace_session_catalog(&mut self, catalog: PreparedSessionControlCatalog) {
-        self.parameter_metadata = catalog.parameter_metadata;
-        self.parameter_state = catalog.parameter_state;
+        self.rows = catalog.rows;
     }
 
     /// The catalog handle of one effect parameter row (issue #1264 D4), or `None` when the
@@ -223,14 +219,20 @@ impl SessionControlProvider {
         parameter_id: u32,
         channel: ParameterChannel,
     ) -> Option<u32> {
-        self.parameter_metadata
+        let section = match rack {
+            ParameterRack::Inserts => ControlSection::Inserts,
+            ParameterRack::Builtins => ControlSection::Builtins,
+            ParameterRack::Console => ControlSection::Console,
+        };
+        self.rows
             .iter()
             .find(|row| {
-                row.parameter_id == parameter_id
-                    && row.channel == channel
-                    && row.rack == rack
-                    && row.track_id == track_id
-                    && row.effect_id == effect_id
+                let address = &row.address;
+                address.control == Some(parameter_id)
+                    && address.lane == Some(channel)
+                    && address.section == section
+                    && address.owner_id.as_deref() == Some(track_id)
+                    && address.slot_id.as_deref() == Some(effect_id)
             })
             .map(|row| row.handle)
     }
@@ -241,11 +243,10 @@ impl SessionControlProvider {
     /// Allocation-free. A handle the catalog does not hold changes nothing; the caller looks every
     /// handle up with [`Self::parameter_handle`] before it commits, so that cannot happen.
     pub fn set_parameter_value(&mut self, handle: u32, value: f32) {
-        if let Ok(index) = self
-            .parameter_state
-            .binary_search_by_key(&handle, |record| record.handle)
+        if let Ok(index) = self.rows.binary_search_by_key(&handle, |row| row.handle)
+            && let ControlBody::Control(row) = &mut self.rows[index].body
         {
-            self.parameter_state[index].value = value;
+            row.value = value;
         }
     }
 
@@ -303,57 +304,31 @@ impl ControlProvider for SessionControlProvider {
         SampleTime(self.sample_source.next_absolute_sample())
     }
 
-    fn parameter_metadata(
+    fn control_list(
         &mut self,
-        request: ParameterMetadataRequest,
-    ) -> Result<ParameterMetadataPage, ParameterProviderError> {
-        // The catalog builder emits strictly increasing handles, including after replacement.
-        let start = self
-            .parameter_metadata
-            .partition_point(|descriptor| descriptor.handle <= request.after_handle);
-        let remaining = &self.parameter_metadata[start..];
-        let descriptors = remaining
-            .iter()
-            .take(usize::from(request.limit))
-            .cloned()
-            .collect::<Vec<_>>();
-        let last_handle = descriptors
-            .last()
-            .map_or(request.after_handle, |descriptor| descriptor.handle);
-        Ok(ParameterMetadataPage {
-            last_handle,
-            eof: descriptors.len() == remaining.len(),
-            descriptors,
-        })
+        _request: &ControlListRequest,
+    ) -> Result<ControlListPage, ParameterProviderError> {
+        // Served from `controls::list` by #1552; the C ABI keeps capability bit 7 clear until
+        // then, so the controller refuses the message before it reaches here.
+        Err(ParameterProviderError::NotFound)
     }
 
-    fn parameter_state(
+    fn control_state(
         &mut self,
-        request: &ParameterStateRequest,
-    ) -> Result<ParameterStatePage, ParameterProviderError> {
-        let mut records = Vec::with_capacity(request.handles.len());
-        for handle in &request.handles {
-            let index = self
-                .parameter_state
-                .binary_search_by_key(handle, |record| record.handle)
-                .map_err(|_| ParameterProviderError::NotFound)?;
-            records.push(self.parameter_state[index]);
-        }
-        Ok(ParameterStatePage {
-            observed_sample: self.sample_source.next_absolute_sample(),
-            records,
-        })
+        _request: &ControlListRequest,
+    ) -> Result<ControlStatePage, ParameterProviderError> {
+        Err(ParameterProviderError::NotFound)
     }
 
-    fn parameter_descriptor(
+    fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ParameterDescriptor, ParameterProviderError> {
+    ) -> Result<&ControlEntry, ParameterProviderError> {
         let index = self
-            .parameter_metadata
-            .binary_search_by_key(&handle.0, |descriptor| descriptor.handle)
+            .rows
+            .binary_search_by_key(&handle.0, |row| row.handle)
             .map_err(|_| ParameterProviderError::NotFound)?;
-        Ok(&self.parameter_metadata[index])
+        Ok(&self.rows[index])
     }
 
     fn counters(
@@ -474,7 +449,7 @@ impl ControlProvider for SessionControlProvider {
 
 fn build_parameter_catalog(
     entries: &[EffectPreparedEntry],
-) -> Result<(Vec<ParameterDescriptor>, Vec<ParameterStateRecord>), SessionControlProviderError> {
+) -> Result<Vec<ControlEntry>, SessionControlProviderError> {
     let count = entries.iter().try_fold(0_usize, |total, entry| {
         entry
             .metadata
@@ -493,13 +468,8 @@ fn build_parameter_catalog(
     if count > u32::MAX as usize {
         return Err(SessionControlProviderError);
     }
-    let mut metadata = Vec::new();
-    let mut state = Vec::new();
-    metadata
-        .try_reserve_exact(count)
-        .map_err(|_| SessionControlProviderError)?;
-    state
-        .try_reserve_exact(count)
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(count)
         .map_err(|_| SessionControlProviderError)?;
     let mut handle = 1_u32;
     for entry in entries {
@@ -526,56 +496,102 @@ fn build_parameter_catalog(
                             && value.channel == prepared_channel
                     })
                     .ok_or(SessionControlProviderError)?;
-                let flags = u32::from(parameter.readable)
-                    | (u32::from(parameter.automatable) << 1)
-                    | (u32::from(parameter.channel_policy == ParameterChannelPolicy::PerLane) << 2);
                 // Reserved exactly, as every other catalog allocation is: `resource_report`
                 // charges these by length, and collecting through `Result<Vec<_>, _>` (which has
                 // no lower size bound) grew six choices to a capacity of eight, 64 retained bytes
                 // per EQ kind descriptor that no row charged (#1060).
-                let mut enum_choices = Vec::new();
-                enum_choices
+                let mut choices = Vec::new();
+                choices
                     .try_reserve_exact(parameter.enum_choices.len())
                     .map_err(|_| SessionControlProviderError)?;
                 for choice in parameter.enum_choices {
-                    enum_choices.push(EnumChoice {
+                    choices.push(EnumChoice {
                         value: choice.value,
                         label: try_string(choice.label)?,
                     });
                 }
-                metadata.push(ParameterDescriptor {
+                let (kind, minimum, maximum) = match parameter.domain {
+                    ParameterDomain::Continuous => (
+                        ControlKind::Continuous,
+                        parameter.minimum.unwrap_or(0.0),
+                        parameter.maximum.unwrap_or(0.0),
+                    ),
+                    ParameterDomain::Boolean => (ControlKind::Toggle, 0.0, 1.0),
+                    ParameterDomain::Enumeration => (
+                        ControlKind::Enumeration,
+                        parameter.enum_choices.first().map_or(0.0, |c| c.value),
+                        parameter.enum_choices.last().map_or(0.0, |c| c.value),
+                    ),
+                };
+                let live = parameter.automation_rate != AutomationRate::None;
+                let (reason, reason_issue, reopen) = match (live, parameter.prepared_reason) {
+                    (true, _) => (None, None, None),
+                    (false, Some(prepared)) => (
+                        Some(control_reason(prepared.reason)),
+                        match prepared.reason {
+                            RebuildReason::RuledLiveNotBuilt { issue } => Some(issue),
+                            _ => None,
+                        },
+                        Some(try_string(prepared.reopen)?),
+                    ),
+                    (false, None) => (
+                        Some(ControlReason::Correctness),
+                        None,
+                        Some(try_string("undeclared")?),
+                    ),
+                };
+                rows.push(ControlEntry {
                     handle,
-                    track_id: try_string(&entry.track_id)?,
-                    rack: protocol_rack(entry.rack),
-                    effect_id: try_string(&entry.effect_id)?,
-                    parameter_id: parameter.id.0,
-                    channel: *channel,
-                    value_kind: ParameterValueKind::F32,
-                    unit: protocol_unit(parameter.unit),
-                    domain: protocol_domain(parameter.domain),
-                    minimum: parameter.minimum,
-                    maximum: parameter.maximum,
-                    default: parameter.default_value,
-                    mapping: protocol_mapping(parameter.mapping),
-                    automation_rate: protocol_rate(parameter.automation_rate),
-                    smoothing_samples: parameter.smoothing_samples,
-                    flags,
-                    display_name: Some(try_string(parameter.display_name)?),
-                    display_unit: Some(try_string(parameter.display_unit)?),
-                    enum_choices,
+                    address: ControlAddress {
+                        owner_kind: ControlOwnerKind::Strip,
+                        owner_id: Some(try_string(&entry.track_id)?),
+                        section: control_section(entry.rack),
+                        slot_id: Some(try_string(&entry.effect_id)?),
+                        control: Some(parameter.id.0),
+                        lane: Some(*channel),
+                    },
+                    // Only what the automation domain check and the live readback use is exact:
+                    // the lattice (`step`, `precision`, `ladder`) and the ramp row belong to the
+                    // listed catalog (#1552), which replaces this one.
+                    body: ControlBody::Control(ControlRow {
+                        name: try_string(parameter.name)?,
+                        display_name: try_string(parameter.display_name)?,
+                        display_unit: try_string(parameter.display_unit)?,
+                        unit: protocol_unit(parameter.unit),
+                        kind,
+                        minimum,
+                        maximum,
+                        disabled_value: None,
+                        default: parameter.default_value,
+                        taper: control_taper(parameter.mapping, parameter.unit),
+                        step: 0.0,
+                        precision: 0,
+                        ladder: Vec::new(),
+                        choices,
+                        ramp_row: None,
+                        default_ramp_samples: parameter.smoothing_samples,
+                        class: if live {
+                            ControlClass::Live
+                        } else {
+                            ControlClass::RebuildOnly
+                        },
+                        reason,
+                        reason_issue,
+                        reopen,
+                        scope: ControlScope::Model,
+                        automatable: live && parameter.automatable,
+                        family: ControlFamily::Effect,
+                        active: true,
+                        value: prepared.value,
+                    }),
                 });
-                state.push(ParameterStateRecord {
-                    handle,
-                    flags: 1,
-                    value: prepared.value,
-                });
-                if metadata.len() < count {
+                if rows.len() < count {
                     handle = handle.checked_add(1).ok_or(SessionControlProviderError)?;
                 }
             }
         }
     }
-    Ok((metadata, state))
+    Ok(rows)
 }
 
 fn retained_telemetry(
@@ -648,28 +664,34 @@ const fn protocol_unit(value: ParameterUnit) -> ProtocolUnit {
     }
 }
 
-const fn protocol_domain(value: ParameterDomain) -> ProtocolDomain {
-    match value {
-        ParameterDomain::Continuous => ProtocolDomain::Continuous,
-        ParameterDomain::Boolean => ProtocolDomain::Boolean,
-        ParameterDomain::Enumeration => ProtocolDomain::Enumeration,
+const fn control_section(value: EffectRack) -> ControlSection {
+    match protocol_rack(value) {
+        ParameterRack::Console => ControlSection::Console,
+        ParameterRack::Inserts => ControlSection::Inserts,
+        ParameterRack::Builtins => ControlSection::Builtins,
     }
 }
 
-const fn protocol_mapping(value: ParameterMapping) -> ProtocolMapping {
-    match value {
-        ParameterMapping::Linear => ProtocolMapping::Linear,
-        ParameterMapping::Logarithmic => ProtocolMapping::Logarithmic,
-        ParameterMapping::Exponential => ProtocolMapping::Exponential,
-        ParameterMapping::Stepped => ProtocolMapping::Stepped,
+const fn control_taper(mapping: ParameterMapping, unit: ParameterUnit) -> ControlTaper {
+    match (mapping, unit) {
+        (ParameterMapping::Linear, ParameterUnit::Db) => ControlTaper::Decibel,
+        (ParameterMapping::Linear, _) => ControlTaper::Linear,
+        (ParameterMapping::Logarithmic, _) => ControlTaper::Logarithmic,
+        (ParameterMapping::Exponential, _) => ControlTaper::Exponential,
+        (ParameterMapping::Stepped, _) => ControlTaper::Stepped,
     }
 }
 
-const fn protocol_rate(value: AutomationRate) -> ParameterAutomationRate {
+const fn control_reason(value: RebuildReason) -> ControlReason {
     match value {
-        AutomationRate::Sample => ParameterAutomationRate::Sample,
-        AutomationRate::Block => ParameterAutomationRate::Block,
-        AutomationRate::None => ParameterAutomationRate::None,
+        RebuildReason::NewMemory => ControlReason::NewMemory,
+        RebuildReason::NewGraph => ControlReason::NewGraph,
+        RebuildReason::ProcessingOrder => ControlReason::ProcessingOrder,
+        RebuildReason::Latency => ControlReason::Latency,
+        RebuildReason::Glitch => ControlReason::Glitch,
+        RebuildReason::Optimisation => ControlReason::Optimisation,
+        RebuildReason::Correctness => ControlReason::Correctness,
+        RebuildReason::RuledLiveNotBuilt { .. } => ControlReason::RuledLiveNotBuilt,
     }
 }
 
@@ -831,8 +853,10 @@ mod tests {
                     }
                 };
                 for channel in channels {
-                    let metadata = &catalog.parameter_metadata[offset];
-                    let state = &catalog.parameter_state[offset];
+                    let row = &catalog.rows[offset];
+                    let ControlBody::Control(control) = &row.body else {
+                        panic!("the catalog holds control rows only");
+                    };
                     let initial = entry
                         .bank_preparation
                         .initial_values
@@ -842,13 +866,23 @@ mod tests {
                                 && value.channel == *channel
                         })
                         .expect("accepted initial value");
-                    assert_eq!(metadata.handle, expected_handle);
-                    assert_eq!(state.handle, expected_handle);
-                    assert_eq!(metadata.track_id, entry.track_id);
-                    assert_eq!(metadata.effect_id, entry.effect_id);
-                    assert_eq!(metadata.rack, protocol_rack(entry.rack));
-                    assert_eq!(metadata.parameter_id, parameter.id.0);
-                    assert_eq!(state.value.to_bits(), initial.value.to_bits());
+                    assert_eq!(row.handle, expected_handle);
+                    assert_eq!(
+                        row.address.owner_id.as_deref(),
+                        Some(entry.track_id.as_str())
+                    );
+                    assert_eq!(
+                        row.address.slot_id.as_deref(),
+                        Some(entry.effect_id.as_str())
+                    );
+                    assert_eq!(row.address.section, control_section(entry.rack));
+                    assert_eq!(row.address.control, Some(parameter.id.0));
+                    assert_eq!(control.name, parameter.name);
+                    assert_eq!(
+                        control.automatable,
+                        parameter.automatable && parameter.automation_rate != AutomationRate::None
+                    );
+                    assert_eq!(control.value.to_bits(), initial.value.to_bits());
                     saw_override |= initial.value.to_bits() != parameter.default_value.to_bits();
                     saw_both |= *channel == PreparedChannel::Both;
                     saw_left |= *channel == PreparedChannel::Left;
@@ -858,7 +892,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(offset, catalog.parameter_metadata.len());
+        assert_eq!(offset, catalog.rows.len());
         assert!(saw_both && saw_left && saw_right && saw_override);
 
         let replacement_entries = &effects.entries[..1];
@@ -877,47 +911,61 @@ mod tests {
         )
         .expect("provider");
         provider.replace_session_catalog(replacement);
-        let page = provider
-            .parameter_metadata(ParameterMetadataRequest {
-                after_handle: 0,
-                limit: u16::MAX,
-            })
-            .expect("replacement metadata");
-        assert!(page.eof);
-        assert!(page.descriptors.iter().all(|row| {
-            row.track_id == replacement_entries[0].track_id
-                && row.effect_id == replacement_entries[0].effect_id
+        assert!(provider.rows.iter().all(|row| {
+            row.address.owner_id.as_deref() == Some(replacement_entries[0].track_id.as_str())
+                && row.address.slot_id.as_deref() == Some(replacement_entries[0].effect_id.as_str())
         }));
+        assert_eq!(
+            provider.rows.len(),
+            provider.rows.last().map_or(0, |row| row.handle as usize),
+            "handles run from 1 without a gap, including after replacement"
+        );
     }
 
     #[test]
     fn catalog_state_clock_transport_counters_and_diagnostics_are_session_backed() {
         let (mut provider, clock) = provider();
-        let page = provider
-            .parameter_metadata(ParameterMetadataRequest {
-                after_handle: 0,
-                limit: u16::MAX,
-            })
-            .expect("metadata");
         // #805 appends six prepared-only EQ HPF/LPF rows; each row is exposed for both lanes.
-        assert_eq!(page.descriptors.len(), 9 * 30 * 2);
-        assert!(page.eof);
-        let first = &page.descriptors[0];
+        assert_eq!(provider.rows.len(), 9 * 30 * 2);
+        let first = provider
+            .control_row(ParameterHandle(1))
+            .expect("the first row")
+            .clone();
         assert_eq!(first.handle, 1);
-        assert_eq!(first.track_id, "eq0");
-        assert_eq!(first.rack, ParameterRack::Console);
-        assert_eq!(first.effect_id, "eq");
-        assert_eq!(first.parameter_id, 1);
-        assert_eq!(first.channel, ParameterChannel::Left);
-        assert_eq!(first.flags, 5);
-        let state = provider
-            .parameter_state(&ParameterStateRequest {
-                handles: vec![1, 2, 5],
-            })
-            .expect("state");
-        assert_eq!(state.records[0].value, 1.0);
-        assert_eq!(state.records[1].value, 1.0);
-        assert_eq!(state.records[2].value, 120.0);
+        assert_eq!(first.address.owner_id.as_deref(), Some("eq0"));
+        assert_eq!(first.address.section, ControlSection::Console);
+        assert_eq!(first.address.slot_id.as_deref(), Some("eq"));
+        assert_eq!(first.address.control, Some(1));
+        assert_eq!(first.address.lane, Some(ParameterChannel::Left));
+        assert_eq!(
+            provider.parameter_handle(
+                "eq0",
+                ParameterRack::Console,
+                "eq",
+                1,
+                ParameterChannel::Left
+            ),
+            Some(1)
+        );
+        let value = |provider: &mut SessionControlProvider, handle| match &provider
+            .control_row(ParameterHandle(handle))
+            .expect("a row")
+            .body
+        {
+            ControlBody::Control(row) => row.value,
+            _ => panic!("a control row"),
+        };
+        assert_eq!(value(&mut provider, 1), 1.0);
+        assert_eq!(value(&mut provider, 2), 1.0);
+        assert_eq!(value(&mut provider, 5), 120.0);
+        // A live edit's value lands in the row, and an unknown handle changes nothing.
+        provider.set_parameter_value(5, 240.0);
+        provider.set_parameter_value(u32::MAX, 1.0);
+        assert_eq!(value(&mut provider, 5), 240.0);
+        assert_eq!(
+            provider.control_row(ParameterHandle(u32::MAX)).err(),
+            Some(ParameterProviderError::NotFound)
+        );
 
         clock.0.store(256, Ordering::Release);
         assert_eq!(provider.current_sample(), SampleTime(256));

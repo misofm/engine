@@ -7,14 +7,13 @@
 use crate::btlv::{CountSink, MessageMeasure, Sink, SliceSink};
 use crate::{
     AutomationCanceled, AutomationEnqueue, AutomationEnqueued, Capabilities, CommandHeader,
-    CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
-    DecodedAutomationEnqueue, DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent,
-    DiagnosticsPage, DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId,
-    MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ParameterMetadataPage, ParameterMetadataRequest,
-    ParameterStatePage, ParameterStateRequest, ProtocolCodec, RequestId, ResponseHeader,
-    SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
-    StatusCode, TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent,
+    ControlListPage, ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
+    CountersRequest, DecodeError, DecodeScratch, DecodedAutomationEnqueue, DecodedCapabilities,
+    DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
+    EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse, OUTER_HEADER_BYTES,
+    ProtocolCodec, RequestId, ResponseHeader, SessionCommitted, SessionEdit, SessionRevision,
+    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -43,14 +42,14 @@ pub enum CommandPayload<'a> {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
     SessionTransactionApply(&'a [SessionEdit]),
-    ParameterMetadataGet(ParameterMetadataRequest),
-    ParameterStateGet(&'a ParameterStateRequest),
     AutomationEnqueue(AutomationEnqueue<'a>),
     TransportGet,
     TransportSet(TransportSetRequest),
     TelemetryConfigure(&'a TelemetryConfiguration),
     CountersGet(&'a CountersRequest),
     DiagnosticsGet(DiagnosticsRequest),
+    ControlListGet(&'a ControlListRequest),
+    ControlStateGet(&'a ControlListRequest),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -67,14 +66,14 @@ pub enum SuccessResponsePayload<'a> {
     Capabilities(Capabilities<'a>),
     SessionSnapshot(SessionSnapshot<'a>),
     SessionTransactionApplied(TransactionApplied),
-    ParameterMetadata(ParameterMetadataPage),
-    ParameterState(ParameterStatePage),
     AutomationEnqueued(AutomationEnqueued),
     TransportGetSnapshot(TransportSnapshot),
     TransportSetSnapshot(TransportSnapshot),
     TelemetryConfiguration(TelemetryConfiguration),
     CounterSnapshot(CounterSnapshot),
     DiagnosticsPage(DiagnosticsPage),
+    ControlListPage(ControlListPage),
+    ControlStatePage(ControlStatePage),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -119,14 +118,14 @@ pub enum DecodedCommandPayload<'a> {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
     SessionTransactionApply(Vec<SessionEdit>),
-    ParameterMetadataGet(ParameterMetadataRequest),
-    ParameterStateGet(ParameterStateRequest),
     AutomationEnqueue(DecodedAutomationEnqueue<'a>),
     TransportGet,
     TransportSet(TransportSetRequest),
     TelemetryConfigure(TelemetryConfiguration),
     CountersGet(CountersRequest),
     DiagnosticsGet(DiagnosticsRequest),
+    ControlListGet(ControlListRequest),
+    ControlStateGet(ControlListRequest),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -142,14 +141,14 @@ pub enum DecodedSuccessResponsePayload<'a> {
     Capabilities(DecodedCapabilities<'a>),
     SessionSnapshot(SessionSnapshot<'a>),
     SessionTransactionApplied(TransactionApplied),
-    ParameterMetadata(ParameterMetadataPage),
-    ParameterState(ParameterStatePage),
     AutomationEnqueued(AutomationEnqueued),
     TransportGetSnapshot(TransportSnapshot),
     TransportSetSnapshot(TransportSnapshot),
     TelemetryConfiguration(TelemetryConfiguration),
     CounterSnapshot(CounterSnapshot),
     DiagnosticsPage(DiagnosticsPage),
+    ControlListPage(ControlListPage),
+    ControlStatePage(ControlStatePage),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -189,14 +188,14 @@ impl<'a> CommandPayload<'a> {
             Self::CapabilitiesGet => MessageId::CapabilitiesGet,
             Self::SessionSnapshotGet(_) => MessageId::SessionSnapshotGet,
             Self::SessionTransactionApply(_) => MessageId::SessionTransactionApply,
-            Self::ParameterMetadataGet(_) => MessageId::ParameterMetadataGet,
-            Self::ParameterStateGet(_) => MessageId::ParameterStateGet,
             Self::AutomationEnqueue(_) => MessageId::AutomationEnqueue,
             Self::TransportGet => MessageId::TransportGet,
             Self::TransportSet(_) => MessageId::TransportSet,
             Self::TelemetryConfigure(_) => MessageId::TelemetryConfigure,
             Self::CountersGet(_) => MessageId::CountersGet,
             Self::DiagnosticsGet(_) => MessageId::DiagnosticsGet,
+            Self::ControlListGet(_) => MessageId::ControlListGet,
+            Self::ControlStateGet(_) => MessageId::ControlStateGet,
         }
     }
 }
@@ -207,14 +206,14 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::Capabilities(_) => MessageId::CapabilitiesGet,
             Self::SessionSnapshot(_) => MessageId::SessionSnapshotGet,
             Self::SessionTransactionApplied(_) => MessageId::SessionTransactionApply,
-            Self::ParameterMetadata(_) => MessageId::ParameterMetadataGet,
-            Self::ParameterState(_) => MessageId::ParameterStateGet,
             Self::AutomationEnqueued(_) => MessageId::AutomationEnqueue,
             Self::TransportGetSnapshot(_) => MessageId::TransportGet,
             Self::TransportSetSnapshot(_) => MessageId::TransportSet,
             Self::TelemetryConfiguration(_) => MessageId::TelemetryConfigure,
             Self::CounterSnapshot(_) => MessageId::CountersGet,
             Self::DiagnosticsPage(_) => MessageId::DiagnosticsGet,
+            Self::ControlListPage(_) => MessageId::ControlListGet,
+            Self::ControlStatePage(_) => MessageId::ControlStateGet,
         }
     }
 }
@@ -424,12 +423,6 @@ impl ProtocolCodec {
                     .decode_session_transaction_frame_limited(decoded, maximum_transaction_edits)?;
                 DecodedCommandPayload::SessionTransactionApply(transaction.edits)
             }
-            MessageId::ParameterMetadataGet => DecodedCommandPayload::ParameterMetadataGet(
-                self.decode_parameter_metadata_request(decoded.payload, header.tlv_count)?,
-            ),
-            MessageId::ParameterStateGet => DecodedCommandPayload::ParameterStateGet(
-                self.decode_parameter_state_request(decoded.payload, header.tlv_count)?,
-            ),
             MessageId::AutomationEnqueue => DecodedCommandPayload::AutomationEnqueue(
                 self.decode_automation_enqueue(decoded.payload, header.tlv_count)?,
             ),
@@ -448,6 +441,12 @@ impl ProtocolCodec {
             ),
             MessageId::DiagnosticsGet => DecodedCommandPayload::DiagnosticsGet(
                 self.decode_diagnostics_request(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ControlListGet => DecodedCommandPayload::ControlListGet(
+                self.decode_control_list_request(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ControlStateGet => DecodedCommandPayload::ControlStateGet(
+                self.decode_control_list_request(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -485,12 +484,6 @@ impl ProtocolCodec {
                     self.decode_transaction_applied(decoded.payload, header.tlv_count)?,
                 )
             }
-            MessageId::ParameterMetadataGet => DecodedSuccessResponsePayload::ParameterMetadata(
-                self.decode_parameter_metadata_page(decoded.payload, header.tlv_count)?,
-            ),
-            MessageId::ParameterStateGet => DecodedSuccessResponsePayload::ParameterState(
-                self.decode_parameter_state_page(decoded.payload, header.tlv_count)?,
-            ),
             MessageId::AutomationEnqueue => DecodedSuccessResponsePayload::AutomationEnqueued(
                 self.decode_automation_enqueued(decoded.payload, header.tlv_count)?,
             ),
@@ -508,6 +501,12 @@ impl ProtocolCodec {
             ),
             MessageId::DiagnosticsGet => DecodedSuccessResponsePayload::DiagnosticsPage(
                 self.decode_diagnostics_page(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ControlListGet => DecodedSuccessResponsePayload::ControlListPage(
+                self.decode_control_list_page(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ControlStateGet => DecodedSuccessResponsePayload::ControlStatePage(
+                self.decode_control_state_page(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -654,12 +653,6 @@ fn write_command_payload(
         CommandPayload::SessionTransactionApply(_) => {
             unreachable!("handled as a complete transaction frame")
         }
-        CommandPayload::ParameterMetadataGet(value) => {
-            crate::message_wire::write_metadata_request(sink, *value)
-        }
-        CommandPayload::ParameterStateGet(value) => {
-            crate::message_wire::write_state_request(sink, value)
-        }
         CommandPayload::AutomationEnqueue(value) => {
             crate::message_wire::write_automation_enqueue(sink, *value)
         }
@@ -678,6 +671,9 @@ fn write_command_payload(
         CommandPayload::DiagnosticsGet(value) => {
             crate::message_wire::write_diagnostics_request(sink, *value)
         }
+        CommandPayload::ControlListGet(value) | CommandPayload::ControlStateGet(value) => {
+            crate::message_wire::write_control_request(sink, value)
+        }
     }
 }
 
@@ -695,12 +691,6 @@ fn write_success_payload(
         }
         SuccessResponsePayload::SessionTransactionApplied(value) => {
             crate::message_wire::write_transaction_applied(sink, *value)
-        }
-        SuccessResponsePayload::ParameterMetadata(value) => {
-            crate::message_wire::write_metadata_page(codec, sink, value)
-        }
-        SuccessResponsePayload::ParameterState(value) => {
-            crate::message_wire::write_state_page(sink, value)
         }
         SuccessResponsePayload::AutomationEnqueued(value) => {
             crate::message_wire::write_automation_enqueued(sink, *value)
@@ -723,6 +713,12 @@ fn write_success_payload(
         }
         SuccessResponsePayload::DiagnosticsPage(value) => {
             crate::message_wire::write_diagnostics_page(codec, sink, value)
+        }
+        SuccessResponsePayload::ControlListPage(value) => {
+            crate::message_wire::write_control_list_page(sink, value)
+        }
+        SuccessResponsePayload::ControlStatePage(value) => {
+            crate::message_wire::write_control_state_page(sink, value)
         }
     }
 }
@@ -780,11 +776,11 @@ mod tests {
             maximum_cached_response_bytes: 64,
             per_block_automation_density: 1,
             admission_quantum_frames: 1,
-            maximum_parameter_page_items: 256,
+            maximum_control_page_items: 256,
             maximum_diagnostic_page_items: 256,
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
-            supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13],
             supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
             flags: crate::CapabilityFlags::B4_BASE,
         }
@@ -925,7 +921,12 @@ mod tests {
         let edits = [SessionEdit::SetSessionId {
             session_id: session::StableId::parse("renamed").expect("stable ID"),
         }];
-        let state = ParameterStateRequest { handles: vec![1] };
+        let control_request = crate::ControlListRequest {
+            structure_epoch: 0,
+            after_handle: 0,
+            limit: 1,
+            owner: None,
+        };
         let records = [crate::AutomationRecord {
             kind: crate::AutomationKind::Point,
             handle: crate::ParameterHandle(1),
@@ -973,25 +974,6 @@ mod tests {
                     payload: CommandPayload::SessionTransactionApply(&edits),
                 },
                 MessageId::SessionTransactionApply,
-            ),
-            (
-                TypedCommandFrame {
-                    request_id: request_id(),
-                    expected_revision: crate::ExpectedRevision::Any,
-                    payload: CommandPayload::ParameterMetadataGet(ParameterMetadataRequest {
-                        after_handle: 0,
-                        limit: 1,
-                    }),
-                },
-                MessageId::ParameterMetadataGet,
-            ),
-            (
-                TypedCommandFrame {
-                    request_id: request_id(),
-                    expected_revision: crate::ExpectedRevision::Any,
-                    payload: CommandPayload::ParameterStateGet(&state),
-                },
-                MessageId::ParameterStateGet,
             ),
             (
                 TypedCommandFrame {
@@ -1050,6 +1032,22 @@ mod tests {
                 },
                 MessageId::DiagnosticsGet,
             ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Any,
+                    payload: CommandPayload::ControlListGet(&control_request),
+                },
+                MessageId::ControlListGet,
+            ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Any,
+                    payload: CommandPayload::ControlStateGet(&control_request),
+                },
+                MessageId::ControlStateGet,
+            ),
         ];
         for (frame, expected_id) in &frames {
             assert_command_frame(&codec, frame, *expected_id);
@@ -1104,29 +1102,6 @@ mod tests {
                     ),
                 },
                 MessageId::SessionTransactionApply,
-            ),
-            (
-                TypedSuccessResponseFrame {
-                    request_id: request_id(),
-                    revision: SessionRevision(7),
-                    payload: SuccessResponsePayload::ParameterMetadata(ParameterMetadataPage {
-                        last_handle: 0,
-                        eof: true,
-                        descriptors: Vec::new(),
-                    }),
-                },
-                MessageId::ParameterMetadataGet,
-            ),
-            (
-                TypedSuccessResponseFrame {
-                    request_id: request_id(),
-                    revision: SessionRevision(7),
-                    payload: SuccessResponsePayload::ParameterState(ParameterStatePage {
-                        observed_sample: 0,
-                        records: Vec::new(),
-                    }),
-                },
-                MessageId::ParameterStateGet,
             ),
             (
                 TypedSuccessResponseFrame {
@@ -1204,6 +1179,34 @@ mod tests {
                     }),
                 },
                 MessageId::DiagnosticsGet,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::ControlListPage(crate::ControlListPage {
+                        revision: 7,
+                        structure_epoch: 1,
+                        last_handle: 0,
+                        eof: true,
+                        entries: Vec::new(),
+                    }),
+                },
+                MessageId::ControlListGet,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::ControlStatePage(crate::ControlStatePage {
+                        revision: 7,
+                        structure_epoch: 1,
+                        last_handle: 0,
+                        eof: true,
+                        records: Vec::new(),
+                    }),
+                },
+                MessageId::ControlStateGet,
             ),
         ];
         for (frame, expected_id) in &responses {

@@ -22,18 +22,17 @@ use crate::TransportState;
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
-    CapabilityFlags, CommandHeader, CounterSnapshot, CounterSnapshotRef, CounterTelemetryRecord,
-    CounterValue, CountersRequest, DecodeError, DecodeScratch, DecodedCommandPayload, Diagnostic,
-    DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EncodeError, EventPayload,
-    ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterAutomationRate,
-    ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
-    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
-    PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
-    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
-    SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
-    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    CapabilityFlags, CommandHeader, ControlBody, ControlEntry, ControlKind, ControlListPage,
+    ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
+    CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
+    DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
+    EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse,
+    ParameterHandle, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
+    ReliablePayload, ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
@@ -108,7 +107,8 @@ fn retained_telemetry_configuration(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(missing_docs)] // Frozen one-to-one capability feature switches.
 pub struct ProviderFeatures {
-    pub parameters: bool,
+    /// `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (capability flag bit 7).
+    pub controls: bool,
     pub transport: bool,
     pub meters: bool,
     pub counters: bool,
@@ -120,7 +120,7 @@ pub struct ProviderFeatures {
 impl ProviderFeatures {
     /// Enable every typed provider and event family.
     pub const ALL: Self = Self {
-        parameters: true,
+        controls: true,
         transport: true,
         meters: true,
         counters: true,
@@ -130,7 +130,7 @@ impl ProviderFeatures {
     };
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
-        parameters: false,
+        controls: false,
         transport: false,
         meters: false,
         counters: false,
@@ -565,21 +565,25 @@ impl std::error::Error for ReplayCacheError {}
 pub trait ControlProvider {
     /// Return the endpoint-owned current absolute sample used for automation past-time admission.
     fn current_sample(&mut self) -> SampleTime;
-    /// Return a bounded typed metadata page for this exact cursor and limit.
-    fn parameter_metadata(
+    /// Return one bounded page of the control list after this cursor (decision 17, C4). A
+    /// request whose `structure_epoch` is not `0` and not the provider's current structure is
+    /// [`ParameterProviderError::Stale`].
+    fn control_list(
         &mut self,
-        request: ParameterMetadataRequest,
-    ) -> Result<ParameterMetadataPage, ParameterProviderError>;
-    /// Return a bounded typed state page preserving requested handle order.
-    fn parameter_state(
+        request: &ControlListRequest,
+    ) -> Result<ControlListPage, ParameterProviderError>;
+    /// Return the values of the control rows of the same page, without the header rows, with the
+    /// same staleness rule.
+    fn control_state(
         &mut self,
-        request: &ParameterStateRequest,
-    ) -> Result<ParameterStatePage, ParameterProviderError>;
-    /// Borrow one typed descriptor for transient automation domain admission.
-    fn parameter_descriptor(
+        request: &ControlListRequest,
+    ) -> Result<ControlStatePage, ParameterProviderError>;
+    /// Borrow one control row for transient automation domain admission: an automatable
+    /// continuous, toggle or enumeration row.
+    fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ParameterDescriptor, ParameterProviderError>;
+    ) -> Result<&ControlEntry, ParameterProviderError>;
     /// Return a typed nondestructive counter snapshot for the requested registered IDs.
     fn counters(
         &mut self,
@@ -606,8 +610,10 @@ pub trait ControlProvider {
 /// Typed bounded provider fixture failure; providers never return raw BTLV payload bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterProviderError {
-    /// The requested revision-scoped parameter handle is absent.
+    /// The requested revision-scoped control handle is absent.
     NotFound,
+    /// The request names a structure that is no longer current (`control.list.stale`).
+    Stale,
     /// The typed provider is temporarily unavailable.
     Unavailable,
     /// A bounded diagnostic cursor predates retained provider history.
@@ -622,13 +628,12 @@ pub enum ParameterProviderError {
 pub struct MockProvider {
     /// Endpoint-owned current absolute sample for bounded automation admission fixtures.
     current_sample: SampleTime,
-    /// Bounded typed metadata fixture catalog.
-    parameter_metadata: Vec<crate::ParameterDescriptor>,
-    /// Eager endpoint-owned descriptor used for accepted automation without changing the
-    /// enumerable metadata catalog.
-    automation_parameter: Option<crate::ParameterDescriptor>,
-    /// Bounded typed state fixture records.
-    parameter_state: ParameterStatePage,
+    /// The small fixed control list the fixture serves, in strictly ascending handle order.
+    controls: Vec<ControlEntry>,
+    /// The structure the fixture's handles belong to. A request for another is stale.
+    structure_epoch: u64,
+    /// The session revision the fixture's pages report.
+    control_revision: u64,
     /// Typed nondestructive registered counter values.
     counter_snapshot: CounterSnapshot,
     /// Bounded retained typed diagnostic history.
@@ -646,12 +651,9 @@ impl Default for MockProvider {
     fn default() -> Self {
         Self {
             current_sample: SampleTime(0),
-            parameter_metadata: Vec::new(),
-            automation_parameter: None,
-            parameter_state: ParameterStatePage {
-                observed_sample: 0,
-                records: Vec::new(),
-            },
+            controls: Vec::new(),
+            structure_epoch: 1,
+            control_revision: 0,
             counter_snapshot: CounterSnapshot {
                 observed_sample: SampleTime(0),
                 values: Vec::new(),
@@ -672,74 +674,82 @@ impl Default for MockProvider {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+impl MockProvider {
+    /// The rows after the request's cursor, at most its limit, of its owner, and the page's last
+    /// handle and end flag.
+    fn control_window(
+        &self,
+        request: &ControlListRequest,
+    ) -> Result<(Vec<ControlEntry>, u32, bool), ParameterProviderError> {
+        if request.structure_epoch != 0 && request.structure_epoch != self.structure_epoch {
+            return Err(ParameterProviderError::Stale);
+        }
+        let mut rows = self.controls.iter().filter(|entry| {
+            entry.handle > request.after_handle
+                && request.owner.as_ref().is_none_or(|owner| {
+                    entry.address.owner_kind == owner.kind && entry.address.owner_id == owner.id
+                })
+        });
+        let entries = rows
+            .by_ref()
+            .take(usize::from(request.limit))
+            .cloned()
+            .collect::<Vec<_>>();
+        let last_handle = entries
+            .last()
+            .map_or(request.after_handle, |entry| entry.handle);
+        Ok((entries, last_handle, rows.next().is_none()))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl ControlProvider for MockProvider {
     fn current_sample(&mut self) -> SampleTime {
         self.current_sample
     }
 
-    fn parameter_metadata(
+    fn control_list(
         &mut self,
-        request: ParameterMetadataRequest,
-    ) -> Result<ParameterMetadataPage, ParameterProviderError> {
-        if self.parameter_metadata.len() > 256 {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
-        let descriptors = self
-            .parameter_metadata
-            .iter()
-            .filter(|descriptor| descriptor.handle > request.after_handle)
-            .take(request.limit as usize)
-            .cloned()
-            .collect::<Vec<_>>();
-        let last_handle = descriptors
-            .last()
-            .map_or(request.after_handle, |descriptor| descriptor.handle);
-        let eof = self
-            .parameter_metadata
-            .iter()
-            .all(|descriptor| descriptor.handle <= last_handle);
-        Ok(ParameterMetadataPage {
+        request: &ControlListRequest,
+    ) -> Result<ControlListPage, ParameterProviderError> {
+        let (entries, last_handle, eof) = self.control_window(request)?;
+        Ok(ControlListPage {
+            revision: self.control_revision,
+            structure_epoch: self.structure_epoch,
             last_handle,
             eof,
-            descriptors,
+            entries,
         })
     }
-    fn parameter_state(
+    fn control_state(
         &mut self,
-        request: &ParameterStateRequest,
-    ) -> Result<ParameterStatePage, ParameterProviderError> {
-        if self.parameter_state.records.len() > 256 {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
-        let mut records = Vec::with_capacity(request.handles.len());
-        for handle in &request.handles {
-            let Some(record) = self
-                .parameter_state
-                .records
+        request: &ControlListRequest,
+    ) -> Result<ControlStatePage, ParameterProviderError> {
+        let (entries, last_handle, eof) = self.control_window(request)?;
+        Ok(ControlStatePage {
+            revision: self.control_revision,
+            structure_epoch: self.structure_epoch,
+            last_handle,
+            eof,
+            records: entries
                 .iter()
-                .find(|record| record.handle == *handle)
-            else {
-                return Err(ParameterProviderError::NotFound);
-            };
-            records.push(*record);
-        }
-        Ok(ParameterStatePage {
-            observed_sample: self.parameter_state.observed_sample,
-            records,
+                .filter_map(|entry| match &entry.body {
+                    ControlBody::Control(row) => Some(crate::ControlStateRecord {
+                        handle: entry.handle,
+                        value: row.value,
+                    }),
+                    ControlBody::OwnerHeader(_) | ControlBody::SectionHeader(_) => None,
+                })
+                .collect(),
         })
     }
-    fn parameter_descriptor(
+    fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ParameterDescriptor, ParameterProviderError> {
-        self.parameter_metadata
+    ) -> Result<&ControlEntry, ParameterProviderError> {
+        self.controls
             .iter()
-            .find(|descriptor| descriptor.handle == handle.0)
-            .or_else(|| {
-                self.automation_parameter
-                    .as_ref()
-                    .filter(|descriptor| descriptor.handle == handle.0)
-            })
+            .find(|entry| entry.handle == handle.0)
             .ok_or(ParameterProviderError::NotFound)
     }
     fn counters(
@@ -892,12 +902,6 @@ pub enum ControlCommand<'a> {
     SessionTransactionApply {
         edits: &'a [SessionEdit],
     },
-    ParameterMetadataGet {
-        request: ParameterMetadataRequest,
-    },
-    ParameterStateGet {
-        request: ParameterStateRequest,
-    },
     AutomationEnqueue {
         batch: AutomationBatchSlot,
     },
@@ -913,6 +917,12 @@ pub enum ControlCommand<'a> {
     },
     DiagnosticsGet {
         request: DiagnosticsRequest,
+    },
+    ControlListGet {
+        request: ControlListRequest,
+    },
+    ControlStateGet {
+        request: ControlListRequest,
     },
 }
 
@@ -932,14 +942,14 @@ impl ControlCommand<'_> {
             Self::CapabilitiesGet => MessageId::CapabilitiesGet,
             Self::SessionSnapshotGet { .. } => MessageId::SessionSnapshotGet,
             Self::SessionTransactionApply { .. } => MessageId::SessionTransactionApply,
-            Self::ParameterMetadataGet { .. } => MessageId::ParameterMetadataGet,
-            Self::ParameterStateGet { .. } => MessageId::ParameterStateGet,
             Self::AutomationEnqueue { .. } => MessageId::AutomationEnqueue,
             Self::TransportGet => MessageId::TransportGet,
             Self::TransportSet { .. } => MessageId::TransportSet,
             Self::TelemetryConfigure { .. } => MessageId::TelemetryConfigure,
             Self::CountersGet { .. } => MessageId::CountersGet,
             Self::DiagnosticsGet { .. } => MessageId::DiagnosticsGet,
+            Self::ControlListGet { .. } => MessageId::ControlListGet,
+            Self::ControlStateGet { .. } => MessageId::ControlStateGet,
         }
     }
 }
@@ -988,8 +998,8 @@ enum Body {
         eof: bool,
     },
     TransactionApplied(TransactionApplied),
-    ParameterMetadata(ParameterMetadataPage),
-    ParameterState(ParameterStatePage),
+    ControlList(ControlListPage),
+    ControlState(ControlStatePage),
     AutomationEnqueued(AutomationEnqueued),
     Transport(TransportSnapshot),
     Telemetry(TelemetryConfiguration),
@@ -1490,12 +1500,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     command: ControlCommand::SessionTransactionApply { edits: &edits },
                 }));
             }
-            DecodedCommandPayload::ParameterMetadataGet(request) => {
-                ControlCommand::ParameterMetadataGet { request }
-            }
-            DecodedCommandPayload::ParameterStateGet(request) => {
-                ControlCommand::ParameterStateGet { request }
-            }
             DecodedCommandPayload::AutomationEnqueue(decoded) => {
                 let revision = match header.expected_revision {
                     ExpectedRevision::Exact(revision) => revision,
@@ -1515,6 +1519,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::CountersGet(request) => ControlCommand::CountersGet { request },
             DecodedCommandPayload::DiagnosticsGet(request) => {
                 ControlCommand::DiagnosticsGet { request }
+            }
+            DecodedCommandPayload::ControlListGet(request) => {
+                ControlCommand::ControlListGet { request }
+            }
+            DecodedCommandPayload::ControlStateGet(request) => {
+                ControlCommand::ControlStateGet { request }
             }
         };
         Ok(self.process(ControllerRequest {
@@ -2133,12 +2143,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     command: ControlCommand::SessionTransactionApply { edits: &edits },
                 });
             }
-            DecodedCommandPayload::ParameterMetadataGet(request) => {
-                ControlCommand::ParameterMetadataGet { request }
-            }
-            DecodedCommandPayload::ParameterStateGet(request) => {
-                ControlCommand::ParameterStateGet { request }
-            }
             DecodedCommandPayload::AutomationEnqueue(value) => {
                 let ExpectedRevision::Exact(revision) = header.expected_revision else {
                     return self.non_ok(StatusCode::InvalidField, None);
@@ -2161,6 +2165,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::CountersGet(request) => ControlCommand::CountersGet { request },
             DecodedCommandPayload::DiagnosticsGet(request) => {
                 ControlCommand::DiagnosticsGet { request }
+            }
+            DecodedCommandPayload::ControlListGet(request) => {
+                ControlCommand::ControlListGet { request }
+            }
+            DecodedCommandPayload::ControlStateGet(request) => {
+                ControlCommand::ControlStateGet { request }
             }
         };
         self.execute(&ControllerRequest {
@@ -2237,12 +2247,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             (MessageId::SessionTransactionApply, Body::TransactionApplied(value)) => {
                 encode_success!(SuccessResponsePayload::SessionTransactionApplied(value))
             }
-            (MessageId::ParameterMetadataGet, Body::ParameterMetadata(value)) => {
-                encode_success!(SuccessResponsePayload::ParameterMetadata(value))
-            }
-            (MessageId::ParameterStateGet, Body::ParameterState(value)) => {
-                encode_success!(SuccessResponsePayload::ParameterState(value))
-            }
             (MessageId::AutomationEnqueue, Body::AutomationEnqueued(value)) => {
                 encode_success!(SuccessResponsePayload::AutomationEnqueued(value))
             }
@@ -2260,6 +2264,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             (MessageId::DiagnosticsGet, Body::Diagnostics(value)) => {
                 encode_success!(SuccessResponsePayload::DiagnosticsPage(value))
+            }
+            (MessageId::ControlListGet, Body::ControlList(value)) => {
+                encode_success!(SuccessResponsePayload::ControlListPage(value))
+            }
+            (MessageId::ControlStateGet, Body::ControlState(value)) => {
+                encode_success!(SuccessResponsePayload::ControlStatePage(value))
             }
             _ => Err(EncodeError::MessageKindMismatch),
         }
@@ -2823,8 +2833,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::SessionTransactionApply { .. } => {
                 features.session_events && self.config.maximum_transaction_edits != 0
             }
-            ControlCommand::ParameterMetadataGet { .. }
-            | ControlCommand::ParameterStateGet { .. } => features.parameters,
+            ControlCommand::ControlListGet { .. } | ControlCommand::ControlStateGet { .. } => {
+                features.controls
+            }
             ControlCommand::TransportGet => features.transport,
             ControlCommand::TransportSet { .. } => features.transport && features.transport_events,
             ControlCommand::CountersGet { .. } => features.counters,
@@ -2946,18 +2957,18 @@ impl<P: ControlProvider> ProtocolController<P> {
                     }
                 }
             }
-            ControlCommand::ParameterMetadataGet {
-                request: parameter_request,
-            } => match self.provider.parameter_metadata(*parameter_request) {
-                Ok(page) => self.ok(Body::ParameterMetadata(page)),
-                Err(error) => self.non_ok(status_for_parameter(error), None),
-            },
-            ControlCommand::ParameterStateGet {
-                request: parameter_request,
-            } => match self.provider.parameter_state(parameter_request) {
-                Ok(page) => self.ok(Body::ParameterState(page)),
-                Err(error) => self.non_ok(status_for_parameter(error), None),
-            },
+            ControlCommand::ControlListGet { request } => {
+                match self.provider.control_list(request) {
+                    Ok(page) => self.ok(Body::ControlList(page)),
+                    Err(error) => self.provider_error_outcome(error),
+                }
+            }
+            ControlCommand::ControlStateGet { request } => {
+                match self.provider.control_state(request) {
+                    Ok(page) => self.ok(Body::ControlState(page)),
+                    Err(error) => self.provider_error_outcome(error),
+                }
+            }
             ControlCommand::AutomationEnqueue { batch } => {
                 if batch.revision != self.session.revision() {
                     return self.non_ok(StatusCode::RevisionConflict, None);
@@ -3163,6 +3174,30 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
+    /// The outcome of a provider refusal. A stale structure is a revision conflict that names
+    /// itself, so a caller refetches the list from the top (`control.list.stale`).
+    fn provider_error_outcome(&self, error: ParameterProviderError) -> Outcome {
+        if error != ParameterProviderError::Stale {
+            return self.non_ok(status_for_parameter(error), None);
+        }
+        self.non_ok_value(
+            status_for_parameter(error),
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: "control.list.stale".to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path: Vec::new(),
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
     fn queue_backpressure_outcome(&self, report: QueueReport) -> Outcome {
         let queue_kind = match report.kind {
             crate::QueueKind::ControlCommand => BackpressureQueueKind::ControlCommand,
@@ -3222,14 +3257,16 @@ impl<P: ControlProvider> ProtocolController<P> {
             features.session_events && self.config.maximum_transaction_edits != 0;
         let mut commands = [0_u16; 11];
         let mut command_len = 0_usize;
-        for id in 1_u16..=11 {
+        for id in 1_u16..=13 {
             let enabled = match id {
+                // `0x0004` and `0x0005` are retired and never advertised.
+                4 | 5 => false,
                 3 => session_transactions,
-                4 | 5 => features.parameters,
                 7 => features.transport,
                 8 => features.transport && features.transport_events,
                 10 => features.counters,
                 11 => features.diagnostics,
+                12 | 13 => features.controls,
                 _ => true,
             };
             if enabled {
@@ -3258,7 +3295,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         if !session_transactions {
             flags &= !(1 << 3);
         }
-        if features.parameters {
+        if features.controls {
             flags |= 1 << 7;
         }
         if features.transport {
@@ -3318,7 +3355,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             maximum_cached_response_bytes: replay.max_response_bytes as u64,
             per_block_automation_density: queue.per_block_automation_density.get() as u64,
             admission_quantum_frames: queue.quantum_frames.get() as u64,
-            maximum_parameter_page_items: 256,
+            maximum_control_page_items: 256,
             maximum_diagnostic_page_items: 256,
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: self.effective_maximum_transaction_edits(),
@@ -3360,26 +3397,23 @@ impl<P: ControlProvider> ProtocolController<P> {
         batch: &AutomationBatchSlot,
     ) -> Result<(), StatusCode> {
         for record in batch.as_slice() {
-            let descriptor = self
+            let entry = self
                 .provider
-                .parameter_descriptor(record.handle)
+                .control_row(record.handle)
                 .map_err(status_for_parameter)?;
-            if descriptor.flags & 2 == 0
-                || descriptor.automation_rate == ParameterAutomationRate::None
-            {
+            let ControlBody::Control(row) = &entry.body else {
+                return Err(StatusCode::InvalidField);
+            };
+            if !row.automatable {
                 return Err(StatusCode::InvalidField);
             }
             for value in [record.start_value, record.end_value] {
-                let valid = match descriptor.domain {
-                    ParameterDomain::Continuous => descriptor
-                        .minimum
-                        .zip(descriptor.maximum)
-                        .is_some_and(|(minimum, maximum)| minimum <= value && value <= maximum),
-                    ParameterDomain::Boolean => value == 0.0 || value == 1.0,
-                    ParameterDomain::Enumeration => descriptor
-                        .enum_choices
-                        .iter()
-                        .any(|choice| choice.value == value),
+                let valid = match row.kind {
+                    ControlKind::Continuous => row.minimum <= value && value <= row.maximum,
+                    ControlKind::Toggle => value == 0.0 || value == 1.0,
+                    ControlKind::Enumeration => {
+                        row.choices.iter().any(|choice| choice.value == value)
+                    }
                 };
                 if !valid {
                     return Err(StatusCode::InvalidField);
@@ -3610,6 +3644,7 @@ fn status_for_automation(error: AutomationBatchError) -> StatusCode {
 fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
     match error {
         ParameterProviderError::NotFound => StatusCode::NotFound,
+        ParameterProviderError::Stale => StatusCode::RevisionConflict,
         ParameterProviderError::Unavailable => StatusCode::Unavailable,
         ParameterProviderError::ReplayExpired => StatusCode::ReplayExpired,
         ParameterProviderError::LimitExceeded => StatusCode::LimitExceeded,

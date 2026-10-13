@@ -237,15 +237,8 @@ fn controller_over(
         queues,
         MockProvider {
             current_sample,
-            parameter_metadata: vec![automation_descriptor()],
-            parameter_state: ParameterStatePage {
-                observed_sample: current_sample.0,
-                records: vec![crate::ParameterStateRecord {
-                    handle: 1,
-                    flags: 1,
-                    value: 0.0,
-                }],
-            },
+            controls: mock_controls(),
+            control_revision: 7,
             counter_snapshot: CounterSnapshot {
                 observed_sample: current_sample,
                 values: vec![
@@ -341,7 +334,7 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
 fn public_b1b_automation_replay_uses_the_ordinary_queue() {
     let records = [crate::AutomationRecord {
         kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(1),
+        handle: ParameterHandle(AUTOMATABLE_CONTROL),
         start: SampleTime(0),
         end: SampleTime(0),
         start_value: 0.25,
@@ -472,28 +465,70 @@ fn configure_event_egress(
     configuration
 }
 
-fn automation_descriptor() -> crate::ParameterDescriptor {
-    crate::ParameterDescriptor {
-        handle: 1,
-        track_id: "vocal".to_owned(),
-        rack: crate::ParameterRack::Inserts,
-        effect_id: "comp".to_owned(),
-        parameter_id: 1,
-        channel: crate::ParameterChannel::Left,
-        value_kind: crate::ParameterValueKind::F32,
-        unit: crate::ParameterUnit::Db,
-        domain: crate::ParameterDomain::Continuous,
-        minimum: Some(-1.0),
-        maximum: Some(1.0),
-        default: 0.0,
-        mapping: crate::ParameterMapping::Linear,
-        automation_rate: crate::ParameterAutomationRate::Sample,
-        smoothing_samples: 0,
-        flags: 3,
-        display_name: None,
-        display_unit: None,
-        enum_choices: Vec::new(),
-    }
+/// The handle of the one automatable control row of the fixture list.
+const AUTOMATABLE_CONTROL: u32 = 3;
+
+/// The fixture's control list: an owner header, an inserts section header and one automatable
+/// continuous row, in ascending handles, so a page carries each kind of row.
+fn mock_controls() -> Vec<crate::ControlEntry> {
+    let address = |section, slot: Option<&str>, control: Option<u32>| crate::ControlAddress {
+        owner_kind: crate::ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section,
+        slot_id: slot.map(str::to_owned),
+        control,
+        lane: control.map(|_| crate::ParameterChannel::Left),
+    };
+    vec![
+        crate::ControlEntry {
+            handle: 1,
+            address: address(crate::ControlSection::Own, None, None),
+            body: crate::ControlBody::OwnerHeader(crate::ControlOwnerHeader {
+                kind: crate::ControlOwnerHeaderKind::Track,
+                name: "v".to_owned(),
+                route: None,
+            }),
+        },
+        crate::ControlEntry {
+            handle: 2,
+            address: address(crate::ControlSection::Inserts, Some("comp"), None),
+            body: crate::ControlBody::SectionHeader(crate::ControlSectionHeader {
+                name: "c".to_owned(),
+                effect: None,
+            }),
+        },
+        crate::ControlEntry {
+            handle: AUTOMATABLE_CONTROL,
+            address: address(crate::ControlSection::Inserts, Some("comp"), Some(1)),
+            body: crate::ControlBody::Control(crate::ControlRow {
+                name: "t".to_owned(),
+                display_name: String::new(),
+                display_unit: String::new(),
+                unit: crate::ParameterUnit::Db,
+                kind: crate::ControlKind::Continuous,
+                minimum: -1.0,
+                maximum: 1.0,
+                disabled_value: None,
+                default: 0.0,
+                taper: crate::ControlTaper::Linear,
+                step: 0.1,
+                precision: 1,
+                ladder: Vec::new(),
+                choices: Vec::new(),
+                ramp_row: None,
+                default_ramp_samples: 0,
+                class: crate::ControlClass::Live,
+                reason: None,
+                reason_issue: None,
+                reopen: None,
+                scope: crate::ControlScope::Model,
+                automatable: true,
+                family: crate::ControlFamily::Effect,
+                active: true,
+                value: 0.25,
+            }),
+        },
+    ]
 }
 
 fn retained_diagnostic(sequence: u64, severity: crate::DiagnosticSeverity) -> Diagnostic {
@@ -523,7 +558,7 @@ fn batch(request_id: u64, sample: u64) -> AutomationBatchSlot {
         id(request_id),
         &[crate::AutomationRecord {
             kind: crate::AutomationKind::Point,
-            handle: crate::ParameterHandle(1),
+            handle: crate::ParameterHandle(AUTOMATABLE_CONTROL),
             start: SampleTime(sample),
             end: SampleTime(sample),
             start_value: 1.0,
@@ -572,10 +607,15 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
     let transaction = [SessionEdit::SetSessionId {
         session_id: session::StableId::parse("framed-session").expect("ID"),
     }];
-    let parameter_state = ParameterStateRequest { handles: vec![1] };
+    let control_request = ControlListRequest {
+        structure_epoch: 0,
+        after_handle: 0,
+        limit: 8,
+        owner: None,
+    };
     let automation_records = [crate::AutomationRecord {
         kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(1),
+        handle: ParameterHandle(AUTOMATABLE_CONTROL),
         start: SampleTime(0),
         end: SampleTime(0),
         start_value: 0.5,
@@ -623,22 +663,19 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
             ),
         ),
         (
-            MessageId::ParameterMetadataGet,
+            MessageId::ControlListGet,
             full_command(
                 1,
                 ExpectedRevision::Any,
-                crate::CommandPayload::ParameterMetadataGet(ParameterMetadataRequest {
-                    after_handle: 0,
-                    limit: 1,
-                }),
+                crate::CommandPayload::ControlListGet(&control_request),
             ),
         ),
         (
-            MessageId::ParameterStateGet,
+            MessageId::ControlStateGet,
             full_command(
                 1,
                 ExpectedRevision::Any,
-                crate::CommandPayload::ParameterStateGet(&parameter_state),
+                crate::CommandPayload::ControlStateGet(&control_request),
             ),
         ),
         (
@@ -723,7 +760,7 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
 fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
     let records = [crate::AutomationRecord {
         kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(1),
+        handle: ParameterHandle(AUTOMATABLE_CONTROL),
         start: SampleTime(0),
         end: SampleTime(0),
         start_value: 0.25,
@@ -1593,11 +1630,30 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 24 + 4 + 8 + 1);
+    assert_eq!(rows.len(), 24 + 4 + 8 + 2 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
         let snapshot = endpoint.session().canonical_snapshot().to_owned();
+        if row.status == StatusCode::UnsupportedMessage as u16 {
+            // A message ID that decodes to no message leaves no safe request identity to
+            // answer, so the refusal is the decoder's status and no response frame exists.
+            let mut output = [0x5a_u8; 2048];
+            let refusal = endpoint
+                .process_command_frame_into(
+                    &row.bytes,
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                    &mut output,
+                )
+                .expect_err(&row.name);
+            let CommandFrameProcessError::Uncorrelatable(error) = refusal else {
+                panic!("{}: refused for another reason: {refusal:?}", row.name);
+            };
+            assert_eq!(error.status() as u16, row.status, "{}", row.name);
+            assert_eq!(output, [0x5a; 2048], "{}: nothing is written", row.name);
+            assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+            continue;
+        }
         let response = process_full_command(&mut endpoint, &row.bytes);
         let mut fields = [0_u16; 64];
         let decoded = ProtocolCodec::default()
@@ -2224,7 +2280,7 @@ fn b2b_btlv_automation_uses_header_identity_typed_domains_and_backpressure() {
         let codec = ProtocolCodec::default();
         let records = [crate::AutomationRecord {
             kind: crate::AutomationKind::Point,
-            handle: crate::ParameterHandle(1),
+            handle: crate::ParameterHandle(AUTOMATABLE_CONTROL),
             start: SampleTime(sample),
             end: SampleTime(sample),
             start_value: value,
@@ -2847,10 +2903,10 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
     for (features, required_command, required_event, required_bit) in [
         (
             ProviderFeatures {
-                parameters: true,
+                controls: true,
                 ..ProviderFeatures::NONE
             },
-            4,
+            12,
             0,
             7,
         ),
@@ -3608,4 +3664,297 @@ fn c2b2_disabled_configuration_emits_nothing_and_reliable_full_returns_original(
         controller.queues_mut().try_enqueue_event(event),
         Err(crate::ReliableEnqueueError { value, .. }) if value == event
     ));
+}
+
+/// Decode a full response frame that the controller wrote.
+fn decode_response(bytes: &[u8]) -> crate::DecodedTypedResponseFrame<'_> {
+    let mut fields = [0_u16; 1024];
+    ProtocolCodec::default()
+        .decode_typed_response(bytes, &mut DecodeScratch::new(&mut fields))
+        .expect("a typed response")
+}
+
+fn control_request(
+    structure_epoch: u64,
+    after_handle: u32,
+    limit: u16,
+    owner: Option<crate::ControlOwnerFilter>,
+) -> ControlListRequest {
+    ControlListRequest {
+        structure_epoch,
+        after_handle,
+        limit,
+        owner,
+    }
+}
+
+/// Gate 3: both control messages dispatch through typed frames to the provider, a page follows its
+/// cursor and limit, an owner filter narrows it, and the state page holds the values of the same
+/// rows without the headers.
+///
+/// Red if a message is not reachable through the frame path, the controller answers one message
+/// with the other's page, or the cursor, limit or owner filter is dropped between frame and
+/// provider.
+#[test]
+fn control_messages_dispatch_through_typed_frames_to_the_provider() {
+    let mut endpoint = controller(8, 1);
+    let mut list = |request: &ControlListRequest, request_id: u64| {
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ControlListGet(request),
+        );
+        let output = process_full_command(&mut endpoint, &input);
+        match decode_response(&output) {
+            crate::DecodedTypedResponseFrame::Success {
+                header,
+                payload: crate::DecodedSuccessResponsePayload::ControlListPage(page),
+            } => {
+                assert_eq!(header.message_id, MessageId::ControlListGet);
+                page
+            }
+            _ => panic!("expected a control list page"),
+        }
+    };
+    let whole = list(&control_request(0, 0, 8, None), 1);
+    assert_eq!(whole.entries.len(), 3);
+    assert_eq!((whole.last_handle, whole.eof), (3, true));
+    assert_eq!((whole.revision, whole.structure_epoch), (7, 1));
+    assert!(matches!(
+        whole.entries[0].body,
+        crate::ControlBody::OwnerHeader(_)
+    ));
+    assert!(matches!(
+        whole.entries[1].body,
+        crate::ControlBody::SectionHeader(_)
+    ));
+    assert!(matches!(
+        whole.entries[2].body,
+        crate::ControlBody::Control(_)
+    ));
+    // The cursor and the limit reach the provider: a page of one, then the rest.
+    let first = list(&control_request(1, 0, 1, None), 2);
+    assert_eq!(
+        (first.entries.len(), first.last_handle, first.eof),
+        (1, 1, false)
+    );
+    let rest = list(&control_request(1, first.last_handle, 8, None), 3);
+    assert_eq!(
+        rest.entries
+            .iter()
+            .map(|entry| entry.handle)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert!(rest.eof);
+    // The owner filter reaches the provider: another strip has no rows and ends the list.
+    let other = list(
+        &control_request(
+            0,
+            0,
+            8,
+            Some(crate::ControlOwnerFilter {
+                kind: crate::ControlOwnerKind::Strip,
+                id: Some("guitar".to_owned()),
+            }),
+        ),
+        4,
+    );
+    assert_eq!(
+        (other.entries.len(), other.last_handle, other.eof),
+        (0, 0, true)
+    );
+
+    let input = full_command(
+        5,
+        ExpectedRevision::Any,
+        crate::CommandPayload::ControlStateGet(&control_request(1, 0, 8, None)),
+    );
+    let output = process_full_command(&mut endpoint, &input);
+    let crate::DecodedTypedResponseFrame::Success {
+        header,
+        payload: crate::DecodedSuccessResponsePayload::ControlStatePage(state),
+    } = decode_response(&output)
+    else {
+        panic!("expected a control state page");
+    };
+    assert_eq!(header.message_id, MessageId::ControlStateGet);
+    assert_eq!(
+        state.records,
+        [crate::ControlStateRecord {
+            handle: AUTOMATABLE_CONTROL,
+            value: 0.25
+        }],
+        "the control row only; the two header rows have no record"
+    );
+    assert_eq!((state.last_handle, state.eof), (3, true));
+}
+
+/// Gate 3: a request for a structure that is not current is `REVISION_CONFLICT` with the typed
+/// diagnostic `control.list.stale`, for both messages, and `0` always names the current one.
+///
+/// Red if a stale epoch is served as a page of handles from another structure, or the refusal is
+/// an untyped status that a client cannot tell from an edit conflict.
+#[test]
+fn a_stale_structure_epoch_is_a_revision_conflict_that_names_itself() {
+    let mut endpoint = controller(8, 1);
+    for (request_id, stale) in [(1_u64, false), (2, true), (3, true)] {
+        let request = control_request(if stale { 2 } else { 0 }, 0, 8, None);
+        let payload = if request_id == 3 {
+            crate::CommandPayload::ControlStateGet(&request)
+        } else {
+            crate::CommandPayload::ControlListGet(&request)
+        };
+        let input = full_command(request_id, ExpectedRevision::Any, payload);
+        let output = process_full_command(&mut endpoint, &input);
+        match decode_response(&output) {
+            crate::DecodedTypedResponseFrame::Success { .. } => {
+                assert!(!stale, "request {request_id} is served");
+            }
+            crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+                assert!(stale, "request {request_id} is refused");
+                assert_eq!(header.status, StatusCode::RevisionConflict);
+                let codes = payload
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(codes, ["control.list.stale"]);
+            }
+        }
+    }
+}
+
+/// Gate 2: the capability registry lists `0x000c` and `0x000d` and never the retired `0x0004` and
+/// `0x0005`; without the controls feature neither new message is listed, bit 7 is clear and a
+/// request for one is `UNAVAILABLE`.
+///
+/// Red if a retired ID is advertised or served, bit 7 stops tracking the pair, or a disabled
+/// provider answers a control request.
+#[test]
+fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones() {
+    let ids = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
+        let response = endpoint.process(capability(request_id, b"registry"));
+        let decoded = ProtocolCodec::default()
+            .decode_capabilities(response.payload(), 27)
+            .expect("capabilities");
+        let commands = decoded
+            .supported_commands
+            .chunks_exact(2)
+            .map(|id| u16::from_le_bytes([id[0], id[1]]))
+            .collect::<Vec<_>>();
+        (commands, decoded.flags.0 & (1 << 7) != 0)
+    };
+    let mut endpoint = controller(8, 1);
+    assert_eq!(
+        ids(&mut endpoint, 1),
+        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13], true)
+    );
+    endpoint.set_provider_features(ProviderFeatures {
+        controls: false,
+        ..ProviderFeatures::ALL
+    });
+    assert_eq!(
+        ids(&mut endpoint, 2),
+        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11], false)
+    );
+    for (request_id, payload) in [
+        (
+            3,
+            crate::CommandPayload::ControlListGet(&control_request(0, 0, 1, None)),
+        ),
+        (
+            4,
+            crate::CommandPayload::ControlStateGet(&control_request(0, 0, 1, None)),
+        ),
+    ] {
+        let input = full_command(request_id, ExpectedRevision::Any, payload);
+        let output = process_full_command(&mut endpoint, &input);
+        let crate::DecodedTypedResponseFrame::NonOk { header, .. } = decode_response(&output)
+        else {
+            panic!("a disabled control provider must refuse");
+        };
+        assert_eq!(header.status, StatusCode::Unavailable);
+    }
+}
+
+/// `AUTOMATION_ENQUEUE` keeps its domain rules over the control row the provider lends: only an
+/// automatable control row admits a record, a toggle admits `0` and `1`, an enumeration admits its
+/// choices, and a header or a missing handle is refused.
+///
+/// Red if the automation check reads a header row as a control, admits a value outside a toggle's
+/// or an enumeration's domain, or admits a record for a row that is not automatable.
+#[test]
+fn automation_keeps_its_domain_rules_over_the_control_row() {
+    let mut endpoint = controller(8, 4);
+    let mut template = match mock_controls().remove(2).body {
+        crate::ControlBody::Control(row) => row,
+        _ => panic!("the third fixture row is a control"),
+    };
+    let row_entry = |handle: u32, row: crate::ControlRow| crate::ControlEntry {
+        handle,
+        address: mock_controls().remove(2).address,
+        body: crate::ControlBody::Control(row),
+    };
+    let mut toggle = template.clone();
+    toggle.kind = crate::ControlKind::Toggle;
+    toggle.minimum = 0.0;
+    toggle.maximum = 1.0;
+    let mut choices = template.clone();
+    choices.kind = crate::ControlKind::Enumeration;
+    choices.choices = vec![
+        crate::EnumChoice {
+            value: 0.0,
+            label: "a".to_owned(),
+        },
+        crate::EnumChoice {
+            value: 2.0,
+            label: "b".to_owned(),
+        },
+    ];
+    choices.default = 0.0;
+    choices.value = 0.0;
+    template.class = crate::ControlClass::RebuildOnly;
+    template.reason = Some(crate::ControlReason::NewGraph);
+    template.reopen = Some("never".to_owned());
+    template.automatable = false;
+    let mut rows = mock_controls();
+    rows.push(row_entry(4, toggle));
+    rows.push(row_entry(5, choices));
+    rows.push(row_entry(6, template));
+    endpoint.provider.controls = rows;
+    let mut next_request = 0_u64;
+    let mut attempt = |endpoint: &mut ProtocolController<MockProvider>, handle: u32, value: f32| {
+        next_request += 1;
+        let request = endpoint.process(ControllerRequest {
+            request_id: id(next_request),
+            expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+            canonical_bytes: b"automation",
+            command: ControlCommand::AutomationEnqueue {
+                batch: AutomationBatchSlot::new(
+                    SessionRevision(7),
+                    id(next_request),
+                    &[crate::AutomationRecord {
+                        kind: crate::AutomationKind::Point,
+                        handle: ParameterHandle(handle),
+                        start: SampleTime(0),
+                        end: SampleTime(0),
+                        start_value: value,
+                        end_value: value,
+                    }],
+                )
+                .expect("batch"),
+            },
+        });
+        let status = request.status;
+        let _ = endpoint.queues_mut().try_dequeue_automation();
+        status
+    };
+    assert_eq!(attempt(&mut endpoint, 4, 1.0), StatusCode::Ok);
+    assert_eq!(attempt(&mut endpoint, 4, 0.5), StatusCode::InvalidField);
+    assert_eq!(attempt(&mut endpoint, 5, 2.0), StatusCode::Ok);
+    assert_eq!(attempt(&mut endpoint, 5, 1.0), StatusCode::InvalidField);
+    assert_eq!(attempt(&mut endpoint, 6, 0.0), StatusCode::InvalidField);
+    assert_eq!(attempt(&mut endpoint, 1, 0.0), StatusCode::InvalidField);
+    assert_eq!(attempt(&mut endpoint, 99, 0.0), StatusCode::NotFound);
 }

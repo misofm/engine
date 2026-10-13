@@ -241,7 +241,7 @@ const fn enum_link(value: session::LinkMode) -> u8 {
         session::LinkMode::Average => 3,
     }
 }
-const fn enum_tap(value: session::SendTap) -> u8 {
+pub(crate) const fn enum_tap(value: session::SendTap) -> u8 {
     match value {
         session::SendTap::Input => 1,
         session::SendTap::PostInput => 2,
@@ -1992,7 +1992,7 @@ fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
+pub(crate) fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
     match value {
         1 => Ok(session::SendTap::Input),
         2 => Ok(session::SendTap::PostInput),

@@ -147,7 +147,12 @@ fn prepare_corpus() -> Corpus {
         all: true,
         ids: Vec::new(),
     };
-    let parameter_state = protocol::ParameterStateRequest { handles: vec![1] };
+    let control_request = protocol::ControlListRequest {
+        structure_epoch: 0,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
+    };
     let automation_record = [AutomationRecord {
         kind: protocol::AutomationKind::Point,
         handle: protocol::ParameterHandle(1),
@@ -178,15 +183,12 @@ fn prepare_corpus() -> Corpus {
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(4),
         expected_revision: ExpectedRevision::Any,
-        payload: CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
-            after_handle: 0,
-            limit: 1,
-        }),
+        payload: CommandPayload::ControlListGet(&control_request),
     });
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(5),
         expected_revision: ExpectedRevision::Any,
-        payload: CommandPayload::ParameterStateGet(&parameter_state),
+        payload: CommandPayload::ControlStateGet(&control_request),
     });
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(6),

@@ -137,12 +137,16 @@ struct FieldSlot<'a> {
     start: usize,
 }
 
+/// The most fields one schema-checked message may declare. The widest is `control_entry`
+/// (decision 17, C4), which declares 34.
+const FIELD_SLOTS: usize = 40;
+
 /// Fixed-slot schema view built in one allocation-free pass.
 pub(crate) struct Fields<'a> {
     bytes: &'a [u8],
     count: u32,
     spec: Option<&'static MessageSpec>,
-    slots: [Option<FieldSlot<'a>>; 32],
+    slots: [Option<FieldSlot<'a>>; FIELD_SLOTS],
     validation: Option<(ProtocolLimits, u8)>,
 }
 
@@ -213,7 +217,7 @@ impl<'a> Fields<'a> {
             bytes,
             count,
             spec: None,
-            slots: [None; 32],
+            slots: [None; FIELD_SLOTS],
             validation: None,
         }
     }
@@ -228,7 +232,7 @@ impl<'a> Fields<'a> {
             bytes,
             count,
             spec: None,
-            slots: [None; 32],
+            slots: [None; FIELD_SLOTS],
             validation: Some((limits, depth)),
         }
     }

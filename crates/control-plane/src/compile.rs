@@ -867,7 +867,12 @@ where
         ProtocolControllerConfig {
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
-            provider_features: ProviderFeatures::ALL,
+            // The control list is served by #1552: until then capability bit 7 stays clear and
+            // `CONTROL_LIST_GET` and `CONTROL_STATE_GET` answer `UNAVAILABLE`.
+            provider_features: ProviderFeatures {
+                controls: false,
+                ..ProviderFeatures::ALL
+            },
         },
         retained_capacity,
     )
