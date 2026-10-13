@@ -9,12 +9,12 @@
 //! The rows come from tables and nowhere else:
 //!
 //! - a strip's builtin rows are `builtins::BUILTIN_PARAMETER_DESCRIPTORS`, bound to the model by
-//!   one `match` arm per builtin ID in [`builtin_rows`];
+//!   one `match` arm per builtin ID in `builtin_rows`;
 //! - a native effect's rows (its bypass, each parameter of its contract descriptor, and an
 //!   insert's link mode) are derived from the launch registry's `ParameterDescriptor` in
-//!   [`effect_rows`], with no table of their own;
-//! - a strip's own rows, a route's, a VCA's and the session's are the tables in [`strip`],
-//!   [`route`], [`vca`] and [`session_rows`]; each row carries its model accessors.
+//!   `effect_rows`, with no table of their own;
+//! - a strip's own rows, a route's, a VCA's and the session's are the tables in `strip`,
+//!   `route`, `vca` and `session_rows`; each row carries its model accessors.
 //!
 //! To add a control, add a row to its table (and the model field it reads); see decision 17,
 //! "How to add a control".

@@ -19,9 +19,10 @@
 //!
 //! The state keeps values and mirrors, never a composition: the effective dB and the effective VCA
 //! mute of a strip are `controls::effective_strip`'s, computed by the host over the accessors
-//! below ([`Self::reach_of`], [`Self::vca_values`], [`Self::own_db`]) and handed to
-//! [`Self::fader_delta`] and [`crate::LiveControlSoloState::strip_delta`], which emit the changed
-//! lanes (decision 17, slice S7c).
+//! below ([`LiveVcaState::reach_of`], [`LiveVcaState::vca_values`], [`LiveVcaState::own_db`])
+//! and handed to [`LiveVcaState::fader_delta`] and
+//! [`crate::LiveControlSoloState::strip_delta`], which emit the changed lanes (decision 17,
+//! slice S7c).
 //!
 //! # Indices
 //!
