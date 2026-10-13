@@ -1097,10 +1097,12 @@ mod tests {
             next,
             ramps: LiveRamps::for_session(next),
             edit: StripEditRamps::default(),
+            diff: None,
         };
         let target = Target {
             before: strip_of(current, &next.tracks[0].id).expect("strip"),
             after: strip_of(next, &next.tracks[0].id).expect("strip"),
+            index: 0,
             instance: None,
         };
         effect_records(&ctx, &target, &Section::Inserts(eq))
