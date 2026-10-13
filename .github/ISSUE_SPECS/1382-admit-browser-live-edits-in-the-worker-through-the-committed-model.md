@@ -126,9 +126,9 @@ term into effective mute, for strips and for sends that follow them.
   Amendment (root, 2026-10-12): the render half of `a_refused_batch_does_not_undo_a_committed_vca_batch`
   (#1525; and its solo and route siblings, if any) moves to the shared path; it is not deleted.
 
-- **D6. The browser's ramp table follows the model.** Root ruling (2026-10-12): #1382 drops or
-  refreshes the browser's `SessionRamps` on every model-only commit, with a test that goes red
-  without it (#1364/#1365 attempt-2 finding; host-web has no model-commit path before #1382).
+- **D6. The browser's ramp table follows the model.** Root ruling (2026-10-12): #1382 drops
+  `SessionRamps`; the Worker resolves an absent length from the committed model. The finding was
+  #1364's attempt 2 (host-web has no model-commit path before #1382).
   `SessionRamps` (`LiveRamps::for_session` plus one pan window per strip, built once in
   `compile_ready`, #1364) is correct only while the model it was built from is the committed model.
   Once this slice lets a transaction commit a `control_smoothing` edit (#1365) or a strip's
@@ -144,8 +144,7 @@ term into effective mute, for strips and for sends that follow them.
 3. Native tests in `hosts/host-web/src/tests.rs`, and the integration test binary
    `hosts/host-web/tests/worker_admission_realtime.rs` (gate 4).
 4. `sdk/src/browser/shipped-host.d.ts` and the host `.d.ts`: the reply's two new fields.
-5. D6: `SessionRamps` is dropped or refreshed on every model-only commit, in
-   `hosts/host-web/src/lib.rs`, and gate 9 proves it.
+5. D6: `SessionRamps` is dropped, in `hosts/host-web/src/lib.rs`, and gate 9 proves it.
 
 ## Authorized paths
 
@@ -214,12 +213,15 @@ term into effective mute, for strips and for sends that follow them.
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `bash scripts/check-workspace-policy.sh`
 
-9. **The ramp table follows the model** (root ruling, 2026-10-12). Native host-web test. Boot a
-   session whose `control_smoothing` is `default`; commit a `SetControlSmoothing` transaction
-   (#1365) with `mute_ms` 5; then submit a mute record with the sentinel ramp. The record ramps over
-   240 samples at 48 kHz (`mute_ms` 5), not 480 (the default table). Repeat with a model-only commit
-   that changes a strip's `smoothing_samples` and a pan record with the sentinel: the pan record
-   ramps over the new window. A transaction that clears the key (`None`) returns the record to 480.
+9. **The ramp table follows the model** (root ruling, 2026-10-12). Native host-web test, two legs.
+   - *Leg 1, the session key.* Boot a session whose `control_smoothing` is `default`; commit a
+     `SetControlSmoothing` transaction (#1365) with `mute_ms` 5; then submit a mute record with the
+     sentinel ramp. The record ramps over 240 samples at 48 kHz (`mute_ms` 5), not 480 (the default
+     table). A transaction that clears the key (`None`) returns the record to 480.
+   - *Leg 2, a strip's window.* Commit a live transaction that edits a strip's pan and its
+     `smoothing_samples` (a `SetTrackMatrixOrPan` with a new pan and `smoothing_samples` 100); then
+     submit a pan record for that strip with the sentinel ramp. The record ramps over 100 samples,
+     the strip's new window, not the window the session booted with.
 
 ## Test value
 
@@ -230,13 +232,17 @@ term into effective mute, for strips and for sends that follow them.
 - Gate 3: turns red if solo or a lease advances the revision, if the shared commit ignores the
   solo term for strips or following sends, or if the overlay is lost when the plan is swapped.
 - Gate 4: turns red if any record or overlay change is written before a later check refuses.
-- Gate 9: turns red if the browser keeps resolving an absent length against the table built at boot,
-  so a `control_smoothing` or strip-window edit takes effect only at the next rebuild (the stale
-  `SessionRamps` the #1364/#1365 attempt-2 verifiers named). No test can show this before this slice:
-  host-web has no model-commit path to change the model.
 - Gate 5: turns red if admission work runs on, or allocates on, the render thread, or if single
   mode's control allocations go uncounted.
 - Gate 6: turns red if the overlay input changes C ABI records when it is absent.
+- Gate 9, leg 1: turns red if the browser keeps resolving an absent length against the
+  `control_smoothing` table built at boot, so a `control_smoothing` edit takes effect only at the
+  next rebuild (the stale `SessionRamps` that #1364's attempt 2 found). No test can show this before
+  this slice: host-web has no model-commit path to change the model.
+- Gate 9, leg 2: turns red if the browser keeps the per-strip pan windows it built at boot, so a
+  live commit that changes a strip's `smoothing_samples` leaves every later sentinel pan record
+  ramping over the old window. Leg 1 cannot catch it: the table and the per-strip windows are
+  separate cached fields, and a drop or refresh of one leaves the other stale.
 - Superseded tests: host-web's composition tests named in D5 are moved or deleted in the same PR.
 
 ## Dependencies
