@@ -36,7 +36,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 19] = [
+        const UNSAFE_ALLOWLIST: [&str; 20] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -50,6 +50,7 @@ impl Policy {
             "crates/session/tests/allocation_budget.rs",
             "crates/capi/src/ffi.rs",
             "crates/capi/tests/resource_lifecycle.rs",
+            "crates/capi/tests/design_bound_cache.rs",
             "crates/capi/tests/plan_swap_race.rs",
             "hosts/host-web/src/ffi.rs",
             "hosts/host-web/src/render_lock.rs",
@@ -62,8 +63,12 @@ impl Policy {
                 .iter()
                 .map(|path| (*path).to_owned())
                 .collect(),
-            marked_files_floor: 26,
-            marked_regions_floor: 95,
+            // The floors equal the tree's counts, so a deleted marker or file fails here. They
+            // carry stream B's raises (#1432's `latest_cell.rs`, #1277, #1279, #1346, #1347 and
+            // #1345 D9: the awk gate's 118 regions in 27 files) and #1448's `poll_meters` region.
+            // A change that adds a marker raises them in the same change.
+            marked_files_floor: 27,
+            marked_regions_floor: 119,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

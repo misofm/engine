@@ -328,3 +328,30 @@ open then, and drops the D5 edits to any spec that B3 closed (a closed spec leav
 #1447 is still open, J fixes the contradiction in its gate 3 (it names the awk script that this slice deletes). J
 moves #1345 D9's awk floor raises into `Policy::workspace()`, because #1345's gate 9 has no awk script to run once
 this slice has landed.
+
+**Rebase onto stream B3 (J3 worker, 2026-10-13; `origin/main` at `88272d08b`).** 68 commits replayed; backup
+branch `j3-pre-rebase-backup` at `2ff0816e7`. Both #1345 and #1447 are in `main` and closed on GitHub.
+- Conflicts. `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` conflicted in the first
+  tool commit (`#1438`) and in the `#1441` commit (B3 raised the floors to 27 files and 118 regions and
+  added `design_bound_cache.rs` to the awk allowlist): each took main's text for the commits before the
+  deletion, and the `#1446` commit deletes both (modify/delete resolved as delete). `crates/builtins-compiler/src/lib.rs`
+  conflicted in the `#1441` commit: B3 already marks `drain_controls` (and the neighbouring helpers), so main's
+  text stands and that commit's marker edit is empty there. The `#1446` commit's D5 pass touched
+  `.github/ISSUE_SPECS/1445-*` (deleted on main with its issue's close): the edit is dropped. No other
+  conflict; the comment-only edits (`observe.rs`, `watermark.rs`, `fpenv.rs`, `softfma.rs`,
+  `resource_lifecycle.rs`, `host-core/src/lib.rs`, `plan.rs`, `ffi.rs`, `render_lock.rs`) and #1448's
+  `poll_meters` markers (blank lines at `lib.rs:3489` and `:3840`, bounding the function exactly) applied
+  cleanly, with line counts kept.
+- D5 re-applied. Open specs B3 added after the pass (#1521, #1523, #1534, #1537, #1538) took the command
+  substitution (`bash scripts/check-realtime-policy.sh` to `cargo run --locked --release -q -p realtime-policy`).
+  The D5 edits to the specs of the four issues B3 closed (#1345, #1346, #1347, #1447) are dropped (their specs
+  return to main's text). #1447 is closed, so the gate 3 contradiction needs no fix. Mentions left as
+  history are the ones listed above, plus #948 (still open on GitHub; left, as before).
+- #1471's allowlist: `crates/capi/tests/design_bound_cache.rs` joins `UNSAFE_ALLOWLIST` (20 entries); it
+  mirrors the awk entry B3 added. The release tool's 7 findings there are gone and nothing else changed.
+- #1345 D9's floors moved into `Policy::workspace()`: 27 files and 119 regions (was 26 and 95). The awk gate's
+  last floors on main were 27 and 118; the tool also counts #1448's `poll_meters` region (119). `git grep`
+  of `// REALTIME_POLICY_BEGIN` gives 119 in 27 files. The pre-#1345 finding at
+  `crates/effect-contract/src/live.rs:366` is gone (#1345 rewrote the function). `target/release/realtime_policy`
+  prints `realtime policy: ok (119 marked regions in 27 files)`. The test base tree keeps its own counts
+  (26 files, 94 regions): the case policy replaces the floors, so no case reads the workspace values.
