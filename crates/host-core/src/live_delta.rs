@@ -141,6 +141,25 @@ pub struct LiveDelta<'a> {
     pub routes: Vec<LiveRouteRecord<'a>>,
 }
 
+impl LiveDelta<'_> {
+    /// Whether the delta holds no record of any kind (#1313 D2): a transaction that changed only
+    /// model-only fields (the session ID, a profile ID, the stored automation) or rewrote
+    /// identical values. The host reports such a commit as `model_only` and a delta with at least
+    /// one record as `live`.
+    ///
+    /// The body names every field, so a field added to [`LiveDelta`] does not compile until it is
+    /// classified here.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            strips,
+            effects,
+            routes,
+        } = self;
+        strips.is_empty() && effects.is_empty() && routes.is_empty()
+    }
+}
+
 /// Why a delta needs a plan rebuild.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveRebuild {

@@ -806,7 +806,10 @@ pub enum ConformanceDecoder {
 /// count stays 46.
 /// Issue #1553 (decision 17, C5) repinned it from `0902357f75bdddcd`: `SetControl` (`0x0800`)
 /// appended, 48 edits, one per allocated opcode. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x9f13_a069_93ef_a99e;
+/// Issue #1313 repinned it from `9f13a06993efa99e`: `TransactionApplied` gains the required field
+/// 2, `edit_path` (`live` 1, `model_only` 2, `rebuild` 3), so the `SESSION_TRANSACTION_APPLY`
+/// response frame carries it. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xa19a_7794_3966_0743;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -981,7 +984,8 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     success!(
         "response.session_transaction",
         SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-            applied_operations: 42
+            applied_operations: 42,
+            edit_path: EditPath::Rebuild
         })
     );
     let (control_page, state_page) = control_corpus_pages();

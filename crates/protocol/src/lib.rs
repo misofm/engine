@@ -24,10 +24,11 @@ pub use message_wire::{
     ControlStatePage, ControlStateRecord, ControlTaper, CounterId, CounterSnapshot,
     CounterSnapshotRef, CounterValue, CountersRequest, DecodedAutomationEnqueue,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticSeverity,
-    DiagnosticsPage, DiagnosticsRequest, EnumChoice, MeterBatch, MeterComponent, MeterRecord,
-    NonOkResponse, ParameterChannel, ParameterRack, ParameterUnit, PathSegment, SessionCommitted,
-    SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration, TransactionApplied,
-    TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
+    DiagnosticsPage, DiagnosticsRequest, EditPath, EnumChoice, MeterBatch, MeterComponent,
+    MeterRecord, NonOkResponse, ParameterChannel, ParameterRack, ParameterUnit, PathSegment,
+    SessionCommitted, SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
+    TransportStateEvent,
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {

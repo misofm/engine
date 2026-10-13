@@ -156,3 +156,43 @@ watermark and complete edits asynchronously* (#1314).
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309): it moves
   `control.rs`; land this on top of it so the edit lands once, in its final file.
+
+## Decision record
+
+Landed on decision 17's controls program (batch 3), before #1559, which appends
+`EditPath::Monitor = 4`. Each adaptation of the spec to today's code:
+
+- **A1. Anchors.** `classify_live_delta` is the registry classifier in
+  `crates/host-core/src/live_delta.rs`; the C ABI command path is `SessionState::command` and
+  `commit_live` in `crates/control-plane/src/control.rs` (#1309). D2 is unchanged in intent: the
+  path is `Rebuild` when the classifier errs, else `ModelOnly` when `LiveDelta::is_empty()`, else
+  `Live`. `LiveDelta` now has three fields (`strips`, `effects`, `routes`, #1557); `is_empty`
+  destructures all three by name with no `..`. A `SET_CONTROL` transaction (#1553) takes the same
+  token and the same path as any other edit.
+- **A2. Commit.** `ObservedPreparedToken::commit(controller, path)` passes the path to
+  `commit_prepared_structural(prepared, path)`; the live arm passes `Live` or `ModelOnly`, the
+  rebuild arm `Rebuild`.
+- **A3. Re-encode.** The commit re-encodes with `encode_success_response_frame_into` from the
+  token's request ID, the prospective session's revision and its `applied_operations`, into the
+  token's own frame buffer, and asserts the length equals the prepared one. It does not store the
+  prepare-time measure, so the token's layout (the CAPI resource contract's `size_of`) does not
+  change. `ReplayCache::overwrite_completed_response` is private to the controller module, requires
+  the entry this token completed and an equal length, and the commit installs the overwritten
+  replay.
+- **A4. Enum shape for #1559.** `EditPath` is `#[repr(u8)]` in `message_wire.rs` with
+  `code()` and `from_code()`; `from_code` is the one decode arm table (`0` and any unallocated value
+  are `None` and decode as `InvalidTlv`). #1559 appends the variant `Monitor = 4` and one arm.
+- **A5. Gate 1, fourth case.** No native effect prepares at a quality other than `normal` today
+  (every `QualityDescriptor` is `Normal`), so a `SetEffectQuality` edit is refused at preparation
+  and returns no response. The mixed case is a fader change beside a source content edit
+  (`LiveRebuild::Structure`), which classifies as a rebuild and prepares.
+- **A6. Gate 1, model-only arm.** The session-ID case is covered in the new test and, for every
+  model-only edit (session ID, both profile IDs, stored automation, `control_smoothing`), in
+  `model_only_edits_commit_without_a_plan_rebuild`.
+- **A7. Hash.** `COMPLETE_SCHEMA_HASH` moved from `9f13a06993efa99e` to `a19a779439660743`
+  ("TransactionApplied gains field 2"). Mirrors re-pinned with a history line: `protocol_corpus.rs`,
+  `scripts/check-protocol-wasm-parity.sh` (both self-test search strings),
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md` and `fuzz/corpus/complete-schema-manifest.md`.
+- **A8. Doc rows.** The header's live-edit paragraph, the qualification "Same events" and "Edit
+  path in the response" bullets (the "No rebuild signal" bullet became the latter), and the
+  registry's `0003` row and enum line state the field.

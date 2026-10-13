@@ -1098,6 +1098,7 @@ mod tests {
                     payload: SuccessResponsePayload::SessionTransactionApplied(
                         TransactionApplied {
                             applied_operations: 1,
+                            edit_path: crate::EditPath::Live,
                         },
                     ),
                 },

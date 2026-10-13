@@ -484,6 +484,7 @@ impl ObservedPreparedToken {
     pub(crate) fn commit(
         mut self,
         controller: &mut ObservedController,
+        path: protocol::EditPath,
     ) -> Result<protocol::CommittedCommandFrame, ()> {
         let prepared = self.inner.take().expect("observed token commits once");
         #[cfg(feature = "test-support")]
@@ -492,11 +493,11 @@ impl ObservedPreparedToken {
             Err(())
         } else {
             controller
-                .commit_prepared_structural(*prepared)
+                .commit_prepared_structural(*prepared, path)
                 .map_err(|_| ())
         };
         #[cfg(not(feature = "test-support"))]
-        let committed = controller.commit_prepared_structural(*prepared);
+        let committed = controller.commit_prepared_structural(*prepared, path);
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| {
             owners.token_disposed += 1;
@@ -1307,8 +1308,9 @@ where
                     drop(prepared);
                     return Err(CommandError::Internal);
                 }
+                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
                 let committed = prepared
-                    .commit(&mut self.controller)
+                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
                     .map_err(|_| CommandError::Internal)?;
                 // Issue #1273 D2: the protocol commit was the last fallible step, so the
                 // persisting producers move now and never move back. Infallible.
@@ -1640,13 +1642,20 @@ where
                 }
             }
         }
+        // #1313 D2: the path is the classifier's result. A delta with no record of any kind is a
+        // commit render has nothing to do for.
+        let path = if delta.is_empty() {
+            protocol::EditPath::ModelOnly
+        } else {
+            protocol::EditPath::Live
+        };
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
         // 7. Commit, then each EQ owner; the catalog's values follow (#1264 D4, #1265 D3);
         // 8. respond.
         let committed = prepared
-            .commit(&mut self.controller)
+            .commit(&mut self.controller, path)
             .expect("the commit predicate was checked under this borrow");
         debug_assert_eq!(
             revision,

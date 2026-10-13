@@ -12,7 +12,7 @@ Message IDs `0004` (parameter metadata get) and `0005` (parameter state get) are
 
 Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupported message, `4` unknown required field, `5` invalid field, `6` limit exceeded, `7` revision conflict, `8` revision exhausted, `9` request ID reuse, `10` replay expired, `11` backpressure, `12` validation failed, `13` not found, `14` unavailable, `15` time in past, `16` automation order, `17` PCM forbidden, `18` internal.
 
-`QueueKind` is control command `1`, automation `2`, reliable response `3`, reliable event `4`, telemetry `5`, replay cache `6`. Diagnostic severity is info `1`, warning `2`, error `3`. Transport state is stopped `1` or playing `2`. Parameter enums are: rack inserts/builtins/console `2`/`4`/`5` (decision 12, #1093: `inserts` kept the retired `dynamic` code and `console` is appended; `1` (SIMD1) and `3` (SIMD2) are retired and refused, never reallocated; `builtins` is the strip's own fixed section, appended by issue #178; the same table is the session edits' rack name and an automation target's rack); channel left/right/both `1..3`; unit dB/Hz/ms/samples/linear/ratio `1..6`. Meter component is left/right/aggregate `1..3`; meter flags are valid/clipped/held bits `0..2`. All unallocated bits reject.
+`QueueKind` is control command `1`, automation `2`, reliable response `3`, reliable event `4`, telemetry `5`, replay cache `6`. Diagnostic severity is info `1`, warning `2`, error `3`. Transport state is stopped `1` or playing `2`. Parameter enums are: rack inserts/builtins/console `2`/`4`/`5` (decision 12, #1093: `inserts` kept the retired `dynamic` code and `console` is appended; `1` (SIMD1) and `3` (SIMD2) are retired and refused, never reallocated; `builtins` is the strip's own fixed section, appended by issue #178; the same table is the session edits' rack name and an automation target's rack); channel left/right/both `1..3`; unit dB/Hz/ms/samples/linear/ratio `1..6`. Transaction edit path (`0003` response field `2`, #1313) is live/model_only/rebuild `1..3`: records on the running plan's live lanes, nothing for render to do, and a successor plan prepared and published; zero and every unallocated value reject. Meter component is left/right/aggregate `1..3`; meter flags are valid/clipped/held bits `0..2`. All unallocated bits reject.
 
 ## Common forms
 
@@ -26,7 +26,7 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 | ---: | --- | --- |
 | `0001` | empty, revision-any | v1 min/max, effective frame/TLV/string/depth limits, batch/page/transaction limits, all queue/replay caps, density/quantum, packed command/event IDs, capability flags |
 | `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-JSON BYTES R`, `4:eof BOOL R` |
-| `0003` | `1:SessionEdit MESSAGE R*`; exact revision, nonempty | `1:applied-operations U32 R` |
+| `0003` | `1:SessionEdit MESSAGE R*`; exact revision, nonempty | `1:applied-operations U32 R`, `2:edit-path U8 R` |
 | `0006` | count `1:U16 R`, stride `2:U16=32 R`, records `3:BYTES R`; exact revision | accepted count `1:U16 R`, occupancy `2:U64 R`, capacity `3:U64 R`, generation `4:U64 R` |
 | `0007` | empty | transport snapshot below |
 | `0008` | state `1:U8 R`, absolute position `2:U64 O`; exact revision | transport snapshot below |

@@ -509,16 +509,24 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   changes until the last of them passes. The cell writes and the commit then cannot
   fail, and render applies every value it reads, because the classifier refuses every value the
   setters would refuse. A refused transaction writes no cell and uses no revision.
-- **Same response and events.** A live edit returns `TransactionApplied` and emits one
-  `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
-  The reliable event lane holds two events, so a host drains it after each edit either way.
-- **No rebuild signal.** Since #1273 a host needs none. After a live edit or a replacement alike
-  it goes on submitting every source the transaction left unchanged, with no seek; after a
-  replacement it acts only on a source the transaction added, changed or removed (see the #1273
-  paragraph under "Linux artifact and consumer boundary", and `miso_engine_v1_source_seek_at`
-  (#1275) to start an added one in time). The ABI gives no way to tell the two apart: the response and the events are
-  the same, and `miso_engine_v1_plan_resources` describes whichever plan is active, which a
-  replacement may leave unchanged. No new symbol, opcode, field, result code or event is added.
+- **Same events.** A live edit emits one `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per
+  queued batch), exactly as a replacement does. The reliable event lane holds two events, so a
+  host drains it after each edit either way.
+- **Edit path in the response (#1313).** The `TransactionApplied` response carries a required
+  field `2:edit-path U8`: `live` 1 (records on the running plan's live lanes, no plan prepared),
+  `model_only` 2 (committed; the classifier's delta holds no record of any kind) and `rebuild` 3
+  (a successor plan was prepared and published, whatever live records the transaction also
+  held). The path is known at submit and written by the commit into the response frame and its
+  replay entry, so an exact replay of the request returns the same bytes. Zero and every other
+  value are refused on decode. This reverses #1053 Q3 ("not now"). A fallback after submit and a
+  supersession are reported by the watermark's outcome flags (#1314). After a live edit or a
+  replacement alike a host goes on submitting every source the transaction left unchanged, with
+  no seek; after a replacement it acts only on a source the transaction added, changed or removed
+  (see the #1273 paragraph under "Linux artifact and consumer boundary", and
+  `miso_engine_v1_source_seek_at` (#1275) to start an added one in time).
+  `miso_engine_v1_plan_resources` describes whichever plan is active, which a replacement may
+  leave unchanged. No new symbol, opcode, result code or event is added; the field travels inside
+  the response bytes.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the

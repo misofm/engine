@@ -1231,7 +1231,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
     );
 
     let committed = endpoint
-        .commit_prepared_structural(prepared)
+        .commit_prepared_structural(prepared, EditPath::ModelOnly)
         .expect("affine commit");
     let mut output = [0xa5_u8; 2048];
     let committed_len = committed.write_into(&mut output).expect("committed bytes");
@@ -1244,6 +1244,79 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         accepted_event
     );
     assert_eq!(endpoint.replay().len(), 1);
+}
+
+fn transaction_edit_path(frame: &[u8]) -> EditPath {
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut fields))
+        .expect("decodable transaction response")
+    {
+        crate::DecodedTypedResponseFrame::Success {
+            payload: crate::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            ..
+        } => applied.edit_path,
+        _ => panic!("expected a transaction success"),
+    }
+}
+
+#[test]
+fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
+    let transaction = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("path-session").expect("ID"),
+    }];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&transaction),
+    );
+
+    // The protocol-only path owns no render plan: the commit changes only the model (#1313 D4).
+    let mut direct = controller(8, 2);
+    let mut direct_output = [0_u8; 2048];
+    let direct_len = direct
+        .process_command_frame_into(
+            &input,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut direct_output,
+        )
+        .expect("one-call path");
+    assert_eq!(
+        transaction_edit_path(&direct_output[..direct_len]),
+        EditPath::ModelOnly
+    );
+
+    for path in [EditPath::Live, EditPath::ModelOnly, EditPath::Rebuild] {
+        let mut endpoint = controller(8, 2);
+        let prepared = match endpoint
+            .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .expect("prepare")
+        {
+            PreparedCommandFrame::Structural(prepared) => *prepared,
+            PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        };
+        let prepared_len = prepared.response_len();
+        let committed = endpoint
+            .commit_prepared_structural(prepared, path)
+            .expect("commit");
+        let mut first = [0_u8; 2048];
+        let first_len = committed.write_into(&mut first).expect("committed bytes");
+        assert_eq!(first_len, prepared_len, "the field is fixed width");
+        assert_eq!(transaction_edit_path(&first[..first_len]), path);
+
+        // The replay entry holds the committed frame, not the prepared placeholder.
+        let mut replay = [0_u8; 2048];
+        let replay_len = endpoint
+            .process_command_frame_into(
+                &input,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                &mut replay,
+            )
+            .expect("replay");
+        assert_eq!(&replay[..replay_len], &first[..first_len]);
+        assert_eq!(transaction_edit_path(&replay[..replay_len]), path);
+        assert_eq!(endpoint.session().revision(), SessionRevision(8));
+    }
 }
 
 #[test]
@@ -1327,7 +1400,7 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
 
     let wrong_owner = structural(&mut owner, &first);
     assert!(matches!(
-        other.commit_prepared_structural(wrong_owner),
+        other.commit_prepared_structural(wrong_owner, EditPath::ModelOnly),
         Err(PreparedCommandCommitError::WrongController)
     ));
     assert_eq!(owner.session().revision(), SessionRevision(7));
@@ -1336,14 +1409,14 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     let stale = structural(&mut owner, &first);
     owner.structural_generation.fetch_add(2, Ordering::AcqRel);
     assert!(matches!(
-        owner.commit_prepared_structural(stale),
+        owner.commit_prepared_structural(stale, EditPath::ModelOnly),
         Err(PreparedCommandCommitError::StaleGeneration)
     ));
     owner.structural_generation.fetch_add(1, Ordering::AcqRel);
 
     let first_token = structural(&mut owner, &first);
     owner
-        .commit_prepared_structural(first_token)
+        .commit_prepared_structural(first_token, EditPath::ModelOnly)
         .expect("first serial commit");
     let _ = owner
         .queues_mut()
@@ -1357,7 +1430,7 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     );
     let second_token = structural(&mut owner, &second);
     owner
-        .commit_prepared_structural(second_token)
+        .commit_prepared_structural(second_token, EditPath::ModelOnly)
         .expect("second serial commit");
     assert_eq!(owner.session().revision(), SessionRevision(9));
     assert_eq!(owner.replay().len(), 2);

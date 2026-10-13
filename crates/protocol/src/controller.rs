@@ -26,10 +26,10 @@ use crate::{
     ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
     CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
     DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
-    EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse,
-    ParameterHandle, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
-    ReliablePayload, ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit,
-    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
+    NonOkResponse, ParameterHandle, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues,
+    QueueReport, ReliablePayload, ReliableSlot, RequestId, SampleTime, SessionCommitted,
+    SessionEdit, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
     SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
     TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
     TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
@@ -471,6 +471,27 @@ impl ReplayCache {
             response_bytes: response.len(),
             _resource_layout_reservation: [0; 16],
         };
+        Ok(())
+    }
+
+    /// Replace the response bytes of the entry `request_id` completed, with bytes of the same
+    /// length (#1313 D3). The request bytes, the entry order and the arena offsets do not move.
+    /// The prepared structural commit uses it to write the edit path into the replay entry that
+    /// preparation completed before the host classified the edit.
+    fn overwrite_completed_response(
+        &mut self,
+        request_id: RequestId,
+        response: &[u8],
+    ) -> Result<(), ReplayCacheError> {
+        let index = self
+            .entry_index(request_id)
+            .map_err(|_| ReplayCacheError::ReservationMissing)?;
+        let entry = self.entries[index];
+        if entry.response_bytes != response.len() {
+            return Err(ReplayCacheError::ResponseTooLarge);
+        }
+        self.storage[entry.response_offset..entry.response_offset + entry.response_bytes]
+            .copy_from_slice(response);
         Ok(())
     }
 
@@ -1618,6 +1639,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             revision,
             payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
                 applied_operations: plan.applied_operations,
+                edit_path: EditPath::ModelOnly,
             }),
         };
         #[cfg(test)]
@@ -1795,6 +1817,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             revision,
             payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
                 applied_operations,
+                edit_path: EditPath::ModelOnly,
             }),
         };
         let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
@@ -1850,6 +1873,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             revision,
             payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
                 applied_operations: plan.applied_operations,
+                edit_path: EditPath::ModelOnly,
             }),
         };
         let written = self
@@ -1985,9 +2009,17 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Validate token affinity/currentness, then apply every prepared controller mutation without
     /// another fallible semantic or capacity decision.
+    ///
+    /// `path` is how the host applied the transaction (#1313 D3). Preparation encodes the response
+    /// with [`EditPath::ModelOnly`] because the host classifies after preparing; the frame never
+    /// leaves the token before this commit. The commit re-encodes the same frame with `path` into
+    /// the token's own buffer and into the prospective replay entry. The field is fixed width, so
+    /// the length is unchanged and neither write can fail. A caller whose token is refused returns
+    /// before either write.
     pub fn commit_prepared_structural(
         &mut self,
         mut prepared: PreparedStructuralCommand,
+        path: EditPath,
     ) -> Result<CommittedCommandFrame, PreparedCommandCommitError> {
         self.check_prepared_structural(&prepared)?;
         let mut event_reservations = prepared
@@ -1995,12 +2027,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             .take()
             .expect("affine token owns exact event reservations");
         let effective_sample = self.provider.current_sample();
-        let commit = self.session.commit_prepared(
-            prepared
-                .prospective_session
-                .take()
-                .expect("affine token owns prospective session"),
-        );
+        let session = prepared
+            .prospective_session
+            .take()
+            .expect("affine token owns prospective session");
+        let response_revision = session.revision();
+        let commit = self.session.commit_prepared(session);
         debug_assert_eq!(
             commit.applied_operations,
             prepared.applied_operations as usize
@@ -2021,7 +2053,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             AutomationCancellationReason::RevisionChanged,
             Some(effective_sample),
         );
-        self.replay = prepared
+        let mut replay = prepared
             .prospective_replay
             .take()
             .expect("affine token owns prospective replay");
@@ -2029,7 +2061,30 @@ impl<P: ControlProvider> ProtocolController<P> {
             .response
             .take()
             .expect("affine token owns committed response");
-        let bytes = response.frame;
+        let mut bytes = response.frame;
+        let final_frame = TypedSuccessResponseFrame {
+            request_id: prepared.request_id,
+            revision: response_revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations: prepared.applied_operations,
+                edit_path: path,
+            }),
+        };
+        let written = self
+            .codec
+            .encode_success_response_frame_into(&final_frame, &mut bytes)
+            .expect(
+                "the edit path is fixed width: the prepared frame buffer holds the final frame",
+            );
+        assert_eq!(
+            written,
+            bytes.len(),
+            "the final frame has the prepared frame's length"
+        );
+        replay
+            .overwrite_completed_response(prepared.request_id, &bytes)
+            .expect("this token completed the entry with a response of the same length");
+        self.replay = replay;
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;
@@ -2950,7 +3005,10 @@ impl<P: ControlProvider> ProtocolController<P> {
                         );
                         self.ok_at_revision(
                             commit.revision,
-                            Body::TransactionApplied(TransactionApplied { applied_operations }),
+                            Body::TransactionApplied(TransactionApplied {
+                                applied_operations,
+                                edit_path: EditPath::ModelOnly,
+                            }),
                         )
                     }
                     Err(error) => {

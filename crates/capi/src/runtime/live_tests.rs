@@ -5,9 +5,9 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    SESSION, automation_status, automation_target, boxed_c_children_with_limits, command_bytes,
-    command_bytes_at_revision, command_c, control_list_all_c, control_list_c, control_state_all_c,
-    control_state_c, event_c, generated_parity_session, limits, submit_c,
+    SESSION, add_muted_track, automation_status, automation_target, boxed_c_children_with_limits,
+    command_bytes, command_bytes_at_revision, command_c, control_list_all_c, control_list_c,
+    control_state_all_c, control_state_c, event_c, generated_parity_session, limits, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -2326,7 +2326,13 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
         let (revision, _, epoch, pending) = rig.summary();
         assert_eq!(pending, 0, "{name}");
         let bytes = rig.transaction(core::slice::from_ref(&edit));
-        assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK, "{name}");
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK, "{name}");
+        assert_eq!(
+            edit_path_of(&response),
+            protocol::EditPath::ModelOnly,
+            "{name}: a delta with no record is reported as model-only"
+        );
         let (after, _, after_epoch, after_pending) = rig.summary();
         assert_eq!(
             (after, after_epoch, after_pending),
@@ -2352,6 +2358,82 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
     }
     assert_eq!(rig.generation, 1, "the host never seeked");
     assert_eq!(rig.summary().2, 0, "the first epoch still renders");
+}
+
+/// The edit path a `SESSION_TRANSACTION_APPLY` success response carries (#1313).
+fn edit_path_of(response: &[u8]) -> protocol::EditPath {
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+        .expect("transaction response")
+    else {
+        panic!("expected a transaction success")
+    };
+    applied.edit_path
+}
+
+/// #1313 gates 1 and 2: the response names how the engine applied the transaction. A fader change
+/// is `live`, a session ID change is `model_only`, an added track is `rebuild`, and a fader change
+/// beside a source content edit is the `rebuild` it takes. An exact replay of the live
+/// request returns the same bytes, path included.
+///
+/// Test value: red if the path is derived from anything but the classifier's result (for example
+/// "a record was pushed", which calls the mixed transaction live; or `live` for an empty delta),
+/// or if the commit forgets to overwrite the replay entry, so a retry reports the placeholder
+/// the prepared frame carried.
+#[test]
+fn each_transactions_response_names_its_edit_path() {
+    let document = effect_session(10, 48_000);
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let live = rig.transaction(&[left_db_edit("eq2", -4.5)]);
+    let (result, first) = rig.send(&live);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&first), protocol::EditPath::Live);
+    assert_eq!(rig.summary().3, 0, "live prepares no candidate");
+    let (result, replay) = rig.send(&live);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        replay, first,
+        "the replay is the first response, byte for byte"
+    );
+    assert_eq!(edit_path_of(&replay), protocol::EditPath::Live);
+
+    let session_id = rig.transaction(&[SessionEdit::SetSessionId {
+        session_id: StableId::parse("path-session").expect("session ID"),
+    }]);
+    let (result, response) = rig.send(&session_id);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::ModelOnly);
+    assert_eq!(rig.summary().3, 0, "model-only prepares no candidate");
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let model = parse_session_json(&document).expect("model");
+    let added = rig.transaction(&add_muted_track(&model, "added"));
+    let (result, response) = rig.send(&added);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    assert_eq!(rig.summary().3, 1, "rebuild prepares a candidate");
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    // No native effect prepares at a quality other than `normal` today, so a quality edit would be
+    // refused at preparation; a source content edit is the structure change that beside a fader
+    // value is still the rebuild it takes (`LiveRebuild::Structure`).
+    let mixed = rig.transaction(&[left_db_edit("eq2", -4.5), content_edit(&model)]);
+    let (result, response) = rig.send(&mixed);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        edit_path_of(&response),
+        protocol::EditPath::Rebuild,
+        "a transaction that also has live records is the rebuild it takes"
+    );
+    assert_eq!(rig.summary().3, 1);
 }
 
 /// `SetControlSmoothing` with the given `mute_ms` and the default table's other two lengths.

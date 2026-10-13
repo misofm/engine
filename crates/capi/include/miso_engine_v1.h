@@ -65,14 +65,22 @@ extern "C" {
  * parametric EQ's prepared targets are cells of that effect's lane; a block applies the bypass
  * first, then the parameters in parameter order, then the targets, all under the one snapshot
  * that covers the fader values. An acknowledged live edit is never dropped. A live edit commits
- * the same response and the same reliable events as a replacement, so the host drains the
- * reliable event lane after each edit either way. After either one the host goes on submitting
- * every source the transaction left unchanged, with no seek; after a replacement it acts only on
- * a source the transaction added, changed or removed (see "Sources across a structural
- * transaction" and "Starting an added stem in time" below). The ABI gives no signal that tells a
- * live edit from a replacement, and a host needs none. (miso_engine_v1_plan_resources describes
- * whichever plan is active, so a replacement may change it, but an unchanged report does not mean
- * that no replacement happened.)
+ * the same reliable events as a replacement, so the host drains the reliable event lane after
+ * each edit either way. The success response of every SESSION_TRANSACTION_APPLY names how the
+ * engine applied the transaction in its required field 2, edit-path (a U8), known when the
+ * command returns and in the same frame as the new revision: 1 = live (records went to the
+ * running plan's live lanes, no plan was prepared), 2 = model_only (committed, and the delta
+ * holds no record for render: a session ID, a profile ID, the stored automation or identical
+ * values), 3 = rebuild (a successor plan was prepared and published, whatever else the
+ * transaction held). Zero and every other value are refused by the decoder. An exact replay of
+ * the request returns the same bytes, the path included. A fallback to a rebuild after submit
+ * and a supersession are not in the response; the watermark's outcome flags report them. After
+ * a live edit or a replacement the host goes on submitting every source the transaction left
+ * unchanged, with no seek; after a replacement it acts only on a source the transaction added,
+ * changed or removed (see "Sources across a structural transaction" and "Starting an added stem
+ * in time" below). (miso_engine_v1_plan_resources describes whichever plan is active, so a
+ * replacement may change it, but an unchanged report does not mean that no replacement
+ * happened; the edit path is the signal.)
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
