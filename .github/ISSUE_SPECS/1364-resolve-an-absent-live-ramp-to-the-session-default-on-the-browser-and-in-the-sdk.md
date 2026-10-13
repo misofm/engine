@@ -614,3 +614,19 @@ the SDK job (383 evals; `node_modules` and `dist` deleted afterwards).
 | #1365 mask | `control_smoothing` not masked | R `model_only_edits_are_live_with_no_records` and the capi live-commit test |
 | host-web resolution | the mute sentinel not resolved | R `an_absent_ramp_resolves_to_the_sessions_row_and_a_given_one_is_kept` |
 | cross-host strip cells | the browser fader command sends 0 instead of the sentinel | R `both_hosts_drain_two_fader_and_two_pan_edits_alike` |
+
+### Rebase onto 70804d3c2
+
+Stream E2's 39 commits are rebased onto `70804d3c2` (J3, PR #1541). The commit mapping from
+`3715d0754` (the head on `88272d08b`; backup branch `backup-e2-pre-rebase-70804d3c2`) is one-to-one and in the
+same order, 39 to 39; the rebased tip of that sequence is `2a7cb1798`. Three commits follow it, in this order:
+the pointer from the J-batch wording in `STREAMS.md` and #1444 to the 2026-10-13 follow-up-batch note, root's
+2026-10-12 ruling for #1382 (D6 drops `SessionRamps`, gate 9 gains a strip-window leg), and root's 2026-10-13 rulings
+on the port points. The head after this note is the branch head.
+
+One port. J3 deleted `scripts/check-realtime-policy.sh`, so the E2 row for
+`hosts/host-web/tests/control_smoothing_parity.rs` (#1364) moved to `UNSAFE_ALLOWLIST` in
+`tools/realtime-policy/src/policy.rs` (20 to 21 entries) with an "Unsafe-code ownership" entry in
+`docs/REALTIME_DEPENDENCY_POLICY.md`, in the commit that introduced the row (old `e274ca72e`, now `4705dc0f2`).
+Earlier gate lists in this record that name `check-realtime-policy.sh` and `test-realtime-policy.sh` are the
+evidence of their time; the gate is now `tools/realtime-policy` (its tests and self-test).
