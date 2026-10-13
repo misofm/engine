@@ -137,3 +137,9 @@ Commands: `cargo test --locked -p host-core --all-features`,
   the double-live admission. Recorded as a successor with the compact, deduplicated row storage.
 - **Page trimming.** The controller trims a page to the endpoint's response bound (`eof` false,
   cursor at the last row kept; one row that cannot fit is `LIMIT_EXCEEDED`).
+  Batch 2 review fold: the page codec reports a page whose content breaks the message rules
+  (unordered handles, a non-finite value, an address that disagrees with its row) as the new
+  `EncodeError::InvalidField`, and only a row count above 256 or a frame bound as `LimitExceeded`;
+  the controller trims on the second and answers the first as `INTERNAL`, since no page size
+  repairs the provider's defect. The trim estimate multiplies in `u64`.
+

@@ -3144,7 +3144,7 @@ pub(crate) fn write_control_request(
     value: &ControlListRequest,
 ) -> Result<(), EncodeError> {
     if !control_request_is_valid(sink.limits(), value) {
-        return Err(EncodeError::LimitExceeded);
+        return Err(EncodeError::InvalidField);
     }
     let count = control_list_request::SPEC.field_count(&[
         (
@@ -3213,8 +3213,13 @@ pub(crate) fn write_control_list_page(
     sink: &mut dyn Sink,
     value: &ControlListPage,
 ) -> Result<(), EncodeError> {
-    if !control_list_page_is_valid(sink.limits(), value) {
+    // More rows than a page holds is the one excess a smaller page cures; every other failure is
+    // the value's own and no page size changes it.
+    if value.entries.len() > usize::from(CONTROL_PAGE_ITEMS) {
         return Err(EncodeError::LimitExceeded);
+    }
+    if !control_list_page_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
     }
     let count =
         control_list_page::SPEC.field_count(&[(control_list_page::ENTRY, value.entries.len())])?;
@@ -3660,8 +3665,11 @@ pub(crate) fn write_control_state_page(
     sink: &mut dyn Sink,
     value: &ControlStatePage,
 ) -> Result<(), EncodeError> {
-    if !control_state_page_is_valid(value) {
+    if value.records.len() > usize::from(CONTROL_PAGE_ITEMS) {
         return Err(EncodeError::LimitExceeded);
+    }
+    if !control_state_page_is_valid(value) {
+        return Err(EncodeError::InvalidField);
     }
     let bytes = value
         .records

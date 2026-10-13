@@ -555,6 +555,9 @@ pub enum EncodeError {
     MessageKindMismatch,
     /// A configured protocol frame, field-count, or UTF-8 byte limit would be exceeded.
     LimitExceeded,
+    /// A typed value breaks its message's own rules (an unordered or non-finite value, a field
+    /// pair that disagrees): the value is wrong at any size, so trimming it cannot help.
+    InvalidField,
     /// The caller buffer is insufficient; no output bytes were written.
     OutputTooSmall {
         /// Exact canonical frame byte length required.
@@ -567,6 +570,7 @@ impl fmt::Display for EncodeError {
         match self {
             Self::MessageKindMismatch => formatter.write_str("message kind mismatch"),
             Self::LimitExceeded => formatter.write_str("protocol encoding limit exceeded"),
+            Self::InvalidField => formatter.write_str("protocol value breaks its message rules"),
             Self::OutputTooSmall { required } => write!(formatter, "output too small: {required}"),
         }
     }

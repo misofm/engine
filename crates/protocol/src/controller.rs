@@ -3733,7 +3733,8 @@ fn status_for_automation(error: AutomationBatchError) -> StatusCode {
 /// How many of `count` page rows to keep when the page measured `measured` payload bytes against
 /// `budget`: `None` when it fits, else fewer rows than `count`, at least one. A page whose one row
 /// does not fit is `LIMIT_EXCEEDED`; a codec limit (frame bytes, field count) is the same excess
-/// as the response bound, so it halves the page.
+/// as the response bound, so it halves the page. A page whose content breaks the message's rules
+/// (`InvalidField`) is the provider's defect at any size: `INTERNAL`, never trimmed.
 fn rows_that_fit(
     measured: Result<usize, EncodeError>,
     budget: usize,
@@ -3741,7 +3742,10 @@ fn rows_that_fit(
 ) -> Result<Option<usize>, StatusCode> {
     let keep = match measured {
         Ok(length) if length <= budget => return Ok(None),
-        Ok(length) => count * budget / length.max(1),
+        Ok(length) => {
+            let kept = (count as u64) * (budget as u64) / (length.max(1) as u64);
+            usize::try_from(kept).unwrap_or(count)
+        }
         Err(EncodeError::LimitExceeded) => count / 2,
         Err(_) => return Err(StatusCode::Internal),
     };

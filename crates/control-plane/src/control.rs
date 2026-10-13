@@ -587,7 +587,9 @@ pub(crate) fn map_encode_error(error: EncodeError) -> CommandError {
         EncodeError::OutputTooSmall { required } => CommandError::BufferTooSmall {
             required: u64::try_from(required).unwrap_or(u64::MAX),
         },
-        EncodeError::MessageKindMismatch | EncodeError::LimitExceeded => CommandError::Internal,
+        EncodeError::MessageKindMismatch
+        | EncodeError::LimitExceeded
+        | EncodeError::InvalidField => CommandError::Internal,
     }
 }
 

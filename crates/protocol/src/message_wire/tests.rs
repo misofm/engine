@@ -1078,7 +1078,7 @@ fn control_request_rules_refuse_on_encode_and_decode_alike() {
         typed(&mut request);
         assert_eq!(
             codec.encoded_control_list_request_len(&request),
-            Err(EncodeError::LimitExceeded),
+            Err(EncodeError::InvalidField),
             "{name}: encode"
         );
         let (patched, count) = edited(&bytes, wire);
@@ -1355,7 +1355,7 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
             typed(&mut broken);
             assert_eq!(
                 codec.encoded_control_list_page_len(&broken),
-                Err(EncodeError::LimitExceeded),
+                Err(EncodeError::InvalidField),
                 "{name}: encode"
             );
         }
@@ -1487,9 +1487,16 @@ fn control_state_page_rules_refuse_on_encode_and_decode_alike() {
     for (name, typed) in encode_rules {
         let mut broken = page.clone();
         typed(&mut broken);
+        // Only a row count above a page is an excess a smaller page cures; the rest is the
+        // value's own defect.
+        let expected = if name == "more than 256 records" {
+            EncodeError::LimitExceeded
+        } else {
+            EncodeError::InvalidField
+        };
         assert_eq!(
             codec.encoded_control_state_page_len(&broken),
-            Err(EncodeError::LimitExceeded),
+            Err(expected),
             "{name}: encode"
         );
     }

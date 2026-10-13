@@ -3885,6 +3885,39 @@ fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
     assert_eq!(header.status, StatusCode::LimitExceeded);
 }
 
+/// Batch 2 review fold item 3: a provider page whose content breaks the message's rules (here
+/// two rows with one handle) is the provider's defect at any size, so it is `INTERNAL` for both
+/// messages and is never trimmed into a smaller page or reported as `LIMIT_EXCEEDED`.
+///
+/// Red if the codec reports a content failure as an excess, so the controller halves the page down
+/// to one row (which is valid) and answers a corrupt list as if it were a short one.
+#[test]
+fn a_content_invalid_provider_page_is_internal_and_is_not_trimmed() {
+    let mut endpoint = controller(8, 1);
+    let row = mock_controls().pop().expect("a control row");
+    endpoint.provider_mut().controls = (0..3)
+        .map(|_| crate::ControlEntry {
+            handle: 2,
+            ..row.clone()
+        })
+        .collect();
+    for (request_id, state) in [(1_u64, false), (2, true)] {
+        let request = control_request(0, 0, 8, None);
+        let payload = if state {
+            crate::CommandPayload::ControlStateGet(&request)
+        } else {
+            crate::CommandPayload::ControlListGet(&request)
+        };
+        let input = full_command(request_id, ExpectedRevision::Any, payload);
+        let output = process_full_command(&mut endpoint, &input);
+        let crate::DecodedTypedResponseFrame::NonOk { header, .. } = decode_response(&output)
+        else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(header.status, StatusCode::Internal, "state {state}");
+    }
+}
+
 /// Gate 3: a request for a structure that is not current is `REVISION_CONFLICT` with the typed
 /// diagnostic `control.list.stale`, for both messages, and `0` always names the current one.
 ///
