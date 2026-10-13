@@ -17,6 +17,58 @@ function deepFreeze<T>(value: T): T {
 
 export const CONTROLS = deepFreeze(
 {
+  "address": {
+    "ownerKinds": [
+      {
+        "name": "session",
+        "code": 1
+      },
+      {
+        "name": "strip",
+        "code": 2
+      },
+      {
+        "name": "route",
+        "code": 3
+      },
+      {
+        "name": "vca",
+        "code": 4
+      }
+    ],
+    "sectionKinds": [
+      {
+        "name": "inserts",
+        "code": 2
+      },
+      {
+        "name": "builtins",
+        "code": 4
+      },
+      {
+        "name": "console",
+        "code": 5
+      },
+      {
+        "name": "own",
+        "code": 6
+      }
+    ],
+    "lanes": [
+      {
+        "name": "left",
+        "code": 1
+      },
+      {
+        "name": "right",
+        "code": 2
+      },
+      {
+        "name": "both",
+        "code": 3
+      }
+    ]
+  },
   "stripOwn": [
     {
       "control": 1,
@@ -4278,37 +4330,83 @@ export type EffectControlName<E extends EffectId> =
   | Controls["effects"][E]["parameters"][number]["name"]
   | NonNullable<Controls["effects"][E]["linkMode"]>["name"];
 
-export type ControlOwnerKind = "session" | "strip" | "route" | "vca";
-export type ControlSectionKind = "own" | "builtins" | "console" | "inserts";
+
+export type ControlOwnerKind = Controls["address"]["ownerKinds"][number]["name"];
+export type ControlSectionKind = Controls["address"]["sectionKinds"][number]["name"];
 /** A per-lane control is addressed `left` or `right`; `both` writes both lanes at once. */
-export type ControlLane = "left" | "right" | "both";
+export type ControlLane = Controls["address"]["lanes"][number]["name"];
+/** The owner of a control: the session, or a strip, route or VCA by its stable ID. */
+export type ControlOwner =
+  | { readonly kind: "session" }
+  | { readonly kind: "strip"; readonly id: string }
+  | { readonly kind: "route"; readonly id: string }
+  | { readonly kind: "vca"; readonly id: string };
 /** Where in an owner a control lives: its own rows, builtins, a console slot or an insert. */
 export type ControlSection =
-  | { readonly kind: "own" }
+  | { readonly kind: "inserts"; readonly effect: string }
   | { readonly kind: "builtins" }
   | { readonly kind: "console"; readonly slot: string }
-  | { readonly kind: "inserts"; readonly effect: string };
+  | { readonly kind: "own" };
 
-interface Addressed<O, S, C> {
-  readonly owner: O;
-  readonly section: S;
-  readonly control: C;
-  readonly lane: ControlLane;
-}
+/** The rows an effect section lists: a console slot has no link-mode row. */
+type EffectRow<E extends EffectId, K extends "console" | "inserts"> =
+  | Controls["effects"][E]["bypass"]
+  | Controls["effects"][E]["parameters"][number]
+  | (K extends "inserts" ? NonNullable<Controls["effects"][E]["linkMode"]> : never);
+
+/**
+ * One row as an address: its machine name, and the lanes its `lanes` allows. A shared row
+ * (one value for its owner) is addressed `both` only; a per-lane row `left`, `right` or
+ * `both`.
+ */
+type Addressed<O, S, Row> = Row extends { readonly name: infer N; readonly lanes: infer L }
+  ? {
+      readonly owner: O;
+      readonly section: S;
+      readonly control: N;
+      readonly lane: L extends "shared" ? Extract<ControlLane, "both"> : ControlLane;
+    }
+  : never;
 
 /**
  * The stable address of one control: owner kind and ID, section kind and slot or effect ID,
  * the control's machine name and the lane. The `control` name must be a row of that owner and
- * section in the core's tables, so an unknown name does not compile.
+ * section in the core's tables and the `lane` one that row allows, so an unknown name, a
+ * `left` lane on a shared row and a link mode on a console slot do not compile.
  */
 export type ControlAddress<E extends EffectId = EffectId> =
-  | Addressed<{ readonly kind: "session" }, { readonly kind: "own" }, SessionControlName>
-  | Addressed<{ readonly kind: "strip"; readonly id: string }, { readonly kind: "own" }, StripOwnControlName>
-  | Addressed<{ readonly kind: "strip"; readonly id: string }, { readonly kind: "builtins" }, BuiltinControlName>
+  | Addressed<
+      { readonly kind: "session" },
+      { readonly kind: "own" },
+      Controls["sessionOwn"][number]
+    >
   | Addressed<
       { readonly kind: "strip"; readonly id: string },
-      { readonly kind: "console"; readonly slot: string } | { readonly kind: "inserts"; readonly effect: string },
-      EffectControlName<E>
+      { readonly kind: "inserts"; readonly effect: string },
+      EffectRow<E, "inserts">
     >
-  | Addressed<{ readonly kind: "route"; readonly id: string }, { readonly kind: "own" }, RouteControlName>
-  | Addressed<{ readonly kind: "vca"; readonly id: string }, { readonly kind: "own" }, VcaControlName>;
+  | Addressed<
+      { readonly kind: "strip"; readonly id: string },
+      { readonly kind: "builtins" },
+      Controls["builtins"][number]
+    >
+  | Addressed<
+      { readonly kind: "strip"; readonly id: string },
+      { readonly kind: "console"; readonly slot: string },
+      EffectRow<E, "console">
+    >
+  | Addressed<
+      { readonly kind: "strip"; readonly id: string },
+      { readonly kind: "own" },
+      Controls["stripOwn"][number]
+    >
+  | Addressed<
+      { readonly kind: "route"; readonly id: string },
+      { readonly kind: "own" },
+      Controls["routeOwn"][number]
+    >
+  | Addressed<
+      { readonly kind: "vca"; readonly id: string },
+      { readonly kind: "own" },
+      Controls["vcaOwn"][number]
+    >;

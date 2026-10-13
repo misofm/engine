@@ -716,8 +716,8 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
 
 mod controls_object {
     use controls::{
-        ControlClass, ControlKind, Family, LiveRampRow, Motion, RebuildReason, RowSource, TableRow,
-        Taper, effect_table_rows, table_rows,
+        ControlClass, ControlKind, Family, Lane, LiveRampRow, Motion, OwnerKind, RebuildReason,
+        RowSource, SectionKind, TableRow, Taper, effect_table_rows, table_rows,
     };
     use effect_compiler::launch_native_effect_registry;
     use parameter_metadata::{LAUNCH_RATES_HZ, render};
@@ -1009,5 +1009,94 @@ mod controls_object {
                 None => assert!(json["linkMode"].is_null(), "{id} has no link-mode row"),
             }
         }
+    }
+    /// A frontend keys a control by its machine name and the wire by its ID, so both must be unique
+    /// in the set an address picks from: each of the five tables, and each effect's bypass,
+    /// parameters and link mode together. Red if two rows of a set share a name (the generated
+    /// SDK type would merge them) or an ID (one address would name two rows).
+    #[test]
+    fn names_and_ids_are_unique_per_table_and_per_effect() {
+        let document: Value = serde_json::from_str(&render()).expect("the document is JSON");
+        let controls = &document["controls"];
+        let check = |what: &str, rows: Vec<&Value>| {
+            let mut names = std::collections::BTreeSet::new();
+            let mut ids = std::collections::BTreeSet::new();
+            for row in rows {
+                let name = row["name"].as_str().expect("a name");
+                assert!(names.insert(name), "{what}: the name `{name}` is repeated");
+                let id = row["control"].as_u64().expect("a control ID");
+                assert!(ids.insert(id), "{what}: the control ID {id} is repeated");
+            }
+        };
+        for key in ["stripOwn", "builtins", "routeOwn", "vcaOwn", "sessionOwn"] {
+            check(key, controls[key].as_array().unwrap().iter().collect());
+        }
+        for (id, effect) in controls["effects"].as_object().unwrap() {
+            let mut rows = vec![&effect["bypass"]];
+            rows.extend(effect["parameters"].as_array().unwrap());
+            if !effect["linkMode"].is_null() {
+                rows.push(&effect["linkMode"]);
+            }
+            check(id, rows);
+        }
+    }
+
+    /// Red if the address vocabulary the SDK builds its types from differs from the core's owner
+    /// kinds, section kinds and lanes, or loses a code.
+    #[test]
+    fn the_address_vocabulary_is_the_cores() {
+        let document: Value = serde_json::from_str(&render()).expect("the document is JSON");
+        let address = &document["controls"]["address"];
+        let listed = |key: &str| -> Vec<(String, u64)> {
+            address[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} is a list"))
+                .iter()
+                .map(|entry| {
+                    (
+                        entry["name"].as_str().unwrap().to_owned(),
+                        entry["code"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let expected = |entries: Vec<(&str, u8)>| -> Vec<(String, u64)> {
+            entries
+                .into_iter()
+                .map(|(name, code)| (name.to_owned(), u64::from(code)))
+                .collect()
+        };
+        assert_eq!(
+            listed("ownerKinds"),
+            expected(OwnerKind::ALL.map(|k| (k.name(), k.code())).to_vec())
+        );
+        assert_eq!(
+            listed("sectionKinds"),
+            expected(SectionKind::ALL.map(|k| (k.name(), k.code())).to_vec())
+        );
+        assert_eq!(
+            listed("lanes"),
+            expected(Lane::ALL.iter().map(|(l, n)| (*n, l.wire())).collect())
+        );
+        // The pinned codes: owner kinds session 1, strip 2, route 3, VCA 4; sections inserts 2,
+        // builtins 4, console 5, own 6; lanes left 1, right 2, both 3.
+        assert_eq!(
+            listed("ownerKinds")
+                .iter()
+                .map(|(_, c)| *c)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            listed("sectionKinds")
+                .iter()
+                .map(|(_, c)| *c)
+                .collect::<Vec<_>>(),
+            [2, 4, 5, 6]
+        );
+        assert_eq!(
+            listed("lanes").iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
     }
 }

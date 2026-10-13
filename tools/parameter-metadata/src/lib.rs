@@ -100,8 +100,9 @@ use builtins::{
     builtin_parameter_unit,
 };
 use controls::{
-    ControlClass, ControlDescriptor, ControlKind, ControlScope, EffectTableRows, Family,
-    LiveRampRow, Motion, RebuildReason, RowSource, TableRow, Taper, effect_table_rows, table_rows,
+    ControlClass, ControlDescriptor, ControlKind, ControlScope, EffectTableRows, Family, Lane,
+    LiveRampRow, Motion, OwnerKind, RebuildReason, RowSource, SectionKind, TableRow, Taper,
+    effect_table_rows, table_rows,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -320,8 +321,38 @@ pub fn render() -> String {
 /// `controls::effect_table_rows`, so a row added to a table reaches this document, and from it the
 /// SDK's `controls.ts`, when the metadata is regenerated. A row's `name` is the declared machine
 /// name; `displayName` is the label a person reads.
+/// The address vocabulary (decision 17, C2): the owner kinds, section kinds and lanes of a control
+/// address, each with its stable code. The SDK builds its address types from it, so a kind the
+/// core gains reaches the SDK when the assets are regenerated and not by a hand edit.
+fn address_object(out: &mut String) {
+    fn list(out: &mut String, key: &str, entries: &[(&str, u8)], last: bool) {
+        append!(out, "      \"{key}\": [");
+        for (index, (name, code)) in entries.iter().enumerate() {
+            append!(
+                out,
+                "{{ \"name\": \"{}\", \"code\": {code} }}{}",
+                escape(name),
+                if index + 1 == entries.len() { "" } else { ", " }
+            );
+        }
+        append!(out, "]{}\n", if last { "" } else { "," });
+    }
+    out.push_str("    \"address\": {\n");
+    let owners = OwnerKind::ALL.map(|kind| (kind.name(), kind.code()));
+    list(out, "ownerKinds", &owners, false);
+    let sections = SectionKind::ALL.map(|kind| (kind.name(), kind.code()));
+    list(out, "sectionKinds", &sections, false);
+    let lanes: Vec<(&str, u8)> = Lane::ALL
+        .iter()
+        .map(|(lane, name)| (*name, lane.wire()))
+        .collect();
+    list(out, "lanes", &lanes, true);
+    out.push_str("    },\n");
+}
+
 fn controls_object(out: &mut String, registry: &effect_contract::NativeEffectRegistry) {
     out.push_str("  \"controls\": {\n");
+    address_object(out);
     let sources = [
         ("stripOwn", RowSource::StripOwn),
         ("builtins", RowSource::Builtins),

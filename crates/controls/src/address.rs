@@ -37,6 +37,34 @@ pub enum OwnerKind {
     Vca,
 }
 
+impl OwnerKind {
+    /// Every owner kind, in code order.
+    pub const ALL: [Self; 4] = [Self::Session, Self::Strip, Self::Route, Self::Vca];
+
+    /// The kind's stable address code: session 1, strip 2, route 3, VCA 4 (#1551 D3). A code is
+    /// never reused.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Session => 1,
+            Self::Strip => 2,
+            Self::Route => 3,
+            Self::Vca => 4,
+        }
+    }
+
+    /// The kind's name in the SDK's address (`session`, `strip`, `route`, `vca`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Strip => "strip",
+            Self::Route => "route",
+            Self::Vca => "vca",
+        }
+    }
+}
+
 impl Owner {
     /// The field-free kind of this owner.
     #[must_use]
@@ -76,6 +104,34 @@ pub enum SectionKind {
     Inserts,
 }
 
+impl SectionKind {
+    /// Every section kind, in code order.
+    pub const ALL: [Self; 4] = [Self::Inserts, Self::Builtins, Self::Console, Self::Own];
+
+    /// The kind's stable code: the `RackName` codes (inserts 2, builtins 4, console 5) and `own` 6,
+    /// appended. A code is never reused.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Inserts => RackName::Inserts.wire(),
+            Self::Builtins => RackName::Builtins.wire(),
+            Self::Console => RackName::Console.wire(),
+            Self::Own => 6,
+        }
+    }
+
+    /// The kind's name in the SDK's address (`inserts`, `builtins`, `console`, `own`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Inserts => "inserts",
+            Self::Builtins => "builtins",
+            Self::Console => "console",
+            Self::Own => "own",
+        }
+    }
+}
+
 impl Section {
     /// The field-free kind of this section.
     #[must_use]
@@ -92,12 +148,7 @@ impl Section {
     /// `own` 6, appended.
     #[must_use]
     pub const fn code(&self) -> u8 {
-        match self {
-            Self::Inserts(_) => RackName::Inserts.wire(),
-            Self::Builtins => RackName::Builtins.wire(),
-            Self::Console(_) => RackName::Console.wire(),
-            Self::Own => 6,
-        }
+        self.kind().code()
     }
 }
 

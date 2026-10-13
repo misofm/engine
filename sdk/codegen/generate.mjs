@@ -168,38 +168,106 @@ function renderControls(catalog) {
     + `  | Controls["effects"][E]["bypass"]["name"]\n`
     + `  | Controls["effects"][E]["parameters"][number]["name"]\n`
     + `  | NonNullable<Controls["effects"][E]["linkMode"]>["name"];\n\n`
-    + `export type ControlOwnerKind = "session" | "strip" | "route" | "vca";\n`
-    + `export type ControlSectionKind = "own" | "builtins" | "console" | "inserts";\n`
+    + renderAddress(catalog.controls.address);
+}
+
+/**
+ * The structural facts of an address that the vocabulary does not carry: the extra field of an
+ * owner or section of each kind, and the table each pair lists. A kind the core gains that is
+ * missing here throws, so a new kind is a decision in this file and not a silent hole in the types.
+ */
+const OWNER_FIELDS = { session: null, strip: "id", route: "id", vca: "id" };
+const SECTION_FIELDS = { own: null, builtins: null, console: "slot", inserts: "effect" };
+
+/** The rows an owner and section kind list, as a type over `Controls`; absent if it has none. */
+const ROWS_OF = {
+  "session/own": `Controls["sessionOwn"][number]`,
+  "strip/own": `Controls["stripOwn"][number]`,
+  "strip/builtins": `Controls["builtins"][number]`,
+  "route/own": `Controls["routeOwn"][number]`,
+  "vca/own": `Controls["vcaOwn"][number]`,
+  "strip/console": `EffectRow<E, "console">`,
+  "strip/inserts": `EffectRow<E, "inserts">`,
+};
+
+function kindObject(kind, field) {
+  return field === null
+    ? `{ readonly kind: "${kind}" }`
+    : `{ readonly kind: "${kind}"; readonly ${field}: string }`;
+}
+
+function renderAddress(address) {
+  const owners = address.ownerKinds.map((entry) => entry.name);
+  const sections = address.sectionKinds.map((entry) => entry.name);
+  const lanes = address.lanes.map((entry) => entry.name);
+  for (const [what, found, known] of [
+    ["owner kind", owners, Object.keys(OWNER_FIELDS)],
+    ["section kind", sections, Object.keys(SECTION_FIELDS)],
+  ]) {
+    const missing = found.filter((name) => !known.includes(name));
+    const gone = known.filter((name) => !found.includes(name));
+    if (missing.length > 0 || gone.length > 0) {
+      throw new Error(
+        `the address vocabulary and sdk/codegen/generate.mjs disagree on the ${what}s: `
+        + `new ${JSON.stringify(missing)}, gone ${JSON.stringify(gone)}`,
+      );
+    }
+  }
+  for (const lane of ["left", "right", "both"]) {
+    if (!lanes.includes(lane)) {
+      throw new Error(`the address vocabulary has no lane \`${lane}\``);
+    }
+  }
+  const pairs = [];
+  for (const owner of owners) {
+    for (const section of sections) {
+      if (ROWS_OF[`${owner}/${section}`] !== undefined) pairs.push([owner, section]);
+    }
+  }
+  return `\n`
+    + `export type ControlOwnerKind = Controls["address"]["ownerKinds"][number]["name"];\n`
+    + `export type ControlSectionKind = Controls["address"]["sectionKinds"][number]["name"];\n`
     + `/** A per-lane control is addressed \`left\` or \`right\`; \`both\` writes both lanes at once. */\n`
-    + `export type ControlLane = "left" | "right" | "both";\n`
+    + `export type ControlLane = Controls["address"]["lanes"][number]["name"];\n`
+    + `/** The owner of a control: the session, or a strip, route or VCA by its stable ID. */\n`
+    + `export type ControlOwner =\n`
+    + owners.map((kind) => `  | ${kindObject(kind, OWNER_FIELDS[kind])}`).join("\n") + `;\n`
     + `/** Where in an owner a control lives: its own rows, builtins, a console slot or an insert. */\n`
     + `export type ControlSection =\n`
-    + `  | { readonly kind: "own" }\n`
-    + `  | { readonly kind: "builtins" }\n`
-    + `  | { readonly kind: "console"; readonly slot: string }\n`
-    + `  | { readonly kind: "inserts"; readonly effect: string };\n\n`
-    + `interface Addressed<O, S, C> {\n`
-    + `  readonly owner: O;\n`
-    + `  readonly section: S;\n`
-    + `  readonly control: C;\n`
-    + `  readonly lane: ControlLane;\n`
-    + `}\n\n`
+    + sections.map((kind) => `  | ${kindObject(kind, SECTION_FIELDS[kind])}`).join("\n") + `;\n\n`
+    + `/** The rows an effect section lists: a console slot has no link-mode row. */\n`
+    + `type EffectRow<E extends EffectId, K extends "console" | "inserts"> =\n`
+    + `  | Controls["effects"][E]["bypass"]\n`
+    + `  | Controls["effects"][E]["parameters"][number]\n`
+    + `  | (K extends "inserts" ? NonNullable<Controls["effects"][E]["linkMode"]> : never);\n\n`
+    + `/**\n`
+    + ` * One row as an address: its machine name, and the lanes its \`lanes\` allows. A shared row\n`
+    + ` * (one value for its owner) is addressed \`both\` only; a per-lane row \`left\`, \`right\` or\n`
+    + ` * \`both\`.\n`
+    + ` */\n`
+    + `type Addressed<O, S, Row> = Row extends { readonly name: infer N; readonly lanes: infer L }\n`
+    + `  ? {\n`
+    + `      readonly owner: O;\n`
+    + `      readonly section: S;\n`
+    + `      readonly control: N;\n`
+    + `      readonly lane: L extends "shared" ? Extract<ControlLane, "both"> : ControlLane;\n`
+    + `    }\n`
+    + `  : never;\n\n`
     + `/**\n`
     + ` * The stable address of one control: owner kind and ID, section kind and slot or effect ID,\n`
     + ` * the control's machine name and the lane. The \`control\` name must be a row of that owner and\n`
-    + ` * section in the core's tables, so an unknown name does not compile.\n`
+    + ` * section in the core's tables and the \`lane\` one that row allows, so an unknown name, a\n`
+    + ` * \`left\` lane on a shared row and a link mode on a console slot do not compile.\n`
     + ` */\n`
     + `export type ControlAddress<E extends EffectId = EffectId> =\n`
-    + `  | Addressed<{ readonly kind: "session" }, { readonly kind: "own" }, SessionControlName>\n`
-    + `  | Addressed<{ readonly kind: "strip"; readonly id: string }, { readonly kind: "own" }, StripOwnControlName>\n`
-    + `  | Addressed<{ readonly kind: "strip"; readonly id: string }, { readonly kind: "builtins" }, BuiltinControlName>\n`
-    + `  | Addressed<\n`
-    + `      { readonly kind: "strip"; readonly id: string },\n`
-    + `      { readonly kind: "console"; readonly slot: string } | { readonly kind: "inserts"; readonly effect: string },\n`
-    + `      EffectControlName<E>\n`
-    + `    >\n`
-    + `  | Addressed<{ readonly kind: "route"; readonly id: string }, { readonly kind: "own" }, RouteControlName>\n`
-    + `  | Addressed<{ readonly kind: "vca"; readonly id: string }, { readonly kind: "own" }, VcaControlName>;\n`;
+    + pairs
+      .map(([owner, section]) =>
+        `  | Addressed<\n`
+        + `      ${kindObject(owner, OWNER_FIELDS[owner])},\n`
+        + `      ${kindObject(section, SECTION_FIELDS[section])},\n`
+        + `      ${ROWS_OF[`${owner}/${section}`]}\n`
+        + `    >`)
+      .join("\n") + `;\n`;
 }
 
 function renderProvenance(catalog, abi) {
