@@ -411,13 +411,13 @@ enum FaderKind {
 impl FaderReader {
     /// Read the stage's pending cells under `snapshot` and apply them in the canonical order
     /// (#1312 D4): fader before mute, left before right. When both channel cells of a kind were
-    /// applied in this drain with equal words, `apply` is called once with `Both`; a cell that
+    /// applied in this call with equal words, `apply` is called once with `Both`; a cell that
     /// read `Unchanged` is not paired.
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
     /// returned after the last. Each applied read adds the writes it replaced to the session
     /// counter (`read_counted`). It allocates nothing and takes no lock.
-    fn drain(
+    fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
         mut apply: impl FnMut(
@@ -482,7 +482,7 @@ struct MatrixReader {
 impl MatrixReader {
     /// Read the stage's pending cell under `snapshot` and apply its newest value in range, if
     /// any. The first refusal is returned; the applied read adds the writes it replaced to the session counter.
-    fn drain(
+    fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
         mut apply: impl FnMut(Matrix2x2, u32) -> Result<(), BuiltinParameterError>,
@@ -758,7 +758,7 @@ fn read_input_cell<const N: usize>(
 impl InputReader {
     /// Read the stage's pending cells under `snapshot` and apply them in the canonical order
     /// (#1346 D2): trim, then polarity, then filter section 0, then section 1, left before right.
-    /// When both channel cells of a kind were applied in this drain with equal words, `apply` is
+    /// When both channel cells of a kind were applied in this call with equal words, `apply` is
     /// called once with a `Both` record.
     ///
     /// Each record is admitted to `witness` before it is applied, from the cells' final contents
@@ -769,7 +769,7 @@ impl InputReader {
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
     /// returned after the last. Each applied read adds the writes it replaced to the session
     /// counter (`read_counted`). It allocates nothing and takes no lock.
-    fn drain(
+    fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
         witness: &mut ChannelSymmetryWitness,
@@ -1177,7 +1177,7 @@ impl BuiltinBankProcessor {
             let Some(witness) = live.get_mut(lane) else {
                 continue;
             };
-            let drained = control.drain(snapshot, witness, |record| {
+            let drained = control.apply_latest(snapshot, witness, |record| {
                 let applied = match record {
                     TrackInputRecord::TrimDb {
                         lanes,
@@ -2035,7 +2035,7 @@ fn drain_fader_controls(
         let Some(control) = control.as_mut() else {
             continue;
         };
-        let drained = control.drain(snapshot, |kind, lanes, words| {
+        let drained = control.apply_latest(snapshot, |kind, lanes, words| {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -2071,7 +2071,7 @@ fn drain_matrix_controls(
         let Some(control) = control.as_mut() else {
             continue;
         };
-        let drained = control.drain(snapshot, |target, smoothing_samples| {
+        let drained = control.apply_latest(snapshot, |target, smoothing_samples| {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -5323,7 +5323,7 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 /// the `LIVE` term. A per-node processor is not a bank slot and the collapse dispatch never asks
 /// it anything -- `GraphRuntimeProcessor::channel_symmetry` is the scalar-tail surface, read by
 /// the prepare-time pool classification -- but the term is folded anyway, by the same
-/// [`InputReader::drain`] the banked drain makes, so the two shapes cannot disagree about what a
+/// [`InputReader::apply_latest`] the banked drain makes, so the two shapes cannot disagree about what a
 /// value meant. If a later phase gives the scalar tail a collapse, the answer is already correct
 /// here.
 #[cfg(any(test, feature = "test-support"))]
@@ -5366,7 +5366,7 @@ impl LiveControlInputProcessor {
     fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let input = &mut self.input;
         self.control
-            .drain(snapshot, &mut self.live, |record| match record {
+            .apply_latest(snapshot, &mut self.live, |record| match record {
                 TrackInputRecord::TrimDb {
                     lanes,
                     db,
@@ -5437,7 +5437,7 @@ impl LiveControlMatrixProcessor {
     fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let matrix = &mut self.matrix;
         self.control
-            .drain(snapshot, |target, smoothing_samples| {
+            .apply_latest(snapshot, |target, smoothing_samples| {
                 #[cfg(any(test, feature = "test-support"))]
                 FADER_MATRIX_LIVE_WITNESS.with(|value| {
                     let mut counters = value.get();
@@ -5511,7 +5511,7 @@ impl LiveControlFaderProcessor {
     fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let fader = &mut self.fader;
         self.control
-            .drain(snapshot, |kind, lanes, words| {
+            .apply_latest(snapshot, |kind, lanes, words| {
                 #[cfg(any(test, feature = "test-support"))]
                 FADER_MATRIX_LIVE_WITNESS.with(|value| {
                     let mut counters = value.get();
@@ -14513,7 +14513,7 @@ mod tests {
     /// 64-sample polarity window the order moves bits: the reversed order is rendered too, to show
     /// the comparison can see it.
     ///
-    /// Red mutation: drain polarity before trim in `InputReader::drain` -> the drained bank
+    /// Red mutation: drain polarity before trim in `InputReader::apply_latest` -> the drained bank
     /// renders the reversed twin's bits, not the canonical twin's.
     #[test]
     fn input_cells_drain_in_the_canonical_order_whatever_the_write_order() {
@@ -14899,7 +14899,7 @@ mod tests {
     ///
     /// Red mutation: make the drain loop `continue` past every record without applying it -> the
     /// coefficient never moves. Red mutation: drop `witness.admit(&record)` from
-    /// `InputReader::drain` -> the per-lane arm keeps claiming symmetry.
+    /// `InputReader::apply_latest` -> the per-lane arm keeps claiming symmetry.
     #[test]
     fn the_per_node_live_control_input_processor_drains_and_folds_its_witness() {
         let parameters = BuiltinParameters {

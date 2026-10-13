@@ -281,3 +281,4 @@ Delivery mode: feature sprint (no mutation runs, short note). Re-measured on the
   --all-targets -- -D warnings`, `cargo test --locked -p realtime-policy` (241 passed). Gate 1
   (`cargo run --locked --release -q -p realtime-policy` on the real tree) FAILS with the three
   hits above and nothing else.
+- Root ruling 2026-10-13 (D3): the three cell-reader methods in crates/builtins-compiler/src/lib.rs are renamed from `drain` to `apply_latest`. They read latest-target cells and pop no queue since #1346 and #1312. This is a rename only, with no behaviour change.
