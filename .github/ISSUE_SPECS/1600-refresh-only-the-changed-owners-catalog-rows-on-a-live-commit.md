@@ -45,7 +45,7 @@ client reads, and its `structure_epoch`, stay exactly what a full rebuild would 
 - **Raised ceilings.** The full-list catalog raised the C ABI reference ceilings to 554,240
   (`capi_retained_bytes`) and 278,912 (`largest_named_allocation_bytes`)
   (`crates/capi/tests/resource_lifecycle.rs:1279-1286`; #1552 decision record).
-- **Compact rows.** #TBD1 (the compact catalog) gives the catalog an
+- **Compact rows.** #1599 (the compact catalog) gives the catalog an
   `owners` table, a `sections` table, shared `descriptors` and fixed-size `rows`, so one owner's
   rows are one contiguous run.
 
@@ -148,7 +148,7 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
 ## Dependencies
 
 - #1554 (merged: the registry classifier and its row diff; D1 extends it).
-- #TBD1 (the compact catalog), which edits `control_provider.rs`
+- #1599 (the compact catalog), which edits `control_provider.rs`
   first and gives each owner one contiguous run of rows.
 - #1552 (merged in batch 2).
 

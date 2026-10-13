@@ -159,7 +159,7 @@ Commands: `cargo test --locked -p host-core --all-features`,
 ## Dependencies
 
 - #1552 (merged on `codex/controls-s3` at `31e6093c2`).
-- Must land before #TBD2 (the live catalog refresh), which edits the same
+- Must land before #1600 (the live catalog refresh), which edits the same
   file.
 
 ## Size

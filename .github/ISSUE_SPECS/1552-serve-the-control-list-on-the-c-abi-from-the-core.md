@@ -150,6 +150,6 @@ Commands: `cargo test --locked -p host-core --all-features`,
   rows, and a header before each owner and section: 932 entries of 272 bytes) where it held the
   effect parameters alone, so the one catalog allocation went 146,880 -> 253,504 bytes and C ABI
   retained 351,003 -> 503,819 (x86-64). Each ceiling is the measured value plus 10 percent, rounded
-  up to 64, as every ceiling in that table is. #TBD1 (shared descriptors and small rows) is the
+  up to 64, as every ceiling in that table is. #1599 (shared descriptors and small rows) is the
   successor that removes the per-entry copy and lowers them.
 
