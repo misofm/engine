@@ -5624,6 +5624,11 @@ fn observation_host(
 /// observation fixture so this test exercises two effect owners without introducing a second
 /// session corpus.
 fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
+    same_track_observation_host_metered(quantum, 0)
+}
+
+/// [`same_track_observation_host`] with `meter_blocks` meter blocks, so it publishes a meter frame.
+fn same_track_observation_host_metered(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
@@ -5634,7 +5639,7 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     second_effect.params[5].value = 0.0;
     second_effect.params[6].value = 5.0;
     model.quantum_frames = quantum;
-    model.sources[0].frames = u64::from(quantum) * 8;
+    model.sources[0].frames = u64::from(quantum) * 64;
     model.tracks.truncate(1);
     model.routes.truncate(1);
     model.tracks[0].inserts.effects.push(second_effect);
@@ -5642,6 +5647,7 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
         live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
@@ -10936,6 +10942,130 @@ fn a_bus_compressor_reports_its_gain_reduction_in_the_bus_word() {
         strip_gain_word(&a, STRIP_BUS as usize).to_bits(),
         0,
         "disarmed"
+    );
+}
+
+/// The gain-reduction word a tap's own latest window reads as: the same `observed_decibels` of the
+/// larger lane that `poll_meters` folds into the strip's slot.
+fn tap_gain_reduction(host: &mut AudioWorkletEngineHost, effect_index: u32) -> f32 {
+    let rows = host
+        .read_observation_addresses(&[ObservationAddress {
+            track_index: 0,
+            rack: LiveEffectRack::Inserts,
+            effect_index,
+            tap_id: 1,
+            channels: ObservationReadChannels::Both,
+        }])
+        .expect("a selected read of the tap");
+    let (Some(left), Some(right)) = (rows[0].left, rows[0].right) else {
+        panic!("the tap has no published window: {:?}", rows[0].status);
+    };
+    let ready = host.ready.as_ref().expect("ready");
+    let tap = ready.effect_observations[effect_index as usize]
+        .as_ref()
+        .expect("observation handle")
+        .descriptor
+        .observations[0];
+    observed_decibels(tap, left.max(right))
+}
+
+/// #1345 Amendment 6: the gain-reduction section is recomputed from the taps armed when each frame
+/// is polled. Two taps (the compressor's and the gate's) reduce on one track; the slot is the larger
+/// of their latest windows, and withdrawing a tap takes only that tap out, at the first frame
+/// polled after the withdrawal was acknowledged.
+///
+/// Test value: red if a withdrawn tap's last window outlives its withdrawal for any number of
+/// polls (a fold that ages out over `windowBlocks`) while the existing bus test, which only looks
+/// after `2 * WINDOW` blocks and a full drain, stays green; and red if withdrawing one tap clears
+/// the whole strip's slot or every armed tap of the track, which no test with one tap per strip
+/// can see.
+#[test]
+fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
+    const QUANTUM: u32 = 128;
+    const WINDOW: u64 = 2;
+    let mut host = same_track_observation_host_metered(QUANTUM, WINDOW);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    // One submission arms both taps; a tap's queue holds one record until a block drains it.
+    for effect in 0..2 {
+        stage_observe_subscribe_at(&mut host, effect, 0, effect as u32);
+    }
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let mut block = 0;
+    let mut render_window = |host: &mut AudioWorkletEngineHost| {
+        for _ in 0..WINDOW {
+            feed_and_render_channels(host, block, 0.75, 0.125);
+            block += 1;
+        }
+    };
+    for _ in 0..8 {
+        render_window(&mut host);
+    }
+    while host.poll_meters() != 0 {}
+    let reduction = [
+        tap_gain_reduction(&mut host, 0),
+        tap_gain_reduction(&mut host, 1),
+    ];
+    assert!(
+        reduction[0] > 0.0 && reduction[1] > 0.0 && reduction[0] != reduction[1],
+        "both taps reduce, by different amounts: {reduction:?}"
+    );
+    let (larger, smaller) = if reduction[0] > reduction[1] {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    assert_eq!(
+        strip_gain_word(&host, 0).to_bits(),
+        reduction[larger].to_bits(),
+        "the slot is the larger tap's window"
+    );
+
+    // Withdraw the larger tap. The first frame polled after the acknowledgement carries the other
+    // tap's window, bit for bit: not the larger one still, not zero.
+    assert_eq!(
+        observe(
+            &mut host,
+            0,
+            RACK_INSERTS,
+            larger as u32,
+            1,
+            WINDOW as u32,
+            false
+        ),
+        RESULT_OK
+    );
+    render_window(&mut host);
+    assert!(host.poll_meters() >= 1, "a frame follows the withdrawal");
+    let remaining = tap_gain_reduction(&mut host, smaller as u32);
+    assert!(
+        remaining > 0.0,
+        "the remaining tap still reduces: {remaining}"
+    );
+    assert_eq!(
+        strip_gain_word(&host, 0).to_bits(),
+        remaining.to_bits(),
+        "the remaining tap alone sets the slot"
+    );
+
+    // Withdraw the other one: the very next frame polled reads exactly zero.
+    assert_eq!(
+        observe(
+            &mut host,
+            0,
+            RACK_INSERTS,
+            smaller as u32,
+            1,
+            WINDOW as u32,
+            false
+        ),
+        RESULT_OK
+    );
+    render_window(&mut host);
+    assert!(host.poll_meters() >= 1, "a frame follows the withdrawal");
+    assert_eq!(
+        strip_gain_word(&host, 0).to_bits(),
+        0,
+        "no tap is armed, so the slot is +0.0 at once"
     );
 }
 

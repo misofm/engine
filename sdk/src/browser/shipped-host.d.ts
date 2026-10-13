@@ -100,6 +100,12 @@
 // `generation`, `validity` and `lossCount` fields make lease resets, producer resets and dropped
 // peak windows visible without changing the peak array.
 //
+// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+// has published. `masterGrDb` is `null` when the designated strip has none.
+//
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
 // `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused with
@@ -671,6 +677,12 @@ export interface MisoMeterFrame {
   /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
+  ///
+  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+  /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+  /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+  /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+  /// has published. `masterGrDb` is `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
   /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///

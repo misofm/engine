@@ -462,11 +462,33 @@ gain-reduction section is recomputed from the taps armed when each frame is poll
 disarms its tap when it is admitted, so every meter frame received after its `result === 0`
 acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`) is the maximum over its
 still-armed taps' latest windows, and `0` when none is armed or none has published. `masterGrDb` is
-`null` when the designated strip has none." *Status:* the contract text and the Rust test that holds its
-two unique catches (zero on the first frame after the unsubscribe; with two reducing taps on one strip,
-disarming the larger leaves the slot bit-equal to the other tap's reading) wait on the user's answer on
-the shipped-file edits; this commit carries the gate only. The `poll_meters` `first_sample >= arm_sample`
-gap (`lib.rs:6083-6097`) is a successor issue and the contract does not describe it.
+`null` when the designated strip has none." *Status:* landed. The text is in both `.d.ts` twins
+(byte-identical) and in the `WebMeterHeader` and `meter_frame` docs of `lib.rs` (doc comments only; no
+code change). The Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`
+(`hosts/host-web/src/tests.rs`) holds the two unique catches. The `poll_meters`
+`first_sample >= arm_sample` gap (`lib.rs:6083-6097`) is a successor issue and the contract does not
+describe it.
+
+**The test (Amendment 6).** One compressor and one gate reduce on one track; both taps are armed in one
+submission and the slot is asserted bit-equal to the larger tap's `observed_decibels`. The larger tap is
+then withdrawn: the first frame polled after (one window rendered, one `poll_meters`) must be bit-equal
+to the other tap's own latest window and nonzero. Then the other is withdrawn: the first frame polled
+after must be `+0.0`. *Test value:* it turns red if a withdrawn tap's last window outlives the
+withdrawal for any number of polls (a fold that ages out over `windowBlocks`) or if withdrawing one tap
+clears the other tap's reading from the strip's slot; `a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`
+only looks after `2 * WINDOW` blocks and a full drain, with one tap per strip, so it sees neither.
+*Mutation evidence* (each applied to `hosts/host-web/src/lib.rs` only, then reverted; run:
+`cargo test -p host-web --features test-support --lib`, 195 tests, 2 ignored):
+(1) `poll_meters` keeps a disarmed tap folded for one more poll (`armed_now | previous armed` per
+effect): the new test is red, the other 192 pass (the bus test and
+`the_meter_frame_carries_the_app_shaped_gain_reduction` stay green, as the bus test drains before it
+looks). (2) The unsubscribe admission also clears the armed mask of every other effect on the same
+track: the new test is red, the other 192 pass. (3) The literal `*mask = 0` on unsubscribe: green, the
+new test included, because every launch effect declares exactly one observation tap (compressor,
+gate/expander, multiband compressor, true-peak limiter), so a per-effect mask clear equals the one-bit
+clear. Catch (3) is therefore not reachable until an effect declares two resident taps; the whole-strip
+clear in (2) is what the test catches today. Reverted: the file is byte-identical to the contract-doc
+edit, and the full `host-web` suite passes.
 **Stated limit (root, 2026-10-12).** In Firefox and WebKit one meter frame can cover more than one
 block even with a one-block meter window (a dev run gave 28 frames for 42 blocks), so a single-block
 dropout inside such a frame can be masked by the other block's peak. This does not make the gate

@@ -1125,6 +1125,12 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 /// Gain-reduction slots are latest independently aged effect folds and do not inherit this span.
 /// A consumer correlates the peak span against a command's `applied_at_sample` rather than against
 /// a wall clock.
+///
+/// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+/// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+/// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+/// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+/// has published. `masterGrDb` is `null` when the designated strip has none.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebMeterHeader {
@@ -2360,6 +2366,12 @@ impl AudioWorkletEngineHost {
     /// in decibels per strip in the same order and the master's. With no submixes every word is
     /// where it always was. Gain reduction is the latest fold from each independently aged effect
     /// observation and does not share the peak interval in [`WebMeterHeader`].
+    ///
+    /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+    /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+    /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+    /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+    /// has published. `masterGrDb` is `null` when the designated strip has none.
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
