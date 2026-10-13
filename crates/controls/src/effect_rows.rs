@@ -9,7 +9,7 @@
 //! In an effect section the control `0` is the instance's bypass, a parameter row has the
 //! parameter's ID, and an insert with a choice of link modes has [`LINK_MODE_CONTROL`].
 
-use effect_compiler::launch_native_effect_registry;
+use effect_compiler::{launch_native_effect_registry, lowers_session_bypass};
 use effect_contract::control::PreparedReason;
 use effect_contract::{
     AutomationRate, EffectDescriptor, LinkMode as ContractLinkMode, ParameterChannelPolicy,
@@ -23,7 +23,7 @@ use session::{
 
 use crate::address::{ControlAddress, Lane, Owner, Section};
 use crate::descriptor::{
-    BASE, Choice, ControlDescriptor, ControlScope, Lanes, Motion, ruled_live_not_built,
+    BASE, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, ruled_live_not_built,
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
@@ -47,40 +47,40 @@ const MULTIBAND_LINK_ISSUE: u32 = 1367;
 const DELAY_ID: &str = "miso.delay";
 const MULTIBAND_ID: &str = "miso.multiband-compressor";
 
-const LINK_CHOICES_MAXIMUM: [Choice; 2] = [
-    Choice {
-        value: 1.0,
-        label: "dual_mono",
-    },
-    Choice {
-        value: 2.0,
-        label: "maximum",
-    },
+/// Every link mode with the label a frontend shows, in code order. The choice lists below are
+/// selected from it by the set bits of an effect's `supported_link_modes`, so a code or label is
+/// written once.
+const LINK_MODES: [(ContractLinkMode, &str); 3] = [
+    (ContractLinkMode::DualMono, "dual_mono"),
+    (ContractLinkMode::Maximum, "maximum"),
+    (ContractLinkMode::Average, "average"),
 ];
-const LINK_CHOICES_AVERAGE: [Choice; 2] = [
-    Choice {
-        value: 1.0,
-        label: "dual_mono",
-    },
-    Choice {
-        value: 3.0,
-        label: "average",
-    },
-];
-const LINK_CHOICES_ALL: [Choice; 3] = [
-    Choice {
-        value: 1.0,
-        label: "dual_mono",
-    },
-    Choice {
-        value: 2.0,
-        label: "maximum",
-    },
-    Choice {
-        value: 3.0,
-        label: "average",
-    },
-];
+
+/// The `N` choices whose mode bit is set in `bits` (bit `code - 1`, as `LinkModeSet` has it).
+const fn link_choices_of<const N: usize>(bits: u32) -> [Choice; N] {
+    let mut out = [Choice {
+        value: 0.0,
+        label: "",
+    }; N];
+    let (mut count, mut index) = (0, 0);
+    while index < LINK_MODES.len() {
+        let (mode, label) = LINK_MODES[index];
+        if bits & (1 << (mode as u32 - 1)) != 0 {
+            out[count] = Choice {
+                value: mode as u32 as f32,
+                label,
+            };
+            count += 1;
+        }
+        index += 1;
+    }
+    assert!(count == N, "the choice count is the number of set bits");
+    out
+}
+
+const LINK_CHOICES_MAXIMUM: [Choice; 2] = link_choices_of(0b011);
+const LINK_CHOICES_AVERAGE: [Choice; 2] = link_choices_of(0b101);
+const LINK_CHOICES_ALL: [Choice; 3] = link_choices_of(0b111);
 
 /// The launch descriptor of a native effect identity, or `None` for a `cid` effect, an unknown
 /// effect or a registry that failed to build.
@@ -178,21 +178,29 @@ pub(crate) fn parameter_descriptor(parameter: &'static ParameterDescriptor) -> C
         scope: ControlScope::Model,
         family: Family::Effect,
         active: true,
+        domain: DomainRule::Contract(parameter),
     }
 }
 
 /// The bypass row of an instance of `effect_id`.
 pub(crate) fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
-    let class = match effect_id {
-        DELAY_ID => ruled_live_not_built(
-            DELAY_BYPASS_ISSUE,
-            "#1339 gives the delay a live bypass shunt; its last step flips the row",
-        ),
-        MULTIBAND_ID => ruled_live_not_built(
-            MULTIBAND_BYPASS_ISSUE,
-            "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row",
-        ),
-        _ => ControlClass::Live,
+    // The one place that decides whether a session bypass is live is `lowers_session_bypass`; the
+    // issue that flips each prepared bypass is a fact of the effect, kept beside it.
+    let class = if lowers_session_bypass(effect_id) {
+        ControlClass::Live
+    } else {
+        match effect_id {
+            DELAY_ID => ruled_live_not_built(
+                DELAY_BYPASS_ISSUE,
+                "#1339 gives the delay a live bypass shunt; its last step flips the row",
+            ),
+            MULTIBAND_ID => ruled_live_not_built(
+                MULTIBAND_BYPASS_ISSUE,
+                "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row",
+            ),
+            // An effect that gains a prepared bypass before root numbers its issue.
+            _ => ruled_live_not_built(0, "a prepared bypass whose live path root has not numbered"),
+        }
     };
     ControlDescriptor {
         name: "bypass",

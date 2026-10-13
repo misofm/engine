@@ -2,7 +2,7 @@
 //! through each member's effective fader and mute.
 
 use effect_contract::{ParameterLattice, ParameterUnit};
-use session::Vca;
+use session::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, Vca};
 
 use crate::address::{Owner, Section};
 use crate::descriptor::{
@@ -46,8 +46,8 @@ pub(crate) static ROWS: [VcaRow; 2] = [
             display_name: "VCA Offset",
             unit: ParameterUnit::Db,
             display_unit: "dB",
-            minimum: -144.0,
-            maximum: 24.0,
+            minimum: FADER_MINIMUM_DB as f32,
+            maximum: FADER_MAXIMUM_DB as f32,
             taper: Taper::Decibel,
             lattice: ParameterLattice::arithmetic(0.1, 1),
             motion: Motion::Ramp(LiveRampRow::VcaOffset),

@@ -11,7 +11,7 @@ use builtins::{
 use session::{ChannelBuiltins, MatrixOrPan, StripRef};
 
 use crate::ControlScope;
-use crate::descriptor::{ControlDescriptor, Lanes, Motion};
+use crate::descriptor::{ControlDescriptor, DomainRule, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::strip::StripMut;
@@ -104,6 +104,10 @@ pub(crate) fn shaped_descriptor(
         scope: ControlScope::Model,
         family: row.family,
         active,
+        domain: DomainRule::Builtin {
+            domain: row.domain,
+            sample_rate,
+        },
     }
 }
 

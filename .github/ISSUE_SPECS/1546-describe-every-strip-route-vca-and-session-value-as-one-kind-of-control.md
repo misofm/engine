@@ -109,7 +109,7 @@ route the hosts through it.
     `StripMatrix`, ramp `Pan`); 2 `solo` (`Toggle`, shared, scope `Monitor`, `Live`, `StripLevel`,
     ramp `Solo`; listed on track strips only: a submix is solo-safe, so an address of `solo` on a
     submix is `control.address.unknown`); 3 `pan_window_samples` (the active `MatrixOrPan` variant's `smoothing_samples`,
-    shared, `Live`, `Setting`, `Fixed`, unit samples, integral, domain `[0, 16_777_216]`);
+    shared, `Live`, `Setting`, `Fixed`, unit samples, integral, domain `[0, u32::MAX]` (see D10));
     64 `effective_fader_db` (per-lane, `Derived`, dB, `[-144, 24]`); 65 `effective_mute`
     (per-lane, `Derived`, `Toggle`).
   - **Route own:** 1 `gain_db` (`[ROUTE_GAIN_DB_MINIMUM, ROUTE_GAIN_DB_MAXIMUM]`, ramp
@@ -184,6 +184,25 @@ route the hosts through it.
   `Live` + `Model` + non-`Setting` rows.
 - **D9. No behaviour change.** No host calls `controls` in this slice. The SDK metadata generator
   output does not change (the new builtin fields are not emitted until S2).
+- **D10. Recorded deviations (batch 1 review fold).**
+  - `active` lives on `ControlDescriptor`, not on the listed row (D6 and D7 said the row). Why:
+    `check` reads nothing but its arguments and must refuse `control.inactive`, and the browser
+    host holds no model, so it builds the descriptor of a row for a strip's shape
+    (`shaped_descriptor(row, rate, active)`) and calls `check` with it. A flag on the listed row
+    would make `check` take a second argument for what the descriptor already is.
+  - `pan_window_samples` has the domain `[0, u32::MAX]`, not `[0, 16_777_216]`. The session grammar
+    holds the window as a `u32` and bounds it nowhere (`parser.u32`), and preparation accepts every
+    `u32` (`host-core` passes `maximum_smoothing_samples: u32::MAX`), so a smaller bound would put a
+    value a valid session holds outside its own row. `u32::MAX as f32` is `2^32`, which `value as
+    u32` saturates back to `u32::MAX`. `tests/domain.rs` holds the largest window and reads it back
+    inside the row.
+  - A descriptor decides its domain through `DomainRule`: a builtin row calls
+    `BuiltinParameterDomain::contains` (a filter cutoff: `validate_builtin_filter_cutoff`, the
+    check session validation uses), an effect parameter calls `effect_contract::parameter_value_valid`,
+    and only the core's own rows (including an effect's bypass and link-mode rows) use their own
+    bounds. A toggle of those rows is exact (`-0.0` is refused), as a builtin toggle is; the bypass
+    row therefore no longer accepts `-0.0`, which only the removed `Family::Effect` special case
+    allowed.
 
 ## Deliverables
 

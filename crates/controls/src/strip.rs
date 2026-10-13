@@ -3,8 +3,8 @@
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
-    Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, MatrixOrPan, SessionModel,
-    StableId, StripKind, StripRef,
+    Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, FADER_MAXIMUM_DB,
+    FADER_MINIMUM_DB, MatrixOrPan, SessionModel, StableId, StripKind, StripRef,
 };
 
 use crate::address::{Owner, Section};
@@ -29,9 +29,11 @@ pub(crate) const EFFECTIVE_FADER_DB: u32 = 64;
 /// The own-row ID of `effective_mute`.
 pub(crate) const EFFECTIVE_MUTE: u32 = 65;
 
-/// The longest pan window a row accepts: 1000 ms at 96 kHz, the longest `pan_ms` the session
-/// accepts at the highest launch rate.
-const PAN_WINDOW_SAMPLES_MAXIMUM: f32 = 96_000.0;
+/// The longest pan window a row accepts: the session grammar holds the window as a `u32` and
+/// bounds it nowhere else, and preparation accepts every `u32` (`host-core` passes
+/// `maximum_smoothing_samples: u32::MAX`), so a window that a valid session holds is in the row's
+/// domain. The `f32` is `2^32`, which `value as u32` saturates to `u32::MAX`.
+const PAN_WINDOW_SAMPLES_MAXIMUM: f32 = u32::MAX as f32;
 
 const MODE_CHOICES: [Choice; 2] = [
     Choice {
@@ -137,8 +139,8 @@ pub(crate) static ROWS: [StripRow; 5] = [
             unit: ParameterUnit::Db,
             display_unit: "dB",
             lanes: Lanes::PerLane,
-            minimum: -144.0,
-            maximum: 24.0,
+            minimum: FADER_MINIMUM_DB as f32,
+            maximum: FADER_MAXIMUM_DB as f32,
             taper: Taper::Decibel,
             lattice: ParameterLattice::arithmetic(0.1, 1),
             class: ControlClass::Derived,

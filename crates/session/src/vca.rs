@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 use crate::model::SessionModel;
 
 /// The lower edge of the fader domain, in dB.
-const FADER_MINIMUM_DB: f64 = -144.0;
+pub const FADER_MINIMUM_DB: f64 = -144.0;
 /// The upper edge of the fader domain, in dB.
-const FADER_MAXIMUM_DB: f64 = 24.0;
+pub const FADER_MAXIMUM_DB: f64 = 24.0;
 
 /// Decision 13 (a): `clamp(member_db + sum(offsets), -144, 24)`, summed in `f64` in the order
 /// given (the member's own value first, then each offset), clamped in `f64`, rounded once to

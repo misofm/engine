@@ -1,6 +1,9 @@
 //! The control descriptor (decision 17, C3) and the one validator, [`check`].
 
-use effect_contract::{ParameterLattice, ParameterUnit};
+use builtins::BuiltinParameterDomain;
+use effect_contract::{
+    ParameterDescriptor, ParameterLattice, ParameterUnit, parameter_value_valid,
+};
 
 use crate::address::Lane;
 use crate::error::ControlError;
@@ -54,6 +57,30 @@ pub enum Motion {
 /// choices are used as declared and not copied.
 pub use effect_contract::EnumChoice as Choice;
 
+/// Which function decides whether a value is in a control's domain.
+///
+/// A builtin row and an effect parameter already have a domain function that preparation and
+/// session validation use; the control core calls that same function, so there is one rule per
+/// value and the row cannot drift from it. Only the core's own rows (a strip's own rows, a
+/// route's, a VCA's, the session's, and the bypass and link-mode rows) are decided here, by the
+/// descriptor's own bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DomainRule {
+    /// The descriptor's own `kind`, `minimum`, `maximum`, `disabled_value` and `choices`.
+    Range,
+    /// A builtin row's [`BuiltinParameterDomain`] at the session's sample rate:
+    /// `BuiltinParameterDomain::contains`, which for a filter cutoff is
+    /// `validate_builtin_filter_cutoff`, the check session validation uses.
+    Builtin {
+        /// The row's declared domain.
+        domain: BuiltinParameterDomain,
+        /// The session's sample rate.
+        sample_rate: u32,
+    },
+    /// An effect parameter's contract row: `effect_contract::parameter_value_valid`.
+    Contract(&'static ParameterDescriptor),
+}
+
 /// What one control is: everything a frontend or an agent needs to draw it, and everything the
 /// validator needs to check a write. The same type describes every control.
 ///
@@ -98,6 +125,8 @@ pub struct ControlDescriptor {
     /// mode, and the reverse). The row set changes only with the session's structure, so an
     /// inactive row is listed and refuses a write.
     pub active: bool,
+    /// Which function decides the domain (see [`DomainRule`]).
+    pub domain: DomainRule,
 }
 
 impl ControlDescriptor {
@@ -111,21 +140,32 @@ impl ControlDescriptor {
     }
 
     /// Whether `value` is in this control's domain. Values are not snapped to the lattice.
+    ///
+    /// A builtin row and an effect parameter delegate to the function the rest of the engine uses
+    /// for them ([`DomainRule`]); the descriptor's own bounds decide only the core's own rows.
     #[must_use]
     pub fn contains(&self, value: f32) -> bool {
-        if !value.is_finite() {
-            return false;
+        match self.domain {
+            DomainRule::Contract(parameter) => parameter_value_valid(parameter, value),
+            DomainRule::Builtin {
+                domain,
+                sample_rate,
+            } => domain.contains(value, sample_rate) && self.is_whole_if_samples(value),
+            DomainRule::Range => value.is_finite() && self.range_contains(value),
         }
+    }
+
+    /// A sample count is a whole number of frames.
+    fn is_whole_if_samples(&self, value: f32) -> bool {
+        self.unit != ParameterUnit::Samples || (value as u32) as f32 == value
+    }
+
+    /// The core's own rows: the descriptor's kind and bounds.
+    fn range_contains(&self, value: f32) -> bool {
         match self.kind {
-            // The exact encodings, as the builtins' own boolean domain has it (an effect's are below).
+            // The exact encodings, as the builtins' boolean domain has them: `-0.0` is refused.
             ControlKind::Toggle => {
-                if self.family == Family::Effect {
-                    // The effect contract's boolean domain (`parameter_value_valid`) takes the two
-                    // zeros as one value, and preparation normalises them.
-                    value == 0.0 || value == 1.0
-                } else {
-                    value.to_bits() == 0.0_f32.to_bits() || value.to_bits() == 1.0_f32.to_bits()
-                }
+                value.to_bits() == 0.0_f32.to_bits() || value.to_bits() == 1.0_f32.to_bits()
             }
             ControlKind::Enumeration => self.choices.iter().any(|choice| choice.value == value),
             ControlKind::Continuous => {
@@ -135,9 +175,7 @@ impl ControlDescriptor {
                 {
                     return true;
                 }
-                // A sample count is a whole number of frames.
-                let whole = self.unit != ParameterUnit::Samples || (value as u32) as f32 == value;
-                whole && value >= self.minimum && value <= self.maximum
+                self.is_whole_if_samples(value) && value >= self.minimum && value <= self.maximum
             }
         }
     }
@@ -202,4 +240,5 @@ pub(crate) const BASE: ControlDescriptor = ControlDescriptor {
     scope: ControlScope::Model,
     family: Family::Setting,
     active: true,
+    domain: DomainRule::Range,
 };

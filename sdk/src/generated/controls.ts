@@ -106,7 +106,7 @@ export const CONTROLS = deepFreeze(
       "unit": "samples",
       "kind": "continuous",
       "minimum": 0,
-      "maximum": 96000,
+      "maximum": 4294967300,
       "disabledValue": null,
       "default": 0,
       "taper": "linear",

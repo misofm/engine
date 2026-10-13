@@ -40,7 +40,8 @@ mod vca;
 
 pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use descriptor::{
-    Choice, ControlDescriptor, ControlScope, EFFECTIVE_SLICE, Lanes, Motion, ROUTE_SLICE, check,
+    Choice, ControlDescriptor, ControlScope, DomainRule, EFFECTIVE_SLICE, Lanes, Motion,
+    ROUTE_SLICE, check,
 };
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
