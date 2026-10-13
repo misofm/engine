@@ -1,11 +1,10 @@
 //! The control list and the one read and write path: [`list`], [`get`], [`set`].
 
-use std::collections::HashMap;
-
 use session::SessionModel;
 
 use crate::address::{ControlAddress, Lane, Owner, Section};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, check};
+use crate::effective::{MonitorOverlay, effective};
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::{builtin_rows, route, session_rows, strip, vca};
@@ -17,9 +16,8 @@ pub struct ControlRow {
     pub address: ControlAddress,
     /// What the control is, resolved at the session's sample rate.
     pub descriptor: ControlDescriptor,
-    /// The committed value. A derived row reports its computed value; a row that the owner's
-    /// shape does not use, and a monitor row (solo, until the overlay exists), report the
-    /// descriptor's default.
+    /// The committed value. A derived row reports its computed value, a monitor row (solo) the
+    /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
 }
 
@@ -52,28 +50,32 @@ pub(crate) fn push_control(
 }
 
 /// Every control of a session, with its descriptor at `sample_rate` and its committed value.
+/// A derived row reports the value [`effective`] computes under `overlay`, and a monitor row
+/// (solo) reports the overlay's.
 ///
 /// Order: strips in [`SessionModel::strips`] order, then routes, then VCAs, then the session's
 /// rows. Within a strip: its own rows, then its builtin rows (then the console and insert
 /// sections, which have no rows until effect rows exist). A per-lane row is listed as `left`
 /// then `right`; a shared row once, as `both`. Every address appears exactly once.
-pub fn list(model: &SessionModel, sample_rate: u32) -> impl Iterator<Item = ControlRow> + use<> {
-    let effective = model.effective_strip_faders();
-    let source_mutes: HashMap<&str, [bool; 2]> = model
-        .strips()
-        .zip(&effective)
-        .map(|(strip, effective)| (strip.id.as_str(), effective.mute))
-        .collect();
+pub fn list(
+    model: &SessionModel,
+    overlay: &MonitorOverlay,
+    sample_rate: u32,
+) -> impl Iterator<Item = ControlRow> + use<> {
+    let effective = effective(model, overlay);
     let mut rows = Vec::new();
-    for (strip, effective) in model.strips().zip(&effective) {
-        strip::push_rows(&mut rows, &strip, effective, sample_rate);
+    for (index, strip) in model.strips().enumerate() {
+        let soloed = overlay.is_soloed(strip.id);
+        strip::push_rows(
+            &mut rows,
+            &strip,
+            &effective.strips[index],
+            soloed,
+            sample_rate,
+        );
     }
-    for route in &model.routes {
-        let source_mute = source_mutes
-            .get(route::source_strip(route).as_str())
-            .copied()
-            .unwrap_or_default();
-        route::push_rows(&mut rows, route, source_mute);
+    for (index, route) in model.routes.iter().enumerate() {
+        route::push_rows(&mut rows, route, effective.routes[index].gate);
     }
     for vca in &model.vcas {
         vca::push_rows(&mut rows, vca);
@@ -85,6 +87,7 @@ pub fn list(model: &SessionModel, sample_rate: u32) -> impl Iterator<Item = Cont
 /// The rows of one owner, in listing order.
 fn owner_rows(
     model: &SessionModel,
+    overlay: &MonitorOverlay,
     owner: &Owner,
     sample_rate: u32,
 ) -> Result<Vec<ControlRow>, ControlError> {
@@ -92,26 +95,29 @@ fn owner_rows(
     match owner {
         Owner::Session => session_rows::push_rows(&mut rows, model),
         Owner::Strip(id) => {
-            let (strip, effective) = model
+            let (index, strip) = model
                 .strips()
-                .zip(model.effective_strip_faders())
-                .find(|(strip, _)| strip.id == id)
+                .enumerate()
+                .find(|(_, strip)| strip.id == id)
                 .ok_or(ControlError::AddressUnknown)?;
-            strip::push_rows(&mut rows, &strip, &effective, sample_rate);
+            let effective = effective(model, overlay);
+            let soloed = overlay.is_soloed(strip.id);
+            strip::push_rows(
+                &mut rows,
+                &strip,
+                &effective.strips[index],
+                soloed,
+                sample_rate,
+            );
         }
         Owner::Route(id) => {
-            let route = model
+            let index = model
                 .routes
                 .iter()
-                .find(|route| route.id == *id)
+                .position(|route| route.id == *id)
                 .ok_or(ControlError::AddressUnknown)?;
-            let source = route::source_strip(route);
-            let source_mute = model
-                .strips()
-                .zip(model.effective_strip_faders())
-                .find(|(strip, _)| strip.id == source)
-                .map_or([false; 2], |(_, effective)| effective.mute);
-            route::push_rows(&mut rows, route, source_mute);
+            let gate = effective(model, overlay).routes[index].gate;
+            route::push_rows(&mut rows, &model.routes[index], gate);
         }
         Owner::Vca(id) => {
             let vca = model
@@ -136,10 +142,11 @@ fn owner_rows(
 /// [`ControlError::Lane`] if the row exists but not on that lane.
 pub fn get(
     model: &SessionModel,
+    overlay: &MonitorOverlay,
     address: &ControlAddress,
     sample_rate: u32,
 ) -> Result<f32, ControlError> {
-    let rows = owner_rows(model, &address.owner, sample_rate)?;
+    let rows = owner_rows(model, overlay, &address.owner, sample_rate)?;
     if let Some(row) = rows.iter().find(|row| row.address == *address) {
         return Ok(row.value);
     }
@@ -171,7 +178,14 @@ pub fn set(
     ramp: Option<u32>,
     sample_rate: u32,
 ) -> Result<(), ControlError> {
-    let rows = owner_rows(model, &address.owner, sample_rate)?;
+    // A written row is never derived or monitor, so the overlay changes neither what `set`
+    // compares against nor what it writes.
+    let rows = owner_rows(
+        model,
+        &MonitorOverlay::default(),
+        &address.owner,
+        sample_rate,
+    )?;
     let mut targets = rows.iter().filter(|row| row.address.same_row(address));
     let descriptor = targets
         .next()

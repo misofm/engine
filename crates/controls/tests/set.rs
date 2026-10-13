@@ -151,7 +151,7 @@ fn writable(row: &ControlRow) -> bool {
 }
 
 fn non_derived(model: &SessionModel) -> Vec<ControlRow> {
-    list(model, RATE)
+    list(model, &controls::MonitorOverlay::default(), RATE)
         .filter(|row| row.descriptor.class != ControlClass::Derived)
         .collect()
 }
@@ -164,7 +164,7 @@ fn non_derived(model: &SessionModel) -> Vec<ControlRow> {
 #[test]
 fn set_then_get_round_trips_every_writable_row_onto_its_own_field() {
     let model = fixture();
-    let rows: Vec<ControlRow> = list(&model, RATE).collect();
+    let rows: Vec<ControlRow> = list(&model, &controls::MonitorOverlay::default(), RATE).collect();
     let mut written = 0;
     for row in rows.iter().filter(|row| writable(row)) {
         let value = probe(row);
@@ -172,7 +172,12 @@ fn set_then_get_round_trips_every_writable_row_onto_its_own_field() {
         set(&mut next, &row.address, value, None, RATE)
             .unwrap_or_else(|error| panic!("{:?} <- {value}: {error}", row.address));
         assert_eq!(
-            get(&next, &row.address, RATE),
+            get(
+                &next,
+                &controls::MonitorOverlay::default(),
+                &row.address,
+                RATE
+            ),
             Ok(value),
             "{:?}",
             row.address
@@ -224,7 +229,9 @@ fn derived_rows_are_read_only() {
 #[test]
 fn derived_rows_report_the_vca_composition_and_the_follow_gate() {
     let mut model = fixture();
-    let value = |model: &SessionModel, address: ControlAddress| get(model, &address, RATE).unwrap();
+    let value = |model: &SessionModel, address: ControlAddress| {
+        get(model, &controls::MonitorOverlay::default(), &address, RATE).unwrap()
+    };
     assert_eq!(value(&model, strip_own("vocal", 64, Lane::Left)), -6.0);
     assert_eq!(value(&model, strip_own("vocal", 64, Lane::Right)), -3.0);
     assert_eq!(value(&model, strip_own("vocal", 65, Lane::Left)), 1.0);
@@ -520,28 +527,58 @@ fn lane_inactive_ramp_unknown_and_monitor_refusals() {
 fn get_refuses_unlisted_lanes_and_unknown_addresses() {
     let model = fixture();
     assert_eq!(
-        get(&model, &strip_builtin("vocal", 5, Lane::Both), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_builtin("vocal", 5, Lane::Both),
+            RATE
+        ),
         Err(ControlError::Lane)
     );
     assert_eq!(
-        get(&model, &strip_builtin("guitar", 7, Lane::Left), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_builtin("guitar", 7, Lane::Left),
+            RATE
+        ),
         Err(ControlError::Lane)
     );
     assert_eq!(
-        get(&model, &strip_builtin("nobody", 5, Lane::Left), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_builtin("nobody", 5, Lane::Left),
+            RATE
+        ),
         Err(ControlError::AddressUnknown)
     );
     assert_eq!(
-        get(&model, &strip_builtin("vocal", 99, Lane::Left), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_builtin("vocal", 99, Lane::Left),
+            RATE
+        ),
         Err(ControlError::AddressUnknown)
     );
     // Solo reads as off until the overlay exists; an inactive row reads as its default.
     assert_eq!(
-        get(&model, &strip_own("vocal", 2, Lane::Both), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_own("vocal", 2, Lane::Both),
+            RATE
+        ),
         Ok(0.0)
     );
     assert_eq!(
-        get(&model, &strip_builtin("vocal", 10, Lane::Both), RATE),
+        get(
+            &model,
+            &controls::MonitorOverlay::default(),
+            &strip_builtin("vocal", 10, Lane::Both),
+            RATE
+        ),
         Ok(1.0)
     );
 }

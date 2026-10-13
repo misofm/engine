@@ -7,7 +7,7 @@
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
     ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Route,
-    RouteDestination, RouteSource,
+    RouteDestination,
 };
 
 use crate::address::{Owner, Section};
@@ -52,10 +52,10 @@ pub(crate) enum RouteValue {
         /// The model write, after the value passed [`crate::check`].
         write: fn(&mut Route, f32),
     },
-    /// Computed from the route and the muted lanes of its source strip.
+    /// Computed from other controls.
     Derived {
-        /// The value of one lane.
-        read: fn(&Route, [bool; 2], Side) -> f32,
+        /// The value of one lane, from the route's effective gate.
+        read: fn([bool; 2], Side) -> f32,
     },
 }
 
@@ -213,12 +213,8 @@ pub(crate) static ROWS: [RouteRow; 8] = [
         output_class: ControlClass::Derived,
         output_active: true,
         value: RouteValue::Derived {
-            // The route's mute, or its follow gate on a muted lane of the source strip.
-            read: |route, source_mute, side| {
-                toggle(
-                    route.mute || (route.follows_mute && side.pick(source_mute[0], source_mute[1])),
-                )
-            },
+            // `crate::effective_gate`, per source lane.
+            read: |gate, side| toggle(side.pick(gate[0], gate[1])),
         },
     },
 ];
@@ -236,17 +232,8 @@ fn descriptor(row: &RouteRow, route: &Route) -> ControlDescriptor {
     }
 }
 
-/// The id of the strip a route reads.
-pub(crate) fn source_strip(route: &Route) -> &session::StableId {
-    match &route.source {
-        RouteSource::Track { track_id, .. } => track_id,
-        RouteSource::Submix { submix_id, .. } => submix_id,
-    }
-}
-
-/// Append every control row of one route. `source_mute` is the effective mute of the route's
-/// source strip, per lane.
-pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, source_mute: [bool; 2]) {
+/// Append every control row of one route. `gate` is the route's effective gate, per source lane.
+pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2]) {
     let owner = Owner::Route(route.id.clone());
     for row in &ROWS {
         let descriptor = descriptor(row, route);
@@ -258,7 +245,7 @@ pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, source_mute: [
             &descriptor,
             |side| match &row.value {
                 RouteValue::Stored { read, .. } => read(route),
-                RouteValue::Derived { read } => read(route, source_mute, side),
+                RouteValue::Derived { read } => read(gate, side),
             },
         );
     }

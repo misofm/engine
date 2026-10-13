@@ -1132,6 +1132,13 @@ fn assert_rejects_in_phase_one(
     assert_zero_phase_two_allocations();
 }
 
+fn effective_of(session: &session::CompiledSession) -> controls::Effective {
+    controls::effective(
+        session.normalized_model(),
+        &controls::MonitorOverlay::default(),
+    )
+}
+
 fn caps() -> BuiltinCompileCaps {
     BuiltinCompileCaps {
         maximum_total_state_bytes: u64::MAX,
@@ -1381,7 +1388,14 @@ fn live_control_cells_are_charged_exactly_as_allocated_with_and_without_the_inpu
     };
     let prepare = |controls: &[TrackControlRequest]| {
         armed(|| {
-            prepare_session_builtins_with_live_controls(&session, &requests, controls, caps(), None)
+            prepare_session_builtins_with_live_controls(
+                &session,
+                &effective_of(&session),
+                &requests,
+                controls,
+                caps(),
+                None,
+            )
         })
         .expect("prepare")
     };

@@ -11,7 +11,7 @@ use controls::{ControlError, Lane, check, list};
 fn check_allocates_nothing() {
     assert_installed();
     let model = fixture();
-    let rows: Vec<_> = list(&model, RATE).collect();
+    let rows: Vec<_> = list(&model, &controls::MonitorOverlay::default(), RATE).collect();
     let descriptor_of = |lane, control| {
         rows.iter()
             .find(|row| row.address == strip_builtin("guitar", control, lane))

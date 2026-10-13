@@ -1,9 +1,10 @@
-//! The VCA composition (#1242 D1): `vca_effective_db`, `SessionModel::vca_reach` and
-//! `SessionModel::effective_strip_faders`, the one place preparation computes a VCA's effect.
+//! The VCA composition (#1242 D1, moved here by decision 17 S1b): `vca_effective_db`,
+//! `SessionModel::vca_reach` and `controls::effective`, the one place preparation computes a VCA's
+//! effect.
 
+use controls::{EffectiveStrip, MonitorOverlay, effective};
 use session::{
-    DualMonoFader, EffectiveStripFader, SessionModel, StableId, Submix, Vca, parse_session_json,
-    vca_effective_db,
+    DualMonoFader, SessionModel, StableId, Submix, Vca, parse_session_json, vca_effective_db,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -160,21 +161,21 @@ fn vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order() {
     let vocal = &model.tracks[0].fader;
     let bus = &model.submixes[0].fader;
     let expected = vec![
-        EffectiveStripFader {
-            db: [
+        EffectiveStrip {
+            fader_db: [
                 vca_effective_db(vocal.left_db, [-1.0]),
                 vca_effective_db(vocal.right_db, [-1.0]),
             ],
             mute: [true, vocal.right_mute],
             vca_mute: [true, false],
         },
-        EffectiveStripFader {
-            db: [1.0 - 2.0 - 3.0 - 4.0, -2.5 + 0.125 + 0.25 + 0.5],
+        EffectiveStrip {
+            fader_db: [1.0 - 2.0 - 3.0 - 4.0, -2.5 + 0.125 + 0.25 + 0.5],
             mute: [false, true],
             vca_mute: [false, true],
         },
-        EffectiveStripFader {
-            db: [
+        EffectiveStrip {
+            fader_db: [
                 model.tracks[2].fader.left_db,
                 model.tracks[2].fader.right_db,
             ],
@@ -184,13 +185,14 @@ fn vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order() {
             ],
             vca_mute: [false, false],
         },
-        EffectiveStripFader {
-            db: [bus.left_db - 3.0 - 4.0, bus.right_db + 0.25 + 0.5],
+        EffectiveStrip {
+            fader_db: [bus.left_db - 3.0 - 4.0, bus.right_db + 0.25 + 0.5],
             mute: [bus.left_mute, true],
             vca_mute: [false, true],
         },
     ];
-    assert_eq!(model.effective_strip_faders(), expected);
+    let actual = effective(&model, &MonitorOverlay::default());
+    assert_eq!(&*actual.strips, expected.as_slice());
 }
 
 /// Gate 1, termination. An unvalidated model whose VCAs form a two-VCA cycle (`c1` holds `c2` and

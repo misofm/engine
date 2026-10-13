@@ -19,6 +19,7 @@ path = "src/lib.rs"
 bench-support.workspace = true
 builtins.workspace = true
 builtins-compiler.workspace = true
+controls.workspace = true
 engine = { workspace = true, features = ["realtime-audit"] }
 effect-compiler.workspace = true
 effect-contract.workspace = true

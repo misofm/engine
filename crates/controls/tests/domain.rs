@@ -46,7 +46,7 @@ fn builtin_descriptor_domain_equals_the_builtins_domain() {
         for edge in [bound, 24.0, -144.0, 48_000.0, 10.0, 1.0] {
             probes.extend([edge, away_from_zero(edge), toward_zero(edge)]);
         }
-        let rows: Vec<_> = list(&model, rate).collect();
+        let rows: Vec<_> = list(&model, &controls::MonitorOverlay::default(), rate).collect();
         for builtin in &BUILTIN_PARAMETER_DESCRIPTORS {
             let lane = if builtin.scope == builtins::BuiltinParameterScope::PerLane {
                 Lane::Left

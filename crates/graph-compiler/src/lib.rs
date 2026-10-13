@@ -312,6 +312,15 @@ mod tests {
     use super::*;
     use crate::banks::bind_rack_banks_indexed;
 
+    /// The effective values of `session` with no solo: what a host without a monitor overlay
+    /// hands the builtins compiler.
+    fn effective_of(session: &session::CompiledSession) -> controls::Effective {
+        controls::effective(
+            session.normalized_model(),
+            &controls::MonitorOverlay::default(),
+        )
+    }
+
     /// Issue #1088's padded-bank gate, beside the harness it reuses.
     mod bank_padding;
     /// Issue #1098's gates: every console slot banked, class A, the diagnostic and #971.
@@ -2922,6 +2931,7 @@ mod tests {
             let builtins = if controlled {
                 prepare_session_builtins_between_render_calls(
                     &session,
+                    &effective_of(&session),
                     &[],
                     &controls,
                     BuiltinCompileCaps {
@@ -11426,6 +11436,7 @@ mod tests {
             .collect();
         let builtins = prepare_session_builtins_with_live_controls(
             &session,
+            &effective_of(&session),
             &[],
             &controls,
             BuiltinCompileCaps {
@@ -11730,10 +11741,20 @@ mod tests {
         };
         let builtins = if between_render_calls {
             prepare_selected_session_builtins_between_render_calls(
-                &session, meters, &controls, caps,
+                &session,
+                &effective_of(&session),
+                meters,
+                &controls,
+                caps,
             )
         } else {
-            prepare_selected_session_builtins_with_live_controls(&session, meters, &controls, caps)
+            prepare_selected_session_builtins_with_live_controls(
+                &session,
+                &effective_of(&session),
+                meters,
+                &controls,
+                caps,
+            )
         }
         .expect("prepared selected console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -11877,6 +11898,7 @@ mod tests {
             .collect();
         let builtins = prepare_session_builtins_between_render_calls(
             &session,
+            &effective_of(&session),
             &[],
             &controls,
             BuiltinCompileCaps {

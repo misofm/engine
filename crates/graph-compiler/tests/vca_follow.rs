@@ -1,5 +1,5 @@
 //! Issue #1242 D2: a following send reads its source strip's effective mute, the VCA's mute
-//! included (VERIFY-2 M12), from the one composition (`SessionModel::effective_strip_faders`).
+//! included (VERIFY-2 M12), from the one composition (`controls::effective`).
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
@@ -173,7 +173,7 @@ fn vca_session(mutes: [bool; 2]) -> SessionModel {
 
 /// `model` with no VCA and every strip's own fader set to its effective value.
 fn written_directly(model: &SessionModel) -> SessionModel {
-    let effective = model.effective_strip_faders();
+    let effective = controls::effective(model, &controls::MonitorOverlay::default());
     let mut plain = model.clone();
     plain.vcas.clear();
     let faders = plain
@@ -181,8 +181,8 @@ fn written_directly(model: &SessionModel) -> SessionModel {
         .iter_mut()
         .map(|track| &mut track.fader)
         .chain(plain.submixes.iter_mut().map(|submix| &mut submix.fader));
-    for (fader, value) in faders.zip(effective) {
-        (fader.left_db, fader.right_db) = (value.db[0], value.db[1]);
+    for (fader, value) in faders.zip(effective.strips.iter()) {
+        (fader.left_db, fader.right_db) = (value.fader_db[0], value.fader_db[1]);
         (fader.left_mute, fader.right_mute) = (value.mute[0], value.mute[1]);
     }
     plain

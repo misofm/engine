@@ -111,7 +111,7 @@ pub struct SessionModel {
     /// Submixes, order-insensitive by stable ID.
     pub submixes: Vec<Submix>,
     /// VCA groups, order-insensitive by stable ID (#1240). Control-only: applied at preparation
-    /// through [`Self::effective_strip_faders`] (#1242).
+    /// through `controls::effective` (#1242, decision 17 C7).
     pub vcas: Vec<Vca>,
     /// The live-ramp lengths this session sets (#1054, decision 15 D15-1): `None` is the schema's
     /// `{ "kind": "default" }` and means [`CONTROL_SMOOTHING_DEFAULT`]; `Some` is
@@ -829,8 +829,8 @@ impl Submix {
 /// member's own fader, and its per-lane mute mutes every reachable member. A member is a track, a
 /// submix or another VCA; membership is acyclic (`vca.cycle`) and one strip may sit in several
 /// VCAs. The canonical session stores each member's own value and each VCA's value, never an
-/// effective value; preparation composes them through [`SessionModel::effective_strip_faders`]
-/// (#1242).
+/// effective value; preparation composes them through `controls::effective` (#1242,
+/// decision 17 C7).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vca {
     /// Stable VCA identity, in the graph-entity namespace of tracks, submixes and outputs.

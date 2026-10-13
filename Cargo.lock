@@ -200,6 +200,7 @@ name = "builtins-compiler"
 version = "0.1.0"
 dependencies = [
  "builtins",
+ "controls",
  "effect-contract",
  "engine",
  "graph",
@@ -307,6 +308,7 @@ dependencies = [
  "bench-support",
  "builtins",
  "builtins-compiler",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "engine",
@@ -890,6 +892,7 @@ dependencies = [
  "builtins",
  "builtins-compiler",
  "conformance",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "engine",
@@ -967,6 +970,7 @@ dependencies = [
  "builtins-compiler",
  "capi",
  "control-plane",
+ "controls",
  "effect-contract",
  "engine",
  "host-core",

@@ -30,7 +30,7 @@ pub use id::StableId;
 pub use model::*;
 pub use parse::parse_session_json;
 pub use validate::{BUILTIN_AUTOMATION_EFFECT_ID, BUILTIN_AUTOMATION_TARGETS};
-pub use vca::{EffectiveStripFader, vca_effective_db};
+pub use vca::vca_effective_db;
 pub use visit::{FieldKey, ModelVisitor, Token, VisitModel, WalkOrder, keys};
 
 /// The only schema version accepted by [`parse_session_json`].

@@ -1384,8 +1384,14 @@ impl SessionRuntime {
         // that means for the pair). Every other row keeps the entry it has always been prepared
         // through.
         let builtins = if workload.web_meters() {
+            // Decision 17, C7: no solo on the bench path.
+            let effective = controls::effective(
+                session.normalized_model(),
+                &controls::MonitorOverlay::default(),
+            );
             builtins_compiler::prepare_selected_session_builtins_between_render_calls(
                 &session,
+                &effective,
                 &web_meters,
                 &[],
                 builtin_caps(),

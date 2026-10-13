@@ -197,7 +197,7 @@ effective_mute(strip, lane) = user_mute || vca_mute || (any_solo && !solo_safe(s
 ```
 
 `vca_mute` is whether any VCA reaching the strip mutes the lane, from the composition preparation
-bakes (`session::SessionModel::effective_strip_faders`); the user mute stays the member's own
+bakes (`controls::effective`); the user mute stays the member's own
 intent, so the solo state is seeded with both and the emitted mirror with their OR, and seeding
 emits nothing. Precedence is fixed:
 

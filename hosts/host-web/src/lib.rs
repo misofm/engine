@@ -6715,7 +6715,7 @@ impl BrowserVcaShape {
             .checked_mul(2)?
             .checked_add(
                 self.strips
-                    .checked_mul(size_of::<session::EffectiveStripFader>() as u64)?,
+                    .checked_mul(size_of::<controls::EffectiveStrip>() as u64)?,
             )?
             .checked_add(self.vcas.checked_mul(word)?)
     }
@@ -7178,7 +7178,7 @@ fn compile_ready(
     // because that order is the addressing authority for every queue, meter and command index.
     // One seed per strip (issue #1213 D3): the tracks, soloable, then the submixes, solo-safe, each
     // seeded from its own session fader mutes. Issue #1242 D3: each also carries its VCA mute
-    // from the same composition the compilers baked (`effective_strip_faders`, in strip order),
+    // from the same composition the compilers baked (`controls::effective`, in strip order),
     // before the solo state and the live-send mirror are built from it.
     let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
     prepared_mutes
@@ -7188,7 +7188,7 @@ fn compile_ready(
     if model.tracks.len() != track_count || model.submixes.len() != submixes.len() {
         return Err(fixed_diagnostic("web.live_controls.effects").into());
     }
-    let effective_faders = model.effective_strip_faders();
+    let effective_faders = controls::effective(model, &controls::MonitorOverlay::default());
     let count = |effects: usize| -> Result<u32, Vec<u8>> {
         u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
     };
@@ -7205,7 +7205,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [track.fader.left_mute, track.fader.right_mute],
             solo_safe: false,
-            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
+            vca_mute: effective_faders.strips[prepared_mutes.len()].vca_mute,
         });
     }
     for submix in &model.submixes {
@@ -7217,7 +7217,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [submix.fader.left_mute, submix.fader.right_mute],
             solo_safe: true,
-            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
+            vca_mute: effective_faders.strips[prepared_mutes.len()].vca_mute,
         });
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect

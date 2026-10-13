@@ -104,7 +104,9 @@ fn expected_addresses() -> Vec<ControlAddress> {
 #[test]
 fn list_yields_every_expected_address_once_in_ruled_order() {
     let model = fixture();
-    let actual: Vec<ControlAddress> = list(&model, RATE).map(|row| row.address).collect();
+    let actual: Vec<ControlAddress> = list(&model, &controls::MonitorOverlay::default(), RATE)
+        .map(|row| row.address)
+        .collect();
     assert_eq!(actual, expected_addresses());
 }
 
@@ -238,7 +240,7 @@ fn listed_lane(builtin: u32) -> Lane {
 #[test]
 fn automatable_is_exactly_the_live_model_value_rows() {
     let model = fixture();
-    let names: BTreeSet<&str> = list(&model, RATE)
+    let names: BTreeSet<&str> = list(&model, &controls::MonitorOverlay::default(), RATE)
         .filter(|row| row.descriptor.automatable())
         .map(|row| row.descriptor.name)
         .collect();
@@ -262,7 +264,7 @@ fn automatable_is_exactly_the_live_model_value_rows() {
 #[test]
 fn tables_are_self_consistent() {
     let model = fixture();
-    let rows: Vec<ControlRow> = list(&model, RATE).collect();
+    let rows: Vec<ControlRow> = list(&model, &controls::MonitorOverlay::default(), RATE).collect();
     let mut names = BTreeSet::new();
     for row in &rows {
         let d = &row.descriptor;

@@ -1,7 +1,7 @@
 //! Issue #1244: host-core composes live VCA moves exactly as preparation does.
 //!
 //! * **Gate 1** `a_live_recompute_equals_preparation`: random forests and edit sequences against
-//!   `SessionModel::effective_strip_faders` of a model the test edits the same way.
+//!   `controls::effective` of a model the test edits the same way.
 //! * **Gate 2** `a_composition_never_owes_a_redundant_record` and
 //!   `an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_lanes`.
 //! * **Gate 3** `a_clamped_member_returns_to_its_own_value`.
@@ -346,12 +346,19 @@ fn normalized(model: &SessionModel) -> SessionModel {
         .clone()
 }
 
+/// Every strip's effective values with no solo: `controls::effective`, the one composition.
+fn effective_strips(model: &SessionModel) -> Vec<controls::EffectiveStrip> {
+    controls::effective(model, &controls::MonitorOverlay::default())
+        .strips
+        .into_vec()
+}
+
 /// The strip-mute owner seeded from a normalized model, as a host seeds it.
 fn solo_state(model: &SessionModel) -> LiveControlSoloState {
     let tracks = model.tracks.len();
     let seeds: Vec<StripMuteSeed> = model
         .strips()
-        .zip(model.effective_strip_faders())
+        .zip(effective_strips(model))
         .enumerate()
         .map(|(index, (strip, effective))| StripMuteSeed {
             mutes: [strip.fader.left_mute, strip.fader.right_mute],
@@ -374,12 +381,11 @@ fn composition(state: &LiveVcaState, strips: usize) -> Vec<([u32; 2], [bool; 2])
         .collect()
 }
 
-/// `effective_strip_faders()` as [`composition`] reads the state.
+/// `controls::effective` as [`composition`] reads the state.
 fn prepared(model: &SessionModel) -> Vec<([u32; 2], [bool; 2])> {
-    model
-        .effective_strip_faders()
+    effective_strips(model)
         .into_iter()
-        .map(|fader| (fader.db.map(f32::to_bits), fader.vca_mute))
+        .map(|fader| (fader.fader_db.map(f32::to_bits), fader.vca_mute))
         .collect()
 }
 
@@ -447,7 +453,7 @@ const GATE_1_REPLAY: &str =
 
 /// Gate 1. Random forests (up to four deep, up to 16 members, overlapping, diamonds, tracks and
 /// submixes as members) and up to 64 random edits each, values across the whole domain: after
-/// every edit every strip's `effective_db` (bits) and `vca_mute` equal `effective_strip_faders()`
+/// every edit every strip's `effective_db` (bits) and `vca_mute` equal `controls::effective`
 /// of a model edited the same way, and `reached_by` is the inverse of `vca_reach()`.
 ///
 /// Red if live composition differs from preparation in order, reach, clamp or lane, if a member's
@@ -557,10 +563,9 @@ fn a_composition_never_owes_a_redundant_record() {
         let mut model = normalized(&generate(&mut draw, tracks, submixes, 8, db, 1_024));
         let mut state = LiveVcaState::try_new(&model).expect("state");
         let strips = tracks + submixes;
-        let mut told: Vec<[f32; 2]> = model
-            .effective_strip_faders()
+        let mut told: Vec<[f32; 2]> = effective_strips(&model)
             .iter()
-            .map(|fader| fader.db)
+            .map(|fader| fader.fader_db)
             .collect();
         for strip in 0..strips {
             assert_eq!(
@@ -571,12 +576,12 @@ fn a_composition_never_owes_a_redundant_record() {
         }
         for edit in 0..48 {
             random_edit(&mut draw, &mut state, &mut model, db);
-            let now = model.effective_strip_faders();
+            let now = effective_strips(&model);
             for strip in 0..strips {
                 let delta = state.fader_delta(strip);
                 assert_eq!(
                     delta,
-                    expected_delta(told[strip], now[strip].db),
+                    expected_delta(told[strip], now[strip].fader_db),
                     "seed {seed}, edit {edit}, strip {strip}"
                 );
                 if !state.reaches(strip) {
@@ -591,7 +596,7 @@ fn a_composition_never_owes_a_redundant_record() {
                 for (lanes, db) in delta.into_iter().flatten() {
                     state.record_emitted_db(strip, lanes, db);
                 }
-                told[strip] = now[strip].db;
+                told[strip] = now[strip].fader_db;
             }
             for strip in 0..strips {
                 assert_eq!(state.fader_delta(strip), [None, None], "seed {seed}");

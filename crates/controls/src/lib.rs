@@ -22,6 +22,7 @@
 mod address;
 mod builtin_rows;
 mod descriptor;
+mod effective;
 mod error;
 mod lane;
 mod live_ramps;
@@ -37,6 +38,11 @@ pub use descriptor::{
 };
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
+};
+pub use effective::{
+    Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
+    EffectiveStrip, ModelInputs, MonitorOverlay, any_solo, effective, effective_gate,
+    effective_into, effective_strip,
 };
 pub use error::ControlError;
 pub use live_ramps::LiveRamps;

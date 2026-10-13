@@ -3,13 +3,13 @@
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
-    DualMonoBuiltins, DualMonoFader, EffectiveStripFader, MatrixOrPan, SessionModel, StableId,
-    StripKind, StripRef,
+    DualMonoBuiltins, DualMonoFader, MatrixOrPan, SessionModel, StableId, StripKind, StripRef,
 };
 
 use crate::address::{Owner, Section};
 use crate::builtin_rows;
 use crate::descriptor::{BASE, Choice, ControlDescriptor, Lanes, Motion};
+use crate::effective::EffectiveStrip;
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::lane::{is_on, toggle};
@@ -54,10 +54,9 @@ pub(crate) enum StripValue {
     /// Computed from other controls.
     Derived {
         /// The value, from the strip's effective fader and mute.
-        read: fn(&EffectiveStripFader, Side) -> f32,
+        read: fn(&EffectiveStrip, Side) -> f32,
     },
-    /// Held by the host, not the model: the overlay writes it, and until it exists the row reads
-    /// as its default.
+    /// Held by the host, not the model: the overlay writes it and the row reads the overlay.
     Monitor,
 }
 
@@ -143,7 +142,7 @@ pub(crate) static ROWS: [StripRow; 5] = [
             ..BASE
         },
         value: StripValue::Derived {
-            read: |effective, side| side.pick(effective.db[0], effective.db[1]),
+            read: |effective, side| side.pick(effective.fader_db[0], effective.fader_db[1]),
         },
     },
     StripRow {
@@ -251,7 +250,8 @@ pub(crate) fn strip_mut<'a>(model: &'a mut SessionModel, id: &StableId) -> Optio
 pub(crate) fn push_rows(
     out: &mut Vec<ControlRow>,
     strip: &StripRef<'_>,
-    effective: &EffectiveStripFader,
+    effective: &EffectiveStrip,
+    soloed: bool,
     sample_rate: u32,
 ) {
     let owner = Owner::Strip(strip.id.clone());
@@ -266,7 +266,7 @@ pub(crate) fn push_rows(
             |side| match &row.value {
                 StripValue::Stored { read, .. } => read(strip, side),
                 StripValue::Derived { read } => read(effective, side),
-                StripValue::Monitor => row.descriptor.default,
+                StripValue::Monitor => toggle(soloed),
             },
         );
     }

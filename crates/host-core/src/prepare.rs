@@ -1789,9 +1789,16 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
+    // Decision 17, C7: every effective value is computed once per preparation, here. No monitor
+    // overlay exists on this path yet, so nothing is soloed.
+    let effective = controls::effective(
+        compiled.normalized_model(),
+        &controls::MonitorOverlay::default(),
+    );
     let builtins = if selected_meters.is_some() {
         prepare_selected_session_builtins_between_render_calls(
             compiled,
+            &effective,
             &meter_requests,
             &control_requests,
             builtin_caps,
@@ -1799,6 +1806,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else if between_render_calls {
         prepare_session_builtins_between_render_calls(
             compiled,
+            &effective,
             &meter_requests
                 .iter()
                 .map(|item| item.request.clone())
@@ -1809,6 +1817,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         prepare_session_builtins_with_live_controls(
             compiled,
+            &effective,
             &meter_requests
                 .iter()
                 .map(|item| item.request.clone())
@@ -2651,13 +2660,13 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
 /// D2), else the strip's own.
 fn effective_fader(
     own: &session::DualMonoFader,
-    effective: Option<&session::EffectiveStripFader>,
+    effective: Option<&controls::EffectiveStrip>,
 ) -> session::DualMonoFader {
     match effective {
         None => own.clone(),
         Some(effective) => session::DualMonoFader {
-            left_db: effective.db[0],
-            right_db: effective.db[1],
+            left_db: effective.fader_db[0],
+            right_db: effective.fader_db[1],
             left_mute: effective.mute[0],
             right_mute: effective.mute[1],
         },
@@ -2686,8 +2695,10 @@ fn join_strips<'a>(
     edit_ramps: &EditRamps,
 ) -> Vec<StripJoin<'a>> {
     let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
-    let committed_effective = vca_in_play.then(|| committed.effective_strip_faders());
-    let next_effective = vca_in_play.then(|| model.effective_strip_faders());
+    // No monitor overlay exists on this path yet: nothing is soloed.
+    let overlay = controls::MonitorOverlay::default();
+    let committed_effective = vca_in_play.then(|| controls::effective(committed, &overlay));
+    let next_effective = vca_in_play.then(|| controls::effective(model, &overlay));
     let ramps = LiveRamps::for_session(model);
     let mut joins = Vec::new();
     for (index, strip) in model.strips().enumerate() {
@@ -2708,11 +2719,13 @@ fn join_strips<'a>(
             before_fader,
             committed_effective
                 .as_ref()
-                .map(|effective| &effective[position]),
+                .map(|effective| &effective.strips[position]),
         );
         let after = effective_fader(
             strip.fader,
-            next_effective.as_ref().map(|effective| &effective[index]),
+            next_effective
+                .as_ref()
+                .map(|effective| &effective.strips[index]),
         );
         // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
         // family prepared. The classifier refuses a whole delta, but that does not turn the other

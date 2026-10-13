@@ -2,7 +2,7 @@
 //!
 //! A VCA has no audio path: its per-lane dB offset adds to every member's own fader, and its
 //! per-lane mute mutes every member. Preparation composes both once, through
-//! `session::SessionModel::effective_strip_faders` (#1242). [`LiveVcaState`] is the same
+//! `controls::effective` (#1242). [`LiveVcaState`] is the same
 //! composition kept live on the control plane, so a VCA move, or a member's own fader move, can be
 //! told to the render plane as the member fader and mute records a fresh plan prepared from the
 //! edited session would bake.
@@ -171,7 +171,7 @@ impl LiveVcaState {
                 .map(|strip| [strip.fader.left_db, strip.fader.right_db]),
         )?;
         // What the prepared fader bakes, which the render plane has already been told:
-        // `effective_strip_faders`' composition -- `vca_effective_db` over the strip's own value
+        // `controls::effective`'s composition -- `vca_effective_db` over the strip's own value
         // and its reach's offsets in ascending VCA-ID order -- read from the flattened tables
         // instead of a second `vca_reach()` (the #1244 verdict's NIT-3). The same function over
         // the same values in the same order gives the same bits.

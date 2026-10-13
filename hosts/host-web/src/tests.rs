@@ -15734,7 +15734,7 @@ fn the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound() {
             .iter()
             .map(|list| (size_of::<Vec<usize>>() + list.capacity() * size_of::<usize>()) as u64)
             .sum();
-        let faders = 64 * size_of::<session::EffectiveStripFader>() as u64;
+        let faders = 64 * size_of::<controls::EffectiveStrip>() as u64;
         assert!(shape.transient_bytes().expect("projection") >= 2 * lists + faders);
     }
     let elapsed = vca_worst_batch_at_the_bound(&mut host);

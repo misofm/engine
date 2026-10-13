@@ -131,7 +131,7 @@ pub(crate) fn fixture() -> SessionModel {
 
 /// The value of the row at `address` in a fresh listing.
 pub(crate) fn row_of(model: &SessionModel, address: &ControlAddress) -> ControlRow {
-    controls::list(model, RATE)
+    controls::list(model, &controls::MonitorOverlay::default(), RATE)
         .find(|row| row.address == *address)
         .expect("listed address")
 }

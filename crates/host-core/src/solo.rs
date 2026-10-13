@@ -27,7 +27,7 @@
 //! # VCA mute
 //!
 //! A strip's VCA mute (issue #1242 D3) is whether any VCA reaching it mutes the lane, as
-//! `session::SessionModel::effective_strip_faders` composed it at preparation. Mute wins: solo
+//! `controls::effective` composed it at preparation. Mute wins: solo
 //! never clears it, solo-safe is not VCA-safe (a VCA-muted submix stays muted), and a VCA has no
 //! solo, so it never counts toward `any_solo`. It is kept apart from the user mute, which stays
 //! the member's own intent. A live VCA mute move sets it through
@@ -116,7 +116,7 @@ pub struct StripMuteSeed {
     /// submix is.
     pub solo_safe: bool,
     /// `[left, right]`: whether any VCA reaching the strip mutes the lane (issue #1242 D3),
-    /// `session::EffectiveStripFader::vca_mute` of the compiled session.
+    /// `controls::EffectiveStrip::vca_mute` of the compiled session.
     pub vca_mute: [bool; 2],
 }
 
