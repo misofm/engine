@@ -59,8 +59,10 @@ const B_RENDERS: u64 = REFUSED_RANGE + 2;
 // and its manifest row moved. Re-pinned for #1346: the input cell reader grew it by 48 more.
 // Re-pinned for #1054 (D1a): the two `prepare_256_tracks` rows moved with `canonical.json`'s new
 // `control_smoothing` key; the render payload rows did not.
+// Re-pinned for #1558: the routes' follow gates are one more retained processor vector, so
+// `resources.jsonl` and its manifest row moved (+2 bytes, +1 allocation per row).
 const ACCEPTED_MANIFEST_SHA256: &str =
-    "3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108";
+    "4432d2bfe744d480def089049d8e26e31d0db726093f545086e400a9321a581c";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const ACCEPTED_GRAPH_METERS_SHA256: &str =

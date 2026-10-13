@@ -286,3 +286,10 @@ Commands: `cargo test --locked -p controls -p host-core --all-features`,
   `successor_swap.rs`, which used a VCA or a followed mute as their "prepared difference" (no valid
   session has a prepared fader family left, so the restart-count test became a carried-lane count
   test; the restarting-input-lane test remains).
+- **Builtins resource grid re-pinned (batch 3 review fold).** The retained follow gates are a new
+  processor vector (`Box<[[bool; 2]]>`, one `[bool; 2]` per route), so `fixtures/builtins/v1/resources.jsonl`
+  moves by +2 bytes in `engine_owned_processor_payload_bytes` (and the retained total) and +1 in
+  `retained_allocation_count` on all nine rows (the fixture session has one route at every track
+  count): for example tracks=1, meters=0: 2205 -> 2207 bytes, 15 -> 16 allocations. The largest
+  allocation does not move. The manifest digest moves `3e151a3c...` -> `4432d2bf...`. Expected: the
+  estimate charges what preparation now retains; no PCM, meter, response or benchmark fixture moved.
