@@ -111,9 +111,13 @@ also include the new method where they name "each method in D1":
 
 A1.1. **Bytes** (the new method in gate 1's oracle comparison). The oracle's re-encoding equals the
    SDK's bytes for `{ muteMs: 5, faderMs: 15, panMs: 25 }`, `{ muteMs: 0, faderMs: -0, panMs: 1000 }`
-   and `null`. Test value: red if field 1 is written for `null`, or if a length is not an exact
-   `f32`. It does not catch two swapped length field IDs: the oracle re-encodes a byte-valid swap
-   identically. A1.2's distinct values 5, 15 and 25 catch that.
+   and `null`. Test value: red if the SDK writes bytes for one of those three values that the
+   engine's codec decodes to a record it would then write differently, a non-canonical encoding. It
+   does not catch
+   field 1 written for `null`, or `-0` written as `+0`: decode then re-encode makes the oracle write
+   the same bytes, so those stay green. It does not catch two swapped length field IDs either: the
+   oracle re-encodes a byte-valid swap identically. A1.2's distinct values 5, 15 and 25 catch the
+   swap, and its `null` case catches field 1 written for `null`.
 A1.2. **Semantics** (the new method in gate 2's snapshot comparison). The oracle snapshot after
    `{ muteMs: 5, faderMs: 15, panMs: 25 }` equals the `toJson()` of a `SessionBuilder` that
    declares that `controlSmoothing`, and a following `null` gives `{ "kind": "default" }`. Test
@@ -140,3 +144,11 @@ A1.3. **Refusal** (the new method in gate 3's style). `1000.001`, `-1`, `NaN` an
   `sdk/src/internal/control-smoothing.ts` as `normalizeControlSmoothing(value, path)`, unchanged for the
   builder, and this slice imports it from there (Authorized paths and D2 above). Record: #1364's
   "Batch verdict follow-ups".
+
+### Batch verdict 2 follow-ups (stream E2 batch, rebased tree)
+
+Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
+
+- *n6.* A1.1's test-value sentence now states only what A1.1 catches: a non-canonical encoding of the three values. It
+  names field 1 written for `null` and `-0` written as `+0` as cases it does not catch (decode then re-encode writes the
+  same bytes); A1.2's `null` case catches the first.

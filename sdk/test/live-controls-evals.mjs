@@ -1101,7 +1101,7 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
    * effect kinds address an insert (rack `1`); the strip kinds carry no rack (`255`).
    */
   function literal(kind, extra = {}) {
-    const effectKind = kind === "effectBypass" || kind.startsWith("observe");
+    const effectKind = kind === "effectBypass" || kind === "effectParam" || kind.startsWith("observe");
     return {
       kind,
       trackIndex: 0,
@@ -1115,7 +1115,9 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
     "pan", "matrix", "faderDb", "mute", "solo", "trimDb", "polarityInvert",
     "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
   ];
-  const UNRAMPED_KINDS = ["effectBypass", "inputFilters", "observeSubscribe", "observeUnsubscribe"];
+  const UNRAMPED_KINDS = [
+    "effectBypass", "effectParam", "inputFilters", "observeSubscribe", "observeUnsubscribe",
+  ];
 
   test("the package root exports the marker and none of the encoder's ramp helpers", async () => {
     // Red if `SESSION_DEFAULT_RAMP` stops being public, or if `checkedRampLength` or

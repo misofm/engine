@@ -63,7 +63,7 @@ for (const [subpath, module] of Object.entries(imported)) {
   // not API on any subpath (only `SESSION_DEFAULT_RAMP` is public, through the writer module).
   for (const internal of [
     "checkedRampLength", "laneEditSmoothingWord", "normalizeControlSmoothing",
-    "knownKeys", "nameList",
+    "knownKeys", "nameList", "f32", "CODE", "fail", "freeze",
   ]) {
     assert.equal(internal in module, false, `${subpath} must not expose the internal ${internal}`);
   }

@@ -1618,7 +1618,44 @@ pub(crate) mod session {
             SetRouteMute => Some(set_route_mute::RAMP_SAMPLES),
             SetRouteFollowsMute => Some(set_route_follows_mute::RAMP_SAMPLES),
             SetVcaFader => Some(set_vca_fader::RAMP_SAMPLES),
-            _ => None,
+            // Listed one by one on purpose, with no wildcard: a new opcode must be classified here,
+            // as in `SessionEdit::ramp_samples`, or the build fails.
+            SetSessionId
+            | SetSampleRateHz
+            | SetQuantumFrames
+            | SetRenderProfile
+            | SetOutputProfile
+            | SetControlSmoothing
+            | UpsertSource
+            | RemoveSource
+            | SetSourceContent
+            | UpsertTrack
+            | RemoveTrack
+            | SetTrackSourceAssignment
+            | SetTrackRack
+            | PutTrackEffect
+            | RemoveTrackEffect
+            | SetTrackEffectOrder
+            | SetEffectIdentity
+            | SetEffectQuality
+            | SetEffectBypass
+            | SetEffectSidechain
+            | UpsertEffectParam
+            | RemoveEffectParam
+            | UpsertSubmix
+            | RemoveSubmix
+            | UpsertOutput
+            | RemoveOutput
+            | UpsertRoute
+            | RemoveRoute
+            | SetRouteSource
+            | SetRouteDestination
+            | UpsertAutomation
+            | RemoveAutomation
+            | SetAutomationTarget
+            | SetAutomationSegments
+            | UpsertVca
+            | RemoveVca => None,
         }
     }
 

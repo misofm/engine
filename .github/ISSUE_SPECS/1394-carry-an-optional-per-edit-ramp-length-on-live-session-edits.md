@@ -562,3 +562,13 @@ realtime-policy`; `scripts/check-workspace-policy.sh`; the `test-debug-a` leg (1
 (`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`); `check-sdk-generated.sh`,
 `check-sdk-types.sh` and `check-sdk-headless.sh`.
+
+### Batch verdict 2 follow-ups (stream E2 batch, rebased tree)
+
+Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
+
+- *n1.* `ramp_samples_field` in `crates/protocol/src/schema.rs` ended in `_ => None`. It now lists the 36 opcodes
+  with no length one by one, so a new `SessionEditOpcode` is a compile error until it is classified, as in
+  `SessionEdit::ramp_samples`. No test change: the defect it prevents is a compile-time one.
+- *n2.* `docs/CONTROL_PROTOCOL_REGISTRY.md` now lists every edit that clears a target's lengths (D3 as ruled): the four
+  upserts, `PutTrackEffect`, `RemoveTrackEffect`, `SetTrackRack` and the four removals.

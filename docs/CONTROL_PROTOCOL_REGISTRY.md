@@ -99,7 +99,7 @@ Per-edit ramp length (#1394, decision 15 D15-1, D15-3). Each live-value edit app
 | `0507` | set route follows-mute | `3` | route mute |
 | `0702` | set VCA fader | `3` | VCA fader, VCA mute |
 
-The last edit of a transaction that writes a row decides its length (`Some(n)` sets it, absent removes it), and `0200`, `0300`, `0500` and `0700` (upserts) clear every length of their target. The effect-bypass crossfade (#1341) and effect parameters have no per-edit length.
+The last edit of a transaction that writes a row decides its length (`Some(n)` sets it, absent removes it), and these clear every length of their target: the four upserts `0200`, `0300`, `0500` and `0700`, the four removals, `PutTrackEffect`, `RemoveTrackEffect` and `SetTrackRack` (#1394 D3). The effect-bypass crossfade (#1341) and effect parameters have no per-edit length.
 
 There are exactly 47 allocated opcodes (#1216 appended `0506`, #1218 `0507`, #1241 opened the VCA family with `0700`–`0702`, and #1365 appended `0008`). Issue #241 retired three: `0006` (set limits), `0102` (set source sample rate) and `0104` (set source mapping), whose subjects left the schema with the `limits` table and the nested source mapping/region. Retired codes are **never reallocated** -- a v1 peer that spells one must be refused, not reinterpreted, which is why `SessionEditOpcode::from_raw` returns `None` for them and a conformance row pins that. A successful atomic transaction replaces the typed `SessionModel`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed canonical JSON, never a compiled/render-plan serialization.
 

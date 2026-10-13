@@ -409,7 +409,9 @@ anything AArch64-only.
 `docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1054-attempt1.md`).
 
 - *Root rulings (2026-10-12), recorded in the spec text above:* gate 4 counts the render calls that carry
-  the commit and the ramp; gate 7 names the unpinned `audit capi` `pcm_digest` move at D4; gate 6's
+  the commit and the ramp; gate 7 (reworded by the root ruling of 2026-10-13, which supersedes the
+  2026-10-12 text: it names no digest and no D4) claims that no pinned render digest moves and the
+  unpinned `audit capi` digest moves only because of the ramps; gate 6's
   host-core command carries `control-provider`; `crates/capi/tests/resource_lifecycle.rs` is a named
   exception in Authorized paths.
 - *MINOR 1:* the `audit capi` claim above is corrected.
@@ -608,3 +610,10 @@ realtime-policy`; `scripts/check-workspace-policy.sh`; the `test-debug-a` leg (1
 (`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`); `check-sdk-generated.sh`,
 `check-sdk-types.sh` and `check-sdk-headless.sh`.
+
+### Batch verdict 2 follow-ups (stream E2 batch, rebased tree)
+
+Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
+
+- *n7.* The batch follow-ups list said gate 7 "names the unpinned `audit capi` `pcm_digest` move at D4". Since `4857eaa7d`
+  gate 7 names no digest and no D4; the line now says what gate 7 claims.

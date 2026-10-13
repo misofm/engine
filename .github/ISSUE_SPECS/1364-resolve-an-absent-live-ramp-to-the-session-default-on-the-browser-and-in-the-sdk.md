@@ -123,7 +123,7 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   `sdk/README.md`
 - Root ruling (2026-10-12), batch verdict m3 and m4 (see "Batch verdict follow-ups"):
   `sdk/src/internal/validation.ts` and `sdk/src/internal/control-smoothing.ts` (new; `core/session.ts`'s
-  validators and the `controlSmoothing` bounds helper, moved unchanged, in no export map or barrel), and
+  validators moved unchanged, and the `controlSmoothing` bounds helper, which gained a `path` parameter; in no export map or barrel), and
   `sdk/test/package-tarball-smoke.mjs`
 
 ## Non-goals
@@ -232,9 +232,10 @@ Attempt 1 failed on one MAJOR (verdict `1364-attempt1.md`, M1): a literal `LaneE
   strip window needs a new boot, which runs `compile_ready` and computes `SessionRamps` again. The
   first path that commits a model-only edit in the browser is the Worker admission of *Admit browser
   live edits in the Worker through the committed model* (#1382), after the control-plane crate of
-  #1309. **#1382 must drop `SessionRamps`** (the sentinel then lowers to `None` and the classifier
-  resolves it with `LiveRamps::resolve` over the committed model, #1394 D5) **or refresh it on every
-  model-only commit**, with a test that goes red without it. #1365's `control_smoothing` edit
+  #1309. **#1382 drops `SessionRamps`** (D6, as ruled 2026-10-12: the sentinel then lowers to `None`
+  and the classifier resolves it with `LiveRamps::resolve` over the committed model, #1394 D5), with
+  a test that goes red without it. The earlier option to refresh it on every model-only commit is
+  superseded. #1365's `control_smoothing` edit
   reaches the browser only through that path.
 - Verdict m1 and the NITs n1 and n2 are folded in attempt 2. NIT n5 (`sdk/README.md`) was not an
   authorized path; root authorized it on 2026-10-12 and the batch follow-ups below resolve it.
@@ -369,7 +370,7 @@ that test is deleted (below).
   as given, as before (the engine refuses a non-zero bypass or input-filter word as `MALFORMED`).
 - *B, the cached `LiveRamps`.* No code. Host-web cannot commit a model change without a rebuild on this branch:
   `compile_ready` has one caller, `boot`, and no entry point edits a model. Recorded in Amendment 1 of this spec and
-  of #1365 (an "Amendment 1 note"); #1382 must drop or refresh `SessionRamps`.
+  of #1365 (an "Amendment 1 note"); #1382 drops `SessionRamps` (D6; the option to refresh it is superseded).
 - *m1.* `a_followed_mute_send_ramps_over_the_resolved_mute_length` is deleted. Every mutation of the follow record's
   ramp it caught turns gate 1 (the `solo` and `vcaMute` rows stage the follow records) and five #1224 follow tests
   red too.
@@ -413,7 +414,7 @@ anything AArch64-only.
 
 **Open items.** `sdk/README.md` (then not an authorized path) showed only `smoothingSamples: 64` and said nothing
 of the absent-length default, `controlSmoothing` or the literal-`LaneEdit` rule: resolved in the batch follow-ups
-below. #1382 must drop or refresh `SessionRamps` (Amendment 1 note; now a duty in #1382's spec).
+below. #1382 drops `SessionRamps` (Amendment 1 note; D6 in #1382's spec, root ruling 2026-10-12; the refresh option is superseded).
 
 **Batch follow-ups** (stream E2 batch, after the verdicts
 `docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1364-attempt1.md` (FAIL, M1) and `1364-attempt2.md`
@@ -639,3 +640,19 @@ realtime-policy`; `scripts/check-workspace-policy.sh`; the `test-debug-a` leg (1
 (`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`); `check-sdk-generated.sh`,
 `check-sdk-types.sh` and `check-sdk-headless.sh`.
+
+### Batch verdict 2 follow-ups (stream E2 batch, rebased tree)
+
+Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
+
+- *n5.* The m4 eval's unramped kinds now include `effectParam` (`UNRAMPED_KINDS` in `sdk/test/live-controls-evals.mjs`;
+  the literal edit addresses an insert, rack 1). Mutation: `laneEditSmoothingWord` skips `requireU32` for `effectParam`
+  only: red, 1 of 384, `issue 1364 -- an absent ramp length is the session default`; reverted: 384 of 384 green.
+- *n9.* The stale option to refresh `SessionRamps` is marked superseded by #1382 D6 (the Amendment 1 note and the two
+  record lines).
+- *n10.* `sdk/src/internal/control-smoothing.ts` no longer says a session transaction builder exists (#1383 and #1385 are
+  open); the Authorized paths line now says the validators moved unchanged and `normalizeControlSmoothing` gained a
+  `path` parameter.
+- *n11.* `sdk/test/package-tarball-smoke.mjs` also refuses `f32`, `CODE`, `fail` and `freeze` on every packed subpath. None
+  is a public export at `70804d3c2` (they are the `validation.ts` primitives; the only `freeze` in the public
+  sources is `Object.freeze`, a call and not an export), and `sdk-package.sh check` passes with them listed.
