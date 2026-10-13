@@ -234,3 +234,5 @@ The slices in turn depend on:
   field and `LiveRamps::resolve`.
 - Batch K3 of *Submix strips and live aux sends* (#1196) has merged (`6f1788f3a`); it no longer
   blocks.
+
+**Decision 17 amendment (2026-10-13).** A strip's console link mode, once declared, is one control row; its live edit is `SET_CONTROL` and its SDK form is generated (#1564). The session grammar and the render work stay this issue's.

@@ -112,3 +112,5 @@ blocks, with honest flags.
 - *Report each configured counter's own value in the C ABI counter snapshot* (#1351), which adds
   the `telemetry_configure` refusal path.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1581, #1583 and #1587 (decision 17, C13). #1581's core output meter is this issue's D2 and D3 (separate left and right peaks over each configured window, on both hosts). #1583 replaces D1's "handle 1 is the plan output" with a configured table of stable targets whose 1-based index is the handle, and delivers D4 with each batch's exact window span; #1587 adds strip peaks and gain reduction. Do not implement this issue; it closes as superseded when #1587 merges.

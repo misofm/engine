@@ -293,3 +293,5 @@ when the same transaction makes a structural edit that swaps the plan.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), whose D5 is D8's pattern
 - *Report each transaction's edit path in its response* (#1313), for `LiveDelta::is_empty` and
   gate 3's path case
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1557, which restates this issue's D1, D3, D4, D6 and D7 as the route family's lowering and flips the send rows to `Live`; #1555 attaches the route lanes from the rows (this issue's D5). This issue's D8 (carry, then retarget) moves to *Carry strip delay lines and live send ramps across a plan swap* (#1284). Close as superseded when #1557 merges.

@@ -196,3 +196,5 @@ No checked-in render digest moves: no fixture ramps the crossover, and the flat 
 
 This slice changes the payload #1280 and #1282 move, so it lands after them and its gate 4 covers
 the new words.
+
+**Decision 17 amendment (2026-10-13).** The crossover carries `prepared_reason: RuledLiveNotBuilt { issue: 1338 }` (#1549). Last step of this issue: set its `automation_rate` to `Block`, remove the reason, and assert that its control row is `Live`; no host or protocol code.

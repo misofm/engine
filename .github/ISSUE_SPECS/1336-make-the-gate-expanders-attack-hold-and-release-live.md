@@ -198,3 +198,5 @@ the same track rendered alone.
 
 - *Carry console effect lanes across a plan swap* (#1279)
 - *Carry live-controlled effect lanes across a plan swap* (#1280)
+
+**Decision 17 amendment (2026-10-13).** The three parameters carry `prepared_reason: RuledLiveNotBuilt { issue: 1336 }` (#1549). Last step of this issue: set their `automation_rate` to `Block`, remove the reason, and assert that their control rows are `Live`; the list, validator, classifier, both hosts and the SDK follow from the row, with no host or protocol code.

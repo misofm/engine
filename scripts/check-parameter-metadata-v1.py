@@ -193,10 +193,16 @@ def finite(value: object, message: str) -> float:
 
 
 def validate(document: dict) -> None:
-    require(set(document) == {
+    # Decision 17 (#1550): the document also carries the control tables, whose rows the `controls`
+    # crate's own tests hold row for row; this validator pins only that the object has its parts.
+    require(set(document) - {"controls"} == {
         "schema", "abiVersion", "commandRecordBytes", "maximumCommandRecords", "commandKinds",
         "commandReasons", "observationVocabularies", "builtins", "effects",
     }, "top-level keys")
+    if "controls" in document:
+        require(isinstance(document["controls"], dict) and set(document["controls"]) == {
+            "address", "stripOwn", "builtins", "routeOwn", "vcaOwn", "sessionOwn", "effects",
+        }, "controls keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
     require(document["commandRecordBytes"] == 48, "command record bytes")
@@ -545,6 +551,12 @@ def self_test() -> int:
     here = pathlib.Path(__file__).resolve().parent
     sample = json.loads((here / "fixtures/parameter-metadata-v1-self-test.json").read_text())
     validate(sample)
+    # The same document with a well-formed `controls` object is valid.
+    with_controls = copy.deepcopy(sample)
+    with_controls["controls"] = {
+        key: [] for key in ("stripOwn", "builtins", "routeOwn", "vcaOwn", "sessionOwn")
+    } | {"address": {}, "effects": {}}
+    validate(with_controls)
     # Issue #143 E9. The shipped registry declares only `Resident` taps, so the computed-tap rules
     # are proved against a document that carries one: a synthetic menu added here, validated as a
     # positive first, then mutated. Testing them only against the shipped document would prove the
@@ -821,6 +833,10 @@ def self_test() -> int:
         (
             "port roles are emitted out of order",
             lambda d: d["effects"][0]["ports"].reverse(),
+        ),
+        (
+            "the controls object has the wrong parts",
+            lambda d: d.update(controls={"stripOwn": []}),
         ),
         (
             "unit name disagrees with unit value",

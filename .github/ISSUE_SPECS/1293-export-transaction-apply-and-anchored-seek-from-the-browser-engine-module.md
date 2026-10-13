@@ -47,7 +47,7 @@ module* (#1386), which uses this slice's staging and outcome record.
   `control_plane::SessionState` in the Worker and boots it with the producers there (its D1),
   preparing through the browser's preparer from *Prepare through an adapter-supplied preparer in
   the control-plane crate* (#1400).
-  *Admit browser live edits in the Worker through the committed model* (#1382) moves live commands
+  *Admit browser live edits in the Worker through the committed model* (#1562) moves live commands
   there.
 - **Source producers.** #1332 D3 item 6 keeps source submission and seeks on the worklet thread,
   but #1290 D4 moves the persisting producers into the candidate on the control thread at commit,
@@ -178,3 +178,7 @@ module* (#1386), which uses this slice's staging and outcome record.
 - *Anchor every seek on the plan's source-read clock* (#1316).
 - *Test held seeks across swaps and supersession, and add a seek to audit capi* (#1319).
 - *Move browser source submission and seeks into the Worker* (#1387).
+
+**Decision 17 amendment (2026-10-13).** #1562 adds one generic command-frame entry on the control half (`miso_engine_web_v1_control_request_ptr`, `_control_command`, `_control_response_ptr`, `_control_response_bytes`) that runs `SessionState::command` for any frame, transactions included. D2 (`miso_engine_web_v1_apply`) and D3 (the outcome record) are dropped: a transaction is applied through that entry and its outcome is the response frame (revision, `edit_path`, diagnostics). D4-D7 (committed document, anchored seek, seek report, mirrors) and D1's staging for #1386's document replace stay.
+
+**Decision 17 amendment (2026-10-13), second line.** D4 is withdrawn too: the committed document reaches the browser as `SESSION_SNAPSHOT_GET` frames through #1562's generic command entry, with the same bytes as on the C ABI, and the SDK reads it with `engine.committedDocument()` (#1571). No `committed_document_ptr` or `committed_document_bytes` export is added. D5-D7 (the anchored seek, the seek report and the mirrors) stay.

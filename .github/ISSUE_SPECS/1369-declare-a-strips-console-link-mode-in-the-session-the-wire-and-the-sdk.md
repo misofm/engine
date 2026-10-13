@@ -167,3 +167,5 @@ still binds one bank (#1368).
 ## Dependencies
 
 - *Lower the link mode to per-lane state in the linked effects' banks* (#1368).
+
+**Decision 17 amendment (2026-10-13).** Its SDK half becomes a generated builder over the link-mode control row (#1564 D4); the SDK writes no hand-written link-mode edit. The session grammar and wire work stay this issue's.

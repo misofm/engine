@@ -43,7 +43,7 @@ shipped AudioWorklet in Chromium, Firefox and WebKit, not only against a scripte
   (`hosts/host-web/src/lib.rs:3258-3290`) adds 1 to `rendered_quanta` after
   `ready.host.plan.render(..)` returns, that is, after the block's observation drain. Today the
   status read and command admission both run on the audio thread between quanta, so "a moved
-  `renderedQuanta` means the slot is drained" holds by construction. H #1332 and H #1382 move
+  `renderedQuanta` means the slot is drained" holds by construction. H #1332 and H #1562 move
   admission and status into a Worker, where it can stop being true.
 - **Codes.** `backpressure` is result 6 and command reason 8
   (`sdk/assets/miso-engine-v1-abi-layout.json:620,626`).
@@ -195,7 +195,7 @@ Gate names are the `gate(...)` names in `run.mjs`. "Command log" entries are
    *Test value:* turns red if the browser owner does not resend after a real render, or if a block
    becomes visible in `renderedQuanta` before its observation drain (the first resend is refused
    again, so the log holds two `bp`); today this order holds by construction on the audio thread,
-   and the gate keeps it when H #1332 and H #1382 move admission and status into a Worker; the
+   and the gate keeps it when H #1332 and H #1562 move admission and status into a Worker; the
    scripted host frees its slot in the same step that moves its count, so it cannot show the order.
 4. **Result mutations (`run.mjs --self-test-mutations`).** Each entry is added to `MUTATIONS`,
    made in `mutate`, and must make `validate` throw with `<browser>: sdk-observation-wait`:
@@ -233,7 +233,7 @@ Gate names are the `gate(...)` names in `run.mjs`. "Command log" entries are
 
 - **#1345 on `main`.** The browser `renderWait` and the one-slot-per-tap observation queue exist
   only on `codex/d15-stream-b3` today.
-- **Before H #1332 and H #1382.** Gate 3 exists to hold the order those two slices can break.
+- **Before H #1332 and H #1562.** Gate 3 exists to hold the order those two slices can break.
 - **Same files as #1522** (`sdk-response-entry.ts`, `run.mjs`): in any order, the later slice
   rebases. #1476 and #1480, the files' hot-file row entries, are on `main`.
 

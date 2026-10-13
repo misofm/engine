@@ -17,8 +17,9 @@
 //!
 //! A send with `follows_mute` zeroes its source strip's effectively muted lanes (issue #1224).
 //! [`LiveRouteMuteFollow::delta`] names the sends a batch's strip mutes moved, and
-//! [`LiveRouteState::follow`] records the new lanes; both read the effective mute through the one
-//! function a host hands them.
+//! [`LiveRouteState::follow`] records the new lanes; both read each send's follow gate from the
+//! function a host hands them, which is `controls::effective_gate` (decision 17, C7). This module
+//! composes nothing.
 //!
 //! # The transaction
 //!
@@ -106,7 +107,10 @@ impl LiveRouteState {
         for route in Self::live_routes(model) {
             let source_strip = source_strip(model, &route.source)?;
             let source_lane_muted = if route.follows_mute {
-                followed_lanes(source_strip, effective_mute)
+                [
+                    effective_mute(source_strip, 0),
+                    effective_mute(source_strip, 1),
+                ]
             } else {
                 [false; 2]
             };
@@ -182,18 +186,17 @@ impl LiveRouteState {
         self.update(route, |entry| entry.mute = mute)
     }
 
-    /// Set a following route's source lanes to its source strip's effective mute now (issue #1224
-    /// D1): what [`LiveRouteMuteFollow::delta`] yielded for it, read through the same function.
-    /// `false`, changing nothing, for an unknown index or a route without `follows_mute`, whose
-    /// lanes stay `[false; 2]`.
-    pub fn follow(&mut self, route: usize, effective_mute: &dyn Fn(usize, usize) -> bool) -> bool {
+    /// Set a following route's source lanes to `lanes`, its follow gate now (issue #1224 D1): what
+    /// [`LiveRouteMuteFollow::delta`] yielded for it. The caller reads the gate from the core, so
+    /// this type does not borrow the inputs it is written under. `false`, changing nothing, for an
+    /// unknown index or a route without `follows_mute`, whose lanes stay `[false; 2]`.
+    pub fn follow(&mut self, route: usize, lanes: [bool; 2]) -> bool {
         let Some(entry) = self.routes.get(route) else {
             return false;
         };
         if !entry.follows_mute {
             return false;
         }
-        let lanes = followed_lanes(entry.source_strip, effective_mute);
         self.update(route, |entry| entry.source_lane_muted = lanes)
     }
 
@@ -227,21 +230,21 @@ impl LiveRouteState {
 /// The follow-mute composition (issue #1224 D2): which live sends a change of strip mutes moves.
 ///
 /// A send with `follows_mute` zeroes the matrix columns of its source strip's effectively muted
-/// lanes (DESIGN P11). The effective mute is handed in as a function, so the browser reads its solo
-/// state and the C ABI its committed model's mutes, and neither spells the composition again.
+/// lanes (DESIGN P11). The gate is handed in as a function (`controls::effective_gate` over the
+/// host's inputs), so no host spells the composition again.
 pub struct LiveRouteMuteFollow;
 
 impl LiveRouteMuteFollow {
     /// Live routes whose follow-mute input changed: `(route index, new source_lane_muted)`, in
-    /// live-route order.
+    /// live-route order. `gate` gives a live route's follow gate, per source lane.
     ///
-    /// A route is yielded only when it has `follows_mute` and its source strip's effective lane
-    /// mutes differ from the mirror's `source_lane_muted`. A redundant record would restart a
+    /// A route is yielded only when it has `follows_mute` and its gate differs from the mirror's
+    /// `source_lane_muted`. A redundant record would restart a
     /// settled ramp, which is digest visible, so nothing unchanged is ever yielded; a route without
     /// `follows_mute` never is.
     pub fn delta<'a>(
         routes: &'a LiveRouteState,
-        effective_mute: &'a dyn Fn(usize, usize) -> bool,
+        gate: &'a dyn Fn(usize) -> [bool; 2],
     ) -> impl Iterator<Item = (usize, [bool; 2])> + 'a {
         routes
             .routes
@@ -251,18 +254,10 @@ impl LiveRouteMuteFollow {
                 if !entry.follows_mute {
                     return None;
                 }
-                let lanes = followed_lanes(entry.source_strip, effective_mute);
+                let lanes = gate(route);
                 (lanes != entry.source_lane_muted).then_some((route, lanes))
             })
     }
-}
-
-/// A following route's source lanes: its source strip's effective mute, lane by lane (D1).
-fn followed_lanes(source_strip: usize, effective_mute: &dyn Fn(usize, usize) -> bool) -> [bool; 2] {
-    [
-        effective_mute(source_strip, 0),
-        effective_mute(source_strip, 1),
-    ]
 }
 
 /// The strip index of a route source: its position among the tracks, or `tracks + j` for submix
@@ -513,11 +508,26 @@ mod tests {
         move |strip, lane| base(strip, lane) != flips.contains(&(strip, lane))
     }
 
+    /// The follow gate a host hands in, from a strip mute: each live route's source strip lanes,
+    /// read now.
+    fn gates(
+        state: &LiveRouteState,
+        mute: &dyn Fn(usize, usize) -> bool,
+    ) -> impl Fn(usize) -> [bool; 2] {
+        let table: Vec<[bool; 2]> = (0..state.len())
+            .map(|route| {
+                let source = state.get(route).map_or(0, |entry| entry.source_strip);
+                [mute(source, 0), mute(source, 1)]
+            })
+            .collect();
+        move |route| table[route]
+    }
+
     fn delta(
         state: &LiveRouteState,
         mute: &dyn Fn(usize, usize) -> bool,
     ) -> Vec<(usize, [bool; 2])> {
-        LiveRouteMuteFollow::delta(state, mute).collect()
+        LiveRouteMuteFollow::delta(state, &gates(state, mute)).collect()
     }
 
     /// Issue #1224 gate 7: one strip's change moves every following send it sources, and only
@@ -592,14 +602,14 @@ mod tests {
         let both = flipped(&model, &[(1, 0), (1, 1), (4, 1)]);
         let moved = delta(&state, &both);
         assert_eq!(moved, [(0, [false, true]), (2, [false, false])]);
-        assert!(!state.follow(1, &both), "b-send does not follow");
+        assert!(!state.follow(1, [true; 2]), "b-send does not follow");
         assert_eq!(
             state.get(1).map(|route| route.source_lane_muted),
             Some([false; 2])
         );
-        assert!(!state.follow(4, &both), "past the last live route");
+        assert!(!state.follow(4, [true; 2]), "past the last live route");
         for (route, lanes) in &moved {
-            assert!(state.follow(*route, &both));
+            assert!(state.follow(*route, *lanes));
             assert_eq!(
                 state.get(*route).map(|entry| entry.source_lane_muted),
                 Some(*lanes)

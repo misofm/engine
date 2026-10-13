@@ -273,3 +273,5 @@ attach flag in host-core*. It lands before H #1332 and before C #1406. Hot-file 
 ## Attempt record
 
 - Attempt 1: not started.
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1565. The core chooses every plan's live lanes (#1555, #1562), and #1565 deletes the word: offset 32 becomes `reserved1` (must be zero), the command staging is allocated only for observation taps, and the SDK's `commandQueueRecords` option goes. `BOOT_OPTIONS_BYTES` and `ABI_VERSION` do not change.

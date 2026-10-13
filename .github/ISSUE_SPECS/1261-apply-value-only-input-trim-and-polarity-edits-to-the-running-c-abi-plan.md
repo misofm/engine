@@ -218,3 +218,5 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1556, which restates this issue's D2 record rules and ramps as the strip-input family's lowering and flips the `trim_db` and `polarity_invert` rows to `Live`; #1555 attaches the input lane from the rows (this issue's D1). Close as superseded when #1556 merges.

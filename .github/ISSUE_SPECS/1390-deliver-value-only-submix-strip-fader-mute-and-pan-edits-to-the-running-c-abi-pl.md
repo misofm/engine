@@ -221,3 +221,5 @@ supersession wording follows.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054), for the lengths in D2
 - *Carry an optional per-edit ramp length on live session edits* (#1394), for D2's per-edit ramp
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1554: the registry classifier lowers the strip-level and strip-matrix families on every strip, submixes included, and `commit_live` resolves producers among all strips. Close as superseded when #1554 merges.

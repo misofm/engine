@@ -43,7 +43,7 @@ worklet only renders and swaps.
   (#1381 D6). #1381 pairs the render-side meter, observation and spectrum readers at adoption in
   Rust (its D3). #1332 D7 creates the two ports this slice uses: the page-to-control-plane port
   and the control-plane-to-worklet `MessageChannel` port. *Admit browser live edits in the Worker
-  through the committed model* (#1382) moves live commands into the Worker over the first.
+  through the committed model* (#1562) moves live commands into the Worker over the first.
 - The exports come from *Export transaction apply and anchored seek from the browser engine
   module* (#1293). The `replace` export is *Diff a replacement document against the committed
   model and export replace from the browser engine module* (#1386). The service and watermark
@@ -96,7 +96,7 @@ worklet only renders and swaps.
   - A staged set is cut over the current buffer, and a growth (#1332 D5) rebuilds it with the
     current set.
   - **Every commit is announced.** After every other commit the control half makes (`live` or
-    `model_only`, from D1 or from #1382's live-edit messages), it posts
+    `model_only`, from D1 or from #1562's live-edit messages), it posts
     `miso.committed.v1 { tag, revision }` on the same port, after the export returns; in `single`
     mode it is the same direct call. The worklet's handler keeps `knownRevision`, the highest
     revision announced by either message (boot sets it to the boot revision). One port delivers in
@@ -187,10 +187,12 @@ worklet only renders and swaps.
 - *Export transaction apply and anchored seek from the browser engine module* (#1293).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
-- *Admit browser live edits in the Worker through the committed model* (#1382).
+- *Admit browser live edits in the Worker through the committed model* (#1562).
 - *Publish the applied-revision watermark in the browser status* (#1349).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Diff a replacement document against the committed model and export replace from the browser
   engine module* (#1386).
 - *Move browser source submission and seeks into the Worker* (#1387).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
+
+**Decision 17 amendment (2026-10-13).** D1's `miso.document.v1` message and D6's `committedDocument()` wrapper method are withdrawn: #1571 reads the committed document with `SESSION_SNAPSHOT_GET` frames through #1562's `control` message. Every event the control plane stages, `SESSION_COMMITTED` included, reaches the page through #1570's `control-event` message. D2-D5 stay.

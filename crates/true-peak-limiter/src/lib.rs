@@ -46,6 +46,7 @@ use core::cell::Cell;
 
 pub mod corpus;
 
+use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
@@ -133,6 +134,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 const fn parameter(
     id: u32,
     name: &'static str,
+    display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
     minimum: f32,
@@ -145,7 +147,8 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
-        display_name: name,
+        name,
+        display_name,
         display_unit,
         unit,
         domain: ParameterDomain::Continuous,
@@ -165,13 +168,22 @@ const fn parameter(
             ParameterDomain::Continuous,
             mapping,
         ),
+        prepared_reason: None,
     }
 }
+
+/// Why the lookahead is prepared: decision 14 rule 3, a live change always glitches (decision 17,
+/// D1).
+const LOOKAHEAD_REASON: Option<PreparedReason> = Some(PreparedReason {
+    reason: RebuildReason::Glitch,
+    reopen: "a window transition that keeps the proof within the plan's memory, with a test that no sample exceeds the ceiling across a change",
+});
 
 /// Frozen descriptor rows. Descriptor position and stable numeric ID agree.
 pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
+        "ceiling_db",
         "ceiling",
         "dBTP-est",
         ParameterUnit::Db,
@@ -185,6 +197,7 @@ pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] =
     ),
     parameter(
         2,
+        "release_ms",
         "release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -196,19 +209,23 @@ pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] =
         SmoothingRule::Linear,
         64,
     ),
-    parameter(
-        3,
-        "lookahead",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        10.0,
-        5.0,
-        ParameterMapping::Linear,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
+    ParameterDescriptor {
+        prepared_reason: LOOKAHEAD_REASON,
+        ..parameter(
+            3,
+            "lookahead_ms",
+            "lookahead",
+            "ms",
+            ParameterUnit::Milliseconds,
+            0.0,
+            10.0,
+            5.0,
+            ParameterMapping::Linear,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        )
+    },
 ];
 
 const PORTS: [PortDescriptor; 2] = [

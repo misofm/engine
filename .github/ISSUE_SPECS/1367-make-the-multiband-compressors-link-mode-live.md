@@ -118,3 +118,5 @@ edit's ramp or the session default, and multiband inserts that differ only by li
 
 The link-record slice (#1371) brings *Lower the link mode to per-lane state in the linked effects'
 banks* (#1368) and *Ramp a lane's detector link between modes* (#1370) with it.
+
+**Decision 17 amendment (2026-10-13).** An insert's link mode is a control row, `LINK_MODE_CONTROL` (`0x8000_0000`) in its insert section, written by `SET_CONTROL` (#1549, #1553; `SetEffectLinkMode` is retired by #1561). For `miso.multiband-compressor` the row is `RebuildOnly(RuledLiveNotBuilt { issue: 1367 })`. Last step of this issue: flip that row's class to `Live` and give the classifier's effect family the link record; no protocol or host code.

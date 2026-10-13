@@ -105,7 +105,7 @@ the browser's own `applied_at_sample` arithmetic.
 
 ## Non-goals
 
-- The SDK API (`engine.apply`'s completion promise) and the Worker loop (stream H, #1381, #1382).
+- The SDK API (`engine.apply`'s completion promise) and the Worker loop (stream H, #1381, #1562).
   Any producer of non-`EXACT` flags (#1310, #1358, #1397).
 
 ## Objective gates

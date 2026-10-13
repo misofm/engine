@@ -7940,7 +7940,10 @@ fn mute_and_solo_are_separate_states() {
             [state.user_mute(1, 0), state.user_mute(1, 1)],
             [false, false]
         );
-        assert!(state.effective_mute(1, 0), "the un-soloed track is gated");
+        assert!(
+            effective_of(host.ready.as_ref().expect("ready"), 1).mute[0],
+            "the un-soloed track is gated"
+        );
     }
 
     // Re-engaging a solo that is already engaged is idempotent, and idempotent all the way down:
@@ -13974,10 +13977,15 @@ fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
         // two mute cells once, since a cell has no queue slot a split could double.
         assert_eq!(after[1] - writes[1], 2, "drums: both mute cells");
         assert_eq!(after[0] - writes[0], 2, "bass: both mute cells");
-        let solo = &live.ready.as_ref().expect("ready").solo;
+        let ready = live.ready.as_ref().expect("ready");
+        let solo = &ready.solo;
         let drums = SOLO_FOLLOW_DRUMS as usize;
         for (lane, &vca_muted) in vca_mutes.iter().enumerate() {
-            assert_eq!(solo.effective_mute(drums, lane), vca_muted, "lane {lane}");
+            assert_eq!(
+                effective_of(ready, drums).mute[lane],
+                vca_muted,
+                "lane {lane}"
+            );
             assert_eq!(solo.emitted_mute(drums, lane), vca_muted, "lane {lane}");
         }
         assert_eq!(
@@ -14373,30 +14381,34 @@ fn vca_lockstep(
     audible
 }
 
-/// The live VCA state's effective dB of every strip and lane, and its VCA mute.
+/// One strip's effective values from the core, over the host's mirrors: the view admission reads
+/// (decision 17, slice S7c D5), with the solo term the mirrors hold.
+fn effective_of(ready: &ReadyOwnership, strip: usize) -> controls::EffectiveStrip {
+    let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
+    view.strip(strip, controls::any_solo(&view))
+}
+
+/// The live mirrors' effective dB of every strip and lane, and its VCA mute.
 fn vca_mirror(host: &AudioWorkletEngineHost) -> Vec<([u32; 2], [bool; 2])> {
-    let vcas = &host.ready.as_ref().expect("ready").vcas;
+    let ready = host.ready.as_ref().expect("ready");
     (0..VCA_STRIPS.len())
         .map(|strip| {
-            (
-                [
-                    vcas.effective_db(strip, 0).to_bits(),
-                    vcas.effective_db(strip, 1).to_bits(),
-                ],
-                vcas.vca_mute(strip),
-            )
+            let effective = effective_of(ready, strip);
+            (effective.fader_db.map(f32::to_bits), effective.vca_mute)
         })
         .collect()
 }
 
 /// Every strip's effective and emitted lane mutes in the strip-mute owner.
 fn vca_solo_mirror(host: &AudioWorkletEngineHost) -> Vec<[bool; 4]> {
-    let solo = &host.ready.as_ref().expect("ready").solo;
+    let ready = host.ready.as_ref().expect("ready");
+    let solo = &ready.solo;
     (0..VCA_STRIPS.len())
         .map(|strip| {
+            let effective = effective_of(ready, strip).mute;
             [
-                solo.effective_mute(strip, 0),
-                solo.effective_mute(strip, 1),
+                effective[0],
+                effective[1],
                 solo.emitted_mute(strip, 0),
                 solo.emitted_mute(strip, 1),
             ]
@@ -14732,10 +14744,10 @@ fn a_live_vca_ride_lands_on_a_fresh_plans_bits() {
                         u32::from(vca_reference_effective(&model, strip, lane).1);
                 }
             }
-            let solo = &live.ready.as_ref().expect("ready").solo;
+            let ready = live.ready.as_ref().expect("ready");
             reach.soloed_vca_muted += (0..3)
                 .filter(|track| {
-                    solos[*track] && (solo.vca_mute(*track, 0) || solo.vca_mute(*track, 1))
+                    solos[*track] && effective_of(ready, *track).vca_mute.contains(&true)
                 })
                 .count() as u32;
             block += 5;
@@ -14826,8 +14838,12 @@ fn a_member_move_and_a_vca_move_compose() {
     );
     stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, 24.0, 0);
     assert_eq!(live.submit_commands(1), RESULT_OK, "band +24 dB");
-    let vcas = &live.ready.as_ref().expect("ready").vcas;
-    assert_eq!(vcas.effective_db(drums as usize, 0), 24.0, "drums clamps");
+    let ready = live.ready.as_ref().expect("ready");
+    assert_eq!(
+        effective_of(ready, drums as usize).fader_db[0],
+        24.0,
+        "drums clamps"
+    );
     vca_lockstep(
         &mut [&mut live, &mut clamped, &mut unedited],
         Some(1),
@@ -14837,8 +14853,12 @@ fn a_member_move_and_a_vca_move_compose() {
     );
     stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, 0.0, 0);
     assert_eq!(live.submit_commands(1), RESULT_OK, "band 0 dB");
-    let vcas = &live.ready.as_ref().expect("ready").vcas;
-    assert_eq!(vcas.effective_db(drums as usize, 0), 20.0, "drums returns");
+    let ready = live.ready.as_ref().expect("ready");
+    assert_eq!(
+        effective_of(ready, drums as usize).fader_db[0],
+        20.0,
+        "drums returns"
+    );
     assert!(vca_lockstep(
         &mut [&mut live, &mut clamped, &mut unedited],
         Some(2),
@@ -14861,14 +14881,14 @@ fn a_member_move_and_a_vca_move_compose() {
     vca_lockstep(&mut [&mut live, &mut own_only], None, 0, 1, "warm-up");
     stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 0.0, 0);
     assert_eq!(live.submit_commands(1), RESULT_OK, "un-mute band");
-    let solo = &live.ready.as_ref().expect("ready").solo;
+    let ready = live.ready.as_ref().expect("ready");
     for lane in 0..2 {
         assert!(
-            solo.effective_mute(drums as usize, lane),
+            effective_of(ready, drums as usize).mute[lane],
             "drums lane {lane}"
         );
         assert!(
-            !solo.effective_mute(VCA_BASS as usize, lane),
+            !effective_of(ready, VCA_BASS as usize).mute[lane],
             "bass lane {lane}"
         );
     }
@@ -15734,7 +15754,7 @@ fn the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound() {
             .iter()
             .map(|list| (size_of::<Vec<usize>>() + list.capacity() * size_of::<usize>()) as u64)
             .sum();
-        let faders = 64 * size_of::<session::EffectiveStripFader>() as u64;
+        let faders = 64 * size_of::<controls::EffectiveStrip>() as u64;
         assert!(shape.transient_bytes().expect("projection") >= 2 * lists + faders);
     }
     let elapsed = vca_worst_batch_at_the_bound(&mut host);
@@ -16765,4 +16785,491 @@ fn resolving_a_sentinel_allocates_nothing() {
         assert_eq!(allocations, 0, "{} admission allocated", kind.name);
         assert_eq!(deallocations, 0, "{} admission freed", kind.name);
     }
+}
+
+// ---- Decision 17, slice S7c: the browser checks, ramps and composes through the core ----
+
+/// The next `f32` beyond `limit`, away from the range (`up` for a maximum, down for a minimum).
+fn beyond(limit: f32, up: bool) -> f32 {
+    let toward_larger_magnitude = (limit > 0.0) == up && limit != 0.0;
+    let bits = limit.to_bits();
+    f32::from_bits(if limit == 0.0 {
+        // The first value past zero in the wanted direction.
+        if up { 1 } else { 0x8000_0001 }
+    } else if toward_larger_magnitude {
+        bits + 1
+    } else {
+        bits - 1
+    })
+}
+
+/// One row of gate 2: a record shape, the core's row it writes, and the lane it writes it on.
+struct DomainRow {
+    name: &'static str,
+    kind: u32,
+    rack: u8,
+    channel: u8,
+    index: u32,
+    owner: OwnerKind,
+    section: SectionKind,
+    control: u32,
+    lane: Lane,
+}
+
+/// Decision 17 slice S7c gate 2. For fader, trim, VCA offset and route gain each range end is
+/// accepted and the next `f32` beyond it is refused `DOMAIN`, and for each boolean kind `0.5` and
+/// `-0.0` are refused `DOMAIN` while `0.0` and `1.0` are accepted. Every case asserts the browser's
+/// answer, the literal expectation and `controls::check`'s answer for the same row and value, so
+/// the browser and the core cannot disagree on a domain.
+///
+/// Test value: red if the browser keeps a literal range or boolean rule of its own that drifts from
+/// the row's (a range end off by one `f32`, a boolean test that accepts `-0.0`).
+#[test]
+fn the_browser_and_the_core_agree_on_every_values_domain() {
+    let rows = [
+        (
+            "fader",
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            OwnerKind::Strip,
+            SectionKind::Builtins,
+            5,
+            Lane::Both,
+        ),
+        (
+            "trim",
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            OwnerKind::Strip,
+            SectionKind::Builtins,
+            2,
+            Lane::Both,
+        ),
+        (
+            "vca offset",
+            COMMAND_VCA_FADER_DB,
+            255,
+            2,
+            0,
+            OwnerKind::Vca,
+            SectionKind::Own,
+            1,
+            Lane::Both,
+        ),
+        (
+            "route gain",
+            COMMAND_ROUTE_GAIN_DB,
+            255,
+            255,
+            0,
+            OwnerKind::Route,
+            SectionKind::Own,
+            1,
+            Lane::Both,
+        ),
+        (
+            "mute",
+            COMMAND_MUTE,
+            255,
+            2,
+            0,
+            OwnerKind::Strip,
+            SectionKind::Builtins,
+            6,
+            Lane::Both,
+        ),
+        (
+            "polarity",
+            COMMAND_POLARITY_INVERT,
+            255,
+            2,
+            0,
+            OwnerKind::Strip,
+            SectionKind::Builtins,
+            1,
+            Lane::Both,
+        ),
+        (
+            "route mute",
+            COMMAND_ROUTE_MUTE,
+            255,
+            255,
+            0,
+            OwnerKind::Route,
+            SectionKind::Own,
+            2,
+            Lane::Both,
+        ),
+        (
+            "vca mute",
+            COMMAND_VCA_MUTE,
+            255,
+            2,
+            0,
+            OwnerKind::Vca,
+            SectionKind::Own,
+            2,
+            Lane::Both,
+        ),
+        (
+            "solo",
+            COMMAND_SOLO,
+            255,
+            255,
+            0,
+            OwnerKind::Strip,
+            SectionKind::Own,
+            2,
+            Lane::Both,
+        ),
+    ]
+    .map(
+        |(name, kind, rack, channel, index, owner, section, control, lane)| DomainRow {
+            name,
+            kind,
+            rack,
+            channel,
+            index,
+            owner,
+            section,
+            control,
+            lane,
+        },
+    );
+    let mut host = ramp_host(None, &[]);
+    let rate = host.ready.as_ref().expect("ready").sample_rate_hz;
+    let mut cases = 0;
+    for row in &rows {
+        let descriptor = controls::row_descriptor(row.owner, row.section, row.control, rate)
+            .expect("the row has a descriptor");
+        let values: Vec<(f32, bool)> = match descriptor.kind {
+            controls::ControlKind::Toggle => vec![
+                (0.0, true),
+                (1.0, true),
+                (0.5, false),
+                (-0.0, false),
+                (2.0, false),
+                (-1.0, false),
+            ],
+            _ => vec![
+                (descriptor.minimum, true),
+                (descriptor.maximum, true),
+                (beyond(descriptor.minimum, false), false),
+                (beyond(descriptor.maximum, true), false),
+            ],
+        };
+        for (value, accepted) in values {
+            stage_command(
+                &mut host,
+                0,
+                row.kind,
+                row.rack,
+                row.channel,
+                row.index,
+                0,
+                0,
+                0,
+                [value, 0.0, 0.0, 0.0],
+            );
+            let result = host.submit_commands(1);
+            let reason = host.command_report().reason;
+            let what = format!("{} {value:?}", row.name);
+            let core = controls::check(&descriptor, row.lane, value, None);
+            assert_eq!(core.is_ok(), accepted, "{what}: the core");
+            assert_eq!(result == RESULT_OK, accepted, "{what}: the browser");
+            if !accepted {
+                assert_eq!(core, Err(ControlError::Domain), "{what}: the core's reason");
+                assert_eq!(result, RESULT_INVALID_ARGUMENT, "{what}");
+                assert_eq!(
+                    reason, COMMAND_REASON_DOMAIN,
+                    "{what}: the browser's reason"
+                );
+            }
+            cases += 1;
+        }
+    }
+    assert!(cases > 40, "{cases} cases");
+}
+
+/// A fixed staged-entry value, so the entries a submission wrote can be told from stale ones.
+fn unstaged() -> StagedCommand {
+    StagedCommand {
+        queue_slot: u32::MAX,
+        original_wire_index: 0,
+        kind: StagedCommandKind::Command(AdmittedCommand::Effect(EffectControlRecord::Bypass(
+            false,
+        ))),
+    }
+}
+
+/// One edit of gate 3, applied to the host's wire and to the test's own model and overlay.
+#[derive(Clone, Copy)]
+enum ComposeEdit {
+    /// VCA index, channel (0 left, 1 right, 2 both), dB.
+    VcaDb(u32, u8, f32),
+    /// VCA index, channel, on.
+    VcaMute(u32, u8, bool),
+    /// Strip index, channel, dB.
+    Fader(u32, u8, f32),
+    /// Strip index, channel, on.
+    Mute(u32, u8, bool),
+    /// Track index, on.
+    Solo(u32, bool),
+}
+
+/// Decision 17 slice S7c gate 3. Two nested VCAs, a solo and two following sends: after each batch
+/// every staged fader and mute value (the last record on each lane, else what the plane was last
+/// told) and every follow record's source lanes equal `controls::effective` of the model the batch
+/// would commit under the solo overlay, and a follow record is staged for a send exactly when its
+/// gate changed.
+///
+/// Test value: red if the browser composes a VCA offset, a VCA mute, the solo term or a send's
+/// follow gate differently from the function preparation and the C ABI use (the order of the
+/// nested reach, the clamp, the solo-safe submix, a lane's mute).
+#[test]
+fn the_browsers_staged_values_equal_the_cores_effective_values() {
+    // Strips: bass 0, drums 1, vocal 2, room 3, verb 4. `va` holds `bass` and `vb`; `vb` holds
+    // `drums` and `verb`. Live sends: `bass-room` 0, `drums-verb` 1, both following.
+    let model = vca_ride_model(
+        &[
+            ("bass", [-1.0, -2.0], [false; 2]),
+            ("drums", [-2.0, -4.0], [false; 2]),
+        ],
+        &[
+            ("va", [-3.0, -3.0], [false; 2], &["bass", "vb"]),
+            ("vb", [-6.0, 2.0], [false; 2], &["drums", "verb"]),
+        ],
+    );
+    let mut host = vca_ride_host(&model, 64);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+
+    let (mut committed, strip_count, route_base) = {
+        let ready = host.ready.as_ref().expect("ready");
+        (
+            ready.session.normalized_model().clone(),
+            ready.strip_count(),
+            ready.strip_count() * 3 + ready.effect_controls.len(),
+        )
+    };
+    let ids: Vec<String> = committed
+        .strips()
+        .map(|strip| strip.id.as_str().to_owned())
+        .collect();
+    assert_eq!(ids, VCA_STRIPS);
+    let mut soloed: Vec<session::StableId> = Vec::new();
+    let live_routes: Vec<usize> = committed
+        .routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| {
+            matches!(
+                route.destination,
+                session::RouteDestination::SubmixInput { .. }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(live_routes.len(), 2);
+
+    let overlay = |soloed: &[session::StableId]| {
+        controls::MonitorOverlay::with_soloed(soloed.iter().cloned())
+    };
+    let core = controls::effective(&committed, &overlay(&soloed));
+    let mut told_db: Vec<[f32; 2]> = core.strips.iter().map(|strip| strip.fader_db).collect();
+    let mut told_mute: Vec<[bool; 2]> = core.strips.iter().map(|strip| strip.mute).collect();
+    let mut told_gate: Vec<[bool; 2]> = live_routes
+        .iter()
+        .map(|&route| core.routes[route].gate)
+        .collect();
+
+    use ComposeEdit::{Fader, Mute, Solo, VcaDb, VcaMute};
+    let batches: [&[ComposeEdit]; 7] = [
+        &[VcaDb(1, 2, -9.5)],
+        &[VcaDb(0, 0, -20.0), Fader(1, 2, -2.5)],
+        &[VcaMute(0, 1, true)],
+        &[Solo(2, true)],
+        &[Mute(0, 2, true), VcaMute(1, 2, true), Solo(2, false)],
+        &[
+            VcaMute(0, 1, false),
+            VcaMute(1, 2, false),
+            Mute(0, 2, false),
+        ],
+        &[
+            Solo(1, true),
+            Fader(2, 0, 6.0),
+            VcaDb(0, 2, 24.0),
+            Mute(4, 0, true),
+        ],
+    ];
+    let mut staged_faders = 0;
+    let mut staged_mutes = 0;
+    let mut staged_follows = 0;
+    for (batch, edits) in batches.iter().enumerate() {
+        for (position, edit) in edits.iter().enumerate() {
+            match *edit {
+                VcaDb(vca, channel, db) => {
+                    stage_vca(
+                        &mut host,
+                        position,
+                        COMMAND_VCA_FADER_DB,
+                        vca,
+                        channel,
+                        db,
+                        32,
+                    );
+                    let fader = &mut committed.vcas[vca as usize].fader;
+                    if channel != 1 {
+                        fader.left_db = db;
+                    }
+                    if channel != 0 {
+                        fader.right_db = db;
+                    }
+                }
+                VcaMute(vca, channel, on) => {
+                    let value = if on { 1.0 } else { 0.0 };
+                    stage_vca(
+                        &mut host,
+                        position,
+                        COMMAND_VCA_MUTE,
+                        vca,
+                        channel,
+                        value,
+                        32,
+                    );
+                    let fader = &mut committed.vcas[vca as usize].fader;
+                    if channel != 1 {
+                        fader.left_mute = on;
+                    }
+                    if channel != 0 {
+                        fader.right_mute = on;
+                    }
+                }
+                Fader(strip, channel, db) => {
+                    stage_fader_db(&mut host, position, strip, channel, db, 32);
+                    let fader = vca_strip_fader(&mut committed, &ids[strip as usize]);
+                    if channel != 1 {
+                        fader.left_db = db;
+                    }
+                    if channel != 0 {
+                        fader.right_db = db;
+                    }
+                }
+                Mute(strip, channel, on) => {
+                    stage_lane_mute(&mut host, position, strip, channel, on, 32);
+                    let fader = vca_strip_fader(&mut committed, &ids[strip as usize]);
+                    if channel != 1 {
+                        fader.left_mute = on;
+                    }
+                    if channel != 0 {
+                        fader.right_mute = on;
+                    }
+                }
+                Solo(track, on) => {
+                    stage_solo(&mut host, position, track, on, 32);
+                    let id = committed.tracks[track as usize].id.clone();
+                    soloed.retain(|soloed| *soloed != id);
+                    if on {
+                        soloed.push(id);
+                    }
+                }
+            }
+        }
+        host.ready
+            .as_mut()
+            .expect("ready")
+            .command_decoded
+            .fill(unstaged());
+        assert_eq!(
+            host.submit_commands(edits.len() as u32),
+            RESULT_OK,
+            "batch {batch}"
+        );
+        let core = controls::effective(&committed, &overlay(&soloed));
+        let ready = host.ready.as_ref().expect("ready");
+        let mut route_records = Vec::new();
+        for entry in ready
+            .command_decoded
+            .iter()
+            .take_while(|entry| entry.queue_slot != u32::MAX)
+        {
+            let StagedCommandKind::Command(record) = entry.kind else {
+                continue;
+            };
+            let slot = entry.queue_slot as usize;
+            let lanes_of = |lanes: BuiltinLaneSelector| match lanes {
+                BuiltinLaneSelector::Left => [true, false],
+                BuiltinLaneSelector::Right => [false, true],
+                BuiltinLaneSelector::Both => [true, true],
+            };
+            match record {
+                AdmittedCommand::Fader(TrackFaderRecord::FaderDb { lanes, db, .. }) => {
+                    let strip = slot - strip_count;
+                    for (slot, covered) in told_db[strip].iter_mut().zip(lanes_of(lanes)) {
+                        if covered {
+                            *slot = db;
+                        }
+                    }
+                    staged_faders += 1;
+                }
+                AdmittedCommand::Fader(TrackFaderRecord::Mute { lanes, muted, .. }) => {
+                    let strip = slot - strip_count;
+                    for (slot, covered) in told_mute[strip].iter_mut().zip(lanes_of(lanes)) {
+                        if covered {
+                            *slot = muted;
+                        }
+                    }
+                    staged_mutes += 1;
+                }
+                AdmittedCommand::Route(record) => {
+                    route_records.push((slot - route_base, record));
+                    staged_follows += 1;
+                }
+                _ => {}
+            }
+        }
+        for (strip, effective) in core.strips.iter().enumerate() {
+            for lane in 0..2 {
+                assert_eq!(
+                    told_db[strip][lane].to_bits(),
+                    effective.fader_db[lane].to_bits(),
+                    "batch {batch}: strip {strip} lane {lane} fader"
+                );
+                assert_eq!(
+                    told_mute[strip][lane], effective.mute[lane],
+                    "batch {batch}: strip {strip} lane {lane} mute"
+                );
+            }
+        }
+        for (route, &model_route) in live_routes.iter().enumerate() {
+            let gate = core.routes[model_route].gate;
+            let entry = ready.routes.get(route).expect("live route");
+            // No send here is muted, so its gate is its follow term alone.
+            assert!(!entry.mute);
+            assert_eq!(entry.source_lane_muted, gate, "batch {batch}: send {route}");
+            let record = route_records.iter().find(|(staged, _)| *staged == route);
+            if gate == told_gate[route] {
+                assert!(record.is_none(), "batch {batch}: send {route} owed nothing");
+            } else {
+                let want = ready.route_controls[route]
+                    .record(entry.gain_db, entry.matrix, entry.mute, gate, 32)
+                    .expect("an in-domain record");
+                assert_eq!(
+                    record.map(|(_, record)| *record),
+                    Some(want),
+                    "batch {batch}: send {route} follow record"
+                );
+            }
+            told_gate[route] = gate;
+        }
+        follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1 + batch as u64, None);
+    }
+    assert!(
+        staged_faders > 4 && staged_mutes > 4,
+        "{staged_faders} {staged_mutes}"
+    );
+    assert!(staged_follows > 2, "{staged_follows}");
 }

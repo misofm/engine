@@ -13,7 +13,7 @@ prepared from the committed model with the same solo state.
 
 No browser code composes the follow. *Let C ABI sends follow their source strip's mute live*
 (#1226) makes the toggle a live row of the shared classifier and builds follow records in the
-shared commit. *Admit browser live edits in the Worker through the committed model* (#1382 D3)
+shared commit. *Admit browser live edits in the Worker through the committed model* (#1562, formerly #1382 D3)
 adds the browser's solo term to that same composition. This slice proves the browser gets the
 result, including with solo. It adds no production code unless a gate finds a browser-only gap,
 and any such fix goes into the shared commit (D2).
@@ -30,10 +30,10 @@ and any such fix goes into the shared commit (D2).
   - `LiveRouteState::follow` (`:189`) and `LiveRouteMuteFollow::delta` (`:232`, `:242`)
     recompute a following route's lanes. The shadow, commit and rollback (`:206`) make a batch all
     or nothing.
-  - #1226 D7 adds `LiveRouteState::set_follows_mute`; #1382 D3 calls it from the shared commit.
+  - #1226 D7 adds `LiveRouteState::set_follows_mute`; #1562 (formerly #1382 D3) calls it from the shared commit.
 - **The browser's effective mute** is `user_mute || vca_mute || (any_solo && !solo_safe &&
   !solo)` (`crates/host-core/src/solo.rs:11-13`). Today host-web's own follow pass composes it
-  (`hosts/host-web/src/lib.rs:5274-5290`). #1382 D5 deletes that pass; #1382 D3 composes the same
+  (`hosts/host-web/src/lib.rs:5274-5290`). #1562 (formerly #1382 D5) deletes that pass; #1562 (formerly #1382 D3) composes the same
   term in the shared commit.
 - **No browser command kind changes `follows_mute`.** Send records use kinds 13-15
   (`hosts/host-web/src/lib.rs:907-916`).
@@ -49,17 +49,17 @@ and any such fix goes into the shared commit (D2).
   committed model (D15-11). This slice adds no worklet command kind and no SDK live-control
   method.
 - **D2. One composition.** The follow records come from the shared commit: #1226 D3-D5 for the
-  model terms (own mute, VCA mute) and the ramp (the session mute length), and #1382 D3 for the
+  model terms (own mute, VCA mute) and the ramp (the session mute length), and #1562 (formerly #1382 D3) for the
   solo term and the mirror flag. host-web adds no composition and keeps no second copy. If a
   test of this slice finds the shared composition wrong for the browser, the fix goes into the
-  shared commit through #1226 or #1382, never into host-web.
+  shared commit through #1226 or #1562, never into host-web.
 - **D3. No route lane, no live.** Every browser entry that attaches live controls attaches a lane
   per route into a submix (`HostLiveLanes::ALL`, `crates/host-core/src/prepare.rs:382-387`). If a
   plan has no lane for the route (live controls off), the shared classifier returns `rebuild`, the
   browser's structural path (*Replace the running browser session in the Rust host*, #1290). This
   is a correct path, not a fallback.
 - **D4. Acked-batch question: can an ack ever precede a drop? No.** This slice adds no queue and
-  no write path. The shared commit's checks run before its first write (#1226 D4, #1382 D4), and
+  no write path. The shared commit's checks run before its first write (#1226 D4, #1562 D4), and
   route lanes are latest-target cells (#1347).
 
 ## Deliverables
@@ -74,7 +74,7 @@ and any such fix goes into the shared commit (D2).
 ## Non-goals
 
 - No change in `crates/host-core` or `crates/control-plane`: #1226 owns the classifier rule and
-  the mirror setter, and #1382 owns the solo term in the shared commit.
+  the mirror setter, and #1562 owns the solo term in the shared commit.
 - No C ABI change. No follow on routes into the output: those are refused at validation and
   never live.
 - No SDK surface. `engine.apply` is not changed here.
@@ -138,8 +138,10 @@ and any such fix goes into the shared commit (D2).
 
 - *Let C ABI sends follow their source strip's mute live* (#1226): the classifier rule, the
   follow composition and the mirror setter.
-- *Admit browser live edits in the Worker through the committed model* (#1382): browser
-  transactions reach the shared commit only through it, and its D3 composes the solo term.
+- *Admit browser live edits in the Worker through the committed model* (#1562): browser
+  transactions reach the shared commit only through it, and #1562 (formerly #1382 D3) composes the solo term.
 - *Hold route-lane values in latest-target cells* (#1347): route lanes are cells.
 - *Report each transaction's edit path in its response* (#1313).
 - *Replace the running browser session in the Rust host* (#1290): gate 3's `rebuild` case.
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1562. A `follows_mute` toggle is a `SET_CONTROL` on route own row 7; in the browser it goes through the Worker's command-frame entry to the core, whose classifier (#1558) makes it live. #1562 gate 1 covers it on a route into a submix, with the same solo overlay. No browser code composes the follow.

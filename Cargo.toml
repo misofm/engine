@@ -4,6 +4,7 @@ members = [
     "crates/lane",
     "crates/math",
     "crates/session",
+    "crates/controls",
     "crates/source",
     "crates/effect-contract",
     "crates/effect-runtime",
@@ -58,6 +59,7 @@ target-smoke = { path = "crates/target-smoke", version = "0.1.0" }
 dsp-reference = { path = "crates/dsp-reference", version = "0.1.0" }
 conformance = { path = "crates/conformance", version = "0.1.0" }
 session = { path = "crates/session", version = "0.1.0" }
+controls = { path = "crates/controls", version = "0.1.0" }
 source = { path = "crates/source", version = "0.1.0" }
 protocol = { path = "crates/protocol", version = "0.1.0" }
 capi = { path = "crates/capi", version = "0.1.0" }

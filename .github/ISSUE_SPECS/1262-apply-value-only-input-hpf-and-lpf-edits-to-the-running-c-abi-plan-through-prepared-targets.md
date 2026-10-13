@@ -169,3 +169,5 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1556, which restates this issue's D1 edit rules (seeds, one-sided, pair and `Both` edits through `InputFilterPreparer`) as the strip-input family's filter lowering and flips the `hpf_hz` and `lpf_hz` rows to `Live`. Close as superseded when #1556 merges.

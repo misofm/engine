@@ -24,6 +24,7 @@ const MAIN_OUT: PortId = match PortId::new("main-out") {
 const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Gain",
+    name: "gain_db",
     display_unit: "dB",
     unit: ParameterUnit::Db,
     domain: ParameterDomain::Continuous,
@@ -41,6 +42,7 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     automatable: true,
     enum_choices: &[],
     lattice: effect_contract::ParameterLattice::arithmetic(0.1, 1),
+    prepared_reason: None,
 }];
 const PORTS: [PortDescriptor; 2] = [
     PortDescriptor {

@@ -219,7 +219,7 @@ filters reach exact rest* (#1328) and *State a bounded tail and an exact-rest bo
 *Research: render stored session automation in the engine, identically on every
 platform* (#1058, stream K); the carry slices #1277 and #1280 (#1269, stream A). The browser
 halves are under #1269: *Admit browser live edits in the Worker through the committed model*
-(#1382), *Publish the applied-revision watermark in the browser status* (#1349), and *Make a send's
+(#1562), *Publish the applied-revision watermark in the browser status* (#1349), and *Make a send's
 follows_mute live in the browser* (#1342) for #1226. `miso_engine_v1_service` is *Add
 miso_engine_v1_service for bounded control work between edits* (#1348, under #1269).
 
@@ -277,3 +277,7 @@ watermark names it* (#1505) proves it under a race.
 - **Scope items 1-6, A1 and A2 D1-D4.** Became D1-D11 here; A1.2 is D5, A1.4 is D6.
 - **"L2" and "L3"** became #1261-#1266.
 - **A3's gates.** Became the gates of #1257 and #1258; gate 7 moved to #1255.
+
+**Decision 17 amendment (2026-10-13).** Its open slices move to decision 17: guard G1 is lifted by #1554 (submix fader, matrix and effects), #1556 (input section, replacing #1261, #1262 and #1267) and #1557 (sends, replacing #1225); G2 and G3 are lifted by #1558 (replacing #1226 and #1247). Classification reads the control rows (#1554), and the C ABI's lanes follow from them (#1555). The umbrella closes when #1558 merges.
+
+**Decision 17 amendment (2026-10-13).** Guards G2 (the mute of a follow source) and G3 (any VCA) are lifted by #1558, not by #1226 and #1247, which #1558 supersedes. Solo on the C ABI, listed under "Out of scope", is delivered by #1559 as a `SET_CONTROL` on the strip's `solo` row in the core's monitor overlay.

@@ -84,3 +84,5 @@ an edit to a different track, lane or parameter than the caller named.
 
 - *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364), on
   `main` after stream E2 merges (`requireU32`, the internal-module pattern).
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1563. The SDK no longer writes 48-byte value records and checks no value domain of its own: every value edit is a `SET_CONTROL` addressed by stable ID, and the core refuses an out-of-range value with `control.domain` on the browser and on the headless engine alike (#1563 gate 2). The SDK keeps only encodability checks (a `u32` ramp, a lane token, a string ID).

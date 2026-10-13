@@ -2,7 +2,7 @@
 //!
 //! A VCA has no audio path: its per-lane dB offset adds to every member's own fader, and its
 //! per-lane mute mutes every member. Preparation composes both once, through
-//! `session::SessionModel::effective_strip_faders` (#1242). [`LiveVcaState`] is the same
+//! `controls::effective` (#1242). [`LiveVcaState`] is the same
 //! composition kept live on the control plane, so a VCA move, or a member's own fader move, can be
 //! told to the render plane as the member fader and mute records a fresh plan prepared from the
 //! edited session would bake.
@@ -17,11 +17,12 @@
 //!   in ascending VCA-ID order (the order the offsets are summed in), and per VCA, the strips it
 //!   reaches in ascending strip order (the inverse table, [`LiveVcaState::reached_by`]).
 //!
-//! The effective dB is [`session::vca_effective_db`] over the strip's own value and its reach's
-//! offsets, in that order: the one composition, never a re-spelling. The effective VCA mute is the
-//! OR of the reach's mutes; it is handed to the one strip-mute owner,
-//! [`crate::LiveControlSoloState::set_vca_mute`], whose `strip_delta` and the follow pass then emit
-//! the changed lanes.
+//! The state keeps values and mirrors, never a composition: the effective dB and the effective VCA
+//! mute of a strip are `controls::effective_strip`'s, computed by the host over the accessors
+//! below ([`LiveVcaState::reach_of`], [`LiveVcaState::vca_values`], [`LiveVcaState::own_db`])
+//! and handed to [`LiveVcaState::fader_delta`] and
+//! [`crate::LiveControlSoloState::strip_delta`], which emit the changed lanes (decision 17,
+//! slice S7c).
 //!
 //! # Indices
 //!
@@ -31,7 +32,7 @@
 //!
 //! # Never a redundant record
 //!
-//! [`LiveVcaState::fader_delta`] yields only the lanes whose effective dB differs from what the
+//! [`LiveVcaState::fader_delta`] yields only the lanes whose effective dB (given) differs from what the
 //! render plane was last told. A retarget of a settled lane re-enters the ramp kernel, which moves
 //! bits, so this is a correctness rule, not an optimization (see the solo module).
 //!
@@ -171,7 +172,7 @@ impl LiveVcaState {
                 .map(|strip| [strip.fader.left_db, strip.fader.right_db]),
         )?;
         // What the prepared fader bakes, which the render plane has already been told:
-        // `effective_strip_faders`' composition -- `vca_effective_db` over the strip's own value
+        // `controls::effective`'s composition -- `vca_effective_db` over the strip's own value
         // and its reach's offsets in ascending VCA-ID order -- read from the flattened tables
         // instead of a second `vca_reach()` (the #1244 verdict's NIT-3). The same function over
         // the same values in the same order gives the same bits.
@@ -287,44 +288,32 @@ impl LiveVcaState {
         true
     }
 
-    /// The effective dB of one lane of a reached strip: [`vca_effective_db`] of its own value and
-    /// its reach's offsets, in ascending VCA-ID order. For a strip no VCA reaches it is the value
-    /// preparation baked, never a later own move of that strip (which this state does not see),
-    /// and `0.0` for an index the plan has no strip or lane for.
+    /// A strip's own `[left, right]` fader dB as this state holds it: the member's intent, which a
+    /// move through [`Self::set_member_db`] updates. For a strip no VCA reaches it is the value
+    /// preparation baked, never a later own move of that strip (which this state does not see).
+    /// `None` for an index the plan has no strip for (every index, in a plan without a VCA).
     #[must_use]
-    pub fn effective_db(&self, strip: usize, lane: usize) -> f32 {
-        let Some(own) = self.own_db.get(strip).and_then(|own| own.get(lane)) else {
-            return 0.0;
-        };
-        vca_effective_db(
-            *own,
-            self.reach_of(strip)
-                .iter()
-                .map(|&vca| self.vca_db[vca][lane]),
-        )
+    pub fn own_db(&self, strip: usize) -> Option<[f32; 2]> {
+        self.own_db.get(strip).copied()
     }
 
-    /// `[left, right]`: whether any VCA reaching the strip mutes the lane.
+    /// One VCA's `[left, right]` offset in dB and `[left, right]` mute, or `None` for an unknown
+    /// VCA.
     #[must_use]
-    pub fn vca_mute(&self, strip: usize) -> [bool; 2] {
-        let mut muted = [false; 2];
-        for &vca in self.reach_of(strip) {
-            muted[0] |= self.vca_mute[vca][0];
-            muted[1] |= self.vca_mute[vca][1];
-        }
-        muted
+    pub fn vca_values(&self, vca: usize) -> Option<([f32; 2], [bool; 2])> {
+        Some((*self.vca_db.get(vca)?, *self.vca_mute.get(vca)?))
     }
 
-    /// The fader records a reached strip still owes: the lanes whose [`Self::effective_db`]
-    /// differs (`!=`) from what the render plane was last told; one `Both` when both change to
-    /// one value. Nothing for a strip no VCA reaches.
+    /// The fader records a reached strip still owes: the lanes where `effective_db`, the strip's
+    /// effective `[left, right]` dB (`controls::effective_strip`'s), differs (`!=`) from what the
+    /// render plane was last told; one `Both` when both change to one value. Nothing for a strip
+    /// no VCA reaches.
     #[must_use]
-    pub fn fader_delta(&self, strip: usize) -> LiveVcaFaderDelta {
+    pub fn fader_delta(&self, strip: usize, effective_db: [f32; 2]) -> LiveVcaFaderDelta {
         if !self.reaches(strip) {
             return [None, None];
         }
-        let left = self.effective_db(strip, 0);
-        let right = self.effective_db(strip, 1);
+        let [left, right] = effective_db;
         let emitted = self.emitted_db[strip];
         match (left != emitted[0], right != emitted[1]) {
             (false, false) => [None, None],
@@ -409,8 +398,9 @@ impl LiveVcaState {
         ]
     }
 
-    /// One strip's reaching VCAs, ascending by VCA ID; empty for an unknown strip.
-    fn reach_of(&self, strip: usize) -> &[usize] {
+    /// One strip's reaching VCAs as VCA indices, ascending by VCA ID; empty for an unknown strip.
+    #[must_use]
+    pub fn reach_of(&self, strip: usize) -> &[usize] {
         span(&self.reach_start, &self.reach, strip)
     }
 

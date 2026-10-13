@@ -24,6 +24,10 @@ use effect_compiler::{
     effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::TailSamples;
+// `LiveRampRow` and `LiveRamps` moved to `effect_contract::control` and `controls` (decision 17);
+// these re-exports keep the old paths, so no call site changes.
+pub use controls::LiveRamps;
+pub use effect_contract::control::LiveRampRow;
 use engine::realtime::{GATE_REVISION_MAX, PreparedRenderPlan};
 use graph::{
     GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
@@ -1785,9 +1789,16 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
+    // Decision 17, C7: every effective value is computed once per preparation, here. No monitor
+    // overlay exists on this path yet, so nothing is soloed.
+    let effective = controls::effective(
+        compiled.normalized_model(),
+        &controls::MonitorOverlay::default(),
+    );
     let builtins = if selected_meters.is_some() {
         prepare_selected_session_builtins_between_render_calls(
             compiled,
+            &effective,
             &meter_requests,
             &control_requests,
             builtin_caps,
@@ -1795,6 +1806,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else if between_render_calls {
         prepare_session_builtins_between_render_calls(
             compiled,
+            &effective,
             &meter_requests
                 .iter()
                 .map(|item| item.request.clone())
@@ -1805,6 +1817,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         prepare_session_builtins_with_live_controls(
             compiled,
+            &effective,
             &meter_requests
                 .iter()
                 .map(|item| item.request.clone())
@@ -2400,119 +2413,6 @@ fn strip_stage_row<'a>(
         .map(|index| &rows[index])
 }
 
-/// The ramp lengths, in samples, that live records carry: the session's `control_smoothing` keys
-/// (`fader_ms`, `mute_ms`, `pan_ms`) rounded once by [`SessionModel::control_smoothing_samples`]
-/// (#1054 D4, decision 15 D15-1).
-///
-/// Every live row reads its length through [`Self::for_row`]; no row has a separate default. The
-/// table of which row uses which key is [`LiveRampRow`]'s, and `docs/SESSION_SCHEMA_V1.md` has it
-/// too.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LiveRamps {
-    /// The `fader_ms` key: the ramp of a `FaderDb` record.
-    pub fader_samples: u32,
-    /// The `mute_ms` key: the ramp of a `Mute` record.
-    pub mute_samples: u32,
-    /// The `pan_ms` key: the ramp of a pan or matrix record whose post-commit model carries no
-    /// `smoothing_samples` of its own.
-    pub pan_samples: u32,
-    /// The `fader_ms` key, read by the detector link glide (#1371).
-    pub link_samples: u32,
-}
-
-/// One live row, and with it the `control_smoothing` key its ramp length comes from (#1054 D3).
-///
-/// | key | rows |
-/// |---|---|
-/// | `fader_ms` | fader dB, input trim, send gain, VCA offset, detector link glide |
-/// | `mute_ms` | mute, solo, polarity invert (twice `mute_ms`), send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade |
-/// | `pan_ms` | pan, matrix, send matrix |
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LiveRampRow {
-    /// A strip's fader dB. Key `fader_ms`.
-    Fader,
-    /// A strip's input trim. Key `fader_ms`.
-    InputTrim,
-    /// A send's gain. Key `fader_ms`.
-    SendGain,
-    /// A VCA's fader offset. Key `fader_ms`.
-    VcaOffset,
-    /// The detector link glide. Key `fader_ms`.
-    LinkGlide,
-    /// A strip's mute. Key `mute_ms`.
-    Mute,
-    /// A strip's solo, which reaches render as a mute record. Key `mute_ms`.
-    Solo,
-    /// A strip's polarity invert: twice the `mute_ms` ramp, because a flip from `+1` to `-1` over
-    /// the mute's own length clicks about 6 dB more than the mute (#1055, `FINDINGS.md` 9.2).
-    PolarityInvert,
-    /// A send's mute. Key `mute_ms`.
-    SendMute,
-    /// A send's `follows_mute` toggle. Key `mute_ms`.
-    SendFollowsMute,
-    /// A VCA's mute. Key `mute_ms`.
-    VcaMute,
-    /// The effect bypass crossfade (#1341), the one row with no per-edit length. Key `mute_ms`.
-    BypassCrossfade,
-    /// A strip's pan. Key `pan_ms`.
-    Pan,
-    /// A strip's raw matrix. Key `pan_ms`.
-    Matrix,
-    /// A send's channel matrix. Key `pan_ms`.
-    SendMatrix,
-}
-
-impl LiveRamps {
-    /// The ramps a session's live records carry: its `control_smoothing` keys, or the researched
-    /// default table when it says `default`, rounded at the session's sample rate (#1054 D2).
-    #[must_use]
-    pub fn for_session(model: &SessionModel) -> Self {
-        let samples = model.control_smoothing_samples();
-        Self {
-            fader_samples: samples.fader,
-            mute_samples: samples.mute,
-            pan_samples: samples.pan,
-            link_samples: samples.fader,
-        }
-    }
-
-    /// The ramp length of one live row: its key's field, and twice `mute_samples` for
-    /// [`LiveRampRow::PolarityInvert`] (at most 192,000 samples at 1000 ms and 96 kHz, inside the
-    /// trim kernel's exact `f32` countdown, `2^24`).
-    #[must_use]
-    pub const fn for_row(self, row: LiveRampRow) -> u32 {
-        match row {
-            LiveRampRow::Fader
-            | LiveRampRow::InputTrim
-            | LiveRampRow::SendGain
-            | LiveRampRow::VcaOffset => self.fader_samples,
-            LiveRampRow::LinkGlide => self.link_samples,
-            LiveRampRow::Mute
-            | LiveRampRow::Solo
-            | LiveRampRow::SendMute
-            | LiveRampRow::SendFollowsMute
-            | LiveRampRow::VcaMute
-            | LiveRampRow::BypassCrossfade => self.mute_samples,
-            LiveRampRow::PolarityInvert => self.mute_samples.saturating_mul(2),
-            LiveRampRow::Pan | LiveRampRow::Matrix | LiveRampRow::SendMatrix => self.pan_samples,
-        }
-    }
-
-    /// The length one record carries: the edit's own ramp when its transaction gave one (an
-    /// explicit 0 included, which steps that edit), else the row's session length
-    /// ([`Self::for_row`]). An edit's length is kept as given, so an absent polarity length is
-    /// twice `mute_samples` and an explicit one is not doubled (#1394 D5).
-    ///
-    /// Every record length goes through here; no record path reads a field directly.
-    #[must_use]
-    pub const fn resolve(self, row: LiveRampRow, edit_ramp: Option<u32>) -> u32 {
-        match edit_ramp {
-            Some(samples) => samples,
-            None => self.for_row(row),
-        }
-    }
-}
-
 /// The per-edit ramp lengths of one strip's three record rows, looked up once from the
 /// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)` and
 /// `(Strip, Matrix)` entries. `None` is "the edit gave no length": the session's applies.
@@ -2760,13 +2660,13 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
 /// D2), else the strip's own.
 fn effective_fader(
     own: &session::DualMonoFader,
-    effective: Option<&session::EffectiveStripFader>,
+    effective: Option<&controls::EffectiveStrip>,
 ) -> session::DualMonoFader {
     match effective {
         None => own.clone(),
         Some(effective) => session::DualMonoFader {
-            left_db: effective.db[0],
-            right_db: effective.db[1],
+            left_db: effective.fader_db[0],
+            right_db: effective.fader_db[1],
             left_mute: effective.mute[0],
             right_mute: effective.mute[1],
         },
@@ -2795,8 +2695,10 @@ fn join_strips<'a>(
     edit_ramps: &EditRamps,
 ) -> Vec<StripJoin<'a>> {
     let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
-    let committed_effective = vca_in_play.then(|| committed.effective_strip_faders());
-    let next_effective = vca_in_play.then(|| model.effective_strip_faders());
+    // No monitor overlay exists on this path yet: nothing is soloed.
+    let overlay = controls::MonitorOverlay::default();
+    let committed_effective = vca_in_play.then(|| controls::effective(committed, &overlay));
+    let next_effective = vca_in_play.then(|| controls::effective(model, &overlay));
     let ramps = LiveRamps::for_session(model);
     let mut joins = Vec::new();
     for (index, strip) in model.strips().enumerate() {
@@ -2817,11 +2719,13 @@ fn join_strips<'a>(
             before_fader,
             committed_effective
                 .as_ref()
-                .map(|effective| &effective[position]),
+                .map(|effective| &effective.strips[position]),
         );
         let after = effective_fader(
             strip.fader,
-            next_effective.as_ref().map(|effective| &effective[index]),
+            next_effective
+                .as_ref()
+                .map(|effective| &effective.strips[index]),
         );
         // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
         // family prepared. The classifier refuses a whole delta, but that does not turn the other

@@ -1,0 +1,26 @@
+[package]
+name = "controls"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "controls"
+
+# The control core (decision 17): it sits on the session model, the builtin rows and the launch
+# effect registry (`effect-compiler`, for the effect rows) and on nothing above them.
+# `builtins-compiler`, `host-core`, `protocol` and the hosts depend on it, never the reverse.
+[dependencies]
+builtins.workspace = true
+effect-compiler.workspace = true
+effect-contract.workspace = true
+session.workspace = true
+
+[dev-dependencies]
+# The allocation gate on `check` (the audited allocator's thread-scoped counters).
+bench-support.workspace = true
+
+[lints]
+workspace = true

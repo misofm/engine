@@ -242,3 +242,5 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - *Crossfade the bypass switch over the session ramp* (#1341), so the live switch never steps (D6).
 - *Refuse commands that would be acknowledged with no effect* (#1315), whose multiband refusal
   this slice lifts (D8).
+
+**Decision 17 amendment (2026-10-13).** The multiband compressor's bypass is the control row at control `0` of its effect section, `RebuildOnly(RuledLiveNotBuilt { issue: 1340 })` (#1549), so lifting it is a rebuild on the C ABI (#1554). Last step of this issue: flip that row to `Live`; no protocol or host code.

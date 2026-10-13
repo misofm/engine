@@ -172,3 +172,5 @@ flag*. Hot-file rows:
 ## Attempt record
 
 - Attempt 1: not started.
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1555: the core chooses each plan's live lanes from its control rows (`controls::live_lanes`), `HostLiveControlRequest::control_queue_depth` is deleted rather than turned into a flag, and `STRIP_LIVE_QUEUE_DEPTH`, `LIVE_QUEUE_DEPTH`, `C_ABI_LIVE_LANES` and `console_workload::CONTROL_QUEUE_DEPTH` go with it. Close as superseded when #1555 merges.

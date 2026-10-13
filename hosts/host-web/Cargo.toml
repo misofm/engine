@@ -25,6 +25,7 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 builtins.workspace = true
 builtins-compiler.workspace = true
+controls.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
 host-core.workspace = true

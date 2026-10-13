@@ -1,7 +1,7 @@
 //! Issue #1244: host-core composes live VCA moves exactly as preparation does.
 //!
 //! * **Gate 1** `a_live_recompute_equals_preparation`: random forests and edit sequences against
-//!   `SessionModel::effective_strip_faders` of a model the test edits the same way.
+//!   `controls::effective` of a model the test edits the same way.
 //! * **Gate 2** `a_composition_never_owes_a_redundant_record` and
 //!   `an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_lanes`.
 //! * **Gate 3** `a_clamped_member_returns_to_its_own_value`.
@@ -346,20 +346,149 @@ fn normalized(model: &SessionModel) -> SessionModel {
         .clone()
 }
 
+/// Every strip's effective values with no solo: `controls::effective`, the one composition.
+fn effective_strips(model: &SessionModel) -> Vec<controls::EffectiveStrip> {
+    controls::effective(model, &controls::MonitorOverlay::default())
+        .strips
+        .into_vec()
+}
+
 /// The strip-mute owner seeded from a normalized model, as a host seeds it.
 fn solo_state(model: &SessionModel) -> LiveControlSoloState {
     let tracks = model.tracks.len();
     let seeds: Vec<StripMuteSeed> = model
         .strips()
-        .zip(model.effective_strip_faders())
+        .zip(effective_strips(model))
         .enumerate()
         .map(|(index, (strip, effective))| StripMuteSeed {
             mutes: [strip.fader.left_mute, strip.fader.right_mute],
             solo_safe: index >= tracks,
-            vca_mute: effective.vca_mute,
+            effective_mute: effective.mute,
         })
         .collect();
     LiveControlSoloState::try_new(&seeds).expect("solo state")
+}
+
+/// The three mirrors as the core's inputs: what the browser's `WebEffectiveView` is, in test form.
+/// A mirror the caller leaves out reads as empty (no solo, no route). Routes report only their
+/// follow term (`mute: false`), because the route mirror keeps a send's own mute apart from the
+/// lanes it follows.
+struct View<'a> {
+    vca: &'a LiveVcaState,
+    solo: Option<&'a LiveControlSoloState>,
+    routes: Option<&'a LiveRouteState>,
+}
+
+impl controls::EffectiveInputs for View<'_> {
+    fn strip_count(&self) -> usize {
+        self.solo.map_or(0, LiveControlSoloState::strip_count)
+    }
+
+    fn own_fader(&self, strip: usize) -> ([f32; 2], [bool; 2]) {
+        (
+            self.vca.own_db(strip).unwrap_or([0.0; 2]),
+            self.solo.map_or([false; 2], |solo| {
+                [0, 1].map(|lane| solo.user_mute(strip, lane))
+            }),
+        )
+    }
+
+    fn soloed(&self, strip: usize) -> bool {
+        self.solo.is_some_and(|solo| solo.solo(strip))
+    }
+
+    fn solo_safe(&self, strip: usize) -> bool {
+        self.solo.is_some_and(|solo| solo.solo_safe(strip))
+    }
+
+    fn reach(&self, strip: usize) -> &[usize] {
+        self.vca.reach_of(strip)
+    }
+
+    fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]) {
+        self.vca.vca_values(vca).unwrap_or(([0.0; 2], [false; 2]))
+    }
+
+    fn route_count(&self) -> usize {
+        self.routes.map_or(0, LiveRouteState::len)
+    }
+
+    fn route(&self, route: usize) -> controls::EffectiveRouteInput {
+        let entry = self.routes.and_then(|routes| routes.get(route));
+        controls::EffectiveRouteInput {
+            mute: false,
+            follows_mute: entry.is_some_and(|entry| entry.follows_mute),
+            source_strip: entry.map_or(usize::MAX, |entry| entry.source_strip),
+        }
+    }
+}
+
+/// One strip's effective values over the VCA mirror alone.
+fn vca_strip(state: &LiveVcaState, strip: usize) -> controls::EffectiveStrip {
+    let view = View {
+        vca: state,
+        solo: None,
+        routes: None,
+    };
+    controls::effective_strip(&view, strip, false)
+}
+
+/// One strip's effective values over the VCA and strip-mute mirrors.
+fn strip_values(
+    state: &LiveVcaState,
+    solo: &LiveControlSoloState,
+    strip: usize,
+) -> controls::EffectiveStrip {
+    let view = View {
+        vca: state,
+        solo: Some(solo),
+        routes: None,
+    };
+    controls::effective_strip(&view, strip, controls::any_solo(&view))
+}
+
+fn effective_db(state: &LiveVcaState, strip: usize, lane: usize) -> f32 {
+    vca_strip(state, strip).fader_db[lane]
+}
+
+fn vca_mute(state: &LiveVcaState, strip: usize) -> [bool; 2] {
+    vca_strip(state, strip).vca_mute
+}
+
+fn effective_mute(state: &LiveVcaState, solo: &LiveControlSoloState, strip: usize) -> [bool; 2] {
+    strip_values(state, solo, strip).mute
+}
+
+/// The fader records a strip owes, from the core's effective dB.
+fn fader_delta(state: &LiveVcaState, strip: usize) -> host_core::LiveVcaFaderDelta {
+    state.fader_delta(strip, vca_strip(state, strip).fader_db)
+}
+
+/// The mute records a strip owes, from the core's effective mute.
+fn mute_delta(
+    state: &LiveVcaState,
+    solo: &LiveControlSoloState,
+    strip: usize,
+) -> host_core::LiveControlMuteDelta {
+    solo.strip_delta(strip, effective_mute(state, solo, strip))
+}
+
+/// A live send's follow gate, from the core: `controls::effective_gate` over the mirrors.
+fn follow_gate(
+    state: &LiveVcaState,
+    solo: &LiveControlSoloState,
+    routes: &LiveRouteState,
+    route: usize,
+) -> [bool; 2] {
+    let view = View {
+        vca: state,
+        solo: Some(solo),
+        routes: Some(routes),
+    };
+    let any_solo = controls::any_solo(&view);
+    let source = routes.get(route).map_or(0, |entry| entry.source_strip);
+    let source = controls::effective_strip(&view, source, any_solo);
+    controls::effective_gate(&view, route, &source)
 }
 
 /// Every strip's every lane: `(effective dB bits, VCA mute)`.
@@ -367,19 +496,19 @@ fn composition(state: &LiveVcaState, strips: usize) -> Vec<([u32; 2], [bool; 2])
     (0..strips)
         .map(|strip| {
             (
-                [0, 1].map(|lane| state.effective_db(strip, lane).to_bits()),
-                state.vca_mute(strip),
+                [0, 1].map(|lane| effective_db(state, strip, lane).to_bits()),
+                vca_mute(state, strip),
             )
         })
         .collect()
 }
 
-/// `effective_strip_faders()` as [`composition`] reads the state.
+/// `controls::effective` of the model, as [`composition`] reads the mirror: the mirror's values
+/// and reach through `controls::effective_strip` must equal the model's.
 fn prepared(model: &SessionModel) -> Vec<([u32; 2], [bool; 2])> {
-    model
-        .effective_strip_faders()
+    effective_strips(model)
         .into_iter()
-        .map(|fader| (fader.db.map(f32::to_bits), fader.vca_mute))
+        .map(|fader| (fader.fader_db.map(f32::to_bits), fader.vca_mute))
         .collect()
 }
 
@@ -447,7 +576,7 @@ const GATE_1_REPLAY: &str =
 
 /// Gate 1. Random forests (up to four deep, up to 16 members, overlapping, diamonds, tracks and
 /// submixes as members) and up to 64 random edits each, values across the whole domain: after
-/// every edit every strip's `effective_db` (bits) and `vca_mute` equal `effective_strip_faders()`
+/// every edit every strip's `effective_db` (bits) and `vca_mute` equal `controls::effective`
 /// of a model edited the same way, and `reached_by` is the inverse of `vca_reach()`.
 ///
 /// Red if live composition differs from preparation in order, reach, clamp or lane, if a member's
@@ -557,26 +686,25 @@ fn a_composition_never_owes_a_redundant_record() {
         let mut model = normalized(&generate(&mut draw, tracks, submixes, 8, db, 1_024));
         let mut state = LiveVcaState::try_new(&model).expect("state");
         let strips = tracks + submixes;
-        let mut told: Vec<[f32; 2]> = model
-            .effective_strip_faders()
+        let mut told: Vec<[f32; 2]> = effective_strips(&model)
             .iter()
-            .map(|fader| fader.db)
+            .map(|fader| fader.fader_db)
             .collect();
         for strip in 0..strips {
             assert_eq!(
-                state.fader_delta(strip),
+                fader_delta(&state, strip),
                 [None, None],
                 "seed {seed}: seeded"
             );
         }
         for edit in 0..48 {
             random_edit(&mut draw, &mut state, &mut model, db);
-            let now = model.effective_strip_faders();
+            let now = effective_strips(&model);
             for strip in 0..strips {
-                let delta = state.fader_delta(strip);
+                let delta = fader_delta(&state, strip);
                 assert_eq!(
                     delta,
-                    expected_delta(told[strip], now[strip].db),
+                    expected_delta(told[strip], now[strip].fader_db),
                     "seed {seed}, edit {edit}, strip {strip}"
                 );
                 if !state.reaches(strip) {
@@ -591,10 +719,10 @@ fn a_composition_never_owes_a_redundant_record() {
                 for (lanes, db) in delta.into_iter().flatten() {
                     state.record_emitted_db(strip, lanes, db);
                 }
-                told[strip] = now[strip].db;
+                told[strip] = now[strip].fader_db;
             }
             for strip in 0..strips {
-                assert_eq!(state.fader_delta(strip), [None, None], "seed {seed}");
+                assert_eq!(fader_delta(&state, strip), [None, None], "seed {seed}");
             }
             state.commit();
         }
@@ -650,7 +778,7 @@ fn shape_session() -> SessionModel {
 
 /// Every strip's delta, in strip order.
 fn deltas(state: &LiveVcaState) -> Vec<host_core::LiveVcaFaderDelta> {
-    (0..5).map(|strip| state.fader_delta(strip)).collect()
+    (0..5).map(|strip| fader_delta(state, strip)).collect()
 }
 
 /// Gate 2, the named cases: a move that keeps every member clamped at -144 dB, and a move of a VCA
@@ -672,7 +800,7 @@ fn an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_l
     let mut state = LiveVcaState::try_new(&model).expect("state");
     let quiet = vec![[None, None]; 5];
     assert_eq!(deltas(&state), quiet);
-    assert_eq!(state.effective_db(0, 0), -144.0);
+    assert_eq!(effective_db(&state, 0, 0), -144.0);
 
     // Clamped before (-160) and after (-190): nothing to tell.
     assert!(state.set_vca_db(index("clamp"), BuiltinLaneSelector::Both, -90.0));
@@ -686,21 +814,21 @@ fn an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_l
     // `pair` to -6 on both lanes: `t2`'s lanes both move to -6, one `Both`.
     assert!(state.set_vca_db(index("pair"), BuiltinLaneSelector::Both, -6.0));
     assert_eq!(
-        state.fader_delta(2),
+        fader_delta(&state, 2),
         [Some((BuiltinLaneSelector::Both, -6.0)), None]
     );
     state.record_emitted_db(2, BuiltinLaneSelector::Both, -6.0);
     // One lane: `Right` alone.
     assert!(state.set_vca_db(index("pair"), BuiltinLaneSelector::Right, -7.0));
     assert_eq!(
-        state.fader_delta(2),
+        fader_delta(&state, 2),
         [Some((BuiltinLaneSelector::Right, -7.0)), None]
     );
     state.record_emitted_db(2, BuiltinLaneSelector::Right, -7.0);
     // `split` on both lanes moves `t3`'s lanes to two values: a `Left` and a `Right`.
     assert!(state.set_vca_db(index("split"), BuiltinLaneSelector::Both, 1.0));
     assert_eq!(
-        state.fader_delta(3),
+        fader_delta(&state, 3),
         [
             Some((BuiltinLaneSelector::Left, -2.0)),
             Some((BuiltinLaneSelector::Right, -8.0)),
@@ -712,12 +840,12 @@ fn an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_l
     assert!(state.set_member_db(3, BuiltinLaneSelector::Right, -9.0));
     assert!(state.set_member_db(3, BuiltinLaneSelector::Left, -4.0));
     assert_eq!(
-        state.fader_delta(3),
+        fader_delta(&state, 3),
         [Some((BuiltinLaneSelector::Left, -3.0)), None]
     );
     // The submix no VCA reaches: its own move is refused and owes nothing here.
     assert!(!state.set_member_db(4, BuiltinLaneSelector::Both, -6.0));
-    assert_eq!(state.fader_delta(4), [None, None]);
+    assert_eq!(fader_delta(&state, 4), [None, None]);
 }
 
 // ---- Gate 3 -------------------------------------------------------------------------------------
@@ -745,10 +873,10 @@ fn a_clamped_member_returns_to_its_own_value() {
     for (offset, effective) in [(24.0, 24.0_f32), (0.0, 20.0)] {
         assert!(state.set_vca_db(0, BuiltinLaneSelector::Both, offset));
         for lane in 0..2 {
-            assert_eq!(state.effective_db(0, lane).to_bits(), effective.to_bits());
+            assert_eq!(effective_db(&state, 0, lane).to_bits(), effective.to_bits());
         }
         assert_eq!(
-            state.fader_delta(0),
+            fader_delta(&state, 0),
             [Some((BuiltinLaneSelector::Both, effective)), None]
         );
         state.record_emitted_db(0, BuiltinLaneSelector::Both, effective);
@@ -759,12 +887,11 @@ fn a_clamped_member_returns_to_its_own_value() {
 // ---- Gate 4 -------------------------------------------------------------------------------------
 
 /// Everything a host can read from the two states: per strip, the effective dB bits, the VCA
-/// mute, the owed fader records, and the strip-mute owner's VCA mute and owed mute records.
+/// mute, the owed fader records and the owed mute records.
 type Snapshot = Vec<(
     [u32; 2],
     [bool; 2],
     host_core::LiveVcaFaderDelta,
-    [bool; 2],
     host_core::LiveControlMuteDelta,
 )>;
 
@@ -772,30 +899,28 @@ fn snapshot(state: &LiveVcaState, solo: &LiveControlSoloState, strips: usize) ->
     (0..strips)
         .map(|strip| {
             (
-                [0, 1].map(|lane| state.effective_db(strip, lane).to_bits()),
-                state.vca_mute(strip),
-                state.fader_delta(strip),
-                [0, 1].map(|lane| solo.vca_mute(strip, lane)),
-                solo.strip_delta(strip),
+                [0, 1].map(|lane| effective_db(state, strip, lane).to_bits()),
+                vca_mute(state, strip),
+                fader_delta(state, strip),
+                mute_delta(state, solo, strip),
             )
         })
         .collect()
 }
 
-/// Edits every mirror of both states: a VCA value and mute, a member value, an emitted value and
-/// the strip-mute owner's VCA term, on lanes no clamp hides.
+/// Edits every mirror of both states: a VCA value and mute, a member value, an emitted fader
+/// value, a user mute and an emitted mute, on lanes no clamp hides.
 fn edit_everything(state: &mut LiveVcaState, solo: &mut LiveControlSoloState, offset: f32) {
     assert!(state.set_vca_db(1, BuiltinLaneSelector::Both, offset));
     assert!(state.set_vca_mute(1, BuiltinLaneSelector::Left, true));
     assert!(state.set_member_db(3, BuiltinLaneSelector::Right, offset - 2.0));
     state.record_emitted_db(2, BuiltinLaneSelector::Both, offset + 1.0);
-    for &strip in state.reached_by(1) {
-        assert!(solo.set_vca_mute(strip, state.vca_mute(strip)));
-    }
+    assert!(solo.set_user_mute(4, BuiltinLaneSelector::Right, offset < 0.0));
+    solo.record_emitted(2, BuiltinLaneSelector::Left, offset < 0.0);
 }
 
 /// Gate 4. After a mix of edits, `rollback` restores every VCA value, member value, emitted value
-/// and the strip-mute owner's VCA mute; `commit` keeps them; and a second transaction shadows
+/// and the strip-mute owner's mirrors; `commit` keeps them; and a second transaction shadows
 /// afresh, so its rollback returns to the committed state, not the first one.
 ///
 /// Red if any mirror is left changed by a refused submission.
@@ -822,9 +947,6 @@ fn rollback_restores_every_mirror_and_commit_keeps_them() {
 
     edit_everything(&mut state, &mut solo, 3.0);
     assert!(state.set_vca_mute(1, BuiltinLaneSelector::Left, false));
-    for &strip in state.reached_by(1) {
-        assert!(solo.set_vca_mute(strip, state.vca_mute(strip)));
-    }
     assert_ne!(snapshot(&state, &solo, 5), edited);
     state.rollback();
     solo.rollback();
@@ -876,53 +998,49 @@ fn follow_session() -> SessionModel {
     normalized(&model)
 }
 
-/// The follow delta, by route ID.
+/// The follow delta, by route ID, with each live send's gate from the core.
 fn follow_delta(
     model: &SessionModel,
+    state: &LiveVcaState,
     routes: &LiveRouteState,
     solo: &LiveControlSoloState,
 ) -> Vec<(String, [bool; 2])> {
     let ids: Vec<&Route> = LiveRouteState::live_routes(model).collect();
-    LiveRouteMuteFollow::delta(routes, &|strip, lane| solo.effective_mute(strip, lane))
+    LiveRouteMuteFollow::delta(routes, &|route| follow_gate(state, solo, routes, route))
         .map(|(route, lanes)| (ids[route].id.as_str().to_owned(), lanes))
         .collect()
 }
 
 /// Stages every owed mute record and follow lane, as a host does at the end of a submission.
-fn settle(solo: &mut LiveControlSoloState, routes: &mut LiveRouteState, strips: usize) {
+fn settle(
+    state: &LiveVcaState,
+    solo: &mut LiveControlSoloState,
+    routes: &mut LiveRouteState,
+    strips: usize,
+) {
     for strip in 0..strips {
-        for (lanes, muted) in solo.strip_delta(strip).into_iter().flatten() {
+        for (lanes, muted) in mute_delta(state, solo, strip).into_iter().flatten() {
             solo.record_emitted(strip, lanes, muted);
         }
     }
-    let moved: Vec<usize> =
-        LiveRouteMuteFollow::delta(routes, &|strip, lane| solo.effective_mute(strip, lane))
-            .map(|(route, _)| route)
+    let moved: Vec<(usize, [bool; 2])> =
+        LiveRouteMuteFollow::delta(routes, &|route| follow_gate(state, solo, routes, route))
             .collect();
-    for route in moved {
-        assert!(routes.follow(route, &|strip, lane| solo.effective_mute(strip, lane)));
+    for (route, lanes) in moved {
+        assert!(routes.follow(route, lanes));
     }
     solo.commit();
     routes.commit();
 }
 
-/// Sets VCA `vca`'s mute and hands each reached strip's new VCA term to the strip-mute owner (D3).
-fn mute_vca(
-    state: &mut LiveVcaState,
-    solo: &mut LiveControlSoloState,
-    vca: usize,
-    lanes: BuiltinLaneSelector,
-    muted: bool,
-) {
+/// Sets VCA `vca`'s mute. The strips it reaches take it through the core's composition at once.
+fn mute_vca(state: &mut LiveVcaState, vca: usize, lanes: BuiltinLaneSelector, muted: bool) {
     assert!(state.set_vca_mute(vca, lanes, muted));
-    for &strip in state.reached_by(vca) {
-        assert!(solo.set_vca_mute(strip, state.vca_mute(strip)));
-    }
 }
 
 /// Gate 5. A VCA mute on a soloed track mutes it (the owner owes the record) and outlives the
 /// un-solo; a VCA mute on a solo-safe submix mutes it; a one-lane VCA mute owes one lane; and the
-/// follow delta read through the owner's `effective_mute` is exactly the following sends of the
+/// follow delta read through the core's `effective_gate` is exactly the following sends of the
 /// VCA-muted strips -- never the send that does not follow.
 ///
 /// Red if solo clears a VCA mute, if solo-safe exempts a strip from it, or if the VCA mute does
@@ -935,69 +1053,68 @@ fn a_vca_mute_wins_over_solo_and_reaches_the_following_sends() {
     let (va, vb, vx) = (0, 1, 2);
     let mut state = LiveVcaState::try_new(&model).expect("state");
     let mut solo = solo_state(&model);
+    let prepared = effective_strips(&model);
     let mut routes =
-        LiveRouteState::try_new(&model, &|strip, lane| solo.effective_mute(strip, lane))
-            .expect("routes");
-    assert!(follow_delta(&model, &routes, &solo).is_empty());
+        LiveRouteState::try_new(&model, &|strip, lane| prepared[strip].mute[lane]).expect("routes");
+    assert!(follow_delta(&model, &state, &routes, &solo).is_empty());
 
     // Solo `a`, and stage what that owes: `b` and its follow send go quiet, `a` stays open.
     assert!(solo.set_solo(a, true));
-    settle(&mut solo, &mut routes, 5);
-    assert!(!solo.effective_mute(a, 0));
+    settle(&state, &mut solo, &mut routes, 5);
+    assert!(!effective_mute(&state, &solo, a)[0]);
 
     // The VCA mute on the soloed track: muted, owed, and only its own follow send moves.
-    mute_vca(&mut state, &mut solo, va, BuiltinLaneSelector::Both, true);
+    mute_vca(&mut state, va, BuiltinLaneSelector::Both, true);
     assert_eq!(
-        solo.strip_delta(a),
+        mute_delta(&state, &solo, a),
         [Some((BuiltinLaneSelector::Both, true)), None]
     );
-    assert!(solo.effective_mute(a, 0) && solo.effective_mute(a, 1));
+    assert!(effective_mute(&state, &solo, a)[0] && effective_mute(&state, &solo, a)[1]);
     assert_eq!(
-        follow_delta(&model, &routes, &solo),
+        follow_delta(&model, &state, &routes, &solo),
         [("a-bx".to_owned(), [true, true])]
     );
-    settle(&mut solo, &mut routes, 5);
+    settle(&state, &mut solo, &mut routes, 5);
 
     // Un-soloing keeps it; `b` reopens and its follow send with it.
     assert!(solo.set_solo(a, false));
-    assert!(solo.effective_mute(a, 0) && solo.effective_mute(a, 1));
-    assert_eq!(solo.strip_delta(a), [None, None]);
+    assert!(effective_mute(&state, &solo, a)[0] && effective_mute(&state, &solo, a)[1]);
+    assert_eq!(mute_delta(&state, &solo, a), [None, None]);
     assert_eq!(
-        follow_delta(&model, &routes, &solo),
+        follow_delta(&model, &state, &routes, &solo),
         [("b-bx".to_owned(), [false, false])]
     );
-    settle(&mut solo, &mut routes, 5);
+    settle(&state, &mut solo, &mut routes, 5);
 
     // The solo-safe submix is not VCA-safe, and its following send into `by` follows.
-    mute_vca(&mut state, &mut solo, vx, BuiltinLaneSelector::Both, true);
+    mute_vca(&mut state, vx, BuiltinLaneSelector::Both, true);
     assert!(solo.solo_safe(bx));
     assert_eq!(
-        solo.strip_delta(bx),
+        mute_delta(&state, &solo, bx),
         [Some((BuiltinLaneSelector::Both, true)), None]
     );
     assert_eq!(
-        follow_delta(&model, &routes, &solo),
+        follow_delta(&model, &state, &routes, &solo),
         [("bx-by".to_owned(), [true, true])]
     );
-    settle(&mut solo, &mut routes, 5);
+    settle(&state, &mut solo, &mut routes, 5);
 
     // A one-lane VCA mute: one lane owed, one follow lane.
-    mute_vca(&mut state, &mut solo, vb, BuiltinLaneSelector::Right, true);
+    mute_vca(&mut state, vb, BuiltinLaneSelector::Right, true);
     assert_eq!(
-        solo.strip_delta(b),
+        mute_delta(&state, &solo, b),
         [Some((BuiltinLaneSelector::Right, true)), None]
     );
     assert_eq!(
-        follow_delta(&model, &routes, &solo),
+        follow_delta(&model, &state, &routes, &solo),
         [("b-bx".to_owned(), [false, true])]
     );
-    settle(&mut solo, &mut routes, 5);
+    settle(&state, &mut solo, &mut routes, 5);
 
     // A solo engaged now neither clears nor re-owes a VCA-muted lane.
     assert!(solo.set_solo(b, true));
-    assert_eq!(solo.strip_delta(b), [None, None]);
-    assert!(solo.effective_mute(b, 1) && !solo.effective_mute(b, 0));
-    assert!(!solo.set_vca_mute(5, [true; 2]));
+    assert_eq!(mute_delta(&state, &solo, b), [None, None]);
+    assert!(effective_mute(&state, &solo, b)[1] && !effective_mute(&state, &solo, b)[0]);
 }
 
 // ---- Gate 6 -------------------------------------------------------------------------------------
@@ -1016,33 +1133,30 @@ fn command_pass(
     let lanes = LANES[step % 3];
     assert!(state.set_vca_db(vca, lanes, db));
     state.set_vca_mute(vca, lanes, step.is_multiple_of(2));
-    for &strip in state.reached_by(vca) {
-        solo.set_vca_mute(strip, state.vca_mute(strip));
-    }
     if let Some(strip) = (0..strips).find(|strip| state.reaches(*strip)) {
         state.set_member_db(strip, lanes, db - 1.0);
     }
     for strip in 0..strips {
-        for (lanes, db) in state.fader_delta(strip).into_iter().flatten() {
+        for (lanes, db) in fader_delta(state, strip).into_iter().flatten() {
             state.record_emitted_db(strip, lanes, db);
             staged += 1;
         }
-        staged += usize::from(state.effective_db(strip, 0) > 0.0);
-        for (lanes, muted) in solo.strip_delta(strip).into_iter().flatten() {
+        staged += usize::from(effective_db(state, strip, 0) > 0.0);
+        for (lanes, muted) in mute_delta(state, solo, strip).into_iter().flatten() {
             solo.record_emitted(strip, lanes, muted);
             staged += 1;
         }
     }
-    let mut moved = [0_usize; 16];
+    let mut moved = [(0_usize, [false; 2]); 16];
     let mut count = 0;
-    for (route, _) in
-        LiveRouteMuteFollow::delta(routes, &|strip, lane| solo.effective_mute(strip, lane))
+    for entry in
+        LiveRouteMuteFollow::delta(routes, &|route| follow_gate(state, solo, routes, route))
     {
-        moved[count] = route;
+        moved[count] = entry;
         count += 1;
     }
-    for &route in &moved[..count] {
-        routes.follow(route, &|strip, lane| solo.effective_mute(strip, lane));
+    for &(route, lanes) in &moved[..count] {
+        routes.follow(route, lanes);
     }
     if step.is_multiple_of(3) {
         state.rollback();
@@ -1057,7 +1171,7 @@ fn command_pass(
 }
 
 /// Gate 6. After `try_new`, a sequence of setters, deltas, `record_emitted_db`, `commit` and
-/// `rollback`, with the strip-mute owner's `set_vca_mute` and the follow pass, allocates and frees
+/// `rollback`, with the core's effective values over the mirrors and the follow pass, allocates and frees
 /// nothing on this thread; `try_new` on a model with no VCA allocates nothing; and
 /// `retained_bytes()` is the net bytes `try_new` keeps, with the largest allocation positive and
 /// at most that (both 0 for `empty()`).
@@ -1084,9 +1198,9 @@ fn the_command_path_allocates_nothing_and_the_retained_bytes_are_measured() {
     assert!(state.largest_allocation_bytes() <= state.retained_bytes());
 
     let mut solo = solo_state(&model);
+    let prepared = effective_strips(&model);
     let mut routes =
-        LiveRouteState::try_new(&model, &|strip, lane| solo.effective_mute(strip, lane))
-            .expect("routes");
+        LiveRouteState::try_new(&model, &|strip, lane| prepared[strip].mute[lane]).expect("routes");
     assert!(routes.len() <= 16);
     // Warm-up: one pass of every path, so nothing lazily initialized is counted below.
     let mut staged = command_pass(&mut state, &mut solo, &mut routes, strips, 0);
@@ -1273,19 +1387,12 @@ fn batch(
         let lanes = draw.pick(&LANES);
         match draw.below(5) {
             0 | 1 => {
-                let (kind, _, vca) =
-                    random_edit(draw, &mut mirrors.vca, &mut intent.model, audible_db);
-                if kind == 1 {
-                    for &strip in mirrors.vca.reached_by(vca) {
-                        let lanes = mirrors.vca.vca_mute(strip);
-                        assert!(mirrors.solo.set_vca_mute(strip, lanes));
-                    }
-                }
+                random_edit(draw, &mut mirrors.vca, &mut intent.model, audible_db);
             }
             2 => {
                 let vca = draw.below(intent.model.vcas.len());
                 let muted = draw.chance(1, 2);
-                mute_vca(&mut mirrors.vca, &mut mirrors.solo, vca, lanes, muted);
+                mute_vca(&mut mirrors.vca, vca, lanes, muted);
                 set_mute(&mut intent.model.vcas[vca].fader, lanes, muted);
                 reach.one_lane_vca_mutes +=
                     usize::from(muted && lanes != BuiltinLaneSelector::Both);
@@ -1318,7 +1425,7 @@ fn batch(
         return;
     }
     for strip in 0..strips {
-        for (lanes, db) in mirrors.vca.fader_delta(strip).into_iter().flatten() {
+        for (lanes, db) in fader_delta(&mirrors.vca, strip).into_iter().flatten() {
             live.gate.write_published(|stamp| {
                 live.handles.strip_controls[strip].fader.write(
                     stamp,
@@ -1332,7 +1439,10 @@ fn batch(
             mirrors.vca.record_emitted_db(strip, lanes, db);
             reach.fader_records += 1;
         }
-        for (lanes, muted) in mirrors.solo.strip_delta(strip).into_iter().flatten() {
+        for (lanes, muted) in mute_delta(&mirrors.vca, &mirrors.solo, strip)
+            .into_iter()
+            .flatten()
+        {
             live.gate.write_published(|stamp| {
                 live.handles.strip_controls[strip].fader.write(
                     stamp,
@@ -1346,21 +1456,15 @@ fn batch(
             mirrors.solo.record_emitted(strip, lanes, muted);
             reach.mute_records += 1;
         }
-        let vca_muted = mirrors.vca.vca_mute(strip).contains(&true);
+        let vca_muted = vca_mute(&mirrors.vca, strip).contains(&true);
         reach.vca_muted_submixes += usize::from(vca_muted && strip >= tracks);
     }
-    let solo = &mirrors.solo;
-    let moved: Vec<usize> = LiveRouteMuteFollow::delta(&mirrors.routes, &|strip, lane| {
-        solo.effective_mute(strip, lane)
+    let moved: Vec<(usize, [bool; 2])> = LiveRouteMuteFollow::delta(&mirrors.routes, &|route| {
+        follow_gate(&mirrors.vca, &mirrors.solo, &mirrors.routes, route)
     })
-    .map(|(route, _)| route)
     .collect();
-    for route in moved {
-        assert!(
-            mirrors
-                .routes
-                .follow(route, &|strip, lane| solo.effective_mute(strip, lane))
-        );
+    for (route, lanes) in moved {
+        assert!(mirrors.routes.follow(route, lanes));
         let entry = *mirrors.routes.get(route).expect("live route");
         live.gate
             .write_published(|stamp| {
@@ -1376,7 +1480,7 @@ fn batch(
             .expect("an in-domain send record");
         reach.route_records += 1;
         reach.vca_muted_followed +=
-            usize::from(mirrors.vca.vca_mute(entry.source_strip).contains(&true));
+            usize::from(vca_mute(&mirrors.vca, entry.source_strip).contains(&true));
     }
     mirrors.commit();
 }
@@ -1430,9 +1534,9 @@ fn live_vca_moves_render_as_a_fresh_plan() {
             names
         );
         let solo = solo_state(&model);
-        let routes =
-            LiveRouteState::try_new(&model, &|strip, lane| solo.effective_mute(strip, lane))
-                .expect("routes");
+        let prepared = effective_strips(&model);
+        let routes = LiveRouteState::try_new(&model, &|strip, lane| prepared[strip].mute[lane])
+            .expect("routes");
         assert_eq!(live.handles.route_controls.len(), routes.len());
         let mut mirrors = Mirrors {
             vca: LiveVcaState::try_new(&model).expect("state"),

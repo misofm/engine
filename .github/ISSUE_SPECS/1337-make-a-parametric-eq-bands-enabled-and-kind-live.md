@@ -198,3 +198,5 @@ Filters for Musical Applications", DAFx-14. **Latency:** 0. **Tail:** unchanged 
 
 - *Carry console effect lanes across a plan swap* (#1279)
 - *Carry live-controlled effect lanes across a plan swap* (#1280)
+
+**Decision 17 amendment (2026-10-13).** Each band's `enabled` and `kind` carry `prepared_reason: RuledLiveNotBuilt { issue: 1337 }` (#1549). Last step of this issue: set their `automation_rate` to `Block`, remove the reason, and assert that their control rows are `Live`; no host or protocol code.

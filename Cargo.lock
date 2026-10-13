@@ -200,6 +200,7 @@ name = "builtins-compiler"
 version = "0.1.0"
 dependencies = [
  "builtins",
+ "controls",
  "effect-contract",
  "engine",
  "graph",
@@ -307,6 +308,7 @@ dependencies = [
  "bench-support",
  "builtins",
  "builtins-compiler",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "engine",
@@ -327,6 +329,17 @@ dependencies = [
  "protocol",
  "session",
  "source",
+]
+
+[[package]]
+name = "controls"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "builtins",
+ "effect-compiler",
+ "effect-contract",
+ "session",
 ]
 
 [[package]]
@@ -880,6 +893,7 @@ dependencies = [
  "builtins",
  "builtins-compiler",
  "conformance",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "engine",
@@ -933,6 +947,7 @@ dependencies = [
  "builtins",
  "builtins-compiler",
  "compressor",
+ "controls",
  "dsp-reference",
  "effect-compiler",
  "effect-contract",
@@ -956,6 +971,7 @@ dependencies = [
  "builtins-compiler",
  "capi",
  "control-plane",
+ "controls",
  "effect-contract",
  "engine",
  "host-core",
@@ -1517,10 +1533,12 @@ version = "0.1.0"
 dependencies = [
  "bench-support",
  "builtins",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "host-core",
  "host-web",
+ "serde_json",
  "sha2 0.11.0",
 ]
 

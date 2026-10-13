@@ -146,9 +146,9 @@ SDK boundary. After this issue one eval proves both on the headless engine, whic
 
 ## Placement (root edits `STREAMS.md`)
 
-- Stream H owns `sdk/`. A new row after #1536: dependency "B #1345, #1346 on `main`; before H #1382"
-  (early). #1382 moves browser live-edit admission into the Worker; this eval then guards the
-  headless path while #1382 changes the admission code.
+- Stream H owns `sdk/`. A new row after #1536: dependency "B #1345, #1346 on `main`; before H #1562"
+  (early). #1562 moves browser live-edit admission into the Worker; this eval then guards the
+  headless path while #1562 changes the admission code.
 - `sdk/test/writer-evals.mjs` has no hot-file row. B #1524 edits it (`commandQueueRecords` in
   `pausedEngine` and `observedEngine`, and the default `maximumBatch`; `1524-*.md:121`, `:160-161`).
   Add a row: "`sdk/test/writer-evals.mjs` | B #1524 (the live-control option and the default batch)
@@ -164,8 +164,10 @@ SDK boundary. After this issue one eval proves both on the headless engine, whic
 
 ## Root rulings (2026-10-13)
 
-- **R1. Stream H**, after #1536, before H #1382. The `writer-evals.mjs` hot-file row is
+- **R1. Stream H**, after #1536, before H #1562. The `writer-evals.mjs` hot-file row is
   accepted (B #1524 in any order; the later slice rebases).
 - **R2. No real-browser twin** in this slice (non-goal stands).
 - **R3. Test value.** The attempt record runs M1-M4 and names, for each, which existing evals also
   go red; a mutation with no unique catch is removed or its case is changed until it has one.
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1563. The 48-byte writer for values is replaced by a per-engine `SET_CONTROL` transaction queue that coalesces by address; #1563 gate 4 tests its coalescing and order, and gate 3 tests that each edit renders as an engine booted from the committed document.

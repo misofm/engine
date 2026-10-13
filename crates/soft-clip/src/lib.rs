@@ -117,6 +117,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 #[allow(clippy::too_many_arguments)]
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
@@ -126,6 +127,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit,
@@ -146,14 +148,42 @@ const fn parameter(
             ParameterDomain::Continuous,
             ParameterMapping::Linear,
         ),
+        prepared_reason: None,
     }
 }
 
 /// Frozen scalar soft-clip parameter rows, in stable numeric-ID order.
 pub const SOFT_CLIP_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
-    parameter(1, "drive", "dB", ParameterUnit::Db, -24.0, 36.0, 0.0),
-    parameter(2, "output", "dB", ParameterUnit::Db, -24.0, 24.0, 0.0),
-    parameter(3, "mix", "linear", ParameterUnit::Linear, 0.0, 1.0, 1.0),
+    parameter(
+        1,
+        "drive_db",
+        "drive",
+        "dB",
+        ParameterUnit::Db,
+        -24.0,
+        36.0,
+        0.0,
+    ),
+    parameter(
+        2,
+        "output_db",
+        "output",
+        "dB",
+        ParameterUnit::Db,
+        -24.0,
+        24.0,
+        0.0,
+    ),
+    parameter(
+        3,
+        "mix",
+        "mix",
+        "linear",
+        ParameterUnit::Linear,
+        0.0,
+        1.0,
+        1.0,
+    ),
 ];
 
 const PORTS: [PortDescriptor; 2] = [

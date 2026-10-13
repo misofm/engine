@@ -145,3 +145,5 @@ what lets the browser's control plane prepare in the Worker while the worklet re
 
 Dependents: *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400) and
 *Replace the running browser session in the Rust host* (#1290).
+
+**Decision 17 amendment (2026-10-13).** D4's refusal (`host.spectrum.target`) and gate 4 stay as host-core's invariant check. From #1593 on, the control plane never passes a missing target: a structural edit that removes a spectrum target's strip or output drops that entry from the session's spectrum configuration in the same commit, before the successor is prepared, so the edit is never refused for a spectrum target (#1593 D4).

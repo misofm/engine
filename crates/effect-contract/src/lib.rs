@@ -4,6 +4,7 @@
 //! persistence envelope. Those are interchange concerns owned by issue 029.
 #![allow(missing_docs)]
 
+pub mod control;
 mod live;
 mod prepared_target;
 mod response;
@@ -716,6 +717,10 @@ pub struct EnumChoice {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParameterDescriptor {
     pub id: ParameterId,
+    /// The stable machine name (decision 17, C3, D8): `[a-z][a-z0-9_]*`, unique within the effect,
+    /// ending with the suffix of its `unit` (see [`machine_name_unit_suffix`]).
+    /// `display_name` is the label a person reads.
+    pub name: &'static str,
     pub display_name: &'static str,
     pub display_unit: &'static str,
     pub unit: ParameterUnit,
@@ -737,6 +742,10 @@ pub struct ParameterDescriptor {
     /// precision before lattice construction. Persisted document text is compared with those
     /// decimal renderings and the generated interior points without passing through `f32`.
     pub lattice: ParameterLattice,
+    /// Why this parameter is prepared (`automation_rate` is `None`), and nothing otherwise
+    /// (decision 17, D1). `validate_descriptor` refuses a prepared parameter without a reason and
+    /// a reason on any other parameter, with [`DescriptorDiagnosticCode::PreparedReason`].
+    pub prepared_reason: Option<control::PreparedReason>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PortDescriptor {
@@ -835,6 +844,8 @@ pub enum DescriptorDiagnosticCode {
     ObservationOrder,
     Observation,
     Lattice,
+    PreparedReason,
+    ParameterName,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DescriptorError {
@@ -989,6 +1000,41 @@ fn observation_valid(d: &EffectDescriptor, o: &ObservationDescriptor) -> bool {
         && (!matches!(o.channels, ObservationChannels::PerLane)
             || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
 }
+/// Whether `name` is a stable machine name: `[a-z][a-z0-9_]*` (decision 17, C3).
+fn valid_machine_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+/// The suffix a machine name must end with for a parameter of `unit` (decision 17, C3/D8), or
+/// `None` when the unit takes no suffix. This is the one place that maps a unit to its suffix.
+///
+/// `dB` ends `_db`, Hz `_hz`, milliseconds `_ms`, samples `_samples`. A linear (unitless, toggle
+/// or enumeration) or ratio parameter has no suffix: a ratio parameter is already named for what
+/// it is (`ratio`, `low_ratio`, `band_1_q`). Seconds (`_s`) and percent (`_percent`) have no
+/// [`ParameterUnit`] today; adding one forces an arm here, because the match is exhaustive.
+#[must_use]
+pub const fn machine_name_unit_suffix(unit: ParameterUnit) -> Option<&'static str> {
+    match unit {
+        ParameterUnit::Db => Some("_db"),
+        ParameterUnit::Hz => Some("_hz"),
+        ParameterUnit::Milliseconds => Some("_ms"),
+        ParameterUnit::Samples => Some("_samples"),
+        ParameterUnit::Linear | ParameterUnit::Ratio => None,
+    }
+}
+/// Every suffix [`machine_name_unit_suffix`] can return, plus the two reserved for units that do
+/// not exist yet; a parameter whose unit takes no suffix must not end with any of them.
+const RESERVED_UNIT_SUFFIXES: [&str; 6] = ["_db", "_hz", "_ms", "_s", "_samples", "_percent"];
+/// Whether `name` carries the suffix its `unit` demands, and no suffix of another unit.
+fn machine_name_matches_unit(name: &str, unit: ParameterUnit) -> bool {
+    match machine_name_unit_suffix(unit) {
+        Some(suffix) => name.ends_with(suffix),
+        None => !RESERVED_UNIT_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix)),
+    }
+}
 pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
@@ -1015,8 +1061,17 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             code: DescriptorDiagnosticCode::LinkModes,
         })
     }
-    let (mut prior, mut ids) = (0, BTreeSet::new());
+    let (mut prior, mut ids, mut names) = (0, BTreeSet::new(), BTreeSet::new());
     for p in d.parameters {
+        if !valid_machine_name(p.name)
+            || !machine_name_matches_unit(p.name, p.unit)
+            || !names.insert(p.name)
+        {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: DescriptorDiagnosticCode::ParameterName,
+            })
+        }
         if p.id.0 == 0 || !ids.insert(p.id.0) {
             e.push(DescriptorError {
                 path: "parameters",
@@ -1034,6 +1089,14 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::Parameter,
+            })
+        }
+        if (p.automation_rate == AutomationRate::None) != p.prepared_reason.is_some()
+            || p.prepared_reason.is_some_and(|r| !valid_text(r.reopen))
+        {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: DescriptorDiagnosticCode::PreparedReason,
             })
         }
         if validate_parameter_lattice(p).is_err() {
@@ -3305,6 +3368,7 @@ mod continuous_mapping_validity_tests {
     const BASE: ParameterDescriptor = ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
+        name: "gain_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,
@@ -3324,6 +3388,7 @@ mod continuous_mapping_validity_tests {
             ParameterDomain::Continuous,
             ParameterMapping::Linear,
         ),
+        prepared_reason: None,
     };
 
     enum TypedExpectation {

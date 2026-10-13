@@ -159,3 +159,5 @@ moves.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+**Decision 17 amendment (2026-10-13).** After #1565 no host builds a strip record: host-web's admission and its record builders are deleted, and only host-core's classifier builds records, from validated models through the core's checks. D1 (private fields and fallible constructors) stays as defence in depth inside host-core; the host-web part of this issue is gone.

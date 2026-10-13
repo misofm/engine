@@ -192,3 +192,5 @@ browser's boot already prepares through it, and its rendered bits do not change.
   three browser entries.
 
 Dependent: *Swap and retire browser plans through the Worker's service loop* (#1381).
+
+**Decision 17 amendment (2026-10-13).** This slice lands as filed. #1593 then gives `RuntimePreparer::prepare` a `spectrum: Option<&SpectrumPreparation>` argument and an `Option<PreparedSpectrumCaptures>` result (D1), and `WebRuntimePreparer` takes the spectrum request from that argument instead of holding it (D5). #1596 then moves the spectrum capture out of `RenderCompanions` to the control plane, as on the C ABI (D5).

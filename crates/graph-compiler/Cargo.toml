@@ -25,6 +25,8 @@ rack-compiler.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+# Decision 17 C7: the tests pass the preparation entries the `controls::Effective` they bake.
+controls.workspace = true
 # Issue #1100: `tests/bypass_resources.rs` measures what a session bypass retains and what its
 # render allocates with the workspace's one audited allocator. Test-only, as the bench policy allows.
 bench-support.workspace = true

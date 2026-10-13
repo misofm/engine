@@ -3211,6 +3211,20 @@ impl PreparedBuiltinsSession {
         self.track_controls.len()
     }
 
+    /// Every strip's effective mute, `[left, right]`, by strip ID, as it was prepared with
+    /// (decision 17, C7): the VCA-composed and solo-composed value baked into the strip's fader.
+    /// Control-side data like [`Self::tails`]: graph lowering reads it for the follow gates and
+    /// nothing render owns carries it. It is read from the retained strip parameters, so it is
+    /// the baked value by construction.
+    pub fn effective_strip_mutes(&self) -> impl Iterator<Item = (&str, [bool; 2])> {
+        self.strips.iter().map(|strip| {
+            (
+                strip.track_id.as_ref(),
+                [strip.parameters.left.muted, strip.parameters.right.muted],
+            )
+        })
+    }
+
     /// Read-only builtin tails used by graph lowering: each strip's `T_decay` (#1329 G1).
     pub fn tails(&self) -> impl Iterator<Item = (&str, TailSamples)> {
         self.tails
@@ -4391,10 +4405,20 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_live_controls(session, requests, &[], caps, None)
+    let effective = controls::effective(
+        session.normalized_model(),
+        &controls::MonitorOverlay::default(),
+    );
+    prepare_session_builtins_with_live_controls(session, &effective, requests, &[], caps, None)
 }
 
 /// Prepare builtins with live-control channels attached (issue #137 D1).
+///
+/// `effective` is every effective value of the session (decision 17, C7): preparation bakes
+/// `effective.strips` as each strip's fader and mute instead of composing the VCAs itself, and
+/// keeps the mutes for the graph compiler's follow gates. It must be `controls::effective` of the
+/// session's normalized model (under whatever monitor overlay the host holds); a value of another
+/// strip count is a preparation diagnostic. Every entry below takes it the same way.
 ///
 /// `controls` requests one bounded control channel per named track; the consumer half is bound
 /// into that track's matrix processor and the producer half is returned in the prepared session
@@ -4412,6 +4436,7 @@ pub fn prepare_session_builtins(
 /// changes.
 pub fn prepare_session_builtins_with_live_controls(
     session: &CompiledSession,
+    effective: &controls::Effective,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
@@ -4419,6 +4444,7 @@ pub fn prepare_session_builtins_with_live_controls(
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     prepare_session_builtins_with_live_controls_and_policy(
         session,
+        effective,
         requests,
         None,
         controls,
@@ -4435,12 +4461,14 @@ pub fn prepare_session_builtins_with_live_controls(
 /// does not add synchronization or enforce the contract at runtime.
 pub fn prepare_session_builtins_between_render_calls(
     session: &CompiledSession,
+    effective: &controls::Effective,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     prepare_session_builtins_with_live_controls_and_policy(
         session,
+        effective,
         requests,
         None,
         controls,
@@ -4454,6 +4482,7 @@ pub fn prepare_session_builtins_between_render_calls(
 /// rendering. Selected requests retain the ordinary permanent observer binding policy.
 pub fn prepare_selected_session_builtins_with_live_controls(
     session: &CompiledSession,
+    effective: &controls::Effective,
     requests: &[SelectedMeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
@@ -4461,6 +4490,7 @@ pub fn prepare_selected_session_builtins_with_live_controls(
     let (plain, metrics) = split_selected_requests(requests);
     prepare_session_builtins_with_live_controls_and_policy(
         session,
+        effective,
         &plain,
         Some(&metrics),
         controls,
@@ -4476,6 +4506,7 @@ pub fn prepare_selected_session_builtins_with_live_controls(
 /// producer delivery contract.
 pub fn prepare_selected_session_builtins_between_render_calls(
     session: &CompiledSession,
+    effective: &controls::Effective,
     requests: &[SelectedMeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
@@ -4483,6 +4514,7 @@ pub fn prepare_selected_session_builtins_between_render_calls(
     let (plain, metrics) = split_selected_requests(requests);
     prepare_session_builtins_with_live_controls_and_policy(
         session,
+        effective,
         &plain,
         Some(&metrics),
         controls,
@@ -4504,8 +4536,10 @@ fn split_selected_requests(
     (plain, metrics)
 }
 
+#[allow(clippy::too_many_arguments)] // The private body of five public entries; each argument is theirs.
 fn prepare_session_builtins_with_live_controls_and_policy(
     session: &CompiledSession,
+    effective: &controls::Effective,
     requests: &[MeterRequest],
     selected_metrics: Option<&[MeterMetricSet]>,
     controls: &[TrackControlRequest],
@@ -4561,6 +4595,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         if !metrics.is_valid() {
             diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
         }
+    }
+    if effective.strips.len() != session.normalized_model().strips().count() {
+        diagnostics.push(diag("builtin.effective.shape", "$.effective"));
     }
     let known_strips: BTreeSet<_> = session
         .normalized_model()
@@ -4619,9 +4656,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
     let resources = resource_plan.expect("validated resource plan").report;
-    // #1242 D2: lowering bakes each strip's VCA-effective fader, computed once, here, before the
-    // phase-two allocation observation (strip `i` is entry `i`).
-    let effective_faders = session.normalized_model().effective_strip_faders();
+    // #1242 D2, decision 17 C7: lowering bakes each strip's effective fader and mute, which the
+    // caller computed (strip `i` is entry `i`).
+    let effective_faders = &*effective.strips;
     // The request index is a transient lookup, not retained storage, so it is built before the
     // phase-two observation that compares retained allocations with the report (#1254 gate 3).
     let mut control_lanes: BTreeMap<&str, (bool, &LiveValuesSuperseded)> = BTreeMap::new();
@@ -4653,12 +4690,12 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         session
             .normalized_model()
             .strips()
-            .zip(&effective_faders)
+            .zip(effective_faders)
             .filter(|(strip, _)| !input_lane_live(strip.id.as_str()))
             .map(|(strip, fader)| {
                 strip_parameters(
                     &strip,
-                    (fader.db, fader.mute),
+                    (fader.fader_db, fader.mute),
                     caps.maximum_smoothing_samples,
                 )
                 .expect("preflighted parameters")
@@ -4685,10 +4722,10 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut tails = Vec::with_capacity(track_count);
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, bool)> = Vec::with_capacity(controls.len());
-    for (strip, fader) in session.normalized_model().strips().zip(&effective_faders) {
+    for (strip, fader) in session.normalized_model().strips().zip(effective_faders) {
         let parameters = strip_parameters(
             &strip,
-            (fader.db, fader.mute),
+            (fader.fader_db, fader.mute),
             caps.maximum_smoothing_samples,
         )
         .expect("preflighted parameters");
@@ -6035,8 +6072,8 @@ pub fn lower_matrix_or_pan(value: &MatrixOrPan) -> Result<(Matrix2x2, u32), Buil
 }
 
 /// The strip's lowered parameters, baking `fader_db` and `muted` (`[left, right]`) as its fader:
-/// the strip's own values for the domain preflight, its VCA-effective values
-/// (`SessionModel::effective_strip_faders`, #1242 D2) for lowering and the tail seal.
+/// the strip's own values for the domain preflight, its effective values (`controls::effective`,
+/// #1242 D2, decision 17 C7) for lowering and the tail seal.
 fn strip_parameters(
     strip: &StripRef<'_>,
     (fader_db, muted): ([f32; 2], [bool; 2]),
@@ -6263,6 +6300,14 @@ mod tests {
         )
         .expect("compile")
     }
+    /// The effective values of `session` with no solo: what a host without a monitor overlay passes.
+    fn effective_of(session: &CompiledSession) -> controls::Effective {
+        controls::effective(
+            session.normalized_model(),
+            &controls::MonitorOverlay::default(),
+        )
+    }
+
     fn caps() -> BuiltinCompileCaps {
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
@@ -7620,6 +7665,7 @@ mod tests {
         let builtins = if between_render_calls {
             prepare_session_builtins_between_render_calls(
                 &compiled,
+                &effective_of(&compiled),
                 meter_requests,
                 &controls,
                 caps(),
@@ -8029,6 +8075,7 @@ mod tests {
         let builtins = if between_render_calls {
             prepare_session_builtins_between_render_calls(
                 &compiled,
+                &effective_of(&compiled),
                 meter.as_slice(),
                 &controls,
                 caps(),
@@ -8036,6 +8083,7 @@ mod tests {
         } else {
             prepare_session_builtins_with_live_controls(
                 &compiled,
+                &effective_of(&compiled),
                 meter.as_slice(),
                 &controls,
                 caps(),
@@ -8474,9 +8522,15 @@ mod tests {
                 input_lane: false,
             })
             .collect::<Vec<_>>();
-        let builtins =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
-                .expect("prepared builtins");
+        let builtins = prepare_session_builtins_with_live_controls(
+            &compiled,
+            &effective_of(&compiled),
+            &[],
+            &controls,
+            caps(),
+            None,
+        )
+        .expect("prepared builtins");
         assert!(builtins.validate_for_session(&compiled).0.is_empty());
         let (mut graph, levels) = track_graph(n);
         let classes = SessionPoolClasses::from_session(&compiled);
@@ -12722,12 +12776,25 @@ mod tests {
         };
         let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
         let raw = collect(
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
-                .expect("raw"),
+            prepare_session_builtins_with_live_controls(
+                &compiled,
+                &effective_of(&compiled),
+                &[],
+                &controls,
+                caps(),
+                None,
+            )
+            .expect("raw"),
         );
         let between = collect(
-            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
-                .expect("between"),
+            prepare_session_builtins_between_render_calls(
+                &compiled,
+                &effective_of(&compiled),
+                &[],
+                &controls,
+                caps(),
+            )
+            .expect("between"),
         );
         for banks in [&default, &raw] {
             assert!(banks.iter().any(|(stage, members, delivery)| {
@@ -12792,6 +12859,7 @@ mod tests {
 
         let selected = prepare_selected_session_builtins_with_live_controls(
             &compiled,
+            &effective_of(&compiled),
             std::slice::from_ref(&request),
             &controls,
             caps(),
@@ -12806,6 +12874,7 @@ mod tests {
 
         let serialized = prepare_selected_session_builtins_between_render_calls(
             &compiled,
+            &effective_of(&compiled),
             std::slice::from_ref(&request),
             &controls,
             caps(),
@@ -12865,11 +12934,16 @@ mod tests {
                 < core::mem::align_of::<LiveControlMatrixProcessor>()
         );
 
-        let serialized =
-            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
-                .expect("serialized owners")
-                .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
-                .expect("checked scalar estimate");
+        let serialized = prepare_session_builtins_between_render_calls(
+            &compiled,
+            &effective_of(&compiled),
+            &[],
+            &controls,
+            caps(),
+        )
+        .expect("serialized owners")
+        .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+        .expect("checked scalar estimate");
         let split_table_entry =
             core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>() as u64;
         assert_eq!(serialized.split_pair_table_bytes, split_table_entry);
@@ -12882,11 +12956,17 @@ mod tests {
             fader.max(matrix).max(outer).max(split_table_entry)
         );
 
-        let concurrent =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
-                .expect("concurrent owners")
-                .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
-                .expect("checked scalar estimate");
+        let concurrent = prepare_session_builtins_with_live_controls(
+            &compiled,
+            &effective_of(&compiled),
+            &[],
+            &controls,
+            caps(),
+            None,
+        )
+        .expect("concurrent owners")
+        .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+        .expect("checked scalar estimate");
         assert_eq!(concurrent.total_bytes, 3 * (fader + matrix));
         assert_eq!(concurrent.largest_allocation_bytes, fader.max(matrix));
 
@@ -12899,11 +12979,16 @@ mod tests {
             graph::GraphScalarOwnerResourceEstimate::default()
         );
 
-        let bank_selected =
-            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
-                .expect("bank candidates")
-                .graph_scalar_owner_resource(Backend::current(), &levels, &classes)
-                .expect("checked vector estimate");
+        let bank_selected = prepare_session_builtins_between_render_calls(
+            &compiled,
+            &effective_of(&compiled),
+            &[],
+            &controls,
+            caps(),
+        )
+        .expect("bank candidates")
+        .graph_scalar_owner_resource(Backend::current(), &levels, &classes)
+        .expect("checked vector estimate");
         assert_eq!(
             bank_selected,
             graph::GraphScalarOwnerResourceEstimate::default(),
@@ -13333,13 +13418,14 @@ mod tests {
         // certified tail; the fixture's input HPF makes it finite and non-zero.
         let session = session();
         let model = session.normalized_model();
+        let effective = controls::effective(model, &controls::MonitorOverlay::default());
         let (strip, fader) = model
             .strips()
-            .zip(model.effective_strip_faders())
+            .zip(effective.strips.iter())
             .next()
             .expect("one strip");
         let parameters =
-            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+            strip_parameters(&strip, (fader.fader_db, fader.mute), u32::MAX).expect("parameters");
         let own =
             builtins::input_section_bound(session.sample_rate().0, parameters).expect("bound");
         assert!(matches!(own.tail, TailSamples::Finite(samples) if samples > 0));
@@ -13385,13 +13471,14 @@ mod tests {
             vec![("vocal", TailSamples::Finite(0))]
         );
         let normalized = compiled.normalized_model();
+        let effective = controls::effective(normalized, &controls::MonitorOverlay::default());
         let (strip, fader) = normalized
             .strips()
-            .zip(normalized.effective_strip_faders())
+            .zip(effective.strips.iter())
             .next()
             .expect("one strip");
         let parameters =
-            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+            strip_parameters(&strip, (fader.fader_db, fader.mute), u32::MAX).expect("parameters");
         let own =
             builtins::input_section_bound(compiled.sample_rate().0, parameters).expect("bound");
         assert_eq!(own.tail, TailSamples::Finite(0));
@@ -13402,6 +13489,7 @@ mod tests {
 
         let live = prepare_session_builtins_with_live_controls(
             &compiled,
+            &effective_of(&compiled),
             &[],
             &[TrackControlRequest {
                 track_id: "vocal".to_owned(),
@@ -13511,6 +13599,7 @@ mod tests {
             let before = builtins::test_support::fixed_input_bounds_computed();
             let prepared = prepare_session_builtins_with_live_controls(
                 &compiled,
+                &effective_of(&compiled),
                 &[],
                 &controls(live),
                 caps(),
@@ -13583,9 +13672,15 @@ mod tests {
                 .expect("compile");
                 let frames = builtins::test_support::fixed_input_frames_walked();
                 let charged = builtins::test_support::fixed_input_charged();
-                let prepared =
-                    prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), None)
-                        .expect("prepare");
+                let prepared = prepare_session_builtins_with_live_controls(
+                    &compiled,
+                    &effective_of(&compiled),
+                    &[],
+                    &[],
+                    caps(),
+                    None,
+                )
+                .expect("prepare");
                 let walked = builtins::test_support::fixed_input_frames_walked() - frames;
                 let charged = builtins::test_support::fixed_input_charged() - charged;
                 let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
@@ -13651,9 +13746,15 @@ mod tests {
         let prepare = |cache: Option<&mut InputBoundCache>| {
             let bounds = builtins::test_support::fixed_input_bounds_computed();
             let frames = builtins::test_support::fixed_input_frames_walked();
-            let prepared =
-                prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), cache)
-                    .expect("prepare");
+            let prepared = prepare_session_builtins_with_live_controls(
+                &compiled,
+                &effective_of(&compiled),
+                &[],
+                &[],
+                caps(),
+                cache,
+            )
+            .expect("prepare");
             assert!(prepared.validate_for_session(&compiled).0.is_empty());
             let values: Vec<(String, NodeTailBound)> = prepared
                 .input_bounds()
@@ -15080,6 +15181,7 @@ mod tests {
         let baseline = prepare_session_builtins(&compiled, &[], caps()).expect("baseline");
         let attached = prepare_session_builtins_with_live_controls(
             &compiled,
+            &effective_of(&compiled),
             &[],
             &[TrackControlRequest {
                 track_id: track.clone(),
@@ -15113,6 +15215,7 @@ mod tests {
 
         let duplicate = prepare_session_builtins_with_live_controls(
             &compiled,
+            &effective_of(&compiled),
             &[],
             &[
                 TrackControlRequest {
@@ -15141,6 +15244,7 @@ mod tests {
 
         let unknown = prepare_session_builtins_with_live_controls(
             &compiled,
+            &effective_of(&compiled),
             &[],
             &[TrackControlRequest {
                 track_id: "no-such-track".to_owned(),
@@ -15158,6 +15262,57 @@ mod tests {
                 .iter()
                 .any(|value| value.code == "builtin.control.unknown_track"),
             "{unknown:?}"
+        );
+    }
+
+    /// Decision 17, C7: preparation bakes the `Effective` it is given, not a composition of its
+    /// own. A solo overlay mutes the vocal in the baked fader and the stored mutes, and an
+    /// `Effective` of another strip count is refused at `$.effective`.
+    ///
+    /// Red if preparation recomputes the fader from the model (the solo would be lost), if
+    /// `effective_strip_mutes` is not the baked value, or if a mismatched shape is truncated by
+    /// the zip instead of refused.
+    #[test]
+    fn preparation_bakes_the_effective_value_it_is_given() {
+        let compiled = session();
+        let vocal = compiled.normalized_model().tracks[0].id.clone();
+        let soloed_elsewhere =
+            controls::MonitorOverlay::with_soloed([
+                session::StableId::parse("not-a-strip").expect("stable ID")
+            ]);
+        // A solo on an unknown ID is no solo; a hand-made effective value is baked as given.
+        let mut effective = controls::effective(compiled.normalized_model(), &soloed_elsewhere);
+        effective.strips[0].mute = [true, false];
+        effective.strips[0].fader_db = [-12.5, -3.0];
+        let prepared = prepare_session_builtins_with_live_controls(
+            &compiled,
+            &effective,
+            &[],
+            &[],
+            caps(),
+            None,
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.effective_strip_mutes().collect::<Vec<_>>(),
+            vec![(vocal.as_str(), [true, false])]
+        );
+        let parameters = prepared.strips[0].parameters;
+        assert_eq!(
+            (parameters.left.fader_db, parameters.right.fader_db),
+            (-12.5, -3.0)
+        );
+
+        let wrong = controls::Effective::with_shape(2, 0);
+        let refused =
+            prepare_session_builtins_with_live_controls(&compiled, &wrong, &[], &[], caps(), None)
+                .err()
+                .expect("refused");
+        assert!(
+            refused
+                .0
+                .iter()
+                .any(|value| value.code == "builtin.effective.shape" && value.path == "$.effective")
         );
     }
 
@@ -15182,7 +15337,10 @@ mod tests {
             },
             members: vec![model.tracks[0].id.clone()],
         }];
-        assert_eq!(model.effective_strip_faders()[0].db[0], 18.5);
+        assert_eq!(
+            controls::effective(&model, &controls::MonitorOverlay::default()).strips[0].fader_db[0],
+            18.5
+        );
         let compiled = compile_session(
             &model,
             CompileCaps {

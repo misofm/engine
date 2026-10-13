@@ -18,6 +18,7 @@ test-support = ["effect-compiler/test-support", "builtins-compiler/test-support"
 [dependencies]
 builtins.workspace = true
 builtins-compiler.workspace = true
+controls.workspace = true
 engine.workspace = true
 effect-compiler.workspace = true
 effect-contract.workspace = true

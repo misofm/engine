@@ -310,16 +310,13 @@ impl GraphCompiler {
             );
         }
         // #1218 D2: a following route reads its source strip's lane mutes. The map is built only
-        // when some route follows; IDs are unique across tracks and submixes. #1242 D2: the
-        // mutes are the strip's effective ones, its own or any reaching VCA's, from the same
-        // composition the builtins compiler bakes into the strip's fader.
+        // when some route follows; IDs are unique across tracks and submixes. #1242 D2, decision
+        // 17 C7: the mutes are the strip's effective ones (its own, any reaching VCA's or the
+        // solo term), exactly the values the builtins compiler baked into the strip's fader, read
+        // back from the prepared builtins.
         let strip_mutes: BTreeMap<&str, [bool; 2]> = if model.routes.iter().any(|r| r.follows_mute)
         {
-            strips
-                .iter()
-                .zip(model.effective_strip_faders())
-                .map(|(strip, fader)| (strip.id.as_str(), fader.mute))
-                .collect()
+            builtins.effective_strip_mutes().collect()
         } else {
             BTreeMap::new()
         };

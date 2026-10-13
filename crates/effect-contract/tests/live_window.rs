@@ -40,6 +40,7 @@ const fn parameter_descriptor(
     ParameterDescriptor {
         id: ParameterId(id),
         display_name: "Synthetic",
+        name: "synthetic_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,
@@ -55,6 +56,7 @@ const fn parameter_descriptor(
         automatable,
         enum_choices: &[] as &[EnumChoice],
         lattice: ParameterLattice::arithmetic(0.1, 1),
+        prepared_reason: None,
     }
 }
 
