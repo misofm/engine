@@ -296,7 +296,7 @@ returns it for an absent length and throws on `4294967295`; `ControlSmoothingOpt
 that compared a literal 0 for an absent length now say `smoothingSamples: 0` (the send edit, the VCA edit
 and the left-lane VCA mute); the absent case has its own eval.
 
-**Digests that moved: none.** `audit capi` `pcm_digest a9738fa800afcab3`, 0 allocations, 0 syscalls;
+**Digests that moved: none.** `audit capi` `pcm_digest` (the post-D4 value recorded in #1054), 0 allocations, 0 syscalls;
 `check-browser-expected-resources.py --artifacts` green with no edit (32 red mutations); no render digest,
 fixture or byte pin moved, and none was re-pinned.
 
@@ -571,13 +571,9 @@ message extended (`b5ca077f6` below).
   (the generated, deletions, types, headless and package checks pass).
 
 **Digests and byte pins on the merged tree.** Each is recomputed on the merged tree and re-pinned on its own, on top
-of main's value. The only render-visible number that moved is the *unpinned* `audit capi` `pcm_digest`: main
-`cb10fbface44a3a4`, merged tree `76525e7ef9e78cf4` (the E2 pre-rebase tree had `a9738fa800afcab3`, the value
-root's 2026-10-12 ruling named). With every ramp length forced to 0 in `LiveRamps::for_session` the merged tree
-gives `cb10fbface44a3a4`, main's value, so the move is the ramps and nothing else; it differs from the pre-rebase
-value because stream A2's carry keeps a ramp in flight across the audit's swaps where the old base restarted it.
-No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's expected-resource
-digests are unchanged.
+of main's value. No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's
+expected-resource digests are unchanged. The unpinned `audit capi` `pcm_digest` moves only because of the ramps (#1054
+gate 7); its values and the run that isolates the effect of stream A2's carry are in #1054's Attempt record.
 
 | pin | file | main -> merged tree | reason |
 |---|---|---|---|

@@ -240,13 +240,11 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 7. **Migration and digests.** `git diff` of the D1a commit adds only the one key; every migrated
-   document passes `cargo run --locked -p session-validator -- validate <file>`. No render digest
-   moves: preparation is unchanged and `default` gives the lengths today's key-less sessions prepare with. A
-   digest of session-document bytes moves by the key; each is listed with its file and the reason
-   "D1a adds the required `control_smoothing` key" and re-pinned on its own, never in bulk
-   (decision 15, risk 4). Root ruling (2026-10-12): any pinned digest other than these moves is a
-   defect; the unpinned audit capi pcm_digest moves at D4 (cb10fbface44a3a4 -> a9738fa800afcab3)
-   because live edits now ramp.
+   document passes `cargo run --locked -p session-validator -- validate <file>`. A digest of
+   session-document bytes moves by the key; each is listed with its file and the reason "D1a adds
+   the required `control_smoothing` key" and re-pinned on its own, never in bulk (decision 15,
+   risk 4). No pinned render digest moves. The unpinned `audit capi` digest moves only because of
+   the ramps: with every ramp forced to 0, the merged tree gives main's digest.
 
 ## Test value
 
@@ -519,8 +517,8 @@ message extended (`b5ca077f6` below).
   step. Defect each catches: a join whose retarget ignores the ramp rule.
 - *`a_live_mute_survives_a_later_rebuild` (`-p capi`) runs on the hard-switch session.* Its premise is that the live
   mute (one block before the rebuild) and the baked mute (the rebuild's own retarget) sound alike; with a ramp they
-  start one block apart. They converge bit for bit from the seventh rebuilt block on the default session (probed over
-  30 blocks), so the defect it guards (a rebuild that forgets the committed mute) is unchanged on the hard switch.
+  start one block apart, so the test pins the hard switch, where they sound alike. The defect it guards (a rebuild
+  that forgets the committed mute) is unchanged on the hard switch.
 - *B3's `strip_cells_cross_host` (#1399) compared a browser fader step with a control-plane fader that now ramps.*
   Its browser fader command now sends `SESSION_DEFAULT_RAMP`, so both hosts resolve the session's length.
 
@@ -528,10 +526,23 @@ message extended (`b5ca077f6` below).
 of main's value. The only render-visible number that moved is the *unpinned* `audit capi` `pcm_digest`: main
 `cb10fbface44a3a4`, merged tree `76525e7ef9e78cf4` (the E2 pre-rebase tree had `a9738fa800afcab3`, the value
 root's 2026-10-12 ruling named). With every ramp length forced to 0 in `LiveRamps::for_session` the merged tree
-gives `cb10fbface44a3a4`, main's value, so the move is the ramps and nothing else; it differs from the pre-rebase
-value because stream A2's carry keeps a ramp in flight across the audit's swaps where the old base restarted it.
-No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's expected-resource
-digests are unchanged.
+gives `cb10fbface44a3a4`, main's value, so the move is the ramps and nothing else. No pinned render digest moved:
+`ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's expected-resource digests are unchanged.
+
+*Why the merged tree differs from the pre-rebase tree (one discriminating run, rebase onto `70804d3c2`).* Stream
+A2's carry keeps a strip's running ramp across a plan swap where the old base restarted the strip at rest. The audit
+has one swap; A2's carry keeps the running call-0 ramp in flight across it. To test that this is the whole
+difference, a scratch copy of the final tree (`git archive HEAD`, built with a separate `CARGO_TARGET_DIR`, both
+deleted afterwards; no committed change) kept the ramps on and removed the carry: no `GraphStripMove` is pushed for
+any strip, so every strip restarts. The patch, in `resolve_strip_carry` (`crates/host-core/src/prepare.rs`), right
+after the `if rows ... FaderMatrix { carries = [both, both]; }` block:
+
+```
++        carries = [false, false]; // PROBE: no strip carries, every strip restarts
+```
+
+The release `target/release/audit capi` then gave `pcm_digest` `a9738fa800afcab3`, with 0 allocations. So the
+`a9738fa800afcab3` -> `76525e7ef9e78cf4` difference is A2's carry of the running call-0 ramp, as expected.
 
 | pin | file | main -> merged tree | reason |
 |---|---|---|---|

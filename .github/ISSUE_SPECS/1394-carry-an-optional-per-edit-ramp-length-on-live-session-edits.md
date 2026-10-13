@@ -291,8 +291,8 @@ registry gains the per-edit table; `docs/C_ABI_V1_QUALIFICATION.md` states the o
 `docs/CONTROL_PROTOCOL_CONFORMANCE.md`, `fuzz/corpus/complete-schema-manifest.md`). The corpus's
 `SetTrackFader` sets `ramp_samples: Some(480)`; every other edit encodes an absent field to the same bytes,
 so that edit is the whole move (frame count 46 and edit count 46 unchanged; confirmed by the corpus staying
-green at the old hash with `None` at `70a0a8991`). **No render digest moved:** `audit capi` `pcm_digest
-a9738fa800afcab3`, the browser module's expected-resource digests (`check-browser-expected-resources.py
+green at the old hash with `None` at `70a0a8991`). **No render digest moved:** `audit capi` `pcm_digest`
+(the post-D4 value recorded in #1054), the browser module's expected-resource digests (`check-browser-expected-resources.py
 --artifacts` green with no edit), and the builtins fixtures are unchanged.
 
 **Test value and mutation runs** (defect applied by a text edit, test run, file restored; "R" red, "G"
@@ -322,7 +322,7 @@ tests, the new integration file, all others); `-p host-core --features test-supp
 live_delta` (34; the spec's command without `control-provider` runs 0 tests, as #1054 recorded);
 `-p capi`; `-p conformance` (incl. `conformance_corpus`); the `test-debug-a` leg (133 `ok` results, no
 failures) and its doctest leg; `cargo test --locked --release -p audit` (33); `cargo build --locked --release
--p audit && ./target/release/audit capi` (0 allocations, 0 syscalls, `pcm_digest a9738fa800afcab3`);
+-p audit && ./target/release/audit capi` (0 allocations, 0 syscalls, `pcm_digest` (the post-D4 value recorded in #1054));
 `bash scripts/run-protocol-allocation-audit.sh target/release/audit`; `bash scripts/check-capi-abi.sh`;
 `bash scripts/check-protocol-wasm-parity.sh` (ok, simd128); `bash scripts/check-builtins-fixtures.sh . target/release/audit`;
 `check-protocol-control-policy.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`,
@@ -494,13 +494,9 @@ message extended (`b5ca077f6` below).
 - *Retained bytes.* The token still carries `EditRamps`; see the ceilings below.
 
 **Digests and byte pins on the merged tree.** Each is recomputed on the merged tree and re-pinned on its own, on top
-of main's value. The only render-visible number that moved is the *unpinned* `audit capi` `pcm_digest`: main
-`cb10fbface44a3a4`, merged tree `76525e7ef9e78cf4` (the E2 pre-rebase tree had `a9738fa800afcab3`, the value
-root's 2026-10-12 ruling named). With every ramp length forced to 0 in `LiveRamps::for_session` the merged tree
-gives `cb10fbface44a3a4`, main's value, so the move is the ramps and nothing else; it differs from the pre-rebase
-value because stream A2's carry keeps a ramp in flight across the audit's swaps where the old base restarted it.
-No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's expected-resource
-digests are unchanged.
+of main's value. No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's
+expected-resource digests are unchanged. The unpinned `audit capi` `pcm_digest` moves only because of the ramps (#1054
+gate 7); its values and the run that isolates the effect of stream A2's carry are in #1054's Attempt record.
 
 | pin | file | main -> merged tree | reason |
 |---|---|---|---|
