@@ -136,9 +136,11 @@ into a submix is `live`; a route from `post_fader` or `post_pan` into the output
 reallocated. Contract identity stays V1; the Rust names are unversioned. Wire form, in the TLV
 encoding of `docs/CONTROL_BTLV_V1.md`:
 
-- **`structure_epoch`.** A `U64` that the core advances on every commit that changes the row set
-  or the row order (any structural edit, and nothing else). Handles are valid only within one
-  `structure_epoch`.
+- **`structure_epoch`.** A `U64` that the core advances on every commit after which the address
+  sequence, a header row, or any control row's descriptor (every field except `value`) differs,
+  live commits included (a live `matrix_mode` switch flips `active`). A client therefore never holds
+  a stale descriptor. Handles are valid only within one `structure_epoch`. (Coordinator amendment
+  of 2026-10-13, found in #1552.)
 - **`CONTROL_LIST_GET` request:** `structure_epoch U64` (`0` for the first page), `after_handle
   U32`, `limit U16`, optional `owner` filter (`owner_kind U8`, `owner_id UTF8`). A non-zero
   `structure_epoch` that is not the current one is refused with `control.list.stale`; the caller
