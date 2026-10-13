@@ -523,6 +523,12 @@ fn effect_records<'a>(
     }
     let effect_before = &racks_before.in_chain_order()[rack][index];
     let effect_after = &racks_after.in_chain_order()[rack][index];
+    // This lowering carries a bypass and parameters. Any other changed effect row (today the link
+    // mode, whose row is rebuild-only) has no record here, so a live classification of it would be
+    // acked and then dropped: it is a rebuild until its own lowering exists.
+    if effect_before.link_mode != effect_after.link_mode {
+        return Err(LiveRebuild::Structure);
+    }
     let bypass = (effect_before.bypass != effect_after.bypass).then_some(effect_after.bypass);
     let (mut records, targets) = if same_params(&effect_before.params, &effect_after.params) {
         (Vec::new(), None)
@@ -646,4 +652,57 @@ fn same_params(before: &[EffectParam], after: &[EffectParam]) -> bool {
                 && left.unit == right.unit
                 && left.value.to_bits() == right.value.to_bits()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session::{LinkMode, parse_session_json};
+
+    const FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+
+    /// The lowering of the fixture's insert `eq` between the fixture and `edit` applied to it.
+    fn insert_records(edit: impl FnOnce(&mut Effect)) -> Result<Option<usize>, LiveRebuild> {
+        let current = parse_session_json(FIXTURE).expect("fixture parses");
+        let mut next = current.clone();
+        let eq = StableId::parse("eq").expect("stable id");
+        edit(
+            next.tracks[0]
+                .inserts
+                .effects
+                .iter_mut()
+                .find(|effect| effect.id == eq)
+                .expect("the fixture's insert"),
+        );
+        let (current, next) = (&current, &next);
+        let ctx = Context {
+            current,
+            next,
+            ramps: LiveRamps::for_session(next),
+            edit: StripEditRamps::default(),
+        };
+        let target = Target {
+            before: strip_of(current, &next.tracks[0].id).expect("strip"),
+            after: strip_of(next, &next.tracks[0].id).expect("strip"),
+            instance: None,
+        };
+        effect_records(&ctx, &target, &Section::Inserts(eq))
+            .map(|records| records.map(|records| records.records.len()))
+    }
+
+    /// Batch 2 review fold item 2. Red if a changed effect row that is neither the bypass nor a
+    /// parameter (the link mode) lowers to no record: a live classification of it would be acked
+    /// and dropped, and the next row made live would repeat the bug. A bypass flip stays one
+    /// record, so the guard is not a blanket refusal.
+    #[test]
+    fn a_changed_effect_row_without_a_record_is_a_rebuild() {
+        assert!(matches!(
+            insert_records(|effect| effect.link_mode = LinkMode::Maximum),
+            Err(LiveRebuild::Structure)
+        ));
+        assert_eq!(
+            insert_records(|effect| effect.bypass = !effect.bypass),
+            Ok(Some(1))
+        );
+    }
 }
