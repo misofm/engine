@@ -717,6 +717,9 @@ pub struct EnumChoice {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParameterDescriptor {
     pub id: ParameterId,
+    /// The stable machine name (decision 17, C3): `[a-z][a-z0-9_]*`, unique within the effect.
+    /// `display_name` is the label a person reads.
+    pub name: &'static str,
     pub display_name: &'static str,
     pub display_unit: &'static str,
     pub unit: ParameterUnit,
@@ -738,6 +741,10 @@ pub struct ParameterDescriptor {
     /// precision before lattice construction. Persisted document text is compared with those
     /// decimal renderings and the generated interior points without passing through `f32`.
     pub lattice: ParameterLattice,
+    /// Why this parameter is prepared (`automation_rate` is `None`), and nothing otherwise
+    /// (decision 17, D1). `validate_descriptor` refuses a prepared parameter without a reason and
+    /// a reason on any other parameter, with [`DescriptorDiagnosticCode::PreparedReason`].
+    pub prepared_reason: Option<control::PreparedReason>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PortDescriptor {
@@ -836,6 +843,8 @@ pub enum DescriptorDiagnosticCode {
     ObservationOrder,
     Observation,
     Lattice,
+    PreparedReason,
+    ParameterName,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DescriptorError {
@@ -990,6 +999,12 @@ fn observation_valid(d: &EffectDescriptor, o: &ObservationDescriptor) -> bool {
         && (!matches!(o.channels, ObservationChannels::PerLane)
             || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
 }
+/// Whether `name` is a stable machine name: `[a-z][a-z0-9_]*` (decision 17, C3).
+fn valid_machine_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
 pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
@@ -1016,8 +1031,14 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             code: DescriptorDiagnosticCode::LinkModes,
         })
     }
-    let (mut prior, mut ids) = (0, BTreeSet::new());
+    let (mut prior, mut ids, mut names) = (0, BTreeSet::new(), BTreeSet::new());
     for p in d.parameters {
+        if !valid_machine_name(p.name) || !names.insert(p.name) {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: DescriptorDiagnosticCode::ParameterName,
+            })
+        }
         if p.id.0 == 0 || !ids.insert(p.id.0) {
             e.push(DescriptorError {
                 path: "parameters",
@@ -1035,6 +1056,14 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::Parameter,
+            })
+        }
+        if (p.automation_rate == AutomationRate::None) != p.prepared_reason.is_some()
+            || p.prepared_reason.is_some_and(|r| !valid_text(r.reopen))
+        {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: DescriptorDiagnosticCode::PreparedReason,
             })
         }
         if validate_parameter_lattice(p).is_err() {
@@ -3306,6 +3335,7 @@ mod continuous_mapping_validity_tests {
     const BASE: ParameterDescriptor = ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
+        name: "gain",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,
@@ -3325,6 +3355,7 @@ mod continuous_mapping_validity_tests {
             ParameterDomain::Continuous,
             ParameterMapping::Linear,
         ),
+        prepared_reason: None,
     };
 
     enum TypedExpectation {

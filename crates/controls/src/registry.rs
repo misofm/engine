@@ -2,12 +2,13 @@
 
 use session::SessionModel;
 
+use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, check};
 use crate::effective::{MonitorOverlay, effective};
 use crate::error::ControlError;
 use crate::lane::Side;
-use crate::{builtin_rows, route, session_rows, strip, vca};
+use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
 
 /// One control of a session: where it is, what it is, and its committed value.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,8 +55,8 @@ pub(crate) fn push_control(
 /// (solo) reports the overlay's.
 ///
 /// Order: strips in [`SessionModel::strips`] order, then routes, then VCAs, then the session's
-/// rows. Within a strip: its own rows, then its builtin rows (then the console and insert
-/// sections, which have no rows until effect rows exist). A per-lane row is listed as `left`
+/// rows. Within a strip: its own rows, then its builtin rows, then the effect rows in chain order: the pre-insert console slots, the inserts, the post-insert
+/// console slots (each instance: bypass, parameters, link mode). A per-lane row is listed as `left`
 /// then `right`; a shared row once, as `both`. Every address appears exactly once.
 pub fn list(
     model: &SessionModel,
@@ -68,6 +69,7 @@ pub fn list(
         let soloed = overlay.is_soloed(strip.id);
         strip::push_rows(
             &mut rows,
+            &model.console,
             &strip,
             &effective.strips[index],
             soloed,
@@ -142,6 +144,7 @@ fn owner_rows(
             let soloed = overlay.is_soloed(strip.id);
             strip::push_rows(
                 &mut rows,
+                &model.console,
                 &strip,
                 &effective.strips[index],
                 soloed,
@@ -230,6 +233,12 @@ pub fn set(
         .ok_or(ControlError::AddressUnknown)?
         .descriptor;
     check(&descriptor, address.lane, value, ramp)?;
+    // The effect contract treats the two zeros as one value and preparation normalises them.
+    let value = if descriptor.family == Family::Effect {
+        effect_contract::normalize_zero(value)
+    } else {
+        value
+    };
     if descriptor.scope == ControlScope::Monitor {
         return Err(ControlError::Monitor);
     }
@@ -268,6 +277,9 @@ fn write(
             sides
                 .iter()
                 .try_for_each(|&side| builtin_rows::write(&mut target, control, side, value))
+        }
+        (Owner::Strip(_), Section::Console(_) | Section::Inserts(_)) => {
+            effect_rows::write(model, address, value)
         }
         (Owner::Route(id), Section::Own) => {
             let target = model

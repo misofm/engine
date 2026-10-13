@@ -4,8 +4,9 @@
 
 use controls::{ControlAddress, ControlRow, Lane, Owner, Section};
 use session::{
-    ChannelMatrix, DualMonoFader, MatrixOrPan, Route, RouteDestination, RouteSource, SendTap,
-    SessionModel, StableId, Submix, Vca, parse_session_json,
+    ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoFader, Effect, EffectIdentity,
+    EffectQuality, LinkMode, MatrixOrPan, Rack, Route, RouteDestination, RouteSource, SendTap,
+    SessionModel, SidechainDeclaration, StableId, Submix, Vca, parse_session_json,
 };
 
 pub(crate) const RATE: u32 = 48_000;
@@ -134,4 +135,90 @@ pub(crate) fn row_of(model: &SessionModel, address: &ControlAddress) -> ControlR
     controls::list(model, &controls::MonitorOverlay::default(), RATE)
         .find(|row| row.address == *address)
         .expect("listed address")
+}
+
+/// The launch effects, as the session spells their identity.
+pub(crate) const LAUNCH_EFFECTS: [&str; 8] = [
+    "miso.parametric-eq",
+    "miso.compressor",
+    "miso.gate-expander",
+    "miso.multiband-compressor",
+    "miso.true-peak-limiter",
+    "miso.soft-clip",
+    "miso.transient-shaper",
+    "miso.delay",
+];
+
+/// The insert ID of a launch effect: `ins-` and the effect's name.
+pub(crate) fn insert_id(effect: &str) -> StableId {
+    id(&format!("ins-{}", effect.trim_start_matches("miso.")))
+}
+
+fn native(effect: &str) -> EffectIdentity {
+    EffectIdentity::Native {
+        effect_id: id(effect),
+    }
+}
+
+/// [`fixture`] with a pre-insert console slot (`glue`, a compressor), a post-insert slot (`ceiling`,
+/// a true-peak limiter) and one insert of every launch effect
+/// on every strip. Each console entry and insert has no parameters, so every value is its default.
+pub(crate) fn effects_fixture() -> SessionModel {
+    let mut model = fixture();
+    model.console = Console {
+        pre_insert: vec![ConsoleSlot {
+            slot: id("glue"),
+            identity: native("miso.compressor"),
+            quality: EffectQuality::Normal,
+            link_mode: LinkMode::DualMono,
+        }],
+        post_insert: vec![ConsoleSlot {
+            slot: id("ceiling"),
+            identity: native("miso.true-peak-limiter"),
+            quality: EffectQuality::Normal,
+            link_mode: LinkMode::DualMono,
+        }],
+    };
+    let entries = || {
+        ["glue", "ceiling"]
+            .map(|slot| ConsoleEntry {
+                slot: id(slot),
+                bypass: false,
+                params: Vec::new(),
+            })
+            .to_vec()
+    };
+    let rack = || Rack {
+        effects: LAUNCH_EFFECTS
+            .iter()
+            .map(|effect| Effect {
+                id: insert_id(effect),
+                identity: native(effect),
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            })
+            .collect(),
+    };
+    for track in &mut model.tracks {
+        track.console = entries();
+        track.inserts = rack();
+    }
+    for submix in &mut model.submixes {
+        submix.console = entries();
+        submix.inserts = rack();
+    }
+    model
+}
+
+/// The address of an effect row in strip `strip`'s insert `effect`.
+pub(crate) fn insert_row(strip: &str, effect: &str, control: u32, lane: Lane) -> ControlAddress {
+    address(
+        Owner::Strip(id(strip)),
+        Section::Inserts(insert_id(effect)),
+        control,
+        lane,
+    )
 }

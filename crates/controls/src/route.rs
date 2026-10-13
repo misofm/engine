@@ -109,8 +109,9 @@ pub(crate) static ROWS: [RouteRow; 8] = [
         id: GAIN_DB,
         descriptor: ControlDescriptor {
             name: "gain_db",
-            display_name: "Send gain",
+            display_name: "Send Gain",
             unit: ParameterUnit::Db,
+            display_unit: "dB",
             minimum: ROUTE_GAIN_DB_MINIMUM,
             maximum: ROUTE_GAIN_DB_MAXIMUM,
             taper: Taper::Decibel,
@@ -129,7 +130,7 @@ pub(crate) static ROWS: [RouteRow; 8] = [
         id: MUTE,
         descriptor: ControlDescriptor {
             name: "mute",
-            display_name: "Send mute",
+            display_name: "Send Mute",
             kind: ControlKind::Toggle,
             minimum: 0.0,
             maximum: 1.0,
@@ -148,28 +149,28 @@ pub(crate) static ROWS: [RouteRow; 8] = [
     matrix_row!(
         MATRIX_LL,
         "matrix_ll",
-        "Send matrix left from left",
+        "Send Matrix Left from Left",
         1.0,
         ll
     ),
     matrix_row!(
         MATRIX_LR,
         "matrix_lr",
-        "Send matrix left from right",
+        "Send Matrix Left from Right",
         0.0,
         lr
     ),
     matrix_row!(
         MATRIX_RL,
         "matrix_rl",
-        "Send matrix right from left",
+        "Send Matrix Right from Left",
         0.0,
         rl
     ),
     matrix_row!(
         MATRIX_RR,
         "matrix_rr",
-        "Send matrix right from right",
+        "Send Matrix Right from Right",
         1.0,
         rr
     ),
@@ -177,7 +178,7 @@ pub(crate) static ROWS: [RouteRow; 8] = [
         id: FOLLOWS_MUTE,
         descriptor: ControlDescriptor {
             name: "follows_mute",
-            display_name: "Send follows mute",
+            display_name: "Send Follows Mute",
             kind: ControlKind::Toggle,
             minimum: 0.0,
             maximum: 1.0,
@@ -199,7 +200,7 @@ pub(crate) static ROWS: [RouteRow; 8] = [
         id: EFFECTIVE_GATE,
         descriptor: ControlDescriptor {
             name: "effective_gate",
-            display_name: "Effective gate",
+            display_name: "Effective Gate",
             kind: ControlKind::Toggle,
             lanes: Lanes::PerLane,
             minimum: 0.0,

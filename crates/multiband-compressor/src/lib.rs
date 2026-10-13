@@ -36,6 +36,7 @@
 //! path. Denormals are handled by `flush` on the six recursive state words, and non-finite output
 //! is caught once per block by `effect_runtime::bank` (D7).
 
+use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
@@ -138,6 +139,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 #[allow(clippy::too_many_arguments)]
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
@@ -151,6 +153,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit,
@@ -171,26 +174,39 @@ const fn parameter(
             ParameterDomain::Continuous,
             mapping,
         ),
+        prepared_reason: None,
     }
 }
 
+/// Why the crossover is prepared: decision 15 E2 makes it live and #1338 builds that, so the row
+/// is rebuild-only until then (decision 17, D1).
+const CROSSOVER_REASON: Option<PreparedReason> = Some(PreparedReason {
+    reason: RebuildReason::RuledLiveNotBuilt { issue: 1338 },
+    reopen: "#1338 makes the crossover live; its last step flips the row",
+});
+
 /// Frozen parameter order and stable numeric IDs for the V1 two-band product.
 pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
-    parameter(
-        1,
-        "crossover",
-        "Hz",
-        ParameterUnit::Hz,
-        80.0,
-        8_000.0,
-        1_000.0,
-        ParameterMapping::Logarithmic,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
+    ParameterDescriptor {
+        prepared_reason: CROSSOVER_REASON,
+        ..parameter(
+            1,
+            "crossover",
+            "crossover",
+            "Hz",
+            ParameterUnit::Hz,
+            80.0,
+            8_000.0,
+            1_000.0,
+            ParameterMapping::Logarithmic,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        )
+    },
     parameter(
         3,
+        "low_threshold",
         "low_threshold",
         "dB",
         ParameterUnit::Db,
@@ -205,6 +221,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     parameter(
         4,
         "low_ratio",
+        "low_ratio",
         "ratio",
         ParameterUnit::Ratio,
         1.0,
@@ -217,6 +234,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         5,
+        "low_attack",
         "low_attack",
         "ms",
         ParameterUnit::Milliseconds,
@@ -231,6 +249,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     parameter(
         6,
         "low_release",
+        "low_release",
         "ms",
         ParameterUnit::Milliseconds,
         5.0,
@@ -243,6 +262,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         7,
+        "low_makeup",
         "low_makeup",
         "dB",
         ParameterUnit::Db,
@@ -257,6 +277,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     parameter(
         8,
         "high_threshold",
+        "high_threshold",
         "dB",
         ParameterUnit::Db,
         -80.0,
@@ -269,6 +290,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         9,
+        "high_ratio",
         "high_ratio",
         "ratio",
         ParameterUnit::Ratio,
@@ -283,6 +305,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     parameter(
         10,
         "high_attack",
+        "high_attack",
         "ms",
         ParameterUnit::Milliseconds,
         0.1,
@@ -296,6 +319,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     parameter(
         11,
         "high_release",
+        "high_release",
         "ms",
         ParameterUnit::Milliseconds,
         5.0,
@@ -308,6 +332,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         12,
+        "high_makeup",
         "high_makeup",
         "dB",
         ParameterUnit::Db,

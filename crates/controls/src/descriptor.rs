@@ -50,14 +50,9 @@ pub enum Motion {
     Fixed,
 }
 
-/// One named choice of an enumeration.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Choice {
-    /// The value written to select this choice.
-    pub value: f32,
-    /// The stable machine label.
-    pub label: &'static str,
-}
+/// One named choice of an enumeration: the effect contract's own type, so an effect parameter's
+/// choices are used as declared and not copied.
+pub use effect_contract::EnumChoice as Choice;
 
 /// What one control is: everything a frontend or an agent needs to draw it, and everything the
 /// validator needs to check a write. The same type describes every control.
@@ -71,6 +66,8 @@ pub struct ControlDescriptor {
     pub display_name: &'static str,
     /// The unit of the value.
     pub unit: ParameterUnit,
+    /// The unit as a person reads it (`dB`, `Hz`, `ms`, `samples`), or `""` for a unitless value.
+    pub display_unit: &'static str,
     /// Continuous, toggle or enumeration.
     pub kind: ControlKind,
     /// Per-lane or shared.
@@ -113,19 +110,6 @@ impl ControlDescriptor {
             && self.family != Family::Setting
     }
 
-    /// The unit as a person reads it.
-    #[must_use]
-    pub const fn display_unit(&self) -> &'static str {
-        match self.unit {
-            ParameterUnit::Db => "dB",
-            ParameterUnit::Hz => "Hz",
-            ParameterUnit::Milliseconds => "ms",
-            ParameterUnit::Samples => "samples",
-            ParameterUnit::Ratio => ":1",
-            ParameterUnit::Linear => "",
-        }
-    }
-
     /// Whether `value` is in this control's domain. Values are not snapped to the lattice.
     #[must_use]
     pub fn contains(&self, value: f32) -> bool {
@@ -133,9 +117,15 @@ impl ControlDescriptor {
             return false;
         }
         match self.kind {
-            // The exact encodings, as the builtins' own boolean domain has it.
+            // The exact encodings, as the builtins' own boolean domain has it (an effect's are below).
             ControlKind::Toggle => {
-                value.to_bits() == 0.0_f32.to_bits() || value.to_bits() == 1.0_f32.to_bits()
+                if self.family == Family::Effect {
+                    // The effect contract's boolean domain (`parameter_value_valid`) takes the two
+                    // zeros as one value, and preparation normalises them.
+                    value == 0.0 || value == 1.0
+                } else {
+                    value.to_bits() == 0.0_f32.to_bits() || value.to_bits() == 1.0_f32.to_bits()
+                }
             }
             ControlKind::Enumeration => self.choices.iter().any(|choice| choice.value == value),
             ControlKind::Continuous => {
@@ -197,6 +187,7 @@ pub(crate) const BASE: ControlDescriptor = ControlDescriptor {
     name: "",
     display_name: "",
     unit: ParameterUnit::Linear,
+    display_unit: "",
     kind: ControlKind::Continuous,
     lanes: Lanes::Shared,
     minimum: 0.0,

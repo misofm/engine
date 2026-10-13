@@ -32,6 +32,7 @@ pub(crate) struct SessionRow {
 /// What a session row starts from: a length in `[0, 1000]` ms.
 const MILLISECONDS: ControlDescriptor = ControlDescriptor {
     unit: ParameterUnit::Milliseconds,
+    display_unit: "ms",
     maximum: CONTROL_SMOOTHING_MS_MAXIMUM,
     lattice: ParameterLattice::arithmetic(1.0, 0),
     family: Family::Setting,
@@ -44,7 +45,7 @@ pub(crate) static ROWS: [SessionRow; 3] = [
         id: FADER_MS,
         descriptor: ControlDescriptor {
             name: "fader_ms",
-            display_name: "Fader ramp",
+            display_name: "Fader Ramp",
             default: CONTROL_SMOOTHING_DEFAULT.fader_ms,
             ..MILLISECONDS
         },
@@ -55,7 +56,7 @@ pub(crate) static ROWS: [SessionRow; 3] = [
         id: MUTE_MS,
         descriptor: ControlDescriptor {
             name: "mute_ms",
-            display_name: "Mute ramp",
+            display_name: "Mute Ramp",
             default: CONTROL_SMOOTHING_DEFAULT.mute_ms,
             ..MILLISECONDS
         },
@@ -66,7 +67,7 @@ pub(crate) static ROWS: [SessionRow; 3] = [
         id: PAN_MS,
         descriptor: ControlDescriptor {
             name: "pan_ms",
-            display_name: "Pan ramp",
+            display_name: "Pan Ramp",
             default: CONTROL_SMOOTHING_DEFAULT.pan_ms,
             ..MILLISECONDS
         },

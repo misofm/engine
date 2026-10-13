@@ -7038,6 +7038,7 @@ mod tests {
                 None => panic!("nonzero"),
             },
             display_name: "Gain",
+            name: "gain",
             display_unit: "x",
             unit: effect_contract::ParameterUnit::Linear,
             domain: effect_contract::ParameterDomain::Continuous,
@@ -7053,6 +7054,7 @@ mod tests {
             automatable: true,
             enum_choices: &[],
             lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
+            prepared_reason: None,
         }];
     static GAIN_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: GAIN_ID,

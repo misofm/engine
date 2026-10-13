@@ -917,6 +917,7 @@ mod tests {
         ParameterDescriptor {
             id: ParameterId(1),
             display_name: "frequency",
+            name: "frequency",
             display_unit: "Hz",
             unit: ParameterUnit::Hz,
             domain: ParameterDomain::Continuous,
@@ -932,6 +933,7 @@ mod tests {
             automatable: true,
             enum_choices: &[],
             lattice,
+            prepared_reason: None,
         }
     }
 

@@ -32,6 +32,17 @@ pub enum RebuildReason {
     },
 }
 
+/// Why a prepared effect parameter (`AutomationRate::None`) is not live, recorded in its own
+/// descriptor row (decision 17, D1): the reason, and the condition that reopens the question or,
+/// for [`RebuildReason::RuledLiveNotBuilt`], the issue that flips it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedReason {
+    /// Why the value is rebuild-only.
+    pub reason: RebuildReason,
+    /// The reopening condition in one sentence, or the issue that makes the row live.
+    pub reopen: &'static str,
+}
+
 /// How a change to one control reaches a running plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlClass {

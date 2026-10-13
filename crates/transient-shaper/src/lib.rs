@@ -91,6 +91,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     minimum: f32,
@@ -99,6 +100,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit: ParameterUnit::Linear,
@@ -119,14 +121,15 @@ const fn parameter(
             ParameterDomain::Continuous,
             ParameterMapping::Linear,
         ),
+        prepared_reason: None,
     }
 }
 
 /// Frozen V1 parameter rows in stable numeric-ID order.
 pub const TRANSIENT_SHAPER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
-    parameter(1, "attack amount", "%", -1.0, 1.0, 0.0),
-    parameter(2, "sustain amount", "%", -1.0, 1.0, 0.0),
-    parameter(3, "mix", "linear", 0.0, 1.0, 1.0),
+    parameter(1, "attack_amount", "attack amount", "%", -1.0, 1.0, 0.0),
+    parameter(2, "sustain_amount", "sustain amount", "%", -1.0, 1.0, 0.0),
+    parameter(3, "mix", "mix", "linear", 0.0, 1.0, 1.0),
 ];
 
 const PORTS: [PortDescriptor; 2] = [

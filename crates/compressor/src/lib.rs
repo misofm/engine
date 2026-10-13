@@ -137,6 +137,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 #[allow(clippy::too_many_arguments)]
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
@@ -150,6 +151,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit,
@@ -170,6 +172,7 @@ const fn parameter(
             ParameterDomain::Continuous,
             mapping,
         ),
+        prepared_reason: None,
     }
 }
 
@@ -177,6 +180,7 @@ const fn parameter(
 pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     parameter(
         1,
+        "threshold",
         "threshold",
         "dB",
         ParameterUnit::Db,
@@ -192,6 +196,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
         2,
         "ratio",
         "ratio",
+        "ratio",
         ParameterUnit::Ratio,
         1.0,
         20.0,
@@ -203,6 +208,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         3,
+        "knee",
         "knee",
         "dB",
         ParameterUnit::Db,
@@ -217,6 +223,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     parameter(
         4,
         "attack",
+        "attack",
         "ms",
         ParameterUnit::Milliseconds,
         0.1,
@@ -229,6 +236,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         5,
+        "release",
         "release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -243,6 +251,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     parameter(
         6,
         "makeup",
+        "makeup",
         "dB",
         ParameterUnit::Db,
         -24.0,
@@ -255,6 +264,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         7,
+        "mix",
         "mix",
         "linear",
         ParameterUnit::Linear,

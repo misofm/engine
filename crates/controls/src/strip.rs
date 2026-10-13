@@ -3,12 +3,14 @@
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
-    DualMonoBuiltins, DualMonoFader, MatrixOrPan, SessionModel, StableId, StripKind, StripRef,
+    Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, MatrixOrPan, SessionModel,
+    StableId, StripKind, StripRef,
 };
 
 use crate::address::{Owner, Section};
 use crate::builtin_rows;
 use crate::descriptor::{BASE, Choice, ControlDescriptor, Lanes, Motion};
+use crate::effect_rows::{self, Instance};
 use crate::effective::EffectiveStrip;
 use crate::error::ControlError;
 use crate::lane::Side;
@@ -76,7 +78,7 @@ pub(crate) static ROWS: [StripRow; 5] = [
         on_submix: true,
         descriptor: ControlDescriptor {
             name: "matrix_mode",
-            display_name: "Pan or matrix",
+            display_name: "Pan or Matrix",
             kind: ControlKind::Enumeration,
             taper: Taper::Stepped,
             lattice: ParameterLattice::indices(),
@@ -111,8 +113,9 @@ pub(crate) static ROWS: [StripRow; 5] = [
         on_submix: true,
         descriptor: ControlDescriptor {
             name: "pan_window_samples",
-            display_name: "Pan window",
+            display_name: "Pan Window",
             unit: ParameterUnit::Samples,
+            display_unit: "samples",
             maximum: PAN_WINDOW_SAMPLES_MAXIMUM,
             lattice: ParameterLattice::arithmetic(1.0, 0),
             ..BASE
@@ -130,8 +133,9 @@ pub(crate) static ROWS: [StripRow; 5] = [
         on_submix: true,
         descriptor: ControlDescriptor {
             name: "effective_fader_db",
-            display_name: "Effective fader",
+            display_name: "Effective Fader",
             unit: ParameterUnit::Db,
+            display_unit: "dB",
             lanes: Lanes::PerLane,
             minimum: -144.0,
             maximum: 24.0,
@@ -150,7 +154,7 @@ pub(crate) static ROWS: [StripRow; 5] = [
         on_submix: true,
         descriptor: ControlDescriptor {
             name: "effective_mute",
-            display_name: "Effective mute",
+            display_name: "Effective Mute",
             kind: ControlKind::Toggle,
             lanes: Lanes::PerLane,
             taper: Taper::Stepped,
@@ -245,10 +249,12 @@ pub(crate) fn strip_mut<'a>(model: &'a mut SessionModel, id: &StableId) -> Optio
     })
 }
 
-/// Append every control row of one strip, in listing order: own, then builtins. The console and
-/// insert sections are empty until effect rows exist (decision 17, S2).
+/// Append every control row of one strip, in listing order: own, then builtins, then the effect
+/// rows in chain order (decision 17, C4): the pre-insert console slots, the inserts, then the
+/// post-insert console slots.
 pub(crate) fn push_rows(
     out: &mut Vec<ControlRow>,
+    console: &Console,
     strip: &StripRef<'_>,
     effective: &EffectiveStrip,
     soloed: bool,
@@ -279,6 +285,39 @@ pub(crate) fn push_rows(
             row.id,
             &descriptor,
             |side| builtin_rows::read(strip, row, side),
+        );
+    }
+    // Chain order: the pre-insert slots, the inserts, then the post-insert slots, each in declared
+    // order. A validated strip carries one entry per slot, in slot order (`pre_insert` first); a
+    // surplus on either side is not listed.
+    let (pre_entries, post_entries) = strip
+        .console
+        .split_at(console.pre_insert.len().min(strip.console.len()));
+    push_console(out, strip, &console.pre_insert, pre_entries);
+    for effect in &strip.inserts.effects {
+        effect_rows::push_rows(
+            out,
+            strip.id,
+            &Section::Inserts(effect.id.clone()),
+            &Instance::insert(effect),
+        );
+    }
+    push_console(out, strip, &console.post_insert, post_entries);
+}
+
+/// The rows of one console section of a strip.
+fn push_console(
+    out: &mut Vec<ControlRow>,
+    strip: &StripRef<'_>,
+    slots: &[ConsoleSlot],
+    entries: &[ConsoleEntry],
+) {
+    for (slot, entry) in slots.iter().zip(entries) {
+        effect_rows::push_rows(
+            out,
+            strip.id,
+            &Section::Console(slot.slot.clone()),
+            &Instance::console(&slot.identity, entry),
         );
     }
 }

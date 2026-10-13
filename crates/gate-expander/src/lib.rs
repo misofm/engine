@@ -22,6 +22,7 @@
 pub mod corpus;
 pub mod kernel;
 
+use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
@@ -81,6 +82,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 #[allow(clippy::too_many_arguments)]
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
@@ -94,6 +96,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit,
@@ -114,13 +117,22 @@ const fn parameter(
             ParameterDomain::Continuous,
             mapping,
         ),
+        prepared_reason: None,
     }
 }
+
+/// Why the attack, hold and release are prepared: decision 15 E2 makes them live and #1336 builds
+/// that, so the row is rebuild-only until then (decision 17, D1).
+const TIMING_REASON: Option<PreparedReason> = Some(PreparedReason {
+    reason: RebuildReason::RuledLiveNotBuilt { issue: 1336 },
+    reopen: "#1336 makes the gate's attack, hold and release live; its last step flips the row",
+});
 
 /// Frozen V1 gate/expander parameters. Descriptor position and stable numeric ID agree.
 pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
+        "threshold",
         "threshold",
         "dB",
         ParameterUnit::Db,
@@ -136,6 +148,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         2,
         "ratio",
         "ratio",
+        "ratio",
         ParameterUnit::Ratio,
         1.0,
         20.0,
@@ -147,6 +160,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     ),
     parameter(
         3,
+        "range",
         "range",
         "dB",
         ParameterUnit::Db,
@@ -161,6 +175,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         4,
         "hysteresis",
+        "hysteresis",
         "dB",
         ParameterUnit::Db,
         0.0,
@@ -171,45 +186,57 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         SmoothingRule::Linear,
         64,
     ),
-    parameter(
-        5,
-        "attack",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.1,
-        50.0,
-        1.0,
-        ParameterMapping::Logarithmic,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
-    parameter(
-        6,
-        "hold",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        1000.0,
-        100.0,
-        ParameterMapping::Linear,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
-    parameter(
-        7,
-        "release",
-        "ms",
-        ParameterUnit::Milliseconds,
-        5.0,
-        2000.0,
-        100.0,
-        ParameterMapping::Logarithmic,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
-    ),
+    ParameterDescriptor {
+        prepared_reason: TIMING_REASON,
+        ..parameter(
+            5,
+            "attack",
+            "attack",
+            "ms",
+            ParameterUnit::Milliseconds,
+            0.1,
+            50.0,
+            1.0,
+            ParameterMapping::Logarithmic,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        )
+    },
+    ParameterDescriptor {
+        prepared_reason: TIMING_REASON,
+        ..parameter(
+            6,
+            "hold",
+            "hold",
+            "ms",
+            ParameterUnit::Milliseconds,
+            0.0,
+            1000.0,
+            100.0,
+            ParameterMapping::Linear,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        )
+    },
+    ParameterDescriptor {
+        prepared_reason: TIMING_REASON,
+        ..parameter(
+            7,
+            "release",
+            "release",
+            "ms",
+            ParameterUnit::Milliseconds,
+            5.0,
+            2000.0,
+            100.0,
+            ParameterMapping::Logarithmic,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        )
+    },
 ];
 
 const PORTS: [PortDescriptor; 3] = [

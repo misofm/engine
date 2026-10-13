@@ -42,6 +42,7 @@ const SIDECHAIN_IN: PortId = match PortId::new("sidechain-in") {
 const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Gain",
+    name: "gain",
     display_unit: "linear",
     unit: ParameterUnit::Linear,
     domain: ParameterDomain::Continuous,
@@ -57,6 +58,7 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     automatable: true,
     enum_choices: &[],
     lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
+    prepared_reason: None,
 }];
 const PORTS: [PortDescriptor; 3] = [
     PortDescriptor {

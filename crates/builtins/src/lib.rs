@@ -242,6 +242,10 @@ impl Default for BuiltinParameters {
 pub struct BuiltinParameterDescriptor {
     pub id: u32,
     pub name: &'static str,
+    /// The name a person reads (decision 17, D6).
+    pub display_name: &'static str,
+    /// The unit as a person reads it, or `""` for a unitless value (decision 17, D6).
+    pub display_unit: &'static str,
     /// The state ownership boundary for this stable parameter ID.
     pub scope: BuiltinParameterScope,
     /// The semantic mapping used to interpret the stored `f32` value.
@@ -488,6 +492,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 1,
         name: "polarity_invert",
+        display_name: "Polarity Invert",
+        display_unit: "",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Boolean,
         domain: BuiltinParameterDomain::BooleanExact,
@@ -516,6 +522,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 2,
         name: "trim_db",
+        display_name: "Input Trim",
+        display_unit: "dB",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::DecibelAmplitude,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -546,6 +554,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 3,
         name: "hpf_hz",
+        display_name: "High-Pass",
+        display_unit: "Hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
         domain: BuiltinParameterDomain::DisabledOrRateKeyedHertz {
@@ -574,6 +584,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 4,
         name: "lpf_hz",
+        display_name: "Low-Pass",
+        display_unit: "Hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
         domain: BuiltinParameterDomain::DisabledOrRateKeyedHertz {
@@ -607,6 +619,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 5,
         name: "fader_db",
+        display_name: "Fader",
+        display_unit: "dB",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::DecibelAmplitude,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -629,6 +643,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 6,
         name: "mute",
+        display_name: "Mute",
+        display_unit: "",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Boolean,
         domain: BuiltinParameterDomain::BooleanExact,
@@ -647,6 +663,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 7,
         name: "matrix_ll",
+        display_name: "Matrix Left from Left",
+        display_unit: "",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -668,6 +686,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 8,
         name: "matrix_lr",
+        display_name: "Matrix Left from Right",
+        display_unit: "",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -689,6 +709,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 9,
         name: "matrix_rl",
+        display_name: "Matrix Right from Left",
+        display_unit: "",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -710,6 +732,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 10,
         name: "matrix_rr",
+        display_name: "Matrix Right from Right",
+        display_unit: "",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -738,6 +762,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 11,
         name: "delay_samples",
+        display_name: "Input Delay",
+        display_unit: "samples",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
@@ -769,6 +795,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 12,
         name: "pan",
+        display_name: "Pan",
+        display_unit: "",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {

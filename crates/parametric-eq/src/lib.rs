@@ -35,6 +35,7 @@
 //! not only on the caller's out-of-band `state_layout_version`. A stale payload is rejected with
 //! `effect.state.version`; there is no silent migration.
 
+use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EffectTargetError,
@@ -444,6 +445,34 @@ const PARAMETER_NAMES: [&str; EQ_BAND_COUNT * 6] = [
     "band-4-shelf-slope",
 ];
 
+/// The stable machine name of each band field, in the same order as [`PARAMETER_NAMES`].
+const PARAMETER_MACHINE_NAMES: [&str; EQ_BAND_COUNT * 6] = [
+    "band_1_enabled",
+    "band_1_kind",
+    "band_1_frequency",
+    "band_1_gain",
+    "band_1_q",
+    "band_1_shelf_slope",
+    "band_2_enabled",
+    "band_2_kind",
+    "band_2_frequency",
+    "band_2_gain",
+    "band_2_q",
+    "band_2_shelf_slope",
+    "band_3_enabled",
+    "band_3_kind",
+    "band_3_frequency",
+    "band_3_gain",
+    "band_3_q",
+    "band_3_shelf_slope",
+    "band_4_enabled",
+    "band_4_kind",
+    "band_4_frequency",
+    "band_4_gain",
+    "band_4_q",
+    "band_4_shelf_slope",
+];
+
 /// Default centre frequency of each band, in Hz.
 const FREQUENCY_DEFAULTS: [f32; EQ_BAND_COUNT] = [80.0, 400.0, 2_000.0, 10_000.0];
 
@@ -500,6 +529,7 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
     let automatable = field >= 2;
     ParameterDescriptor {
         id: parameter_id(band_base(band) + field as u32),
+        name: PARAMETER_MACHINE_NAMES[band * 6 + field],
         display_name: PARAMETER_NAMES[band * 6 + field],
         display_unit: DISPLAY_UNITS[field],
         unit: UNITS[field],
@@ -532,11 +562,20 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
             DOMAINS[field],
             MAPPINGS[field],
         ),
+        prepared_reason: if automatable { None } else { Some(BAND_REASON) },
     }
 }
 
+/// Why a band's `enabled` and `kind` are prepared: decision 15 E2 makes them live and #1337 builds
+/// that, so the rows are rebuild-only until then (decision 17, D1).
+const BAND_REASON: PreparedReason = PreparedReason {
+    reason: RebuildReason::RuledLiveNotBuilt { issue: 1337 },
+    reopen: "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
+};
+
 const fn cut_parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     unit: ParameterUnit,
     domain: ParameterDomain,
@@ -545,6 +584,7 @@ const fn cut_parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit: match unit {
             ParameterUnit::Hz => "Hz",
@@ -566,6 +606,7 @@ const fn cut_parameter(
         automatable: true,
         enum_choices: &[],
         lattice: effect_contract::default_parameter_lattice(unit, domain, mapping),
+        prepared_reason: None,
     }
 }
 
@@ -582,6 +623,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     }
     table[EQ_BAND_COUNT * 6] = cut_parameter(
         65,
+        "hpf_enabled",
         "hpf-enabled",
         ParameterUnit::Linear,
         ParameterDomain::Boolean,
@@ -590,6 +632,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     );
     table[EQ_BAND_COUNT * 6 + 1] = cut_parameter(
         66,
+        "hpf_frequency",
         "hpf-frequency",
         ParameterUnit::Hz,
         ParameterDomain::Continuous,
@@ -598,6 +641,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     );
     table[EQ_BAND_COUNT * 6 + 2] = cut_parameter(
         67,
+        "hpf_q",
         "hpf-q",
         ParameterUnit::Ratio,
         ParameterDomain::Continuous,
@@ -606,6 +650,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     );
     table[EQ_BAND_COUNT * 6 + 3] = cut_parameter(
         81,
+        "lpf_enabled",
         "lpf-enabled",
         ParameterUnit::Linear,
         ParameterDomain::Boolean,
@@ -614,6 +659,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     );
     table[EQ_BAND_COUNT * 6 + 4] = cut_parameter(
         82,
+        "lpf_frequency",
         "lpf-frequency",
         ParameterUnit::Hz,
         ParameterDomain::Continuous,
@@ -622,6 +668,7 @@ const EQ_PARAMETERS: [ParameterDescriptor; EQ_BAND_COUNT * 6 + 6] = {
     );
     table[EQ_BAND_COUNT * 6 + 5] = cut_parameter(
         83,
+        "lpf_q",
         "lpf-q",
         ParameterUnit::Ratio,
         ParameterDomain::Continuous,

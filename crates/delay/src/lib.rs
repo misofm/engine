@@ -131,6 +131,7 @@ const fn parameter_id(value: u32) -> ParameterId {
 #[allow(clippy::too_many_arguments)]
 const fn parameter(
     id: u32,
+    name: &'static str,
     display_name: &'static str,
     display_unit: &'static str,
     unit: ParameterUnit,
@@ -142,6 +143,7 @@ const fn parameter(
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         id: parameter_id(id),
+        name,
         display_name,
         display_unit,
         unit,
@@ -162,6 +164,7 @@ const fn parameter(
             ParameterDomain::Continuous,
             ParameterMapping::Linear,
         ),
+        prepared_reason: None,
     }
 }
 
@@ -182,6 +185,7 @@ const fn with_lattice(
 pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
+        "delay_time",
         "delay time",
         "ms",
         ParameterUnit::Milliseconds,
@@ -194,6 +198,7 @@ pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         2,
         "feedback",
+        "feedback",
         "linear",
         ParameterUnit::Linear,
         ParameterChannelPolicy::PerLane,
@@ -205,6 +210,7 @@ pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     with_lattice(
         parameter(
             3,
+            "damping",
             "damping",
             "linear",
             ParameterUnit::Linear,
@@ -219,6 +225,7 @@ pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         4,
         "mix",
+        "mix",
         "linear",
         ParameterUnit::Linear,
         ParameterChannelPolicy::PerLane,
@@ -229,6 +236,7 @@ pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     ),
     parameter(
         5,
+        "cross_feedback",
         "cross feedback",
         "linear",
         ParameterUnit::Linear,

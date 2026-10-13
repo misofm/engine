@@ -24,6 +24,7 @@ fn descriptor(
     ParameterDescriptor {
         id: ParameterId(1),
         display_name: "probe",
+        name: "probe",
         display_unit: "probe",
         unit,
         domain,
@@ -39,6 +40,7 @@ fn descriptor(
         automatable: true,
         enum_choices: &[],
         lattice,
+        prepared_reason: None,
     }
 }
 

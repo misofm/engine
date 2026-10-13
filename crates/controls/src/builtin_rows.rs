@@ -84,7 +84,8 @@ pub(crate) fn shaped_descriptor(
     };
     ControlDescriptor {
         name: row.name,
-        display_name: display_name(row.id),
+        display_name: row.display_name,
+        display_unit: row.display_unit,
         unit: builtin_parameter_unit(row),
         kind: row.kind,
         lanes: match row.scope {
@@ -103,24 +104,6 @@ pub(crate) fn shaped_descriptor(
         scope: ControlScope::Model,
         family: row.family,
         active,
-    }
-}
-
-fn display_name(id: u32) -> &'static str {
-    match id {
-        POLARITY_INVERT => "Polarity invert",
-        TRIM_DB => "Trim",
-        HPF_HZ => "High-pass cutoff",
-        LPF_HZ => "Low-pass cutoff",
-        FADER_DB => "Fader",
-        MUTE => "Mute",
-        MATRIX_LL => "Matrix left from left",
-        MATRIX_LR => "Matrix left from right",
-        MATRIX_RL => "Matrix right from left",
-        MATRIX_RR => "Matrix right from right",
-        DELAY_SAMPLES => "Delay",
-        PAN => "Pan",
-        _ => "",
     }
 }
 

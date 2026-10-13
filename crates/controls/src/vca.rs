@@ -43,8 +43,9 @@ pub(crate) static ROWS: [VcaRow; 2] = [
         id: OFFSET_DB,
         descriptor: ControlDescriptor {
             name: "offset_db",
-            display_name: "VCA offset",
+            display_name: "VCA Offset",
             unit: ParameterUnit::Db,
+            display_unit: "dB",
             minimum: -144.0,
             maximum: 24.0,
             taper: Taper::Decibel,
@@ -61,7 +62,7 @@ pub(crate) static ROWS: [VcaRow; 2] = [
         id: MUTE,
         descriptor: ControlDescriptor {
             name: "mute",
-            display_name: "VCA mute",
+            display_name: "VCA Mute",
             kind: ControlKind::Toggle,
             taper: Taper::Stepped,
             lattice: ParameterLattice::indices(),
