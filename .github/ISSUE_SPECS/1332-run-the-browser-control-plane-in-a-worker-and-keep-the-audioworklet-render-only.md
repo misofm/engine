@@ -325,6 +325,8 @@ Root note (2026-10-12, by named exception, from #1530 open question 1): this sli
 supplies the runtime counter and the const, destructor-free thread locals. The ports of D7 carry
 #1057's edit API messages, so its design note fixes what they serve.
 
+Root note (2026-10-13): *Share one in-flight status read in the browser host* (#1536) lands before this slice, and the Worker rewire keeps its sharing rule.
+
 ## Successor slices
 
 - *Move browser source submission and seeks into the Worker* (#1387), next.
