@@ -289,3 +289,116 @@ red without that. Until then a cached table cannot go stale.
 
 - *n7:* the Amendment 1 note above named "attempt 2". #1365 had attempt 1 only; the note is #1364's
   attempt 2. Its heading now reads "Amendment 1 note (#1364 attempt 2, under root's 2026-10-12 ruling)".
+
+### Rebase onto 88272d08b
+
+Stream E2 was rebased from base `8c0deee2c` (head `cf9df5f89`) onto `origin/main` `88272d08b`, which carries
+stream A2 (PR #1526: the strip carry and `join_strips`) and stream B3 (PR #1540: latest-target cells for the
+input, route and effect lanes). All 38 commits survive in order, none was dropped, and no commit became empty.
+The verdicts and the Attempt records above cite the old hashes; this table maps each to its new one. The old
+head is kept as the local branch `backup-e2-pre-rebase-88272d08b`. Fold-in fixups were squashed into the commit
+they belong to (the table lists the final hashes), and a commit whose body needed the port's meaning has its
+message extended (`b5ca077f6` below).
+
+| old | new | subject |
+|---|---|---|
+| `8a68e257f` | `371c322a7` | Add the required control_smoothing root key to the session model, grammar, visitor, schema and SDK writer (#1054 D1, D2) |
+| `351650a5b` | `d9deebc4d` | Migrate every checked-in session document to carry control_smoothing default (#1054 D1a) |
+| `23c9629a2` | `22352f79c` | Re-pin the C ABI snapshot length for the control_smoothing key (#1054 gate 7) |
+| `da9f2ff50` | `5d694755e` | Test the control_smoothing grammar, rounding and default table; regenerate the writer corpus (#1054 gates 1, 2) |
+| `a575e74fd` | `32d88540a` | Ramp live fader, mute and matrix records over the session's control_smoothing (#1054 D4, D5) |
+| `f4d0263c7` | `64b46e076` | Hear the live mute ramp through the C ABI; compare the other live edits after their ramp (#1054 gates 4, 5) |
+| `9e0184a76` | `7a3d6448c` | Re-pin the prepare_256_tracks session_template_sha256 for the control_smoothing key (#1054 gate 7) |
+| `735ca09df` | `5d0f57168` | Re-pin the builtins-graph ACCEPTED_MANIFEST_SHA256 (#1054 gate 7) |
+| `62ffd591d` | `00c445565` | Re-pin the audit unit test's joined-corpus manifest identity (#1054 gate 7) |
+| `7ded0025d` | `89eb08e25` | Re-pin the browser staged session document size (#1054 gate 7) |
+| `408cdece3` | `a75aa18ad` | Keep the one-byte mutation of the staged document size one byte (#1054) |
+| `2c39d189d` | `d86be61a3` | Keep the default-table property assertion out of clippy's constant folding (#1054 gate 2) |
+| `d00c310ea` | `7e23d6e95` | Split the default-table test from the pan-at-twice-mute property (#1054 gate 2) |
+| `adf234b19` | `686b96e27` | Settle the raced C ABI plan past the session's live ramps; record attempt 1 in the spec (#1054) |
+| `6a9f7192e` | `334d379c0` | Add EditRamps, the per-edit ramp lengths of one session transaction (#1394 D2) |
+| `70a0a8991` | `356fea5f2` | Carry an optional ramp_samples on the live-value session edits and record it per transaction (#1394 D1, D3, D4) |
+| `860e817ad` | `2242114c1` | Re-pin COMPLETE_SCHEMA_HASH for the corpus's SetTrackFader ramp_samples (#1394 gate 5) |
+| `434df0140` | `b5ca077f6` | Read every live record length through LiveRamps::resolve with the transaction's edit ramps (#1394 D5, D6) |
+| `7cf89f67e` | `48f0577da` | Test a live edit's own ramp length through the C ABI and document it (#1394 gate 6) |
+| `5a18bddde` | `0c2b1f788` | Test that clearing one effect's ramp lengths leaves its siblings and its strip (#1394 D2) |
+| `5abf225f2` | `ae5954aff` | Record attempt 1 in the #1394 spec |
+| `11269ef80` | `0c8a2abae` | Resolve an absent live ramp to the session default in the browser host (#1364 D1, D2) |
+| `d0439731d` | `adefbab67` | Default an absent SDK ramp to the session's and author controlSmoothing (#1364 D3, D4) |
+| `751523524` | `da8685337` | Test that the browser and the C ABI render the same bits for an absent ramp (#1364 gate 3) |
+| `6e4254588` | `e274ca72e` | Record attempt 1 in the #1364 spec and allow the parity test's unsafe calls |
+| `bd8a92e9d` | `972df2784` | Clear a ramp entry when an edit rewrites or removes its target (#1394 attempt 2) |
+| `9db950add` | `9c6a345b0` | Edit control_smoothing by a model-only session transaction (#1365 D1-D6) |
+| `b16fb4d14` | `11dbea2f0` | Record attempt 1 in the #1365 spec |
+| `c7382644c` | `744e14a05` | Resolve an absent ramp on a literal LaneEdit by kind, in the writer and the browser transport (#1364 attempt 2) |
+| `59eecdc66` | `4c1f2da6f` | Fold the #1054 batch follow-ups: rulings in the spec, for_row walk, note order (stream E2) |
+| `3d1909dd8` | `f57034db8` | Fold the #1394 batch follow-ups: pin SetVcaFader's rows, make ramp_samples exhaustive (stream E2) |
+| `35f8b908a` | `3b436c6cc` | Fold the #1365 batch follow-ups: gate 7 command, gate 5 sentence, wrapped docs (stream E2) |
+| `0029220a6` | `0449fc9a3` | Fold the #1364 batch follow-ups: ramp helpers out of the public exports, README, D3 wording (stream E2) |
+| `c1e162b9c` | `6680156c9` | Add the SessionRamps duty to #1382's spec (root ruling 2026-10-12, #1364/#1365 attempt-2 finding) |
+| `29bd7f3ca` | `5d1766c9e` | Amend #1385 to encode SetControlSmoothing (root amendment 2026-10-12, #1365) |
+| `4b5f58913` | `0bd1d94bc` | Stream E2 batch follow-ups, SDK: u32 check on unramped kinds, shared controlSmoothing helper, subpath leak check |
+| `7d00abca1` | `2aa74e168` | Stream E2 batch follow-ups, comments and specs (n1, n2, n5, n6, n7, m3, m4 records) |
+| `cf9df5f89` | `a03ada37e` | State that #1385 alone encodes SetControlSmoothing (root ruling 2026-10-12: fold into #1385) |
+
+**What was ported by meaning (#1365).**
+
+- *The model-only mask still holds on the new classifier.* `classify_live_delta` still masks `control_smoothing`
+  (`masked.control_smoothing = current.control_smoothing`); with the mask removed `model_only_edits_are_live_with_no_records`
+  and the capi live-commit test go red (mutation below).
+- *First preparation that bakes a ramp length.* The classifier's doc promised that the first slice to bake a length
+  into a plan at preparation would say so. Stream A2's carry retarget is that slice: it writes fader, mute and matrix
+  records into the successor's cells at preparation, with the lengths of the successor's own model (and the
+  transaction's edit lengths, #1394 D6), so a `control_smoothing` edit in a rebuild transaction governs its retargets
+  and a later edit governs only later transitions. The `live_delta.rs` doc now says so, and
+  `docs/C_ABI_V1_QUALIFICATION.md` states that a rebuild keeps the transaction's lengths.
+- *Corpus:* `SetControlSmoothing` and the `COMPLETE_SCHEMA_HASH` chain are unchanged by main (see the pins above).
+
+**Digests and byte pins on the merged tree.** Each is recomputed on the merged tree and re-pinned on its own, on top
+of main's value. The only render-visible number that moved is the *unpinned* `audit capi` `pcm_digest`: main
+`cb10fbface44a3a4`, merged tree `76525e7ef9e78cf4` (the E2 pre-rebase tree had `a9738fa800afcab3`, the value
+root's 2026-10-12 ruling named). With every ramp length forced to 0 in `LiveRamps::for_session` the merged tree
+gives `cb10fbface44a3a4`, main's value, so the move is the ramps and nothing else; it differs from the pre-rebase
+value because stream A2's carry keeps a ramp in flight across the audit's swaps where the old base restarted it.
+No pinned render digest moved: `ACCEPTED_GRAPH_PCM_SHA256`/`_METERS_` and the browser module's expected-resource
+digests are unchanged.
+
+| pin | file | main -> merged tree | reason |
+|---|---|---|---|
+| `ACCEPTED_MANIFEST_SHA256` | `tools/audit/src/builtins_graph.rs` | `28f109c9...93e9d0` -> `3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108` | D1a adds the required `control_smoothing` key (moves the two `prepare_256_tracks` rows); history line on top of the #1346 line |
+| joined-corpus manifest identity | `tools/audit/src/fixture_builtins.rs` | same pair | same reason; same history order |
+| `session_template_sha256` x2 | `fixtures/builtins/v1/benchmark/prepare_256_tracks-{48000,96000}.toml` | `dc19e091...72330` -> `4c575634...e6fb` | D1a |
+| `MANIFEST.tsv` rows | same two tomls | `4cc2ca53...e996` -> `a729c476...55c8`, `ee6d238c...1111` -> `35ebd642...befe` | D1a |
+| snapshot length in the command-response vector | `crates/capi/src/runtime/tests.rs` | 14,193 (0x3771) -> 14,245 (0x37a5) | D1a: the 52-byte `control_smoothing` key |
+| `sessionDocumentBytes` (and the self-test's one-byte mutation) | `hosts/host-web/tests/browser-v1/expected.json`, `scripts/check-browser-expected-resources.py` | 1969 -> 2021 (1970 -> 2022) | D1a |
+| `COMPLETE_SCHEMA_HASH` | `crates/conformance/src/protocol_corpus.rs` + three mirrors | `ab357b6c432f9755` -> `5429f052592101ef` (#1394: `ramp_samples`) -> `8eb4cc8d075a4355` (#1365: `SetControlSmoothing`) | main did not touch `crates/protocol`, so the chain and its history lines are unchanged |
+
+**Resource ceilings against main** (`resource_lifecycle`, `reference_session_retained_rows_stay_within_their_budgets`):
+no ceiling is raised and none trips. Only two rows move: `capi_retained_bytes` 282,287 -> 282,303 of 282,432 (+16
+bytes; 129 bytes of headroom left; the retained prepared-token layout grew by the E2 structures, `EditRamps` in
+`PreparedSessionTransaction` and the model's `control_smoothing` field, not decomposed further) and the compiled
+model estimate 19,434 -> 19,486 of 25,344 (+52, the `control_smoothing` key's bytes). `graph_session_plus_plan_bytes`
+405,686, the effect-control resources 19,377 and every other row are equal to main's.
+
+**Gates run on the merged tree** (the port's proof set; the rest of the sweep is deferred to the rebase onto J3's
+merge): `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+`-p host-core --features test-support,control-provider --test live_delta` (35); `-p capi`; `cargo test -p host-web
+--features test-support`; `-p protocol --features test-support`; `-p conformance`. An earlier full sweep of the tree
+before the last test addition was also green: `test-debug-a` and `-b` with doctests, the policy scripts,
+`check-cross-targets.sh`, `check-capi-abi.sh`, `check-protocol-wasm-parity.sh`, `audit capi` (0 allocations, 0
+syscalls), the builtins fixtures check, the worklet chain (`--named-twin` build, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`) and
+the SDK job (383 evals; `node_modules` and `dist` deleted afterwards).
+
+**Mutation runs for each semantic port** (defect applied by a text edit, test run, file restored; "R" red):
+
+| Port | Defect | Result |
+|---|---|---|
+| classifier reads the transaction's edit ramps | `StripEditRamps::of` replaced by the default | R `a_records_length_is_its_edits_own_when_the_edit_carried_one` |
+| successor join reads them too | same, in `join_strips` | R `a_retarget_carries_the_edit_ramp_of_its_transaction_on_every_width_and_form` |
+| the control plane hands them to the successor | `SuccessorBase::edit_ramps` set to an empty `EditRamps` | R `a_rebuilds_carried_strip_retargets_over_its_edits_own_ramp` (`-p capi`) |
+| matrix rule (#1394 D5, #1054 D5) shared by classifier and join | the model's own window ignored | R 3 `live_delta` tests and 4 `successor_swap` tests |
+| mute row | `Mute` record reads the fader length | R 2 `live_delta` tests and 2 `successor_swap` tests |
+| #1365 mask | `control_smoothing` not masked | R `model_only_edits_are_live_with_no_records` and the capi live-commit test |
+| host-web resolution | the mute sentinel not resolved | R `an_absent_ramp_resolves_to_the_sessions_row_and_a_given_one_is_kept` |
+| cross-host strip cells | the browser fader command sends 0 instead of the sentinel | R `both_hosts_drain_two_fader_and_two_pan_edits_alike` |
