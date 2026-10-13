@@ -599,3 +599,12 @@ One port. J3 deleted `scripts/check-realtime-policy.sh`, so the E2 row for
 `docs/REALTIME_DEPENDENCY_POLICY.md`, in the commit that introduced the row (old `e274ca72e`, now `4705dc0f2`).
 Earlier gate lists in this record that name `check-realtime-policy.sh` and `test-realtime-policy.sh` are the
 evidence of their time; the gate is now `tools/realtime-policy` (its tests and self-test).
+
+Gates on the final tree (all green, no resource ceiling raised): `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings`; `./target/release/realtime_policy` and `cargo test -p
+realtime-policy`; `scripts/check-workspace-policy.sh`; the `test-debug-a` leg (1858 tests, plus its doctests);
+`-p capi`, `-p host-web --features test-support` and `live_delta` with `control-provider` (348 tests);
+`scripts/check-capi-abi.sh`; `audit capi` (0 allocations, 0 syscalls, `total_violations` 0); the worklet chain
+(`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`); `check-sdk-generated.sh`,
+`check-sdk-types.sh` and `check-sdk-headless.sh`.
