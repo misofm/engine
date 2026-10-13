@@ -389,10 +389,7 @@ fn retained_bytes_projection_matches_the_live_set() {
 #[test]
 fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let live_controls = HostLiveControlRequest {
-        control_queue_depth: core::num::NonZeroUsize::new(4),
-        ..HostLiveControlRequest::default()
-    };
+    let live_controls = HostLiveControlRequest::default();
     let (prepared, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &caps(),
@@ -485,10 +482,7 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
 #[test]
 fn effect_control_bytes_join_the_graph_session_cap() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let live_controls = HostLiveControlRequest {
-        control_queue_depth: core::num::NonZeroUsize::new(4),
-        ..HostLiveControlRequest::default()
-    };
+    let live_controls = HostLiveControlRequest::default();
     let (prepared, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &caps(),
@@ -712,7 +706,6 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
     live_control_caps.maximum_meter_items = 1 << 16;
     live_control_caps.maximum_meter_bytes = 1 << 24;
     let live_controls = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(4).expect("nonzero")),
         meter_period_frames: Some(NonZeroU32::new(128).expect("nonzero")),
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
         ..HostLiveControlRequest::default()
@@ -743,37 +736,6 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         assert_eq!(&*handles.meters[index].track_id, track.as_str());
     }
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
-}
-
-/// Issue #137: a host that asks for no live controls gets none, and pays for none.
-#[test]
-fn no_live_control_request_attaches_nothing_and_charges_nothing() {
-    use host_core::{
-        HostLiveControlRequest, compile_host_session as compile,
-        prepare_host_runtime_with_live_controls,
-    };
-
-    let compiled = compile(SESSION, &caps()).expect("compiled fixture");
-    let (plain, handles) = prepare_host_runtime_with_live_controls(
-        &compiled,
-        &caps(),
-        &HostLiveControlRequest::default(),
-    )
-    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
-    assert!(handles.strip_controls.is_empty());
-    assert!(handles.meters.is_empty());
-    assert_eq!(handles.strips.len(), 9);
-    assert_eq!(plain.report.builtin_meter_payload_bytes, 0);
-    let baseline = prepare_host_runtime(&compiled, &caps())
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        })
-        .report;
-    assert_eq!(
-        plain.report.builtin_processor_payload_bytes, baseline.builtin_processor_payload_bytes,
-        "unattached live controls change no processor byte"
-    );
-    assert_eq!(plain.report, baseline);
 }
 
 /// Unit-level pin for the shared encoder's independent 64-line defense.
@@ -835,10 +797,7 @@ fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
 #[test]
 fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let with_lanes = HostLiveControlRequest {
-        control_queue_depth: core::num::NonZeroUsize::new(4),
-        ..HostLiveControlRequest::default()
-    };
+    let with_lanes = HostLiveControlRequest::default();
     let gate = engine::realtime::plan_revision_gate_retained_bytes();
     let row = |report: &HostPrepareReport| {
         report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes

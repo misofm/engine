@@ -136,3 +136,55 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record (implementation, 2026-10-13)
+
+- **D8. `controls::get` and `controls::set` resolve one row (carry-forward from the batch-1
+  review).** `set` is now the hot control-thread path (a transaction of N `SET_CONTROL` edits), and
+  both functions used to build every row of the owner and run the allocating `effective(model)` per
+  call, so N edits cost O(N x model). `registry::resolve` now finds the one row by owner, section
+  and control ID (`strip::resolve`, `route::resolve`, `vca::resolve`, `session_rows::resolve`,
+  `effect_rows::resolve`): the descriptor comes from the section table, from the builtin table with
+  the owner's shape for `active`, or from the effect contract's descriptor, and the committed value
+  from that row's accessor alone. Only a derived row in `get` computes `effective`; `set` never does
+  (a derived row is refused by `check` first, and solo needs no overlay). Results are identical:
+  the existing `controls` tests are unchanged and green, and `get_returns_the_listed_value_of_every_row`
+  pins `get` to `list` for every row of the fixture under a soloed overlay.
+- **D9. The edit's address type.** `protocol::control_core` re-exports `controls::{ControlAddress,
+  ControlError, Lane, Owner, Section}` so `conformance` (whose dependency list the
+  `check-conformance-boundaries.sh` gate pins) can build the corpus edit without a new dependency.
+- **D10. The ramp row comes from the descriptor.** `record_edit_ramps` asks
+  `controls::row_descriptor` for the row's `Motion` and maps its `LiveRampRow` to the existing
+  `EditRampRow`, so D4's table lives in the control core and cannot drift; a row of an effect section
+  has a fixed ramp. The mapping function has no wildcard, so a new live ramp row must be classified.
+- **D11. Wire.** The address is the control list's `ControlAddress` message; the decoder requires
+  `control` and `lane` and refuses an owner ID or slot ID that disagrees with its kind or section
+  (`INVALID_FIELD`) and an unallocated owner, section or lane code (`INVALID_TLV`). The value is read
+  without the finiteness check the other float fields have, so a NaN reaches the validator
+  (`control.domain` at its own edit).
+- **Mirrors re-pinned.** `COMPLETE_SCHEMA_HASH` is `0x9f13a06993efa99e`; the same value is in
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md`, `fuzz/corpus/complete-schema-manifest.md` and the fault
+  injection search strings of `scripts/check-protocol-wasm-parity.sh` (which still named the value
+  from before #1551).
+- **D12. Ramp conflict (batch 2 review fold).** Several `SET_CONTROL` rows share one `(target,
+  row)` ramp key, so "last edit decides" would let the later edit silently set the earlier one's
+  length. One transaction that resolves two different lengths for one key through `SET_CONTROL`
+  (an explicit length against another, or against none) is refused at the later edit with the new
+  code `control.ramp.conflict` (`ControlError::RampConflict`, path `edits[i]`), before any write;
+  equal lengths agree. A per-kind edit is not a control write and keeps its last-edit-decides rule.
+- **D13. One address codec (batch 2 review fold; amends D11).** `SET_CONTROL` writes and reads its
+  address with the control list's own encoder and decoder (`write_control_address_fields`,
+  `decode_control_address` in `message_wire.rs`) and holds it to the list's rules for a control
+  row, so there is one code table and one status: every refusal of an address, an unallocated
+  owner, section or lane code included, is `INVALID_FIELD` (D11 said `INVALID_TLV` for the codes;
+  the registry document always said `INVALID_FIELD`). The conversions between the wire address and
+  `controls::ControlAddress` are `From<&controls::ControlAddress> for protocol::ControlAddress`,
+  `ControlAddress::try_from_controls` (a fallible copy of each ID, for the host-core list builder)
+  and `TryFrom<&protocol::ControlAddress> for controls::ControlAddress`; a test ties the owner,
+  section and lane codes of both sides.
+- **Gate 3, measured (batch 2 review fold).** `a_set_control_ramp_of_480_samples_reaches_its_target_at_block_480_over_the_quantum`
+  (capi `live_tests.rs`) renders a stateless session (no latency) after a `SET_CONTROL` fader edit
+  with `ramp_samples` 480: every block that begins before sample 480 differs from both the old and
+  the target fader, and every block from `480 / quantum` on equals a rebuilt plan of the target
+  session bit for bit. The earlier test pinned only the equality with the per-kind edit.
+

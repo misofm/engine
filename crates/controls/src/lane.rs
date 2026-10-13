@@ -61,3 +61,8 @@ impl Side {
         }
     }
 }
+
+/// `value` for the `left` and the `right` side.
+pub(crate) fn both_sides<T>(value: impl Fn(Side) -> T) -> [T; 2] {
+    [value(Side::Left), value(Side::Right)]
+}

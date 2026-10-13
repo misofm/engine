@@ -26,6 +26,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "builtins"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "engine",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,10 +60,74 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "compressor"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "controls"
+version = "0.1.0"
+dependencies = [
+ "builtins",
+ "effect-compiler",
+ "effect-contract",
+ "session",
+]
+
+[[package]]
 name = "decoded-char"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5440d1dc8ea7cae44cda3c64568db29bfa2434aba51ae66a50c00488841a65a3"
+
+[[package]]
+name = "delay"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "effect-compiler"
+version = "0.1.0"
+dependencies = [
+ "compressor",
+ "delay",
+ "effect-contract",
+ "engine",
+ "gate-expander",
+ "multiband-compressor",
+ "parametric-eq",
+ "session",
+ "soft-clip",
+ "transient-shaper",
+ "true-peak-limiter",
+]
+
+[[package]]
+name = "effect-contract"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "effect-runtime"
+version = "0.1.0"
+dependencies = [
+ "lane",
+ "math",
+]
 
 [[package]]
 name = "engine"
@@ -58,6 +138,16 @@ name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
+
+[[package]]
+name = "gate-expander"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
 
 [[package]]
 name = "getrandom"
@@ -135,6 +225,13 @@ dependencies = [
  "smallstr",
  "smallvec",
  "utf8-decode",
+]
+
+[[package]]
+name = "lane"
+version = "0.1.0"
+dependencies = [
+ "wide",
 ]
 
 [[package]]
@@ -238,10 +335,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "math"
+version = "0.1.0"
+dependencies = [
+ "lane",
+]
+
+[[package]]
+name = "multiband-compressor"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "parametric-eq"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "engine",
+ "lane",
+ "math",
+]
 
 [[package]]
 name = "proc-macro-error"
@@ -280,6 +405,7 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "controls",
  "engine",
  "session",
 ]
@@ -298,6 +424,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "session"
@@ -338,6 +473,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
+name = "soft-clip"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,6 +491,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "transient-shaper"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "true-peak-limiter"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
 ]
 
 [[package]]
@@ -371,3 +536,13 @@ name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
+name = "wide"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de2aaf408e58689c2096682331b1f42bb2d9f2ed6b11560407d023cd0a6c634e"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
+]

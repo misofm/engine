@@ -259,7 +259,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
             maximum_tlvs: 64,
             maximum_nesting: 4,
             maximum_automation_records: 256,
-            maximum_parameter_page_items: 256,
+            maximum_control_page_items: 256,
             maximum_diagnostic_page_items: 256,
             maximum_transaction_edits: 64,
             supported_commands: commands,
@@ -307,7 +307,10 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     );
 
     assert_parity_rejects(&[1, 3, 2], &events);
+    // The pair rule, an unallocated ID and a retired ID are each refused.
     assert_parity_rejects(&[1, 2, 12], &events);
+    assert_parity_rejects(&[1, 2, 14], &events);
+    assert_parity_rejects(&[1, 2, 4], &events);
     assert_parity_rejects(&commands, &[0x8001]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
 }
@@ -336,7 +339,7 @@ fn b1b_success_schemas_round_trip_and_truncate() {
         maximum_cached_response_bytes: 512,
         per_block_automation_density: 256,
         admission_quantum_frames: 64,
-        maximum_parameter_page_items: 256,
+        maximum_control_page_items: 256,
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
@@ -528,404 +531,1220 @@ fn b1b_fixed_goldens_and_every_byte_truncation() {
     }
 }
 
-#[test]
-fn b2a_metadata_and_state_are_typed_bounded_and_strict() {
-    let codec = codec();
-    let descriptor = ParameterDescriptor {
-        handle: 1,
-        track_id: "vocal".to_owned(),
-        rack: ParameterRack::Inserts,
-        effect_id: "comp".to_owned(),
-        parameter_id: 7,
-        channel: ParameterChannel::Left,
-        value_kind: ParameterValueKind::F32,
-        unit: ParameterUnit::Db,
-        domain: ParameterDomain::Continuous,
-        minimum: Some(-24.0),
-        maximum: Some(24.0),
-        default: 0.0,
-        mapping: ParameterMapping::Linear,
-        automation_rate: ParameterAutomationRate::Sample,
-        smoothing_samples: 12,
-        flags: 3,
-        display_name: Some("Threshold".to_owned()),
-        display_unit: Some("dB".to_owned()),
-        enum_choices: Vec::new(),
-    };
-    let page = ParameterMetadataPage {
-        last_handle: 1,
-        eof: true,
-        descriptors: vec![descriptor],
-    };
-    let mut metadata = vec![
-        0;
-        codec
-            .encoded_parameter_metadata_page_len(&page)
-            .expect("len")
-    ];
-    codec
-        .encode_parameter_metadata_page(&page, &mut metadata)
-        .expect("encode");
-    assert_eq!(metadata[51], 1, "descriptor handle stays mandatory");
-    assert_eq!(codec.decode_parameter_metadata_page(&metadata, 3), Ok(page));
-    for end in 0..metadata.len() {
-        assert!(
-            codec
-                .decode_parameter_metadata_page(&metadata[..end], 3)
-                .is_err()
-        );
+/// A parsed BTLV field: the control tests edit a valid encoding as a tree and re-serialise it, so
+/// a frame that is well formed on the wire but breaks a schema rule can be built from a valid one.
+#[derive(Clone, Debug)]
+enum Node {
+    Leaf(Vec<u8>),
+    Message(Vec<Tlv>),
+}
+
+#[derive(Clone, Debug)]
+struct Tlv {
+    id: u16,
+    wire: u8,
+    mandatory: u8,
+    node: Node,
+}
+
+fn parse_tlvs(mut bytes: &[u8]) -> Vec<Tlv> {
+    let mut fields = Vec::new();
+    while !bytes.is_empty() {
+        let id = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let length = u32::from_le_bytes(bytes[4..8].try_into().expect("length")) as usize;
+        let value = &bytes[8..8 + length];
+        fields.push(Tlv {
+            id,
+            wire: bytes[2],
+            mandatory: bytes[3],
+            node: if bytes[2] == 11 {
+                Node::Message(parse_tlvs(&value[8..]))
+            } else {
+                Node::Leaf(value.to_vec())
+            },
+        });
+        bytes = &bytes[8 + length.next_multiple_of(8)..];
     }
-    let request = ParameterStateRequest {
-        handles: vec![1, 2],
-    };
-    let mut request_bytes = [0_u8; 16];
-    codec
-        .encode_parameter_state_request(&request, &mut request_bytes)
-        .expect("request");
-    assert_eq!(
-        codec.decode_parameter_state_request(&request_bytes, 1),
-        Ok(request)
-    );
-    let state = ParameterStatePage {
-        observed_sample: 44,
-        records: vec![
-            ParameterStateRecord {
-                handle: 1,
-                flags: 3,
-                value: -2.0,
-            },
-            ParameterStateRecord {
-                handle: 2,
-                flags: 0,
-                value: 0.0,
-            },
-        ],
-    };
-    let mut state_bytes = vec![0; codec.encoded_parameter_state_page_len(&state).expect("len")];
-    codec
-        .encode_parameter_state_page(&state, &mut state_bytes)
-        .expect("encode");
-    assert_eq!(
-        codec.decode_parameter_state_page(&state_bytes, 4),
-        Ok(state)
-    );
-    let invalid = ParameterStatePage {
-        observed_sample: 0,
-        records: vec![ParameterStateRecord {
-            handle: 1,
-            flags: 2,
+    fields
+}
+
+fn write_tlvs(fields: &[Tlv]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in fields {
+        let value = match &field.node {
+            Node::Leaf(value) => value.clone(),
+            Node::Message(inner) => {
+                let mut value = (inner.len() as u32).to_le_bytes().to_vec();
+                value.extend_from_slice(&0_u32.to_le_bytes());
+                value.extend(write_tlvs(inner));
+                value
+            }
+        };
+        out.extend_from_slice(&field.id.to_le_bytes());
+        out.extend_from_slice(&[field.wire, field.mandatory]);
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(&value);
+        out.resize(out.len() + value.len().next_multiple_of(8) - value.len(), 0);
+    }
+    out
+}
+
+/// An optional field's TLV.
+fn leaf(id: u16, wire: u8, value: &[u8]) -> Tlv {
+    Tlv {
+        id,
+        wire,
+        mandatory: 0,
+        node: Node::Leaf(value.to_vec()),
+    }
+}
+
+/// The `n`th occurrence of field `id` among `fields`, as a message.
+fn nth(fields: &mut [Tlv], id: u16, n: usize) -> &mut Vec<Tlv> {
+    match &mut fields
+        .iter_mut()
+        .filter(|field| field.id == id)
+        .nth(n)
+        .expect("the field is present")
+        .node
+    {
+        Node::Message(inner) => inner,
+        Node::Leaf(_) => panic!("field {id} is not a message"),
+    }
+}
+
+fn entry(page: &mut [Tlv], index: usize) -> &mut Vec<Tlv> {
+    nth(page, 5, index)
+}
+
+fn address(page: &mut [Tlv], index: usize) -> &mut Vec<Tlv> {
+    nth(entry(page, index), 3, 0)
+}
+
+fn set(fields: &mut [Tlv], id: u16, value: &[u8]) {
+    let field = fields
+        .iter_mut()
+        .find(|field| field.id == id)
+        .expect("the field is present");
+    field.node = Node::Leaf(value.to_vec());
+}
+
+fn insert_again(fields: &mut Vec<Tlv>, field: Tlv) {
+    let at = fields
+        .iter()
+        .rposition(|other| other.id <= field.id)
+        .map_or(0, |at| at + 1);
+    fields.insert(at, field);
+}
+
+fn remove(fields: &mut Vec<Tlv>, id: u16) {
+    assert!(fields.iter().any(|field| field.id == id), "field {id}");
+    fields.retain(|field| field.id != id);
+}
+
+fn insert(fields: &mut Vec<Tlv>, field: Tlv) {
+    assert!(fields.iter().all(|other| other.id != field.id));
+    let at = fields
+        .iter()
+        .position(|other| other.id > field.id)
+        .unwrap_or(fields.len());
+    fields.insert(at, field);
+}
+
+/// Edit the encoding of `bytes` and return the new bytes with their top-level field count.
+fn edited(bytes: &[u8], edit: impl FnOnce(&mut Vec<Tlv>)) -> (Vec<u8>, u32) {
+    let mut fields = parse_tlvs(bytes);
+    edit(&mut fields);
+    (write_tlvs(&fields), fields.len() as u32)
+}
+
+fn control_row(name: &str) -> ControlRow {
+    ControlRow {
+        name: name.to_owned(),
+        display_name: "Ratio".to_owned(),
+        display_unit: ":1".to_owned(),
+        unit: ParameterUnit::Ratio,
+        kind: ControlKind::Continuous,
+        minimum: 1.0,
+        maximum: 20.0,
+        disabled_value: None,
+        default: 4.0,
+        taper: ControlTaper::Logarithmic,
+        step: 0.5,
+        precision: 1,
+        ladder: vec![2.0, 4.0, 8.0],
+        choices: Vec::new(),
+        ramp_row: None,
+        default_ramp_samples: 0,
+        class: ControlClass::Live,
+        reason: None,
+        reason_issue: None,
+        reopen: None,
+        scope: ControlScope::Model,
+        automatable: true,
+        family: ControlFamily::Effect,
+        active: true,
+        value: 4.0,
+    }
+}
+
+fn control_address_of(
+    section: ControlSection,
+    slot: Option<&str>,
+    control: Option<u32>,
+) -> ControlAddress {
+    ControlAddress {
+        owner_kind: ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section,
+        slot_id: slot.map(str::to_owned),
+        control,
+        lane: control.map(|_| ParameterChannel::Left),
+    }
+}
+
+/// One page with every kind of row and every optional field once: entry 0 an owner header, 1 a
+/// route owner header, 2 and 3 section headers, 4 a live continuous row (with a disabled value
+/// and a ramp row), 5 a toggle, 6 a rebuild-only enumeration, 7 a rebuild-only row that a ruling
+/// makes live, 8 a derived monitor row that is inactive.
+fn control_page() -> ControlListPage {
+    let mut live = control_row("ratio");
+    live.disabled_value = Some(0.0);
+    live.ramp_row = Some(ControlRampRow::Fader);
+    live.default_ramp_samples = 480;
+    let mut toggle = control_row("bypass");
+    toggle.kind = ControlKind::Toggle;
+    toggle.minimum = 0.0;
+    toggle.maximum = 1.0;
+    toggle.default = 0.0;
+    toggle.value = 1.0;
+    toggle.taper = ControlTaper::Stepped;
+    toggle.ladder = Vec::new();
+    let mut detector = control_row("detector");
+    detector.kind = ControlKind::Enumeration;
+    detector.class = ControlClass::RebuildOnly;
+    detector.automatable = false;
+    detector.reason = Some(ControlReason::NewMemory);
+    detector.reopen = Some("a detector that shares one buffer".to_owned());
+    detector.choices = vec![
+        EnumChoice {
             value: 0.0,
-        }],
-    };
-    assert_eq!(
-        codec.encoded_parameter_state_page_len(&invalid),
-        Err(EncodeError::LimitExceeded)
-    );
-}
-
-fn b2_descriptor(handle: u32, domain: ParameterDomain) -> ParameterDescriptor {
-    let (minimum, maximum, default, choices) = match domain {
-        ParameterDomain::Continuous => (Some(-1.0), Some(1.0), 0.0, Vec::new()),
-        ParameterDomain::Boolean => (None, None, 1.0, Vec::new()),
-        ParameterDomain::Enumeration => (
-            None,
-            None,
-            2.0,
-            vec![
-                EnumChoice {
-                    value: 1.0,
-                    label: "one".to_owned(),
-                },
-                EnumChoice {
-                    value: 2.0,
-                    label: "two".to_owned(),
-                },
-            ],
-        ),
-    };
-    ParameterDescriptor {
-        handle,
-        track_id: "vocal".to_owned(),
-        rack: ParameterRack::Inserts,
-        effect_id: "comp".to_owned(),
-        parameter_id: handle,
-        channel: ParameterChannel::Left,
-        value_kind: ParameterValueKind::F32,
-        unit: ParameterUnit::Db,
-        domain,
-        minimum,
-        maximum,
-        default,
-        mapping: ParameterMapping::Linear,
-        automation_rate: ParameterAutomationRate::Sample,
-        smoothing_samples: 12,
-        flags: 3,
-        display_name: None,
-        display_unit: None,
-        enum_choices: choices,
+            label: "Peak".to_owned(),
+        },
+        EnumChoice {
+            value: 1.0,
+            label: "RMS".to_owned(),
+        },
+    ];
+    detector.minimum = 0.0;
+    detector.maximum = 1.0;
+    detector.default = 0.0;
+    detector.value = 1.0;
+    detector.taper = ControlTaper::Stepped;
+    let mut ruled = control_row("lookahead");
+    ruled.class = ControlClass::RebuildOnly;
+    ruled.automatable = false;
+    ruled.reason = Some(ControlReason::RuledLiveNotBuilt);
+    ruled.reason_issue = Some(1557);
+    ruled.reopen = Some("#1557".to_owned());
+    ruled.family = ControlFamily::Route;
+    let mut derived = control_row("effective_fader");
+    derived.class = ControlClass::Derived;
+    derived.automatable = false;
+    derived.scope = ControlScope::Monitor;
+    derived.active = false;
+    derived.unit = ParameterUnit::Db;
+    let controls = [live, toggle, detector, ruled, derived];
+    let mut entries = vec![
+        ControlEntry {
+            handle: 1,
+            address: ControlAddress {
+                owner_kind: ControlOwnerKind::Strip,
+                owner_id: Some("vocal".to_owned()),
+                section: ControlSection::Own,
+                slot_id: None,
+                control: None,
+                lane: None,
+            },
+            body: ControlBody::OwnerHeader(ControlOwnerHeader {
+                kind: ControlOwnerHeaderKind::Track,
+                name: "Vocal".to_owned(),
+                route: None,
+            }),
+        },
+        ControlEntry {
+            handle: 2,
+            address: ControlAddress {
+                owner_kind: ControlOwnerKind::Route,
+                owner_id: Some("vocal-main".to_owned()),
+                section: ControlSection::Own,
+                slot_id: None,
+                control: None,
+                lane: None,
+            },
+            body: ControlBody::OwnerHeader(ControlOwnerHeader {
+                kind: ControlOwnerHeaderKind::Route,
+                name: "vocal-main".to_owned(),
+                route: Some(ControlRouteEnds {
+                    source: "vocal".to_owned(),
+                    destination: "main".to_owned(),
+                    tap: session::SendTap::PostFader,
+                }),
+            }),
+        },
+        ControlEntry {
+            handle: 3,
+            address: control_address_of(ControlSection::Builtins, None, None),
+            body: ControlBody::SectionHeader(ControlSectionHeader {
+                name: "Builtins".to_owned(),
+                effect: None,
+            }),
+        },
+        ControlEntry {
+            handle: 4,
+            address: control_address_of(ControlSection::Inserts, Some("comp"), None),
+            body: ControlBody::SectionHeader(ControlSectionHeader {
+                name: "Compressor".to_owned(),
+                effect: Some("miso.compressor".to_owned()),
+            }),
+        },
+    ];
+    for (index, control) in controls.into_iter().enumerate() {
+        entries.push(ControlEntry {
+            handle: 5 + index as u32,
+            address: control_address_of(
+                ControlSection::Inserts,
+                Some("comp"),
+                Some(index as u32 + 1),
+            ),
+            body: ControlBody::Control(control),
+        });
+    }
+    ControlListPage {
+        revision: 7,
+        structure_epoch: 3,
+        last_handle: 9,
+        eof: true,
+        entries,
     }
 }
 
-#[test]
-fn descriptor_invariant_rejects_encode_and_decode_identically() {
-    let codec = ProtocolCodec::default();
-    let descriptor = b2_descriptor(1, ParameterDomain::Continuous);
-    assert!(descriptor_is_valid(codec.limits(), &descriptor));
-    let page = ParameterMetadataPage {
-        last_handle: 1,
-        eof: true,
-        descriptors: vec![descriptor.clone()],
-    };
-    let mut encoded = vec![
+fn encode_control_page(codec: &ProtocolCodec, page: &ControlListPage) -> Vec<u8> {
+    let mut bytes = vec![
         0;
         codec
-            .encoded_parameter_metadata_page_len(&page)
-            .expect("valid descriptor length")
+            .encoded_control_list_page_len(page)
+            .expect("the page is valid")
     ];
-    codec
-        .encode_parameter_metadata_page(&page, &mut encoded)
-        .expect("valid descriptor encode");
     assert_eq!(
-        codec
-            .decode_parameter_metadata_page(&encoded, 3)
-            .expect("valid descriptor decode"),
-        page
+        codec.encode_control_list_page(page, &mut bytes),
+        Ok(bytes.len())
     );
+    bytes
+}
 
-    let mut invalid = descriptor;
-    invalid.default = 2.0;
-    assert!(!descriptor_is_valid(codec.limits(), &invalid));
-    assert_eq!(
-        codec.encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-            last_handle: 1,
-            eof: true,
-            descriptors: vec![invalid],
+fn decode_control_page(
+    codec: &ProtocolCodec,
+    bytes: &[u8],
+    count: u32,
+) -> Result<ControlListPage, DecodeError> {
+    codec.decode_control_list_page(bytes, count)
+}
+
+fn top_level_count(bytes: &[u8]) -> u32 {
+    parse_tlvs(bytes).len() as u32
+}
+
+/// Gate 1: a request, a list page of every kind of row and every optional field, and a state page
+/// round-trip exactly, and every strict prefix of each is refused.
+///
+/// Red if a field is dropped, reordered or mis-typed on either side, so a kind or an optional
+/// field (a disabled value, a ramp row, a reason issue, a route's ends) does not survive.
+#[test]
+fn control_messages_round_trip_every_kind_and_optional_field() {
+    let codec = ProtocolCodec::default();
+    for owner in [
+        None,
+        Some(ControlOwnerFilter {
+            kind: ControlOwnerKind::Session,
+            id: None,
         }),
-        Err(EncodeError::LimitExceeded)
-    );
-
-    let default_prefix = [12, 0, 6, 1, 4, 0, 0, 0];
-    let offset = encoded
-        .windows(default_prefix.len())
-        .position(|window| window == default_prefix)
-        .expect("descriptor default field")
-        + default_prefix.len();
-    encoded[offset..offset + 4].copy_from_slice(&2.0_f32.to_le_bytes());
-    assert_eq!(
-        codec.decode_parameter_metadata_page(&encoded, 3),
-        Err(DecodeError::InvalidTlv)
-    );
-}
-
-#[test]
-fn b2a_goldens_truncations_malformed_matrix_and_encoder_audit() {
-    let codec = ProtocolCodec::default();
-    let metadata_request = ParameterMetadataRequest {
-        after_handle: 4,
-        limit: 3,
-    };
-    let mut metadata_request_bytes = [0_u8; 32];
-    codec
-        .encode_parameter_metadata_request(metadata_request, &mut metadata_request_bytes)
-        .expect("metadata request");
-    assert_eq!(
-        hex(&metadata_request_bytes),
-        "0100030104000000040000000000000002000201020000000300000000000000"
-    );
-    for end in 0..metadata_request_bytes.len() {
-        assert!(
+        Some(ControlOwnerFilter {
+            kind: ControlOwnerKind::Strip,
+            id: Some("vocal".to_owned()),
+        }),
+    ] {
+        let request = ControlListRequest {
+            structure_epoch: 9,
+            after_handle: 4,
+            limit: 256,
+            owner,
+        };
+        let mut bytes = vec![
+            0;
             codec
-                .decode_parameter_metadata_request(&metadata_request_bytes[..end], 2)
-                .is_err()
-        );
-    }
-    let page = ParameterMetadataPage {
-        last_handle: 3,
-        eof: true,
-        descriptors: vec![
-            b2_descriptor(1, ParameterDomain::Continuous),
-            b2_descriptor(2, ParameterDomain::Boolean),
-            b2_descriptor(3, ParameterDomain::Enumeration),
-        ],
-    };
-    let mut metadata = vec![
-        0;
+                .encoded_control_list_request_len(&request)
+                .expect("len")
+        ];
         codec
-            .encoded_parameter_metadata_page_len(&page)
-            .expect("metadata len")
-    ];
-    codec
-        .encode_parameter_metadata_page(&page, &mut metadata)
-        .expect("metadata encode");
-    assert_eq!(
-        hex(&metadata),
-        concat!(
-            "010003010400000003000000000000000200080101000000010000000000000003000b01080100001000000000000000",
-            "010003010400000001000000000000000200090105000000766f63616c00000003000101010000000200000000000000",
-            "0400090104000000636f6d70000000000500030104000000010000000000000006000101010000000100000000000000",
-            "070001010100000001000000000000000800010101000000010000000000000009000101010000000100000000000000",
-            "0a00060004000000000080bf000000000b000600040000000000803f000000000c000601040000000000000000000000",
-            "0d0001010100000001000000000000000e0001010100000001000000000000000f000301040000000c00000000000000",
-            "1000030104000000030000000000000003000b01e80000000e0000000000000001000301040000000200000000000000",
-            "0200090105000000766f63616c000000030001010100000002000000000000000400090104000000636f6d7000000000",
-            "050003010400000002000000000000000600010101000000010000000000000007000101010000000100000000000000",
-            "08000101010000000100000000000000090001010100000002000000000000000c000601040000000000803f00000000",
-            "0d0001010100000001000000000000000e0001010100000001000000000000000f000301040000000c00000000000000",
-            "1000030104000000030000000000000003000b0148010000100000000000000001000301040000000300000000000000",
-            "0200090105000000766f63616c000000030001010100000002000000000000000400090104000000636f6d7000000000",
-            "050003010400000003000000000000000600010101000000010000000000000007000101010000000100000000000000",
-            "08000101010000000100000000000000090001010100000003000000000000000c000601040000000000004000000000",
-            "0d0001010100000001000000000000000e0001010100000001000000000000000f000301040000000c00000000000000",
-            "1000030104000000030000000000000013000b0028000000020000000000000001000601040000000000803f00000000",
-            "02000901030000006f6e65000000000013000b0028000000020000000000000001000601040000000000004000000000",
-            "020009010300000074776f0000000000"
-        )
-    );
-    for end in 0..metadata.len() {
-        assert!(
-            codec
-                .decode_parameter_metadata_page(&metadata[..end], 5)
-                .is_err()
+            .encode_control_list_request(&request, &mut bytes)
+            .expect("encode");
+        let count = top_level_count(&bytes);
+        assert_eq!(
+            codec.decode_control_list_request(&bytes, count),
+            Ok(request)
         );
+        for end in 0..bytes.len() {
+            assert!(
+                codec
+                    .decode_control_list_request(&bytes[..end], count)
+                    .is_err()
+            );
+        }
     }
-    let state_request = ParameterStateRequest {
-        handles: vec![1, 2],
-    };
-    let mut state_request_bytes = [0_u8; 16];
-    codec
-        .encode_parameter_state_request(&state_request, &mut state_request_bytes)
-        .expect("state request");
+
+    let page = control_page();
+    let bytes = encode_control_page(&codec, &page);
+    let count = top_level_count(&bytes);
+    assert_eq!(decode_control_page(&codec, &bytes, count), Ok(page.clone()));
+    for end in 0..bytes.len() {
+        assert!(decode_control_page(&codec, &bytes[..end], count).is_err());
+    }
+    let mut short = vec![0xa5; bytes.len() - 1];
     assert_eq!(
-        hex(&state_request_bytes),
-        "01000d01080000000100000002000000"
+        codec.encode_control_list_page(&page, &mut short),
+        Err(EncodeError::OutputTooSmall {
+            required: bytes.len()
+        })
     );
-    for end in 0..state_request_bytes.len() {
-        assert!(
-            codec
-                .decode_parameter_state_request(&state_request_bytes[..end], 1)
-                .is_err()
-        );
-    }
-    let state = ParameterStatePage {
-        observed_sample: 8,
+    assert!(short.iter().all(|byte| *byte == 0xa5));
+
+    // The state page of the same rows: the control rows only, and a last handle past them.
+    let state = ControlStatePage {
+        revision: 7,
+        structure_epoch: 3,
+        last_handle: 12,
+        eof: false,
         records: vec![
-            ParameterStateRecord {
-                handle: 1,
-                flags: 1,
-                value: 0.5,
+            ControlStateRecord {
+                handle: 5,
+                value: 4.0,
             },
-            ParameterStateRecord {
-                handle: 2,
-                flags: 0,
-                value: 0.0,
+            ControlStateRecord {
+                handle: 9,
+                value: -0.5,
             },
         ],
     };
-    let mut state_bytes = vec![
-        0;
-        codec
-            .encoded_parameter_state_page_len(&state)
-            .expect("state len")
-    ];
+    let mut state_bytes = vec![0; codec.encoded_control_state_page_len(&state).expect("len")];
     codec
-        .encode_parameter_state_page(&state, &mut state_bytes)
-        .expect("state encode");
+        .encode_control_state_page(&state, &mut state_bytes)
+        .expect("encode");
+    let state_count = top_level_count(&state_bytes);
     assert_eq!(
-        hex(&state_bytes),
-        "01000401080000000800000000000000020002010200000002000000000000000300020102000000100000000000000004000a012000000001000000010000000000003f0000000002000000000000000000000000000000"
+        codec.decode_control_state_page(&state_bytes, state_count),
+        Ok(state)
     );
     for end in 0..state_bytes.len() {
         assert!(
             codec
-                .decode_parameter_state_page(&state_bytes[..end], 4)
+                .decode_control_state_page(&state_bytes[..end], state_count)
                 .is_err()
         );
     }
-    assert!(
-        codec
-            .decode_parameter_metadata_request(
-                &[
-                    1, 0, 3, 1, 4, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 1, 2, 0, 0, 0, 0, 0, 0, 0
-                ],
-                2
-            )
-            .is_err()
-    );
-    for request in [
-        ParameterStateRequest { handles: vec![] },
-        ParameterStateRequest { handles: vec![0] },
-        ParameterStateRequest {
-            handles: vec![2, 1],
-        },
-        ParameterStateRequest {
-            handles: vec![1, 1],
-        },
-    ] {
-        assert!(
-            codec
-                .encode_parameter_state_request(&request, &mut [0_u8; 16])
-                .is_err()
-        );
-    }
-    let mut bad = b2_descriptor(1, ParameterDomain::Continuous);
-    bad.default = 2.0;
-    assert!(
-        codec
-            .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-                last_handle: 1,
-                eof: true,
-                descriptors: vec![bad]
+}
+
+/// A page of 256 control rows and an empty page are valid at the bound; one more row is not.
+///
+/// Red if the page bound is off by one on either side, or an empty end-of-list page is refused.
+#[test]
+fn control_pages_hold_exactly_two_hundred_fifty_six_rows() {
+    let codec = ProtocolCodec::default();
+    let template = control_page().entries[4].clone();
+    let rows = |count: u32| {
+        (1..=count)
+            .map(|handle| ControlEntry {
+                handle,
+                ..template.clone()
             })
-            .is_err()
-    );
-    let mut bad = b2_descriptor(1, ParameterDomain::Boolean);
-    bad.default = 0.5;
-    assert!(
-        codec
-            .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-                last_handle: 1,
-                eof: true,
-                descriptors: vec![bad]
-            })
-            .is_err()
-    );
-    let mut bad = b2_descriptor(1, ParameterDomain::Enumeration);
-    bad.enum_choices.push(EnumChoice {
-        value: 2.0,
-        label: "duplicate".to_owned(),
-    });
-    assert!(
-        codec
-            .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-                last_handle: 1,
-                eof: true,
-                descriptors: vec![bad]
-            })
-            .is_err()
-    );
-    let mut bad_state = state_bytes.clone();
-    bad_state[60] = 4;
-    assert!(codec.decode_parameter_state_page(&bad_state, 4).is_err());
-    bad_state = state_bytes.clone();
-    bad_state[68] = 1;
-    assert!(codec.decode_parameter_state_page(&bad_state, 4).is_err());
-    let many = (1..=256)
-        .map(|handle| b2_descriptor(handle, ParameterDomain::Continuous))
-        .collect::<Vec<_>>();
-    let full = ParameterMetadataPage {
-        last_handle: 256,
-        eof: true,
-        descriptors: many,
+            .collect::<Vec<_>>()
     };
-    let required = codec
-        .encoded_parameter_metadata_page_len(&full)
-        .expect("full len");
-    let mut output = vec![0; required];
+    let page = |count: u32| ControlListPage {
+        revision: 1,
+        structure_epoch: 1,
+        last_handle: count,
+        eof: true,
+        entries: rows(count),
+    };
+    let full = page(256);
+    let bytes = encode_control_page(&codec, &full);
     assert_eq!(
-        codec.encode_parameter_metadata_page(&full, &mut output),
-        Ok(required)
+        decode_control_page(&codec, &bytes, top_level_count(&bytes)),
+        Ok(full)
     );
-    assert_eq!(codec.decode_parameter_metadata_page(&output, 258), Ok(full));
+    let empty = page(0);
+    let bytes = encode_control_page(&codec, &empty);
+    assert_eq!(
+        decode_control_page(&codec, &bytes, top_level_count(&bytes)),
+        Ok(empty)
+    );
+    assert_eq!(
+        codec.encoded_control_list_page_len(&page(257)),
+        Err(EncodeError::LimitExceeded)
+    );
+    // The decoder holds the same bound: a 257th well-formed row appended to a full page's bytes is
+    // refused, whatever the frame limits would have admitted.
+    let bytes = encode_control_page(&codec, &page(256));
+    let (patched, count) = edited(&bytes, |fields| {
+        let mut last = nth(fields, 5, 255).clone();
+        set(&mut last, 1, &257_u32.to_le_bytes());
+        fields.push(Tlv {
+            id: 5,
+            wire: 11,
+            mandatory: 1,
+            node: Node::Message(last),
+        });
+        set(fields, 3, &257_u32.to_le_bytes());
+    });
+    assert_eq!(
+        decode_control_page(&codec, &patched, count),
+        Err(DecodeError::InvalidField)
+    );
+}
+
+/// Gate 1: each request rule is refused on encode and on decode alike, and a decoded refusal is
+/// `INVALID_FIELD`.
+///
+/// Red if `limit` 0 or 257 is accepted, a cursor rides with epoch 0 (which names no structure
+/// to continue in), an owner ID rides with the session or is missing from
+/// another owner, or the two directions disagree on which request is valid.
+#[test]
+fn control_request_rules_refuse_on_encode_and_decode_alike() {
+    let codec = ProtocolCodec::default();
+    let valid = ControlListRequest {
+        structure_epoch: 0,
+        after_handle: 0,
+        limit: 8,
+        owner: Some(ControlOwnerFilter {
+            kind: ControlOwnerKind::Strip,
+            id: Some("vocal".to_owned()),
+        }),
+    };
+    let mut bytes = vec![0; 256];
+    let length = codec
+        .encode_control_list_request(&valid, &mut bytes)
+        .expect("valid request");
+    bytes.truncate(length);
+
+    type Typed = fn(&mut ControlListRequest);
+    type Wire = fn(&mut Vec<Tlv>);
+    let rules: [(&str, Typed, Wire); 8] = [
+        (
+            "limit 0",
+            |r| r.limit = 0,
+            |f| set(f, 3, &0_u16.to_le_bytes()),
+        ),
+        (
+            "a cursor at structure epoch 0",
+            |r| r.after_handle = 3,
+            |f| set(f, 2, &3_u32.to_le_bytes()),
+        ),
+        (
+            "limit 257",
+            |r| r.limit = 257,
+            |f| set(f, 3, &257_u16.to_le_bytes()),
+        ),
+        (
+            "session owner with an ID",
+            |r| {
+                r.owner = Some(ControlOwnerFilter {
+                    kind: ControlOwnerKind::Session,
+                    id: Some("vocal".to_owned()),
+                });
+            },
+            |f| set(f, 4, &[1]),
+        ),
+        (
+            "strip owner without an ID",
+            |r| r.owner.as_mut().expect("owner").id = None,
+            |f| remove(f, 5),
+        ),
+        (
+            "owner ID that is not a stable ID",
+            |r| r.owner.as_mut().expect("owner").id = Some("Not A Stable ID".to_owned()),
+            |f| set(f, 5, b"Not A Stable ID"),
+        ),
+        (
+            "owner ID without a kind",
+            |r| {
+                // Not representable: a typed owner has its kind. The encoder's refusal is the
+                // session owner's ID rule.
+                r.owner = Some(ControlOwnerFilter {
+                    kind: ControlOwnerKind::Session,
+                    id: Some("vocal".to_owned()),
+                });
+            },
+            |f| remove(f, 4),
+        ),
+        (
+            "owner kind outside the table",
+            |r| {
+                r.owner = Some(ControlOwnerFilter {
+                    kind: ControlOwnerKind::Vca,
+                    id: None,
+                });
+            },
+            |f| set(f, 4, &[5]),
+        ),
+    ];
+    for (name, typed, wire) in rules {
+        let mut request = valid.clone();
+        typed(&mut request);
+        assert_eq!(
+            codec.encoded_control_list_request_len(&request),
+            Err(EncodeError::InvalidField),
+            "{name}: encode"
+        );
+        let (patched, count) = edited(&bytes, wire);
+        assert_eq!(
+            codec.decode_control_list_request(&patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+        assert_eq!(
+            DecodeError::InvalidField.status(),
+            crate::StatusCode::InvalidField
+        );
+    }
+}
+
+/// Gate 1: each presence rule of the address and of a row kind (a header with a value, a
+/// rebuild-only row with no reason, a control row without its lane) is refused on encode where the
+/// typed value can say it and on decode always, and a decoded refusal is `INVALID_FIELD`.
+///
+/// Red if the codec accepts a row whose fields contradict its kind, or only one direction checks.
+#[test]
+fn control_entry_rules_refuse_on_encode_and_decode_alike() {
+    type Typed = fn(&mut ControlListPage);
+    type Wire = fn(&mut Vec<Tlv>);
+    fn row(page: &mut ControlListPage, index: usize) -> &mut ControlRow {
+        match &mut page.entries[index].body {
+            ControlBody::Control(row) => row,
+            _ => panic!("entry {index} is a control row"),
+        }
+    }
+    fn f32_bytes(value: f32) -> [u8; 4] {
+        value.to_le_bytes()
+    }
+    fn choice(fields: &mut [Tlv]) -> Tlv {
+        let inner = nth(entry(fields, 6), 23, 0).clone();
+        Tlv {
+            id: 23,
+            wire: 11,
+            mandatory: 0,
+            node: Node::Message(inner),
+        }
+    }
+    let rules: Vec<(&str, Option<Typed>, Wire)> = vec![
+        ("handle zero", Some(|p| p.entries[0].handle = 0), |f| {
+            set(entry(f, 0), 1, &0_u32.to_le_bytes())
+        }),
+        (
+            "handles do not ascend",
+            Some(|p| p.entries[1].handle = 1),
+            |f| set(entry(f, 1), 1, &1_u32.to_le_bytes()),
+        ),
+        (
+            "last handle is not the last entry's",
+            Some(|p| p.last_handle = 8),
+            |f| set(f, 3, &8_u32.to_le_bytes()),
+        ),
+        (
+            "session owner with an ID",
+            Some(|p| p.entries[4].address.owner_kind = ControlOwnerKind::Session),
+            |f| set(address(f, 4), 1, &[1]),
+        ),
+        (
+            "strip owner without an ID",
+            Some(|p| p.entries[4].address.owner_id = None),
+            |f| remove(address(f, 4), 2),
+        ),
+        (
+            "owner ID that is not a stable ID",
+            Some(|p| p.entries[4].address.owner_id = Some("Vocal Track".to_owned())),
+            |f| set(address(f, 4), 2, b"Vocal Track"),
+        ),
+        (
+            "inserts section without a slot",
+            Some(|p| p.entries[3].address.slot_id = None),
+            |f| remove(address(f, 3), 4),
+        ),
+        (
+            "builtins section with a slot",
+            Some(|p| p.entries[2].address.slot_id = Some("comp".to_owned())),
+            |f| insert(address(f, 2), leaf(4, 9, b"comp")),
+        ),
+        (
+            "console section without a slot",
+            Some(|p| {
+                p.entries[3].address.section = ControlSection::Console;
+                p.entries[3].address.slot_id = None;
+            }),
+            |f| {
+                set(address(f, 3), 3, &[ControlSection::Console.code()]);
+                remove(address(f, 3), 4);
+            },
+        ),
+        (
+            "own section with a slot",
+            Some(|p| p.entries[0].address.slot_id = Some("comp".to_owned())),
+            |f| insert(address(f, 0), leaf(4, 9, b"comp")),
+        ),
+        (
+            "control row without a control ID",
+            Some(|p| p.entries[4].address.control = None),
+            |f| remove(address(f, 4), 5),
+        ),
+        (
+            "control row without a lane",
+            Some(|p| p.entries[4].address.lane = None),
+            |f| remove(address(f, 4), 6),
+        ),
+        (
+            "header row with a control ID",
+            Some(|p| p.entries[2].address.control = Some(1)),
+            |f| insert(address(f, 2), leaf(5, 3, &1_u32.to_le_bytes())),
+        ),
+        (
+            "header row with a lane",
+            Some(|p| p.entries[2].address.lane = Some(ParameterChannel::Left)),
+            |f| insert(address(f, 2), leaf(6, 1, &[1])),
+        ),
+        (
+            "owner header outside the own section",
+            Some(|p| p.entries[0].address.section = ControlSection::Builtins),
+            |f| set(address(f, 0), 3, &[4]),
+        ),
+        (
+            "owner header kind contradicts the owner",
+            Some(|p| {
+                if let ControlBody::OwnerHeader(header) = &mut p.entries[0].body {
+                    header.kind = ControlOwnerHeaderKind::Vca;
+                }
+            }),
+            |f| set(entry(f, 0), 4, &[4]),
+        ),
+        (
+            "route owner without its ends",
+            Some(|p| {
+                if let ControlBody::OwnerHeader(header) = &mut p.entries[1].body {
+                    header.route = None;
+                }
+            }),
+            |f| remove(entry(f, 1), 7),
+        ),
+        (
+            "other owner with route ends",
+            Some(|p| {
+                if let ControlBody::OwnerHeader(header) = &mut p.entries[0].body {
+                    header.route = Some(ControlRouteEnds {
+                        source: "a".to_owned(),
+                        destination: "b".to_owned(),
+                        tap: session::SendTap::Input,
+                    });
+                }
+            }),
+            |f| insert(entry(f, 0), leaf(7, 9, b"a")),
+        ),
+        ("section header kind contradicts the section", None, |f| {
+            set(entry(f, 2), 4, &[5])
+        }),
+        (
+            "effect on a builtins section header",
+            Some(|p| {
+                if let ControlBody::SectionHeader(header) = &mut p.entries[2].body {
+                    header.effect = Some("miso.compressor".to_owned());
+                }
+            }),
+            |f| insert(entry(f, 2), leaf(6, 9, b"miso.compressor")),
+        ),
+        ("effect on an owner header", None, |f| {
+            insert(entry(f, 0), leaf(6, 9, b"miso.compressor"))
+        }),
+        ("owner header with a value", None, |f| {
+            insert(entry(f, 0), leaf(34, 6, &f32_bytes(1.0)))
+        }),
+        ("section header with a name of a control", None, |f| {
+            insert(entry(f, 3), leaf(10, 9, b"ratio"))
+        }),
+        ("control row with a header kind", None, |f| {
+            insert(entry(f, 4), leaf(4, 1, &[1]))
+        }),
+        ("control row with route ends", None, |f| {
+            insert(entry(f, 4), leaf(9, 1, &[1]))
+        }),
+        (
+            "rebuild-only row without a reason",
+            Some(|p| row(p, 6).reason = None),
+            |f| remove(entry(f, 6), 27),
+        ),
+        (
+            "rebuild-only row without a reopen condition",
+            Some(|p| row(p, 6).reopen = None),
+            |f| remove(entry(f, 6), 29),
+        ),
+        (
+            "live row with a reason",
+            Some(|p| row(p, 4).reason = Some(ControlReason::NewGraph)),
+            |f| insert(entry(f, 4), leaf(27, 1, &[2])),
+        ),
+        (
+            "live row with a reopen condition",
+            Some(|p| row(p, 4).reopen = Some("never".to_owned())),
+            |f| insert(entry(f, 4), leaf(29, 9, b"never")),
+        ),
+        (
+            "ruled-live row without its issue",
+            Some(|p| row(p, 7).reason_issue = None),
+            |f| remove(entry(f, 7), 28),
+        ),
+        (
+            "issue on another reason",
+            Some(|p| row(p, 6).reason_issue = Some(1)),
+            |f| insert(entry(f, 6), leaf(28, 3, &1_u32.to_le_bytes())),
+        ),
+        (
+            "automatable row that is not live",
+            Some(|p| row(p, 6).automatable = true),
+            |f| set(entry(f, 6), 31, &[1]),
+        ),
+        (
+            "automatable row in the monitor scope",
+            Some(|p| row(p, 4).scope = ControlScope::Monitor),
+            |f| set(entry(f, 4), 30, &[2]),
+        ),
+        (
+            "enumeration without choices",
+            Some(|p| row(p, 6).choices.clear()),
+            |f| entry(f, 6).retain(|field| field.id != 23),
+        ),
+        (
+            "enumeration default outside its choices",
+            Some(|p| row(p, 6).default = 5.0),
+            |f| set(entry(f, 6), 18, &f32_bytes(5.0)),
+        ),
+        (
+            "enumeration value outside its choices",
+            Some(|p| row(p, 6).value = 5.0),
+            |f| set(entry(f, 6), 34, &f32_bytes(5.0)),
+        ),
+        (
+            "enumeration with a duplicate choice",
+            Some(|p| {
+                let duplicate = row(p, 6).choices[0].clone();
+                row(p, 6).choices.push(duplicate);
+            }),
+            |f| {
+                let duplicate = choice(f);
+                insert_again(entry(f, 6), duplicate);
+            },
+        ),
+        (
+            "continuous row with choices",
+            Some(|p| {
+                row(p, 4).choices.push(EnumChoice {
+                    value: 0.0,
+                    label: "x".to_owned(),
+                });
+            }),
+            |f| {
+                let extra = choice(f);
+                insert(entry(f, 4), extra);
+            },
+        ),
+        ("range inverted", Some(|p| row(p, 4).minimum = 100.0), |f| {
+            set(entry(f, 4), 15, &f32_bytes(100.0))
+        }),
+        (
+            "value not finite",
+            Some(|p| row(p, 4).value = f32::NAN),
+            |f| set(entry(f, 4), 34, &f32_bytes(f32::NAN)),
+        ),
+        (
+            "default not finite",
+            Some(|p| row(p, 4).default = f32::INFINITY),
+            |f| set(entry(f, 4), 18, &f32_bytes(f32::INFINITY)),
+        ),
+        (
+            "disabled value not finite",
+            Some(|p| row(p, 4).disabled_value = Some(f32::NAN)),
+            |f| set(entry(f, 4), 17, &f32_bytes(f32::NAN)),
+        ),
+        (
+            "empty machine name",
+            Some(|p| row(p, 4).name.clear()),
+            |f| set(entry(f, 4), 10, b""),
+        ),
+    ];
+    let codec = ProtocolCodec::default();
+    let page = control_page();
+    let bytes = encode_control_page(&codec, &page);
+    for (name, typed, wire) in rules {
+        if let Some(typed) = typed {
+            let mut broken = page.clone();
+            typed(&mut broken);
+            assert_eq!(
+                codec.encoded_control_list_page_len(&broken),
+                Err(EncodeError::InvalidField),
+                "{name}: encode"
+            );
+        }
+        let (patched, count) = edited(&bytes, wire);
+        assert_eq!(
+            decode_control_page(&codec, &patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+    }
+
+    // A control row that lacks any one of its required fields is refused.
+    for id in [
+        10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 25, 26, 30, 31, 32, 33, 34,
+    ] {
+        let (patched, count) = edited(&bytes, |f| remove(entry(f, 4), id));
+        assert_eq!(
+            decode_control_page(&codec, &patched, count),
+            Err(DecodeError::InvalidField),
+            "control row without field {id}"
+        );
+    }
+    // A header row that lacks its kind or its name is refused.
+    for id in [4, 5] {
+        let (patched, count) = edited(&bytes, |f| remove(entry(f, 2), id));
+        assert_eq!(
+            decode_control_page(&codec, &patched, count),
+            Err(DecodeError::InvalidField),
+            "header row without field {id}"
+        );
+    }
+}
+
+/// Gate 1: a code outside any control code table is `INVALID_FIELD`, wherever it rides.
+///
+/// Red if a table accepts a code it does not allocate, or maps one to another variant.
+#[test]
+fn control_codes_outside_their_tables_are_invalid_fields() {
+    let codec = ProtocolCodec::default();
+    let bytes = encode_control_page(&codec, &control_page());
+    // (entry, field path inside the entry, codes outside the table)
+    let cases: [(usize, &[u16], &[u8]); 15] = [
+        (4, &[2], &[0, 4, 255]),
+        (4, &[3, 1], &[0, 5]),
+        (4, &[3, 3], &[0, 1, 3, 7]),
+        (4, &[3, 6], &[0, 4]),
+        (0, &[4], &[0, 6]),
+        (1, &[9], &[0, 8]),
+        (4, &[13], &[0, 7]),
+        (4, &[14], &[0, 4]),
+        (4, &[19], &[0, 6]),
+        (4, &[24], &[0, 16]),
+        (4, &[26], &[0, 4]),
+        (6, &[27], &[0, 9]),
+        (4, &[30], &[0, 3]),
+        (4, &[32], &[0, 7]),
+        (2, &[4], &[0, 1, 3, 7]),
+    ];
+    for (index, path, invalid) in cases {
+        for code in invalid {
+            let (patched, count) = edited(&bytes, |f| {
+                let mut fields = entry(f, index);
+                for id in &path[..path.len() - 1] {
+                    fields = nth(fields, *id, 0);
+                }
+                set(fields, path[path.len() - 1], &[*code]);
+            });
+            assert_eq!(
+                decode_control_page(&codec, &patched, count),
+                Err(DecodeError::InvalidField),
+                "entry {index} field {path:?} code {code}"
+            );
+        }
+    }
+}
+
+/// Gate 1: the state page refuses descending or repeated handles, a handle of zero, a wrong
+/// record width, a count that disagrees with the bytes, a value that is not finite and a last
+/// handle before its last record, on encode and on decode alike.
+///
+/// Red if the fixed eight-byte record layout drifts, or an unordered page is acknowledged.
+#[test]
+fn control_state_page_rules_refuse_on_encode_and_decode_alike() {
+    let codec = ProtocolCodec::default();
+    let page = ControlStatePage {
+        revision: 7,
+        structure_epoch: 3,
+        last_handle: 6,
+        eof: true,
+        records: vec![
+            ControlStateRecord {
+                handle: 2,
+                value: 1.0,
+            },
+            ControlStateRecord {
+                handle: 5,
+                value: 2.0,
+            },
+        ],
+    };
+    let mut bytes = vec![0; codec.encoded_control_state_page_len(&page).expect("len")];
+    codec
+        .encode_control_state_page(&page, &mut bytes)
+        .expect("encode");
+    // Record bytes: handle 2 = 1.0, handle 5 = 2.0, in eight-byte records.
+    let fields = parse_tlvs(&bytes);
+    let records = fields.iter().find(|field| field.id == 7).expect("records");
+    let Node::Leaf(raw) = &records.node else {
+        panic!("records are bytes")
+    };
+    assert_eq!(raw.len(), 16, "two eight-byte records");
+    assert_eq!(&raw[..4], &2_u32.to_le_bytes());
+    assert_eq!(&raw[4..8], &1.0_f32.to_le_bytes());
+
+    type Typed = fn(&mut ControlStatePage);
+    let encode_rules: [(&str, Typed); 6] = [
+        ("descending handles", |p| p.records.reverse()),
+        ("repeated handle", |p| p.records[1].handle = 2),
+        ("handle zero", |p| p.records[0].handle = 0),
+        ("value not finite", |p| p.records[0].value = f32::NAN),
+        ("last handle before the last record", |p| p.last_handle = 4),
+        ("more than 256 records", |p| {
+            p.records = (1..=257)
+                .map(|handle| ControlStateRecord { handle, value: 0.0 })
+                .collect();
+            p.last_handle = 257;
+        }),
+    ];
+    for (name, typed) in encode_rules {
+        let mut broken = page.clone();
+        typed(&mut broken);
+        // Only a row count above a page is an excess a smaller page cures; the rest is the
+        // value's own defect.
+        let expected = if name == "more than 256 records" {
+            EncodeError::LimitExceeded
+        } else {
+            EncodeError::InvalidField
+        };
+        assert_eq!(
+            codec.encoded_control_state_page_len(&broken),
+            Err(expected),
+            "{name}: encode"
+        );
+    }
+    type Wire = fn(&mut Vec<Tlv>);
+    let swapped = |first: u32, second: u32| {
+        let mut raw = Vec::new();
+        for (handle, value) in [(first, 1.0_f32), (second, 2.0_f32)] {
+            raw.extend_from_slice(&handle.to_le_bytes());
+            raw.extend_from_slice(&value.to_le_bytes());
+        }
+        raw
+    };
+    let decode_rules: Vec<(&str, Wire)> = vec![
+        ("descending handles", |f| {
+            set(
+                f,
+                7,
+                &[5, 0, 0, 0, 0, 0, 0, 0x40, 2, 0, 0, 0, 0, 0, 0x80, 0x3f],
+            );
+        }),
+        ("record width 16", |f| set(f, 6, &16_u16.to_le_bytes())),
+        ("record width 4", |f| set(f, 6, &4_u16.to_le_bytes())),
+        ("count above 256", |f| set(f, 5, &257_u16.to_le_bytes())),
+    ];
+    for (name, wire) in decode_rules {
+        let (patched, count) = edited(&bytes, wire);
+        assert_eq!(
+            codec.decode_control_state_page(&patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+    }
+    // A count that disagrees with the bytes is a length error, not a shorter page.
+    let (patched, count) = edited(&bytes, |f| set(f, 5, &1_u16.to_le_bytes()));
+    assert_eq!(
+        codec.decode_control_state_page(&patched, count),
+        Err(DecodeError::InvalidValueLength)
+    );
+    // A value that is not finite and a handle of zero, built on the wire.
+    for (name, raw) in [
+        ("NaN value", {
+            let mut raw = swapped(2, 5);
+            raw[4..8].copy_from_slice(&f32::NAN.to_le_bytes());
+            raw
+        }),
+        ("handle zero", swapped(0, 5)),
+        ("repeated handle", swapped(5, 5)),
+    ] {
+        let (patched, count) = edited(&bytes, |f| set(f, 7, &raw));
+        assert_eq!(
+            codec.decode_control_state_page(&patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+    }
+    let (patched, count) = edited(&bytes, |f| set(f, 3, &4_u32.to_le_bytes()));
+    assert_eq!(
+        codec.decode_control_state_page(&patched, count),
+        Err(DecodeError::InvalidField),
+        "last handle before the last record"
+    );
+}
+
+/// Every control code table allocates exactly its listed codes, in ascending order, and reads
+/// each back to its own variant; every other byte is `INVALID_FIELD`. The tables the sprint's
+/// rulings pin are checked against their sources: the section codes are `ParameterRack`'s plus
+/// `own`, the live-ramp rows run from `fader` 1 to `send matrix` 15.
+///
+/// Red if a code is renumbered, reused for another variant or left unreachable, which would move
+/// a wire code that a frontend or an agent reads.
+#[test]
+fn control_code_tables_are_exact() {
+    fn check<T: Copy + core::fmt::Debug + PartialEq>(
+        codes: &[u8],
+        from_code: fn(u8) -> Result<T, DecodeError>,
+        code: fn(T) -> u8,
+    ) {
+        assert!(codes.windows(2).all(|pair| pair[0] < pair[1]));
+        for raw in 0..=u8::MAX {
+            match from_code(raw) {
+                Ok(variant) => {
+                    assert!(codes.contains(&raw), "code {raw} is allocated");
+                    assert_eq!(code(variant), raw);
+                }
+                Err(error) => {
+                    assert!(!codes.contains(&raw), "code {raw} is not allocated");
+                    assert_eq!(error, DecodeError::InvalidField);
+                }
+            }
+        }
+    }
+    check(
+        ControlOwnerKind::CODES,
+        ControlOwnerKind::from_code,
+        ControlOwnerKind::code,
+    );
+    check(
+        ControlSection::CODES,
+        ControlSection::from_code,
+        ControlSection::code,
+    );
+    check(
+        ControlOwnerHeaderKind::CODES,
+        ControlOwnerHeaderKind::from_code,
+        ControlOwnerHeaderKind::code,
+    );
+    check(
+        ControlKind::CODES,
+        ControlKind::from_code,
+        ControlKind::code,
+    );
+    check(
+        ControlTaper::CODES,
+        ControlTaper::from_code,
+        ControlTaper::code,
+    );
+    check(
+        ControlRampRow::CODES,
+        ControlRampRow::from_code,
+        ControlRampRow::code,
+    );
+    check(
+        ControlClass::CODES,
+        ControlClass::from_code,
+        ControlClass::code,
+    );
+    check(
+        ControlReason::CODES,
+        ControlReason::from_code,
+        ControlReason::code,
+    );
+    check(
+        ControlScope::CODES,
+        ControlScope::from_code,
+        ControlScope::code,
+    );
+    check(
+        ControlFamily::CODES,
+        ControlFamily::from_code,
+        ControlFamily::code,
+    );
+
+    assert_eq!(ControlOwnerKind::CODES, [1, 2, 3, 4]);
+    assert_eq!(ControlSection::Inserts.code(), ParameterRack::Inserts as u8);
+    assert_eq!(
+        ControlSection::Builtins.code(),
+        ParameterRack::Builtins as u8
+    );
+    assert_eq!(ControlSection::Console.code(), ParameterRack::Console as u8);
+    assert_eq!(ControlSection::Own.code(), 6);
+    // Every ramp-row code, pinned: the codes are wire contract and a client matches on them, so a
+    // swap of two rows must turn this red even though each code still round-trips.
+    let ramp_rows = [
+        (ControlRampRow::Fader, 1),
+        (ControlRampRow::InputTrim, 2),
+        (ControlRampRow::SendGain, 3),
+        (ControlRampRow::VcaOffset, 4),
+        (ControlRampRow::LinkGlide, 5),
+        (ControlRampRow::Mute, 6),
+        (ControlRampRow::Solo, 7),
+        (ControlRampRow::PolarityInvert, 8),
+        (ControlRampRow::SendMute, 9),
+        (ControlRampRow::SendFollowsMute, 10),
+        (ControlRampRow::VcaMute, 11),
+        (ControlRampRow::BypassCrossfade, 12),
+        (ControlRampRow::Pan, 13),
+        (ControlRampRow::Matrix, 14),
+        (ControlRampRow::SendMatrix, 15),
+    ];
+    assert_eq!(ramp_rows.len(), ControlRampRow::CODES.len());
+    for (row, code) in ramp_rows {
+        assert_eq!(row.code(), code, "{row:?}");
+        assert_eq!(ControlRampRow::from_code(code), Ok(row));
+    }
+    assert_eq!(ControlReason::RuledLiveNotBuilt.code(), 8);
+}
+
+/// Gate 2: a retired message ID decodes to `UNSUPPORTED_MESSAGE`, no message variant uses a
+/// retired code, and a capability registry that lists one is refused.
+///
+/// Red if `0x0004` or `0x0005` is reallocated to a new message or still served, or a peer can
+/// advertise one.
+#[test]
+fn retired_message_ids_are_never_reused_or_advertised() {
+    assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005]);
+    for raw in 0..=u16::MAX {
+        match crate::MessageId::from_raw(raw) {
+            Ok(message) => {
+                assert_eq!(message.raw(), raw);
+                assert!(
+                    !crate::RETIRED_MESSAGE_IDS.contains(&raw),
+                    "a message uses the retired code {raw:#06x}"
+                );
+            }
+            Err(error) => {
+                if crate::RETIRED_MESSAGE_IDS.contains(&raw) {
+                    assert_eq!(error, DecodeError::UnsupportedMessage);
+                }
+            }
+        }
+    }
+    assert!(!allocated_id(0x0004, false) && !allocated_id(0x0005, false));
+    assert!(
+        [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13]
+            .into_iter()
+            .all(|id| allocated_id(id, false))
+    );
+    assert!(!allocated_id(0, false) && !allocated_id(14, false));
 }
 
 fn automation_record(sample: u64, handle: u32, value: f32) -> crate::AutomationRecord {
@@ -1808,4 +2627,132 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
 
 fn hex(bytes: &[u8]) -> String {
     engine::hex_lower(bytes)
+}
+
+/// Batch 2 review fold item 4: the control core's owner, section and lane codes are the wire
+/// tables' codes, variant for variant, and the one conversion between the two address types is a
+/// round trip that refuses what a control row cannot be.
+///
+/// Red if either side gains, renumbers or drops a kind without the other (the list would then
+/// carry an address that `SET_CONTROL` reads as another row), or if the conversion invents an
+/// owner or slot ID.
+#[test]
+fn the_control_core_and_the_wire_tables_agree_on_every_code() {
+    let mut core_owners: Vec<u8> = controls::OwnerKind::ALL
+        .map(controls::OwnerKind::code)
+        .to_vec();
+    core_owners.sort_unstable();
+    assert_eq!(core_owners, ControlOwnerKind::CODES);
+    for kind in controls::OwnerKind::ALL {
+        let wire = ControlOwnerKind::from_controls(kind);
+        assert_eq!(wire.code(), kind.code());
+        assert_eq!(wire.to_controls(), kind);
+        assert_eq!(ControlOwnerKind::from_code(kind.code()), Ok(wire));
+    }
+    let mut core_sections: Vec<u8> = controls::SectionKind::ALL
+        .map(controls::SectionKind::code)
+        .to_vec();
+    core_sections.sort_unstable();
+    assert_eq!(core_sections, ControlSection::CODES);
+    for kind in controls::SectionKind::ALL {
+        let wire = ControlSection::from_controls(kind);
+        assert_eq!(wire.code(), kind.code());
+        assert_eq!(ControlSection::from_code(kind.code()), Ok(wire));
+    }
+    for (lane, code) in [
+        (controls::Lane::Left, 1),
+        (controls::Lane::Right, 2),
+        (controls::Lane::Both, 3),
+    ] {
+        assert_eq!(ParameterChannel::from_session(lane) as u8, code);
+        assert_eq!(schema::session_parameter_channel_wire(lane), code);
+    }
+
+    let id = |text: &str| session::StableId::parse(text).expect("stable id");
+    let shapes = [
+        (controls::Owner::Session, controls::Section::Own),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Builtins,
+        ),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Inserts(id("eq")),
+        ),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Console(id("desk")),
+        ),
+        (controls::Owner::Route(id("send")), controls::Section::Own),
+        (controls::Owner::Vca(id("grp")), controls::Section::Own),
+    ];
+    for (owner, section) in shapes {
+        let address = controls::ControlAddress {
+            owner,
+            section,
+            control: 9,
+            lane: controls::Lane::Left,
+        };
+        let wire = ControlAddress::from(&address);
+        assert_eq!(controls::ControlAddress::try_from(&wire), Ok(address));
+    }
+    let wire = ControlAddress {
+        owner_kind: ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section: ControlSection::Builtins,
+        slot_id: None,
+        control: Some(1),
+        lane: Some(ParameterChannel::Both),
+    };
+    assert!(controls::ControlAddress::try_from(&wire).is_ok());
+    for (name, broken) in [
+        (
+            "no control",
+            ControlAddress {
+                control: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "no lane",
+            ControlAddress {
+                lane: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "strip without an ID",
+            ControlAddress {
+                owner_id: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "builtins with a slot",
+            ControlAddress {
+                slot_id: Some("eq".to_owned()),
+                ..wire.clone()
+            },
+        ),
+        (
+            "inserts without a slot",
+            ControlAddress {
+                section: ControlSection::Inserts,
+                ..wire.clone()
+            },
+        ),
+        (
+            "an ID that is not a stable ID",
+            ControlAddress {
+                owner_id: Some("Not Stable".to_owned()),
+                ..wire.clone()
+            },
+        ),
+    ] {
+        assert_eq!(
+            controls::ControlAddress::try_from(&broken),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
 }

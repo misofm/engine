@@ -116,3 +116,35 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
 - Shrinks *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391):
   its D2 ("attach whenever `control_queue_depth` is `Some`") becomes "attach when the route's rows
   are live"; its render work stays (see `amendments-a.md`; #1557 has the route half).
+
+## Evidence record
+
+**D5, measured once (2026-10-13, release build, x86-64-v3, one invocation).** The console-workload
+64-track session (`fixtures/session/v1/console-sixty-four-track-intended.json`: 64 tracks, two
+pre-insert and one post-insert console slot, every route into the output), prepared through
+`prepare_host_runtime_with_live_lanes` with the lanes the C ABI now chooses and with
+`HostLiveLanes::ALL`. Render: 128-frame blocks of noise on every track, one warm-up run of 1,000
+blocks, then two measured rounds of 1,000 blocks; the figure is the median per-block `render` time.
+No tuning, no retry.
+
+| | `controls::live_lanes` (effects only) | `HostLiveLanes::ALL` | difference |
+|---|---|---|---|
+| `builtin_processor_payload_bytes` (= `builtin_retained_payload_bytes`) | 200,960 | 257,792 | +56,832 (the 64 strips' input cells) |
+| `graph_session_plus_plan_bytes`, `effect_control_resources.total_bytes()`, `route_control_resources.total_bytes` | 4,788,291 / 197,440 / 0 | same | 0 |
+| median per-block render, round 1 / round 2 | 101.25 / 101.01 us | 101.86 / 101.85 us | +0.6 / +0.8 us (about 0.7 percent) |
+
+The route lanes add nothing here because the session has no route into a submix; a session with
+submix sends pays the `route_control_resources` row for them. `output_tail` is `Infinite` in both
+columns (the session's limiter), so the input lane's infinite live tail changes no report here. The
+C ABI's lane set equals `C_ABI_LIVE_LANES` for the session (`effects` only; the effect control
+bytes are identical to the pre-change preparation), and `audit capi` reports `pcm_digest`
+`76525e7ef9e78cf4` unchanged.
+
+## Decision record (batch 2 review fold, 2026-10-13)
+
+- **D-fold-1. Lanes by class and family only.** `LiveLanes::of_rows` no longer skips a row whose
+  `active` flag is false. `active` follows a value (a live `matrix_mode` switch flips it), and a
+  value must never change which lanes a plan has: otherwise a successor of one session could
+  carry other lanes than its predecessor, and a live edit could find its lane missing. The
+  `active` flag still decides what a row lists and what `set` accepts.
+

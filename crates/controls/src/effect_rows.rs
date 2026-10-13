@@ -27,7 +27,7 @@ use crate::descriptor::{
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
-use crate::registry::{ControlRow, push_control};
+use crate::registry::{ControlRow, Resolved, push_control};
 use crate::{ControlClass, ControlKind, Family, RebuildReason, Taper};
 
 /// The control ID of an effect's bypass.
@@ -92,6 +92,18 @@ fn contract(identity: &EffectIdentity) -> Option<&'static EffectDescriptor> {
     registry
         .get_ascii(effect_id.as_str())
         .map(|factory| factory.descriptor())
+}
+
+/// Whether the instance `identity` has control rows at all: a native effect the launch registry
+/// carries. A `cid` effect and an identity the registry lacks have none, so no row sees a change
+/// to their values.
+pub(crate) fn has_rows(identity: &EffectIdentity) -> bool {
+    contract(identity).is_some()
+}
+
+/// Whether an insert of `identity` has a link-mode row: the effect supports a choice of modes.
+pub(crate) fn has_link_mode_row(identity: &EffectIdentity) -> bool {
+    contract(identity).is_some_and(|descriptor| link_choices(descriptor).is_some())
 }
 
 /// The numeric code of a link mode: the `effect_contract::LinkMode` code.
@@ -340,6 +352,33 @@ pub(crate) fn push_rows(
             |_| link_code(mode),
         );
     }
+}
+
+/// Find one row of an instance by its control ID, as [`push_rows`] would list it: `None` for a
+/// `cid` effect, an identity the registry lacks, or an ID the effect does not have.
+pub(crate) fn resolve(instance: &Instance<'_>, control: u32) -> Option<Resolved> {
+    let descriptor = contract(instance.identity)?;
+    let effect_id = descriptor.id.as_str();
+    Some(match control {
+        BYPASS_CONTROL => {
+            Resolved::stored(bypass_descriptor(effect_id), |_| toggle(instance.bypass))
+        }
+        LINK_MODE_CONTROL => {
+            let (mode, choices) = (instance.link_mode?, link_choices(descriptor)?);
+            Resolved::stored(link_mode_descriptor(effect_id, choices), |_| {
+                link_code(mode)
+            })
+        }
+        control => {
+            let parameter = descriptor
+                .parameters
+                .iter()
+                .find(|parameter| parameter.id.0 == control)?;
+            Resolved::stored(parameter_descriptor(parameter), |side| {
+                resolved(instance.params, parameter, side)
+            })
+        }
+    })
 }
 
 /// The contract unit as the session spells it.

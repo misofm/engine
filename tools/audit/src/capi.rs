@@ -265,7 +265,7 @@ impl Drop for AuditHandles {
 }
 
 /// How many kinds of live edit the editor cycles through.
-const LIVE_EDIT_KINDS: u64 = 5;
+const LIVE_EDIT_KINDS: u64 = 6;
 
 /// The control-thread side of the audit: live fader-mute, pan, effect parameter, EQ parameter and
 /// effect bypass edits, committed through the C entry point between render calls.
@@ -279,6 +279,7 @@ struct LiveEditor {
     thresholded: bool,
     boosted: bool,
     bypassed: bool,
+    faded: bool,
     command: Vec<u8>,
     response: [u8; 4_096],
     event: [u8; 4_096],
@@ -296,6 +297,7 @@ impl LiveEditor {
             thresholded: false,
             boosted: false,
             bypassed: false,
+            faded: false,
             command: vec![0; 4_096],
             response: [0; 4_096],
             event: [0; 4_096],
@@ -304,7 +306,8 @@ impl LiveEditor {
 
     /// The next edit, in a cycle of [`LIVE_EDIT_KINDS`]: a mute toggle on `eq0`, a pan move on
     /// `eq1`, the compressor's threshold on `eq2`'s left lane, band 1's left gain on `eq0`'s
-    /// console EQ (an enabled band, so it designs a target), and the compressor's bypass. Every
+    /// console EQ (an enabled band, so it designs a target), the compressor's bypass, and a
+    /// `SET_CONTROL` on `eq1`'s fader (left lane, by its stable address). Every
     /// edit changes its value, so each one writes a value or a target to a lane's cells.
     fn next_edit(&mut self) -> SessionEdit {
         let track = |id: &str| StableId::parse(id).expect("fixture track");
@@ -361,6 +364,20 @@ impl LiveEditor {
                         unit: ParameterUnit::Db,
                         value: if self.boosted { 3.0 } else { -3.0 },
                     },
+                }
+            }
+            5 => {
+                self.faded = !self.faded;
+                SessionEdit::SetControl {
+                    address: protocol::control_core::ControlAddress {
+                        owner: protocol::control_core::Owner::Strip(track("eq1")),
+                        section: protocol::control_core::Section::Builtins,
+                        // The builtin `fader_db` row.
+                        control: 5,
+                        lane: protocol::control_core::Lane::Left,
+                    },
+                    value: if self.faded { -3.0 } else { 0.0 },
+                    ramp_samples: None,
                 }
             }
             _ => {

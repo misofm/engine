@@ -16,17 +16,23 @@ mod wire;
 
 pub use message_wire::{
     AutomationCanceled, AutomationCancellationReason, AutomationEnqueue, AutomationEnqueued,
-    Backpressure, BackpressureQueueKind, Capabilities, CapabilityFlags, CounterId, CounterSnapshot,
+    Backpressure, BackpressureQueueKind, CONTROL_PAGE_ITEMS, CONTROL_STATE_RECORD_BYTES,
+    Capabilities, CapabilityFlags, ControlAddress, ControlBody, ControlClass, ControlEntry,
+    ControlFamily, ControlKind, ControlListPage, ControlListRequest, ControlOwnerFilter,
+    ControlOwnerHeader, ControlOwnerHeaderKind, ControlOwnerKind, ControlRampRow, ControlReason,
+    ControlRouteEnds, ControlRow, ControlScope, ControlSection, ControlSectionHeader,
+    ControlStatePage, ControlStateRecord, ControlTaper, CounterId, CounterSnapshot,
     CounterSnapshotRef, CounterValue, CountersRequest, DecodedAutomationEnqueue,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticSeverity,
     DiagnosticsPage, DiagnosticsRequest, EnumChoice, MeterBatch, MeterComponent, MeterRecord,
-    NonOkResponse, ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
-    ParameterMapping, ParameterMetadataPage, ParameterMetadataRequest, ParameterRack,
-    ParameterStatePage, ParameterStateRecord, ParameterStateRequest, ParameterUnit,
-    ParameterValueKind, PathSegment, SessionCommitted, SessionSnapshot, SessionSnapshotRequest,
-    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportState, TransportStateEvent,
+    NonOkResponse, ParameterChannel, ParameterRack, ParameterUnit, PathSegment, SessionCommitted,
+    SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration, TransactionApplied,
+    TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
 };
+/// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
+pub mod control_core {
+    pub use controls::{ControlAddress, ControlError, Lane, Owner, Section};
+}
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,
     SessionStore, SessionStoreError, apply_session_edit,
@@ -49,8 +55,8 @@ pub use typed_frame::{
 pub use wire::{
     CommandFrame, CommandHeader, DecodeError, DecodeScratch, DecodedFrame, EncodeError, EventFrame,
     EventHeader, ExpectedRevision, Frame, FrameHeader, FrameKind, MessageId, ProtocolCodec,
-    ProtocolLimits, ProtocolVersion, RequestId, ResponseHeader, SampleTime, SessionRevision,
-    StatusCode,
+    ProtocolLimits, ProtocolVersion, RETIRED_MESSAGE_IDS, RequestId, ResponseHeader, SampleTime,
+    SessionRevision, StatusCode,
 };
 
 /// The current, frozen BTLV wire major version.

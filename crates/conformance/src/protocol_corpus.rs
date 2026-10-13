@@ -305,6 +305,17 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             },
             ramp_samples: None,
         },
+        // #1553: the first fader of the track by its stable address, with a ramp of 240 samples.
+        SessionEdit::SetControl {
+            address: control_core::ControlAddress {
+                owner: control_core::Owner::Strip(track_id.clone()),
+                section: control_core::Section::Builtins,
+                control: 5,
+                lane: control_core::Lane::Left,
+            },
+            value: -3.0,
+            ramp_samples: Some(240),
+        },
     ]
 }
 
@@ -360,8 +371,9 @@ pub fn console_session_fixture() -> SessionModel {
 
 /// One wire conformance row for decision 12's retired and refused codes (#1094).
 ///
-/// `bytes` is one complete `SESSION_TRANSACTION_APPLY` command frame, request ID 1 at exact
-/// revision 7. An endpoint whose session is [`console_session_fixture`] answers it with `status`
+/// `bytes` is one complete command frame, request ID 1: a `SESSION_TRANSACTION_APPLY` at exact
+/// revision 7, or, for the two retired message IDs, an empty frame under the retired ID, which
+/// the endpoint refuses with the decoder's `UNSUPPORTED_MESSAGE` and no response frame. An endpoint whose session is [`console_session_fixture`] answers it with `status`
 /// and exactly the diagnostic codes in `diagnostic`: the endpoint's generic `protocol.failure` for
 /// a frame refused at decode, the edit's own code for an edit refusal, none for a success. A
 /// refusing row commits nothing. The rows carry numbers and strings rather than protocol types so
@@ -384,7 +396,12 @@ pub struct RetiredCodeRow {
 /// - the retired track fields 6 (`simd1`) and 8 (`simd2`), mandatory (`UNKNOWN_REQUIRED_FIELD`)
 ///   and optional (`MALFORMED_FRAME`, never skipped as an unknown optional field);
 /// - each structural or declaration edit addressed at `console` (`VALIDATION_FAILED`,
-///   `session.edit.console_slot_fixed`).
+///   `session.edit.console_slot_fixed`);
+/// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
+///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
+///   C4): `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
+///   no message leaves no safe request identity, so these two rows carry the status the decoder
+///   maps the refusal to, no diagnostic, and the endpoint writes no response frame for them.
 ///
 /// The last row, `control.unknown_optional_track_field_12`, is the splice's control: the same
 /// frame surgery with a never-allocated optional field ID decodes and commits (`OK`), so a
@@ -393,6 +410,7 @@ pub struct RetiredCodeRow {
 pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
     const MALFORMED_FRAME: u16 = StatusCode::MalformedFrame as u16;
     const UNKNOWN_REQUIRED_FIELD: u16 = StatusCode::UnknownRequiredField as u16;
+    const UNSUPPORTED_MESSAGE: u16 = StatusCode::UnsupportedMessage as u16;
     const VALIDATION_FAILED: u16 = StatusCode::ValidationFailed as u16;
     const DECODE_REFUSAL: Option<&str> = Some("protocol.failure");
     let session = console_session_fixture();
@@ -457,6 +475,26 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             bytes: transaction_frame(edit),
             status: VALIDATION_FAILED,
             diagnostic: Some("session.edit.console_slot_fixed"),
+        });
+    }
+    for retired in [0x0004_u16, 0x0005] {
+        let mut bytes = vec![0; OUTER_HEADER_BYTES];
+        ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(1).expect("literal request ID"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CapabilitiesGet,
+                },
+                &mut bytes,
+            )
+            .expect("an empty command frame encodes");
+        bytes[16..18].copy_from_slice(&retired.to_le_bytes());
+        rows.push(RetiredCodeRow {
+            name: format!("retired.message_id_{retired:#06x}"),
+            bytes,
+            status: UNSUPPORTED_MESSAGE,
+            diagnostic: None,
         });
     }
     rows.push(RetiredCodeRow {
@@ -761,7 +799,14 @@ pub enum ConformanceDecoder {
 /// that one edit is the whole move; the frame count and the edit count stay 46.
 /// Issue #1365 repinned it from `5429f052592101ef`: #1365 appends `SetControlSmoothing` (`0x0008`),
 /// 47 edits, one per allocated opcode. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x8eb4_cc8d_075a_4355;
+/// Issue #1551 (decision 17, C4) repinned it from `8eb4cc8d075a4355`: `CONTROL_LIST_GET` and
+/// `CONTROL_STATE_GET` (`0x000c`, `0x000d`) replace the retired `PARAMETER_METADATA_GET` and
+/// `PARAMETER_STATE_GET` (`0x0004`, `0x0005`) as command and response frames, the capability
+/// registry lists the new pair, and the capabilities field 21 is the control page bound. The frame
+/// count stays 46.
+/// Issue #1553 (decision 17, C5) repinned it from `0902357f75bdddcd`: `SetControl` (`0x0800`)
+/// appended, 48 edits, one per allocated opcode. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x9f13_a069_93ef_a99e;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -772,7 +817,15 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     let revision = SessionRevision(7);
     let mut frames = Vec::new();
     let transaction_edits = complete_all_opcode_fixture();
-    let state = ParameterStateRequest { handles: vec![1] };
+    let control_request = ControlListRequest {
+        structure_epoch: 0,
+        after_handle: 0,
+        limit: 8,
+        owner: Some(ControlOwnerFilter {
+            kind: ControlOwnerKind::Strip,
+            id: Some("vocal".to_owned()),
+        }),
+    };
     let automation = [AutomationRecord {
         kind: AutomationKind::Point,
         handle: ParameterHandle(1),
@@ -805,8 +858,8 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                         &$payload,
                         CommandPayload::CapabilitiesGet
                             | CommandPayload::SessionSnapshotGet(_)
-                            | CommandPayload::ParameterMetadataGet(_)
-                            | CommandPayload::ParameterStateGet(_)
+                            | CommandPayload::ControlListGet(_)
+                            | CommandPayload::ControlStateGet(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -833,15 +886,12 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         CommandPayload::SessionTransactionApply(&transaction_edits)
     );
     command!(
-        "command.parameter_metadata_get",
-        CommandPayload::ParameterMetadataGet(ParameterMetadataRequest {
-            after_handle: 0,
-            limit: 1
-        })
+        "command.control_list_get",
+        CommandPayload::ControlListGet(&control_request)
     );
     command!(
-        "command.parameter_state_get",
-        CommandPayload::ParameterStateGet(&state)
+        "command.control_state_get",
+        CommandPayload::ControlStateGet(&control_request)
     );
     command!(
         "command.automation_enqueue",
@@ -893,11 +943,11 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_cached_response_bytes: 64,
         per_block_automation_density: 1,
         admission_quantum_frames: 1,
-        maximum_parameter_page_items: 256,
+        maximum_control_page_items: 256,
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13],
         supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
@@ -934,20 +984,14 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             applied_operations: 42
         })
     );
+    let (control_page, state_page) = control_corpus_pages();
     success!(
-        "response.parameter_metadata",
-        SuccessResponsePayload::ParameterMetadata(ParameterMetadataPage {
-            last_handle: 0,
-            eof: true,
-            descriptors: Vec::new()
-        })
+        "response.control_list",
+        SuccessResponsePayload::ControlListPage(control_page)
     );
     success!(
-        "response.parameter_state",
-        SuccessResponsePayload::ParameterState(ParameterStatePage {
-            observed_sample: 0,
-            records: Vec::new()
-        })
+        "response.control_state",
+        SuccessResponsePayload::ControlStatePage(state_page)
     );
     success!(
         "response.automation",
@@ -1114,6 +1158,179 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     );
     event!("event.diagnostic", EventPayload::Diagnostic(&diagnostic));
     frames
+}
+
+/// One control list page that carries every kind of row and every optional field once -- an
+/// owner header, a route owner header, two section headers, and a control row of each `kind`
+/// and `class` -- and the state page of its control rows.
+fn control_corpus_pages() -> (ControlListPage, ControlStatePage) {
+    let address = |section, slot: Option<&str>, control, lane| ControlAddress {
+        owner_kind: ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section,
+        slot_id: slot.map(str::to_owned),
+        control,
+        lane,
+    };
+    let row = |name: &str, kind, class| ControlRow {
+        name: name.to_owned(),
+        display_name: "Ratio".to_owned(),
+        display_unit: ":1".to_owned(),
+        unit: ParameterUnit::Ratio,
+        kind,
+        minimum: 1.0,
+        maximum: 20.0,
+        disabled_value: None,
+        default: 4.0,
+        taper: ControlTaper::Logarithmic,
+        step: 0.5,
+        precision: 1,
+        ladder: vec![2.0, 4.0, 8.0],
+        choices: Vec::new(),
+        ramp_row: None,
+        default_ramp_samples: 0,
+        class,
+        reason: None,
+        reason_issue: None,
+        reopen: None,
+        scope: ControlScope::Model,
+        automatable: class == ControlClass::Live,
+        family: ControlFamily::Effect,
+        active: true,
+        value: 4.0,
+    };
+    let mut live = row("ratio", ControlKind::Continuous, ControlClass::Live);
+    live.disabled_value = Some(0.0);
+    live.ramp_row = Some(ControlRampRow::Fader);
+    live.default_ramp_samples = 480;
+    let mut toggle = row("bypass", ControlKind::Toggle, ControlClass::Live);
+    toggle.minimum = 0.0;
+    toggle.maximum = 1.0;
+    toggle.default = 0.0;
+    toggle.value = 1.0;
+    toggle.taper = ControlTaper::Stepped;
+    toggle.ladder = Vec::new();
+    let mut choice = row(
+        "detector",
+        ControlKind::Enumeration,
+        ControlClass::RebuildOnly,
+    );
+    choice.choices = vec![
+        EnumChoice {
+            value: 0.0,
+            label: "Peak".to_owned(),
+        },
+        EnumChoice {
+            value: 1.0,
+            label: "RMS".to_owned(),
+        },
+    ];
+    choice.default = 0.0;
+    choice.value = 1.0;
+    choice.minimum = 0.0;
+    choice.maximum = 1.0;
+    choice.taper = ControlTaper::Stepped;
+    choice.reason = Some(ControlReason::NewMemory);
+    choice.reopen = Some("a detector that shares one buffer".to_owned());
+    let mut ruled = row(
+        "lookahead",
+        ControlKind::Continuous,
+        ControlClass::RebuildOnly,
+    );
+    ruled.reason = Some(ControlReason::RuledLiveNotBuilt);
+    ruled.reason_issue = Some(1557);
+    ruled.reopen = Some("#1557".to_owned());
+    ruled.family = ControlFamily::Route;
+    let mut derived = row(
+        "effective_fader",
+        ControlKind::Continuous,
+        ControlClass::Derived,
+    );
+    derived.scope = ControlScope::Monitor;
+    derived.active = false;
+    derived.unit = ParameterUnit::Db;
+    let controls = [live, toggle, choice, ruled, derived];
+    let mut entries = vec![
+        ControlEntry {
+            handle: 1,
+            address: address(ControlSection::Own, None, None, None),
+            body: ControlBody::OwnerHeader(ControlOwnerHeader {
+                kind: ControlOwnerHeaderKind::Track,
+                name: "Vocal".to_owned(),
+                route: None,
+            }),
+        },
+        ControlEntry {
+            handle: 2,
+            address: ControlAddress {
+                owner_kind: ControlOwnerKind::Route,
+                owner_id: Some("vocal-main".to_owned()),
+                section: ControlSection::Own,
+                slot_id: None,
+                control: None,
+                lane: None,
+            },
+            body: ControlBody::OwnerHeader(ControlOwnerHeader {
+                kind: ControlOwnerHeaderKind::Route,
+                name: "vocal-main".to_owned(),
+                route: Some(ControlRouteEnds {
+                    source: "vocal".to_owned(),
+                    destination: "main".to_owned(),
+                    tap: SendTap::PostFader,
+                }),
+            }),
+        },
+        ControlEntry {
+            handle: 3,
+            address: address(ControlSection::Builtins, None, None, None),
+            body: ControlBody::SectionHeader(ControlSectionHeader {
+                name: "Builtins".to_owned(),
+                effect: None,
+            }),
+        },
+        ControlEntry {
+            handle: 4,
+            address: address(ControlSection::Inserts, Some("comp"), None, None),
+            body: ControlBody::SectionHeader(ControlSectionHeader {
+                name: "Compressor".to_owned(),
+                effect: Some("miso.compressor".to_owned()),
+            }),
+        },
+    ];
+    let mut records = Vec::new();
+    for (index, control) in controls.into_iter().enumerate() {
+        let handle = 5 + u32::try_from(index).expect("five controls");
+        records.push(ControlStateRecord {
+            handle,
+            value: control.value,
+        });
+        entries.push(ControlEntry {
+            handle,
+            address: address(
+                ControlSection::Inserts,
+                Some("comp"),
+                Some(u32::try_from(index).expect("five controls") + 1),
+                Some(ParameterChannel::Left),
+            ),
+            body: ControlBody::Control(control),
+        });
+    }
+    (
+        ControlListPage {
+            revision: 7,
+            structure_epoch: 3,
+            last_handle: 9,
+            eof: true,
+            entries,
+        },
+        ControlStatePage {
+            revision: 7,
+            structure_epoch: 3,
+            last_handle: 9,
+            eof: true,
+            records,
+        },
+    )
 }
 
 fn output() -> Vec<u8> {

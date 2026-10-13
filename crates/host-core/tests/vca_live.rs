@@ -15,8 +15,6 @@
 //! Every session is built from the observation fixture emptied to transparent strips (no console
 //! slot, no insert, an identity input section), so the output is the faders, mutes and sends alone.
 
-use core::num::NonZeroUsize;
-
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use builtins::BuiltinLaneSelector;
 use builtins_compiler::{TestOnlyWriteGate, TrackFaderRecord};
@@ -33,7 +31,6 @@ use session::{
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
 const QUANTUM: usize = 128;
-const DEPTH: usize = 8;
 /// What every host output buffer holds before a render, so an unwritten sample shows.
 const HOST_SENTINEL: f32 = 7.0;
 const LANES: [BuiltinLaneSelector; 3] = [
@@ -1247,10 +1244,7 @@ impl Live {
         let compiled = compile_host_session(&document(model), &caps()).unwrap_or_else(|failure| {
             panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
         });
-        let request = HostLiveControlRequest {
-            control_queue_depth: Some(NonZeroUsize::new(DEPTH).expect("depth")),
-            ..HostLiveControlRequest::default()
-        };
+        let request = HostLiveControlRequest::default();
         let (host, handles) = prepare_host_runtime_with_live_controls(&compiled, &caps(), &request)
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))

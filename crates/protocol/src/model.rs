@@ -5,6 +5,7 @@
 //! non-publishable `CompiledSession` control-plane artifact.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
@@ -117,6 +118,9 @@ pub enum SessionEditOpcode {
     RemoveVca = 0x0701,
     /// `SetVcaFader` (#1241).
     SetVcaFader = 0x0702,
+    /// `SetControl` (decision 17, #1553): any control by its stable address. The first code of
+    /// the control family (`0x08xx`).
+    SetControl = 0x0800,
 }
 
 impl SessionEditOpcode {
@@ -177,6 +181,7 @@ impl SessionEditOpcode {
             0x0700 => Some(Self::UpsertVca),
             0x0701 => Some(Self::RemoveVca),
             0x0702 => Some(Self::SetVcaFader),
+            0x0800 => Some(Self::SetControl),
             _ => None,
         }
     }
@@ -489,6 +494,19 @@ pub enum SessionEdit {
         /// (#1394). Transaction metadata, never model state.
         ramp_samples: Option<u32>,
     },
+    /// Set any control by its stable address (decision 17, C5, #1553). The core's one validator
+    /// refuses a bad write with a typed [`SessionEditError::Control`] before anything changes;
+    /// whether the committed edit is live or a rebuild is the classifier's answer for the
+    /// resulting model, exactly as for the per-kind edit that writes the same field.
+    SetControl {
+        address: controls::ControlAddress,
+        /// The value in the control's unit; a toggle is exactly 0 or 1 and an enumeration one of
+        /// its choice values. Not required to be finite on the wire: the validator refuses it.
+        value: f32,
+        /// This edit's own ramp length in samples; absent means the row's default. A row whose
+        /// ramp is fixed refuses an explicit length. Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
+    },
 }
 
 impl SessionEdit {
@@ -543,6 +561,7 @@ impl SessionEdit {
             Self::UpsertVca { .. } => SessionEditOpcode::UpsertVca,
             Self::RemoveVca { .. } => SessionEditOpcode::RemoveVca,
             Self::SetVcaFader { .. } => SessionEditOpcode::SetVcaFader,
+            Self::SetControl { .. } => SessionEditOpcode::SetControl,
         }
     }
 }
@@ -564,7 +583,8 @@ impl SessionEdit {
             | Self::SetRouteGainDb { ramp_samples, .. }
             | Self::SetRouteMute { ramp_samples, .. }
             | Self::SetRouteFollowsMute { ramp_samples, .. }
-            | Self::SetVcaFader { ramp_samples, .. } => *ramp_samples,
+            | Self::SetVcaFader { ramp_samples, .. }
+            | Self::SetControl { ramp_samples, .. } => *ramp_samples,
             // Listed one by one on purpose, with no wildcard: a new variant must be classified
             // here, as in `record_edit_ramps`. An existing arm that gains a `ramp_samples` field
             // still compiles, so a reviewer checks the arm of any variant that gains one.
@@ -612,27 +632,39 @@ impl SessionEdit {
 /// edit that writes a `(target, row)` decides it, so a later edit without a length removes an
 /// earlier one's. An upsert, a removal or a rack edit that replaces an effect rewrites the
 /// target's rows with no length and clears them.
-fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
+///
+/// Several `SET_CONTROL` rows share one `(target, row)` key (the fader's left and right lanes, the
+/// pan and the matrix rows, trim and polarity, a route's mute and follows-mute), and the key holds
+/// one length. `control_writes` remembers the length each key's last `SET_CONTROL` gave it (`None`
+/// for absent), so a second `SET_CONTROL` that resolves a different length for the same key is
+/// refused with [`controls::ControlError::RampConflict`]; equal lengths agree. A per-kind edit or
+/// a rewrite of the target is not a control write: it replaces the key's record and keeps its
+/// last-edit-decides behaviour.
+fn record_edit_ramps(
+    ramps: &mut EditRamps,
+    control_writes: &mut ControlRampWrites,
+    edit: &SessionEdit,
+) -> Result<(), controls::ControlError> {
     let length = edit.ramp_samples();
-    let mut write = |target: EditRampTarget, rows: &[EditRampRow]| {
-        for row in rows {
-            ramps.set(&target, *row, length);
-        }
+    let mut recorder = RampRecorder {
+        ramps,
+        control_writes,
+        length,
     };
     match edit {
-        SessionEdit::SetTrackFader { track_id, .. } => write(
+        SessionEdit::SetTrackFader { track_id, .. } => recorder.write(
             EditRampTarget::Strip(track_id.clone()),
             &[EditRampRow::Fader, EditRampRow::Mute],
         ),
-        SessionEdit::SetTrackMatrixOrPan { track_id, .. } => write(
+        SessionEdit::SetTrackMatrixOrPan { track_id, .. } => recorder.write(
             EditRampTarget::Strip(track_id.clone()),
             &[EditRampRow::Matrix],
         ),
-        SessionEdit::SetTrackBuiltins { track_id, .. } => write(
+        SessionEdit::SetTrackBuiltins { track_id, .. } => recorder.write(
             EditRampTarget::Strip(track_id.clone()),
             &[EditRampRow::Input],
         ),
-        SessionEdit::SetTrackConsole { track_id, .. } => write(
+        SessionEdit::SetTrackConsole { track_id, .. } => recorder.write(
             EditRampTarget::Strip(track_id.clone()),
             &[EditRampRow::Link],
         ),
@@ -641,7 +673,7 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
             rack_name,
             effect_id,
             ..
-        } => write(
+        } => recorder.write(
             EditRampTarget::Effect {
                 strip: track_id.clone(),
                 rack: *rack_name,
@@ -649,49 +681,57 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
             },
             &[EditRampRow::Link],
         ),
-        SessionEdit::SetConsole { .. } => write(EditRampTarget::Console, &[EditRampRow::Link]),
-        SessionEdit::SetRouteGainDb { route_id, .. } => write(
+        SessionEdit::SetConsole { .. } => {
+            recorder.write(EditRampTarget::Console, &[EditRampRow::Link])
+        }
+        SessionEdit::SetRouteGainDb { route_id, .. } => recorder.write(
             EditRampTarget::Route(route_id.clone()),
             &[EditRampRow::RouteGain],
         ),
         SessionEdit::SetRouteMute { route_id, .. }
-        | SessionEdit::SetRouteFollowsMute { route_id, .. } => write(
+        | SessionEdit::SetRouteFollowsMute { route_id, .. } => recorder.write(
             EditRampTarget::Route(route_id.clone()),
             &[EditRampRow::RouteMute],
         ),
-        SessionEdit::SetRouteChannelMatrix { route_id, .. } => write(
+        SessionEdit::SetRouteChannelMatrix { route_id, .. } => recorder.write(
             EditRampTarget::Route(route_id.clone()),
             &[EditRampRow::RouteMatrix],
         ),
-        SessionEdit::SetVcaFader { vca_id, .. } => write(
+        SessionEdit::SetVcaFader { vca_id, .. } => recorder.write(
             EditRampTarget::Vca(vca_id.clone()),
             &[EditRampRow::VcaFader, EditRampRow::VcaMute],
         ),
+        // A control edit writes the one row its address names, if that row ramps.
+        SessionEdit::SetControl { address, .. } => {
+            if let Some((target, row)) = control_ramp_row(address) {
+                recorder.write_control(target, row)?;
+            }
+        }
         SessionEdit::UpsertTrack { track } => {
-            ramps.clear_target(&EditRampTarget::Strip(track.id.clone()));
+            recorder.clear_target(&EditRampTarget::Strip(track.id.clone()));
         }
         SessionEdit::UpsertSubmix { submix } => {
-            ramps.clear_target(&EditRampTarget::Strip(submix.id.clone()));
+            recorder.clear_target(&EditRampTarget::Strip(submix.id.clone()));
         }
         SessionEdit::UpsertRoute { route } => {
-            ramps.clear_target(&EditRampTarget::Route(route.id.clone()));
+            recorder.clear_target(&EditRampTarget::Route(route.id.clone()));
         }
         SessionEdit::UpsertVca { vca } => {
-            ramps.clear_target(&EditRampTarget::Vca(vca.id.clone()));
+            recorder.clear_target(&EditRampTarget::Vca(vca.id.clone()));
         }
         // A removal ends the target's rows, and only an upsert (above) re-creates it, so the
         // removal clears too: no entry outlives the thing it describes.
         SessionEdit::RemoveTrack { track_id } => {
-            ramps.clear_target(&EditRampTarget::Strip(track_id.clone()));
+            recorder.clear_target(&EditRampTarget::Strip(track_id.clone()));
         }
         SessionEdit::RemoveSubmix { submix_id } => {
-            ramps.clear_target(&EditRampTarget::Strip(submix_id.clone()));
+            recorder.clear_target(&EditRampTarget::Strip(submix_id.clone()));
         }
         SessionEdit::RemoveRoute { route_id } => {
-            ramps.clear_target(&EditRampTarget::Route(route_id.clone()));
+            recorder.clear_target(&EditRampTarget::Route(route_id.clone()));
         }
         SessionEdit::RemoveVca { vca_id } => {
-            ramps.clear_target(&EditRampTarget::Vca(vca_id.clone()));
+            recorder.clear_target(&EditRampTarget::Vca(vca_id.clone()));
         }
         // A rack edit that replaces an effect or a whole rack rewrites the effects' link modes
         // with no length, as an upsert does for its strip.
@@ -699,13 +739,13 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
             track_id,
             rack_name,
             ..
-        } => ramps.clear_rack(track_id, *rack_name),
+        } => recorder.ramps.clear_rack(track_id, *rack_name),
         SessionEdit::PutTrackEffect {
             track_id,
             rack_name,
             effect,
             ..
-        } => ramps.clear_target(&EditRampTarget::Effect {
+        } => recorder.clear_target(&EditRampTarget::Effect {
             strip: track_id.clone(),
             rack: *rack_name,
             effect: effect.id.clone(),
@@ -714,7 +754,7 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
             track_id,
             rack_name,
             effect_id,
-        } => ramps.clear_target(&EditRampTarget::Effect {
+        } => recorder.clear_target(&EditRampTarget::Effect {
             strip: track_id.clone(),
             rack: *rack_name,
             effect: effect_id.clone(),
@@ -749,6 +789,92 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
         | SessionEdit::SetAutomationTarget { .. }
         | SessionEdit::SetAutomationSegments { .. } => {}
     }
+    Ok(())
+}
+
+/// The length each `(target, row)` key's last `SET_CONTROL` edit of the transaction gave it, with
+/// `None` for an edit that carried none.
+type ControlRampWrites = BTreeMap<(EditRampTarget, EditRampRow), Option<u32>>;
+
+/// The two records [`record_edit_ramps`] keeps for one edit.
+struct RampRecorder<'a> {
+    ramps: &'a mut EditRamps,
+    control_writes: &'a mut ControlRampWrites,
+    length: Option<u32>,
+}
+
+impl RampRecorder<'_> {
+    /// A per-kind edit wrote `rows`: the last edit decides, and the key is no longer a control's.
+    fn write(&mut self, target: EditRampTarget, rows: &[EditRampRow]) {
+        for row in rows {
+            self.control_writes.remove(&(target.clone(), *row));
+            self.ramps.set(&target, *row, self.length);
+        }
+    }
+
+    /// A `SET_CONTROL` edit wrote `row`: refused when an earlier `SET_CONTROL` of the transaction
+    /// resolved another length for the same key, before anything is recorded.
+    fn write_control(
+        &mut self,
+        target: EditRampTarget,
+        row: EditRampRow,
+    ) -> Result<(), controls::ControlError> {
+        let key = (target, row);
+        if self
+            .control_writes
+            .get(&key)
+            .is_some_and(|earlier| *earlier != self.length)
+        {
+            return Err(controls::ControlError::RampConflict);
+        }
+        self.ramps.set(&key.0, row, self.length);
+        self.control_writes.insert(key, self.length);
+        Ok(())
+    }
+
+    /// An upsert or a removal rewrote `target`: every length of it goes, control or not.
+    fn clear_target(&mut self, target: &EditRampTarget) {
+        self.ramps.clear_target(target);
+        self.control_writes.retain(|(owner, _), _| owner != target);
+    }
+}
+
+/// The `(target, row)` of the recorded ramp length that a write to `address` decides (#1553 D4),
+/// or `None` for a row whose ramp is fixed (its kernel owns it, and `controls::check` has refused
+/// an explicit length) or that has no ramp row. The row is the one the control's descriptor names,
+/// so the table of which control ramps lives in the control core and nowhere else.
+fn control_ramp_row(address: &controls::ControlAddress) -> Option<(EditRampTarget, EditRampRow)> {
+    use controls::{LiveRampRow, Motion, Owner};
+    let Motion::Ramp(ramp_row) = controls::row_motion(
+        address.owner.kind(),
+        address.section.kind(),
+        address.control,
+    )?
+    else {
+        return None;
+    };
+    // No wildcard: a new live ramp row must be classified here.
+    let row = match ramp_row {
+        LiveRampRow::Fader => EditRampRow::Fader,
+        LiveRampRow::Mute => EditRampRow::Mute,
+        LiveRampRow::Pan | LiveRampRow::Matrix => EditRampRow::Matrix,
+        LiveRampRow::InputTrim | LiveRampRow::PolarityInvert => EditRampRow::Input,
+        LiveRampRow::SendGain => EditRampRow::RouteGain,
+        LiveRampRow::SendMute | LiveRampRow::SendFollowsMute => EditRampRow::RouteMute,
+        LiveRampRow::SendMatrix => EditRampRow::RouteMatrix,
+        LiveRampRow::VcaOffset => EditRampRow::VcaFader,
+        LiveRampRow::VcaMute => EditRampRow::VcaMute,
+        // Solo is a monitor row (refused by `set`), the link glide has no control row with a
+        // per-edit length, and the bypass crossfade is fixed.
+        LiveRampRow::Solo | LiveRampRow::LinkGlide | LiveRampRow::BypassCrossfade => return None,
+    };
+    let target = match &address.owner {
+        Owner::Strip(id) => EditRampTarget::Strip(id.clone()),
+        Owner::Route(id) => EditRampTarget::Route(id.clone()),
+        Owner::Vca(id) => EditRampTarget::Vca(id.clone()),
+        Owner::Session => return None,
+    };
+    Some((target, row))
 }
 
 /// An edit-resolution failure before session compilation.
@@ -777,6 +903,9 @@ pub enum SessionEditError {
     /// second (#1394 D4, the bound of `control_smoothing`'s 1000 ms). The bound uses the rate the
     /// transaction commits.
     RampOutOfRange,
+    /// A `SetControl` edit was refused by the control core's validator (decision 17, C5). The
+    /// diagnostic code is the control code itself (`control.domain`, `control.read_only`, ...).
+    Control(controls::ControlError),
 }
 
 impl fmt::Display for SessionEditError {
@@ -1067,6 +1196,16 @@ pub fn apply_session_edit(
                 .ok_or(SessionEditError::NotFound)?
                 .fader = fader.clone();
         }
+        // Every check runs inside `set`, before its one model write (the acked-batch rule).
+        SessionEdit::SetControl {
+            address,
+            value,
+            ramp_samples,
+        } => {
+            let sample_rate_hz = session.sample_rate_hz;
+            controls::set(session, address, *value, *ramp_samples, sample_rate_hz)
+                .map_err(SessionEditError::Control)?;
+        }
     }
     Ok(())
 }
@@ -1224,12 +1363,18 @@ impl SessionStore {
         let next_revision = current.0 + 1;
         let mut candidate = self.compiled.normalized_model().clone();
         let mut edit_ramps = EditRamps::new();
+        let mut control_writes = ControlRampWrites::new();
         for (operation_index, edit) in edits.iter().enumerate() {
             apply_session_edit(&mut candidate, edit).map_err(|error| SessionStoreError::Edit {
                 operation_index,
                 error,
             })?;
-            record_edit_ramps(&mut edit_ramps, edit);
+            record_edit_ramps(&mut edit_ramps, &mut control_writes, edit).map_err(|error| {
+                SessionStoreError::Edit {
+                    operation_index,
+                    error: SessionEditError::Control(error),
+                }
+            })?;
         }
         candidate.revision = next_revision;
         let compiled = compile_session(&candidate, self.caps).map_err(|diagnostics| {
@@ -1855,8 +2000,9 @@ mod tests {
     /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1216 appends
     /// `SetRouteMute` (`0x0506`), #1218 appends `SetRouteFollowsMute` (`0x0507`) and #1241 opens
     /// the VCA family with `UpsertVca`, `RemoveVca` and `SetVcaFader` (`0x0700`-`0x0702`), and
-    /// #1365 appends `SetControlSmoothing` (`0x0008`): every allocated code round-trips through
-    /// `from_raw`, there are exactly 47 of them, and no retired code came back.
+    /// #1365 appends `SetControlSmoothing` (`0x0008`) and #1553 opens the control family with
+    /// `SetControl` (`0x0800`): every allocated code round-trips through
+    /// `from_raw`, there are exactly 48 of them, and no retired code came back.
     ///
     /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
     /// variant, or if an opcode is added to the enum but not to `from_raw`.
@@ -1865,7 +2011,7 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 47);
+        assert_eq!(allocated.len(), 48);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
@@ -1898,6 +2044,10 @@ mod tests {
         assert_eq!(
             SessionEditOpcode::from_raw(0x0702),
             Some(SessionEditOpcode::SetVcaFader)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0800),
+            Some(SessionEditOpcode::SetControl)
         );
         for retired in [0x0006, 0x0102, 0x0104] {
             assert_eq!(SessionEditOpcode::from_raw(retired), None);

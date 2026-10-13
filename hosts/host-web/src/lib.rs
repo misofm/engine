@@ -36,9 +36,9 @@ use host_core::{
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
     InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps, LiveRouteMuteFollow,
     LiveRouteState, LiveVcaState, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    RouteControlError, RouteControlProducer, RouteControlRecord, STRIP_LIVE_QUEUE_DEPTH,
-    SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
-    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
+    RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
+    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -7818,11 +7818,6 @@ fn live_control_request(
     options: WebBootOptions,
     quantum_frames: u32,
 ) -> Option<HostLiveControlRequest> {
-    // Issue #1326 D1: every plan carries the lanes, so the depth is always `Some`.
-    let control_queue_depth = match options.live_control_command_queue_records {
-        0 => STRIP_LIVE_QUEUE_DEPTH,
-        records => NonZeroUsize::new(u32::try_from(records).ok()? as usize)?,
-    };
     let meter_period_frames = if options.live_control_meter_blocks == 0 {
         None
     } else {
@@ -7830,7 +7825,6 @@ fn live_control_request(
         Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
     };
     Some(HostLiveControlRequest {
-        control_queue_depth: Some(control_queue_depth),
         meter_period_frames,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
         meter_tap: MeterTap::PostMatrix,

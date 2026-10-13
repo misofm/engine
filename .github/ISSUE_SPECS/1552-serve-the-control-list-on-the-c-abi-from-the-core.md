@@ -120,3 +120,36 @@ Commands: `cargo test --locked -p host-core --all-features`,
 ## Supersedes and shrinks
 
 - None directly; this is the discovery half of decision 17.
+
+## Decision record
+
+- **Epoch rule (coordinator, binding; supersedes D2 and the live-commit sentence of D3).**
+  `structure_epoch` advances by one on every commit, live or rebuild, after which the catalog's
+  address sequence, any header, or any control row's descriptor (every field except `value`)
+  differs from the previous catalog. A client therefore never holds a stale descriptor under a
+  current epoch. A live commit builds the committed model's catalog before its first write and
+  publishes it after the commit with the same `replace_session_catalog` a rebuild uses, so a live
+  `matrix_mode` switch (which flips `active`) advances the epoch and a fader move (values only)
+  does not. Tests: host-core `a_commit_refreshes_values_and_only_a_changed_address_sequence_advances_the_epoch`
+  and capi `a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not`.
+- **Cost.** A live commit now builds a full catalog (one `controls::list` pass plus the wire rows) and
+  holds it beside the current one until the commit publishes it; that transient copy is not part of
+  the double-live admission. Recorded as a successor with the compact, deduplicated row storage.
+- **Page trimming.** The controller trims a page to the endpoint's response bound (`eof` false,
+  cursor at the last row kept; one row that cannot fit is `LIMIT_EXCEEDED`).
+  Batch 2 review fold: the page codec reports a page whose content breaks the message rules
+  (unordered handles, a non-finite value, an address that disagrees with its row) as the new
+  `EncodeError::InvalidField`, and only a row count above 256 or a frame bound as `LimitExceeded`;
+  the controller trims on the second and answers the first as `INTERNAL`, since no page size
+  repairs the provider's defect. The trim estimate multiplies in `u64`.
+- **Raised C ABI reference ceilings (batch 2 review fold).** `crates/capi/tests/resource_lifecycle.rs`
+  moved `capi_retained_bytes` 282,432 -> 554,240 and `largest_named_allocation_bytes` 99,840 ->
+  278,912, at both lane widths (#1551 raised them to 386,112 and 161,600 for the effect-parameter
+  catalog's wire rows; #1552 raised them again). The cause is structural, not tuning: the catalog now holds every
+  control of the session (the nine tracks' builtins, console EQs, own rows and routes, the session
+  rows, and a header before each owner and section: 932 entries of 272 bytes) where it held the
+  effect parameters alone, so the one catalog allocation went 146,880 -> 253,504 bytes and C ABI
+  retained 351,003 -> 503,819 (x86-64). Each ceiling is the measured value plus 10 percent, rounded
+  up to 64, as every ceiling in that table is. #1599 (shared descriptors and small rows) is the
+  successor that removes the per-entry copy and lowers them.
+

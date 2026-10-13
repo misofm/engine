@@ -4,7 +4,8 @@ mod common;
 
 use common::{RATE, fixture};
 use controls::{
-    ControlDescriptor, MonitorOverlay, Owner, OwnerKind, Section, SectionKind, list, row_descriptor,
+    ControlDescriptor, MonitorOverlay, Owner, OwnerKind, Section, SectionKind, list,
+    row_descriptor, row_motion,
 };
 
 /// The listing's descriptor of a row that the shape-independent table answers, with `active` read
@@ -45,6 +46,24 @@ fn a_model_free_descriptor_equals_the_listed_one() {
             Some(expected(row.descriptor)),
             "{address:?}"
         );
+        // The rate-free motion is the descriptor's, at every launch rate.
+        for rate in [44_100, 48_000, 88_200, 96_000] {
+            assert_eq!(
+                row_motion(
+                    address.owner.kind(),
+                    address.section.kind(),
+                    address.control
+                ),
+                row_descriptor(
+                    address.owner.kind(),
+                    address.section.kind(),
+                    address.control,
+                    rate
+                )
+                .map(|descriptor| descriptor.motion),
+                "{address:?} at {rate}"
+            );
+        }
         checked += 1;
     }
     assert!(checked > 40, "the walk reached {checked} rows");

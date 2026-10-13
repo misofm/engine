@@ -150,3 +150,10 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
   (#1267): the effect half is here; #1556 covers the input half.
 - Shrinks *Deliver value-only fader, mute and pan transactions to the running C ABI plan through the
   live console lanes* (#1053): its G1 guard is lifted for submix fader, matrix and effects here.
+## Decision record (batch 2 review fold, 2026-10-13)
+
+- **D-fold-1.** `effect_records` returns `LiveRebuild::Structure` when a changed effect
+  row is neither the bypass nor a parameter (today the link mode), so a future live row without a
+  lowering can never be acked and dropped. The classifier's step 4 reaches it only for a live row,
+  and no link-mode row is live today, so the test calls the lowering directly (`live_delta.rs`
+  unit test).

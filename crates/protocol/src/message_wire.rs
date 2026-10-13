@@ -10,7 +10,10 @@ use crate::{
         CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8, read_u16, read_u32,
         read_u64,
     },
-    schema::{self, descriptor, enum_choice},
+    schema::{
+        self, control_address, control_entry, control_list_page, control_list_request,
+        control_state_page, enum_choice,
+    },
 };
 
 #[cfg(test)]
@@ -90,7 +93,7 @@ pub struct Capabilities<'a> {
     pub maximum_cached_response_bytes: u64,
     pub per_block_automation_density: u64,
     pub admission_quantum_frames: u64,
-    pub maximum_parameter_page_items: u16,
+    pub maximum_control_page_items: u16,
     pub maximum_diagnostic_page_items: u16,
     pub maximum_telemetry_handles: u16,
     pub maximum_transaction_edits: u32,
@@ -128,7 +131,7 @@ pub struct DecodedCapabilities<'a> {
     pub maximum_cached_response_bytes: u64,
     pub per_block_automation_density: u64,
     pub admission_quantum_frames: u64,
-    pub maximum_parameter_page_items: u16,
+    pub maximum_control_page_items: u16,
     pub maximum_diagnostic_page_items: u16,
     pub maximum_telemetry_handles: u16,
     pub maximum_transaction_edits: u32,
@@ -174,22 +177,6 @@ pub struct SessionCommitted {
     pub applied_operations: u32,
 }
 
-/// Fixed B2a parameter domain registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterDomain {
-    Continuous = 1,
-    Boolean = 2,
-    Enumeration = 3,
-}
-/// Fixed B2a descriptor value kind; only finite `f32` values exist in v1.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterValueKind {
-    F32 = 1,
-}
 /// Fixed B2a rack registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -226,26 +213,6 @@ pub enum ParameterUnit {
     Linear = 5,
     Ratio = 6,
 }
-/// Fixed B2a mapping registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterMapping {
-    Linear = 1,
-    Logarithmic = 2,
-    Exponential = 3,
-    Stepped = 4,
-}
-/// Fixed B2a automation-rate registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterAutomationRate {
-    Sample = 1,
-    Block = 2,
-    None = 3,
-}
-
 impl ParameterRack {
     pub(crate) const fn from_session(value: session::RackName) -> Self {
         match value {
@@ -349,65 +316,488 @@ pub struct EnumChoice {
     pub value: f32,
     pub label: String,
 }
-/// Complete typed B2a parameter descriptor.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterDescriptor {
-    pub handle: u32,
-    pub track_id: String,
-    pub rack: ParameterRack,
-    pub effect_id: String,
-    pub parameter_id: u32,
-    pub channel: ParameterChannel,
-    pub value_kind: ParameterValueKind,
-    pub unit: ParameterUnit,
-    pub domain: ParameterDomain,
-    pub minimum: Option<f32>,
-    pub maximum: Option<f32>,
-    pub default: f32,
-    pub mapping: ParameterMapping,
-    pub automation_rate: ParameterAutomationRate,
-    pub smoothing_samples: u32,
-    pub flags: u32,
-    pub display_name: Option<String>,
-    pub display_unit: Option<String>,
-    pub enum_choices: Vec<EnumChoice>,
+/// Declare one control code table (decision 17, C4): a `repr(u8)` enum with explicit
+/// discriminants, its allocated codes in ascending order, and the strict reader that refuses a
+/// code outside the table as `INVALID_FIELD`.
+macro_rules! control_code_table {
+    (
+        $(#[$meta:meta])*
+        $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident = $code:literal,)+
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        #[repr(u8)]
+        pub enum $name {
+            $($(#[$variant_meta])* $variant = $code,)+
+        }
+
+        impl $name {
+            /// Every allocated code, ascending.
+            pub const CODES: &'static [u8] = &[$($code),+];
+
+            /// The wire code.
+            #[must_use]
+            pub const fn code(self) -> u8 {
+                self as u8
+            }
+
+            /// The variant of a wire code; a code outside the table is `INVALID_FIELD`.
+            pub const fn from_code(code: u8) -> Result<Self, DecodeError> {
+                match code {
+                    $($code => Ok(Self::$variant),)+
+                    _ => Err(DecodeError::InvalidField),
+                }
+            }
+        }
+    };
 }
-/// Typed metadata query cursor and bounded page limit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterMetadataRequest {
+
+control_code_table! {
+    /// Which kind of owner a control, or a control request, names.
+    #[allow(missing_docs)]
+    ControlOwnerKind {
+        Session = 1,
+        Strip = 2,
+        Route = 3,
+        Vca = 4,
+    }
+}
+
+control_code_table! {
+    /// The part of an owner a control belongs to. Codes `2`, `4` and `5` are `ParameterRack`'s;
+    /// `own` is appended.
+    #[allow(missing_docs)]
+    ControlSection {
+        Inserts = 2,
+        Builtins = 4,
+        Console = 5,
+        Own = 6,
+    }
+}
+
+control_code_table! {
+    /// What an owner header row describes.
+    #[allow(missing_docs)]
+    ControlOwnerHeaderKind {
+        Track = 1,
+        Submix = 2,
+        Route = 3,
+        Vca = 4,
+        Session = 5,
+    }
+}
+
+control_code_table! {
+    /// What kind of value a control holds.
+    #[allow(missing_docs)]
+    ControlKind {
+        Continuous = 1,
+        Toggle = 2,
+        Enumeration = 3,
+    }
+}
+
+control_code_table! {
+    /// How a frontend maps a control's range to a knob.
+    #[allow(missing_docs)]
+    ControlTaper {
+        Linear = 1,
+        Logarithmic = 2,
+        Exponential = 3,
+        Decibel = 4,
+        Stepped = 5,
+    }
+}
+
+control_code_table! {
+    /// The `control_smoothing` row that gives a live control its default ramp, in the declaration
+    /// order of the live-ramp rows.
+    #[allow(missing_docs)]
+    ControlRampRow {
+        Fader = 1,
+        InputTrim = 2,
+        SendGain = 3,
+        VcaOffset = 4,
+        LinkGlide = 5,
+        Mute = 6,
+        Solo = 7,
+        PolarityInvert = 8,
+        SendMute = 9,
+        SendFollowsMute = 10,
+        VcaMute = 11,
+        BypassCrossfade = 12,
+        Pan = 13,
+        Matrix = 14,
+        SendMatrix = 15,
+    }
+}
+
+control_code_table! {
+    /// How a change to a control reaches a running plan.
+    #[allow(missing_docs)]
+    ControlClass {
+        Live = 1,
+        RebuildOnly = 2,
+        Derived = 3,
+    }
+}
+
+control_code_table! {
+    /// Why a control is rebuild-only.
+    #[allow(missing_docs)]
+    ControlReason {
+        NewMemory = 1,
+        NewGraph = 2,
+        ProcessingOrder = 3,
+        Latency = 4,
+        Glitch = 5,
+        Optimisation = 6,
+        Correctness = 7,
+        RuledLiveNotBuilt = 8,
+    }
+}
+
+control_code_table! {
+    /// Where a control's value lives.
+    #[allow(missing_docs)]
+    ControlScope {
+        Model = 1,
+        Monitor = 2,
+    }
+}
+
+control_code_table! {
+    /// The render family that carries a live change.
+    #[allow(missing_docs)]
+    ControlFamily {
+        StripLevel = 1,
+        StripMatrix = 2,
+        StripInput = 3,
+        Route = 4,
+        Effect = 5,
+        Setting = 6,
+    }
+}
+
+/// The control list's page-size bound: `limit` is `1..=256`, and a page holds at most that many
+/// rows.
+pub const CONTROL_PAGE_ITEMS: u16 = 256;
+
+/// Bytes of one `CONTROL_STATE_GET` record: `handle` (`u32` LE) then `value` (`f32` LE).
+pub const CONTROL_STATE_RECORD_BYTES: u16 = 8;
+
+/// A control list or control state request: one page of the rows after `after_handle`, of one
+/// structure, optionally of one owner. `CONTROL_STATE_GET` takes the same request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlListRequest {
+    /// The structure the caller's handles belong to; `0` for the first page, which has no cursor
+    /// (`after_handle` `0`; a cursor with epoch `0` is `INVALID_FIELD`). A page read at
+    /// another structure answers `REVISION_CONFLICT` (`control.list.stale`).
+    pub structure_epoch: u64,
+    /// The last handle the caller has; `0` starts the list.
     pub after_handle: u32,
+    /// The most rows to return, `1..=256`.
     pub limit: u16,
+    /// Restrict the page to one owner's rows.
+    pub owner: Option<ControlOwnerFilter>,
 }
-/// Typed metadata page in strictly increasing handle order.
+
+/// The owner a request restricts its page to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlOwnerFilter {
+    /// The kind of owner.
+    pub kind: ControlOwnerKind,
+    /// The owner's stable ID; absent exactly for the session owner.
+    pub id: Option<String>,
+}
+
+/// The stable address of one row: stable IDs, never indices.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlAddress {
+    /// The kind of owner.
+    pub owner_kind: ControlOwnerKind,
+    /// The owner's stable ID; absent exactly for the session owner.
+    pub owner_id: Option<String>,
+    /// The part of the owner.
+    pub section: ControlSection,
+    /// The console slot or insert ID; present exactly for the console and inserts sections.
+    pub slot_id: Option<String>,
+    /// The row ID inside the section; present exactly in a control row.
+    pub control: Option<u32>,
+    /// The lane; present exactly in a control row.
+    pub lane: Option<ParameterChannel>,
+}
+
+impl ControlOwnerKind {
+    /// The wire kind of the control core's owner kind.
+    #[must_use]
+    pub const fn from_controls(kind: controls::OwnerKind) -> Self {
+        match kind {
+            controls::OwnerKind::Session => Self::Session,
+            controls::OwnerKind::Strip => Self::Strip,
+            controls::OwnerKind::Route => Self::Route,
+            controls::OwnerKind::Vca => Self::Vca,
+        }
+    }
+
+    /// The control core's owner kind of this wire kind.
+    #[must_use]
+    pub const fn to_controls(self) -> controls::OwnerKind {
+        match self {
+            Self::Session => controls::OwnerKind::Session,
+            Self::Strip => controls::OwnerKind::Strip,
+            Self::Route => controls::OwnerKind::Route,
+            Self::Vca => controls::OwnerKind::Vca,
+        }
+    }
+}
+
+impl ControlSection {
+    /// The wire section of the control core's section kind.
+    #[must_use]
+    pub const fn from_controls(kind: controls::SectionKind) -> Self {
+        match kind {
+            controls::SectionKind::Inserts => Self::Inserts,
+            controls::SectionKind::Builtins => Self::Builtins,
+            controls::SectionKind::Console => Self::Console,
+            controls::SectionKind::Own => Self::Own,
+        }
+    }
+}
+
+impl ControlAddress {
+    /// The wire address of a control core address, with every text copied by `text` (so a host
+    /// that must not abort on allocation failure passes a fallible copy). The one conversion of
+    /// the kind, section and lane codes: the control list and `SET_CONTROL` both use it.
+    ///
+    /// # Errors
+    ///
+    /// The first error `text` returns.
+    pub fn try_from_controls<E>(
+        address: &controls::ControlAddress,
+        mut text: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<Self, E> {
+        let owner_id = match &address.owner {
+            controls::Owner::Session => None,
+            controls::Owner::Strip(id) | controls::Owner::Route(id) | controls::Owner::Vca(id) => {
+                Some(id)
+            }
+        };
+        let slot_id = match &address.section {
+            controls::Section::Own | controls::Section::Builtins => None,
+            controls::Section::Console(id) | controls::Section::Inserts(id) => Some(id),
+        };
+        Ok(Self {
+            owner_kind: ControlOwnerKind::from_controls(address.owner.kind()),
+            owner_id: owner_id.map(|id| text(id.as_str())).transpose()?,
+            section: ControlSection::from_controls(address.section.kind()),
+            slot_id: slot_id.map(|id| text(id.as_str())).transpose()?,
+            control: Some(address.control),
+            lane: Some(ParameterChannel::from_session(address.lane)),
+        })
+    }
+}
+
+impl From<&controls::ControlAddress> for ControlAddress {
+    fn from(address: &controls::ControlAddress) -> Self {
+        match Self::try_from_controls(address, |text| {
+            Ok::<_, core::convert::Infallible>(text.to_owned())
+        }) {
+            Ok(address) => address,
+            Err(never) => match never {},
+        }
+    }
+}
+
+/// The control core's address of a wire address: refused as `INVALID_FIELD` unless it names one
+/// lane of one control and its owner and slot IDs agree with its kind and section (the rules of
+/// a control row of the list).
+impl TryFrom<&ControlAddress> for controls::ControlAddress {
+    type Error = DecodeError;
+
+    fn try_from(address: &ControlAddress) -> Result<Self, DecodeError> {
+        let id = |text: &Option<String>| {
+            text.as_deref()
+                .map(|text| session::StableId::parse(text).ok_or(DecodeError::InvalidField))
+                .transpose()
+        };
+        let owner = match (address.owner_kind, id(&address.owner_id)?) {
+            (ControlOwnerKind::Session, None) => controls::Owner::Session,
+            (ControlOwnerKind::Strip, Some(id)) => controls::Owner::Strip(id),
+            (ControlOwnerKind::Route, Some(id)) => controls::Owner::Route(id),
+            (ControlOwnerKind::Vca, Some(id)) => controls::Owner::Vca(id),
+            _ => return Err(DecodeError::InvalidField),
+        };
+        let section = match (address.section, id(&address.slot_id)?) {
+            (ControlSection::Own, None) => controls::Section::Own,
+            (ControlSection::Builtins, None) => controls::Section::Builtins,
+            (ControlSection::Console, Some(id)) => controls::Section::Console(id),
+            (ControlSection::Inserts, Some(id)) => controls::Section::Inserts(id),
+            _ => return Err(DecodeError::InvalidField),
+        };
+        let (Some(control), Some(lane)) = (address.control, address.lane) else {
+            return Err(DecodeError::InvalidField);
+        };
+        Ok(Self {
+            owner,
+            section,
+            control,
+            lane: lane.into_session(),
+        })
+    }
+}
+
+/// One row of the control list. A header row opens an owner or a section; a control row is one
+/// value.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterMetadataPage {
-    pub last_handle: u32,
-    pub eof: bool,
-    pub descriptors: Vec<ParameterDescriptor>,
-}
-/// One validated fixed-width parameter state record.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterStateRecord {
+pub struct ControlEntry {
+    /// The row's handle in the list's structure: nonzero and ascending down the list.
     pub handle: u32,
-    pub flags: u32,
+    /// The row's stable address. An owner header carries the `own` section.
+    pub address: ControlAddress,
+    /// What the row is.
+    pub body: ControlBody,
+}
+
+/// The three kinds of row.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ControlBody {
+    /// Opens an owner.
+    OwnerHeader(ControlOwnerHeader),
+    /// Opens a section of the owner above it.
+    SectionHeader(ControlSectionHeader),
+    /// One value.
+    Control(ControlRow),
+}
+
+/// An owner header row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlOwnerHeader {
+    /// What the owner is. It must agree with the address's owner kind.
+    pub kind: ControlOwnerHeaderKind,
+    /// The owner's name.
+    pub name: String,
+    /// A route's ends; present exactly for a route owner.
+    pub route: Option<ControlRouteEnds>,
+}
+
+/// The ends of a route owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlRouteEnds {
+    /// The route's source.
+    pub source: String,
+    /// The route's destination.
+    pub destination: String,
+    /// The send tap the route reads.
+    pub tap: session::SendTap,
+}
+
+/// A section header row. Its section is the address's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlSectionHeader {
+    /// The section's name.
+    pub name: String,
+    /// The effect identity of a console slot or an insert; never on another section.
+    pub effect: Option<String>,
+}
+
+/// A control row: the descriptor of one value and the value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlRow {
+    /// The stable machine name.
+    pub name: String,
+    /// The name a person reads.
+    pub display_name: String,
+    /// The unit as a person reads it; empty for a unitless value.
+    pub display_unit: String,
+    /// The unit of the value.
+    pub unit: ParameterUnit,
+    /// Continuous, toggle or enumeration.
+    pub kind: ControlKind,
+    /// The inclusive lower bound.
+    pub minimum: f32,
+    /// The inclusive upper bound.
+    pub maximum: f32,
+    /// A value outside the range that also is accepted.
+    pub disabled_value: Option<f32>,
+    /// The value of a new session.
+    pub default: f32,
+    /// How a frontend maps the range to a control.
+    pub taper: ControlTaper,
+    /// The lattice step.
+    pub step: f32,
+    /// The digits after the point a frontend shows.
+    pub precision: u8,
+    /// The named step ladder; empty when there is none.
+    pub ladder: Vec<f32>,
+    /// The choices of an enumeration; empty for any other kind.
+    pub choices: Vec<EnumChoice>,
+    /// The ramp row the default ramp length comes from; absent for a fixed ramp.
+    pub ramp_row: Option<ControlRampRow>,
+    /// The default ramp length in samples.
+    pub default_ramp_samples: u32,
+    /// Live, rebuild-only or derived.
+    pub class: ControlClass,
+    /// Why the control is rebuild-only; present exactly when `class` is rebuild-only.
+    pub reason: Option<ControlReason>,
+    /// The issue that makes a ruled-live control live; present exactly with
+    /// [`ControlReason::RuledLiveNotBuilt`].
+    pub reason_issue: Option<u32>,
+    /// The condition that reopens the question; present exactly when `class` is rebuild-only.
+    pub reopen: Option<String>,
+    /// Whether the value is in the session or in the host.
+    pub scope: ControlScope,
+    /// Whether an agent may automate the control. Only a live model control is.
+    pub automatable: bool,
+    /// The render family that carries a live change.
+    pub family: ControlFamily,
+    /// `false` for a row the owner's present shape does not use.
+    pub active: bool,
+    /// The committed value.
     pub value: f32,
 }
-/// Typed state request handles in caller order.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterStateRequest {
-    pub handles: Vec<u32>,
-}
-/// Typed state page preserving requested-handle order.
+
+/// One page of the control list, in strictly ascending handle order.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(missing_docs)]
-pub struct ParameterStatePage {
-    pub observed_sample: u64,
-    pub records: Vec<ParameterStateRecord>,
+pub struct ControlListPage {
+    /// The session revision the page was read at.
+    pub revision: u64,
+    /// The structure the handles belong to.
+    pub structure_epoch: u64,
+    /// The last handle of the page, or the request's cursor on an empty page.
+    pub last_handle: u32,
+    /// Whether the list ends with this page.
+    pub eof: bool,
+    /// The rows.
+    pub entries: Vec<ControlEntry>,
+}
+
+/// One control's value in a state page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlStateRecord {
+    /// The control row's handle.
+    pub handle: u32,
+    /// The committed value.
+    pub value: f32,
+}
+
+/// One page of control values: the control rows of the same rows a list page of the same request
+/// holds, without the header rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlStatePage {
+    /// The session revision the page was read at.
+    pub revision: u64,
+    /// The structure the handles belong to.
+    pub structure_epoch: u64,
+    /// The last handle the page covers: at least the last record's, and the cursor for the next
+    /// request. Header rows are covered but have no record.
+    pub last_handle: u32,
+    /// Whether the list ends with this page.
+    pub eof: bool,
+    /// The values, in strictly ascending handle order.
+    pub records: Vec<ControlStateRecord>,
 }
 
 /// Typed `AUTOMATION_ENQUEUE` command records. The enclosing frame supplies identity/revision.
@@ -1095,143 +1485,99 @@ impl ProtocolCodec {
         })
     }
 
-    /// Encode/decode the exact two-field metadata cursor request.
-    pub fn encode_parameter_metadata_request(
+    /// Return the exact caller-buffer size of a control list or control state request.
+    pub fn encoded_control_list_request_len(
         &self,
-        value: ParameterMetadataRequest,
-        output: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let mut sizing = CountSink::new(self.limits());
-        write_metadata_request(&mut sizing, value)?;
-        let required = checked_sink_len(self, &mut sizing)?;
-        if output.len() < required {
-            return Err(EncodeError::OutputTooSmall { required });
-        }
-        let mut writer = SliceSink::new(output, self.limits());
-        write_metadata_request(&mut writer, value)?;
-        checked_writer_len(&writer, required)
-    }
-    /// Strictly decode the exact two-field metadata cursor request.
-    pub fn decode_parameter_metadata_request(
-        &self,
-        payload: &[u8],
-        count: u32,
-    ) -> Result<ParameterMetadataRequest, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::metadata_request::SPEC)?;
-        let value = ParameterMetadataRequest {
-            after_handle: read_u32(one_spec!(message, schema::metadata_request::AFTER_HANDLE)?)?,
-            limit: read_u16(one_spec!(message, schema::metadata_request::LIMIT)?)?,
-        };
-        if value.limit == 0 || value.limit > 256 {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(value)
-    }
-    /// Return the exact direct caller-buffer size for a metadata page.
-    pub fn encoded_parameter_metadata_page_len(
-        &self,
-        value: &ParameterMetadataPage,
+        value: &ControlListRequest,
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
-        write_metadata_page(self, &mut sink, value)?;
+        write_control_request(&mut sink, value)?;
         checked_sink_len(self, &mut sink)
     }
-    /// Encode a canonical typed metadata page without allocation.
-    pub fn encode_parameter_metadata_page(
+    /// Encode the request that `CONTROL_LIST_GET` and `CONTROL_STATE_GET` share, without
+    /// allocation.
+    pub fn encode_control_list_request(
         &self,
-        value: &ParameterMetadataPage,
+        value: &ControlListRequest,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let required = self.encoded_parameter_metadata_page_len(value)?;
+        let required = self.encoded_control_list_request_len(value)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
-        write_metadata_page(self, &mut writer, value)?;
+        write_control_request(&mut writer, value)?;
         checked_writer_len(&writer, required)
     }
-    /// Strictly decode a typed metadata page into bounded typed descriptors.
-    pub fn decode_parameter_metadata_page(
+    /// Strictly decode the request that `CONTROL_LIST_GET` and `CONTROL_STATE_GET` share.
+    pub fn decode_control_list_request(
         &self,
         payload: &[u8],
         count: u32,
-    ) -> Result<ParameterMetadataPage, DecodeError> {
-        decode_metadata_page(self, Message::top_level(payload, count, self.limits())?)
+    ) -> Result<ControlListRequest, DecodeError> {
+        decode_control_request(self, Message::top_level(payload, count, self.limits())?)
     }
-    /// Encode a bounded sorted unique nonzero state-handle request without allocation.
-    pub fn encoded_parameter_state_request_len(
+    /// Return the exact caller-buffer size of a control list page.
+    pub fn encoded_control_list_page_len(
         &self,
-        value: &ParameterStateRequest,
+        value: &ControlListPage,
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
-        write_state_request(&mut sink, value)?;
+        write_control_list_page(&mut sink, value)?;
         checked_sink_len(self, &mut sink)
     }
-
-    /// Encode a bounded sorted unique nonzero state-handle request without allocation.
-    pub fn encode_parameter_state_request(
+    /// Encode a control list page without allocation.
+    pub fn encode_control_list_page(
         &self,
-        value: &ParameterStateRequest,
+        value: &ControlListPage,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let required = self.encoded_parameter_state_request_len(value)?;
+        let required = self.encoded_control_list_page_len(value)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
-        write_state_request(&mut writer, value)?;
+        write_control_list_page(&mut writer, value)?;
         checked_writer_len(&writer, required)
     }
-    /// Strictly decode a bounded sorted unique nonzero state-handle request.
-    pub fn decode_parameter_state_request(
+    /// Strictly decode a control list page.
+    pub fn decode_control_list_page(
         &self,
         payload: &[u8],
         count: u32,
-    ) -> Result<ParameterStateRequest, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::state_request::SPEC)?;
-        let bytes = one_spec!(message, schema::state_request::HANDLES)?;
-        if !bytes.len().is_multiple_of(4) {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        let handles = bytes
-            .chunks_exact(4)
-            .map(read_u32)
-            .collect::<Result<Vec<_>, _>>()?;
-        check_handles(&handles)?;
-        Ok(ParameterStateRequest { handles })
+    ) -> Result<ControlListPage, DecodeError> {
+        decode_control_list_page(self, Message::top_level(payload, count, self.limits())?)
     }
-    /// Return exact caller-buffer bytes for the validated fixed-record state page.
-    pub fn encoded_parameter_state_page_len(
+    /// Return the exact caller-buffer size of a control state page.
+    pub fn encoded_control_state_page_len(
         &self,
-        value: &ParameterStatePage,
+        value: &ControlStatePage,
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
-        write_state_page(&mut sink, value)?;
+        write_control_state_page(&mut sink, value)?;
         checked_sink_len(self, &mut sink)
     }
-    /// Encode a validated fixed-16-byte-record state page without allocation.
-    pub fn encode_parameter_state_page(
+    /// Encode a control state page of fixed eight-byte records without allocation.
+    pub fn encode_control_state_page(
         &self,
-        value: &ParameterStatePage,
+        value: &ControlStatePage,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let required = self.encoded_parameter_state_page_len(value)?;
+        let required = self.encoded_control_state_page_len(value)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
-        write_state_page(&mut writer, value)?;
+        write_control_state_page(&mut writer, value)?;
         checked_writer_len(&writer, required)
     }
-    /// Strictly decode fixed 16-byte state records.
-    pub fn decode_parameter_state_page(
+    /// Strictly decode a control state page.
+    pub fn decode_control_state_page(
         &self,
         payload: &[u8],
         count: u32,
-    ) -> Result<ParameterStatePage, DecodeError> {
-        decode_state_page(self, Message::top_level(payload, count, self.limits())?)
+    ) -> Result<ControlStatePage, DecodeError> {
+        decode_control_state_page(Message::top_level(payload, count, self.limits())?)
     }
 
     /// Return the exact direct caller-buffer length for one typed automation command payload.
@@ -2365,35 +2711,6 @@ pub(crate) fn write_session_committed(
     )
 }
 
-pub(crate) fn write_metadata_request(
-    sink: &mut dyn Sink,
-    value: ParameterMetadataRequest,
-) -> Result<(), EncodeError> {
-    if value.limit == 0 || value.limit > 256 {
-        return Err(EncodeError::LimitExceeded);
-    }
-    sink.check_field_count(schema::metadata_request::SPEC.field_count(&[])?)?;
-    write_spec!(
-        sink,
-        schema::metadata_request::AFTER_HANDLE,
-        &value.after_handle.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::metadata_request::LIMIT,
-        &value.limit.to_le_bytes()
-    )
-}
-
-pub(crate) fn write_state_request(
-    sink: &mut dyn Sink,
-    value: &ParameterStateRequest,
-) -> Result<(), EncodeError> {
-    check_handles(&value.handles).map_err(|_| EncodeError::LimitExceeded)?;
-    sink.check_field_count(schema::state_request::SPEC.field_count(&[])?)?;
-    write_u32s(sink, schema::state_request::HANDLES, &value.handles)
-}
-
 pub(crate) fn write_automation_enqueue(
     sink: &mut dyn Sink,
     value: AutomationEnqueue<'_>,
@@ -2741,395 +3058,857 @@ pub(crate) fn write_non_ok(
     Ok(())
 }
 
-fn check_handles(handles: &[u32]) -> Result<(), DecodeError> {
-    if handles.is_empty()
-        || handles.len() > 256
-        || handles.contains(&0)
-        || handles.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(())
+/// Which kind of row an entry is: the codes of `control_entry` field 2.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum ControlRowKind {
+    OwnerHeader = 1,
+    SectionHeader = 2,
+    Control = 3,
 }
-pub(crate) fn write_metadata_page(
-    codec: &ProtocolCodec,
-    sink: &mut dyn Sink,
-    value: &ParameterMetadataPage,
-) -> Result<(), EncodeError> {
-    if value.descriptors.len() > 256
-        || value
-            .descriptors
-            .windows(2)
-            .any(|pair| pair[0].handle >= pair[1].handle)
-        || value
-            .descriptors
-            .last()
-            .is_some_and(|v| v.handle != value.last_handle)
-        || value.descriptors.first().is_some_and(|v| v.handle == 0)
-    {
-        return Err(EncodeError::LimitExceeded);
+
+impl ControlRowKind {
+    const fn from_code(code: u8) -> Result<Self, DecodeError> {
+        match code {
+            1 => Ok(Self::OwnerHeader),
+            2 => Ok(Self::SectionHeader),
+            3 => Ok(Self::Control),
+            _ => Err(DecodeError::InvalidField),
+        }
     }
-    let count = schema::metadata_page::SPEC
-        .field_count(&[(schema::metadata_page::DESCRIPTOR, value.descriptors.len())])?;
+}
+
+impl ControlBody {
+    const fn row_kind(&self) -> ControlRowKind {
+        match self {
+            Self::OwnerHeader(_) => ControlRowKind::OwnerHeader,
+            Self::SectionHeader(_) => ControlRowKind::SectionHeader,
+            Self::Control(_) => ControlRowKind::Control,
+        }
+    }
+}
+
+const fn has_slot(section: ControlSection) -> bool {
+    matches!(section, ControlSection::Console | ControlSection::Inserts)
+}
+
+fn text_fits(limits: crate::ProtocolLimits, text: &str) -> bool {
+    text.len() <= limits.max_string_bytes
+}
+
+fn stable_id_fits(limits: crate::ProtocolLimits, text: &str) -> bool {
+    text_fits(limits, text) && valid_stable_id(text)
+}
+
+/// A request's own rules, shared by both directions: `limit` is `1..=256`, a cursor names the
+/// structure it belongs to (epoch `0` means "the current one" and has no handles to continue
+/// from, so it holds `after_handle` `0`), and the owner ID is present exactly for a kind other than
+/// the session.
+fn control_request_is_valid(limits: crate::ProtocolLimits, value: &ControlListRequest) -> bool {
+    (1..=CONTROL_PAGE_ITEMS).contains(&value.limit)
+        && (value.structure_epoch != 0 || value.after_handle == 0)
+        && value.owner.as_ref().is_none_or(|owner| {
+            (owner.kind == ControlOwnerKind::Session) == owner.id.is_none()
+                && owner
+                    .id
+                    .as_deref()
+                    .is_none_or(|id| stable_id_fits(limits, id))
+        })
+}
+
+/// An address's own rules, shared by both directions: the owner ID is absent exactly for the
+/// session, the slot ID is present exactly for the console and inserts sections, and the control
+/// and lane are present exactly in a control row.
+fn control_address_is_valid(
+    limits: crate::ProtocolLimits,
+    address: &ControlAddress,
+    row: ControlRowKind,
+) -> bool {
+    (address.owner_kind == ControlOwnerKind::Session) == address.owner_id.is_none()
+        && address
+            .owner_id
+            .as_deref()
+            .is_none_or(|id| stable_id_fits(limits, id))
+        && has_slot(address.section) == address.slot_id.is_some()
+        && address
+            .slot_id
+            .as_deref()
+            .is_none_or(|id| stable_id_fits(limits, id))
+        && (row == ControlRowKind::Control) == address.control.is_some()
+        && (row == ControlRowKind::Control) == address.lane.is_some()
+        && (row != ControlRowKind::OwnerHeader || address.section == ControlSection::Own)
+}
+
+fn owner_header_matches(header: ControlOwnerHeaderKind, owner: ControlOwnerKind) -> bool {
+    matches!(
+        (header, owner),
+        (
+            ControlOwnerHeaderKind::Track | ControlOwnerHeaderKind::Submix,
+            ControlOwnerKind::Strip
+        ) | (ControlOwnerHeaderKind::Route, ControlOwnerKind::Route)
+            | (ControlOwnerHeaderKind::Vca, ControlOwnerKind::Vca)
+            | (ControlOwnerHeaderKind::Session, ControlOwnerKind::Session)
+    )
+}
+
+/// An entry's own rules, shared by both directions. The wire has no spelling for a header row
+/// with a value or a control row without one, so the typed body already holds that; what remains
+/// is the agreement between the address, the header kind and the row.
+fn control_entry_is_valid(limits: crate::ProtocolLimits, entry: &ControlEntry) -> bool {
+    if entry.handle == 0 || !control_address_is_valid(limits, &entry.address, entry.body.row_kind())
+    {
+        return false;
+    }
+    match &entry.body {
+        ControlBody::OwnerHeader(header) => {
+            owner_header_matches(header.kind, entry.address.owner_kind)
+                && (header.kind == ControlOwnerHeaderKind::Route) == header.route.is_some()
+                && text_fits(limits, &header.name)
+                && header.route.as_ref().is_none_or(|route| {
+                    text_fits(limits, &route.source) && text_fits(limits, &route.destination)
+                })
+        }
+        ControlBody::SectionHeader(header) => {
+            text_fits(limits, &header.name)
+                && header.effect.as_deref().is_none_or(|effect| {
+                    has_slot(entry.address.section) && text_fits(limits, effect)
+                })
+        }
+        ControlBody::Control(row) => control_row_is_valid(limits, row),
+    }
+}
+
+/// A control row's own rules, shared by both directions: finite numbers, an ordered range,
+/// choices exactly for an enumeration and holding its default and value, and the class, reason,
+/// issue and reopen condition present exactly together. A control is automatable only if it is a
+/// live model value.
+fn control_row_is_valid(limits: crate::ProtocolLimits, row: &ControlRow) -> bool {
+    let finite = row.minimum.is_finite()
+        && row.maximum.is_finite()
+        && row.default.is_finite()
+        && row.step.is_finite()
+        && row.value.is_finite()
+        && row.disabled_value.is_none_or(f32::is_finite)
+        && row.ladder.iter().all(|step| step.is_finite())
+        && row.choices.iter().all(|choice| choice.value.is_finite());
+    if !finite
+        || row.minimum > row.maximum
+        || row.name.is_empty()
+        || !text_fits(limits, &row.name)
+        || !text_fits(limits, &row.display_name)
+        || !text_fits(limits, &row.display_unit)
+        || row
+            .choices
+            .iter()
+            .any(|choice| !text_fits(limits, &choice.label))
+        || row
+            .reopen
+            .as_deref()
+            .is_some_and(|text| !text_fits(limits, text))
+    {
+        return false;
+    }
+    let choice_values = row.choices.iter().map(|choice| choice.value);
+    let unique = row.choices.iter().enumerate().all(|(index, choice)| {
+        row.choices[..index]
+            .iter()
+            .all(|earlier| earlier.value != choice.value)
+    });
+    let choices_fit = match row.kind {
+        ControlKind::Enumeration => {
+            !row.choices.is_empty()
+                && unique
+                && choice_values.clone().any(|value| value == row.default)
+                && choice_values.clone().any(|value| value == row.value)
+        }
+        ControlKind::Continuous | ControlKind::Toggle => row.choices.is_empty(),
+    };
+    let rebuild_only = row.class == ControlClass::RebuildOnly;
+    choices_fit
+        && rebuild_only == row.reason.is_some()
+        && rebuild_only == row.reopen.is_some()
+        && (row.reason == Some(ControlReason::RuledLiveNotBuilt)) == row.reason_issue.is_some()
+        && (!row.automatable
+            || (row.class == ControlClass::Live
+                && row.scope == ControlScope::Model
+                && row.family != ControlFamily::Setting))
+}
+
+fn control_list_page_is_valid(limits: crate::ProtocolLimits, page: &ControlListPage) -> bool {
+    page.entries.len() <= usize::from(CONTROL_PAGE_ITEMS)
+        && page
+            .entries
+            .windows(2)
+            .all(|pair| pair[0].handle < pair[1].handle)
+        && page
+            .entries
+            .last()
+            .is_none_or(|last| last.handle == page.last_handle)
+        && page
+            .entries
+            .iter()
+            .all(|entry| control_entry_is_valid(limits, entry))
+}
+
+fn control_state_page_is_valid(page: &ControlStatePage) -> bool {
+    page.records.len() <= usize::from(CONTROL_PAGE_ITEMS)
+        && page.records.first().is_none_or(|first| first.handle != 0)
+        && page
+            .records
+            .windows(2)
+            .all(|pair| pair[0].handle < pair[1].handle)
+        && page
+            .records
+            .last()
+            .is_none_or(|last| last.handle <= page.last_handle)
+        && page.records.iter().all(|record| record.value.is_finite())
+}
+
+pub(crate) fn write_control_request(
+    sink: &mut dyn Sink,
+    value: &ControlListRequest,
+) -> Result<(), EncodeError> {
+    if !control_request_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
+    }
+    let count = control_list_request::SPEC.field_count(&[
+        (
+            control_list_request::OWNER_KIND,
+            usize::from(value.owner.is_some()),
+        ),
+        (
+            control_list_request::OWNER_ID,
+            usize::from(value.owner.as_ref().is_some_and(|owner| owner.id.is_some())),
+        ),
+    ])?;
     sink.check_field_count(count)?;
     write_spec!(
         sink,
-        schema::metadata_page::LAST_HANDLE,
-        &value.last_handle.to_le_bytes()
+        control_list_request::STRUCTURE_EPOCH,
+        &value.structure_epoch.to_le_bytes()
     )?;
-    write_spec!(sink, schema::metadata_page::EOF, &[u8::from(value.eof)])?;
-    for descriptor in &value.descriptors {
-        write_descriptor(codec, sink, schema::metadata_page::DESCRIPTOR, descriptor)?;
+    write_spec!(
+        sink,
+        control_list_request::AFTER_HANDLE,
+        &value.after_handle.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        control_list_request::LIMIT,
+        &value.limit.to_le_bytes()
+    )?;
+    if let Some(owner) = &value.owner {
+        write_spec!(sink, control_list_request::OWNER_KIND, &[owner.kind.code()])?;
+        if let Some(id) = &owner.id {
+            write_spec!(sink, control_list_request::OWNER_ID, id.as_bytes())?;
+        }
     }
     Ok(())
 }
-fn write_descriptor(
+
+fn decode_control_request(
     codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ControlListRequest, DecodeError> {
+    let message = message.schema_spec(&control_list_request::SPEC)?;
+    let kind = optional_spec!(message, control_list_request::OWNER_KIND)?
+        .map(|code| ControlOwnerKind::from_code(read_u8(code)?))
+        .transpose()?;
+    let id = optional_spec!(message, control_list_request::OWNER_ID)?
+        .map(|id| read_string(codec, id).map(str::to_owned))
+        .transpose()?;
+    let value = ControlListRequest {
+        structure_epoch: read_u64(one_spec!(message, control_list_request::STRUCTURE_EPOCH)?)?,
+        after_handle: read_u32(one_spec!(message, control_list_request::AFTER_HANDLE)?)?,
+        limit: read_u16(one_spec!(message, control_list_request::LIMIT)?)?,
+        // An owner ID with no kind is refused: the filter is built from the kind.
+        owner: match (kind, id) {
+            (Some(kind), id) => Some(ControlOwnerFilter { kind, id }),
+            (None, None) => None,
+            (None, Some(_)) => return Err(DecodeError::InvalidField),
+        },
+    };
+    if !control_request_is_valid(codec.limits(), &value) {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(value)
+}
+
+pub(crate) fn write_control_list_page(
     sink: &mut dyn Sink,
-    spec: schema::FieldSpec,
-    value: &ParameterDescriptor,
+    value: &ControlListPage,
 ) -> Result<(), EncodeError> {
-    if !descriptor_is_valid(codec.limits(), value) {
+    // More rows than a page holds is the one excess a smaller page cures; every other failure is
+    // the value's own and no page size changes it.
+    if value.entries.len() > usize::from(CONTROL_PAGE_ITEMS) {
         return Err(EncodeError::LimitExceeded);
     }
-    let fields = descriptor::SPEC.field_count(&[
-        (descriptor::MINIMUM, usize::from(value.minimum.is_some())),
-        (descriptor::MAXIMUM, usize::from(value.maximum.is_some())),
+    if !control_list_page_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
+    }
+    let count =
+        control_list_page::SPEC.field_count(&[(control_list_page::ENTRY, value.entries.len())])?;
+    sink.check_field_count(count)?;
+    write_spec!(
+        sink,
+        control_list_page::REVISION,
+        &value.revision.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        control_list_page::STRUCTURE_EPOCH,
+        &value.structure_epoch.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        control_list_page::LAST_HANDLE,
+        &value.last_handle.to_le_bytes()
+    )?;
+    write_spec!(sink, control_list_page::EOF, &[u8::from(value.eof)])?;
+    for entry in &value.entries {
+        write_control_entry(sink, entry)?;
+    }
+    Ok(())
+}
+
+fn write_control_address(sink: &mut dyn Sink, address: &ControlAddress) -> Result<(), EncodeError> {
+    sink.nested_spec(control_entry::ADDRESS, &mut |sink| {
+        write_control_address_fields(sink, address)
+    })
+}
+
+/// The fields of one address message, the one encoder of the address: the control list's rows and
+/// the `SET_CONTROL` edit both write it. The caller has validated the address.
+fn write_control_address_fields(
+    sink: &mut dyn Sink,
+    address: &ControlAddress,
+) -> Result<(), EncodeError> {
+    let fields = control_address::SPEC.field_count(&[
         (
-            descriptor::DISPLAY_NAME,
-            usize::from(value.display_name.is_some()),
+            control_address::OWNER_ID,
+            usize::from(address.owner_id.is_some()),
         ),
         (
-            descriptor::DISPLAY_UNIT,
-            usize::from(value.display_unit.is_some()),
+            control_address::SLOT_ID,
+            usize::from(address.slot_id.is_some()),
         ),
-        (descriptor::ENUM_CHOICE, value.enum_choices.len()),
+        (
+            control_address::CONTROL,
+            usize::from(address.control.is_some()),
+        ),
+        (control_address::LANE, usize::from(address.lane.is_some())),
     ])?;
-    sink.nested_spec(spec, &mut |sink| {
+    sink.message_header(fields)?;
+    write_spec!(
+        sink,
+        control_address::OWNER_KIND,
+        &[address.owner_kind.code()]
+    )?;
+    if let Some(id) = &address.owner_id {
+        write_spec!(sink, control_address::OWNER_ID, id.as_bytes())?;
+    }
+    write_spec!(sink, control_address::SECTION, &[address.section.code()])?;
+    if let Some(id) = &address.slot_id {
+        write_spec!(sink, control_address::SLOT_ID, id.as_bytes())?;
+    }
+    if let Some(control) = address.control {
+        write_spec!(sink, control_address::CONTROL, &control.to_le_bytes())?;
+    }
+    if let Some(lane) = address.lane {
+        write_spec!(
+            sink,
+            control_address::LANE,
+            &[schema::parameter_channel_wire(lane)]
+        )?;
+    }
+    Ok(())
+}
+
+/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
+/// list's one address encoding, with `control` and `lane` present. An address that breaks the
+/// list's rules is `InvalidField`.
+pub(crate) fn write_set_control_address(
+    sink: &mut dyn Sink,
+    address: &controls::ControlAddress,
+) -> Result<(), EncodeError> {
+    let address = ControlAddress::from(address);
+    if !control_address_is_valid(sink.limits(), &address, ControlRowKind::Control) {
+        return Err(EncodeError::InvalidField);
+    }
+    write_control_address_fields(sink, &address)
+}
+
+/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
+/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
+/// unallocated owner, section or lane code included.
+pub(crate) fn decode_set_control_address(
+    message: Message<'_>,
+) -> Result<controls::ControlAddress, DecodeError> {
+    let limits = message.limits();
+    let address = decode_control_address(limits, message)?;
+    if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
+        return Err(DecodeError::InvalidField);
+    }
+    controls::ControlAddress::try_from(&address)
+}
+
+fn write_control_entry(sink: &mut dyn Sink, entry: &ControlEntry) -> Result<(), EncodeError> {
+    use control_entry as e;
+    let (header, route, effect, row) = match &entry.body {
+        ControlBody::OwnerHeader(header) => (true, header.route.is_some(), false, None),
+        ControlBody::SectionHeader(header) => (true, false, header.effect.is_some(), None),
+        ControlBody::Control(row) => (false, false, false, Some(row)),
+    };
+    let one = |present: bool| usize::from(present);
+    let control = row.is_some();
+    let fields = e::SPEC.field_count(&[
+        (e::HEADER_KIND, one(header)),
+        (e::HEADER_NAME, one(header)),
+        (e::EFFECT, one(effect)),
+        (e::SOURCE, one(route)),
+        (e::DESTINATION, one(route)),
+        (e::TAP, one(route)),
+        (e::NAME, one(control)),
+        (e::DISPLAY_NAME, one(control)),
+        (e::DISPLAY_UNIT, one(control)),
+        (e::UNIT, one(control)),
+        (e::KIND, one(control)),
+        (e::MINIMUM, one(control)),
+        (e::MAXIMUM, one(control)),
+        (
+            e::DISABLED_VALUE,
+            one(row.is_some_and(|row| row.disabled_value.is_some())),
+        ),
+        (e::DEFAULT, one(control)),
+        (e::TAPER, one(control)),
+        (e::STEP, one(control)),
+        (e::PRECISION, one(control)),
+        (e::LADDER, one(control)),
+        (e::CHOICE, row.map_or(0, |row| row.choices.len())),
+        (
+            e::RAMP_ROW,
+            one(row.is_some_and(|row| row.ramp_row.is_some())),
+        ),
+        (e::DEFAULT_RAMP_SAMPLES, one(control)),
+        (e::CLASS, one(control)),
+        (e::REASON, one(row.is_some_and(|row| row.reason.is_some()))),
+        (
+            e::REASON_ISSUE,
+            one(row.is_some_and(|row| row.reason_issue.is_some())),
+        ),
+        (e::REOPEN, one(row.is_some_and(|row| row.reopen.is_some()))),
+        (e::SCOPE, one(control)),
+        (e::AUTOMATABLE, one(control)),
+        (e::FAMILY, one(control)),
+        (e::ACTIVE, one(control)),
+        (e::VALUE, one(control)),
+    ])?;
+    sink.nested_spec(control_list_page::ENTRY, &mut |sink| {
         sink.message_header(fields)?;
-        write_spec!(sink, descriptor::HANDLE, &value.handle.to_le_bytes())?;
-        write_spec!(sink, descriptor::TRACK_ID, value.track_id.as_bytes())?;
-        write_spec!(
-            sink,
-            descriptor::RACK,
-            &[schema::parameter_rack_wire(value.rack)]
-        )?;
-        write_spec!(sink, descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
-        write_spec!(
-            sink,
-            descriptor::PARAMETER_ID,
-            &value.parameter_id.to_le_bytes()
-        )?;
-        write_spec!(
-            sink,
-            descriptor::CHANNEL,
-            &[schema::parameter_channel_wire(value.channel)]
-        )?;
-        write_spec!(sink, descriptor::VALUE_KIND, &[value.value_kind as u8])?;
-        write_spec!(
-            sink,
-            descriptor::UNIT,
-            &[schema::parameter_unit_wire(value.unit)]
-        )?;
-        write_spec!(sink, descriptor::DOMAIN, &[value.domain as u8])?;
-        if let Some(v) = value.minimum {
-            write_spec!(sink, descriptor::MINIMUM, &v.to_le_bytes())?;
-        }
-        if let Some(v) = value.maximum {
-            write_spec!(sink, descriptor::MAXIMUM, &v.to_le_bytes())?;
-        }
-        write_spec!(sink, descriptor::DEFAULT, &value.default.to_le_bytes())?;
-        write_spec!(sink, descriptor::MAPPING, &[value.mapping as u8])?;
-        write_spec!(
-            sink,
-            descriptor::AUTOMATION_RATE,
-            &[value.automation_rate as u8]
-        )?;
-        write_spec!(
-            sink,
-            descriptor::SMOOTHING_SAMPLES,
-            &value.smoothing_samples.to_le_bytes()
-        )?;
-        write_spec!(sink, descriptor::FLAGS, &value.flags.to_le_bytes())?;
-        if let Some(v) = &value.display_name {
-            write_spec!(sink, descriptor::DISPLAY_NAME, v.as_bytes())?;
-        }
-        if let Some(v) = &value.display_unit {
-            write_spec!(sink, descriptor::DISPLAY_UNIT, v.as_bytes())?;
-        }
-        for choice in &value.enum_choices {
-            write_enum_choice(codec, sink, choice)?;
+        write_spec!(sink, e::HANDLE, &entry.handle.to_le_bytes())?;
+        write_spec!(sink, e::ROW_KIND, &[entry.body.row_kind() as u8])?;
+        write_control_address(sink, &entry.address)?;
+        match &entry.body {
+            ControlBody::OwnerHeader(header) => {
+                write_spec!(sink, e::HEADER_KIND, &[header.kind.code()])?;
+                write_spec!(sink, e::HEADER_NAME, header.name.as_bytes())?;
+                if let Some(route) = &header.route {
+                    write_spec!(sink, e::SOURCE, route.source.as_bytes())?;
+                    write_spec!(sink, e::DESTINATION, route.destination.as_bytes())?;
+                    write_spec!(sink, e::TAP, &[crate::session_wire::enum_tap(route.tap)])?;
+                }
+            }
+            ControlBody::SectionHeader(header) => {
+                write_spec!(sink, e::HEADER_KIND, &[entry.address.section.code()])?;
+                write_spec!(sink, e::HEADER_NAME, header.name.as_bytes())?;
+                if let Some(effect) = &header.effect {
+                    write_spec!(sink, e::EFFECT, effect.as_bytes())?;
+                }
+            }
+            ControlBody::Control(row) => write_control_row(sink, row)?,
         }
         Ok(())
     })
 }
 
-fn write_enum_choice(
-    codec: &ProtocolCodec,
-    sink: &mut dyn Sink,
-    choice: &EnumChoice,
-) -> Result<(), EncodeError> {
-    if !choice.value.is_finite() {
-        return Err(EncodeError::LimitExceeded);
+fn write_control_row(sink: &mut dyn Sink, row: &ControlRow) -> Result<(), EncodeError> {
+    use control_entry as e;
+    write_spec!(sink, e::NAME, row.name.as_bytes())?;
+    write_spec!(sink, e::DISPLAY_NAME, row.display_name.as_bytes())?;
+    write_spec!(sink, e::DISPLAY_UNIT, row.display_unit.as_bytes())?;
+    write_spec!(sink, e::UNIT, &[schema::parameter_unit_wire(row.unit)])?;
+    write_spec!(sink, e::KIND, &[row.kind.code()])?;
+    write_spec!(sink, e::MINIMUM, &row.minimum.to_le_bytes())?;
+    write_spec!(sink, e::MAXIMUM, &row.maximum.to_le_bytes())?;
+    if let Some(disabled) = row.disabled_value {
+        write_spec!(sink, e::DISABLED_VALUE, &disabled.to_le_bytes())?;
     }
-    check_string(codec, &choice.label)?;
+    write_spec!(sink, e::DEFAULT, &row.default.to_le_bytes())?;
+    write_spec!(sink, e::TAPER, &[row.taper.code()])?;
+    write_spec!(sink, e::STEP, &row.step.to_le_bytes())?;
+    write_spec!(sink, e::PRECISION, &[row.precision])?;
+    let ladder_bytes = row
+        .ladder
+        .len()
+        .checked_mul(4)
+        .ok_or(EncodeError::LimitExceeded)?;
+    sink.stream_field_spec(e::LADDER, ladder_bytes, &mut |sink| {
+        for step in &row.ladder {
+            sink.raw(&step.to_le_bytes())?;
+        }
+        Ok(())
+    })?;
+    for choice in &row.choices {
+        write_enum_choice(sink, choice)?;
+    }
+    if let Some(ramp) = row.ramp_row {
+        write_spec!(sink, e::RAMP_ROW, &[ramp.code()])?;
+    }
+    write_spec!(
+        sink,
+        e::DEFAULT_RAMP_SAMPLES,
+        &row.default_ramp_samples.to_le_bytes()
+    )?;
+    write_spec!(sink, e::CLASS, &[row.class.code()])?;
+    if let Some(reason) = row.reason {
+        write_spec!(sink, e::REASON, &[reason.code()])?;
+    }
+    if let Some(issue) = row.reason_issue {
+        write_spec!(sink, e::REASON_ISSUE, &issue.to_le_bytes())?;
+    }
+    if let Some(reopen) = &row.reopen {
+        write_spec!(sink, e::REOPEN, reopen.as_bytes())?;
+    }
+    write_spec!(sink, e::SCOPE, &[row.scope.code()])?;
+    write_spec!(sink, e::AUTOMATABLE, &[u8::from(row.automatable)])?;
+    write_spec!(sink, e::FAMILY, &[row.family.code()])?;
+    write_spec!(sink, e::ACTIVE, &[u8::from(row.active)])?;
+    write_spec!(sink, e::VALUE, &row.value.to_le_bytes())
+}
+
+fn write_enum_choice(sink: &mut dyn Sink, choice: &EnumChoice) -> Result<(), EncodeError> {
     let fields = enum_choice::SPEC.field_count(&[])?;
-    sink.nested_spec(descriptor::ENUM_CHOICE, &mut |sink| {
+    sink.nested_spec(control_entry::CHOICE, &mut |sink| {
         sink.message_header(fields)?;
         write_spec!(sink, enum_choice::VALUE, &choice.value.to_le_bytes())?;
         write_spec!(sink, enum_choice::LABEL, choice.label.as_bytes())
     })
 }
-fn decode_metadata_page(
+
+fn decode_control_list_page(
     codec: &ProtocolCodec,
     message: Message<'_>,
-) -> Result<ParameterMetadataPage, DecodeError> {
-    let message = message.schema_spec(&schema::metadata_page::SPEC)?;
-    let descriptors = values_spec!(message, schema::metadata_page::DESCRIPTOR)?
-        .map(|v| decode_descriptor(codec, Message::nested_at_depth(v, codec.limits(), 1)?))
+) -> Result<ControlListPage, DecodeError> {
+    let message = message.schema_spec(&control_list_page::SPEC)?;
+    let entries = values_spec!(message, control_list_page::ENTRY)?
+        .map(|entry| {
+            decode_control_entry(codec, Message::nested_at_depth(entry, codec.limits(), 1)?)
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let page = ParameterMetadataPage {
-        last_handle: read_u32(one_spec!(message, schema::metadata_page::LAST_HANDLE)?)?,
-        eof: read_bool(one_spec!(message, schema::metadata_page::EOF)?)?,
-        descriptors,
+    let page = ControlListPage {
+        revision: read_u64(one_spec!(message, control_list_page::REVISION)?)?,
+        structure_epoch: read_u64(one_spec!(message, control_list_page::STRUCTURE_EPOCH)?)?,
+        last_handle: read_u32(one_spec!(message, control_list_page::LAST_HANDLE)?)?,
+        eof: read_bool(one_spec!(message, control_list_page::EOF)?)?,
+        entries,
     };
-    if page.descriptors.len() > 256
-        || page
-            .descriptors
-            .windows(2)
-            .any(|p| p[0].handle >= p[1].handle)
-        || page
-            .descriptors
-            .last()
-            .is_some_and(|v| v.handle != page.last_handle)
-    {
-        return Err(DecodeError::InvalidTlv);
+    if !control_list_page_is_valid(codec.limits(), &page) {
+        return Err(DecodeError::InvalidField);
     }
     Ok(page)
 }
-fn decode_descriptor(
-    codec: &ProtocolCodec,
+
+fn decode_control_address(
+    limits: crate::ProtocolLimits,
     message: Message<'_>,
-) -> Result<ParameterDescriptor, DecodeError> {
-    let message = message.schema_spec(&descriptor::SPEC)?;
-    let choices = values_spec!(message, descriptor::ENUM_CHOICE)?
-        .map(|v| decode_choice(codec, Message::nested_at_depth(v, codec.limits(), 2)?))
-        .collect::<Result<Vec<_>, _>>()?;
-    let value = ParameterDescriptor {
-        handle: read_u32(one_spec!(message, descriptor::HANDLE)?)?,
-        track_id: read_string(codec, one_spec!(message, descriptor::TRACK_ID)?)?.to_owned(),
-        rack: schema::parameter_rack_from_wire(read_u8(one_spec!(message, descriptor::RACK)?)?)?,
-        effect_id: read_string(codec, one_spec!(message, descriptor::EFFECT_ID)?)?.to_owned(),
-        parameter_id: read_u32(one_spec!(message, descriptor::PARAMETER_ID)?)?,
-        channel: schema::parameter_channel_from_wire(read_u8(one_spec!(
+) -> Result<ControlAddress, DecodeError> {
+    let message = message.schema_spec(&control_address::SPEC)?;
+    let text = |spec: schema::FieldSpec| {
+        optional_spec!(message, spec)?
+            .map(|value| read_string_within(limits, value).map(str::to_owned))
+            .transpose()
+    };
+    Ok(ControlAddress {
+        owner_kind: ControlOwnerKind::from_code(read_u8(one_spec!(
             message,
-            descriptor::CHANNEL
+            control_address::OWNER_KIND
         )?)?)?,
-        value_kind: parse_value_kind(read_u8(one_spec!(message, descriptor::VALUE_KIND)?)?)?,
-        unit: schema::parameter_unit_from_wire(read_u8(one_spec!(message, descriptor::UNIT)?)?)?,
-        domain: parse_domain(read_u8(one_spec!(message, descriptor::DOMAIN)?)?)?,
-        minimum: optional_spec!(message, descriptor::MINIMUM)?
-            .map(read_f32)
+        owner_id: text(control_address::OWNER_ID)?,
+        section: ControlSection::from_code(read_u8(one_spec!(
+            message,
+            control_address::SECTION
+        )?)?)?,
+        slot_id: text(control_address::SLOT_ID)?,
+        control: optional_spec!(message, control_address::CONTROL)?
+            .map(read_u32)
             .transpose()?,
-        maximum: optional_spec!(message, descriptor::MAXIMUM)?
-            .map(read_f32)
+        lane: optional_spec!(message, control_address::LANE)?
+            .map(|code| {
+                schema::parameter_channel_from_wire(read_u8(code)?)
+                    .map_err(|_| DecodeError::InvalidField)
+            })
             .transpose()?,
-        default: read_f32(one_spec!(message, descriptor::DEFAULT)?)?,
-        mapping: parse_mapping(read_u8(one_spec!(message, descriptor::MAPPING)?)?)?,
-        automation_rate: parse_rate(read_u8(one_spec!(message, descriptor::AUTOMATION_RATE)?)?)?,
-        smoothing_samples: read_u32(one_spec!(message, descriptor::SMOOTHING_SAMPLES)?)?,
-        flags: read_u32(one_spec!(message, descriptor::FLAGS)?)?,
-        display_name: optional_spec!(message, descriptor::DISPLAY_NAME)?
-            .map(|v| read_string(codec, v).map(str::to_owned))
-            .transpose()?,
-        display_unit: optional_spec!(message, descriptor::DISPLAY_UNIT)?
-            .map(|v| read_string(codec, v).map(str::to_owned))
-            .transpose()?,
-        enum_choices: choices,
-    };
-    if !descriptor_is_valid(codec.limits(), &value) {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(value)
-}
-fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoice, DecodeError> {
-    let message = message.schema_spec(&enum_choice::SPEC)?;
-    let value = read_f32(one_spec!(message, enum_choice::VALUE)?)?;
-    if !value.is_finite() {
-        return Err(DecodeError::InvalidTlv);
-    };
-    Ok(EnumChoice {
-        value,
-        label: read_string(codec, one_spec!(message, enum_choice::LABEL)?)?.to_owned(),
     })
 }
-fn descriptor_is_valid(limits: crate::ProtocolLimits, value: &ParameterDescriptor) -> bool {
-    if value.handle == 0 || value.flags & !7 != 0 || !value.default.is_finite() {
-        return false;
+
+fn decode_control_entry(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ControlEntry, DecodeError> {
+    use control_entry as e;
+    let limits = codec.limits();
+    let message = message.schema_spec(&e::SPEC)?;
+    let handle = read_u32(one_spec!(message, e::HANDLE)?)?;
+    let row_kind = ControlRowKind::from_code(read_u8(one_spec!(message, e::ROW_KIND)?)?)?;
+    let address = decode_control_address(
+        limits,
+        Message::nested_at_depth(one_spec!(message, e::ADDRESS)?, limits, 2)?,
+    )?;
+    // A field outside the row's kind is refused, never skipped.
+    let absent = |specs: &[schema::FieldSpec]| -> Result<(), DecodeError> {
+        for spec in specs {
+            if values_spec!(message, *spec)?.next().is_some() {
+                return Err(DecodeError::InvalidField);
+            }
+        }
+        Ok(())
+    };
+    let required = |spec: schema::FieldSpec| -> Result<&[u8], DecodeError> {
+        optional_spec!(message, spec)?.ok_or(DecodeError::InvalidField)
+    };
+    let text = |spec: schema::FieldSpec| -> Result<String, DecodeError> {
+        read_string(codec, required(spec)?).map(str::to_owned)
+    };
+    let optional_text = |spec: schema::FieldSpec| -> Result<Option<String>, DecodeError> {
+        optional_spec!(message, spec)?
+            .map(|value| read_string(codec, value).map(str::to_owned))
+            .transpose()
+    };
+    let control_only = [
+        e::NAME,
+        e::DISPLAY_NAME,
+        e::DISPLAY_UNIT,
+        e::UNIT,
+        e::KIND,
+        e::MINIMUM,
+        e::MAXIMUM,
+        e::DISABLED_VALUE,
+        e::DEFAULT,
+        e::TAPER,
+        e::STEP,
+        e::PRECISION,
+        e::LADDER,
+        e::CHOICE,
+        e::RAMP_ROW,
+        e::DEFAULT_RAMP_SAMPLES,
+        e::CLASS,
+        e::REASON,
+        e::REASON_ISSUE,
+        e::REOPEN,
+        e::SCOPE,
+        e::AUTOMATABLE,
+        e::FAMILY,
+        e::ACTIVE,
+        e::VALUE,
+    ];
+    let body = match row_kind {
+        ControlRowKind::OwnerHeader => {
+            absent(&control_only)?;
+            absent(&[e::EFFECT])?;
+            let kind = ControlOwnerHeaderKind::from_code(read_u8(required(e::HEADER_KIND)?)?)?;
+            let route = if kind == ControlOwnerHeaderKind::Route {
+                Some(ControlRouteEnds {
+                    source: text(e::SOURCE)?,
+                    destination: text(e::DESTINATION)?,
+                    tap: crate::session_wire::parse_tap(read_u8(required(e::TAP)?)?)
+                        .map_err(|_| DecodeError::InvalidField)?,
+                })
+            } else {
+                absent(&[e::SOURCE, e::DESTINATION, e::TAP])?;
+                None
+            };
+            ControlBody::OwnerHeader(ControlOwnerHeader {
+                kind,
+                name: text(e::HEADER_NAME)?,
+                route,
+            })
+        }
+        ControlRowKind::SectionHeader => {
+            absent(&control_only)?;
+            absent(&[e::SOURCE, e::DESTINATION, e::TAP])?;
+            // A section header repeats its section in the header kind; the two must agree.
+            let kind = ControlSection::from_code(read_u8(required(e::HEADER_KIND)?)?)?;
+            if kind != address.section {
+                return Err(DecodeError::InvalidField);
+            }
+            ControlBody::SectionHeader(ControlSectionHeader {
+                name: text(e::HEADER_NAME)?,
+                effect: optional_text(e::EFFECT)?,
+            })
+        }
+        ControlRowKind::Control => {
+            absent(&[
+                e::HEADER_KIND,
+                e::HEADER_NAME,
+                e::EFFECT,
+                e::SOURCE,
+                e::DESTINATION,
+                e::TAP,
+            ])?;
+            let float =
+                |spec: schema::FieldSpec| -> Result<f32, DecodeError> { read_f32(required(spec)?) };
+            let ladder = required(e::LADDER)?
+                .chunks_exact(4)
+                .map(read_f32)
+                .collect::<Result<Vec<_>, _>>()?;
+            let choices = values_spec!(message, e::CHOICE)?
+                .map(|choice| decode_choice(Message::nested_at_depth(choice, limits, 2)?))
+                .collect::<Result<Vec<_>, _>>()?;
+            ControlBody::Control(ControlRow {
+                name: text(e::NAME)?,
+                display_name: text(e::DISPLAY_NAME)?,
+                display_unit: text(e::DISPLAY_UNIT)?,
+                unit: schema::parameter_unit_from_wire(read_u8(required(e::UNIT)?)?)
+                    .map_err(|_| DecodeError::InvalidField)?,
+                kind: ControlKind::from_code(read_u8(required(e::KIND)?)?)?,
+                minimum: float(e::MINIMUM)?,
+                maximum: float(e::MAXIMUM)?,
+                disabled_value: optional_spec!(message, e::DISABLED_VALUE)?
+                    .map(read_f32)
+                    .transpose()?,
+                default: float(e::DEFAULT)?,
+                taper: ControlTaper::from_code(read_u8(required(e::TAPER)?)?)?,
+                step: float(e::STEP)?,
+                precision: read_u8(required(e::PRECISION)?)?,
+                ladder,
+                choices,
+                ramp_row: optional_spec!(message, e::RAMP_ROW)?
+                    .map(|code| ControlRampRow::from_code(read_u8(code)?))
+                    .transpose()?,
+                default_ramp_samples: read_u32(required(e::DEFAULT_RAMP_SAMPLES)?)?,
+                class: ControlClass::from_code(read_u8(required(e::CLASS)?)?)?,
+                reason: optional_spec!(message, e::REASON)?
+                    .map(|code| ControlReason::from_code(read_u8(code)?))
+                    .transpose()?,
+                reason_issue: optional_spec!(message, e::REASON_ISSUE)?
+                    .map(read_u32)
+                    .transpose()?,
+                reopen: optional_text(e::REOPEN)?,
+                scope: ControlScope::from_code(read_u8(required(e::SCOPE)?)?)?,
+                automatable: read_bool(required(e::AUTOMATABLE)?)?,
+                family: ControlFamily::from_code(read_u8(required(e::FAMILY)?)?)?,
+                active: read_bool(required(e::ACTIVE)?)?,
+                value: float(e::VALUE)?,
+            })
+        }
+    };
+    let entry = ControlEntry {
+        handle,
+        address,
+        body,
+    };
+    if !control_entry_is_valid(limits, &entry) {
+        return Err(DecodeError::InvalidField);
     }
-    if value.track_id.len() > limits.max_string_bytes
-        || value.effect_id.len() > limits.max_string_bytes
-        || value
-            .display_name
-            .as_ref()
-            .is_some_and(|text| text.len() > limits.max_string_bytes)
-        || value
-            .display_unit
-            .as_ref()
-            .is_some_and(|text| text.len() > limits.max_string_bytes)
-        || !valid_stable_id(&value.track_id)
-        || !valid_stable_id(&value.effect_id)
-    {
-        return false;
-    }
-    match value.domain {
-        ParameterDomain::Continuous => match (value.minimum, value.maximum) {
-            (Some(min), Some(max))
-                if min.is_finite()
-                    && max.is_finite()
-                    && min <= value.default
-                    && value.default <= max
-                    && value.enum_choices.is_empty() => {}
-            _ => return false,
-        },
-        ParameterDomain::Boolean
-            if value.minimum.is_none()
-                && value.maximum.is_none()
-                && value.enum_choices.is_empty()
-                && (value.default == 0.0 || value.default == 1.0) => {}
-        ParameterDomain::Enumeration
-            if value.minimum.is_none()
-                && value.maximum.is_none()
-                && !value.enum_choices.is_empty()
-                && value.enum_choices.iter().all(|c| c.value.is_finite())
-                && value.enum_choices.iter().any(|c| c.value == value.default)
-                && value
-                    .enum_choices
-                    .iter()
-                    .enumerate()
-                    .all(|(i, c)| value.enum_choices[..i].iter().all(|p| p.value != c.value)) => {}
-        _ => return false,
-    }
-    true
+    Ok(entry)
 }
-fn parse_domain(v: u8) -> Result<ParameterDomain, DecodeError> {
-    match v {
-        1 => Ok(ParameterDomain::Continuous),
-        2 => Ok(ParameterDomain::Boolean),
-        3 => Ok(ParameterDomain::Enumeration),
-        _ => Err(DecodeError::InvalidTlv),
-    }
+
+fn decode_choice(message: Message<'_>) -> Result<EnumChoice, DecodeError> {
+    let message = message.schema_spec(&enum_choice::SPEC)?;
+    Ok(EnumChoice {
+        value: read_f32(one_spec!(message, enum_choice::VALUE)?)?,
+        label: core::str::from_utf8(one_spec!(message, enum_choice::LABEL)?)
+            .map_err(|_| DecodeError::InvalidUtf8)?
+            .to_owned(),
+    })
 }
-fn parse_value_kind(v: u8) -> Result<ParameterValueKind, DecodeError> {
-    if v == 1 {
-        Ok(ParameterValueKind::F32)
-    } else {
-        Err(DecodeError::InvalidTlv)
-    }
-}
-fn parse_mapping(v: u8) -> Result<ParameterMapping, DecodeError> {
-    match v {
-        1 => Ok(ParameterMapping::Linear),
-        2 => Ok(ParameterMapping::Logarithmic),
-        3 => Ok(ParameterMapping::Exponential),
-        4 => Ok(ParameterMapping::Stepped),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_rate(v: u8) -> Result<ParameterAutomationRate, DecodeError> {
-    match v {
-        1 => Ok(ParameterAutomationRate::Sample),
-        2 => Ok(ParameterAutomationRate::Block),
-        3 => Ok(ParameterAutomationRate::None),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-pub(crate) fn write_state_page(
+
+pub(crate) fn write_control_state_page(
     sink: &mut dyn Sink,
-    value: &ParameterStatePage,
+    value: &ControlStatePage,
 ) -> Result<(), EncodeError> {
-    if value.records.len() > 256 {
+    if value.records.len() > usize::from(CONTROL_PAGE_ITEMS) {
         return Err(EncodeError::LimitExceeded);
     }
-    for record in &value.records {
-        validate_state_record(record).map_err(|_| EncodeError::LimitExceeded)?;
+    if !control_state_page_is_valid(value) {
+        return Err(EncodeError::InvalidField);
     }
     let bytes = value
         .records
         .len()
-        .checked_mul(16)
+        .checked_mul(usize::from(CONTROL_STATE_RECORD_BYTES))
         .ok_or(EncodeError::LimitExceeded)?;
-    sink.check_field_count(schema::state_page::SPEC.field_count(&[])?)?;
+    sink.check_field_count(control_state_page::SPEC.field_count(&[])?)?;
     write_spec!(
         sink,
-        schema::state_page::OBSERVED_SAMPLE,
-        &value.observed_sample.to_le_bytes()
+        control_state_page::REVISION,
+        &value.revision.to_le_bytes()
     )?;
     write_spec!(
         sink,
-        schema::state_page::COUNT,
+        control_state_page::STRUCTURE_EPOCH,
+        &value.structure_epoch.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        control_state_page::LAST_HANDLE,
+        &value.last_handle.to_le_bytes()
+    )?;
+    write_spec!(sink, control_state_page::EOF, &[u8::from(value.eof)])?;
+    write_spec!(
+        sink,
+        control_state_page::COUNT,
         &u16::try_from(value.records.len())
             .map_err(|_| EncodeError::LimitExceeded)?
-            .to_le_bytes(),
+            .to_le_bytes()
     )?;
     write_spec!(
         sink,
-        schema::state_page::RECORD_BYTES,
-        &16_u16.to_le_bytes()
+        control_state_page::RECORD_BYTES,
+        &CONTROL_STATE_RECORD_BYTES.to_le_bytes()
     )?;
-    sink.stream_field_spec(schema::state_page::RECORDS, bytes, &mut |sink| {
+    sink.stream_field_spec(control_state_page::RECORDS, bytes, &mut |sink| {
         for record in &value.records {
             sink.raw(&record.handle.to_le_bytes())?;
-            sink.raw(&record.flags.to_le_bytes())?;
             sink.raw(&record.value.to_le_bytes())?;
-            sink.raw(&0_u32.to_le_bytes())?;
         }
         Ok(())
     })
 }
-fn decode_state_page(
-    _codec: &ProtocolCodec,
-    message: Message<'_>,
-) -> Result<ParameterStatePage, DecodeError> {
-    let message = message.schema_spec(&schema::state_page::SPEC)?;
-    let count = read_u16(one_spec!(message, schema::state_page::COUNT)?)? as usize;
-    if count > 256 || read_u16(one_spec!(message, schema::state_page::RECORD_BYTES)?)? != 16 {
-        return Err(DecodeError::InvalidTlv);
+
+fn decode_control_state_page(message: Message<'_>) -> Result<ControlStatePage, DecodeError> {
+    let message = message.schema_spec(&control_state_page::SPEC)?;
+    let count = usize::from(read_u16(one_spec!(message, control_state_page::COUNT)?)?);
+    if count > usize::from(CONTROL_PAGE_ITEMS)
+        || read_u16(one_spec!(message, control_state_page::RECORD_BYTES)?)?
+            != CONTROL_STATE_RECORD_BYTES
+    {
+        return Err(DecodeError::InvalidField);
     }
-    let bytes = one_spec!(message, schema::state_page::RECORDS)?;
-    if bytes.len() != count.checked_mul(16).ok_or(DecodeError::LimitExceeded)? {
+    let bytes = one_spec!(message, control_state_page::RECORDS)?;
+    if bytes.len() != count * usize::from(CONTROL_STATE_RECORD_BYTES) {
         return Err(DecodeError::InvalidValueLength);
     }
-    let mut records = Vec::with_capacity(count);
-    for raw in bytes.chunks_exact(16) {
-        if raw[12..].iter().any(|v| *v != 0) {
-            return Err(DecodeError::NonzeroReserved);
-        }
-        let record = ParameterStateRecord {
-            handle: read_u32(&raw[..4])?,
-            flags: read_u32(&raw[4..8])?,
-            value: read_f32(&raw[8..12])?,
-        };
-        validate_state_record(&record)?;
-        records.push(record)
-    }
-    Ok(ParameterStatePage {
-        observed_sample: read_u64(one_spec!(message, schema::state_page::OBSERVED_SAMPLE)?)?,
+    let records = bytes
+        .chunks_exact(usize::from(CONTROL_STATE_RECORD_BYTES))
+        .map(|raw| {
+            Ok(ControlStateRecord {
+                handle: read_u32(&raw[..4])?,
+                value: read_f32(&raw[4..])?,
+            })
+        })
+        .collect::<Result<Vec<_>, DecodeError>>()?;
+    let page = ControlStatePage {
+        revision: read_u64(one_spec!(message, control_state_page::REVISION)?)?,
+        structure_epoch: read_u64(one_spec!(message, control_state_page::STRUCTURE_EPOCH)?)?,
+        last_handle: read_u32(one_spec!(message, control_state_page::LAST_HANDLE)?)?,
+        eof: read_bool(one_spec!(message, control_state_page::EOF)?)?,
         records,
-    })
-}
-fn validate_state_record(value: &ParameterStateRecord) -> Result<(), DecodeError> {
-    if value.handle == 0 || value.flags & !3 != 0 {
-        return Err(DecodeError::InvalidTlv);
+    };
+    if !control_state_page_is_valid(&page) {
+        return Err(DecodeError::InvalidField);
     }
-    let valid = value.flags & 1 != 0;
-    let active = value.flags & 2 != 0;
-    if (!valid && (!value.value.is_sign_positive() || value.value != 0.0 || active))
-        || (valid && !value.value.is_finite())
-    {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(())
+    Ok(page)
 }
 
 pub(crate) fn write_capabilities(
@@ -3224,8 +4003,8 @@ pub(crate) fn write_capabilities(
     }
     write_spec!(
         sink,
-        schema::capabilities::MAXIMUM_PARAMETER_PAGE_ITEMS,
-        &value.maximum_parameter_page_items.to_le_bytes(),
+        schema::capabilities::MAXIMUM_CONTROL_PAGE_ITEMS,
+        &value.maximum_control_page_items.to_le_bytes(),
     )?;
     write_spec!(
         sink,
@@ -3352,9 +4131,9 @@ fn decode_capabilities<'a>(
             message,
             schema::capabilities::ADMISSION_QUANTUM_FRAMES
         )?)?,
-        maximum_parameter_page_items: read_u16(one_spec!(
+        maximum_control_page_items: read_u16(one_spec!(
             message,
-            schema::capabilities::MAXIMUM_PARAMETER_PAGE_ITEMS
+            schema::capabilities::MAXIMUM_CONTROL_PAGE_ITEMS
         )?)?,
         maximum_diagnostic_page_items: read_u16(one_spec!(
             message,
@@ -3446,7 +4225,7 @@ struct CapabilityInvariantView<'a> {
     maximum_tlvs: u32,
     maximum_nesting: u8,
     maximum_automation_records: u16,
-    maximum_parameter_page_items: u16,
+    maximum_control_page_items: u16,
     maximum_diagnostic_page_items: u16,
     maximum_transaction_edits: u32,
     supported_commands: IdSource<'a>,
@@ -3463,7 +4242,7 @@ impl<'a> From<&Capabilities<'a>> for CapabilityInvariantView<'a> {
             maximum_tlvs: value.maximum_tlvs,
             maximum_nesting: value.maximum_nesting,
             maximum_automation_records: value.maximum_automation_records,
-            maximum_parameter_page_items: value.maximum_parameter_page_items,
+            maximum_control_page_items: value.maximum_control_page_items,
             maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
             maximum_transaction_edits: value.maximum_transaction_edits,
             supported_commands: IdSource::Native(value.supported_commands),
@@ -3482,7 +4261,7 @@ impl<'a> From<&DecodedCapabilities<'a>> for CapabilityInvariantView<'a> {
             maximum_tlvs: value.maximum_tlvs,
             maximum_nesting: value.maximum_nesting,
             maximum_automation_records: value.maximum_automation_records,
-            maximum_parameter_page_items: value.maximum_parameter_page_items,
+            maximum_control_page_items: value.maximum_control_page_items,
             maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
             maximum_transaction_edits: value.maximum_transaction_edits,
             supported_commands: IdSource::LittleEndian(value.supported_commands),
@@ -3503,7 +4282,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || value.maximum_tlvs < 27
         || value.maximum_nesting == 0
         || value.maximum_automation_records != 256
-        || value.maximum_parameter_page_items > 256
+        || value.maximum_control_page_items > 256
         || value.maximum_diagnostic_page_items > 256
         || ((value.maximum_transaction_edits != 0) != session_family)
         || value.flags.0 & !CapabilityFlags::KNOWN != 0
@@ -3513,7 +4292,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
         || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
         || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
-        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x0004) && has_command(0x0005)))
+        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x000c) && has_command(0x000d)))
         || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
         || ((value.flags.0 & (1 << 9) != 0) != has_event(0x8020))
         || ((value.flags.0 & (1 << 10) != 0) != (has_command(0x000a) && has_event(0x8021)))
@@ -3522,7 +4301,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || (has_command(0x0003) != has_event(0x8001))
         || (has_event(0x8001) != has_event(0x8002))
-        || (has_command(0x0004) != has_command(0x0005))
+        || (has_command(0x000c) != has_command(0x000d))
         || (has_command(0x0008) != has_event(0x8010))
         || (has_command(0x000a) != has_event(0x8021))
         || (has_command(0x000b) != has_event(0x8030))
@@ -3535,7 +4314,8 @@ fn allocated_id(id: u16, event: bool) -> bool {
     if event {
         matches!(id, 0x8001 | 0x8002 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
     } else {
-        matches!(id, 1..=11)
+        // `0x0004` and `0x0005` are retired: never allocated again, never advertised.
+        matches!(id, 1..=13) && !crate::wire::is_retired_message_id(id)
     }
 }
 
@@ -3981,7 +4761,11 @@ fn decode_backpressure(
 }
 
 fn read_string<'a>(codec: &ProtocolCodec, value: &'a [u8]) -> Result<&'a str, DecodeError> {
-    if value.len() > codec.limits().max_string_bytes {
+    read_string_within(codec.limits(), value)
+}
+
+fn read_string_within(limits: crate::ProtocolLimits, value: &[u8]) -> Result<&str, DecodeError> {
+    if value.len() > limits.max_string_bytes {
         return Err(DecodeError::LimitExceeded);
     }
     core::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)

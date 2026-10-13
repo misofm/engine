@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use crate::{RackName, StableId};
 
 /// The object a live row belongs to: the key, with [`EditRampRow`], of one recorded length.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditRampTarget {
     /// A strip: a track or a submix, named by its stable ID.
     Strip(StableId),

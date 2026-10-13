@@ -276,54 +276,6 @@ pub(crate) mod enum_choice {
     };
 }
 
-pub(crate) mod descriptor {
-    use super::{FieldSpec, MessageSpec, Wire, enum_choice};
-
-    pub(crate) const HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
-    pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(2, Wire::Utf8);
-    pub(crate) const RACK: FieldSpec = FieldSpec::req(3, Wire::U8);
-    pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(4, Wire::Utf8);
-    pub(crate) const PARAMETER_ID: FieldSpec = FieldSpec::req(5, Wire::U32);
-    pub(crate) const CHANNEL: FieldSpec = FieldSpec::req(6, Wire::U8);
-    pub(crate) const VALUE_KIND: FieldSpec = FieldSpec::req(7, Wire::U8);
-    pub(crate) const UNIT: FieldSpec = FieldSpec::req(8, Wire::U8);
-    pub(crate) const DOMAIN: FieldSpec = FieldSpec::req(9, Wire::U8);
-    pub(crate) const MINIMUM: FieldSpec = FieldSpec::opt(10, Wire::F32);
-    pub(crate) const MAXIMUM: FieldSpec = FieldSpec::opt(11, Wire::F32);
-    pub(crate) const DEFAULT: FieldSpec = FieldSpec::req(12, Wire::F32);
-    pub(crate) const MAPPING: FieldSpec = FieldSpec::req(13, Wire::U8);
-    pub(crate) const AUTOMATION_RATE: FieldSpec = FieldSpec::req(14, Wire::U8);
-    pub(crate) const SMOOTHING_SAMPLES: FieldSpec = FieldSpec::req(15, Wire::U32);
-    pub(crate) const FLAGS: FieldSpec = FieldSpec::req(16, Wire::U32);
-    pub(crate) const DISPLAY_NAME: FieldSpec = FieldSpec::opt(17, Wire::Utf8);
-    pub(crate) const DISPLAY_UNIT: FieldSpec = FieldSpec::opt(18, Wire::Utf8);
-    pub(crate) const ENUM_CHOICE: FieldSpec = FieldSpec::msg(19, false, true, &enum_choice::SPEC);
-    pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "ParameterDescriptor",
-        fields: &[
-            HANDLE,
-            TRACK_ID,
-            RACK,
-            EFFECT_ID,
-            PARAMETER_ID,
-            CHANNEL,
-            VALUE_KIND,
-            UNIT,
-            DOMAIN,
-            MINIMUM,
-            MAXIMUM,
-            DEFAULT,
-            MAPPING,
-            AUTOMATION_RATE,
-            SMOOTHING_SAMPLES,
-            FLAGS,
-            DISPLAY_NAME,
-            DISPLAY_UNIT,
-            ENUM_CHOICE,
-        ],
-    };
-}
-
 pub(crate) mod snapshot_request {
     use super::*;
     pub(crate) const OFFSET: FieldSpec = FieldSpec::req(1, Wire::U64);
@@ -372,45 +324,149 @@ pub(crate) mod session_committed {
     };
 }
 
-pub(crate) mod metadata_request {
+/// The control list (decision 17, C4): `CONTROL_LIST_GET` and `CONTROL_STATE_GET` share one
+/// request, and the list page carries one `control_entry` per owner header, section header and
+/// control row.
+pub(crate) mod control_list_request {
     use super::*;
-    pub(crate) const AFTER_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
-    pub(crate) const LIMIT: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const STRUCTURE_EPOCH: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const AFTER_HANDLE: FieldSpec = FieldSpec::req(2, Wire::U32);
+    pub(crate) const LIMIT: FieldSpec = FieldSpec::req(3, Wire::U16);
+    pub(crate) const OWNER_KIND: FieldSpec = FieldSpec::opt(4, Wire::U8);
+    pub(crate) const OWNER_ID: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "ParameterMetadataRequest",
-        fields: &[AFTER_HANDLE, LIMIT],
+        name: "ControlListRequest",
+        fields: &[STRUCTURE_EPOCH, AFTER_HANDLE, LIMIT, OWNER_KIND, OWNER_ID],
     };
 }
 
-pub(crate) mod metadata_page {
-    use super::{descriptor, *};
-    pub(crate) const LAST_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
-    pub(crate) const EOF: FieldSpec = FieldSpec::req(2, Wire::Bool);
-    pub(crate) const DESCRIPTOR: FieldSpec = FieldSpec::msg(3, true, true, &descriptor::SPEC);
+pub(crate) mod control_address {
+    use super::*;
+    pub(crate) const OWNER_KIND: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const OWNER_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    pub(crate) const SECTION: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) const SLOT_ID: FieldSpec = FieldSpec::opt(4, Wire::Utf8);
+    pub(crate) const CONTROL: FieldSpec = FieldSpec::opt(5, Wire::U32);
+    pub(crate) const LANE: FieldSpec = FieldSpec::opt(6, Wire::U8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "ParameterMetadataPage",
-        fields: &[LAST_HANDLE, EOF, DESCRIPTOR],
+        name: "ControlAddress",
+        fields: &[OWNER_KIND, OWNER_ID, SECTION, SLOT_ID, CONTROL, LANE],
     };
 }
 
-pub(crate) mod state_request {
-    use super::*;
-    pub(crate) const HANDLES: FieldSpec = FieldSpec::req(1, Wire::PackedU32);
+pub(crate) mod control_entry {
+    use super::{FieldSpec, MessageSpec, Wire, control_address, enum_choice};
+
+    pub(crate) const HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const ROW_KIND: FieldSpec = FieldSpec::req(2, Wire::U8);
+    pub(crate) const ADDRESS: FieldSpec = FieldSpec::msg(3, true, false, &control_address::SPEC);
+    // A header row.
+    pub(crate) const HEADER_KIND: FieldSpec = FieldSpec::opt(4, Wire::U8);
+    pub(crate) const HEADER_NAME: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    pub(crate) const EFFECT: FieldSpec = FieldSpec::opt(6, Wire::Utf8);
+    pub(crate) const SOURCE: FieldSpec = FieldSpec::opt(7, Wire::Utf8);
+    pub(crate) const DESTINATION: FieldSpec = FieldSpec::opt(8, Wire::Utf8);
+    pub(crate) const TAP: FieldSpec = FieldSpec::opt(9, Wire::U8);
+    // A control row.
+    pub(crate) const NAME: FieldSpec = FieldSpec::opt(10, Wire::Utf8);
+    pub(crate) const DISPLAY_NAME: FieldSpec = FieldSpec::opt(11, Wire::Utf8);
+    pub(crate) const DISPLAY_UNIT: FieldSpec = FieldSpec::opt(12, Wire::Utf8);
+    pub(crate) const UNIT: FieldSpec = FieldSpec::opt(13, Wire::U8);
+    pub(crate) const KIND: FieldSpec = FieldSpec::opt(14, Wire::U8);
+    pub(crate) const MINIMUM: FieldSpec = FieldSpec::opt(15, Wire::F32);
+    pub(crate) const MAXIMUM: FieldSpec = FieldSpec::opt(16, Wire::F32);
+    pub(crate) const DISABLED_VALUE: FieldSpec = FieldSpec::opt(17, Wire::F32);
+    pub(crate) const DEFAULT: FieldSpec = FieldSpec::opt(18, Wire::F32);
+    pub(crate) const TAPER: FieldSpec = FieldSpec::opt(19, Wire::U8);
+    pub(crate) const STEP: FieldSpec = FieldSpec::opt(20, Wire::F32);
+    pub(crate) const PRECISION: FieldSpec = FieldSpec::opt(21, Wire::U8);
+    pub(crate) const LADDER: FieldSpec = FieldSpec::opt(22, Wire::PackedF32);
+    pub(crate) const CHOICE: FieldSpec = FieldSpec::msg(23, false, true, &enum_choice::SPEC);
+    pub(crate) const RAMP_ROW: FieldSpec = FieldSpec::opt(24, Wire::U8);
+    pub(crate) const DEFAULT_RAMP_SAMPLES: FieldSpec = FieldSpec::opt(25, Wire::U32);
+    pub(crate) const CLASS: FieldSpec = FieldSpec::opt(26, Wire::U8);
+    pub(crate) const REASON: FieldSpec = FieldSpec::opt(27, Wire::U8);
+    pub(crate) const REASON_ISSUE: FieldSpec = FieldSpec::opt(28, Wire::U32);
+    pub(crate) const REOPEN: FieldSpec = FieldSpec::opt(29, Wire::Utf8);
+    pub(crate) const SCOPE: FieldSpec = FieldSpec::opt(30, Wire::U8);
+    pub(crate) const AUTOMATABLE: FieldSpec = FieldSpec::opt(31, Wire::Bool);
+    pub(crate) const FAMILY: FieldSpec = FieldSpec::opt(32, Wire::U8);
+    pub(crate) const ACTIVE: FieldSpec = FieldSpec::opt(33, Wire::Bool);
+    pub(crate) const VALUE: FieldSpec = FieldSpec::opt(34, Wire::F32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "ParameterStateRequest",
-        fields: &[HANDLES],
+        name: "ControlEntry",
+        fields: &[
+            HANDLE,
+            ROW_KIND,
+            ADDRESS,
+            HEADER_KIND,
+            HEADER_NAME,
+            EFFECT,
+            SOURCE,
+            DESTINATION,
+            TAP,
+            NAME,
+            DISPLAY_NAME,
+            DISPLAY_UNIT,
+            UNIT,
+            KIND,
+            MINIMUM,
+            MAXIMUM,
+            DISABLED_VALUE,
+            DEFAULT,
+            TAPER,
+            STEP,
+            PRECISION,
+            LADDER,
+            CHOICE,
+            RAMP_ROW,
+            DEFAULT_RAMP_SAMPLES,
+            CLASS,
+            REASON,
+            REASON_ISSUE,
+            REOPEN,
+            SCOPE,
+            AUTOMATABLE,
+            FAMILY,
+            ACTIVE,
+            VALUE,
+        ],
     };
 }
 
-pub(crate) mod state_page {
+pub(crate) mod control_list_page {
     use super::*;
-    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
-    pub(crate) const COUNT: FieldSpec = FieldSpec::req(2, Wire::U16);
-    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(3, Wire::U16);
-    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(4, Wire::Bytes);
+    pub(crate) const REVISION: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const STRUCTURE_EPOCH: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const LAST_HANDLE: FieldSpec = FieldSpec::req(3, Wire::U32);
+    pub(crate) const EOF: FieldSpec = FieldSpec::req(4, Wire::Bool);
+    pub(crate) const ENTRY: FieldSpec = FieldSpec::msg(5, true, true, &control_entry::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "ParameterStatePage",
-        fields: &[OBSERVED_SAMPLE, COUNT, RECORD_BYTES, RECORDS],
+        name: "ControlListPage",
+        fields: &[REVISION, STRUCTURE_EPOCH, LAST_HANDLE, EOF, ENTRY],
+    };
+}
+
+pub(crate) mod control_state_page {
+    use super::*;
+    pub(crate) const REVISION: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const STRUCTURE_EPOCH: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const LAST_HANDLE: FieldSpec = FieldSpec::req(3, Wire::U32);
+    pub(crate) const EOF: FieldSpec = FieldSpec::req(4, Wire::Bool);
+    pub(crate) const COUNT: FieldSpec = FieldSpec::req(5, Wire::U16);
+    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(6, Wire::U16);
+    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(7, Wire::Bytes);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ControlStatePage",
+        fields: &[
+            REVISION,
+            STRUCTURE_EPOCH,
+            LAST_HANDLE,
+            EOF,
+            COUNT,
+            RECORD_BYTES,
+            RECORDS,
+        ],
     };
 }
 
@@ -693,7 +749,7 @@ pub(crate) mod capabilities {
     pub(crate) const MAXIMUM_CACHED_RESPONSE_BYTES: FieldSpec = FieldSpec::req(18, Wire::U64);
     pub(crate) const PER_BLOCK_AUTOMATION_DENSITY: FieldSpec = FieldSpec::req(19, Wire::U64);
     pub(crate) const ADMISSION_QUANTUM_FRAMES: FieldSpec = FieldSpec::req(20, Wire::U64);
-    pub(crate) const MAXIMUM_PARAMETER_PAGE_ITEMS: FieldSpec = FieldSpec::req(21, Wire::U16);
+    pub(crate) const MAXIMUM_CONTROL_PAGE_ITEMS: FieldSpec = FieldSpec::req(21, Wire::U16);
     pub(crate) const MAXIMUM_DIAGNOSTIC_PAGE_ITEMS: FieldSpec = FieldSpec::req(22, Wire::U16);
     pub(crate) const MAXIMUM_TELEMETRY_HANDLES: FieldSpec = FieldSpec::req(23, Wire::U16);
     pub(crate) const MAXIMUM_TRANSACTION_EDITS: FieldSpec = FieldSpec::req(24, Wire::U32);
@@ -723,7 +779,7 @@ pub(crate) mod capabilities {
             MAXIMUM_CACHED_RESPONSE_BYTES,
             PER_BLOCK_AUTOMATION_DENSITY,
             ADMISSION_QUANTUM_FRAMES,
-            MAXIMUM_PARAMETER_PAGE_ITEMS,
+            MAXIMUM_CONTROL_PAGE_ITEMS,
             MAXIMUM_DIAGNOSTIC_PAGE_ITEMS,
             MAXIMUM_TELEMETRY_HANDLES,
             MAXIMUM_TRANSACTION_EDITS,
@@ -1602,6 +1658,21 @@ pub(crate) mod session {
         };
     }
 
+    /// `SET_CONTROL` (decision 17, C5): any control by its stable address (#1553 D2). The address is
+    /// the control address message of the control list; a set requires its `control` and `lane`.
+    pub(crate) mod set_control {
+        use super::*;
+        pub(crate) const ADDRESS: FieldSpec =
+            FieldSpec::msg(1, true, false, &crate::schema::control_address::SPEC);
+        pub(crate) const VALUE: FieldSpec = FieldSpec::req(2, Wire::F32);
+        /// This edit's own ramp length in samples, absent for the row's default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetControl",
+            fields: &[ADDRESS, VALUE, RAMP_SAMPLES],
+        };
+    }
+
     /// The optional `ramp_samples` field of a live-value edit's payload (#1394 D1), or `None` for
     /// an opcode that does not carry one.
     pub(crate) const fn ramp_samples_field(opcode: crate::SessionEditOpcode) -> Option<FieldSpec> {
@@ -1618,6 +1689,7 @@ pub(crate) mod session {
             SetRouteMute => Some(set_route_mute::RAMP_SAMPLES),
             SetRouteFollowsMute => Some(set_route_follows_mute::RAMP_SAMPLES),
             SetVcaFader => Some(set_vca_fader::RAMP_SAMPLES),
+            SetControl => Some(set_control::RAMP_SAMPLES),
             // Listed one by one on purpose, with no wildcard: a new opcode must be classified here,
             // as in `SessionEdit::ramp_samples`, or the build fails.
             SetSessionId
@@ -1709,6 +1781,7 @@ pub(crate) mod session {
             UpsertVca => &upsert_vca::SPEC,
             RemoveVca => &remove_vca::SPEC,
             SetVcaFader => &set_vca_fader::SPEC,
+            SetControl => &set_control::SPEC,
         }
     }
 }
@@ -1722,15 +1795,15 @@ mod tests {
         let specs = [
             &capabilities_request::SPEC,
             &enum_choice::SPEC,
-            &descriptor::SPEC,
             &snapshot_request::SPEC,
             &snapshot::SPEC,
             &transaction_applied::SPEC,
             &session_committed::SPEC,
-            &metadata_request::SPEC,
-            &metadata_page::SPEC,
-            &state_request::SPEC,
-            &state_page::SPEC,
+            &control_list_request::SPEC,
+            &control_address::SPEC,
+            &control_entry::SPEC,
+            &control_list_page::SPEC,
+            &control_state_page::SPEC,
             &automation_enqueue::SPEC,
             &automation_enqueued::SPEC,
             &transport_get::SPEC,
@@ -1771,7 +1844,7 @@ mod tests {
         for edit in crate::session_wire::complete_all_opcode_fixture() {
             validate(session::payload_spec(edit.opcode()));
         }
-        assert!(std::hint::black_box(descriptor::HANDLE).mandatory);
+        assert!(std::hint::black_box(control_entry::HANDLE).mandatory);
     }
 
     #[test]

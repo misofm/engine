@@ -323,6 +323,7 @@ dependencies = [
 name = "control-plane"
 version = "0.1.0"
 dependencies = [
+ "controls",
  "effect-contract",
  "engine",
  "host-core",
@@ -1650,6 +1651,7 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "conformance",
+ "controls",
  "engine",
  "session",
 ]

@@ -87,7 +87,7 @@ fn pinned_hex(value: &str) -> Vec<u8> {
 }
 
 const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
-    "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
+    "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011600000001000200030006000700080009000a000b000c000d0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
     // #338 re-pin: canonical JSON snapshot bytes were 16,712 (0x4148), beginning with `{`.
     // #1093 re-pin: 13,729 (0x35a1) after the fixture moved to decision 12's console shape.
     // #1216 re-pin: 13,918 (0x365e), route field `mute` added, value false (21 bytes, 9 routes).
@@ -100,9 +100,9 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     // bytes). Only the snapshot length moves; the key's bytes are not otherwise pinned here.
     "4d49534f43544c000100000030000200020000004000000002000000000000002a0000000000000004000000000000000100040108000000a5370000000000000200040108000000000000000000000003000a01010000007b0000000000000004000801010000000000000000000000",
     // #1093 re-pin: the first descriptor's rack is `console` (5), was `simd1` (1).
-    "4d49534f43544c000100000030000200040000003801000003000000000000002a000000000000000300000000000000010003010400000001000000000000000200080101000000000000000000000003000b011001000010000000000000000100030104000000010000000000000002000901030000006571300000000000030001010100000005000000000000000400090102000000657100000000000005000301040000000100000000000000060001010100000001000000000000000700010101000000010000000000000008000101010000000500000000000000090001010100000002000000000000000c0006010400000000000000000000000d0001010100000004000000000000000e0001010100000003000000000000000f00030104000000000000000000000010000301040000000500000000000000110009000e00000062616e642d312d656e61626c6564000012000900060000006f6e2f6f66660000",
-    "4d49534f43544c000100000030000200050000004800000004000000000000002a00000000000000040000000000000001000401080000000000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010000000000803f00000000",
-    "4d49534f43544c000100000030000200060005004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
+    "4d49534f43544c0001000000300002000c000000d000000003000000000000002a00000000000000050000000000000001000401080000002a0000000000000002000401080000000100000000000000030003010400000001000000000000000400080101000000000000000000000005000b01880000000500000000000000010003010400000001000000000000000200010101000000010000000000000003000b013800000003000000000000000100010101000000020000000000000002000900030000006571300000000000030001010100000006000000000000000400010001000000010000000000000005000900030000006571300000000000",
+    "4d49534f43544c0001000000300002000d0000006800000004000000000000002a00000000000000070000000000000001000401080000002a00000000000000020004010800000001000000000000000300030104000000010000000000000004000801010000000000000000000000050002010200000000000000000000000600020102000000080000000000000007000a0100000000",
+    "4d49534f43544c000100000030000200060005005800000005000000000000002a00000000000000020000000000000001000b01400000000200000000000000010009011d0000006175746f6d6174696f6e2e7461726765742e756e737570706f727465640000000200010101000000030000000000000002000301040000000000000000000000",
     "4d49534f43544c000100000030000200070000003000000006000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000",
     "4d49534f43544c000100000030000200080000003000000007000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
     "4d49534f43544c000100000030000200090000005000000008000000000000002a00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
@@ -277,11 +277,236 @@ pub(super) fn command_c_capacity(
     (result, output.required_bytes, storage)
 }
 
+/// The status and diagnostic codes of one `AUTOMATION_ENQUEUE` record to `handle` at `revision`
+/// with `value` at both ends: the control row the provider holds for the handle decides it
+/// (`NOT_FOUND` for a handle the catalog does not hold).
+pub(super) fn automation_status(
+    session: *mut crate::Session,
+    request_id: u64,
+    revision: u64,
+    handle: u32,
+    value: f32,
+) -> (StatusCode, Vec<String>) {
+    let record = protocol::AutomationRecord {
+        kind: protocol::AutomationKind::Point,
+        handle: protocol::ParameterHandle(handle),
+        start: protocol::SampleTime(1 << 20),
+        end: protocol::SampleTime(1 << 20),
+        start_value: value,
+        end_value: value,
+    };
+    let request = command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
+            records: core::slice::from_ref(&record),
+        }),
+    );
+    let (result, response) = command_c(session, &request);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("automation response")
+    {
+        protocol::DecodedTypedResponseFrame::Success { .. } => (StatusCode::Ok, Vec::new()),
+        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => (
+            header.status,
+            payload
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect(),
+        ),
+    }
+}
+
+/// One decoded success page, or the status and diagnostic codes of a non-OK response.
+type PageResult<T> = Result<T, (StatusCode, Vec<String>)>;
+
+/// One `CONTROL_LIST_GET` page through the C ABI, under request ID `request_id`.
+pub(super) fn control_list_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    request: &protocol::ControlListRequest,
+) -> PageResult<protocol::ControlListPage> {
+    let bytes = command_bytes(
+        request_id,
+        protocol::CommandPayload::ControlListGet(request),
+    );
+    control_response_c(session, &bytes, |payload| match payload {
+        protocol::DecodedSuccessResponsePayload::ControlListPage(page) => page,
+        _ => panic!("expected a control list page"),
+    })
+}
+
+/// One `CONTROL_STATE_GET` page through the C ABI, under request ID `request_id`.
+pub(super) fn control_state_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    request: &protocol::ControlListRequest,
+) -> PageResult<protocol::ControlStatePage> {
+    let bytes = command_bytes(
+        request_id,
+        protocol::CommandPayload::ControlStateGet(request),
+    );
+    control_response_c(session, &bytes, |payload| match payload {
+        protocol::DecodedSuccessResponsePayload::ControlStatePage(page) => page,
+        _ => panic!("expected a control state page"),
+    })
+}
+
+fn control_response_c<T>(
+    session: *mut crate::Session,
+    request: &[u8],
+    page: impl FnOnce(protocol::DecodedSuccessResponsePayload<'_>) -> T,
+) -> PageResult<T> {
+    let (result, _, response) = command_c_capacity(session, request, 1 << 20);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = vec![0_u16; 1 << 16];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("control response")
+    {
+        protocol::DecodedTypedResponseFrame::Success { payload, .. } => Ok(page(payload)),
+        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => Err((
+            header.status,
+            payload
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect(),
+        )),
+    }
+}
+
+/// The whole control list of `session`, in pages of `limit` rows, with the structure epoch and
+/// the revision of its first page. Request IDs count up from `request_id`.
+pub(super) fn control_list_all_c(
+    session: *mut crate::Session,
+    request_id: &mut u64,
+    limit: u16,
+) -> (Vec<protocol::ControlEntry>, u64, u64) {
+    let mut entries = Vec::new();
+    let mut after_handle = 0;
+    let mut first = None;
+    loop {
+        *request_id += 1;
+        let page = control_list_c(
+            session,
+            *request_id,
+            &protocol::ControlListRequest {
+                structure_epoch: first.map_or(0, |(epoch, _)| epoch),
+                after_handle,
+                limit,
+                owner: None,
+            },
+        )
+        .expect("a list page");
+        first.get_or_insert((page.structure_epoch, page.revision));
+        entries.extend(page.entries);
+        after_handle = page.last_handle;
+        if page.eof {
+            let (epoch, revision) = first.expect("a first page");
+            return (entries, epoch, revision);
+        }
+    }
+}
+
+/// Every control value of `session`, `(handle, value bits)`, in pages of `limit` rows.
+pub(super) fn control_state_all_c(
+    session: *mut crate::Session,
+    request_id: &mut u64,
+    limit: u16,
+) -> Vec<(u32, u32)> {
+    let mut values = Vec::new();
+    let mut after_handle = 0;
+    // A cursor names the structure it belongs to: the first page asks for the current one (`0`)
+    // and the later pages for the epoch it answered.
+    let mut epoch = 0;
+    loop {
+        *request_id += 1;
+        let page = control_state_c(
+            session,
+            *request_id,
+            &protocol::ControlListRequest {
+                structure_epoch: epoch,
+                after_handle,
+                limit,
+                owner: None,
+            },
+        )
+        .expect("a state page");
+        epoch = page.structure_epoch;
+        values.extend(
+            page.records
+                .iter()
+                .map(|record| (record.handle, record.value.to_bits())),
+        );
+        after_handle = page.last_handle;
+        if page.eof {
+            return values;
+        }
+    }
+}
+
+/// [`automation_target`] of a session of its own: the handle a session built from `document`
+/// gives, read without touching the session under test.
+pub(super) fn automation_target_of(document: &str, value: f32) -> u32 {
+    let (c_session, c_plan) = boxed_c_children(document);
+    let (entries, ..) = control_list_all_c(c_session, &mut 0, 64);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+    automation_target(&entries, value)
+}
+
+/// The handle of the first listed effect parameter that accepts `value` as an automation target
+/// (a live continuous parameter whose range holds it).
+pub(super) fn automation_target(entries: &[protocol::ControlEntry], value: f32) -> u32 {
+    entries
+        .iter()
+        .find_map(|entry| match &entry.body {
+            protocol::ControlBody::Control(row)
+                if row.family == protocol::ControlFamily::Effect
+                    && row.automatable
+                    && row.kind == protocol::ControlKind::Continuous
+                    && entry.address.control != Some(0)
+                    && row.minimum <= value
+                    && value <= row.maximum =>
+            {
+                Some(entry.handle)
+            }
+            _ => None,
+        })
+        .expect("a live effect parameter that takes the value")
+}
+
+/// A committed structural edit publishes the replacement control list to the running controller:
+/// the structure epoch advances, the removed track's owner rows are gone, the last handle of the
+/// superseded list stops naming a row, and a request that holds the old epoch is told so.
+///
+/// Red if a commit leaves the controller holding the list of the superseded session, so a client
+/// keeps handles that name rows that no longer exist.
 #[test]
-fn c_commands_publish_the_replacement_parameter_catalog() {
+fn c_commands_publish_the_replacement_control_list() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
-    // The EQ is a console slot every track carries (decision 12), so the replacement catalog
-    // drops `eq0`'s EQ by removing the track and its route; console edits are #1094's.
+    let mut request = 0;
+    let (before, epoch, revision) = control_list_all_c(c_session, &mut request, 64);
+    assert_eq!((epoch, revision), (1, 42));
+    assert!(
+        before
+            .iter()
+            .any(|entry| entry.address.owner_id.as_deref() == Some("eq0"))
+    );
+    let last = before.len() as u32;
+    request += 1;
+    assert_ne!(
+        automation_status(c_session, request, 42, last, 0.0).0,
+        StatusCode::NotFound,
+        "the last row has a handle before the replacement"
+    );
+    // The EQ is a console slot every track carries (decision 12), so the replacement list drops
+    // `eq0`'s rows by removing the track and its route; console edits are #1094's.
     let edits = [
         protocol::SessionEdit::RemoveRoute {
             route_id: session::StableId::parse("eq0-main").expect("route ID"),
@@ -290,38 +515,58 @@ fn c_commands_publish_the_replacement_parameter_catalog() {
             track_id: session::StableId::parse("eq0").expect("track ID"),
         },
     ];
+    request += 1;
     let replace = command_bytes_at_revision(
-        1,
+        request,
         ExpectedRevision::Exact(SessionRevision(42)),
         protocol::CommandPayload::SessionTransactionApply(&edits),
     );
     assert_eq!(command_c(c_session, &replace).0, crate::RESULT_OK);
 
-    let metadata = command_bytes_at_revision(
-        2,
-        ExpectedRevision::Exact(SessionRevision(43)),
-        protocol::CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
-            after_handle: 0,
-            limit: 1,
-        }),
+    let (after, epoch, revision) = control_list_all_c(c_session, &mut request, 64);
+    assert_eq!((epoch, revision), (2, 43), "the structure changed once");
+    assert!(
+        after
+            .iter()
+            .all(|entry| !matches!(entry.address.owner_id.as_deref(), Some("eq0" | "eq0-main"))),
+        "the removed track's and route's rows are gone"
     );
-    let (result, response) = command_c(c_session, &metadata);
-    assert_eq!(result, crate::RESULT_OK);
-    let mut fields = [0_u16; 512];
-    let protocol::DecodedTypedResponseFrame::Success {
-        header,
-        payload: protocol::DecodedSuccessResponsePayload::ParameterMetadata(page),
-    } = ProtocolCodec::default()
-        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-        .expect("replacement metadata response")
-    else {
-        panic!("expected replacement metadata success")
+    assert!(
+        after
+            .iter()
+            .any(|entry| entry.address.owner_id.as_deref() == Some("eq1"))
+    );
+    assert!(after.len() < before.len());
+    request += 1;
+    assert_eq!(
+        automation_status(c_session, request, 43, last, 0.0).0,
+        StatusCode::NotFound,
+        "the last handle of the superseded list is gone"
+    );
+
+    // A client that holds the old epoch starts again, from either message.
+    let stale = protocol::ControlListRequest {
+        structure_epoch: 1,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
     };
-    assert_eq!(header.revision, SessionRevision(43));
-    assert_eq!(page.descriptors.len(), 1);
-    assert_eq!(page.descriptors[0].handle, 1);
-    assert_eq!(page.descriptors[0].track_id, "eq1");
-    assert_eq!(page.descriptors[0].rack, protocol::ParameterRack::Console);
+    request += 1;
+    assert_eq!(
+        control_list_c(c_session, request, &stale).err(),
+        Some((
+            StatusCode::RevisionConflict,
+            vec!["control.list.stale".to_owned()]
+        ))
+    );
+    request += 1;
+    assert_eq!(
+        control_state_c(c_session, request, &stale).err(),
+        Some((
+            StatusCode::RevisionConflict,
+            vec!["control.list.stale".to_owned()]
+        ))
+    );
 
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
@@ -360,26 +605,6 @@ fn c_commands_observe_the_rendered_plan_sample() {
         crate::ffi::test_render(c_plan, 0, &output),
         crate::RESULT_OK
     );
-
-    let state = command_bytes(
-        2,
-        protocol::CommandPayload::ParameterStateGet(&protocol::ParameterStateRequest {
-            handles: vec![1],
-        }),
-    );
-    let (result, response) = command_c(c_session, &state);
-    assert_eq!(result, crate::RESULT_OK);
-    let mut fields = [0_u16; 64];
-    let protocol::DecodedTypedResponseFrame::Success {
-        payload: protocol::DecodedSuccessResponsePayload::ParameterState(state),
-        ..
-    } = codec
-        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-        .expect("rendered parameter-state response")
-    else {
-        panic!("expected parameter-state success")
-    };
-    assert_eq!(state.observed_sample, 128);
 
     let transport = command_bytes(3, protocol::CommandPayload::TransportGet);
     let (result, response) = command_c(c_session, &transport);
@@ -1879,7 +2104,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         "4d49534f43544c000100000030000200030000001000000004000000000000002b00000000000000010000000000000001000301040000000100000000000000",
         "4d49534f43544c000100000030000200090000005800000005000000000000002b00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
         "4d49534f43544c000100000030000200090000005800000006000000000000002b00000000000000060000000000000001000d010800000001000000020000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
-        "4d49534f43544c00010000003000020001000000c801000007000000000000002b000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
+        "4d49534f43544c00010000003000020001000000c801000007000000000000002b000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011600000001000200030006000700080009000a000b000c000d0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
         "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000100000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
     ];
     const EVENTS: [&str; 7] = [
@@ -1931,7 +2156,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
 
     let record = protocol::AutomationRecord {
         kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(5),
+        handle: protocol::ParameterHandle(automation_target_of(SESSION, 100.0)),
         start: protocol::SampleTime(1),
         end: protocol::SampleTime(1),
         start_value: 100.0,
@@ -2360,29 +2585,33 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         ),
         protocol::MessageId::SessionSnapshotGet
     );
+    // The first page of the control list and of the control states: one row, the first owner's
+    // header (`eq0`), and the page after it.
+    let control_request = protocol::ControlListRequest {
+        structure_epoch: 0,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
+    };
     assert_eq!(
         dispatch!(
             ExpectedRevision::Any,
-            protocol::CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
-                after_handle: 0,
-                limit: 1,
-            },),
+            protocol::CommandPayload::ControlListGet(&control_request),
             StatusCode::Ok,
             42,
             &[]
         ),
-        protocol::MessageId::ParameterMetadataGet
+        protocol::MessageId::ControlListGet
     );
-    let state = protocol::ParameterStateRequest { handles: vec![1] };
     assert_eq!(
         dispatch!(
             ExpectedRevision::Any,
-            protocol::CommandPayload::ParameterStateGet(&state),
+            protocol::CommandPayload::ControlStateGet(&control_request),
             StatusCode::Ok,
             42,
             &[]
         ),
-        protocol::MessageId::ParameterStateGet
+        protocol::MessageId::ControlStateGet
     );
     let automation = [protocol::AutomationRecord {
         kind: protocol::AutomationKind::Point,
@@ -2761,14 +2990,9 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     let (without_effects, _) = host_core::prepare_host_runtime_with_live_lanes(
         &compiled,
         &caps,
-        &HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..HostLiveControlRequest::default()
-        },
-        HostLiveLanes {
-            effects: false,
-            ..C_ABI_LIVE_LANES
-        },
+        &HostLiveControlRequest::default(),
+        // The C ABI's selection less its effect lanes: today no input or route row is live.
+        HostLiveLanes::FADER_AND_MATRIX,
         None,
         &host_core::LiveValuesSuperseded::default(),
     )

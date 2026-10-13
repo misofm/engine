@@ -168,3 +168,16 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None. #1552 serves the messages.
+
+## Decision record (batch 2 review fold, 2026-10-13)
+
+- **D-fold-1. One address codec.** The address message has one encoder and one decoder, shared by
+  the control list and `SET_CONTROL` (#1553 D13), and one set of conversions to and from
+  `controls::ControlAddress`; `host-core`'s list builder uses the same conversion with a fallible
+  ID copy. `EncodeError::InvalidField` (#1552) is the encoder's status for an address or a request
+  that breaks the rules.
+- **D-fold-2. Epoch 0 with a cursor.** A request with `structure_epoch` 0 and `after_handle` other
+  than 0 is `INVALID_FIELD` on both directions: epoch 0 means "the current structure" and has no
+  handles to continue from, and honouring a cursor under it would page a list the caller never
+  pinned.
+

@@ -150,7 +150,6 @@
 //! guest does not contain this corpus: it plays one frozen block per track, and a per-block source
 //! there is tooling (the #996 verdict's owner ruling).
 
-use core::num::NonZeroUsize;
 use core::ops::RangeInclusive;
 
 use bench_support::digest::Sha256Sink;
@@ -279,7 +278,6 @@ fn caps() -> HostPrepareCaps {
 /// A live control channel per effect and one observation tap per effect; no meters.
 fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         observation_taps: 1,
         ..HostLiveControlRequest::default()
     }

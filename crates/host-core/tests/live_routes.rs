@@ -1,6 +1,6 @@
 //! Issue #1221: host-core produces live send records.
 //!
-//! With a control queue depth, preparation attaches one live lane per route into a submix and
+//! With live controls, preparation attaches one live lane per route into a submix and
 //! hands back one [`RouteControlProducer`] per lane, in canonical route-ID order. A producer
 //! builds its record's target with `graph_compiler::route_coefficients`, refuses before it writes,
 //! and its lanes are charged against the host's caps. A lane is a latest-target cell (#1347): a
@@ -10,8 +10,6 @@
 //! slot, no insert, HPF and LPF off), and every track reads its own non-constant two-lane noise.
 //! The settled comparisons run from the push block plus the ramp length plus the plan's output
 //! latency, which bounds every route's compensation delay.
-
-use core::num::NonZeroUsize;
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use bench_support::producer::render_while_producing;
@@ -23,7 +21,7 @@ use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler, route_
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
     PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlResources,
-    SourceSubmission, compile_host_session, compiled_session_shape,
+    SourceSubmission, compile_host_session, compiled_session_shape, prepare_host_session,
     prepare_host_session_with_live_controls,
 };
 use session::{
@@ -38,8 +36,6 @@ const CONSOLE_FIXTURE: &str =
 const QUANTUM: usize = 128;
 /// What every host output plane holds before a block.
 const HOST_SENTINEL: f32 = 7.0;
-/// The depth every gate attaches with, unless it says otherwise.
-const DEPTH: usize = 8;
 /// One past the indexed ramp's longest length.
 const TOO_LONG: u32 = (1 << 22) + 1;
 
@@ -69,13 +65,6 @@ fn caps() -> HostPrepareCaps {
         maximum_meter_streams: 64,
         maximum_meter_items: 1 << 16,
         maximum_meter_bytes: 1 << 24,
-    }
-}
-
-fn request(depth: Option<usize>) -> HostLiveControlRequest {
-    HostLiveControlRequest {
-        control_queue_depth: depth.map(|depth| NonZeroUsize::new(depth).expect("depth")),
-        ..HostLiveControlRequest::default()
     }
 }
 
@@ -308,16 +297,39 @@ struct Live {
 }
 
 impl Live {
-    fn new(model: &SessionModel, feeds: &Feeds, depth: Option<usize>) -> Self {
-        Self::from_document(&document(model), feeds, depth)
+    fn new(model: &SessionModel, feeds: &Feeds, live: bool) -> Self {
+        Self::from_document(&document(model), feeds, live)
     }
 
-    fn from_document(document: &str, feeds: &Feeds, depth: Option<usize>) -> Self {
-        let (_, mut host, handles) =
-            prepare_host_session_with_live_controls(document, &caps(), &request(depth))
-                .unwrap_or_else(|failure| {
-                    panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-                });
+    /// `live` prepares with live controls; otherwise through the plain entry, with no handles.
+    fn from_document(document: &str, feeds: &Feeds, live: bool) -> Self {
+        let (mut host, handles) = if live {
+            let (_, host, handles) = prepare_host_session_with_live_controls(
+                document,
+                &caps(),
+                &HostLiveControlRequest::default(),
+            )
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+            (host, handles)
+        } else {
+            let (_, host) = prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+            let handles = HostLiveControlHandles {
+                strips: Vec::new(),
+                track_count: 0,
+                strip_controls: Vec::new(),
+                effect_controls: Vec::new(),
+                meters: Vec::new(),
+                effect_observations: Vec::new(),
+                route_controls: Vec::new(),
+                master_track: None,
+                live_values_superseded: host_core::LiveValuesSuperseded::default(),
+            };
+            (host, handles)
+        };
         let gate = host
             .plan
             .take_revision_gate()
@@ -482,7 +494,7 @@ fn the_live_target_is_the_prepared_constant() {
     let initial = values(&mut draw, false);
     let u = values(&mut draw, false);
     let base = follow_session(initial, false, [false; 2], u);
-    let live = Live::new(&base, &Vec::new(), Some(DEPTH));
+    let live = Live::new(&base, &Vec::new(), true);
     let producer = &live.handles.route_controls[0];
     assert_eq!(producer.route_id(), "t-b");
     for _ in 0..2_000 {
@@ -518,12 +530,12 @@ fn the_live_target_is_the_prepared_constant() {
         let settled = push_block * QUANTUM + length as usize;
         let blocks = settled.div_ceil(QUANTUM) + 3;
         let feeds = feeds(&mut draw, &["t", "u"], blocks * QUANTUM);
-        let mut live = Live::new(&base, &feeds, Some(DEPTH));
+        let mut live = Live::new(&base, &feeds, true);
         let mut actual = live.render(push_block);
         live.set_route("t-b", drawn, lanes, length)
             .expect("written");
         live.render_into(blocks - push_block, &mut actual);
-        let fresh = Live::new(&follow_session(drawn, true, lanes, u), &feeds, None).render(blocks);
+        let fresh = Live::new(&follow_session(drawn, true, lanes, u), &feeds, false).render(blocks);
         assert_planes(
             &actual,
             &fresh,
@@ -587,14 +599,14 @@ fn a_settled_live_edit_through_host_core_equals_a_fresh_plan() {
             let edit = two_buses(rate, &sends);
             let push_block = 2;
             let feed_ids = ["a", "c", "e", "f"];
-            let probe = Live::new(&model, &Vec::new(), Some(DEPTH));
+            let probe = Live::new(&model, &Vec::new(), true);
             let latency = usize::try_from(probe.host.report.latency_samples).expect("latency");
             assert!(latency > 0, "c-b carries compensation");
             drop(probe);
             let settled = push_block * QUANTUM + lengths[0].max(lengths[1]) as usize + latency;
             let blocks = settled.div_ceil(QUANTUM) + 3;
             let feeds = feeds(&mut draw, &feed_ids, blocks * QUANTUM);
-            let mut live = Live::new(&model, &feeds, Some(DEPTH));
+            let mut live = Live::new(&model, &feeds, true);
             let mut actual = live.render(push_block);
             // A host addresses a live send by its index in `route_controls`, which is canonical
             // route-ID order: `a-b`, `c-b`, `e-x`, `f-x`, the same order `sends` is in.
@@ -603,7 +615,7 @@ fn a_settled_live_edit_through_host_core_equals_a_fresh_plan() {
                     .expect("written");
             }
             live.render_into(blocks - push_block, &mut actual);
-            let fresh = Live::new(&edit, &feeds, None).render(blocks);
+            let fresh = Live::new(&edit, &feeds, false).render(blocks);
             assert_planes(
                 &actual,
                 &fresh,
@@ -648,7 +660,6 @@ fn drained() -> Vec<u64> {
 /// Test value: red if a refused call writes a cell, or if `record` publishes a value by itself.
 #[test]
 fn a_refused_send_record_writes_nothing() {
-    const SMALL: usize = 4;
     let mut draw = Draw::new(1_221_003);
     let r0 = values(&mut draw, false);
     let r1 = values(&mut draw, false);
@@ -658,8 +669,8 @@ fn a_refused_send_record_writes_nothing() {
     let edit = values(&mut draw, false);
 
     // Domain and Length refusals.
-    let unedited = Live::new(&model, &feeds, None).render(blocks);
-    let mut live = Live::new(&model, &feeds, Some(SMALL));
+    let unedited = Live::new(&model, &feeds, false).render(blocks);
+    let mut live = Live::new(&model, &feeds, true);
     for (gain_db, length, error) in [
         (f32::NAN, 0, RouteControlError::Domain),
         (f32::INFINITY, 480, RouteControlError::Domain),
@@ -690,7 +701,7 @@ fn a_refused_send_record_writes_nothing() {
     assert_planes(&actual, &unedited, 0, "after refusals");
 
     // `record` then `write` is `set`.
-    let mut split = Live::new(&model, &feeds, Some(SMALL));
+    let mut split = Live::new(&model, &feeds, true);
     let record = split
         .producer("r0")
         .record(edit.gain_db, edit.matrix, edit.mute, [true, false], 37)
@@ -713,7 +724,7 @@ fn a_refused_send_record_writes_nothing() {
             .expect("the gate stays with the host")
             .write_published(|stamp| producer.write(stamp, record));
     }
-    let mut whole = Live::new(&model, &feeds, Some(SMALL));
+    let mut whole = Live::new(&model, &feeds, true);
     let whole_before = whole.render(1);
     whole
         .set_route("r0", edit, [true, false], 37)
@@ -755,7 +766,7 @@ fn many_send_edits_before_one_block_apply_the_last_and_are_counted() {
         .collect();
     let length = 37;
 
-    let mut many = Live::new(&model, &feeds, Some(DEPTH));
+    let mut many = Live::new(&model, &feeds, true);
     let mut actual = many.render(1);
     for (edit, lanes) in &edits {
         many.set_route("r0", *edit, *lanes, length)
@@ -777,7 +788,7 @@ fn many_send_edits_before_one_block_apply_the_last_and_are_counted() {
         (EDITS - 1) as u64
     );
 
-    let mut twin = Live::new(&model, &feeds, Some(DEPTH));
+    let mut twin = Live::new(&model, &feeds, true);
     let mut expected = twin.render(1);
     let (last, lanes) = edits[EDITS - 1];
     twin.set_route("r0", last, lanes, length).expect("written");
@@ -787,7 +798,7 @@ fn many_send_edits_before_one_block_apply_the_last_and_are_counted() {
     assert!(
         first_difference(
             &actual[0],
-            &Live::new(&model, &feeds, None).render(blocks)[0]
+            &Live::new(&model, &feeds, false).render(blocks)[0]
         )
         .is_some(),
         "the edit is audible"
@@ -809,14 +820,14 @@ fn live_controls_cost_the_standing_sessions_no_fold() {
     let blocks = 8;
     let mut draw = Draw::new(1_221_004);
     let feeds = feeds(&mut draw, &["fixture-source"], blocks * QUANTUM);
-    let mut without = Live::from_document(CONSOLE_FIXTURE, &feeds, None);
-    let mut with = Live::from_document(CONSOLE_FIXTURE, &feeds, Some(64));
+    let mut without = Live::from_document(CONSOLE_FIXTURE, &feeds, false);
+    let mut with = Live::from_document(CONSOLE_FIXTURE, &feeds, true);
     let folds = without.host.plan.bank_route_folds();
     assert!(folds > 0, "the fixture folds its master");
     assert_eq!(
         with.host.plan.bank_route_folds(),
         folds,
-        "Some(64) against None"
+        "attached against plain"
     );
     assert!(with.handles.route_controls.is_empty());
     assert_eq!(
@@ -825,7 +836,7 @@ fn live_controls_cost_the_standing_sessions_no_fold() {
     );
     let expected = without.render(blocks);
     let actual = with.render(blocks);
-    assert_planes(&actual, &expected, 0, "Some(64) against None");
+    assert_planes(&actual, &expected, 0, "attached against plain");
     assert!(actual[0].iter().any(|sample| *sample != 0.0));
 }
 
@@ -859,7 +870,7 @@ fn out_of_order() -> SessionModel {
 #[test]
 fn live_send_handles_are_in_canonical_route_order() {
     let model = out_of_order();
-    let mut live = Live::new(&model, &Vec::new(), Some(DEPTH));
+    let mut live = Live::new(&model, &Vec::new(), true);
     let ids: Vec<&str> = live
         .handles
         .route_controls
@@ -889,7 +900,7 @@ fn live_send_handles_are_in_canonical_route_order() {
         }
         graph::test_only_route_mix_reset();
     }
-    let idle = Live::new(&model, &Vec::new(), None);
+    let idle = Live::new(&model, &Vec::new(), false);
     assert!(idle.handles.route_controls.is_empty());
 }
 
@@ -997,7 +1008,7 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
         values(&mut draw, false),
         values(&mut draw, false),
     ));
-    let live = Live::from_document(&document, &Vec::new(), Some(DEPTH));
+    let live = Live::from_document(&document, &Vec::new(), true);
     let charged = live.host.report.route_control_resources;
     assert_eq!(charged, graph_route_resources(&document));
     assert_eq!(charged.routes, 2);
@@ -1007,7 +1018,7 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
 
     let mut limits = caps();
     limits.maximum_graph_session_plus_plan_bytes = total;
-    prepare_host_session_with_live_controls(&document, &limits, &request(Some(DEPTH)))
+    prepare_host_session_with_live_controls(&document, &limits, &HostLiveControlRequest::default())
         .unwrap_or_else(|failure| {
             panic!(
                 "at the admitted total: {}",
@@ -1015,15 +1026,17 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
             )
         });
     limits.maximum_graph_session_plus_plan_bytes = total - 1;
-    let Err(failure) =
-        prepare_host_session_with_live_controls(&document, &limits, &request(Some(DEPTH)))
-    else {
+    let Err(failure) = prepare_host_session_with_live_controls(
+        &document,
+        &limits,
+        &HostLiveControlRequest::default(),
+    ) else {
         panic!("one byte below the admitted total prepares");
     };
     assert_eq!(failure.kind(), PrepareRejection::Resource);
     assert_eq!(failure.as_bytes(), b"host.graph.resource.limit\t$\n");
 
-    let idle = Live::from_document(&document, &Vec::new(), None);
+    let idle = Live::from_document(&document, &Vec::new(), false);
     assert_eq!(
         idle.host.report.route_control_resources,
         RouteControlResources::default()
@@ -1059,7 +1072,7 @@ fn live_sends_render_without_allocating() {
     ];
     let blocks = 48;
     let feeds = feeds(&mut draw, &["a", "c", "e", "f"], blocks * QUANTUM);
-    let mut live = Live::new(&two_buses(48_000, &sends), &feeds, Some(DEPTH));
+    let mut live = Live::new(&two_buses(48_000, &sends), &feeds, true);
     let producers = core::mem::take(&mut live.handles.route_controls);
     assert_eq!(producers.len(), 4);
     let gate = live.gate.take().expect("the gate");

@@ -102,10 +102,6 @@ pub enum MessageId {
     SessionSnapshotGet = 0x0002,
     /// `SESSION_TRANSACTION_APPLY`.
     SessionTransactionApply = 0x0003,
-    /// `PARAMETER_METADATA_GET`.
-    ParameterMetadataGet = 0x0004,
-    /// `PARAMETER_STATE_GET`.
-    ParameterStateGet = 0x0005,
     /// `AUTOMATION_ENQUEUE`.
     AutomationEnqueue = 0x0006,
     /// `TRANSPORT_GET`.
@@ -118,6 +114,10 @@ pub enum MessageId {
     CountersGet = 0x000a,
     /// `DIAGNOSTICS_GET`.
     DiagnosticsGet = 0x000b,
+    /// `CONTROL_LIST_GET` (decision 17, C4).
+    ControlListGet = 0x000c,
+    /// `CONTROL_STATE_GET` (decision 17, C4).
+    ControlStateGet = 0x000d,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
     /// `AUTOMATION_CANCELED`.
@@ -132,6 +132,25 @@ pub enum MessageId {
     Diagnostic = 0x8030,
 }
 
+/// The command message IDs that were allocated and are retired: `PARAMETER_METADATA_GET`
+/// (`0x0004`) and `PARAMETER_STATE_GET` (`0x0005`), replaced by `CONTROL_LIST_GET` and
+/// `CONTROL_STATE_GET` (decision 17, C4). A retired ID decodes to `UnsupportedMessage`, is never
+/// advertised and is never reallocated.
+pub const RETIRED_MESSAGE_IDS: [u16; 2] = [0x0004, 0x0005];
+
+/// Whether `value` is a retired message ID.
+#[must_use]
+pub(crate) const fn is_retired_message_id(value: u16) -> bool {
+    let mut index = 0;
+    while index < RETIRED_MESSAGE_IDS.len() {
+        if RETIRED_MESSAGE_IDS[index] == value {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 impl MessageId {
     /// Return the frozen numeric ID.
     #[must_use]
@@ -141,18 +160,22 @@ impl MessageId {
 
     /// Parse one frozen numeric message ID, rejecting unassigned and media-reserved values.
     pub const fn from_raw(value: u16) -> Result<Self, DecodeError> {
+        // A retired ID is refused like any unallocated one, whatever the table below says.
+        if is_retired_message_id(value) {
+            return Err(DecodeError::UnsupportedMessage);
+        }
         let message = match value {
             0x0001 => Self::CapabilitiesGet,
             0x0002 => Self::SessionSnapshotGet,
             0x0003 => Self::SessionTransactionApply,
-            0x0004 => Self::ParameterMetadataGet,
-            0x0005 => Self::ParameterStateGet,
             0x0006 => Self::AutomationEnqueue,
             0x0007 => Self::TransportGet,
             0x0008 => Self::TransportSet,
             0x0009 => Self::TelemetryConfigure,
             0x000a => Self::CountersGet,
             0x000b => Self::DiagnosticsGet,
+            0x000c => Self::ControlListGet,
+            0x000d => Self::ControlStateGet,
             0x8001 => Self::SessionCommitted,
             0x8002 => Self::AutomationCanceled,
             0x8010 => Self::TransportState,
@@ -488,6 +511,9 @@ pub enum DecodeError {
     MessageKindMismatch,
     /// A TLV field ID, flags, order, count, or padding was invalid.
     InvalidTlv,
+    /// A well-formed field held a value its schema refuses: a code outside its table, a field
+    /// present or absent against its row kind, or a bound (decision 17, C4).
+    InvalidField,
     /// A scalar, packed, bool, or nested-message length was invalid.
     InvalidValueLength,
     /// A UTF-8 field was not valid UTF-8.
@@ -508,6 +534,7 @@ impl DecodeError {
             Self::PcmForbidden => StatusCode::PcmForbidden,
             Self::LimitExceeded | Self::ScratchTooSmall => StatusCode::LimitExceeded,
             Self::UnknownRequiredField => StatusCode::UnknownRequiredField,
+            Self::InvalidField => StatusCode::InvalidField,
             _ => StatusCode::MalformedFrame,
         }
     }
@@ -528,6 +555,9 @@ pub enum EncodeError {
     MessageKindMismatch,
     /// A configured protocol frame, field-count, or UTF-8 byte limit would be exceeded.
     LimitExceeded,
+    /// A typed value breaks its message's own rules (an unordered or non-finite value, a field
+    /// pair that disagrees): the value is wrong at any size, so trimming it cannot help.
+    InvalidField,
     /// The caller buffer is insufficient; no output bytes were written.
     OutputTooSmall {
         /// Exact canonical frame byte length required.
@@ -540,6 +570,7 @@ impl fmt::Display for EncodeError {
         match self {
             Self::MessageKindMismatch => formatter.write_str("message kind mismatch"),
             Self::LimitExceeded => formatter.write_str("protocol encoding limit exceeded"),
+            Self::InvalidField => formatter.write_str("protocol value breaks its message rules"),
             Self::OutputTooSmall { required } => write!(formatter, "output too small: {required}"),
         }
     }

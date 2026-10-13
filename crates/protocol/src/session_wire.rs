@@ -241,7 +241,7 @@ const fn enum_link(value: session::LinkMode) -> u8 {
         session::LinkMode::Average => 3,
     }
 }
-const fn enum_tap(value: session::SendTap) -> u8 {
+pub(crate) const fn enum_tap(value: session::SendTap) -> u8 {
     match value {
         session::SendTap::Input => 1,
         session::SendTap::PostInput => 2,
@@ -644,6 +644,10 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetVcaFader { vca_id, fader, .. } => {
             tx_id(sink, fields[0], vca_id)?;
             tx_message(sink, fields[1], |v| tx_fader(v, fader))
+        }
+        SessionEdit::SetControl { address, value, .. } => {
+            tx_message(sink, fields[0], |v| tx_control_address(v, address))?;
+            tx_f32(sink, fields[1], *value)
         }
     }?;
     match (ramp_field, edit.ramp_samples()) {
@@ -1497,7 +1501,26 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
             fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
             ramp_samples,
         }),
+        crate::SessionEditOpcode::SetControl => Ok(SessionEdit::SetControl {
+            address: parse_control_address(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
+            // Not required to be finite here: the control validator refuses it, naming the edit.
+            value: read_f32(one_spec!(payload, fields[1])?)?,
+            ramp_samples,
+        }),
     }
+}
+
+/// The control address of a `SetControl` edit: the control list's address message, in which a set
+/// requires the `control` and the `lane`. Its encoder and decoder are the list's (`message_wire`).
+fn tx_control_address(
+    sink: &mut dyn Sink,
+    address: &controls::ControlAddress,
+) -> Result<(), EncodeError> {
+    crate::message_wire::write_set_control_address(sink, address)
+}
+
+fn parse_control_address(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
+    crate::message_wire::decode_set_control_address(message)
 }
 
 fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeError> {
@@ -1992,7 +2015,7 @@ fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
+pub(crate) fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
     match value {
         1 => Ok(session::SendTap::Input),
         2 => Ok(session::SendTap::PostInput),

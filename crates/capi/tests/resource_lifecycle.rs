@@ -609,9 +609,6 @@ struct HostHalf {
     effects: Box<[host_core::EffectControlProducer]>,
 }
 
-/// capi's live-lane depth, `LIVE_QUEUE_DEPTH` (#1053 D4), which is crate-private.
-const LIVE_QUEUE_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::new(16).unwrap();
-
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
     host_half_counting(
         document,
@@ -644,10 +641,7 @@ fn host_half_counting(
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
-        &host_core::HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..host_core::HostLiveControlRequest::default()
-        },
+        &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
             strip_input: false,
             effects: true,
@@ -703,10 +697,7 @@ impl HostHalf {
         host_core::prepare_host_runtime_with_live_lanes(
             self.store.compiled(),
             &host_caps(compile_limits),
-            &host_core::HostLiveControlRequest {
-                control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-                ..host_core::HostLiveControlRequest::default()
-            },
+            &host_core::HostLiveControlRequest::default(),
             host_core::HostLiveLanes {
                 strip_input: false,
                 effects: true,
@@ -1154,6 +1145,25 @@ impl Budget {
 /// `aarch64-debug` run prints the measured row. graph metadata and the two plan rows grow by the
 /// same 320 bytes inside their slack.
 ///
+/// #1551 raised the two catalog rows, a structural move: the provider's parameter catalog holds
+/// each effect parameter as the control list's `ControlEntry` (the row `AUTOMATION_ENQUEUE`'s
+/// domain check reads), 272 bytes a row against the 168 of the `ParameterDescriptor` it replaces,
+/// plus the row's machine name and a stable address of two strings, and no state record. The nine
+/// EQs' 540 rows make the catalog's single allocation 90,720 -> 146,880 (the largest named
+/// allocation) and capi retained 282,303 -> 351,003 on x86-64; the rows are lane-independent, so the four-lane
+/// ceilings move with them. The ceilings are the new values plus 10 %, rounded up to 64.
+///
+/// #1552 replaced that catalog with the control list built from `controls::list`, a structural
+/// move: the catalog now holds every control of the session, not the effect parameters alone,
+/// with an owner header before each owner's rows and a section header before each section's. The
+/// reference session's 932 entries (the nine tracks' builtins, console EQs, own rows and routes,
+/// the session's rows, and the headers) make the catalog's single allocation 146,880 -> 253,504
+/// (932 x 272, the largest named allocation) and capi retained 351,003 -> 503,819 on x86-64: each
+/// entry stores exactly the wire row (its address strings, its machine and display names, its
+/// ladder and its choices) and a 4-byte value beside it, with no field the list does not send.
+/// The rows are lane-independent, so the four-lane ceilings move with them. The ceilings are the
+/// new values plus 10 %, rounded up to 64.
+///
 /// #1328 raised the effect scalar scratch row from its zero claim, a structural move: the
 /// parametric EQ now declares its two rest planes as scratch (`REST_PLANE_BYTES_PER_FRAME`, 8 bytes
 /// per frame per prepared lane: one `f32` threshold word per channel), which it had allocated at
@@ -1266,14 +1276,14 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 282_432,
-        four_lanes: 282_432,
+        eight_lanes: 554_240,
+        four_lanes: 554_240,
     },
     Budget {
         row: "largest_named_allocation_bytes",
         value: |report| report.largest_named_allocation_bytes,
-        eight_lanes: 99_840,
-        four_lanes: 99_840,
+        eight_lanes: 278_912,
+        four_lanes: 278_912,
     },
 ];
 
@@ -1968,10 +1978,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
-        &host_core::HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..host_core::HostLiveControlRequest::default()
-        },
+        &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
             strip_input: false,
             effects: true,

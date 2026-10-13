@@ -10,26 +10,6 @@ pub struct CompiledChildren<A: ControlAdapter> {
     pub plan: PlanState<A>,
 }
 
-/// The control-queue depth the C ABI passes to preparation (`Some` attaches live controls). It
-/// sizes no queue: every strip, effect and route lane is a set of latest-target cells with no
-/// depth (#1312, #1345, #1346, #1347). An effect's observation queue would hold one slot per
-/// declared tap, and the C ABI binds none (it asks for no observation taps).
-///
-/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
-#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
-pub const LIVE_QUEUE_DEPTH: NonZeroUsize = host_core::STRIP_LIVE_QUEUE_DEPTH;
-
-/// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
-/// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
-/// no route lane (#1225). An effect lane is its latest-target cells (#1345).
-///
-/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
-#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
-pub const C_ABI_LIVE_LANES: HostLiveLanes = HostLiveLanes {
-    effects: true,
-    ..HostLiveLanes::FADER_AND_MATRIX
-};
-
 pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
     pub(crate) strips: StripLanes,
@@ -43,7 +23,7 @@ pub(crate) struct PreparedRuntime {
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
     pub(crate) inventory: PlanStateInventory,
-    pub(crate) control_catalog: PreparedSessionControlCatalog,
+    pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
     /// The designs this preparation used, for the next preparation to read (#1471 Amendment 2).
     pub(crate) bound_seed: InputBoundRecord,
@@ -325,7 +305,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
 
 pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
-    catalog: &PreparedSessionControlCatalog,
+    catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
     bound_seed_bytes: u64,
@@ -607,23 +587,21 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    // #1256 D1: every plan carries each strip's fader/mute and matrix/pan lanes, and #1263 D1 one
-    // lane per prepared effect instance; nothing else live: no input lane (its tail would turn
-    // infinite) and no route lane (#1225).
+    // Decision 17, C6: the core chooses the live lanes from the session's live control rows. Every
+    // plan carries each strip's fader/mute and matrix/pan lanes (#1256 D1); the others follow the
+    // rows, so a row that becomes live gets its lane with no change here.
     //
     // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
     // transaction left unchanged is prepared vacant to carry its predecessor's ring.
-    let live = HostLiveControlRequest {
-        control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-        ..HostLiveControlRequest::default()
-    };
+    let live = HostLiveControlRequest::default();
+    let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
     bound_cache.begin_journal();
     let prepared = match successor {
         Some(base) => prepare_host_runtime_with_live_lanes_successor(
             compiled,
             &caps,
             &live,
-            C_ABI_LIVE_LANES,
+            lanes,
             base,
             Some(&mut *bound_cache),
             superseded,
@@ -632,7 +610,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             compiled,
             &caps,
             &live,
-            C_ABI_LIVE_LANES,
+            lanes,
             Some(&mut *bound_cache),
             superseded,
         ),
@@ -853,6 +831,7 @@ where
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
         control_catalog,
+        store.revision().0,
         sample_source,
         retained_capacity,
         RENDER_DIAGNOSTIC_SLOTS,

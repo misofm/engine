@@ -2011,3 +2011,156 @@ fn set_control_smoothing_round_trips_and_decode_refuses_a_partial_or_out_of_rang
         );
     }
 }
+
+fn control_edit(
+    owner: controls::Owner,
+    section: controls::Section,
+    value: f32,
+    ramp_samples: Option<u32>,
+) -> SessionEdit {
+    SessionEdit::SetControl {
+        address: controls::ControlAddress {
+            owner,
+            section,
+            control: 3,
+            lane: ParameterChannel::Right,
+        },
+        value,
+        ramp_samples,
+    }
+}
+
+/// #1553 gate 5: `SetControl` round-trips for every owner and section shape, with the ramp absent,
+/// an explicit 0 and 96000, and with a non-finite value, which the codec carries to the validator.
+/// The three ramp encodings differ.
+///
+/// Red if the encoder and decoder disagree on the address (a dropped owner or slot ID, a wrong
+/// code), if an absent ramp decodes as 0, or if the codec refuses a NaN that the validator must
+/// refuse by name.
+#[test]
+fn set_control_round_trips_every_address_shape_and_ramp() {
+    use controls::{Owner, Section};
+    let codec = ProtocolCodec::default();
+    let shapes = [
+        (Owner::Session, Section::Own),
+        (Owner::Strip(id("vocal")), Section::Builtins),
+        (Owner::Strip(id("vocal")), Section::Own),
+        (Owner::Strip(id("vocal")), Section::Inserts(id("eq"))),
+        (Owner::Strip(id("vocal")), Section::Console(id("desk-eq"))),
+        (Owner::Route(id("to-main")), Section::Own),
+        (Owner::Vca(id("grp")), Section::Own),
+    ];
+    let mut encodings = Vec::new();
+    for ramp in [None, Some(0), Some(96_000)] {
+        let edits: Vec<_> = shapes
+            .iter()
+            .cloned()
+            .map(|(owner, section)| control_edit(owner, section, -1.5, ramp))
+            .collect();
+        let bytes = encode(&edits);
+        let decoded = codec
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 128]))
+            .expect("SetControl decodes");
+        assert_eq!(decoded.edits, edits, "ramp {ramp:?}");
+        assert_eq!(encode(&decoded.edits), bytes, "ramp {ramp:?} re-encodes");
+        encodings.push(bytes);
+    }
+    assert!(encodings[0] != encodings[1] && encodings[1] != encodings[2]);
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let edits = [control_edit(
+            controls::Owner::Session,
+            controls::Section::Own,
+            value,
+            None,
+        )];
+        let bytes = encode(&edits);
+        let decoded = codec
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("a non-finite value decodes");
+        let SessionEdit::SetControl { value: got, .. } = &decoded.edits[0] else {
+            panic!("a SetControl");
+        };
+        assert_eq!(got.to_bits(), value.to_bits());
+    }
+}
+
+/// #1553 D2: the address of a set requires its `control` and `lane`, and breaks the list's rules
+/// when the owner ID or the slot ID is present or absent against its kind or section: each is
+/// refused at decode, and an unallocated owner, section or lane code is `InvalidField` too: the
+/// list's one address decoder answers both messages.
+///
+/// Red if a set decodes an address that names no control, a lane-less address, a strip without an
+/// ID or a builtins section with a slot.
+#[test]
+fn set_control_refuses_an_address_that_breaks_its_rules() {
+    use schema::control_address as a;
+    let field =
+        |spec: FieldSpec, value: &[u8]| (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec());
+    let parse = |kind: u8,
+                 owner: Option<&str>,
+                 section: u8,
+                 slot: Option<&str>,
+                 control: Option<u32>,
+                 lane: Option<u8>| {
+        let mut fields = vec![field(a::OWNER_KIND, &[kind])];
+        if let Some(owner) = owner {
+            fields.push(field(a::OWNER_ID, owner.as_bytes()));
+        }
+        fields.push(field(a::SECTION, &[section]));
+        if let Some(slot) = slot {
+            fields.push(field(a::SLOT_ID, slot.as_bytes()));
+        }
+        if let Some(control) = control {
+            fields.push(field(a::CONTROL, &control.to_le_bytes()));
+        }
+        if let Some(lane) = lane {
+            fields.push(field(a::LANE, &[lane]));
+        }
+        parse_control_address(Message::nested(&raw_message(fields)).expect("nested"))
+    };
+    // Strip, builtins, control 5, left: the accepted shape.
+    assert!(parse(2, Some("vocal"), 4, None, Some(5), Some(1)).is_ok());
+    assert!(parse(1, None, 6, None, Some(1), Some(3)).is_ok());
+    assert!(parse(2, Some("vocal"), 2, Some("eq"), Some(0), Some(3)).is_ok());
+    for (name, result) in [
+        (
+            "no control",
+            parse(2, Some("vocal"), 4, None, None, Some(1)),
+        ),
+        ("no lane", parse(2, Some("vocal"), 4, None, Some(5), None)),
+        (
+            "strip without an ID",
+            parse(2, None, 4, None, Some(5), Some(1)),
+        ),
+        (
+            "session with an ID",
+            parse(1, Some("vocal"), 6, None, Some(1), Some(3)),
+        ),
+        (
+            "builtins with a slot",
+            parse(2, Some("vocal"), 4, Some("eq"), Some(5), Some(1)),
+        ),
+        (
+            "inserts without a slot",
+            parse(2, Some("vocal"), 2, None, Some(0), Some(1)),
+        ),
+    ] {
+        assert_eq!(result, Err(DecodeError::InvalidField), "{name}");
+    }
+    for (name, result) in [
+        ("owner kind 0", parse(0, None, 6, None, Some(1), Some(1))),
+        ("owner kind 5", parse(5, None, 6, None, Some(1), Some(1))),
+        (
+            "section 1 (retired)",
+            parse(2, Some("vocal"), 1, None, Some(5), Some(1)),
+        ),
+        (
+            "section 7",
+            parse(2, Some("vocal"), 7, None, Some(5), Some(1)),
+        ),
+        ("lane 0", parse(2, Some("vocal"), 4, None, Some(5), Some(0))),
+        ("lane 4", parse(2, Some("vocal"), 4, None, Some(5), Some(4))),
+    ] {
+        assert_eq!(result, Err(DecodeError::InvalidField), "{name}");
+    }
+}

@@ -38,8 +38,8 @@ pub(crate) use engine::realtime::{
     RenderIo, WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
 };
 pub(crate) use host_core::{
-    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,
-    PrepareDiagnostics, PreparedSessionControlCatalog, SessionControlProvider, SourceControlError,
+    ControlCatalog, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy,
+    PlanStateInventory, PrepareDiagnostics, SessionControlProvider, SourceControlError,
     SourceControlSet, SuccessorBase, parse_host_session, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_live_lanes_successor,
 };
@@ -70,8 +70,7 @@ pub use plan::{PlanQueries, PlanState};
 
 #[cfg(feature = "test-support")]
 pub use compile::{
-    C_ABI_LIVE_LANES, CapiResources, CompiledModelAdmission, LIVE_QUEUE_DEPTH, LiveEpochResources,
-    prepare_caps, validate_live_peak,
+    CapiResources, CompiledModelAdmission, LiveEpochResources, prepare_caps, validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{

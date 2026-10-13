@@ -9975,16 +9975,10 @@ fn lane_free_render(document: &str, blocks: u64) -> Vec<u32> {
     .expect("lane session compile");
     let options = lane_options(0);
     let caps = prepare_caps(&compiled, options, options.source_ring_frames, u64::MAX);
-    let (mut host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-        &compiled,
-        &caps,
-        &HostLiveControlRequest::default(),
-        &[],
-        HostLiveLanes::ALL,
-        &host_core::LiveValuesSuperseded::default(),
-    )
-    .expect("lane-free preparation");
-    assert!(handles.strip_controls.is_empty(), "no lane at all");
+    // The plain entry attaches no lane at all (every entry that takes a request attaches live
+    // controls, #1555 D3).
+    let mut host =
+        host_core::prepare_host_runtime(&compiled, &caps).expect("lane-free preparation");
     let quantum = STRIP_QUANTUM as usize;
     let mut bits = Vec::new();
     for block in 0..blocks {

@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
 The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
-session transaction contains all 47 allocated `SessionEditOpcode` values), all 11 successful
+session transaction contains all 48 allocated `SessionEditOpcode` values), all 11 successful
 responses, all 18 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`8eb4cc8d075a4355`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`9f13a06993efa99e`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -33,6 +33,14 @@ live-value edits, and the corpus's `SetTrackFader` sets it, so that edit's bytes
 and edit counts are unchanged.
 Issue #1365 re-pinned it from `5429f052592101ef`: #1365 appends `SetControlSmoothing` (`0x0008`),
 so the transaction carries 47 edits; the frame count is unchanged.
+Issue #1551 (decision 17, C4) re-pinned it from `8eb4cc8d075a4355`: `CONTROL_LIST_GET` and
+`CONTROL_STATE_GET` (`0x000c`, `0x000d`) replace the retired `PARAMETER_METADATA_GET` and
+`PARAMETER_STATE_GET` (`0x0004`, `0x0005`), so the command and response frames of the pair are new
+(a list page with every kind of row and optional field, and the state page of its control rows),
+and the capability registry lists the new pair; the frame count is unchanged. The retired IDs are
+covered by `retired_code_rows()`, not by a frame.
+Issue #1553 (decision 17, C5) re-pinned it from `0902357f75bdddcd`: #1553 appends `SetControl`
+(`0x0800`), so the transaction carries 48 edits; the frame count is unchanged.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

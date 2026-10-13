@@ -120,8 +120,8 @@ mod limiter_linked_session;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
-    PlanSampleSource, PreparedSessionControlCatalog, SessionControlProvider,
-    SessionControlProviderError, SessionControlProviderResources,
+    ControlCatalog, PlanSampleSource, SessionControlProvider, SessionControlProviderError,
+    SessionControlProviderResources,
 };
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
@@ -131,15 +131,17 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+#[cfg(all(feature = "control-provider", feature = "test-support"))]
+pub use live_delta::take_lowered_owner_count;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{LiveDelta, LiveRebuild, LiveStripRecords, classify_live_delta};
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps,
-    PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, STRIP_LIVE_QUEUE_DEPTH,
-    SourceInventoryRow, SuccessorBase, compile_host_model, compile_host_session, count_effects,
-    default_source_ring_frames, parse_host_session, prepare_host_runtime,
+    PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase,
+    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
+    effect_producer_position, parse_host_session, prepare_host_runtime,
     prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
@@ -148,6 +150,7 @@ pub use prepare::{
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_live_controls, strip_control_table_bytes,
+    strip_position,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -197,6 +200,7 @@ pub use effect_compiler::{
 };
 #[cfg(feature = "test-support")]
 pub use prepare::{
+    test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
     test_only_prepare_host_runtime_with_live_controls_on,
     test_only_prepare_host_runtime_with_live_controls_successor_on,
 };

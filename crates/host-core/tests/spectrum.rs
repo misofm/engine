@@ -411,7 +411,6 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
     limits.maximum_meter_items = u64::MAX;
     limits.maximum_meter_bytes = u64::MAX;
     let live_controls = HostLiveControlRequest {
-        control_queue_depth: core::num::NonZeroUsize::new(1),
         meter_period_frames: core::num::NonZeroU32::new(128),
         ..HostLiveControlRequest::default()
     };

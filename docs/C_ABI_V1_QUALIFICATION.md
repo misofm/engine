@@ -233,11 +233,25 @@ device 0.
 ## Issue 369 control-provider refresh
 
 IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
-`host_core::SessionControlProvider`. The production parameter catalog is snapshotted directly from
-each accepted `EffectPreparedEntry`'s `metadata.descriptor` and
-`bank_preparation.initial_values` before graph lowering consumes those entries. Parameter state
-therefore uses the exact prepared values; automation domain
-checks therefore address real revision-scoped handles. Current/effective sample reads the active
+`host_core::SessionControlProvider`. Since #1552 the provider serves the control list
+(`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core: its
+catalog is `host_core::ControlCatalog`, built from the compiled session's `controls::list` with an
+owner header before each owner's rows and a section header before each section's, each entry at its
+handle (from 1, in list order) and its committed value beside it. The list therefore covers every
+control of the session (strips, builtins, console slots, inserts, routes, VCAs and the session's
+own rows), and can never disagree with what `controls` validates. Every commit replaces the
+catalog with the committed model's (a live commit builds it before its first write and publishes it
+after the commit), so values are re-read through `controls::list` and a derived row follows its
+inputs. `structure_epoch` starts at 1 and
+advances by one on every commit, live or rebuild, after which the address sequence, a header or any
+control row's descriptor (every field except `value`) differs from the previous catalog (a live
+`matrix_mode` switch flips `active` and so advances it; a fader move does not); a
+request that names another epoch is `REVISION_CONFLICT` with `control.list.stale`. The page
+`revision` is the committed session revision. A page holds at most `limit` rows and fewer when its
+response would exceed the endpoint's response bound (the page then is not the end of the list).
+Automation domain checks read the catalog row by handle; until #1567 only an effect parameter is a
+target of `AUTOMATION_ENQUEUE`, and a handle that names any other row is `INVALID_FIELD` with
+`automation.target.unsupported`. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
 provider's counter and diagnostic pages. The four provider-owned counters (the two telemetry counters, canceled automation, and
@@ -261,8 +275,8 @@ The session store must fit its compiled-model estimate, and the prepared plan it
 bound; see the test). The canonical JSON is charged once, with the compiled model in the graph cap:
 capi's epoch row no longer charges it a second time. The double-live admission is derived from the two live reports
 and the owning crates' resource reports rather than from a hand-maintained layout mirror.
-The C response vectors now pin session-derived metadata/state and registered telemetry
-counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
+The C response vectors now pin session-derived control-list and control-state pages and registered
+telemetry counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
 build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
 The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
 declared feature surface changed. The subsequent #371 marker-only integration was rebuilt
@@ -524,11 +538,12 @@ and compares the resolved values bit by bit.
   (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix
   strip, and `params` that preparation refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic).
-- **No ack before a drop.** Every record passes its producer's preflight, and every readback row
-  is looked up, before the first cell write.
-- **The readback follows.** After the commit, the protocol's parameter state
-  (`PARAMETER_STATE_GET`) reports each live value, exactly as a rebuild's catalog would. The
-  catalog's handles and metadata do not change.
+- **No ack before a drop.** Every record passes its producer's preflight before the first cell
+  write.
+- **The readback follows.** After the commit, the control state (`CONTROL_STATE_GET`) and the
+  control list (`CONTROL_LIST_GET`) report each live value, exactly as a rebuild's catalog would
+  (#1552: the catalog's values are re-read from the committed model). The catalog's handles and
+  `structure_epoch` do not change.
 - **Effects keep their state.** A live parameter edit is not bit-identical to a fresh plan of the
   edited session, because the effect's history differs; it is bit-identical to the browser's live
   lane given the same records at the same block, at the four launch rates on one and ten tracks.
