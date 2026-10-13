@@ -161,7 +161,8 @@ async function testMainRealm() {
           response = {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
             lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
-            nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
+            nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
+            memoryBytes: 65536,
           };
           if (statusMutation !== null) response = statusMutation(response);
         } else if (received.tag === "miso.renderallocations.v1") {
@@ -1312,6 +1313,7 @@ async function testMainRealm() {
     const status = await host.status();
     assert.equal(status.tag, "miso.status.v1");
     assert.equal(status.memoryBytes, host.memoryBytes);
+    assert.equal(status.liveValuesSuperseded, 7n, "the status reply carries the superseded count");
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -1360,6 +1362,35 @@ async function testMainRealm() {
     await errorResult(schemaHost.status(), 255);
     statusMutation = null;
     await schemaHost.dispose();
+
+    // #1399 gate 3: the reply's field set and the count's type are checked. A reply without the
+    // count, and one whose count is not a u64 `bigint`, fail the whole host with 255; a count at
+    // the top of the u64 range is accepted and read back whole.
+    const countHost = () => createMisoAudioWorkletHost({
+      context,
+      document: new Uint8Array(),
+      options: limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    for (const mutation of [
+      // No count; a number rather than a bigint; a negative count; a count past u64.
+      ({ liveValuesSuperseded: _dropped, ...rest }) => rest,
+      (reply) => ({ ...reply, liveValuesSuperseded: 7 }),
+      (reply) => ({ ...reply, liveValuesSuperseded: -1n }),
+      (reply) => ({ ...reply, liveValuesSuperseded: 1n << 64n }),
+    ]) {
+      const refused = await countHost();
+      statusMutation = mutation;
+      await errorResult(refused.status(), 255);
+      statusMutation = null;
+      await refused.dispose();
+    }
+    const wide = await countHost();
+    statusMutation = (reply) => ({ ...reply, liveValuesSuperseded: (1n << 64n) - 1n });
+    assert.equal((await wide.status()).liveValuesSuperseded, (1n << 64n) - 1n);
+    statusMutation = null;
+    await wide.dispose();
 
     // Issue #1477 D3: the render allocation reply check, conjunct by conjunct. Any other tag,
     // field set, result or count fails the whole host with 255; the well-formed reply resolves at
@@ -3240,6 +3271,32 @@ async function testProcessor() {
       const status = processor.port.posts.at(-1).message;
       assert.equal(status.memoryBytes, 65536);
       assert.equal(status.nextAbsoluteSample, 64n);
+    }
+
+    // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply
+    // carries the word. Words 56, 64 and 72 stay required zero: a nonzero one fails construction.
+    {
+      const fake = createFakeExports(64);
+      new DataView(fake.exports.memory.buffer, 16384).setBigUint64(48, 0x0102_0304_0506n, true);
+      const processor = construct(fake);
+      assert.equal(processor.port.posts[0].message.tag, "miso.ready.v1");
+      processor.receive({ tag: "miso.status.v1", requestId: 1 });
+      const status = processor.port.posts.at(-1).message;
+      assert.equal(status.liveValuesSuperseded, 0x0102_0304_0506n);
+      new DataView(fake.exports.memory.buffer, 16384).setBigUint64(48, (1n << 64n) - 1n, true);
+      processor.receive({ tag: "miso.status.v1", requestId: 2 });
+      assert.equal(
+        processor.port.posts.at(-1).message.liveValuesSuperseded,
+        (1n << 64n) - 1n,
+        "the word is read whole",
+      );
+    }
+    for (const offset of [56, 64, 72]) {
+      const fake = createFakeExports(64);
+      new DataView(fake.exports.memory.buffer, 16384).setBigUint64(offset, 1n, true);
+      const processor = construct(fake);
+      assert.equal(fake.calls.dispose, 1, `a nonzero reserved word at ${offset} fails the boot`);
+      assert.equal(processor.port.posts[0].message.tag, "miso.error.v1");
     }
 
     {

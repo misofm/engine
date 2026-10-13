@@ -216,7 +216,14 @@ export class OfflineEngine {
     return this.#boundary.readObservations(selections);
   }
 
-  /** Subscribe to bounded resident observation rows; values are refreshed by `pump()`. */
+  /**
+   * Subscribe to bounded resident observation rows; values are refreshed by `pump()`.
+   *
+   * An effect's observation queue holds one subscription per tap until a block drains it. A
+   * subscribe, update or close that finds the slot taken by an earlier one is refused at once with
+   * the typed, retryable `backpressure` error. It never waits: this engine renders only when the
+   * caller does, so the caller calls `render()` and submits again.
+   */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
   }

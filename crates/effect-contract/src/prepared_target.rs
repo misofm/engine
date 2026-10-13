@@ -66,6 +66,14 @@ pub trait NativeEffectTargetPreparation: Send + Sync {
     /// Maximum number of targets this capability can produce for one complete configuration.
     fn maximum_targets(&self) -> usize;
 
+    /// The number of logical target slots: every target's [`PreparedEffectTarget::slot`] is below
+    /// it. A slot holds one target per channel, so the default is the least count that holds
+    /// [`Self::maximum_targets`] targets, two to a slot. A lane holds one latest-target cell per
+    /// `(slot, channel)` (decision 15, D15-2; issue #1345).
+    fn target_slots(&self) -> usize {
+        self.maximum_targets().div_ceil(2)
+    }
+
     /// Design targets from a complete final candidate on the control or worker plane.
     ///
     /// Implementations may invoke their effect designer here. They must validate request shape,

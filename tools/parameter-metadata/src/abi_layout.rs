@@ -316,7 +316,7 @@ fn boot_options_fields() -> [Field; 11] {
     ]
 }
 
-fn status_fields() -> [Field; 11] {
+fn status_fields() -> [Field; 12] {
     [
         ("structSize", offset_of!(WebStatus, struct_size), "u32"),
         ("abiVersion", offset_of!(WebStatus, abi_version), "u32"),
@@ -340,7 +340,12 @@ fn status_fields() -> [Field; 11] {
             offset_of!(WebStatus, rendered_quanta),
             "u64",
         ),
-        ("reserved", offset_of!(WebStatus, reserved), "u64[4]"),
+        (
+            "liveValuesSuperseded",
+            offset_of!(WebStatus, live_values_superseded),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebStatus, reserved), "u64[3]"),
     ]
 }
 

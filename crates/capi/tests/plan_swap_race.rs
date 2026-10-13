@@ -11,6 +11,7 @@
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use bench_support::producer::render_while_producing;
@@ -25,6 +26,28 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-n
 
 /// Frames per render block and per submitted source chunk.
 const QUANTUM: u32 = 128;
+
+/// The fewest thin-sweep revision stores (of 320) that must return within 1/16 of the commit's own
+/// duration of a render call's start for the two-strip race to count. That stretch is about where a
+/// commit's cell writes come before a strip's drain and its publish after the block's snapshot, the
+/// window in which a drain that reads outside the snapshot is caught, and it follows the commit's
+/// cost, not the call's length. Measured counts, `taskset -c 0-3`, 12 runs each: quiet release 118
+/// to 140, debug 23 to 35; two busy-loop processes on the CPUs, release 120 to 142, debug 28 to 39;
+/// four of them (every CPU taken), release 8 to 31 and debug 1 to 6. So 10 passes a quiet or
+/// half-loaded 4-CPU runner with a margin of 2 in debug and 12 in release, and refuses the debug
+/// runs of a runner whose CPUs are all taken.
+const THIN_FLOOR: u64 = 10;
+
+/// Held for the whole of every timing-sensitive race test in this file. Each race spins at least
+/// two threads and guards itself against vacuity with an overlap count, so two races at once
+/// starve each other's overlap on a machine with few cores (a 4-CPU runner), and the test harness
+/// runs a binary's tests in parallel. A failed race poisons the lock; the next race takes it anyway
+/// so one failure stays one failure.
+static RACES: Mutex<()> = Mutex::new(());
+
+fn one_race_at_a_time() -> MutexGuard<'static, ()> {
+    RACES.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Render blocks after an admission beyond which `RESULT_BACKPRESSURE` is a wedge. A healthy
 /// replacement is admitted again once its swapping block has rendered.
@@ -442,6 +465,7 @@ impl Control<'_> {
 /// ring: `source.ring.vacated` (a submit routed to an epoch whose producer has moved) or
 /// `source.frame.noncontiguous` (a ring that lost its write position) fails.
 fn race_plan_swaps(swaps: u64, readers: usize) {
+    let _race = one_race_at_a_time();
     assert_installed();
     // Warm the JSON frontend's lazily boxed process statics before anything is observed.
     let _ = session::parse_session_json(r#"{"warm":0}"#);
@@ -610,34 +634,6 @@ fn resource_queries_racing_plan_swaps_always_find_the_published_row() {
     race_plan_swaps(200, 2);
 }
 
-/// Live fader edits that alternate track `eq0` between 0 dB and -6 dB: edit `n` (counting from 1)
-/// sets -6 dB when `n` is odd.
-fn fader_command(request_id: u64, revision: u64, edit: u64) -> Vec<u8> {
-    let db = if edit % 2 == 1 { -6.0 } else { 0.0 };
-    let edits = [SessionEdit::SetTrackFader {
-        track_id: StableId::parse("eq0").expect("track ID"),
-        fader: session::DualMonoFader {
-            left_db: db,
-            right_db: db,
-            left_mute: false,
-            right_mute: false,
-        },
-    }];
-    let mut bytes = vec![0_u8; 4_096];
-    let len = ProtocolCodec::default()
-        .encode_command_frame_into(
-            &TypedCommandFrame {
-                request_id: RequestId::new(request_id).expect("nonzero request"),
-                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
-                payload: CommandPayload::SessionTransactionApply(&edits),
-            },
-            &mut bytes,
-        )
-        .expect("fader command");
-    bytes.truncate(len);
-    bytes
-}
-
 /// One applied-revision watermark read through the any-thread entry, or `None` if it was busy.
 fn watermark_c(plan_address: usize) -> Option<Watermark> {
     // SAFETY: The plan outlives every caller, and a zeroed watermark is a valid value whose size
@@ -660,6 +656,22 @@ fn watermark_c(plan_address: usize) -> Option<Watermark> {
 ///
 /// `session` must be live and used by this thread alone for the call.
 unsafe fn commit_c(session: *mut Session, request: &[u8], revision: u64) -> u32 {
+    // SAFETY: The caller guarantees a live session used by this thread alone.
+    unsafe { commit_c_noting(session, request, revision, || {}) }
+}
+
+/// [`commit_c`] that calls `submitted` as soon as the submit call returns, before its response is
+/// read: the commit's revision store has landed by then.
+///
+/// # Safety
+///
+/// As [`commit_c`].
+unsafe fn commit_c_noting(
+    session: *mut Session,
+    request: &[u8],
+    revision: u64,
+    submitted: impl FnOnce(),
+) -> u32 {
     let mut response = [0_u8; 4_096];
     let mut fields = [0_u16; 64];
     let mut output = BytesOut {
@@ -673,6 +685,7 @@ unsafe fn commit_c(session: *mut Session, request: &[u8], revision: u64) -> u32 
     let code = unsafe {
         miso_engine_v1_submit_command(session, request.as_ptr(), request.len() as u64, &mut output)
     };
+    submitted();
     if code == RESULT_OK {
         let header = match ProtocolCodec::default()
             .decode_typed_response(
@@ -721,6 +734,64 @@ fn live_document() -> String {
     session::canonical_session_json(&model).expect("canonical")
 }
 
+/// The stateless fixture cut to two strips whose levels the output shows apart: `eq0` reaches only
+/// the output's left plane and `eq1` only its right plane (a route matrix with one diagonal
+/// entry), so a block's last sample on each plane is that strip's fader level times its source
+/// channel. `eq0` starts at 0 dB and `eq1` at -6 dB, the levels [`pair_command`]'s even edits set.
+fn pair_document() -> String {
+    let mut model = session::parse_session_json(&live_document()).expect("live fixture");
+    model.tracks.truncate(2);
+    model.routes.retain(|route| {
+        matches!(&route.source, session::RouteSource::Track { track_id, .. }
+            if model.tracks.iter().any(|track| &track.id == track_id))
+    });
+    assert_eq!(model.routes.len(), 2, "one route per kept strip");
+    for (index, route) in model.routes.iter_mut().enumerate() {
+        let on = |present: bool| f32::from(u8::from(present));
+        route.channel_matrix = session::ChannelMatrix {
+            ll: on(index == 0),
+            lr: 0.0,
+            rl: 0.0,
+            rr: on(index == 1),
+        };
+    }
+    model.tracks[1].fader.left_db = -6.0;
+    model.tracks[1].fader.right_db = -6.0;
+    session::canonical_session_json(&model).expect("canonical")
+}
+
+/// One live transaction that sets both strips of [`pair_document`] at once: edit `n` (counting
+/// from 1) sets `eq0` to -6 dB and `eq1` to 0 dB when `n` is odd, and the reverse when it is even.
+fn pair_command(request_id: u64, revision: u64, edit: u64) -> Vec<u8> {
+    let (first, second) = if edit % 2 == 1 {
+        (-6.0, 0.0)
+    } else {
+        (0.0, -6.0)
+    };
+    let edits = [("eq0", first), ("eq1", second)].map(|(id, db)| SessionEdit::SetTrackFader {
+        track_id: StableId::parse(id).expect("track ID"),
+        fader: session::DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+    });
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("pair command");
+    bytes.truncate(len);
+    bytes
+}
+
 fn live_limits() -> CompileLimits {
     CompileLimits {
         source_ring_frames: 4 * LIVE_QUANTUM,
@@ -755,10 +826,10 @@ fn last_samples(pcm: &[f32; 2 * LIVE_FRAMES]) -> [u32; 2] {
     ]
 }
 
-/// The steady levels at 0 dB and at -6 dB on `eq0`, measured on one thread: the last samples of a
-/// block before any edit, and of the first block after the -6 dB edit, whose ramp must end inside
-/// it (the next block repeats it bit for bit).
-fn live_levels(document: &str) -> [[u32; 2]; 2] {
+/// The two steady states of [`pair_document`], measured on one thread: the last samples of a block
+/// before any edit (`eq0` at 0 dB, `eq1` at -6 dB), and of the first block after edit 1, whose
+/// ramps must end inside it. Edit 2 must return to the first state bit for bit.
+fn pair_levels(document: &str) -> [[u32; 2]; 2] {
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(document, &live_limits()) };
     let first = watermark_c(plan as usize)
@@ -777,24 +848,39 @@ fn live_levels(document: &str) -> [[u32; 2]; 2] {
         }
         last_samples(pcm)
     };
-    let _ = block(0, &mut pcm);
-    let unity = block(1, &mut pcm);
-    // SAFETY: as above.
-    let code = unsafe { commit_c(session, &fader_command(1, first, 1), first) };
-    assert_eq!(code, RESULT_OK);
-    let attenuated = block(2, &mut pcm);
-    assert_eq!(
-        block(3, &mut pcm),
-        attenuated,
-        "the ramp ends within a block"
-    );
-    assert_ne!(attenuated, unity, "the edit changes the level");
+    let initial = block(0, &mut pcm);
+    assert_eq!(block(1, &mut pcm), initial, "the document starts steady");
+    let mut flipped = initial;
+    for edit in 1..=2 {
+        // SAFETY: as above.
+        let code = unsafe {
+            commit_c(
+                session,
+                &pair_command(edit, first + edit - 1, edit),
+                first + edit - 1,
+            )
+        };
+        assert_eq!(code, RESULT_OK);
+        let state = block(2 * edit, &mut pcm);
+        assert_eq!(
+            block(2 * edit + 1, &mut pcm),
+            state,
+            "the ramps end within a block"
+        );
+        if edit == 1 {
+            assert_ne!(state[0], initial[0], "edit 1 changes eq0's plane");
+            assert_ne!(state[1], initial[1], "edit 1 changes eq1's plane");
+            flipped = state;
+        } else {
+            assert_eq!(state, initial, "edit 2 restores the first state");
+        }
+    }
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
         miso_engine_v1_session_destroy(session);
         miso_engine_v1_plan_destroy(plan);
     }
-    [unity, attenuated]
+    [initial, flipped]
 }
 
 /// The handshake that times a render call against a commit, in nanoseconds since `base`.
@@ -811,6 +897,8 @@ struct RenderGate {
     parked: AtomicBool,
     start: AtomicU64,
     in_render: AtomicBool,
+    /// When the latest render call began (set before `in_render`).
+    render_began: AtomicU64,
     render_nanos: AtomicU64,
 }
 
@@ -840,18 +928,31 @@ impl RenderGate {
     }
 }
 
-/// Offsets per sweep: edit `n` lands its revision store about `n % PHASES` steps along a span
-/// from a quarter of a render call before the call to the call's end.
+/// Offsets per sweep: an edit lands its revision store about its phase, `0..PHASES`, steps along
+/// its sweep. The wide sweep runs from a quarter of a render call before the call to the call's end.
 const PHASES: u64 = 16;
 
-/// The control side of [`a_watermark_advance_names_a_block_that_applied_the_edit`]: it feeds the
-/// source and, once the watermark covers the last edit, commits the next live fader edit against
-/// a parked render call, so at most one edit is in flight and each advance covers exactly one
-/// revision.
+/// The control side of the live race ([`a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`]):
+/// it feeds the source and, once the watermark covers the last edit, commits the next live fader
+/// edit against a parked render call, so at most one edit is in flight and each advance covers
+/// exactly one revision.
 struct LiveControl<'a> {
     session_address: usize,
     plan_address: usize,
     edits: u64,
+    /// Encodes edit `n` (the request ID, the expected revision, `n`) as one transaction.
+    command: fn(u64, u64, u64) -> Vec<u8>,
+    /// The sweeps of a revision store across a render call, each in 64ths of the call from its
+    /// `from` to its `to`. Counting edits from 0 as `committed` does (edit `n` here is edit `n + 1`
+    /// of `command`), edit `n` takes sweep `n % len` and, in it, the offset
+    /// `from + (to - from) * (n / len % PHASES) / PHASES`.
+    windows: &'static [(i64, i64)],
+    /// The sweep whose stores are timed against the render call they landed in, if any: a
+    /// store counts in `early` when the submit call returned within 1/16 of the commit's own
+    /// duration (`commit_nanos`) of the call's start.
+    timed_sweep: Option<usize>,
+    timed: u64,
+    early: u64,
     committed: u64,
     revision: u64,
     gate: &'a RenderGate,
@@ -886,10 +987,15 @@ impl LiveControl<'_> {
         // `commit_nanos - target` before the store when that is positive, else start it now and
         // commit `target - commit_nanos` later.
         let render = self.gate.render_nanos.load(Ordering::Acquire);
-        let sweep = i128::from((self.committed % PHASES) * render * 5 / (4 * PHASES));
-        let target = sweep - i128::from(render / 4);
+        let sweep = self.committed as usize % self.windows.len();
+        let (from, to) = self.windows[sweep];
+        let phase = self.committed / self.windows.len() as u64 % PHASES;
+        let span = i128::from(to - from);
+        let target = (i128::from(from) * i128::from(render)
+            + span * i128::from(render) * i128::from(phase) / i128::from(PHASES))
+            / 64;
         let lead = i128::from(self.commit_nanos) - target;
-        let request = fader_command(self.committed + 1, self.revision, self.committed + 1);
+        let request = (self.command)(self.committed + 1, self.revision, self.committed + 1);
         self.gate.want.store(false, Ordering::Relaxed);
         let now = self.gate.now();
         let start = now + u64::try_from(lead.max(1)).expect("positive");
@@ -899,13 +1005,28 @@ impl LiveControl<'_> {
             core::hint::spin_loop();
         }
         let began = self.gate.now();
+        let mut stored = 0;
+        let gate = self.gate;
         // SAFETY: as above.
-        let code = unsafe { commit_c(session, &request, self.revision) };
+        let code =
+            unsafe { commit_c_noting(session, &request, self.revision, || stored = gate.now()) };
         // The commit's last write, the revision store, fell inside a render call.
         let inside = self.gate.in_render.load(Ordering::SeqCst);
         self.commit_nanos = self.gate.now() - began;
         match code {
             RESULT_OK => {
+                if self.timed_sweep == Some(sweep) {
+                    self.timed += 1;
+                    let call = self.gate.render_began.load(Ordering::SeqCst);
+                    // A render call that began after the store is not the call it landed in. The
+                    // window is scaled by the commit, not by the call: a defect needs the commit's
+                    // first cell write before a strip's drain and its publish after the block's
+                    // snapshot, which is a stretch of about the commit's cost, in debug as in
+                    // release. The call's length is no measure of it (1/16 of a debug call is
+                    // about ten times that stretch).
+                    self.early +=
+                        u64::from(stored >= call && stored - call < self.commit_nanos / 16);
+                }
                 self.overlapped += u64::from(inside);
                 self.committed += 1;
                 self.revision += 1;
@@ -916,27 +1037,40 @@ impl LiveControl<'_> {
     }
 }
 
-/// #1314 D3 (verifier F2), #1502 D2: render takes the running plan's snapshot before the executor
-/// renders the block, so a watermark advance to `r` at a block's first sample means that block
-/// applied `r` from its first drain on.
+/// #1505, #1312, D15-2 and D15-17: under a racing render, one live transaction that changes two
+/// strips lands in one block, and the watermark names that block, neither a block early nor a block
+/// late. It is also the race that a watermark advance names a block that applied the edit it
+/// reports (#1314 D3, #1502 D2): the single-strip form of that race is this test's second
+/// assertion, so it is not repeated (a snapshot taken after the executor rendered turns this test
+/// red at its first advance, as the single-strip test did).
 ///
-/// The control thread commits live fader edits on `eq0`, alternating -6 dB and 0 dB, one at a time,
-/// each timed by a [`RenderGate`] against a render call, so the revision stores sweep the call:
-/// some land before it, many inside `render_inner`, before the strip's drain and after it.
-/// After each block this thread reads the watermark. When it advanced, to `r`, it must name this
-/// block's first sample, and the block's last samples must be the steady level `r` targets
-/// (measured single-threaded by [`live_levels`]): the ramp started at or before the block's first
-/// sample and ends within the block. The reverse does not hold, and the test does not ask it: an
-/// edit whose record a drain takes after render took the snapshot is applied in a block the
-/// watermark reports later.
+/// Each commit is one transaction over [`pair_document`] that sets `eq0` and `eq1`, whose levels
+/// the output's two planes show apart, to opposite levels, and the next commit waits until the
+/// watermark covers the last, so each advance covers one revision. Per rendered block this thread
+/// asserts that:
 ///
-/// Taking the snapshot after the executor rendered lets a commit that lands after the block's drains
-/// advance the watermark at that block, which renders the previous level throughout.
+/// * the two planes' last samples are both the old state or both the new one, never a mix (a
+///   transaction split across two blocks);
+/// * a watermark advance to `r` at this block names this block's first sample, and the block shows
+///   `r`'s state; and
+/// * a block that shows a state different from the previous block's is the block the watermark
+///   advanced at (a watermark published a block late).
+///
+/// Reading the cells under [`engine::realtime::LiveSnapshot::ALL`] instead of the block's snapshot,
+/// or publishing the watermark a block late, turns the third assertion red. Half of the commits
+/// sweep their revision store across the whole render call, from a quarter of a call before it to
+/// its end, and half across the call's first few percent, where a store lands after the snapshot
+/// and before the strips' drains. The run refuses to pass unless at least [`THIN_FLOOR`] of the
+/// thin sweep's stores landed within 1/16 of a commit's duration of a call's start, the stretch in
+/// which a commit's cell writes and its publish straddle a block's snapshot and drains, as well as
+/// a tenth of all stores landing inside a call.
 #[test]
-fn a_watermark_advance_names_a_block_that_applied_the_edit() {
-    const EDITS: u64 = 320;
-    let document = live_document();
-    let levels = live_levels(&document);
+fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
+    let _race = one_race_at_a_time();
+    const EDITS: u64 = 640;
+    let document = pair_document();
+    let states = pair_levels(&document);
+    assert_ne!(states[0], states[1]);
 
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(&document, &live_limits()) };
@@ -950,6 +1084,7 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         parked: AtomicBool::new(false),
         start: AtomicU64::new(0),
         in_render: AtomicBool::new(false),
+        render_began: AtomicU64::new(0),
         render_nanos: AtomicU64::new(0),
     };
     let rendered = AtomicU64::new(0);
@@ -959,6 +1094,11 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         session_address: session as usize,
         plan_address,
         edits: EDITS,
+        command: pair_command,
+        windows: &[(-16, 64), (-2, 6)],
+        timed_sweep: Some(1),
+        timed: 0,
+        early: 0,
         committed: 0,
         revision: first,
         gate: &gate,
@@ -967,6 +1107,8 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         next_frame: 0,
     };
     let block_bound = usize::try_from(EDITS * 64).expect("block bound");
+    // The previous block's last samples; the document starts in the first state.
+    let mut shown = states[0];
     render_while_producing(
         block_bound,
         &mut control,
@@ -986,6 +1128,7 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
             let mut pcm = [f32::NAN; 2 * LIVE_FRAMES];
             gate.wait_for_start();
             let started = gate.now();
+            gate.render_began.store(started, Ordering::SeqCst);
             gate.in_render.store(true, Ordering::SeqCst);
             // SAFETY: This thread is the plan's only renderer.
             let code = unsafe { render_live(plan_address as *mut Plan, start, &mut pcm) };
@@ -994,6 +1137,12 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
                 .store(gate.now() - started, Ordering::Release);
             assert_eq!(code, RESULT_OK, "render refused block {block}");
             let watermark = watermark_c(plan_address).expect("the renderer never reads busy");
+            let now_shown = last_samples(&pcm);
+            assert!(
+                states.contains(&now_shown),
+                "block {block} mixes the two strips' states: {now_shown:08x?}, steady states \
+                 {states:08x?}"
+            );
             if watermark.revision != newest {
                 let edit = watermark.revision - first;
                 assert_eq!(watermark.revision, newest + 1, "one edit per advance");
@@ -1002,17 +1151,24 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
                     "an advance names the block that made it"
                 );
                 assert_eq!(
-                    last_samples(&pcm),
-                    levels[usize::from(edit % 2 == 1)],
-                    "block {block}: the watermark advanced to edit {edit} in a block that did not \
-                     apply it"
+                    now_shown,
+                    states[usize::from(edit % 2 == 1)],
+                    "block {block}: the watermark advanced to edit {edit} in a block that does \
+                     not show it"
                 );
                 last.store(watermark.revision, Ordering::Release);
+            } else {
+                assert_eq!(
+                    now_shown, shown,
+                    "block {block} shows a new state, but the watermark (revision {newest}) did \
+                     not advance at it"
+                );
             }
+            shown = now_shown;
             rendered.store(block + 1, Ordering::Release);
         },
     );
-    let overlapped = control.overlapped;
+    let (overlapped, timed, early) = (control.overlapped, control.timed, control.early);
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
         miso_engine_v1_session_destroy(session);
@@ -1026,5 +1182,16 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
     assert!(
         overlapped > EDITS / 10,
         "vacuous: {overlapped} of {EDITS} revision stores fell inside a render call"
+    );
+    // The thin sweep aims about one phase in 16 of its stores into the stretch of 1/16 of a commit
+    // after the call's start, and the rest reach it by jitter. A store counted here returned
+    // within that stretch of the call's start, which is where a drain that reads outside the
+    // snapshot is caught. The count follows the commit's cost, so it is small by nature (see
+    // `THIN_FLOOR` for the measurements); a run below the floor did not sweep that stretch and
+    // says nothing about the defect, so it fails loudly.
+    assert!(
+        early >= THIN_FLOOR,
+        "vacuous: {early} of {timed} thin-sweep revision stores returned within 1/16 of a \
+         commit's duration of their render call's start, fewer than {THIN_FLOOR}"
     );
 }

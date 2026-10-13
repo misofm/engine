@@ -55,15 +55,26 @@ accumulator, no conflating cell. Not a disabled one — none. `attach_effect_obs
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
 zero is **walked over the built runtime** rather than computed from the request.
 
-**Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe ride the effect's
-existing bounded control channel as `EffectControlRecord::Observe`, applied at the block
-boundary and acknowledged with the exact `applied_at_sample`. Slots are preallocated from the
-declared menu, so subscribe allocates nothing and disarm frees nothing: `retained_bytes` is
+**Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe are
+`EffectControlRecord::Observe` records on the effect's observation queue, applied at the block
+boundary and acknowledged with the exact `applied_at_sample`. That queue is a bounded FIFO with one
+slot per observation tap the effect declares (none for an effect without taps), preallocated at
+preparation, so subscribe allocates nothing and disarm frees nothing: `retained_bytes` is
 unchanged across both. An unarmed tap's state is never read, transformed or stored; the honest cost
 is one predicted branch per driven effect per block.
 
-Because a subscription and a parameter command share one queue and one drain, STATE and IMPACT
-correlate on one sample timeline **by construction** rather than by two clocks agreeing.
+The queue holds observation records only. The effect's parameter, bypass and EQ-target values are
+latest-target cells (#1345): a later write to a cell replaces the value render has not yet read,
+and the replaced write is counted in `live_values_superseded`. Observation records are never
+replaced or coalesced; they stay in order. An `Observe` record overwrites its tap's whole state at
+the block that drains it, so one submission names each tap at most once: admission refuses a second
+`Observe` for the same tap in one submission with `COMMAND_REASON_MALFORMED`, before it writes
+anything. A submission whose `Observe` records do not fit the queue's free slots, because earlier records
+are not yet drained, is answered with `COMMAND_REASON_BACKPRESSURE`, which clears after one render.
+
+Render drains one block's cells and records together: bypass, then parameter cells, then target
+cells, then the observation queue. So STATE and IMPACT still correlate on one sample timeline
+**by construction** rather than by two clocks agreeing, with the block as the unit of order.
 
 ## The transport
 

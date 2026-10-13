@@ -239,8 +239,10 @@ preparation bakes, into the records the members already take.
   effective value (every member clamped at -144 dB) and a mute of already-muted members stage
   nothing.
 - **All or nothing.** VCA fader records, then strip mute records, then follow records are staged and
-  room-checked together before any push; a full member or send queue refuses the whole submission
-  as typed backpressure, and the VCA state rolls back with the solo state and the send mirror. The
+  validated together before any write; a refusal (a follow window past a send's longest ramp, a
+  send edit outside the route domain) refuses the whole submission, and the VCA state rolls back
+  with the solo state and the send mirror. A member's fader and a send are latest-target cells
+  (#1312, #1347) with no queue to fill. The
   decode staging grows by two entries per strip a VCA reaches, and the bridge's exact retained
   report charges the VCA state.
 - **Bounded per-command work** (amendment A1, a planner decision subject to owner review). A batch's
@@ -276,10 +278,9 @@ therefore no longer carries a muted drum track's pre-fader reverb send.
   fades with its strip; a no-op record on the other lane never sets it.
 - **Never a redundant record.** `delta` yields only a change, for the same digest reason as the
   strip records above.
-- **All or nothing.** Follow records are room-checked with the strip mute records before any push.
-  A full send queue refuses the whole submission as typed backpressure, at the wire index of the
-  first record staged on that send's queue (which can be an earlier send command, kinds 13-15, on
-  the same send), and the solo state and the send mirror both roll back. When a mute change moves
+- **All or nothing.** Follow records are validated with the strip mute records before any write.
+  A send is a latest-target cell (#1347), so no number of records on one send is refused for room;
+  any refusal rolls back the solo state and the send mirror. When a mute change moves
   a following send, a window that exceeds the send's longest ramp (`2^22` samples) is refused
   `domain` rather than clamped; a solo's window counts the same way and is reported at the batch's
   first solo record. The same kind 4 is admitted when no following send moves, as before #1224. The decode staging grows by one entry per live send.
@@ -328,8 +329,8 @@ bindings follow it.
 
 - **Which routes are live (D1).** `PreparedGraphPlan::attach_route_controls`, and its sealed
   delegate `PreparedBuiltinsGraphArtifact::attach_route_live_controls`, run after compile and
-  before bind. They give every route whose destination is a **submix input** one bounded SPSC queue
-  of `RouteControlRecord`s, in canonical route-ID order, and return the producers. Routes into an
+  before bind. They give every route whose destination is a **submix input** one latest-target cell
+  of `RouteControlRecord` words (#1347), in canonical route-ID order, and return the producers. Routes into an
   output keep their prepared constants, their single-master fold and their structural edits. A
   second attach is refused. With no attach the plan binds exactly what it bound before.
 - **The record (D2).** A record holds `target`, `mute` and `length`:
@@ -380,16 +381,18 @@ bindings follow it.
   keeps staging it. The fade reaches the bus whole, `d` samples later and aligned, and the line
   holds only zero-coefficient output when an unmute arrives. Skipping it would cut the fade still
   in its line and later release stale arena samples.
-- **The drain (D5).** At the op's start, every block, including while the route is inactive, the
-  op pops exactly the records available at entry and applies each in order. Nothing is dropped: a
-  record that arrives later is applied in a later block, and a full queue refuses a push and hands
-  the record back.
+- **The read (D5, #1347).** At the op's start, every block, including while the route is inactive,
+  the op reads its cell under the block's live snapshot and, if it holds a value not applied
+  before, retargets once from the coefficients it is at to that value over its ramp. A write cannot
+  fail: any number of writes may precede one block, the block applies the newest, and each replaced
+  write is added to `live_values_superseded`. A value stamped above the block's snapshot waits for
+  the first block that covers it.
 - **Shape (D6).** A live route is `NodeKind::LiveRoute`, never a `GraphNodeBinding`. It never
   folds: the fold planner's metadata answers `has_route_control`, and `plain_route_gains` declines
-  such a route, because an epilogue would never drain its queue.
+  such a route, because an epilogue would never read its cell.
 - **Resources (D8).** `route_control_resources` is an upper bound on what the attach adds before
   bind and on what the bound plan retains:
-  - each queue's retained payload;
+  - each route's cell: the one shared allocation of its three-slot cell and dirty word;
   - the lane box, the plan's binding entry and the render-side owner box, per route;
   - the producer table;
   - the route IDs, twice: the producer's copy and the binding's node-ID copy, which the plan holds

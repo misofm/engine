@@ -39,6 +39,12 @@ import type {
 } from "./spectrum.ts";
 import type { EngineCallResult } from "./boundary.ts";
 
+/**
+ * How many renders a refused subscription waits through before the refusal is thrown. One render
+ * drains an effect's observation queue, so more than one means another writer keeps refilling it.
+ */
+const MAXIMUM_ADMISSION_RETRIES = 8;
+
 /** The bounded configuration accepted by `subscribeObservations`. */
 export interface ObservationSubscriptionLimits {
   readonly maximumHandles?: number;
@@ -113,6 +119,13 @@ export interface ObservationSubscription {
   readonly bounds: ObservationSubscriptionBounds;
   readLatest(): readonly ObservationReadResult[];
   pump(): Promise<ObservationSubscriptionNotification | undefined>;
+  /**
+   * Replace the selections and the window. A window change on a tap this handle alone holds is one
+   * re-arm. Like `close()`, it meets a typed, retryable `backpressure` error when an earlier
+   * subscription still holds the tap's queue slot and no render has drained it yet. The headless
+   * engine refuses at once, so the caller renders and calls again. The browser engine first waits
+   * for a render, up to `requestDeadlineMs`, and ends in the same error when none comes.
+   */
   update(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt>;
   close(): Promise<void>;
 }
@@ -129,6 +142,22 @@ export interface ObservationSubscriptionTransport {
   observationMap(): MaybePromise<ObservationMap>;
   readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
   liveControls(): MaybePromise<EngineLiveControls>;
+  /**
+   * A transport whose renders run on their own clock (a browser's audio thread) lets a managed
+   * submission that was refused with `backpressure` wait for a render and be sent again. A
+   * transport whose caller drives the renders leaves this absent: the refusal is thrown at once,
+   * typed and retryable, and the caller renders and submits again.
+   */
+  readonly renderWait?: {
+    /** The longest one managed submission waits for renders, across all of its resends. */
+    readonly boundMs: number;
+    /**
+     * Resolves `true` once the engine has rendered a block after this call, and `false` when
+     * `timeoutMs` passes first or the engine is closed or replaced. It never waits longer than
+     * `timeoutMs`.
+     */
+    next(timeoutMs: number): Promise<boolean>;
+  };
   /** Optional live-response capture/evaluation seam owned by the same lifetime. */
   readonly responseRead?: (
     request: TrackResponseQuery,
@@ -600,10 +629,15 @@ export class ObservationSubscriptionOwner {
       if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
         throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
       }
-      const disarm = remove.filter((entry) => {
+      // The bindings this handle alone holds and drops.
+      const release = remove.filter((entry) => {
         const binding = this.#bindings.get(entry.key);
         return binding !== undefined && binding.refs === 1;
       });
+      // A window change moves one tap from one key to another. A submission names a tap once: an
+      // `Observe` record overwrites the tap's whole state at the block that drains it, so the
+      // arm with the new window is the re-arm, and the old key sends no disarm (#1345 D2).
+      const disarm = release.filter((entry) => !newEntries.some((added) => added.baseKey === entry.baseKey));
       this.#assertCommandSize(newEntries.length + disarm.length);
       const preflightEntries = newEntries.filter((entry) => !state.entries.some((current) => {
         const binding = this.#bindings.get(current.key);
@@ -625,8 +659,8 @@ export class ObservationSubscriptionOwner {
       const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
-      disarm.forEach((entry) => this.#bindings.delete(entry.key));
-      remove.filter((entry) => !disarm.includes(entry)).forEach((entry) => {
+      release.forEach((entry) => this.#bindings.delete(entry.key));
+      remove.filter((entry) => !release.includes(entry)).forEach((entry) => {
         const binding = this.#bindings.get(entry.key);
         if (binding !== undefined) binding.refs -= 1;
       });
@@ -850,16 +884,35 @@ export class ObservationSubscriptionOwner {
     epoch: bigint,
   ): Promise<CommandReport | undefined> {
     if (edits.length === 0) return undefined;
-    this.#assertEpoch(epoch);
-    let report: CommandReport;
     const managedSubmit = (liveControls as EngineLiveControls & {
       readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
     } | undefined)?.submitManaged;
-    report = managedSubmit === undefined
-      ? await liveControls!.submit(...edits)
-      : await managedSubmit.call(liveControls, ...edits);
-    if (!report.ok) throw commandFailure("observation transaction was refused", report);
-    return report;
+    const wait = this.#transport.renderWait;
+    let deadline: number | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      this.#assertEpoch(epoch);
+      const report = managedSubmit === undefined
+        ? await liveControls!.submit(...edits)
+        : await managedSubmit.call(liveControls, ...edits);
+      if (report.ok) return report;
+      // A submission names each tap once, so a refusal for room means a record of an earlier
+      // submission still holds the tap's slot, and a render drains it. That refusal alone is flow
+      // control: it is typed and retryable. Anything else, a malformed or unbound request
+      // included, never succeeds on resend and is thrown at once.
+      if (report.reasonName !== "backpressure" || wait === undefined
+          || attempt >= MAXIMUM_ADMISSION_RETRIES) {
+        throw commandFailure("observation transaction was refused", report);
+      }
+      // Renders on their own clock: wait for one within the bound, then send the same edits again.
+      // When the bound passes without a render the refusal stands, so a context that does not
+      // render ends in the typed error and never in an endless wait.
+      deadline ??= Date.now() + wait.boundMs;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw commandFailure("observation transaction was refused", report);
+      const rendered = await wait.next(remaining);
+      this.#assertEpoch(epoch);
+      if (!rendered) throw commandFailure("observation transaction was refused", report);
+    }
   }
 
   #assertCommandSize(count: number): void {

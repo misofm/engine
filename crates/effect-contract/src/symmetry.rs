@@ -34,12 +34,12 @@
 //! | [`SOURCE`](ChannelSymmetryWitness::SOURCE) | preparation: the track's two channels read one source channel, or a one-channel source | a recompile with a different source mapping |
 //! | [`DESIGNED`](ChannelSymmetryWitness::DESIGNED) | preparation: every designed per-lane word the stage's kernel reads compares bit-equal between the channels | a recompile with asymmetric parameters |
 //! | [`RESTORED`](ChannelSymmetryWitness::RESTORED) | restore: the left and right payload sections compared byte-equal | a restore whose sections differ |
-//! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word, unless it is a one-channel `Parameter` whose drain also staged its bit-equal other-channel twin (the pairing rule below) |
+//! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word, unless it is a one-channel `Parameter` or `PreparedTarget` whose block also applied its bit-equal other-channel twin (the pairing rule below) |
 //! | [`UNBYPASSED`](ChannelSymmetryWitness::UNBYPASSED) | preparation | a live bypass on an upstream stage; **restored** when it is lifted |
 //!
 //! # The hook rule is structural, not a list of kinds
 //!
-//! The rule is *"every record admitted onto a live-control queue declares what it does to an
+//! The rule is *"every record admitted onto a live-control lane declares what it does to an
 //! upstream per-lane word"*, and it is carried by [`LiveControlRecord`] rather than by an
 //! `if` over today's record kinds. A new live-control record type -- an automation span, anything
 //! a later issue adds -- cannot be drained into a witness-carrying stage without implementing that
@@ -57,20 +57,19 @@
 //! no restoring arm, the first knob touch on a mono stem would retire its bank's collapse for the
 //! rest of the plan although the two writes leave the channels exactly where a `Both` would.
 //!
-//! So `EffectControlLane::stage` defers a one-channel `Parameter` record to the end of its drain
-//! and folds it only if the drain's staged spans do not **pair**: every `Left` span must be
-//! immediately followed by a `Right` span of the same parameter, kind and samples with values
-//! equal by bits, and every `Right` span immediately preceded by one. The staging is last-wins per
-//! `(parameter, channel)`, so a paired window is the channels' final values, and the effects apply
-//! a twin by the same validation and the same code from the same value. It is decided from the
-//! records alone, at the drain, because the chain decides the block's mode right after it.
+//! So `EffectControlLane::stage` folds a one-channel write only if the block's applied cells do
+//! not **pair**. A lane holds the latest value per `(parameter, channel)` (decision 15, issue
+//! #1345), so a `Left` and a `Right` cell of one parameter that a block applies together with
+//! words equal by bits (staged as the two spans the effect accepts, and as one prepared target
+//! for a target slot) leave the witness alone, and a block that applies only one of them, or
+//! applies two unequal words, clears it. A `Both` command that
+//! arrives as two records written before one block is the paired case; the same two records
+//! split across two blocks are a lone write in the first. It is decided from the cells alone, at
+//! the drain, because the chain decides the block's mode right after it.
 //!
 //! What it does **not** cover, deliberately:
 //!
-//! * a one-channel `PreparedTarget`. Targets are a FIFO with no last-wins staging, so equal last
-//!   targets per channel do not mean equal state: `[Left A, Both C, Right A]` leaves `C` and `A`.
-//!   They fold as before. A symmetric both-channel target edit is already one `Both` target;
-//! * a pair split across two drains: each drain sees a lone write and clears `LIVE`, as before;
+//! * a pair split across two blocks: each block sees a lone write and clears `LIVE`, as before;
 //! * re-earning `LIVE` after a genuinely asymmetric write. The rule never sets the term; it only
 //!   declines to clear it.
 //!

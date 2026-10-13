@@ -8,10 +8,14 @@ import { MisoUsageError } from "./errors.ts";
  *
  * # What the writer is for
  *
- * A hand on a fader produces edits far faster than a render thread drains them. The engine's
- * per-track control queue is bounded -- 64 records by default -- and a submission that does not fit
- * is refused **whole**, with `reason: backpressure`. That refusal is the engine working correctly:
- * it is flow control, not failure. The bug it invites is in the caller, and it has two shapes.
+ * A hand on a fader produces edits far faster than a render thread drains them. Every live value
+ * the engine holds (a fader, a mute, a pan or matrix, an input filter, a route, an effect
+ * parameter, bypass or EQ target) sits in a latest-target cell, which takes any number of writes
+ * and refuses none for room. The one live record that still rides a bounded queue is an effect's
+ * observation subscription, with one slot per tap the effect declares, and a submission that does
+ * not fit is refused **whole**, with `reason: backpressure`. That refusal is the engine working
+ * correctly: it is flow control, not failure. The writer stays correct for any record the engine
+ * may refuse that way, and the bug it guards against is in the caller, and it has two shapes.
  *
  * The first is treating the refusal as an error. A drag that refuses one batch and tears down the
  * session has turned a full queue into a broken mix. So this writer's contract is: **a flow-control
@@ -27,15 +31,13 @@ import { MisoUsageError } from "./errors.ts";
  *
  * # Why the split is discovered rather than computed
  *
- * A batch too large for the queue must be broken up. The writer could compute the split if it knew
- * how many queue slots each record costs -- and it is not one: a `channel = both` record lowers to
- * *two* lane records, which is why 32 both-lane parameters fill a 64-record queue exactly while 64
- * single-lane ones do. But that ratio is the engine's lowering rule, and a copy of it here would be
- * one more private constant to drift.
+ * A batch the engine refuses for room must be made smaller. The writer could compute the split if
+ * it knew how much room each record needs -- and it is not one: that cost is the engine's
+ * admission rule, and a copy of it here would be one more private constant to drift.
  *
  * So the writer discovers the boundary instead: a refusal halves the next attempt's size, and a
  * success grows it back toward the caller's ceiling. The engine's own answer drives the split,
- * which means the writer stays correct if the lowering rule ever changes.
+ * which means the writer stays correct if the admission rule ever changes.
  */
 
 /** One addressed live-control edit, in the wire's own vocabulary. */
@@ -97,8 +99,8 @@ export interface WriterOptions {
    */
   readonly submit: (records: Uint8Array, count: number) => CommandReport | Promise<CommandReport>;
   /**
-   * The largest batch to attempt. Defaults to the engine's default queue depth, which is the
-   * largest a single-lane batch can be from idle.
+   * The largest batch to attempt. Defaults to the engine's default command-record count
+   * (`defaultCommandQueueRecords`), the host's own bound on commands in flight.
    */
   readonly maximumBatch?: number;
 }

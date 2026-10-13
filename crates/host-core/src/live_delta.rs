@@ -66,14 +66,15 @@ pub struct LiveEffectRecords<'a> {
     /// value changes, in descriptor order, `Left` before `Right`; never empty.
     ///
     /// For an instance with `targets` (the EQ) the `Parameter` records are its owner's edits
-    /// (`EffectControlProducer::edit_owner`), never pushed: the queue gets the targets. Its
-    /// `Bypass` record, like every other instance's, is pushed as it is, ahead of the targets.
+    /// (`EffectControlProducer::edit_owner`), never written as they are: the cells get the targets.
+    /// Its `Bypass` record, like every other instance's, is written as it is, ahead of the
+    /// targets.
     pub records: Vec<EffectControlRecord>,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
     /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
     /// (`EffectControlProducer::publish_candidate_targets`). `None` for every other effect, whose
-    /// `records` are pushed as they are.
+    /// `records` are written as they are.
     pub targets: Option<Vec<PreparedEffectTarget>>,
 }
 

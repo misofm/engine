@@ -168,13 +168,13 @@ describe("issue 777 -- selected resident observations", () => {
       const repeated = engine.readObservations([comp, gate]);
       assert.deepEqual(repeated, first);
 
-      // The prior resident cell survives a re-arm, but is historical for that new arm.
-      await liveControls.submit(
-        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
-          .observe("Gain Reduction", false, 2),
+      // The prior resident cell survives a re-arm, but is historical for that new arm. A re-arm of
+      // an armed tap is one record: it restarts the window, and no withdrawal comes first.
+      const rearmed = await liveControls.submit(
         liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
       );
+      assert.equal(rearmed.ok, true);
       assert.equal(engine.readObservations([comp])[0].status, "pending");
       feed(engine, 2); engine.render();
       feed(engine, 3); engine.render();

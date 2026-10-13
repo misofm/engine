@@ -35,6 +35,11 @@ math.workspace = true
 [dev-dependencies]
 # Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060).
 lane.workspace = true
+# Dev-only: `tests/strip_cells_cross_host.rs` drives the control plane the C ABI embeds beside the
+# browser host, to prove the two admissions and drains agree (#1399). The control plane's command
+# frames are encoded with `protocol`. Neither is linked into the browser artifact.
+control-plane.workspace = true
+protocol.workspace = true
 # Dev-only: the native leg of the #106 F4 native<->simd128 session parity gate digests its rendered
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.
 sha2.workspace = true

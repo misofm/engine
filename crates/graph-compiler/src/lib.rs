@@ -405,10 +405,7 @@ mod tests {
         PrepareEffectBankRequest, PrepareEffectRequest, PreparedEffectTarget, PreparedNativeEffect,
         PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
-    use engine::realtime::{
-        PlanarBufferMut, PreparedRenderPlan, Producer, QueueGeneration, RenderIo, RenderTime,
-        audit, bounded_spsc,
-    };
+    use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime, audit};
     use graph::{
         GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
         GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
@@ -1266,50 +1263,39 @@ mod tests {
         blocks: u64,
         command_target: bool,
     ) -> Vec<Vec<f32>> {
+        let frames = artifact.envelope().quantum.0 as usize;
+        let mut plan = bind_session_builtins(artifact, cross_index_input_binding, Vec::new());
         if command_target {
-            {
-                let producer = producers
-                    .iter_mut()
-                    .find(|producer| {
-                        producer.track_id.as_ref() == "cross1"
-                            && producer.address == LiveEffectAddress::insert(1)
-                    })
-                    .expect("dynamic slot-1 control producer");
-                for channel in [
-                    effect_contract::ParameterChannel::Left,
-                    effect_contract::ParameterChannel::Right,
-                ] {
-                    producer
-                        .try_push(EffectControlRecord::Parameter {
-                            parameter_index: 0,
-                            channel,
-                            value: 0.0,
-                        })
-                        .expect("control queue has room");
-                }
-            }
-            let decoy = producers
+            // One transaction: the cells are written under a stamp of the plan's gate, and the
+            // revision is published after the last of them.
+            let mut gate = plan.take_revision_gate().expect("the plan's gate handle");
+            let revision = gate.last_published() + 1;
+            let stamp = gate.stamp(revision).expect("a legal revision");
+            // A live bypass is the command: the fixture's effect declares its one parameter at the
+            // sample rate, which has no cell, and a bypass lands on exactly the lane it is
+            // written to, so a lane handed to the wrong node changes the rendered bits.
+            producers
+                .iter_mut()
+                .find(|producer| {
+                    producer.track_id.as_ref() == "cross1"
+                        && producer.address == LiveEffectAddress::insert(1)
+                })
+                .expect("dynamic slot-1 control producer")
+                .write(stamp, EffectControlRecord::Bypass(true))
+                .expect("every lane has a bypass cell");
+            // The decoy lane belongs to another node; it is written the value it already holds, so
+            // a swap of the two lanes is visible and a correct handoff is not.
+            producers
                 .iter_mut()
                 .find(|producer| {
                     producer.track_id.as_ref() == "cross0"
                         && producer.address == LiveEffectAddress::console(0)
                 })
-                .expect("simd1 slot-0 control producer");
-            for channel in [
-                effect_contract::ParameterChannel::Left,
-                effect_contract::ParameterChannel::Right,
-            ] {
-                decoy
-                    .try_push(EffectControlRecord::Parameter {
-                        parameter_index: 0,
-                        channel,
-                        value: 2.0,
-                    })
-                    .expect("decoy control queue has room");
-            }
+                .expect("simd1 slot-0 control producer")
+                .write(stamp, EffectControlRecord::Bypass(false))
+                .expect("every lane has a bypass cell");
+            gate.publish(revision);
         }
-        let frames = artifact.envelope().quantum.0 as usize;
-        let mut plan = bind_session_builtins(artifact, cross_index_input_binding, Vec::new());
         (0..blocks)
             .map(|block| {
                 let mut pcm = vec![0.0_f32; frames * 2];
@@ -2930,7 +2916,6 @@ mod tests {
             .expect("compiled scalar session");
             let controls = [TrackControlRequest {
                 track_id: model.tracks[0].id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(4).expect("queue"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             }];
@@ -3096,9 +3081,11 @@ mod tests {
 
     #[test]
     fn effect_control_resource_uses_independent_queue_and_owner_arithmetic() {
-        // Keep the expected bytes in this test independent of `effect_control_resource`: the
-        // queue helper, the lane layout and the target FIFO are the witnesses, while the report
-        // only supplies the final graph deltas and cap boundary.
+        // Keep the expected bytes in this test independent of `effect_control_resource`: a lane's
+        // heap is its own accounting, which `tests/bypass_resources.rs` holds to the audited
+        // allocator (`a_lanes_own_accounting_is_what_the_allocator_sees`), and the owners around
+        // it are sized here from their types, while the report only supplies the final graph
+        // deltas and cap boundary.
         let model = queued_eq_model();
         let registry = launch_native_effect_registry().expect("launch registry");
         let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
@@ -3131,69 +3118,59 @@ mod tests {
             let mut effects = prepare_native_session_effects(&session, registry, effect_caps)
                 .expect("prepared EQ effects");
             assert_eq!(effects.entries.len(), 8);
-            let requested_depth = NonZeroUsize::new(4_103).expect("fixture queue depth");
-            let producers = attach_effect_live_controls(&mut effects, requested_depth)
-                .expect("checked effect live-control attachment");
+            let producers = attach_effect_live_controls(
+                &mut effects,
+                &engine::realtime::LiveValuesSuperseded::new(),
+                0,
+            )
+            .expect("checked effect live-control attachment");
             assert_eq!(producers.len(), effects.entries.len());
             let mut expected_total = 0_u64;
             let mut expected_largest = 0_u64;
             for (index, entry) in effects.entries.iter_mut().enumerate() {
-                let capped_capacity = entry.metadata.automation_capacity as usize;
-                let actual_capacity = producers[index].capacity();
-                assert_eq!(
-                    actual_capacity,
-                    requested_depth.get().min(capped_capacity),
-                    "attachment caps the requested depth at metadata capacity"
-                );
                 if index >= controlled {
                     entry.control = None;
                     continue;
                 }
-                let capacity = NonZeroUsize::new(actual_capacity).expect("EQ queue capacity");
-                let payload =
-                    engine::realtime::bounded_spsc_retained_payload::<EffectControlRecord>(
-                        capacity,
-                    )
-                    .expect("queue payload");
-                assert_eq!(
-                    payload.slot_count,
-                    actual_capacity + 1,
-                    "sentinel slot retained"
-                );
-                let queue_header = payload.ring_header_bytes as u64;
-                let queue_slots = payload.slot_payload_bytes as u64;
-                expected_total = expected_total
-                    .checked_add(queue_header)
-                    .and_then(|value| value.checked_add(queue_slots))
-                    .expect("queue resource arithmetic");
-                expected_largest = expected_largest.max(queue_header).max(queue_slots);
-                let target_bytes = if target_staging {
-                    (actual_capacity * size_of::<PreparedEffectTarget>()) as u64
+                // The lane the plan retains, in the layout under test: a prepared-target owner's
+                // (one cell per `(slot, channel)` and no parameter cell) or an ordinary effect's
+                // (one cell per live parameter). The lane's own accounting is the witness for its
+                // heap, each allocation once; `bypass_resources` measures the same bytes with the
+                // workspace's audited allocator.
+                let slots = if target_staging {
+                    parametric_eq::ParametricEqFactory.target_slots()
                 } else {
                     0
                 };
+                let (_writer, lane) = effect_contract::effect_control_lane(
+                    effect_contract::EffectLaneSpec {
+                        shape: effect_contract::EffectLaneShape::from_descriptor(
+                            entry.factory.descriptor(),
+                            slots,
+                        ),
+                        bypass: entry.bank_preparation.bypass,
+                        observation_depth: 0,
+                    },
+                    &engine::realtime::LiveValuesSuperseded::new(),
+                )
+                .expect("a lane");
+                assert_eq!(
+                    lane.parameter_cells(),
+                    if target_staging {
+                        0
+                    } else {
+                        effect_contract::EffectLaneShape::live_parameter_cells(
+                            entry.factory.descriptor(),
+                        )
+                    },
+                    "the EQ's parameters ride its targets; an ordinary lane has a cell for each"
+                );
+                let resources = lane.retained_resources();
                 expected_total = expected_total
-                    .checked_add(target_bytes)
-                    .expect("target resource arithmetic");
-                expected_largest = expected_largest.max(target_bytes);
-                if target_staging {
-                    let (_, consumer) =
-                        bounded_spsc(capacity, QueueGeneration(0)).expect("fixture target queue");
-                    let lane = EffectControlLane::new_with_target_staging(
-                        consumer,
-                        entry.bank_preparation.bypass,
-                    );
-                    assert_eq!(lane.target_staging_retained_bytes() as u64, target_bytes);
-                    entry.control = Some(Box::new(lane));
-                } else {
-                    // Production EQ now owns target staging. Construct an ordinary lane
-                    // explicitly to keep the independent accounting proof for both layouts.
-                    let (_, consumer) =
-                        bounded_spsc(capacity, QueueGeneration(0)).expect("fixture ordinary queue");
-                    let lane = EffectControlLane::new(consumer, entry.bank_preparation.bypass);
-                    assert_eq!(lane.target_staging_retained_bytes(), 0);
-                    entry.control = Some(Box::new(lane));
-                }
+                    .checked_add(resources.total_bytes)
+                    .expect("lane resource arithmetic");
+                expected_largest = expected_largest.max(resources.largest_allocation_bytes);
+                entry.control = Some(Box::new(lane));
             }
 
             let bank_width = BankWidth::for_backend(dispatch)
@@ -3212,6 +3189,10 @@ mod tests {
             if banked && controlled != 0 {
                 assert_eq!(8 % bank_width, 0, "EQ fixture fills complete banks");
                 let banks = controlled.div_ceil(bank_width) as u64;
+                // The bank's lane array. Beside it the bank keeps a `(lane index, queue)` entry for
+                // each lane that has an observation queue; these lanes are built with none
+                // (`observation_depth: 0`), so the table is empty and allocates nothing. The
+                // tapped table is held to the allocator in `tests/bypass_resources.rs`.
                 let bank_bytes = (bank_width * size_of::<Option<EffectControlLane>>()) as u64;
                 expected_total = expected_total
                     .checked_add(bank_bytes * banks)
@@ -3434,9 +3415,8 @@ mod tests {
             }
         }
 
-        // The launch compressor is the non-EQ ordinary owner: its real attachment path must cap
-        // the requested depth too, and because its factory has no target capability it retains no
-        // prepared-target FIFO.
+        // The launch compressor is the non-EQ ordinary owner: its real attachment path holds a cell
+        // for each of its live parameters, no target cell, and a window that holds them all.
         let compressor_model = accepted_compressor_graph_fixture();
         let compressor_session = compile_session(
             &compressor_model,
@@ -3454,32 +3434,47 @@ mod tests {
         let mut compressor_effects =
             prepare_native_session_effects(&compressor_session, compressor_registry, effect_caps)
                 .expect("prepared compressor effects");
-        let compressor_depth = NonZeroUsize::new(4_103).expect("compressor queue depth");
-        let compressor_producers =
-            attach_effect_live_controls(&mut compressor_effects, compressor_depth)
-                .expect("checked compressor attachment");
+        let compressor_producers = attach_effect_live_controls(
+            &mut compressor_effects,
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
+        )
+        .expect("checked compressor attachment");
         assert_eq!(compressor_producers.len(), compressor_effects.entries.len());
         for (entry, producer) in compressor_effects.entries.iter().zip(&compressor_producers) {
             assert_eq!(entry.effect_id, "compressor");
+            let cells =
+                effect_contract::EffectLaneShape::live_parameter_cells(entry.factory.descriptor());
+            let shape = producer.writer().shape();
+            assert_eq!((shape.parameter_cells(), shape.target_slots()), (cells, 0));
             assert_eq!(
-                producer.capacity(),
-                compressor_depth
-                    .get()
-                    .min(entry.metadata.automation_capacity as usize)
+                producer.observe_capacity(),
+                0,
+                "no observation capacity asked for"
             );
             let lane = entry.control.as_deref().expect("attached compressor lane");
-            assert_eq!(lane.target_staging_retained_bytes(), 0);
-            let payload = lane
-                .retained_queue_payload()
-                .expect("compressor queue payload");
-            let independent =
-                engine::realtime::bounded_spsc_retained_payload::<EffectControlRecord>(
-                    NonZeroUsize::new(producer.capacity()).expect("capacity"),
-                )
-                .expect("independent compressor payload");
             assert_eq!(
-                payload, independent,
-                "compressor queue is charged at actual capacity"
+                lane.check_window(entry.metadata.automation_capacity as usize),
+                Ok(())
+            );
+            // The real attachment path builds the lane the descriptor's shape asks for and nothing
+            // more: the same heap as a lane built directly from that shape.
+            let (_writer, direct) = effect_contract::effect_control_lane(
+                effect_contract::EffectLaneSpec {
+                    shape: effect_contract::EffectLaneShape::from_descriptor(
+                        entry.factory.descriptor(),
+                        0,
+                    ),
+                    bypass: entry.bank_preparation.bypass,
+                    observation_depth: 0,
+                },
+                &engine::realtime::LiveValuesSuperseded::new(),
+            )
+            .expect("a lane");
+            assert_eq!(
+                lane.retained_resources(),
+                direct.retained_resources(),
+                "the attached compressor lane retains what its shape alone needs"
             );
         }
     }
@@ -4555,7 +4550,8 @@ mod tests {
         let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
         let _producers = attach_effect_live_controls(
             &mut shuffled,
-            NonZeroUsize::new(4).expect("control queue"),
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
         )
         .expect("controls attach to every prepared effect");
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
@@ -4606,12 +4602,14 @@ mod tests {
         }
         let baseline_producers = attach_effect_live_controls(
             &mut baseline,
-            NonZeroUsize::new(8).expect("control queue"),
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
         )
         .expect("baseline controls attach");
         let candidate_producers = attach_effect_live_controls(
             &mut candidate,
-            NonZeroUsize::new(8).expect("control queue"),
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
         )
         .expect("candidate controls attach");
         candidate.entries.reverse();
@@ -4694,7 +4692,8 @@ mod tests {
         }
         let crossed_processor_producers = attach_effect_live_controls(
             &mut crossed_processor,
-            NonZeroUsize::new(8).expect("control queue"),
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
         )
         .expect("crossed processor controls attach");
         let first = crossed_processor
@@ -4752,7 +4751,8 @@ mod tests {
         }
         let crossed_control_producers = attach_effect_live_controls(
             &mut crossed_control,
-            NonZeroUsize::new(8).expect("control queue"),
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
         )
         .expect("crossed control attach");
         // Keep the crossed consumers tied to the two owners that receive the commands below:
@@ -6081,9 +6081,10 @@ mod tests {
         );
     }
 
+    /// An EQ lane's cell writer, held beside the plan the fixture binds.
     struct RawEqProducer {
         track_id: String,
-        producer: Producer<EffectControlRecord>,
+        writer: effect_contract::EffectCellWriter,
     }
 
     struct QueuedEqArtifact {
@@ -6094,6 +6095,8 @@ mod tests {
 
     struct BoundQueuedEq {
         plan: PreparedRenderPlan,
+        /// The plan's gate handle: the fixture's writes are stamped from it and published on it.
+        gate: engine::realtime::PlanRevisionGate,
         producers: Vec<RawEqProducer>,
         initial_values: Vec<InitialParameterValue>,
     }
@@ -6185,20 +6188,27 @@ mod tests {
             "the retained EQ seed is 60 values"
         );
         let mut producers = Vec::with_capacity(effects.entries.len());
+        let superseded = engine::realtime::LiveValuesSuperseded::new();
         for entry in &mut effects.entries {
-            let capacity = NonZeroUsize::new(entry.metadata.automation_capacity as usize)
-                .expect("EQ automation capacity");
-            let (producer, consumer) =
-                bounded_spsc(capacity, QueueGeneration(0)).expect("raw fixture queue");
             // This is an exclusively owned fixture route. Production publication remains behind
-            // the checked effect-compiler producer, which still refuses prepared targets here.
-            entry.control = Some(Box::new(EffectControlLane::new_with_target_staging(
-                consumer,
-                entry.bank_preparation.bypass,
-            )));
+            // the checked effect-compiler producer, which writes the same cells through its
+            // owner's transaction.
+            let (writer, lane) = effect_contract::effect_control_lane(
+                effect_contract::EffectLaneSpec {
+                    shape: effect_contract::EffectLaneShape::from_descriptor(
+                        &PARAMETRIC_EQ_DESCRIPTOR,
+                        ParametricEqFactory.target_slots(),
+                    ),
+                    bypass: entry.bank_preparation.bypass,
+                    observation_depth: 0,
+                },
+                &superseded,
+            )
+            .expect("an EQ lane");
+            entry.control = Some(Box::new(lane));
             producers.push(RawEqProducer {
                 track_id: entry.track_id.clone(),
-                producer,
+                writer,
             });
         }
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
@@ -6216,13 +6226,15 @@ mod tests {
     }
 
     fn bind_queued_eq(queued: QueuedEqArtifact) -> BoundQueuedEq {
-        let plan = bind_session_builtins(
+        let mut plan = bind_session_builtins(
             queued.artifact,
             equal_parametric_eq_input_binding,
             Vec::new(),
         );
+        let gate = plan.take_revision_gate().expect("the plan's gate handle");
         BoundQueuedEq {
             plan,
+            gate,
             producers: queued.producers,
             initial_values: queued.initial_values,
         }
@@ -6327,19 +6339,34 @@ mod tests {
         prepared_eq_records_with_seed(initial_values, sample_rate, &[], edits)
     }
 
-    fn queue_records(producer: &mut RawEqProducer, records: &[EffectControlRecord]) {
+    /// One transaction: write `records` to producer `index`'s cells under one stamp of the plan's
+    /// gate, then publish the revision.
+    fn queue_records(bound: &mut BoundQueuedEq, index: usize, records: &[EffectControlRecord]) {
+        let revision = bound.gate.last_published() + 1;
+        let stamp = bound.gate.stamp(revision).expect("a legal revision");
+        let producer = &mut bound.producers[index];
         for record in records {
             producer
-                .producer
-                .try_push(*record)
-                .unwrap_or_else(|_| panic!("queued target for {}", producer.track_id));
+                .writer
+                .write(stamp, *record)
+                .unwrap_or_else(|_| panic!("target cell for {}", producer.track_id));
         }
+        bound.gate.publish(revision);
     }
 
-    fn queue_all(producers: &mut [RawEqProducer], records: &[EffectControlRecord]) {
-        for producer in producers {
-            queue_records(producer, records);
+    /// One transaction over every producer.
+    fn queue_all(bound: &mut BoundQueuedEq, records: &[EffectControlRecord]) {
+        let revision = bound.gate.last_published() + 1;
+        let stamp = bound.gate.stamp(revision).expect("a legal revision");
+        for producer in &mut bound.producers {
+            for record in records {
+                producer
+                    .writer
+                    .write(stamp, *record)
+                    .unwrap_or_else(|_| panic!("target cell for {}", producer.track_id));
+            }
         }
+        bound.gate.publish(revision);
     }
 
     fn assert_prepared_selector(
@@ -6377,7 +6404,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_eq_target_queue_collapses_then_matches_always_dual_and_scalar() {
+    fn prepared_eq_target_cells_collapse_then_match_always_dual_and_scalar() {
         let model = queued_eq_model();
         let registry = launch_native_effect_registry().expect("launch registry");
         let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
@@ -6453,9 +6480,9 @@ mod tests {
             },
             ContractParameterChannel::Both
         );
-        queue_all(&mut candidate.producers, &hpf);
-        queue_all(&mut oracle.producers, &hpf);
-        queue_all(&mut scalar.producers, &hpf);
+        queue_all(&mut candidate, &hpf);
+        queue_all(&mut oracle, &hpf);
+        queue_all(&mut scalar, &hpf);
 
         let candidate_first = render_queued_eq(&mut candidate, 0);
         let oracle_first = render_queued_eq(&mut oracle, 0);
@@ -6500,9 +6527,9 @@ mod tests {
                 value: 4_000.0,
             }],
         );
-        queue_records(&mut candidate.producers[0], &right_retarget);
-        queue_records(&mut oracle.producers[0], &right_retarget);
-        queue_records(&mut scalar.producers[0], &right_retarget);
+        queue_records(&mut candidate, 0, &right_retarget);
+        queue_records(&mut oracle, 0, &right_retarget);
+        queue_records(&mut scalar, 0, &right_retarget);
         for block in 1..5 {
             let candidate_pcm = render_queued_eq(&mut candidate, block);
             let oracle_pcm = render_queued_eq(&mut oracle, block);
@@ -6525,7 +6552,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_eq_target_queue_fifo_left_both_left_matches_final_dual_batch() {
+    fn prepared_eq_target_cells_left_both_left_match_the_final_dual_batch() {
         let model = queued_eq_model();
         let registry = launch_native_effect_registry().expect("launch registry");
         let candidate = compile_queued_eq(&model, registry, 8_074, host_dispatch());
@@ -6552,8 +6579,8 @@ mod tests {
         };
         let warm = [enabled, warm_frequency];
         let initial_hpf = prepared_eq_records(&candidate.initial_values, 48_000, &warm);
-        queue_all(&mut candidate.producers, &initial_hpf);
-        queue_all(&mut oracle.producers, &initial_hpf);
+        queue_all(&mut candidate, &initial_hpf);
+        queue_all(&mut oracle, &initial_hpf);
         for block in 0..3 {
             let candidate_pcm = render_queued_eq(&mut candidate, block);
             let oracle_pcm = render_queued_eq(&mut oracle, block);
@@ -6578,7 +6605,8 @@ mod tests {
             channel: ContractParameterChannel::Left,
             value: 2_000.0,
         };
-        // Each separately admitted batch is prepared from its complete prior accepted target.
+        // Each separately admitted batch is prepared from its complete prior accepted target and
+        // committed as a transaction of its own; the cells hold the last write of each channel.
         let left_x = prepared_eq_records_with_seed(&candidate.initial_values, 48_000, &warm, &[x]);
         let both_y = prepared_eq_records_with_seed(
             &candidate.initial_values,
@@ -6591,9 +6619,9 @@ mod tests {
         assert_prepared_selector(&left_x, 0, ContractParameterChannel::Left, "Left X");
         assert_prepared_selector(&both_y, 0, ContractParameterChannel::Both, "Both Y");
         assert_prepared_selector(&left_z, 0, ContractParameterChannel::Left, "Left Z");
-        queue_all(&mut candidate.producers, &left_x);
-        queue_all(&mut candidate.producers, &both_y);
-        queue_all(&mut candidate.producers, &left_z);
+        queue_all(&mut candidate, &left_x);
+        queue_all(&mut candidate, &both_y);
+        queue_all(&mut candidate, &left_z);
 
         // The oracle prepares the final configuration in one independent request. It neither
         // replays the three candidate batches nor reuses any candidate target payload.
@@ -6627,7 +6655,7 @@ mod tests {
             ContractParameterChannel::Right,
             "final Right Y",
         );
-        queue_all(&mut oracle.producers, &final_targets);
+        queue_all(&mut oracle, &final_targets);
 
         for block in 3..7 {
             let candidate_pcm = render_queued_eq(&mut candidate, block);
@@ -6635,7 +6663,7 @@ mod tests {
             assert_pcm_bits_equal(
                 &[candidate_pcm],
                 &[oracle_pcm],
-                &format!("FIFO target block {block}"),
+                &format!("last-write target block {block}"),
             );
         }
         assert!(
@@ -11392,7 +11420,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -11686,7 +11713,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -11845,7 +11871,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })

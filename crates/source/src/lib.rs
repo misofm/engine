@@ -1386,46 +1386,98 @@ impl PcmSourceConsumer {
     }
 
     /// Pop toward the block to play. `clock` is the block's, for a seek observed here.
+    ///
+    /// The call pops at most the blocks queued when it begins (`available`), never the blocks the
+    /// host publishes while it runs: a count taken at entry, not the ring's capacity, bounds it, so
+    /// a host that keeps the ring fed cannot hold the render here. Two counted phases, with the
+    /// one seek re-observe between them and in neither loop.
     fn acquire_current_block(&mut self, clock: SeekClock) {
         if self.current.is_some() {
             return;
         }
-        for _ in 0..self.transfer_block_count {
+        let available = self
+            .data_consumer
+            .available_at_entry()
+            .min(self.transfer_block_count);
+        let mut popped = 0_usize;
+        let mut unobserved = None;
+        for _ in 0..available {
             let Ok(block) = self.data_consumer.try_pop() else {
                 break;
             };
-            self.native_decoder_sanitized_samples = self
-                .native_decoder_sanitized_samples
-                .max(block.native_decoder_sanitized_samples);
+            popped += 1;
+            self.note_sanitized_samples(&block);
             if self.is_unobserved_generation(block.generation) {
-                // This block's seek was pushed after this block's command pop. The producer pushes
-                // a seek's command before any of its PCM, on one thread, through release/acquire
-                // queues, so the command is in the one-slot command queue now: observe it before
-                // judging the block rather than discard accepted PCM (#1274 MINOR-3). Bounded:
-                // at most one command pop per popped block.
-                self.observe_seek_at_block_boundary(clock);
-            }
-            if block.generation == self.active_generation
-                && block.start_frame.0 >= self.next_frame.0
-            {
-                if block.end_of_region {
-                    self.note_end_frame(&block);
-                }
-                self.current = Some(block);
+                unobserved = Some(block);
                 break;
             }
-            if self
-                .held_seek
-                .is_some_and(|held| held.generation == block.generation)
-            {
-                // A held anchored seek's first block: kept unexamined as the pending block until
-                // the seek applies (its end, if it carries one, is noted then), and the blocks
-                // behind it stay queued.
-                self.current = Some(block);
-                break;
+            if self.settle_block(block) {
+                return;
             }
-            self.note_end_and_discard(block);
         }
+        let Some(block) = unobserved else {
+            return;
+        };
+        // This block's seek was pushed after this block's command pop. The host pushes a seek's
+        // command before any of its PCM, on one thread, through release/acquire queues, so the
+        // command is in the one-slot command queue now: observe it before judging the block
+        // rather than discard accepted PCM (#1274 MINOR-3). Bounded: at most one command pop per
+        // call. A counted block was published after its seek's command was pushed, so that
+        // command was pushed before the count too. Only `observe_seek_at_block_boundary` pops the
+        // one-slot queue (its callers are this acquire, `prepare_seek` and `begin_block_observe`,
+        // all on this consumer's thread), so at the count at most one command is pushed and not
+        // yet popped, and at most one generation among the counted blocks is unobserved. This one
+        // pop observes it, and a later command's blocks were published after the count.
+        self.observe_seek_at_block_boundary(clock);
+        if self.settle_block(block) {
+            return;
+        }
+        let unpopped = available.saturating_sub(popped);
+        let rest = self.data_consumer.available_at_entry().min(unpopped);
+        for _ in 0..rest {
+            let Ok(block) = self.data_consumer.try_pop() else {
+                break;
+            };
+            self.note_sanitized_samples(&block);
+            debug_assert!(
+                !self.is_unobserved_generation(block.generation),
+                "a block counted at entry has an observed seek after one re-observe"
+            );
+            if self.settle_block(block) {
+                return;
+            }
+        }
+    }
+
+    /// Keep `block` as the pending block (`true`) when it is the active generation at or after
+    /// `next_frame`, or a held seek's first block; otherwise discard it (`false`). Pops nothing.
+    fn settle_block(&mut self, block: Box<TransferBlock>) -> bool {
+        if block.generation == self.active_generation && block.start_frame.0 >= self.next_frame.0 {
+            if block.end_of_region {
+                self.note_end_frame(&block);
+            }
+            self.current = Some(block);
+            return true;
+        }
+        if self
+            .held_seek
+            .is_some_and(|held| held.generation == block.generation)
+        {
+            // A held anchored seek's first block: kept unexamined as the pending block until
+            // the seek applies (its end, if it carries one, is noted then), and the blocks
+            // behind it stay queued.
+            self.current = Some(block);
+            return true;
+        }
+        self.note_end_and_discard(block);
+        false
+    }
+
+    /// Carry the decoder's sanitized-sample count of `block` into the consumer's running maximum.
+    fn note_sanitized_samples(&mut self, block: &TransferBlock) {
+        self.native_decoder_sanitized_samples = self
+            .native_decoder_sanitized_samples
+            .max(block.native_decoder_sanitized_samples);
     }
 
     /// Whether `generation` is newer than every seek this consumer has observed.
@@ -2339,6 +2391,48 @@ mod tests {
             consumer.stale_generation_discard_count, 1,
             "the late-skipped block"
         );
+    }
+
+    /// A host that keeps the ring fed while the render acquires its block (#1447). Every block
+    /// the host publishes is stale, so each is discarded, and a block's acquire pops only what was
+    /// queued when it began: the next block takes the one the host published during it. Red if
+    /// the acquire is bounded by the ring's capacity instead of the count at its entry: it then
+    /// pops again whenever the host refills the queue between two passes, and chases the host.
+    /// The test races a real host thread, so it is red on most runs of that defect, not on every
+    /// run: a green run on a reverted bound is not proof the bound holds.
+    #[test]
+    fn the_acquire_does_not_pop_a_block_published_after_its_count() {
+        const BLOCKS: usize = 200_000;
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        assert!(consumer.transfer_block_count > 1);
+        consumer.next_frame = SourceFrame(u64::MAX / 2);
+        let host = producer.into_host_chunk_provider(RATE);
+        let started = std::time::Instant::now();
+        bench_support::producer::render_while_producing(
+            BLOCKS,
+            host,
+            |host| {
+                let queue = &host.producer.data_producer;
+                if queue.available_capacity() == queue.capacity() {
+                    let start = host.producer.next_write_frame.0;
+                    let _submitted = host.submit(chunk(1, start, &[&[0.5; 4]], 4, false));
+                }
+            },
+            |host| {
+                let queue = &host.producer.data_producer;
+                queue.available_capacity() < queue.capacity()
+            },
+            |block| {
+                let before = consumer.stale_generation_discard_count;
+                consumer.begin_block();
+                let discarded = consumer.stale_generation_discard_count - before;
+                assert!(
+                    discarded <= 1,
+                    "block {block}: the acquire popped {discarded} blocks, one was queued at its entry"
+                );
+            },
+        );
+        eprintln!("{BLOCKS} blocks in {:?}", started.elapsed());
     }
 
     /// #1274 follow-ups NIT-2. Red if `prepare_seek` grants readiness for the playing generation

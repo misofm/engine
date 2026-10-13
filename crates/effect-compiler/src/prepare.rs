@@ -1,15 +1,13 @@
-use core::num::NonZeroUsize;
 use effect_contract::{
-    AutomationRate, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
+    AutomationRate, EffectCellWriter, EffectControlLane, EffectControlRecord, EffectDescriptor,
+    EffectLaneShape, EffectLaneSpec, EffectQuality, EffectWriteRefusal, InitialParameterValue,
+    LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane, ObservePushError,
     ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
     PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError,
+    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError, effect_control_lane,
     expected_prepared_metadata,
 };
-use engine::realtime::{
-    ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
-};
+use engine::realtime::{LiveStamp, LiveValuesSuperseded, ObservationReader, observation_slot};
 use session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
     ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, RackName, SessionModel,
@@ -61,9 +59,9 @@ pub struct EffectPreparedEntry {
     /// [`lowers_session_bypass`] and `None` on every other, and [`attach_effect_live_controls`]
     /// replaces it with a live channel seeded from [`Self::initial_bypass`]; nothing else creates
     /// one. It travels with the entry into `GraphPreparedEffect`, so the plan that renders the
-    /// effect is the one that drains its queue and applies its shunt, and a session with no live
-    /// controls and no bypassed instance carries a `None` that the runtime turns back into the
-    /// byte-identical live-control-free path.
+    /// effect is the one that reads its cells, drains its observation queue and applies its shunt,
+    /// and a session with no live controls and no bypassed instance carries a `None` that the
+    /// runtime turns back into the byte-identical live-control-free path.
     pub control: Option<Box<EffectControlLane>>,
     /// This instance's observation taps (issue #143 D3, level 1).
     ///
@@ -588,7 +586,19 @@ fn prepare_with_console_eligibility(
                     limits: PrepareEffectLimits {
                         maximum_total_state_bytes: caps.maximum_total_state_bytes,
                         maximum_scratch_bytes: caps.maximum_scratch_bytes,
-                        maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+                        // Decision 15, D15-2 and #1345 D4: the window holds a span for every live
+                        // parameter cell, so the effect accepts that many. The bound depends on the
+                        // descriptor alone, so every instance of one effect has one capacity and
+                        // attaching a live lane changes no program key. The parametric EQ is
+                        // raised too, though its lane holds target cells in place of parameter
+                        // cells and so stages no parameter span: whether an instance is attached
+                        // to a lane, or to an owner, must not change its capacity.
+                        maximum_automation_spans_per_block: caps
+                            .maximum_automation_spans_per_block
+                            .max(
+                                u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
+                                    .unwrap_or(u32::MAX),
+                            ),
                     },
                     tail_bound,
                 };
@@ -676,12 +686,14 @@ fn prepare_with_console_eligibility(
     }
 }
 
-/// One prepared live-control channel for one effect instance (issue #140 A).
+/// One prepared live-control lane for one effect instance, as control holds it (issue #140 A;
+/// decision 15, D15-2; issue #1345).
 ///
-/// The producer half stays on the control plane; the consumer half rode into the plan inside the
-/// entry. The ring is an `Arc` the two halves share, so either may drop first and the last owner
-/// frees it: `PreparedHost` drops its plan first, and capi drops a reclaimed plan before the
-/// provider epoch that keeps its producers (#1263 D5), both on the control thread.
+/// The writer is control's end of the instance's latest-target cells and observation queue. The
+/// render end rode into the plan inside the entry; the cells are an `Arc` the two ends share, so
+/// either may drop first and the last owner frees them: `PreparedHost` drops its plan first, and
+/// capi drops a reclaimed plan before the provider epoch that keeps its producers (#1263 D5), both
+/// on the control thread.
 pub struct EffectControlProducer {
     /// Session-stable identity of the strip (a track or a submix) this channel addresses.
     pub track_id: Box<str>,
@@ -698,13 +710,14 @@ pub struct EffectControlProducer {
     /// to the `parameter_index` the render side stages, and check the value's domain, without a
     /// second copy of the registry.
     pub descriptor: &'static EffectDescriptor,
-    /// Checked bounded producer endpoint; unsupported prepared targets are refused before queue
-    /// mutation, while ordinary records retain the queue's full-result retry semantics.
-    producer: EffectControlProducerHandle,
+    /// The instance's cell writers and observation queue. A write cannot fail on a value; a
+    /// record the lane has no cell for is refused by [`Self::preflight`] before the first write
+    /// of its transaction.
+    writer: EffectCellWriter,
     /// Optional off-audio-thread owner for a factory's prepared-target capability.
     ///
     /// The box is private so callers must use the checked transaction methods below; no raw
-    /// producer or reusable "validated" flag can bypass candidate/revision admission.
+    /// writer or reusable "validated" flag can bypass candidate/revision admission.
     owner: Option<Box<EffectControlOwner>>,
 }
 
@@ -713,7 +726,8 @@ pub struct EffectControlProducer {
 pub struct EffectControlResources {
     /// The actual backing allocation of the native producer `Vec`, using its capacity.
     pub producer_table_bytes: u64,
-    /// Retained strings, owner boxes, owner row/dirty backings and distinct factory `Arc`s.
+    /// Retained strings, owner boxes, owner row/dirty backings, the writers' cell-writer arrays
+    /// and distinct factory `Arc`s.
     pub owned_payload_bytes: u64,
     /// Largest individual allocation in `owned_payload_bytes` (the producer table is separate).
     pub largest_owned_allocation_bytes: u64,
@@ -759,6 +773,12 @@ pub fn effect_control_resources(
                 .ok_or(EffectControlResourceError::Arithmetic)?;
             largest_owned_allocation_bytes = largest_owned_allocation_bytes.max(bytes);
         }
+        let writer = producer.writer.retained_resources();
+        owned_payload_bytes = owned_payload_bytes
+            .checked_add(writer.total_bytes)
+            .ok_or(EffectControlResourceError::Arithmetic)?;
+        largest_owned_allocation_bytes =
+            largest_owned_allocation_bytes.max(writer.largest_allocation_bytes);
         if let Some(owner) = producer.owner.as_deref() {
             let facts = owner.resource_facts()?;
             owned_payload_bytes = owned_payload_bytes
@@ -793,122 +813,89 @@ pub fn effect_control_resources(
     })
 }
 
-/// Why an effect-control publication failed.
-#[derive(Debug)]
-pub enum EffectControlPushError {
-    /// This owner has no prepared-target capability at this checkpoint. The record was not
-    /// published and is returned for the caller's refusal report.
-    Unsupported { record: EffectControlRecord },
-    /// The bounded queue was full. The underlying queue retains its generation and full counter.
-    Full(QueueFull<EffectControlRecord>),
-}
-
-/// Checked control-plane endpoint for one effect queue.
-///
-/// The underlying producer is intentionally private: callers cannot bypass target capability
-/// checks or manufacture a production prepared-target route by setting a flag. Component tests
-/// that need to exercise the target consumer construct an exclusively owned low-level queue and
-/// lane directly.
-pub struct EffectControlProducerHandle {
-    inner: Producer<EffectControlRecord>,
-    requires_prepared_targets: bool,
-}
-
-impl EffectControlProducerHandle {
-    fn new(inner: Producer<EffectControlRecord>, requires_prepared_targets: bool) -> Self {
-        Self {
-            inner,
-            requires_prepared_targets,
-        }
-    }
-
-    /// Exact usable queue capacity.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.inner.capacity()
-    }
-
-    /// Producer-side capacity snapshot used for complete target-prefix admission.
-    #[must_use]
-    pub fn available_capacity(&self) -> usize {
-        self.inner.available_capacity()
-    }
-
-    /// Producer-local successful publication count.
-    #[must_use]
-    pub const fn success_count(&self) -> u64 {
-        self.inner.success_count()
-    }
-
-    /// Producer-local full/overflow count.
-    #[must_use]
-    pub const fn full_count(&self) -> u64 {
-        self.inner.full_count()
-    }
-
-    /// Check delivery capability without touching the queue, counters, or record ownership.
-    ///
-    /// A prepared-capable owner will eventually require all EQ parameter records to arrive with
-    /// their companion targets. Assignment4 keeps production owners unregistered, so this path
-    /// remains fail-closed until the owner transaction is available.
-    pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
-        if matches!(record, EffectControlRecord::PreparedTarget(_))
-            || (self.requires_prepared_targets
-                && matches!(record, EffectControlRecord::Parameter { .. }))
-        {
-            return Err(EffectControlPushError::Unsupported { record });
-        }
-        Ok(())
-    }
-
-    /// Publish one record after checking whether this owner can deliver prepared targets.
-    pub fn try_push(&mut self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
-        self.preflight(record)?;
-        self.inner
-            .try_push(record)
-            .map_err(EffectControlPushError::Full)
-    }
-
-    pub(crate) fn try_push_prepared(
-        &mut self,
-        target: effect_contract::PreparedEffectTarget,
-    ) -> Result<(), EffectControlPushError> {
-        self.inner
-            .try_push(EffectControlRecord::PreparedTarget(target))
-            .map_err(EffectControlPushError::Full)
-    }
-}
-
 impl EffectControlProducer {
-    /// Read-only checked endpoint for capacity and accounting inspection.
+    /// Check delivery capability without writing: `Ok` when [`Self::write`] would take `record`.
+    ///
+    /// A record the lane has no cell for is refused here: a parameter that is not `Block`-rate or
+    /// whose channel does not match its policy, a parameter of a prepared-target owner (its
+    /// parameters ride its targets), an observation subscription (it rides the queue,
+    /// [`Self::try_push_observe`]), and any prepared target: a target reaches its cells only
+    /// through the owner's transaction ([`Self::publish_candidate_targets`]), so no caller can
+    /// bypass the candidate and revision admission. The transaction that writes preflights every
+    /// record before its first write (D15-2 condition 3).
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal`].
+    pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectWriteRefusal> {
+        if matches!(record, EffectControlRecord::PreparedTarget(_)) {
+            return Err(EffectWriteRefusal::Target);
+        }
+        self.writer.check(&record)
+    }
+
+    /// Write `record` as the newest value of its cell(s), stamped with the revision of the
+    /// transaction that commits it. The caller publishes that revision on the plan's gate after
+    /// every write of the transaction.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal`], with nothing written. The caller has preflighted the record, so a
+    /// refusal here is an internal fault.
+    pub fn write(
+        &mut self,
+        stamp: LiveStamp<'_>,
+        record: EffectControlRecord,
+    ) -> Result<(), EffectWriteRefusal> {
+        self.preflight(record)?;
+        self.writer.write(stamp, record)
+    }
+
+    /// Queue one observation subscription for the lane's next drain, in order (D15-2: an
+    /// observation record stays a FIFO).
+    ///
+    /// # Errors
+    ///
+    /// [`ObservePushError`], with nothing queued.
+    pub fn try_push_observe(
+        &mut self,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Result<(), ObservePushError> {
+        self.writer
+            .try_push_observe(tap_index, armed, window_blocks)
+    }
+
+    /// The observation queue's capacity: the number of taps the effect declares, `0` for a lane
+    /// without a queue.
     #[must_use]
-    pub fn producer(&self) -> &EffectControlProducerHandle {
-        &self.producer
+    pub fn observe_capacity(&self) -> usize {
+        self.writer.observe_capacity()
     }
 
-    /// Publishes one ordinary semantic/observation record through the checked endpoint.
-    pub fn try_push(&mut self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
-        self.producer.try_push(record)
-    }
-
-    /// Checks one ordinary record without queue mutation.
-    pub fn preflight(&self, record: EffectControlRecord) -> Result<(), EffectControlPushError> {
-        self.producer.preflight(record)
-    }
-
+    /// Free slots of the observation queue.
     #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.producer.capacity()
+    pub fn observe_available_capacity(&self) -> usize {
+        self.writer.observe_available_capacity()
     }
 
+    /// Producer-local count of observation records queued.
     #[must_use]
-    pub const fn success_count(&self) -> u64 {
-        self.producer.success_count()
+    pub fn observe_success_count(&self) -> u64 {
+        self.writer.observe_success_count()
     }
 
+    /// Producer-local count of observation records refused because the queue was full.
     #[must_use]
-    pub const fn full_count(&self) -> u64 {
-        self.producer.full_count()
+    pub fn observe_full_count(&self) -> u64 {
+        self.writer.observe_full_count()
+    }
+
+    /// The instance's cell writer, for inspection.
+    #[must_use]
+    pub fn writer(&self) -> &EffectCellWriter {
+        &self.writer
     }
 
     /// Whether this effect has an opted-in prepared-target owner.
@@ -944,9 +931,13 @@ impl EffectControlProducer {
             .edit(parameter_index, channel, value)
     }
 
-    /// Publishes a validated target prefix and marks the owner ready for its one commit.
+    /// Writes a validated target set into the owner's target cells, stamped with the revision of
+    /// the transaction that commits it, and marks the owner ready for its one commit. A write
+    /// cannot fail on room: only the revision and the targets are checked, by
+    /// [`Self::preflight_candidate_targets`], which the caller ran before its first write.
     pub fn publish_candidate_targets(
         &mut self,
+        stamp: LiveStamp<'_>,
         base_revision: u64,
         targets: &[effect_contract::PreparedEffectTarget],
     ) -> Result<(), EffectControlOwnerError> {
@@ -954,11 +945,11 @@ impl EffectControlProducer {
             .owner
             .as_deref_mut()
             .ok_or(EffectControlOwnerError::Unsupported)?;
-        owner.publish(&mut self.producer, base_revision, targets)
+        owner.publish(&mut self.writer, stamp, base_revision, targets)
     }
 
-    /// Preflights this owner's exact target prefix, including revision and complete queue room.
-    /// The queue, candidate and owner phase remain unchanged.
+    /// Preflights this owner's exact target set against its open candidate and its revision. The
+    /// cells, candidate and owner phase remain unchanged.
     pub fn preflight_candidate_targets(
         &self,
         base_revision: u64,
@@ -968,7 +959,16 @@ impl EffectControlProducer {
             .owner
             .as_deref()
             .ok_or(EffectControlOwnerError::Unsupported)?;
-        owner.preflight_publication(&self.producer, base_revision, targets)
+        owner.preflight_publication(base_revision, targets)?;
+        // The publication writes each target to the cell the lane's writer addresses it by, so
+        // the preflight asks the writer about every one: a set the owner accepts and the lane has
+        // no cell for is refused here, before the first write (D7), not discovered by a write.
+        for target in targets {
+            self.writer
+                .check(&EffectControlRecord::PreparedTarget(*target))
+                .map_err(|_| EffectControlOwnerError::Shape)?;
+        }
+        Ok(())
     }
 
     /// Commits the candidate after successful complete publication.
@@ -985,95 +985,6 @@ impl EffectControlProducer {
             .as_deref_mut()
             .ok_or(EffectControlOwnerError::Unsupported)?
             .discard()
-    }
-}
-
-#[cfg(test)]
-mod control_producer_tests {
-    use super::{EffectControlProducerHandle, EffectControlPushError};
-    use core::num::NonZeroUsize;
-    use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
-    use engine::realtime::{QueueGeneration, bounded_spsc};
-
-    fn target(slot: u32) -> EffectControlRecord {
-        EffectControlRecord::PreparedTarget(PreparedEffectTarget {
-            slot,
-            channel: ParameterChannel::Left,
-            words: [slot; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        })
-    }
-
-    fn parameter(value: f32) -> EffectControlRecord {
-        EffectControlRecord::Parameter {
-            parameter_index: 3,
-            channel: ParameterChannel::Left,
-            value,
-        }
-    }
-
-    #[test]
-    fn unsupported_target_is_returned_without_touching_queue_or_full_counter() {
-        let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
-            NonZeroUsize::new(2).expect("capacity"),
-            QueueGeneration(7),
-        )
-        .expect("queue");
-        let mut producer = EffectControlProducerHandle::new(producer, false);
-        producer
-            .try_push(parameter(0.25))
-            .expect("first queue slot");
-        producer
-            .try_push(parameter(0.5))
-            .expect("second queue slot");
-        let record = target(11);
-
-        assert_eq!(producer.success_count(), 2);
-        assert_eq!(producer.full_count(), 0);
-        let refusal = producer.try_push(record).expect_err("unsupported target");
-        match refusal {
-            EffectControlPushError::Unsupported { record: returned } => {
-                assert_eq!(returned, record);
-            }
-            EffectControlPushError::Full(_) => panic!("unsupported is distinct from full"),
-        }
-        assert_eq!(producer.success_count(), 2);
-        assert_eq!(producer.full_count(), 0);
-        assert_eq!(consumer.available_at_entry(), 2);
-    }
-
-    #[test]
-    fn ordinary_semantic_record_publishes_and_full_refusal_preserves_original_record() {
-        let (producer, mut consumer) = bounded_spsc::<EffectControlRecord>(
-            NonZeroUsize::new(1).expect("capacity"),
-            QueueGeneration(9),
-        )
-        .expect("queue");
-        let mut producer = EffectControlProducerHandle::new(producer, false);
-        let first = parameter(0.25);
-        assert!(producer.try_push(first).is_ok());
-        assert_eq!(producer.success_count(), 1);
-        assert_eq!(producer.full_count(), 0);
-        assert_eq!(consumer.try_pop().expect("semantic record"), first);
-
-        let second = parameter(0.5);
-        let third = parameter(0.75);
-        producer.try_push(second).expect("room after pop");
-        let refusal = producer.try_push(third).expect_err("full queue");
-        match refusal {
-            EffectControlPushError::Full(full) => {
-                assert_eq!(full.value, third);
-                assert_eq!(full.generation, QueueGeneration(9));
-                assert_eq!(full.full_count, 1);
-            }
-            EffectControlPushError::Unsupported { .. } => panic!("ordinary record is supported"),
-        }
-        assert_eq!(producer.success_count(), 2);
-        assert_eq!(producer.full_count(), 1);
-        assert_eq!(consumer.available_at_entry(), 1);
-        assert_eq!(
-            consumer.try_pop().expect("retained semantic record"),
-            second
-        );
     }
 }
 
@@ -1312,15 +1223,16 @@ mod owner_tests {
     use crate::EffectControlOwnerPhase;
     use core::alloc::Layout;
     use core::mem::size_of;
-    use core::num::NonZeroUsize;
     use core::sync::atomic::AtomicUsize;
     use effect_contract::{
-        EffectControlRecord, NativeEffectFactory, ParameterChannel, PreparedEffectTarget,
-        default_initial_values,
+        NativeEffectFactory, ParameterChannel, PreparedEffectTarget, default_initial_values,
     };
-    use engine::realtime::{QueueGeneration, bounded_spsc};
+    use engine::realtime::{CellWriter, GatePin, RevisionGate};
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use std::sync::Arc;
+
+    /// The EQ's six target slots.
+    const EQ_SLOTS: usize = 6;
 
     fn preparation() -> EffectBankPreparation {
         EffectBankPreparation {
@@ -1347,24 +1259,64 @@ mod owner_tests {
         }
     }
 
-    fn owner_and_queue() -> (
-        EffectControlOwner,
-        EffectControlProducerHandle,
-        engine::realtime::Consumer<EffectControlRecord>,
-    ) {
-        let preparation = preparation();
-        let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
-        let owner = EffectControlOwner::new(factory, &preparation).expect("valid EQ owner");
-        let (producer, consumer) = bounded_spsc(
-            NonZeroUsize::new(12).expect("capacity"),
-            QueueGeneration(31),
-        )
-        .expect("queue");
-        (
-            owner,
-            EffectControlProducerHandle::new(producer, true),
-            consumer,
-        )
+    /// An EQ owner, the writer of its target cells, the render end of those cells and the plan's
+    /// gate.
+    struct OwnerRig {
+        owner: EffectControlOwner,
+        writer: EffectCellWriter,
+        lane: EffectControlLane,
+        gate: RevisionGate,
+        pin: GatePin,
+        superseded: LiveValuesSuperseded,
+    }
+
+    impl OwnerRig {
+        fn new() -> Self {
+            let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
+            let owner = EffectControlOwner::new(factory, &preparation()).expect("valid EQ owner");
+            let superseded = LiveValuesSuperseded::new();
+            let (writer, lane) = effect_control_lane(
+                EffectLaneSpec {
+                    shape: EffectLaneShape::from_descriptor(&PARAMETRIC_EQ_DESCRIPTOR, EQ_SLOTS),
+                    bypass: false,
+                    observation_depth: 0,
+                },
+                &superseded,
+            )
+            .expect("an EQ lane");
+            let (gate, pin) = RevisionGate::pair(0);
+            Self {
+                owner,
+                writer,
+                lane,
+                gate,
+                pin,
+                superseded,
+            }
+        }
+
+        /// Publish `targets` as one transaction: stamp the next revision, write the cells, publish
+        /// the revision.
+        fn publish(
+            &mut self,
+            base_revision: u64,
+            targets: &[PreparedEffectTarget],
+        ) -> Result<(), EffectControlOwnerError> {
+            let revision = self.pin.last_published() + 1;
+            let stamp = self.pin.stamp(revision).expect("a legal revision");
+            let result = self
+                .owner
+                .publish(&mut self.writer, stamp, base_revision, targets);
+            self.pin.publish(&self.gate, revision);
+            result
+        }
+
+        /// The targets one block applies.
+        fn block(&mut self) -> Vec<PreparedEffectTarget> {
+            let snapshot = self.gate.snapshot();
+            self.lane.stage(&mut [], 0, snapshot);
+            self.lane.prepared_targets().to_vec()
+        }
     }
 
     fn resource_producer(
@@ -1375,19 +1327,34 @@ mod owner_tests {
         let owner = factory.map(|factory| {
             Box::new(EffectControlOwner::new(factory, &preparation()).expect("valid EQ owner"))
         });
-        let (producer, _consumer) = bounded_spsc(
-            NonZeroUsize::new(12).expect("capacity"),
-            QueueGeneration(33),
+        let (writer, _lane) = effect_control_lane(
+            EffectLaneSpec {
+                shape: EffectLaneShape::from_descriptor(
+                    &PARAMETRIC_EQ_DESCRIPTOR,
+                    if owner.is_some() { EQ_SLOTS } else { 0 },
+                ),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &LiveValuesSuperseded::new(),
         )
-        .expect("queue");
+        .expect("an EQ lane");
         EffectControlProducer {
             track_id: track_id.into(),
             address: LiveEffectAddress::insert(0),
             effect_id: effect_id.into(),
             descriptor: &PARAMETRIC_EQ_DESCRIPTOR,
-            producer: EffectControlProducerHandle::new(producer, owner.is_some()),
+            writer,
             owner,
         }
+    }
+
+    fn blank_targets() -> [PreparedEffectTarget; 12] {
+        [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; 12]
     }
 
     #[test]
@@ -1410,6 +1377,12 @@ mod owner_tests {
         let row_backing = (values * size_of::<InitialParameterValue>()) as u64;
         let dirty_backing = (values * size_of::<bool>()) as u64;
         let owner_payload = owner_box + (2 * row_backing) + dirty_backing;
+        // The EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells and
+        // none for parameters: its parameters ride its targets.
+        let writer_backing = (2
+            * EQ_SLOTS
+            * size_of::<CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>())
+            as u64;
         let factory_layout = Layout::new::<AtomicUsize>()
             .extend(Layout::new::<AtomicUsize>())
             .expect("Arc header layout")
@@ -1423,7 +1396,7 @@ mod owner_tests {
             + "effect-a".len() as u64
             + "track-b".len() as u64
             + "effect-b".len() as u64
-            + (2 * owner_payload)
+            + (2 * (owner_payload + writer_backing))
             + factory_layout;
         let expected_table = 5 * size_of::<EffectControlProducer>() as u64;
         let expected_largest = [
@@ -1434,6 +1407,7 @@ mod owner_tests {
             owner_box,
             row_backing,
             dirty_backing,
+            writer_backing,
             factory_layout,
         ]
         .into_iter()
@@ -1451,27 +1425,30 @@ mod owner_tests {
             expected_table.max(expected_largest)
         );
 
+        // A producer with no owner holds a writer for each parameter cell: the EQ's 22 `Block`
+        // parameters are all `PerLane`, so 44.
         let mut production = Vec::with_capacity(3);
         production.push(resource_producer("track", "effect", None));
         let production_resources =
             effect_control_resources(&production).expect("production resource facts");
+        let parameter_writers = (44 * size_of::<CellWriter<1>>()) as u64;
         assert_eq!(
             production_resources.producer_table_bytes,
             3 * size_of::<EffectControlProducer>() as u64
         );
         assert_eq!(
             production_resources.owned_payload_bytes,
-            "track".len() as u64 + "effect".len() as u64
+            "track".len() as u64 + "effect".len() as u64 + parameter_writers
         );
         assert_eq!(
             production_resources.largest_owned_allocation_bytes,
-            "effect".len() as u64
+            parameter_writers.max("effect".len() as u64)
         );
     }
 
     /// #1469 Amendment 1. Red if a plan is charged for a factory the process-lifetime launch
     /// registry owns: the two owners share the registry's EQ factory, so the charge is their
-    /// strings and owner payloads alone.
+    /// strings, owner payloads and writers alone.
     #[test]
     fn effect_control_resources_charge_no_registry_owned_factory() {
         let factory = launch_native_effect_registry()
@@ -1489,7 +1466,10 @@ mod owner_tests {
         let values = preparation().initial_values.len();
         let owner_payload = size_of::<EffectControlOwner>() as u64
             + (2 * (values * size_of::<InitialParameterValue>()) as u64)
-            + (values * size_of::<bool>()) as u64;
+            + (values * size_of::<bool>()) as u64
+            + (2 * EQ_SLOTS
+                * size_of::<CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>())
+                as u64;
         let strings = ["track-a", "effect-a", "track-b", "effect-b"]
             .map(|text| text.len() as u64)
             .into_iter()
@@ -1500,104 +1480,104 @@ mod owner_tests {
 
     #[test]
     fn opted_in_eq_owner_prepares_both_and_commits_once() {
-        let (mut owner, mut producer, mut consumer) = owner_and_queue();
-        let initial = owner.committed().to_vec();
-        owner.begin(0).expect("base revision");
-        owner
+        let mut rig = OwnerRig::new();
+        let initial = rig.owner.committed().to_vec();
+        rig.owner.begin(0).expect("base revision");
+        rig.owner
             .edit(2, ParameterChannel::Both, 100.0)
             .expect("numeric Both edit");
-        let mut targets = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; 12];
-        let count = owner
+        let mut targets = blank_targets();
+        let count = rig
+            .owner
             .prepare_targets_into(&mut targets)
             .expect("off-audio preparation");
         assert_eq!(count, 1, "equal Both lanes coalesce");
         assert_eq!(targets[0].channel, ParameterChannel::Both);
         assert_eq!(
-            owner.committed(),
+            rig.owner.committed(),
             initial,
             "preparation leaves committed rows unchanged"
         );
-        let final_rows = owner.candidate().to_vec();
+        let final_rows = rig.owner.candidate().to_vec();
         let changed: Vec<_> = final_rows
             .iter()
             .filter(|row| row.parameter_index == 2)
             .collect();
         assert_eq!(changed.len(), 2);
         assert!(changed.iter().all(|row| row.value == 100.0));
-        owner
-            .publish(&mut producer, 0, &targets[..count])
-            .expect("complete prefix publication");
+        rig.publish(0, &targets[..count])
+            .expect("complete target publication");
         assert_eq!(
-            owner.committed(),
+            rig.owner.committed(),
             initial,
             "publication precedes shadow commit"
         );
-        assert!(owner.edit(2, ParameterChannel::Both, 200.0).is_err());
-        assert!(owner.discard().is_err());
-        assert_eq!(owner.commit().expect("one commit"), 1);
-        assert_eq!(owner.committed(), final_rows);
-        assert!(owner.commit().is_err(), "repeat commit refused");
+        assert!(rig.owner.edit(2, ParameterChannel::Both, 200.0).is_err());
+        assert!(rig.owner.discard().is_err());
+        assert_eq!(rig.owner.commit().expect("one commit"), 1);
+        assert_eq!(rig.owner.committed(), final_rows);
+        assert!(rig.owner.commit().is_err(), "repeat commit refused");
         assert_eq!(
-            consumer.try_pop(),
-            Ok(EffectControlRecord::PreparedTarget(targets[0]))
+            rig.block(),
+            vec![targets[0]],
+            "the block applies the target once"
         );
     }
 
     #[test]
     fn opted_in_owner_accepts_two_transactions_before_render() {
-        let (mut owner, mut producer, mut consumer) = owner_and_queue();
-        let initial = owner.committed().to_vec();
-        let mut first = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; 12];
-        owner.begin(0).expect("first base revision");
-        owner
+        let mut rig = OwnerRig::new();
+        let initial = rig.owner.committed().to_vec();
+        let mut first = blank_targets();
+        rig.owner.begin(0).expect("first base revision");
+        rig.owner
             .edit(2, ParameterChannel::Both, 100.0)
             .expect("first Both edit");
-        let first_count = owner
+        let first_count = rig
+            .owner
             .prepare_targets_into(&mut first)
             .expect("first prepare");
         assert_eq!(first_count, 1);
-        owner
-            .publish(&mut producer, 0, &first[..first_count])
+        rig.publish(0, &first[..first_count])
             .expect("first publication");
-        assert_eq!(owner.commit(), Ok(1));
+        assert_eq!(rig.owner.commit(), Ok(1));
 
-        let mut second = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; 12];
-        owner.begin(1).expect("second base revision before render");
-        owner
+        let mut second = blank_targets();
+        rig.owner
+            .begin(1)
+            .expect("second base revision before render");
+        rig.owner
             .edit(2, ParameterChannel::Right, 200.0)
             .expect("second asymmetric edit");
-        let second_count = owner
+        let second_count = rig
+            .owner
             .prepare_targets_into(&mut second)
             .expect("second prepare");
         assert_eq!(second_count, 1);
         assert_eq!(second[0].channel, ParameterChannel::Right);
-        owner
-            .publish(&mut producer, 1, &second[..second_count])
+        rig.publish(1, &second[..second_count])
             .expect("second publication");
-        assert_eq!(owner.commit(), Ok(2));
+        assert_eq!(rig.owner.commit(), Ok(2));
+        // The cells hold the latest write of each channel: the left cell the first transaction's
+        // `Both`, the right cell the second's `Right`. The block applies them as two lone targets.
+        let applied = rig.block();
+        assert_eq!(applied.len(), 2);
         assert_eq!(
-            consumer.try_pop(),
-            Ok(EffectControlRecord::PreparedTarget(first[0]))
+            (applied[0].slot, applied[0].channel, applied[0].words),
+            (first[0].slot, ParameterChannel::Left, first[0].words)
         );
         assert_eq!(
-            consumer.try_pop(),
-            Ok(EffectControlRecord::PreparedTarget(second[0]))
+            (applied[1].slot, applied[1].channel, applied[1].words),
+            (second[0].slot, ParameterChannel::Right, second[0].words)
         );
-        assert_eq!(owner.committed_revision(), 2);
         assert_eq!(
-            owner
+            rig.superseded.get(),
+            1,
+            "the first transaction's right-channel write was replaced before any block read it"
+        );
+        assert_eq!(rig.owner.committed_revision(), 2);
+        assert_eq!(
+            rig.owner
                 .committed()
                 .iter()
                 .find(|row| { row.parameter_index == 2 && row.channel == ParameterChannel::Left })
@@ -1606,7 +1586,7 @@ mod owner_tests {
             100.0
         );
         assert_eq!(
-            owner
+            rig.owner
                 .committed()
                 .iter()
                 .find(|row| { row.parameter_index == 2 && row.channel == ParameterChannel::Right })
@@ -1615,7 +1595,7 @@ mod owner_tests {
             200.0
         );
         assert_ne!(
-            owner.committed(),
+            rig.owner.committed(),
             initial.as_slice(),
             "both transactions changed the seed"
         );
@@ -1655,116 +1635,116 @@ mod owner_tests {
 
     #[test]
     fn invalid_edit_poison_survives_valid_overwrite_until_discard() {
-        let (mut owner, _producer, _consumer) = owner_and_queue();
-        owner.begin(0).expect("base revision");
-        assert!(owner.edit(2, ParameterChannel::Left, f32::NAN).is_err());
-        assert!(owner.edit(2, ParameterChannel::Left, 100.0).is_err());
-        assert!(owner.prepare_targets_into(&mut []).is_err());
-        owner.discard().expect("discard poisoned candidate");
-        owner.begin(0).expect("restart at unchanged revision");
+        let mut rig = OwnerRig::new();
+        rig.owner.begin(0).expect("base revision");
+        assert!(rig.owner.edit(2, ParameterChannel::Left, f32::NAN).is_err());
+        assert!(rig.owner.edit(2, ParameterChannel::Left, 100.0).is_err());
+        assert!(rig.owner.prepare_targets_into(&mut []).is_err());
+        rig.owner.discard().expect("discard poisoned candidate");
+        rig.owner.begin(0).expect("restart at unchanged revision");
     }
 
+    /// A target set wants no room: any number of transactions publish before a block reads, each
+    /// is accepted, and the block applies the newest write of each cell.
+    ///
+    /// Test value: a publication path that still refuses for room (the removed `Capacity` error),
+    /// which would turn a paused host's edits into `BACKPRESSURE` or a rebuild.
     #[test]
-    fn full_prefix_refusal_preserves_queue_and_candidate() {
-        let (mut owner, mut producer, mut consumer) = owner_and_queue();
-        for slot in 0..11 {
-            producer
-                .try_push(EffectControlRecord::Bypass(slot % 2 == 0))
-                .expect("fill queue");
+    fn a_target_set_wants_no_room_and_the_newest_write_of_each_cell_is_applied() {
+        let mut rig = OwnerRig::new();
+        let mut last = blank_targets();
+        let mut last_count = 0;
+        for revision in 0..40_u64 {
+            rig.owner.begin(revision).expect("base revision");
+            rig.owner
+                .edit(2, ParameterChannel::Both, 100.0 + revision as f32)
+                .expect("numeric edit");
+            rig.owner
+                .edit(2, ParameterChannel::Right, 200.0 + revision as f32)
+                .expect("asymmetric target");
+            last_count = rig.owner.prepare_targets_into(&mut last).expect("prepare");
+            assert_eq!(last_count, 2);
+            rig.publish(revision, &last[..last_count])
+                .expect("a publication never refuses for room");
+            rig.owner.commit().expect("commit");
         }
-        let initial = owner.committed().to_vec();
-        owner.begin(0).expect("base revision");
-        owner
-            .edit(2, ParameterChannel::Both, 100.0)
-            .expect("numeric edit");
-        owner
-            .edit(2, ParameterChannel::Right, 200.0)
-            .expect("asymmetric target");
-        let candidate = owner.candidate().to_vec();
-        let mut targets = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; 12];
-        let count = owner.prepare_targets_into(&mut targets).expect("prepare");
-        assert_eq!(count, 2);
-        assert_eq!(producer.available_capacity(), 1);
-        let successes = producer.success_count();
-        let full = producer.full_count();
+        assert_eq!(rig.owner.phase(), EffectControlOwnerPhase::Idle);
+        let applied = rig.block();
+        assert_eq!(applied, last[..last_count].to_vec());
         assert_eq!(
-            owner.publish(&mut producer, 0, &targets[..count]),
-            Err(EffectControlOwnerError::Capacity)
+            rig.superseded.get(),
+            2 * 39,
+            "39 replaced writes on each of the two cells"
         );
-        assert_eq!(owner.committed(), initial);
-        assert_eq!(owner.candidate(), candidate);
-        assert_eq!(owner.committed_revision(), 0);
-        assert_eq!(consumer.available_at_entry(), 11);
-        assert_eq!(
-            (producer.success_count(), producer.full_count()),
-            (successes, full)
-        );
-        assert_eq!(owner.phase(), EffectControlOwnerPhase::Open);
-        for slot in 0..11 {
-            assert_eq!(
-                consumer.try_pop(),
-                Ok(EffectControlRecord::Bypass(slot % 2 == 0))
-            );
-        }
-        assert_eq!(consumer.available_at_entry(), 0);
     }
 
     #[test]
     fn stale_base_and_commit_before_publish_are_refused() {
-        let (mut owner, mut producer, _consumer) = owner_and_queue();
-        assert!(owner.begin(1).is_err(), "stale base");
-        owner.begin(0).expect("current base");
-        assert!(owner.commit().is_err(), "commit before publication");
-        owner.edit(2, ParameterChannel::Both, 100.0).expect("edit");
-        let mut targets = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; 12];
-        let count = owner.prepare_targets_into(&mut targets).expect("prepare");
-        owner
-            .publish(&mut producer, 1, &targets[..count])
+        let mut rig = OwnerRig::new();
+        assert!(rig.owner.begin(1).is_err(), "stale base");
+        rig.owner.begin(0).expect("current base");
+        assert!(rig.owner.commit().is_err(), "commit before publication");
+        rig.owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("edit");
+        let mut targets = blank_targets();
+        let count = rig
+            .owner
+            .prepare_targets_into(&mut targets)
+            .expect("prepare");
+        rig.publish(1, &targets[..count])
             .expect_err("stale publication");
-        assert_eq!(owner.phase(), EffectControlOwnerPhase::Open);
+        assert_eq!(rig.owner.phase(), EffectControlOwnerPhase::Open);
+        assert!(
+            rig.block().is_empty(),
+            "a refused publication wrote no cell"
+        );
     }
 }
 
-/// Attach one bounded live-control channel to every prepared effect of the session.
+/// Attach one live-control lane to every prepared effect of the session: the instance's
+/// latest-target cells and, for an effect that declares observation taps when the plan has
+/// observation capacity, its observation queue.
 ///
 /// # The capacity rule that makes the render-side drain exact
 ///
-/// A channel is prepared at `min(depth, automation_capacity)` records. Each drained
-/// [`EffectControlRecord::Parameter`] produces at most one span and duplicates collapse, so a
-/// full drain can never stage more spans than the effect's own
-/// [`PreparedEffectMetadata::automation_capacity`](effect_contract::PreparedEffectMetadata).
-/// "The staging window cannot overflow" is therefore an invariant of preparation, not a runtime
-/// check on the render thread.
+/// A block stages one span for every live parameter cell it reads, in the block that reads it
+/// (decision 15, D15-2 and #1345 D4), so an instance's staging window, which is exactly its
+/// `automation_capacity`, must hold every live parameter cell of its effect.
+/// [`prepare_native_session_effects`] raises each instance's capacity to at least
+/// [`EffectLaneShape::live_parameter_cells`] of its descriptor, so this is an invariant of
+/// preparation, not a runtime check on the render thread.
+///
+/// `observation_taps` is the observation capacity the host asked for (zero for none): with it, an
+/// effect that declares taps gets a queue of one slot per declared tap, which holds the
+/// subscriptions of one block in order.
 ///
 /// # Errors
 ///
-/// `effect.control.prepare` if a bounded queue cannot be built, and
-/// `effect.control.capacity` if an effect declares a zero automation capacity, which no launch
-/// effect does and which would leave the channel unable to deliver anything.
+/// `effect.control.prepare` if a lane cannot be built, `effect.control.capacity` if an effect's
+/// automation capacity is below its live parameter cells (which preparation makes unreachable),
+/// and `effect.control.owner` if a prepared-target owner cannot be built.
 pub fn attach_effect_live_controls(
     prepared: &mut EffectPreparedSession,
-    depth: NonZeroUsize,
+    superseded: &LiveValuesSuperseded,
+    observation_taps: u32,
 ) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
     let declared = declared_live_addresses(&prepared.session);
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
         let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
-        let Some(capacity) = NonZeroUsize::new(entry.metadata.automation_capacity as usize) else {
+        let descriptor = entry.factory.descriptor();
+        let target_capability = entry.factory.target_preparation();
+        let target_slots = target_capability.map_or(0, |capability| capability.target_slots());
+        let shape = EffectLaneShape::from_descriptor(descriptor, target_slots);
+        if (entry.metadata.automation_capacity as usize) < shape.parameter_cells() {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.capacity",
                 path,
             });
             continue;
-        };
+        }
         let Some(&address) = declared.get(&(
             entry.track_id.as_str(),
             entry.rack,
@@ -1776,17 +1756,30 @@ pub fn attach_effect_live_controls(
             });
             continue;
         };
-        let Ok((producer, consumer)) =
-            bounded_spsc::<EffectControlRecord>(depth.min(capacity), QueueGeneration(0))
-        else {
+        let observation_depth = if observation_taps == 0 {
+            0
+        } else {
+            descriptor.observations.len()
+        };
+        // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
+        // lowered is prepared enabled (issue #1087), and this lane replaces the channel-less
+        // lane that carried the same bit. For the delay and the multiband (`lowers_session_bypass`
+        // is false) the prepared bypass stays in force, so a live toggle cannot lift it.
+        let Some((writer, lane)) = effect_control_lane(
+            EffectLaneSpec {
+                shape,
+                bypass: entry.initial_bypass,
+                observation_depth,
+            },
+            superseded,
+        ) else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.prepare",
                 path,
             });
             continue;
         };
-        let target_capable = entry.factory.target_preparation().is_some();
-        let owner = if target_capable {
+        let owner = if target_capability.is_some() {
             match EffectControlOwner::new(Arc::clone(&entry.factory), &entry.bank_preparation) {
                 Ok(owner) => Some(Box::new(owner)),
                 Err(_) => {
@@ -1804,19 +1797,11 @@ pub fn attach_effect_live_controls(
             track_id: entry.track_id.as_str().into(),
             address,
             effect_id: entry.effect_id.as_str().into(),
-            descriptor: entry.factory.descriptor(),
-            producer: EffectControlProducerHandle::new(producer, owner.is_some()),
+            descriptor,
+            writer,
             owner,
         });
-        // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
-        // lowered is prepared enabled (issue #1087), and this channel replaces the channel-less
-        // lane that carried the same bit. For the delay and the multiband (`lowers_session_bypass`
-        // is false) the prepared bypass stays in force, so a live toggle cannot lift it.
-        entry.control = Some(Box::new(if target_capable {
-            EffectControlLane::new_with_target_staging(consumer, entry.initial_bypass)
-        } else {
-            EffectControlLane::new(consumer, entry.initial_bypass)
-        }));
+        entry.control = Some(Box::new(lane));
     }
     if diagnostics.is_empty() {
         Ok(producers)

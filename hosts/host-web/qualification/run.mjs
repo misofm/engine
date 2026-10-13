@@ -27,7 +27,7 @@ const MUTATIONS = [
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
-  "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
+  "observation-armed", "observation-disarmed", "observation-identity", "observation-window",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
@@ -39,7 +39,15 @@ const MUTATIONS = [
   "render-allocations", "staging-reads",
   // Issue #1476 D5: one SDK instance's allocator call, and one SDK instance closed without its read.
   "sdk-render-allocations", "sdk-render-allocations-missing",
+  // Batch-verdict 2, B2 (root 2026-10-12): a real AudioContext resumed outside a trusted click, and
+  // a harness that clicked fewer or more controls than the page declared.
+  "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra",
 ];
+
+// The total time the page may take, from the first evaluate to the result, clicks included. A page
+// that is stuck (WebKit can wedge a page whose context stalls under full CPU load) fails by name here
+// instead of waiting on a locator.
+const PAGE_DEADLINE_MS = 300_000;
 
 // Issue #1476 D4: every SDK engine `sdk-response-entry.ts` creates, in the order its count is
 // read (with repeats). A new SDK instance adds its label here.
@@ -197,7 +205,7 @@ function validate(browserName, result) {
   gate(browserName, "control-path", live?.telemetryFrames >= 1,
     "no render-telemetry frame arrived over a full window");
 
-  // Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, with `firstSample`
+  // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
   const observation = result.observation;
@@ -219,12 +227,24 @@ function validate(browserName, result) {
   gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
     && observation?.armed?.windowsTile === true,
   "observation windows did not advance monotonically and tile");
-  gate(browserName, "observation-unsubscribe", observation?.disarmed?.unsubscribeResult === 0
-    && observation?.disarmed?.unsubscribeBindings === 0
-    && observation?.disarmed?.maximumTrackGrDb === 0,
-  "an unsubscribed tap kept publishing");
+  // A tap that was never armed publishes none. (That an unsubscribe stops a tap's reading is the
+  // Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`'s, #1345
+  // Amendment 7.)
+  gate(browserName, "observation-disarmed", observation?.disarmed?.maximumTrackGrDb === 0,
+    "a tap that was never armed published a reduction");
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
+  // Every real `AudioContext.resume()` ran inside a trusted click (the page counts them, split by
+  // `window.event`) and the harness clicked exactly the controls the page declared: no direct
+  // `resume()`, no missing click, no extra one (batch-verdict 2, B2).
+  const resumes = result.resumes;
+  gate(browserName, "resume-clicks", resumes?.direct === 0
+    && Number.isInteger(resumes?.declared)
+    && resumes.declared === (result.sdkResponse === null ? 0 : 2)
+    && resumes.inClick === resumes.declared
+    && resumes.planned === resumes.declared
+    && resumes.clicksPerformed === resumes.declared,
+  `a real AudioContext was resumed outside a trusted click, the page did not declare the two SDK clicks (none without the SDK), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -716,8 +736,11 @@ function mutate(result, mutation) {
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
-  if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;
+  if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
+  if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
+  if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
+  if (mutation === "resume-clicks-extra") copy.resumes.clicksPerformed += 1;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-observation-window-reversed") {
     const window = copy.sdkResponse.observations.resident.windows[0];
@@ -770,7 +793,9 @@ function mutationProofs(browserName, result) {
   for (const mutation of mutations) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation)),
-      (error) => error instanceof Error && error.message.startsWith(`${browserName}:`),
+      (error) => error instanceof Error && error.message.startsWith(
+        mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:` : `${browserName}:`,
+      ),
       `${browserName}: ${mutation}: red mutation escaped its gate`,
     );
   }
@@ -889,6 +914,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     });
     page.setDefaultTimeout(120000);
     await page.goto(`${origin}/qualification/index.html`);
+    const plan = await page.evaluate(
+      async (enabled) => (await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`))
+        .resumeClickPlan(enabled),
+      sdkEnabled,
+    );
     const execution = page.evaluate(async (enabled) => {
       try {
         const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
@@ -904,22 +934,48 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         };
       }
     }, sdkEnabled);
-    if (sdkEnabled) {
-      // Resume each real AudioContext with a trusted gesture across browsers. The SDK
-      // qualification creates these controls in execution order; racing completion keeps
-      // a preceding failure from turning into a locator timeout that hides its diagnostic.
-      const completion = execution.then((value) => ({ kind: "complete", value }));
-      for (const selector of ["#spectrum-collection-resume", "#spectrum-hop-resume"]) {
-        const click = page.locator(selector).click().then(
+    // Resume each real AudioContext with a trusted gesture across browsers: WebKit starts or restarts
+    // a context only inside a user activation, and leaves `resume()` pending without one. The page
+    // declares the controls it needs clicked (`resumeClickPlan`), in order, and this loop clicks
+    // exactly those, counting its clicks, under the one `PAGE_DEADLINE_MS` deadline for the whole
+    // page. The count goes into the result: a missing or an extra click, or a `resume()` that was
+    // not in a click, fails the `resume-clicks` gate by name. Racing completion keeps a preceding
+    // failure from turning into a locator timeout that hides its diagnostic.
+    const deadline = Date.now() + PAGE_DEADLINE_MS;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const completion = execution.then((value) => ({ kind: "complete", value }));
+    let deadlineTimer;
+    const expired = new Promise((resolve) => {
+      deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), remaining());
+    });
+    let clicksPerformed = 0;
+    try {
+      for (const selector of plan) {
+        const click = page.locator(selector).first().click({ timeout: remaining() }).then(
           () => ({ kind: "clicked" }),
           (error) => ({ kind: "click-error", error }),
         );
-        const outcome = await Promise.race([completion, click]);
+        const outcome = await Promise.race([completion, click, expired]);
         if (outcome.kind === "complete") break;
-        if (outcome.kind === "click-error") throw outcome.error;
+        if (outcome.kind === "deadline" || outcome.kind === "click-error") {
+          // The page neither finished nor made the control this loop waits for: it is stuck. Name
+          // that, with what the page logged, instead of a bare locator timeout.
+          throw new Error(`${browserName}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
+        }
+        clicksPerformed += 1;
       }
+      const outcome = await Promise.race([completion, expired]);
+      if (outcome.kind === "deadline") {
+        throw new Error(`${browserName}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); page diagnostics: ${diagnostics.join("; ")}`);
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
     }
     const result = await execution;
+    if (result.resumes !== undefined) {
+      result.resumes.planned = plan.length;
+      result.resumes.clicksPerformed = clicksPerformed;
+    }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);

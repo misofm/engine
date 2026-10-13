@@ -54,7 +54,9 @@ function status(exports, handle) {
   assert.equal(view.getUint32(0, true), 80);
   assert.equal(view.getUint32(4, true), ABI_VERSION);
   assert.equal(view.getUint32(28, true), 0);
-  for (const offset of [48, 56, 64, 72]) assert.equal(view.getBigUint64(offset, true), 0n);
+  // Word 48 is `live_values_superseded` (#1399): a script that replaces a live value render has
+  // not read counts it, so it is not required zero. Words 56, 64 and 72 are still reserved.
+  for (const offset of [56, 64, 72]) assert.equal(view.getBigUint64(offset, true), 0n);
   return {
     state: view.getUint32(8, true),
     lastResult: view.getUint32(12, true),
@@ -366,7 +368,7 @@ async function runBackend(modulePath, expectedBackend, sessionDocument, source) 
 ///
 /// The fixture is identity apart from one dynamic-rack parametric EQ whose band 1 is a low shelf,
 /// so a constant input renders to that same constant until a command moves it. Ten blocks; one
-/// matrix retarget, three refusals, a smoothed pan, a windowed fader move, a windowed mute, an
+/// matrix retarget, two refusals, a smoothed pan, a windowed fader move, a windowed mute, an
 /// effect parameter on both lanes, a live bypass, and one batch that releases the mute and the
 /// bypass together across two different destination queues. The digest is a statement about
 /// *when* each of those took effect, not merely that they did.
@@ -427,11 +429,9 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
   reports.matrix = submitCommands(control, [matrix]);
   step(1);
   reports.unknownTrack = submitCommands(control, [{ ...matrix, trackIndex: 5 }]);
-  // A flood of bypass records, which stay a queue: a matrix or fader value is a latest-target
-  // cell with no room to overfill (#1312).
-  reports.flood = submitCommands(
-    control, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => bypassOn),
-  );
+  // No flood: every matrix, fader, input, send and effect value is a latest-target cell with no
+  // room to overfill (#1312, #1345, #1346, #1347), and this fixture's EQ declares no tap for a
+  // subscription queue to hold.
   reports.unknownParameter = submitCommands(control, [unknownParameter]);
   step(2);
   reports.pan = submitCommands(control, [pan]);

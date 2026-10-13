@@ -57,7 +57,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   // without duplicating the engine's authority: the engine still refuses if this check is wrong.
   if (observationTaps !== 0n && commandQueueRecords === 0n) {
     throw new MisoUsageError(
-      "observation taps ride the effect's own command queue, so liveControlObservationTaps requires "
+      "an observation subscription is a live command, so liveControlObservationTaps requires "
       + "liveControlCommandQueueRecords",
     );
   }

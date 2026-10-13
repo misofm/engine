@@ -1281,6 +1281,14 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
 /// report does not carry: its estimate is 23,039 bytes at both widths, plus 10 %, rounded to 64.
 const REFERENCE_MODEL_BUDGET: u64 = 25_344;
 
+/// The native effect-control resources the graph cap also charges (`prepare_host_runtime`'s
+/// `admitted_graph_and_model`: the producer table plus the transferred owner payloads, per prepared
+/// effect lane and per control cell, not per block). Its measured total for the nine console-slot
+/// EQs is 19,377 bytes at both widths (the row is lane-width independent: 15,345 before #1345's
+/// per-tap cells replaced the control queue and the target FIFO), plus 10 %, rounded up to a
+/// 64-byte multiple: 21,314.7 -> 21,376. The same convention as the model budget above.
+const REFERENCE_EFFECT_CONTROL_BUDGET: u64 = 21_376;
+
 /// Sets one C cap row.
 type SetCap = fn(&mut CompileLimits, u64);
 
@@ -1296,7 +1304,24 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
             report
         }
     };
-    let model = host_half(SESSION, &limits()).model_estimate();
+    let half = host_half(SESSION, &limits());
+    let model = half.model_estimate();
+    let effect_controls = half
+        .prepared
+        .report
+        .effect_control_resources
+        .total_bytes()
+        .unwrap_or_else(|| panic!("the reference session's effect-control total fits"));
+    // The graph cap charges these too (`admitted_graph_and_model`); the reference session, a
+    // first preparation with no route lane and no spectrum capture, adds none of them.
+    assert_eq!(
+        (
+            half.prepared.report.route_control_resources.total_bytes,
+            half.prepared.report.spectrum_capture_retained_bytes,
+        ),
+        (0, 0),
+        "the graph requirement below omits terms the reference session now makes nonzero"
+    );
     let budget = |row: &str| {
         REFERENCE_BUDGETS
             .iter()
@@ -1326,6 +1351,12 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
             model.compiled_model_bytes
         ));
     }
+    println!("effect-control resources: {effect_controls} of {REFERENCE_EFFECT_CONTROL_BUDGET}");
+    if effect_controls > REFERENCE_EFFECT_CONTROL_BUDGET {
+        over.push(format!(
+            "effect-control resources {effect_controls} > {REFERENCE_EFFECT_CONTROL_BUDGET}"
+        ));
+    }
     assert!(
         over.is_empty(),
         "retained rows over their budget (raise the budget with its reason, or find the \
@@ -1339,8 +1370,10 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
         (
             "graph",
             |caps, value| caps.maximum_graph_session_plus_plan_bytes = value,
-            report.graph_session_plus_plan_bytes + model.compiled_model_bytes,
-            budget("graph_session_plus_plan_bytes") + REFERENCE_MODEL_BUDGET,
+            report.graph_session_plus_plan_bytes + model.compiled_model_bytes + effect_controls,
+            budget("graph_session_plus_plan_bytes")
+                + REFERENCE_MODEL_BUDGET
+                + REFERENCE_EFFECT_CONTROL_BUDGET,
         ),
         (
             "source-total",
@@ -1388,6 +1421,19 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
         unsafe {
             let (session, plan) = compile_c(SESSION, &at_budget);
             assert_eq!(resources_c(plan), report, "{row}: the cap moves no row");
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
+        }
+        // The requirement is exact: a cap equal to it admits, and the cap one below refuses.
+        let mut exact = limits();
+        set_cap(&mut exact, requirement);
+        println!(
+            "{row}: requirement {requirement} admits, {} refuses",
+            requirement - 1
+        );
+        // SAFETY: The returned handles are uniquely owned until the matching destroy calls.
+        unsafe {
+            let (session, plan) = compile_c(SESSION, &exact);
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2865,7 +2911,6 @@ impl RaceEdits {
 struct RaceCounts {
     live: u64,
     structural: u64,
-    live_backpressure: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
     retries: u64,
@@ -2891,8 +2936,6 @@ const RACE_WEDGE_BLOCKS: u64 = 256;
 /// One submission's outcome in the race.
 enum Submitted {
     Committed,
-    /// `RESULT_BACKPRESSURE` with `control.live.backpressure`.
-    LiveBackpressure,
     /// `RESULT_BACKPRESSURE` with `control.plan.backpressure`.
     PlanBackpressure,
     /// `RESULT_OK` with the protocol's own `Backpressure` status.
@@ -2970,10 +3013,6 @@ impl RaceControl<'_> {
             (RESULT_BACKPRESSURE, _) => {
                 // SAFETY: This thread is the session's only control caller.
                 match unsafe { last_error_c(self.session) }.as_slice() {
-                    b"control.live.backpressure" => {
-                        self.counts.live_backpressure += 1;
-                        Submitted::LiveBackpressure
-                    }
                     b"control.plan.backpressure" => {
                         self.counts.plan_backpressure += 1;
                         Submitted::PlanBackpressure
@@ -3307,10 +3346,6 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         let counts = race_live_edits(run);
         assert_eq!(counts.structural, RACE_EDITS / 8 + 2, "run {run}");
         assert!(counts.live >= RACE_EDITS - RACE_EDITS / 8, "run {run}");
-        assert_eq!(
-            counts.live_backpressure, 0,
-            "run {run}: a fader, mute or pan edit is never refused for room"
-        );
         assert!(counts.plan_backpressure >= 1, "run {run}");
         // Every admitted structural transaction swapped in exactly one plan, and no live edit
         // swapped in one of its own: a live edit that silently rebuilt is counted here.
@@ -3320,7 +3355,6 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         );
         total.live += counts.live;
         total.structural += counts.structural;
-        total.live_backpressure += counts.live_backpressure;
         total.plan_backpressure += counts.plan_backpressure;
         total.event_backpressure += counts.event_backpressure;
         total.retries += counts.retries;

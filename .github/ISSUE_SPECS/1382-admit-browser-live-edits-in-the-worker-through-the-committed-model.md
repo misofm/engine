@@ -123,6 +123,8 @@ term into effective mute, for strips and for sends that follow them.
   that assert host-web-only composition move to the shared path's equivalents, or are deleted in
   the same PR. The static gate's worklet leg for `command_submit`
   (`check-web-audioworklet.sh:494-500`) is removed with the export's worklet role.
+  Amendment (root, 2026-10-12): the render half of `a_refused_batch_does_not_undo_a_committed_vca_batch`
+  (#1525; and its solo and route siblings, if any) moves to the shared path; it is not deleted.
 
 ## Deliverables
 

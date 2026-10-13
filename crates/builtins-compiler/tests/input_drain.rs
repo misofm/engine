@@ -43,11 +43,6 @@ fn prepared_filter(lanes: BuiltinLaneSelector) -> TrackInputRecord {
     }
 }
 
-#[test]
-fn prepared_filter_record_stays_within_the_frozen_queue_slot_bound() {
-    assert!(core::mem::size_of::<TrackInputRecord>() <= 64);
-}
-
 /// A per-lane retarget de-symmetrizes; a `Both` retarget preserves.
 ///
 /// Red mutation: return `SymmetryEvent::Preserve` for every selector -> the `Left`/`Right` arms
@@ -152,43 +147,40 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
     assert!(rebound.eligible());
 }
 
-/// A block applies every input record queued at its entry, however full the queue is.
+/// A block applies the last value of each input cell, however many edits came before it.
 ///
-/// The drain reads the queue's length once at block entry (`available_at_entry`) and pops that
-/// many. Every other test in the tree queues one or two records per track, so a drain that stopped
-/// early -- a per-block cap, an off-by-one on the count, a `break` on the first retarget -- would
-/// leave the rest pending and apply them blocks late without any of them noticing. Here each
-/// track's queue is filled to capacity with a walk of immediate trims ending on -40 dB, rendered,
-/// then filled again, ending on -20 dB, and rendered again. The second fill starts where the first
-/// drain left the ring's cursors, so the second block's drain reads a wrapped count.
+/// Every other test in the tree writes one or two values per track, so a drain that stopped early,
+/// applied the oldest value, or read a cell once per revision would pass them. Here each track
+/// takes a long walk of immediate trims ending on -40 dB, rendered, then a second walk ending on
+/// -20 dB, rendered again. Each walk is far longer than the 16-record queue the lane had before
+/// #1346, and every edit is its own transaction.
 ///
-/// * Every record was **applied** in its block: each block renders exactly the bits a twin renders
-///   when it is sent only that block's last record, and a third, uncommanded twin shows the
+/// * Every walk was **collapsed** to its last value: each block renders exactly the bits a twin
+///   renders when it is sent only that block's last value, and a third, uncommanded twin shows the
 ///   comparison can see a trim at all.
-/// * Nothing is **pending**: after each block every queue takes another capacity's worth of
-///   records.
+/// * Nothing is **refused**: the walk is accepted in full, where the queue refused its 17th record.
 ///
-/// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the
-/// full cohort and one-lane tail of the SIMD fixture, at the build's own width) and the scalar one
+/// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the full
+/// cohort and one-lane tail of the SIMD fixture, at the build's own width) and the scalar one
 /// (`LiveControlInputProcessor::process`, through the scalar-dispatch fixture).
 ///
-/// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
-/// `separate_capacity_sixteen_drain_witness_has_no_pending_records`), retired with its capture
-/// tooling.
+/// Replaces `a_block_drains_every_input_record_queued_at_its_entry` (#1027, from the #600
+/// input-trim qualification), which filled the queue to capacity.
 ///
-/// Red mutation (Sol, #1027 attempt 1): cap the banked drain at two records per block,
-/// `for _ in 0..available.min(2)` -> the banked arm's first block renders the second record's trim
-/// instead of the last one's; with that assertion removed, the refill finds records still pending.
-/// The same cap on the scalar drain turns the scalar arm red. A consumer that reads a wrapped count
-/// as empty turns the second block red.
+/// Red mutation: apply the oldest value of the walk instead of the newest (read the cell's
+/// first-written slot) -> the first block renders the walk's first trim, not its last. Skip the
+/// input drain in `begin_block` -> the filled run renders the uncommanded twin's bits.
 #[cfg(feature = "test-support")]
 #[test]
-fn a_block_drains_every_input_record_queued_at_its_entry() {
+fn a_block_applies_the_last_of_many_input_edits() {
     use builtins_compiler::{
         PreparedBuiltinsGraphBound, test_only_prepared_pair_graph,
         test_only_prepared_scalar_pair_graph,
     };
     use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+
+    /// Far past the 16 records the input queue held.
+    const WALK: usize = 40;
 
     fn trim(db: f32) -> TrackInputRecord {
         TrackInputRecord::TrimDb {
@@ -214,51 +206,28 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
         output.iter().map(|value| value.to_bits()).collect()
     }
 
-    /// Fills every track's queue: a walk of trims ending on `last` dB. Returns the capacities.
-    fn fill(bound: &mut PreparedBuiltinsGraphBound, arm: &str, last: f32) -> Vec<usize> {
-        let mut capacities = Vec::new();
-        for control in &mut bound.track_controls {
-            let capacity = control.input.as_ref().expect("input lane").capacity();
-            assert!(
-                capacity > 2,
-                "{arm}: a queue of {capacity} cannot tell a cap of two apart"
-            );
-            for index in 1..capacity {
-                control
-                    .input
-                    .as_mut()
-                    .expect("input lane")
-                    .try_push(trim(-(index as f32)))
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "{arm} {}: a record from before the block is still pending",
-                            control.track_id
-                        )
-                    });
-            }
-            control
-                .input
-                .as_mut()
-                .expect("input lane")
-                .try_push(trim(last))
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "{arm} {}: a record from before the block is still pending",
-                        control.track_id
-                    )
-                });
-            assert!(
-                control
-                    .input
-                    .as_mut()
-                    .expect("input lane")
-                    .try_push(trim(-6.0))
-                    .is_err(),
-                "{arm}: the queue is full before the block"
-            );
-            capacities.push(capacity);
+    /// Writes one transaction per edit of a walk of trims ending on `last` dB, on every track.
+    fn walk(bound: &mut PreparedBuiltinsGraphBound, last: f32) {
+        for index in 1..WALK {
+            bound.test_only_write(|controls, stamp| {
+                for control in controls {
+                    control
+                        .input
+                        .as_mut()
+                        .expect("input lane")
+                        .write(stamp, trim(-(index as f32)));
+                }
+            });
         }
-        capacities
+        bound.test_only_write(|controls, stamp| {
+            for control in controls {
+                control
+                    .input
+                    .as_mut()
+                    .expect("input lane")
+                    .write(stamp, trim(last));
+            }
+        });
     }
 
     type Build = fn() -> PreparedBuiltinsGraphBound;
@@ -267,22 +236,21 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
         ("scalar", || test_only_prepared_scalar_pair_graph(false)),
     ];
     for (arm, build) in arms {
-        let mut filled = build();
+        let mut walked = build();
         let mut last_only = build();
         let mut quiet = build();
-        // Block 0: an empty ring filled to capacity. Block 1: refilled after the drain, so the
-        // ring's cursors have wrapped, and the drain reads a wrapped count.
         for (block, last) in [(0_u64, -40.0_f32), (1, -20.0)] {
-            fill(&mut filled, arm, last);
-            for control in &mut last_only.track_controls {
-                control
-                    .input
-                    .as_mut()
-                    .expect("input lane")
-                    .try_push(trim(last))
-                    .expect("queue room");
-            }
-            let filled_bits = render(&mut filled, block);
+            walk(&mut walked, last);
+            last_only.test_only_write(|controls, stamp| {
+                for control in controls {
+                    control
+                        .input
+                        .as_mut()
+                        .expect("input lane")
+                        .write(stamp, trim(last));
+                }
+            });
+            let walked_bits = render(&mut walked, block);
             let last_only_bits = render(&mut last_only, block);
             assert_ne!(
                 last_only_bits,
@@ -290,12 +258,9 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
                 "{arm} block {block}: the trim moves no bit, so the comparison proves nothing"
             );
             assert_eq!(
-                filled_bits, last_only_bits,
-                "{arm} block {block}: the block did not apply every queued record: the last one \
-                 did not decide it"
+                walked_bits, last_only_bits,
+                "{arm} block {block}: the block did not apply the walk's last value"
             );
         }
-        // Nothing from block 1 is pending either: every queue takes another capacity's worth.
-        fill(&mut filled, arm, -6.0);
     }
 }

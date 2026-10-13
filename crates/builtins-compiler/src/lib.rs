@@ -1,7 +1,6 @@
 //! Off-render preparation adapter for issue-007 builtins.
 #![allow(missing_docs)]
 
-use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -34,10 +33,11 @@ use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveControlRecord, NodeTailBound, ResponseAnalysisError,
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent, TailSamples,
 };
+pub use engine::realtime::LiveValuesSuperseded;
 use engine::realtime::{
     CellRead, CellReader, CellWriter, Consumer, DirtyReader, DirtyWord, LatestCell, LiveSnapshot,
-    LiveStamp, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
-    bounded_spsc, bounded_spsc_retained_payload,
+    LiveStamp, PreparedRenderPlan, RenderEnvelope, RenderError, SharedAllocation,
+    bounded_spsc_retained_payload,
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, BuiltinStripOwner,
@@ -51,7 +51,6 @@ use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use session::{CompiledSession, MatrixOrPan, StripRef, Track};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -154,28 +153,28 @@ pub enum TrackFaderRecord {
 
 /// One live-control trim, polarity or prepared-filter record for a track's **input** stage.
 ///
-/// # Why this is a third record type and a third queue
+/// # Why this is a third record type and a third set of cells
 ///
-/// The same reason [`TrackFaderRecord`] is a second one, one stage earlier: a queue has exactly
-/// one consumer, and that consumer is whoever renders the addressed stage. The input section is a
-/// different stage from the fader, on a different node and in a different bank, so it needs its
-/// own channel. `TrackControlRecord` and `TrackFaderRecord` are unchanged.
+/// The same reason [`TrackFaderRecord`] is a second one, one stage earlier: a stage's cells have
+/// exactly one reader, and that reader is whoever renders the addressed stage. The input section
+/// is a different stage from the fader, on a different node and in a different bank, so it needs
+/// its own cells. `TrackControlRecord` and `TrackFaderRecord` are unchanged. Since #1346 it is the
+/// value written to the strip's latest-target input cells ([`InputCells::write`]), not an element
+/// of a queue: a trim or polarity value lands in its channel's cell, a prepared filter target in
+/// the cell of its section and channel, and render applies the newest value of each.
 ///
-/// # Why one record carries `Both` rather than two per-lane records
+/// # What `Both` means, and how the witness reads it
 ///
-/// This is a deliberate departure from the effect-parameter lowering, where a `channel = both`
-/// command on a `PerLane` parameter becomes *two* records
-/// (`CommandRecord::into_effect_records`). It is the fader/mute lowering that is copied here
-/// instead, and the reason is the channel-symmetry witness rather than economy: this record type
-/// is **upstream of the seam**, so [`ChannelSymmetryWitness::admit`] reads it, and a pair of
-/// per-lane records would present as two `Desymmetrize` events and retire the track's mono
-/// collapse for the life of the plan -- on a command that changes both channels identically, at
-/// one block boundary, over one window. `BuiltinLaneSelector::Both` says exactly what happened and
-/// is admitted as [`SymmetryEvent::Preserve`], which is what
-/// `SymmetryEvent::Preserve`'s own documentation says a both-channel retarget is. The effect
-/// path splits because a launch effect counts a policy-violating span as invalid rather than
-/// applying it; the builtins have no such constraint, and `BuiltinLaneSelector` exists precisely
-/// to carry the distinction.
+/// This record type is **upstream of the seam**, so [`ChannelSymmetryWitness::admit`] reads it, and
+/// a pair of per-lane edits that changed both channels identically at one block boundary must not
+/// retire the track's mono collapse for the life of the plan. `BuiltinLaneSelector::Both` says
+/// exactly that and is admitted as [`SymmetryEvent::Preserve`], which is what
+/// `SymmetryEvent::Preserve`'s own documentation says a both-channel retarget is. A cell holds a
+/// value per channel, so render rebuilds the record from the cells' final contents (#1346 D3): when
+/// both channels' cells of a kind were applied in one block with equal words, the drain admits and
+/// applies one `Both` record, and any other pair, or a lone channel, is admitted as
+/// `Desymmetrize`. So `Both` written as one record and the two channels written as two equal
+/// records read alike, and no write order changes what the witness sees.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrackInputRecord {
     /// Retarget the addressed lanes' input trim, in decibels, over an explicit ramp window.
@@ -239,75 +238,18 @@ impl LiveControlRecord for TrackInputRecord {
 pub struct TrackControlRequest {
     /// Session-stable track identity. It must name a track of the compiled session.
     pub track_id: String,
-    /// Exact bounded depth of this track's input queue (the input lane's ring, #210 phase 3). A
-    /// full queue is typed backpressure. The fader and matrix lanes are latest-target cells and
-    /// have no depth (#1312).
-    pub queue_capacity: NonZeroUsize,
     /// The session's `live_values_superseded` count, which this strip's cell readers add to
     /// (#1312 D2). Every request of one session carries clones of one count.
     pub superseded: LiveValuesSuperseded,
     /// Whether the strip also gets the live input trim/polarity/filter lane (#1254 D1).
     ///
     /// `true` attaches all three lanes, as every request did before #1254. `false` attaches only
-    /// the matrix and fader lanes: no input ring is created or charged, the producer's
+    /// the matrix and fader lanes: no input cells are created or charged, the producer's
     /// [`TrackControlProducer::input`] is `None`, and the strip keeps its chain's own builtin
-    /// tail, because only a live input target can enable a filter the session left off.
+    /// tail, because only a live input target can enable a filter the session left off. Every lane
+    /// is a latest-target cell with no depth (#1312, #1346), so a request names no queue size.
     pub input_lane: bool,
 }
-
-/// The session's count of live values a later write replaced before render read them (D15-2,
-/// #1312 D2): `live_values_superseded`.
-///
-/// One per session, shared by every plan the session prepares. Render is its only writer, with a
-/// load, a saturating add and a store (never a read-modify-write: a plan swap hands render from
-/// one plan to the next on the same single render thread, so two writers never overlap); control
-/// reads it. A clone shares the count.
-#[derive(Clone, Debug, Default)]
-pub struct LiveValuesSuperseded(Arc<AtomicU64>);
-
-impl LiveValuesSuperseded {
-    /// A count at zero.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
-    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
-    /// session charges it once (#1312 D2).
-    #[must_use]
-    pub fn retained_bytes() -> u64 {
-        u64::try_from(core::alloc::Layout::new::<SharedAllocation<AtomicU64>>().size())
-            .expect("a count allocation's size fits u64")
-    }
-
-    /// Control: the writes counted so far.
-    #[must_use]
-    pub fn get(&self) -> u64 {
-        self.0.load(core::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Render: add `count` replaced writes. Saturating. Render is the only writer.
-    // REALTIME_POLICY_BEGIN
-    fn add(&self, count: u64) {
-        if count != 0 {
-            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
-            self.0.store(
-                now.saturating_add(count),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-        }
-    }
-    // REALTIME_POLICY_END
-}
-
-impl PartialEq for LiveValuesSuperseded {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for LiveValuesSuperseded {}
 
 /// Words of one fader or mute cell: the value (`fader_db` bits, or `0`/`1`) and the ramp window.
 const FADER_CELL_WORDS: usize = 2;
@@ -349,15 +291,6 @@ impl MatrixLane {
             dirty: DirtyWord::new(),
         }
     }
-}
-
-/// The layout of an `Arc<T>` allocation: the two counts, then `T` (the allocation `Arc::new`
-/// makes). The resource plan charges each lane by it.
-#[repr(C)]
-struct SharedAllocation<T> {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
-    value: T,
 }
 
 /// Control's write end of one strip's fader/mute cells (#1312 D5). A write cannot fail and never
@@ -482,8 +415,8 @@ impl FaderReader {
     /// read `Unchanged` is not paired.
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
-    /// returned after the last. The count of writes the reads replaced is added to the session
-    /// counter once. It allocates nothing and takes no lock.
+    /// returned after the last. Each applied read adds the writes it replaced to the session
+    /// counter (`read_counted`). It allocates nothing and takes no lock.
     fn drain(
         &mut self,
         snapshot: LiveSnapshot,
@@ -498,26 +431,20 @@ impl FaderReader {
             return Ok(());
         }
         let mut applied = [None; FADER_CELLS];
-        let mut superseded = 0_u64;
         for (index, slot) in applied.iter_mut().enumerate() {
             if pending & (1 << index) == 0 {
                 continue;
             }
-            if let CellRead::Applied {
-                words,
-                superseded: replaced,
-                ..
-            } = self.cells[index].read(
+            if let CellRead::Applied { words, .. } = self.cells[index].read_counted(
                 &self.lane.cells[index],
                 snapshot,
                 &mut self.dirty,
                 index as u32,
+                &self.superseded,
             ) {
-                superseded = superseded.saturating_add(replaced);
                 *slot = Some(words);
             }
         }
-        self.superseded.add(superseded);
         let mut first_error = Ok(());
         for (kind, base) in [(FaderKind::Fader, FADER_LEFT), (FaderKind::Mute, MUTE_LEFT)] {
             let mut run = |selector, words| {
@@ -554,7 +481,7 @@ struct MatrixReader {
 // REALTIME_POLICY_BEGIN
 impl MatrixReader {
     /// Read the stage's pending cell under `snapshot` and apply its newest value in range, if
-    /// any. The first refusal is returned; the replaced count is added to the session counter.
+    /// any. The first refusal is returned; the applied read adds the writes it replaced to the session counter.
     fn drain(
         &mut self,
         snapshot: LiveSnapshot,
@@ -564,15 +491,15 @@ impl MatrixReader {
         if pending == 0 {
             return Ok(());
         }
-        let CellRead::Applied {
-            words, superseded, ..
-        } = self
-            .cell
-            .read(&self.lane.cell, snapshot, &mut self.dirty, 0)
-        else {
+        let CellRead::Applied { words, .. } = self.cell.read_counted(
+            &self.lane.cell,
+            snapshot,
+            &mut self.dirty,
+            0,
+            &self.superseded,
+        ) else {
             return Ok(());
         };
-        self.superseded.add(superseded);
         apply(
             Matrix2x2 {
                 ll: f32::from_bits(words[0]),
@@ -620,13 +547,365 @@ fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader)
     )
 }
 
+/// Words of one input trim cell: the `trim_db` bits and the ramp window.
+const TRIM_CELL_WORDS: usize = 2;
+/// Words of one input polarity cell: `0` or `1` and the ramp window.
+const POLARITY_CELL_WORDS: usize = 2;
+/// Words of one input filter cell: the final pair's two values, then the section's six
+/// coefficients (`[c1, a2, a3, m0, m1, m2]`), all as bits.
+const FILTER_CELL_WORDS: usize = 8;
+/// The input section's two filter sections: the HPF (`0`) and the LPF (`1`).
+const FILTER_SECTIONS: usize = 2;
+/// Cells of one input stage: trim left and right, polarity left and right, then the filter cells
+/// of section 0 and section 1, left before right. The cell index is its dirty bit, and the stage's
+/// canonical drain order (#1346 D2).
+const INPUT_CELLS: usize = 4 + 2 * FILTER_SECTIONS;
+const TRIM_FIRST: usize = 0;
+const POLARITY_FIRST: usize = 2;
+const FILTER_FIRST: usize = 4;
+const _: () = assert!(
+    INPUT_CELLS <= u64::BITS as usize,
+    "a cell index is a dirty bit"
+);
+
+/// What one strip's input stage shares between its writer (control) and its reader (render): the
+/// trim, polarity and filter cells and their one dirty word (#1346 D1).
+struct InputLane {
+    trim: [LatestCell<TRIM_CELL_WORDS>; 2],
+    polarity: [LatestCell<POLARITY_CELL_WORDS>; 2],
+    filter: [LatestCell<FILTER_CELL_WORDS>; 2 * FILTER_SECTIONS],
+    dirty: DirtyWord,
+}
+
+impl InputLane {
+    fn new() -> Self {
+        Self {
+            trim: core::array::from_fn(|_| LatestCell::new()),
+            polarity: core::array::from_fn(|_| LatestCell::new()),
+            filter: core::array::from_fn(|_| LatestCell::new()),
+            dirty: DirtyWord::new(),
+        }
+    }
+}
+
+/// The channels a lane selector addresses, as cell indices (left `0`, right `1`).
+fn selected_channels(lanes: BuiltinLaneSelector) -> core::ops::RangeInclusive<usize> {
+    match lanes {
+        BuiltinLaneSelector::Left => 0..=0,
+        BuiltinLaneSelector::Right => 1..=1,
+        BuiltinLaneSelector::Both => 0..=1,
+    }
+}
+
+/// Control's write end of one strip's input trim, polarity and filter cells (#1346 D6). A write
+/// cannot fail on a value and never waits.
+pub struct InputCells {
+    lane: Arc<InputLane>,
+    trim: [CellWriter<TRIM_CELL_WORDS>; 2],
+    polarity: [CellWriter<POLARITY_CELL_WORDS>; 2],
+    filter: [CellWriter<FILTER_CELL_WORDS>; 2 * FILTER_SECTIONS],
+}
+
+impl InputCells {
+    /// Write `record` as the newest value of the cell(s) it addresses, stamped with the revision of
+    /// the transaction that commits it. A `Both` record writes the left and the right cell; a
+    /// filter target writes the cells of its section.
+    ///
+    /// The caller publishes the stamp's revision on the plan's gate after every write of the
+    /// transaction (#1346 D7); a value is not applied before that.
+    ///
+    /// # Panics
+    ///
+    /// When a filter target names a section other than `0` or `1`. The caller has validated the
+    /// target ([`builtins::validate_prepared_input_filter_target`]) before its first write of the
+    /// transaction, as every fallible check precedes the first write; a value is never dropped
+    /// for want of a cell.
+    pub fn write(&mut self, stamp: LiveStamp<'_>, record: TrackInputRecord) {
+        match record {
+            TrackInputRecord::TrimDb {
+                lanes,
+                db,
+                smoothing_samples,
+            } => {
+                let words = [db.to_bits(), smoothing_samples];
+                for channel in selected_channels(lanes) {
+                    self.trim[channel].write(
+                        &self.lane.trim[channel],
+                        &self.lane.dirty,
+                        (TRIM_FIRST + channel) as u32,
+                        stamp,
+                        words,
+                    );
+                }
+            }
+            TrackInputRecord::PolarityInvert {
+                lanes,
+                inverted,
+                smoothing_samples,
+            } => {
+                let words = [u32::from(inverted), smoothing_samples];
+                for channel in selected_channels(lanes) {
+                    self.polarity[channel].write(
+                        &self.lane.polarity[channel],
+                        &self.lane.dirty,
+                        (POLARITY_FIRST + channel) as u32,
+                        stamp,
+                        words,
+                    );
+                }
+            }
+            TrackInputRecord::PreparedFilter { target } => {
+                let section = usize::try_from(target.section)
+                    .ok()
+                    .filter(|section| *section < FILTER_SECTIONS)
+                    .expect("a prepared filter target names section 0 or 1");
+                let c = target.coefficients;
+                let words = [
+                    target.pair[0].to_bits(),
+                    target.pair[1].to_bits(),
+                    c[0].to_bits(),
+                    c[1].to_bits(),
+                    c[2].to_bits(),
+                    c[3].to_bits(),
+                    c[4].to_bits(),
+                    c[5].to_bits(),
+                ];
+                for channel in selected_channels(target.lanes) {
+                    let index = 2 * section + channel;
+                    self.filter[index].write(
+                        &self.lane.filter[index],
+                        &self.lane.dirty,
+                        (FILTER_FIRST + index) as u32,
+                        stamp,
+                        words,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl InputCells {
+    /// Test-only: how many writes each cell has taken (trim left and right, polarity left and
+    /// right, then the filter cells section 0 left and right, section 1 left and right). Valid
+    /// while no write is in flight, which a quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_counts(&self) -> [u64; INPUT_CELLS] {
+        fn count<const N: usize>(peek: Option<([u32; N], u64)>) -> u64 {
+            peek.map_or(0, |(_, sequence)| sequence)
+        }
+        let reader = CellReader::new();
+        core::array::from_fn(|index| match index {
+            0..=1 => count(reader.peek_unread(&self.lane.trim[index - TRIM_FIRST])),
+            2..=3 => count(reader.peek_unread(&self.lane.polarity[index - POLARITY_FIRST])),
+            _ => count(reader.peek_unread(&self.lane.filter[index - FILTER_FIRST])),
+        })
+    }
+}
+
+/// Render's read end of one strip's input cells: the cells' readers, the stage's deferred mask and
+/// the session counter (#1346 D1).
+struct InputReader {
+    lane: Arc<InputLane>,
+    trim: [CellReader; 2],
+    polarity: [CellReader; 2],
+    filter: [CellReader; 2 * FILTER_SECTIONS],
+    dirty: DirtyReader,
+    superseded: LiveValuesSuperseded,
+}
+
+/// The value(s) a pair of channel cells applied in one drain: one `Both` value when the two words
+/// are equal, else one value per applied channel (#1346 D2). A cell that read `Unchanged` is not
+/// paired.
+// REALTIME_POLICY_BEGIN
+fn paired_channels<const N: usize>(
+    left: Option<[u32; N]>,
+    right: Option<[u32; N]>,
+) -> [Option<(BuiltinLaneSelector, [u32; N])>; 2] {
+    match (left, right) {
+        (Some(left), Some(right)) if left == right => {
+            [Some((BuiltinLaneSelector::Both, left)), None]
+        }
+        (left, right) => [
+            left.map(|words| (BuiltinLaneSelector::Left, words)),
+            right.map(|words| (BuiltinLaneSelector::Right, words)),
+        ],
+    }
+}
+
+/// Read one pending cell under `snapshot`: its newest value in range, if it was not applied
+/// before. The replaced count joins `superseded`.
+fn read_input_cell<const N: usize>(
+    pending: u64,
+    bit: usize,
+    cell: &LatestCell<N>,
+    reader: &mut CellReader,
+    snapshot: LiveSnapshot,
+    dirty: &mut DirtyReader,
+    superseded: &LiveValuesSuperseded,
+) -> Option<[u32; N]> {
+    if pending & (1 << bit) == 0 {
+        return None;
+    }
+    match reader.read_counted(cell, snapshot, dirty, bit as u32, superseded) {
+        CellRead::Applied { words, .. } => Some(words),
+        CellRead::Unchanged => None,
+    }
+}
+
+impl InputReader {
+    /// Read the stage's pending cells under `snapshot` and apply them in the canonical order
+    /// (#1346 D2): trim, then polarity, then filter section 0, then section 1, left before right.
+    /// When both channel cells of a kind were applied in this drain with equal words, `apply` is
+    /// called once with a `Both` record.
+    ///
+    /// Each record is admitted to `witness` before it is applied, from the cells' final contents
+    /// (#1346 D3): an equal pair is a `Both` record (`Preserve`), any other pair or a lone channel
+    /// is per-lane records (`Desymmetrize`), through the one `admit` hook, so a record kind still
+    /// cannot reach render state without declaring its witness effect.
+    ///
+    /// Every applied value is applied even if an earlier one is refused; the first refusal is
+    /// returned after the last. Each applied read adds the writes it replaced to the session
+    /// counter (`read_counted`). It allocates nothing and takes no lock.
+    fn drain(
+        &mut self,
+        snapshot: LiveSnapshot,
+        witness: &mut ChannelSymmetryWitness,
+        mut apply: impl FnMut(TrackInputRecord) -> Result<(), BuiltinParameterError>,
+    ) -> Result<(), BuiltinParameterError> {
+        let pending = self.dirty.pending(&self.lane.dirty);
+        if pending == 0 {
+            return Ok(());
+        }
+        let Self {
+            lane,
+            trim,
+            polarity,
+            filter,
+            dirty,
+            superseded,
+        } = self;
+        let trim_words: [Option<[u32; TRIM_CELL_WORDS]>; 2] = core::array::from_fn(|channel| {
+            read_input_cell(
+                pending,
+                TRIM_FIRST + channel,
+                &lane.trim[channel],
+                &mut trim[channel],
+                snapshot,
+                dirty,
+                superseded,
+            )
+        });
+        let polarity_words: [Option<[u32; POLARITY_CELL_WORDS]>; 2] =
+            core::array::from_fn(|channel| {
+                read_input_cell(
+                    pending,
+                    POLARITY_FIRST + channel,
+                    &lane.polarity[channel],
+                    &mut polarity[channel],
+                    snapshot,
+                    dirty,
+                    superseded,
+                )
+            });
+        let filter_words: [Option<[u32; FILTER_CELL_WORDS]>; 2 * FILTER_SECTIONS] =
+            core::array::from_fn(|index| {
+                read_input_cell(
+                    pending,
+                    FILTER_FIRST + index,
+                    &lane.filter[index],
+                    &mut filter[index],
+                    snapshot,
+                    dirty,
+                    superseded,
+                )
+            });
+        let mut first_error = Ok(());
+        let mut run = |record: TrackInputRecord| {
+            // The one hook. `admit` takes the record by trait, not by kind, so a record type
+            // added to these cells later cannot reach the render state without declaring what it
+            // does to the witness (`effect_contract::symmetry::LiveControlRecord`).
+            witness.admit(&record);
+            // Every value is applied; the first refusal is the one returned.
+            first_error = first_error.and(apply(record));
+        };
+        for (lanes, words) in paired_channels(trim_words[0], trim_words[1])
+            .into_iter()
+            .flatten()
+        {
+            run(TrackInputRecord::TrimDb {
+                lanes,
+                db: f32::from_bits(words[0]),
+                smoothing_samples: words[1],
+            });
+        }
+        for (lanes, words) in paired_channels(polarity_words[0], polarity_words[1])
+            .into_iter()
+            .flatten()
+        {
+            run(TrackInputRecord::PolarityInvert {
+                lanes,
+                inverted: words[0] != 0,
+                smoothing_samples: words[1],
+            });
+        }
+        for section in 0..FILTER_SECTIONS {
+            for (lanes, words) in
+                paired_channels(filter_words[2 * section], filter_words[2 * section + 1])
+                    .into_iter()
+                    .flatten()
+            {
+                run(TrackInputRecord::PreparedFilter {
+                    target: PreparedInputFilterTarget {
+                        lanes,
+                        section: section as u32,
+                        pair: [f32::from_bits(words[0]), f32::from_bits(words[1])],
+                        coefficients: [
+                            f32::from_bits(words[2]),
+                            f32::from_bits(words[3]),
+                            f32::from_bits(words[4]),
+                            f32::from_bits(words[5]),
+                            f32::from_bits(words[6]),
+                            f32::from_bits(words[7]),
+                        ],
+                    },
+                });
+            }
+        }
+        first_error
+    }
+}
+// REALTIME_POLICY_END
+
+/// One strip's input lane, as its two ends: control's writers and render's reader.
+fn input_lane_cells(superseded: &LiveValuesSuperseded) -> (InputCells, InputReader) {
+    let lane = Arc::new(InputLane::new());
+    (
+        InputCells {
+            lane: Arc::clone(&lane),
+            trim: core::array::from_fn(|_| CellWriter::new()),
+            polarity: core::array::from_fn(|_| CellWriter::new()),
+            filter: core::array::from_fn(|_| CellWriter::new()),
+        },
+        InputReader {
+            lane,
+            trim: core::array::from_fn(|_| CellReader::new()),
+            polarity: core::array::from_fn(|_| CellReader::new()),
+            filter: core::array::from_fn(|_| CellReader::new()),
+            dirty: DirtyReader::new(),
+            superseded: superseded.clone(),
+        },
+    )
+}
+
 /// The control-side producer half of one prepared live-control channel.
 ///
-/// The fader/mute and matrix/pan halves are latest-target cells (#1312): a write cannot fail, and
-/// render applies the last committed value of each cell. The input half is still a bounded SPSC
-/// ring until #1346. Each is an `Arc` (or ring) shared by the producer and the consumer, so either
-/// may drop first: the last owner frees the storage, on the control thread, since the render
-/// thread never drops a plan.
+/// Every half is a latest-target cell set (#1312, #1346): a write cannot fail, and render applies
+/// the last committed value of each cell. Each is an `Arc` shared by the [`TrackControlProducer`] and the reader
+/// half, so either may drop first: the last owner frees the storage, on the control thread, since the
+/// render thread never drops a plan.
 pub struct TrackControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
@@ -638,10 +917,9 @@ pub struct TrackControlProducer {
     /// live-control channel" stays one object with one lifetime: all three halves are created
     /// together, handed to the caller together, and dropped together.
     pub fader: FaderCells,
-    /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
-    /// depth, for the reason the field above states. `None` when the request set
-    /// [`TrackControlRequest::input_lane`] to `false` (#1254 D1).
-    pub input: Option<Producer<TrackInputRecord>>,
+    /// The input trim/polarity/filter stage's cell writers (#210 phase 3, #1346 D6). `None` when
+    /// the request set [`TrackControlRequest::input_lane`] to `false` (#1254 D1).
+    pub input: Option<InputCells>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -681,7 +959,7 @@ struct StripControlConsumers {
     /// strip is unreachable, and `strip_bindings` says so rather than papering over it. The input
     /// side is also `None` from the start when the request had `input_lane: false` (#1254 D1);
     /// that strip's input section is then the plain one, banked or per node.
-    input: Option<Consumer<TrackInputRecord>>,
+    input: Option<InputReader>,
     fader: Option<FaderReader>,
     matrix: Option<MatrixReader>,
 }
@@ -784,37 +1062,38 @@ const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMET
 ///
 /// # The third drain, and why it is at bank level
 ///
-/// `TrackInputRecord` rides a bounded SPSC queue with exactly one consumer, and that consumer is
-/// whoever renders the track's input section. The input builtins are **banked** --
-/// `BuiltinInputBank` over eight member tracks -- so the consumer is this processor, draining
-/// its members' queues in one loop, and not a per-track node sibling. The single-consumer property
-/// is preserved structurally, exactly as it is for the fader and the matrix:
-/// `into_graph_artifact_with_banks` moves each `Consumer` out of its `StripPreparation` once, so a
-/// track's input is either a bank lane or a per-node [`LiveControlInputProcessor`] and never both.
+/// The input trim, polarity and filter values ride latest-target cells (#1346) with exactly one
+/// reader, and that reader is whoever renders the track's input section. The input builtins are
+/// **banked** -- `BuiltinInputBank` over eight member tracks -- so the reader is this processor,
+/// draining its members' cells in one loop, and not a per-track node sibling. The single-reader
+/// property is preserved structurally, exactly as it is for the fader and the matrix:
+/// `into_graph_artifact_with_banks` moves each [`InputReader`] out of its `StripPreparation` once,
+/// so a track's input is either a bank lane or a per-node [`LiveControlInputProcessor`] and never
+/// both.
 ///
 /// # Why the drain is `begin_block` and not the first paragraph of `process`
 ///
 /// This is the difference from [`FaderBankProcessor`], and it is load-bearing. The fader and the
-/// matrix are **seam-side**: a collapsed chain duplicates its one plane *into* them, so a record
+/// matrix are **seam-side**: a collapsed chain duplicates its one plane *into* them, so a value
 /// that writes one of their channels changes nothing the collapse dispatch needs to know, and
 /// draining inside `process` is fine. The input section is **upstream** of the seam. A collapsed
-/// block publishes the left plane on both channels, so a `Left` trim retarget admitted at block
+/// block publishes the left plane on both channels, so a `Left` trim retarget applied at block
 /// `N` must be visible to the collapse dispatch *before* block `N` decides whether to run one
 /// plane -- or the right channel would receive a retarget addressed to the left one, and the bits
 /// would be wrong on the one block nobody would think to look at.
 /// `rack::BankStage::begin_block` states the rule; `BankChain::run` drains every slot,
 /// then reads the witness, then gathers. This drain is on the correct side of that ordering.
 ///
-/// `try_pop` moves one `Copy` record and a retarget performs at most one division per channel;
-/// neither allocates, locks, nor drops, which is what keeps the shipped artifact's render
-/// call-graph gate green.
+/// A cell read is a few loads and a retarget performs at most one division per channel; neither
+/// allocates, locks, nor drops, which is what keeps the shipped artifact's render call-graph gate
+/// green.
 struct BuiltinBankProcessor {
     bank: BuiltinInputBank,
-    /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
+    /// One reader per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
     /// so the lane index is the array index and no lane map is stored.
-    controls: Box<[Option<Consumer<TrackInputRecord>>]>,
+    controls: Box<[Option<InputReader>]>,
     /// Each lane's **live** channel-symmetry terms, retained across blocks for the reason
-    /// `EffectControlLane::symmetry` gives: the terms describe what the drained records did, so
+    /// `EffectControlLane::symmetry` gives: the terms describe what the drained values did, so
     /// they have to survive the block that drained them.
     ///
     /// Inline and fixed at the widest bank rather than boxed: it is one byte per lane, and a
@@ -832,15 +1111,46 @@ struct BuiltinBankProcessor {
 /// Widest bank any backend selects (`BankWidth::Eight`), as a plain array bound.
 const MAXIMUM_BANK_LANES: usize = 8;
 
+/// The lane mask of a drain that visits every lane of a bank: the block drain's.
+const EVERY_LANE: u8 = u8::MAX;
+
+// REALTIME_POLICY_BEGIN
+/// Whether bit `lane` of `lanes` is set. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
+const fn lane_selected(lanes: u8, lane: usize) -> bool {
+    debug_assert!(lane < MAXIMUM_BANK_LANES);
+    (lanes >> (lane % MAXIMUM_BANK_LANES)) & 1 != 0
+}
+// REALTIME_POLICY_END
+
+/// The mask [`GraphPreparedBuiltinBankProcessor::live_lanes`] reports: bit `n` is set when lane
+/// `n` of a bank holds a live reader. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
+fn live_lane_mask(present: impl Iterator<Item = bool>) -> u8 {
+    present.enumerate().fold(0, |mask, (lane, live)| {
+        debug_assert!(lane < MAXIMUM_BANK_LANES);
+        mask | (u8::from(live) << lane)
+    })
+}
+
 impl BuiltinBankProcessor {
-    /// Apply every record waiting at entry on each lane's queue to lane state: the body of
-    /// [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the plan-swap drain.
+    /// Apply every pending value of each lane's input cells readable under `snapshot` to lane
+    /// state, in the canonical order, folding the lane's witness from what this drain applied
+    /// (#1346 D2, D3): the body of [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the
+    /// plan-swap drain.
     ///
-    /// `carry` picks what a refused apply does. The block drain (`false`) stops at it and returns
-    /// the error, as it always has. The carry drain (`true`) counts it and goes on, because this
-    /// bank never drains again: every record present at entry is consumed, and the result is the
-    /// refused count.
-    fn drain_controls(&mut self, carry: bool) -> Result<usize, BuiltinParameterError> {
+    /// `lanes` names the lanes that drain (bit `n` is lane `n`): every lane for the block drain,
+    /// the carried lanes for the plan-swap drain.
+    ///
+    /// `carry` picks what a refused apply does. The block drain (`false`) applies everything it
+    /// read and returns the first refusal after the last lane, as the fader's drain does. The
+    /// carry drain (`true`) counts each refusal and goes on, because this bank never drains again:
+    /// the result is the refused count.
+    // REALTIME_POLICY_BEGIN
+    fn drain_controls(
+        &mut self,
+        snapshot: LiveSnapshot,
+        lanes: u8,
+        carry: bool,
+    ) -> Result<usize, BuiltinParameterError> {
         let Self {
             bank,
             controls,
@@ -848,21 +1158,26 @@ impl BuiltinBankProcessor {
             ..
         } = self;
         let mut refused = 0_usize;
+        let mut first_error = Ok(());
         for (lane, control) in controls.iter_mut().enumerate() {
+            if !lane_selected(lanes, lane) {
+                continue;
+            }
             let Some(control) = control.as_mut() else {
                 continue;
             };
-            let available = control.available_at_entry();
-            for _ in 0..available {
-                let Ok(record) = control.try_pop() else {
-                    break;
-                };
-                // The one hook. `admit` takes the record by trait, not by kind, so a record type
-                // added to this queue later cannot reach the render state without declaring what
-                // it does to the witness (`effect_contract::symmetry::LiveControlRecord`).
-                if let Some(witness) = live.get_mut(lane) {
-                    witness.admit(&record);
-                }
+            // `live` holds `MAXIMUM_BANK_LANES` terms and a bank never has more lanes, so every
+            // lane that holds a reader has its term. The `get_mut` only keeps a slice index (a
+            // panic edge) out of the render call graph; a lane without a term would skip its whole
+            // drain, acknowledged values and all, so a debug build refuses it outright.
+            debug_assert!(
+                lane < MAXIMUM_BANK_LANES,
+                "a bank lane with a reader has a symmetry term"
+            );
+            let Some(witness) = live.get_mut(lane) else {
+                continue;
+            };
+            let drained = control.drain(snapshot, witness, |record| {
                 let applied = match record {
                     TrackInputRecord::TrimDb {
                         lanes,
@@ -879,14 +1194,18 @@ impl BuiltinBankProcessor {
                     }
                 };
                 match applied {
-                    Ok(()) => {}
-                    Err(error) if !carry => return Err(error),
-                    Err(_) => refused = refused.saturating_add(1),
+                    Err(_) if carry => {
+                        refused = refused.saturating_add(1);
+                        Ok(())
+                    }
+                    other => other,
                 }
-            }
+            });
+            first_error = first_error.and(drained);
         }
-        Ok(refused)
+        first_error.map(|()| refused)
     }
+    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
@@ -910,11 +1229,17 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     fn begin_block(
         &mut self,
         first_sample: u64,
-        snapshot: engine::realtime::LiveSnapshot,
+        snapshot: LiveSnapshot,
     ) -> Result<(), RenderError> {
-        // The trim and polarity lanes are queues: they ignore `S` until #1346 moves them to cells.
-        let _ = (first_sample, snapshot);
-        self.drain_controls(false).map(|_| ()).map_err(render_error)
+        let _ = first_sample;
+        self.drain_controls(snapshot, EVERY_LANE, false)
+            .map(|_| ())
+            .map_err(render_error)
+    }
+
+    /// The lanes whose input cells this bank drains (#1346; #1504 D3's slot guard reads it).
+    fn live_lanes(&self) -> u8 {
+        live_lane_mask(self.controls.iter().map(Option::is_some))
     }
 
     // REALTIME_POLICY_BEGIN
@@ -939,8 +1264,8 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
 
     /// Issue #1276 D2: the lane's whole input-section state and its live symmetry terms. The
-    /// queue consumer stays: every record this lane's predecessor admitted was applied to lane
-    /// state by [`Self::drain_for_carry`], and the successor's own queue takes every later one.
+    /// cell reader stays: every value this lane's predecessor had written was applied to lane
+    /// state by [`Self::drain_for_carry`], and the successor's own cells take every later one.
     fn adopt_input_lane(
         &mut self,
         lane: usize,
@@ -972,13 +1297,16 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         true
     }
 
-    /// Issue #1276 D4. A record reached this queue only after validation, so applying it cannot
-    /// fail; were it to, that record is counted and every other record present at entry is
-    /// still applied, so the carry loses none of them.
-    fn drain_for_carry(&mut self) -> usize {
+    /// Issue #1276 D4, #1346 D5. A value reached these cells only after validation, so applying it
+    /// cannot fail; were it to, that value is counted and every other pending value is still
+    /// applied, so the carry loses none of them. It reads with [`LiveSnapshot::ALL`], which on the
+    /// quiescent predecessor equals the adoption block's snapshot (#1312 D6): every value the
+    /// predecessor holds was written before the successor's publication.
+    fn drain_for_carry(&mut self, lanes: u8) -> usize {
         // The carry drain counts a refused apply instead of returning it, so `Err` is not
-        // produced; were it, it is reported as one refused record, never as none.
-        self.drain_controls(true).unwrap_or(1)
+        // produced; were it, it is reported as one refused value, never as none.
+        self.drain_controls(LiveSnapshot::ALL, lanes, true)
+            .unwrap_or(1)
     }
     // REALTIME_POLICY_END
 
@@ -1114,16 +1442,17 @@ impl FaderBankProcessor {
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls, snapshot)
+        drain_fader_controls(bank, controls, snapshot, EVERY_LANE)
     }
 
-    /// Apply every pending value of every lane's cells, whatever its revision: the block drain
-    /// with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls it on a
-    /// quiescent predecessor before it exports a lane (#1277); no production render path takes
-    /// `ALL`.
+    /// Apply every pending value of the cells of the lanes in `lanes`, whatever its revision: the
+    /// block drain with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls
+    /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
+    /// takes `ALL`.
     // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
+    fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes)
     }
 
     /// Whether `predecessor` is a fader bank of this bank's width with lane `predecessor_lane`
@@ -1181,7 +1510,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     }
 
     /// Issue #1277 D8. The cell reader stays: every value the predecessor's cells held was
-    /// applied to lane state by [`Self::drain_for_carry`], and the successor's own cells take
+    /// applied to lane state by [`Self::drain_strip_for_carry`], and the successor's own cells take
     /// every later one.
     fn adopt_strip_lane(
         &mut self,
@@ -1197,10 +1526,11 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
                 .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
     }
 
-    /// Issue #1277 D8: apply every pending cell value with every revision, as the block drain
-    /// would at the next block. A value the apply refuses is counted, and the rest still apply.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    /// Issue #1277 D8: apply every pending cell value of the carried lanes with every revision,
+    /// as the block drain would at the next block. A value the apply refuses is counted, and the
+    /// rest still apply. A lane that restarts is not read, so its replaced writes are not counted.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(owner == BuiltinStripOwner::Fader && self.apply_pending(lanes).is_err())
     }
     // REALTIME_POLICY_END
     /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
@@ -1211,6 +1541,9 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         self.drain(snapshot)
+    }
+    fn live_lanes(&self) -> u8 {
+        live_lane_mask(self.controls.iter().map(Option::is_some))
     }
     fn process(
         &mut self,
@@ -1264,13 +1597,14 @@ impl MatrixBankProcessor {
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let Self { bank, controls, .. } = self;
-        drain_matrix_controls(bank, controls, snapshot)
+        drain_matrix_controls(bank, controls, snapshot, EVERY_LANE)
     }
 
     /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
     // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
+    fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_matrix_controls(bank, controls, LiveSnapshot::ALL, lanes)
     }
 
     /// The matrix bank's counterpart of [`FaderBankProcessor::can_adopt_lane`].
@@ -1338,8 +1672,8 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     }
 
     /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(owner == BuiltinStripOwner::Matrix && self.apply_pending(lanes).is_err())
     }
     // REALTIME_POLICY_END
     /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
@@ -1350,6 +1684,9 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         self.drain(snapshot)
+    }
+    fn live_lanes(&self) -> u8 {
+        live_lane_mask(self.controls.iter().map(Option::is_some))
     }
     fn process(
         &mut self,
@@ -1680,16 +2017,21 @@ fn scalar_owner_id(track_id: &StableGraphId) -> u16 {
 }
 
 // REALTIME_POLICY_BEGIN
-/// Drain every lane's fader and mute cells into `bank` under the block's `snapshot` (#1312 D4,
-/// D12). Each lane reads and applies in the canonical order, an applied value is never lost to a
+/// Drain the fader and mute cells of the lanes in `lanes` into `bank` under the block's `snapshot`
+/// (#1312 D4, D12): every lane for the block drain, the carried lanes for the plan-swap drain.
+/// Each lane reads and applies in the canonical order, an applied value is never lost to a
 /// refusal of another, and the first refusal is returned after the last lane.
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
     controls: &mut [Option<FaderReader>],
     snapshot: LiveSnapshot,
+    lanes: u8,
 ) -> Result<(), RenderError> {
     let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
+        if !lane_selected(lanes, lane) {
+            continue;
+        }
         let Some(control) = control.as_mut() else {
             continue;
         };
@@ -1719,9 +2061,13 @@ fn drain_matrix_controls(
     bank: &mut BuiltinMatrixBank,
     controls: &mut [Option<MatrixReader>],
     snapshot: LiveSnapshot,
+    lanes: u8,
 ) -> Result<(), RenderError> {
     let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
+        if !lane_selected(lanes, lane) {
+            continue;
+        }
         let Some(control) = control.as_mut() else {
             continue;
         };
@@ -1783,13 +2129,6 @@ impl FaderMatrixBankProcessor {
         let matrix = self.matrix.drain(snapshot);
         fader.and(matrix)
     }
-
-    /// Both stages' [`FaderBankProcessor::apply_pending`] and its matrix counterpart.
-    // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
-    }
-    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
@@ -1859,9 +2198,16 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             })
     }
 
-    /// Issue #1277 D8: both halves apply every pending value; the first refusal is counted.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    /// Issue #1277 D8: `owner`'s half applies every pending value of the carried lanes; the first
+    /// refusal is counted. The other half is not read: it has its own moves.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(
+            match owner {
+                BuiltinStripOwner::Fader => self.fader.apply_pending(lanes),
+                BuiltinStripOwner::Matrix => self.matrix.apply_pending(lanes),
+            }
+            .is_err(),
+        )
     }
     // REALTIME_POLICY_END
     /// Both stages' drains, fader first (#1312 D12). Each stage applies everything it read; the
@@ -1873,6 +2219,10 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         self.drain(snapshot)
+    }
+    /// The lanes either stage drains: a fused pair drains what its two stages do.
+    fn live_lanes(&self) -> u8 {
+        self.fader.live_lanes() | self.matrix.live_lanes()
     }
     fn process(
         &mut self,
@@ -2030,7 +2380,7 @@ fn strip_processor_bytes(stage: TrackStage, width: effect_contract::BankWidth) -
     let inline = u64::try_from(inline).ok()?;
     match stage {
         TrackStage::PostInputBuiltins => {
-            inline.checked_add(strip_control_bytes::<Consumer<TrackInputRecord>>(width)?)
+            inline.checked_add(strip_control_bytes::<InputReader>(width)?)
         }
         TrackStage::PostFader => inline
             .checked_add(strip_control_bytes::<FaderReader>(width)?)?
@@ -2257,9 +2607,9 @@ struct BuiltinSessionSeal {
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
-    /// Issue #137 D1: `(track_id, queue_capacity, input_lane)` per live-control channel, sorted
-    /// (#1254 D1 added the input-lane flag).
-    controls: Vec<(Box<str>, usize, bool)>,
+    /// Issue #137 D1: `(track_id, input_lane)` per live-control channel, sorted (#1254 D1 added
+    /// the input-lane flag; the cells have no depth to seal, #1312, #1346).
+    controls: Vec<(Box<str>, bool)>,
     resources: BuiltinResourceEstimate,
 }
 
@@ -2914,17 +3264,10 @@ impl PreparedBuiltinsSession {
                 "$.builtins.processors",
             ));
         }
-        let mut actual_controls: Vec<(&str, usize, bool)> = self
+        let mut actual_controls: Vec<(&str, bool)> = self
             .track_controls
             .iter()
-            .map(|control| {
-                (
-                    control.track_id.as_ref(),
-                    // The cells have no depth (#1312): only the input ring's is sealed.
-                    control.input.as_ref().map_or(0, Producer::capacity),
-                    control.input.is_some(),
-                )
-            })
+            .map(|control| (control.track_id.as_ref(), control.input.is_some()))
             .collect();
         actual_controls.sort_unstable();
         let expected_tails = match expected_tails(
@@ -2968,7 +3311,7 @@ impl PreparedBuiltinsSession {
             .seal
             .controls
             .iter()
-            .map(|(track, capacity, input_lane)| (track.as_ref(), *capacity, *input_lane))
+            .map(|(track, input_lane)| (track.as_ref(), *input_lane))
             .eq(actual_controls)
         {
             diagnostics.push(diag(
@@ -3342,7 +3685,7 @@ impl PreparedBuiltinsSession {
                 }
                 let processor: Box<dyn GraphPreparedBuiltinBankProcessor> = match stage {
                     TrackStage::PostInputBuiltins => {
-                        let mut controls: Vec<Option<Consumer<TrackInputRecord>>> =
+                        let mut controls: Vec<Option<InputReader>> =
                             (0..lanes).map(|_| None).collect();
                         let mut inputs = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -3693,16 +4036,17 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         &self.graph.estimate
     }
 
-    /// Give every route into a submix input a live lane before bind (issue #1220 D7), returning
-    /// one producer per lane in canonical route-ID order. Delegates to
+    /// Give every route into a submix input a live lane before bind (issue #1220 D7, #1347),
+    /// returning one producer per lane in canonical route-ID order. Every lane adds its replaced
+    /// writes to `superseded`, the session's count. Delegates to
     /// [`PreparedGraphPlan::attach_route_controls`]: the sealed graph is attached in place and
     /// never handed out. A second call is refused
     /// ([`graph::GraphRouteControlError::AlreadyAttached`]).
     pub fn attach_route_live_controls(
         &mut self,
-        depth: core::num::NonZeroUsize,
+        superseded: &LiveValuesSuperseded,
     ) -> Result<Vec<graph::GraphRouteControlProducer>, graph::GraphRouteControlError> {
-        self.graph.attach_route_controls(depth)
+        self.graph.attach_route_controls(superseded)
     }
 
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
@@ -3994,7 +4338,7 @@ fn live_input_bound(sample_rate: u32) -> NodeTailBound {
 /// payload's copy agrees with the seal's.
 fn expected_tails(
     session: &CompiledSession,
-    sorted_controls: &[(&str, usize, bool)],
+    sorted_controls: &[(&str, bool)],
     sealed: &[(Box<str>, NodeTailBound)],
     live_bound: Option<NodeTailBound>,
 ) -> Result<Vec<(Box<str>, NodeTailBound)>, ()> {
@@ -4003,8 +4347,8 @@ fn expected_tails(
     for strip in model.strips() {
         let id = strip.id.as_str();
         let live = sorted_controls
-            .binary_search_by(|(control, _, _)| control.cmp(&id))
-            .is_ok_and(|index| sorted_controls[index].2);
+            .binary_search_by(|(control, _)| control.cmp(&id))
+            .is_ok_and(|index| sorted_controls[index].1);
         let bound = if live {
             live_bound.ok_or(())?
         } else {
@@ -4280,16 +4624,11 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let effective_faders = session.normalized_model().effective_strip_faders();
     // The request index is a transient lookup, not retained storage, so it is built before the
     // phase-two observation that compares retained allocations with the report (#1254 gate 3).
-    let mut control_capacity: BTreeMap<&str, (NonZeroUsize, bool, &LiveValuesSuperseded)> =
-        BTreeMap::new();
+    let mut control_lanes: BTreeMap<&str, (bool, &LiveValuesSuperseded)> = BTreeMap::new();
     for control in controls {
-        control_capacity.insert(
+        control_lanes.insert(
             control.track_id.as_str(),
-            (
-                control.queue_capacity,
-                control.input_lane,
-                &control.superseded,
-            ),
+            (control.input_lane, &control.superseded),
         );
     }
     // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
@@ -4305,9 +4644,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     // live bound (D3). `bound_cache`, when the host keeps one, serves designs it already holds with
     // the same charge, so the prepared values are the same with or without it (D2).
     let input_lane_live = |track_id: &str| {
-        control_capacity
+        control_lanes
             .get(track_id)
-            .is_some_and(|(_, input_lane, _)| *input_lane)
+            .is_some_and(|(input_lane, _)| *input_lane)
     };
     let design_bounds = builtins::input_section_bounds(
         session.sample_rate().0,
@@ -4328,9 +4667,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     )
     .expect("preflighted coefficients");
     let mut design_bounds = design_bounds.into_iter();
-    let live_bound = control_capacity
+    let live_bound = control_lanes
         .values()
-        .any(|(_, input_lane, _)| *input_lane)
+        .any(|(input_lane, _)| *input_lane)
         .then(|| live_input_bound(session.sample_rate().0));
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
@@ -4345,7 +4684,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut bank_inputs = Vec::with_capacity(track_count);
     let mut tails = Vec::with_capacity(track_count);
     let mut track_controls = Vec::with_capacity(controls.len());
-    let mut control_seal: Vec<(Box<str>, usize, bool)> = Vec::with_capacity(controls.len());
+    let mut control_seal: Vec<(Box<str>, bool)> = Vec::with_capacity(controls.len());
     for (strip, fader) in session.normalized_model().strips().zip(&effective_faders) {
         let parameters = strip_parameters(
             &strip,
@@ -4374,22 +4713,14 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         tails.push((Box::<str>::from(strip.id.as_str()), bound));
         bank_inputs.push((Box::<str>::from(strip.id.as_str()), bank_input));
         let graph_id = StableGraphId::parse(strip.id.as_str()).expect("preflighted stable ID");
-        let control_failure = || {
-            BuiltinDiagnosticSet::sorted(vec![diag(
-                "builtin.control.prepare",
-                &format!("$.controls[track_id={}]", strip.id.as_str()),
-            )])
-        };
-        let control = match control_capacity.get(strip.id.as_str()) {
+        let control = match control_lanes.get(strip.id.as_str()) {
             None => None,
-            Some(&(capacity, input_lane, superseded)) => {
+            Some(&(input_lane, superseded)) => {
                 let (producer, control) = matrix_lane(superseded);
                 let (fader_producer, fader_control) = fader_lane(superseded);
                 let (input_producer, input_control) = if input_lane {
-                    let (producer, consumer) =
-                        bounded_spsc::<TrackInputRecord>(capacity, QueueGeneration(0))
-                            .map_err(|_| control_failure())?;
-                    (Some(producer), Some(consumer))
+                    let (cells, reader) = input_lane_cells(superseded);
+                    (Some(cells), Some(reader))
                 } else {
                     (None, None)
                 };
@@ -4409,11 +4740,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                     fader: fader_producer,
                     input: input_producer,
                 });
-                control_seal.push((
-                    Box::<str>::from(strip.id.as_str()),
-                    if input_lane { capacity.get() } else { 0 },
-                    input_lane,
-                ));
+                control_seal.push((Box::<str>::from(strip.id.as_str()), input_lane));
                 Some(StripControlConsumers {
                     input: input_control,
                     fader: Some(fader_control),
@@ -4557,7 +4884,7 @@ fn resource_plan(
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
         // changes no byte of the *section* storage, and the only live-control-dependent rows left
-        // are the input ring (until #1346) and the fader and matrix cells' `Arc`s charged below.
+        // are the input, fader and matrix cells' `Arc`s charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -4569,57 +4896,33 @@ fn resource_plan(
     // because they are per-track processor storage rather than meter storage: the producer vector,
     // its seal, and one bounded ring per requested track.
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
-    add_vector_layout::<(Box<str>, usize, bool)>(&mut processor, controls.len())?;
+    add_vector_layout::<(Box<str>, bool)>(&mut processor, controls.len())?;
     for control in controls {
-        // #1312 D5: the fader/mute and matrix/pan lanes are latest-target cells, one `Arc`
-        // allocation each, charged by the allocation's own layout. Only the input lane (#210
-        // phase 3, until #1346) is still a bounded ring, charged here when requested (#1254 D1).
-        for layout in [
-            core::alloc::Layout::new::<SharedAllocation<MatrixLane>>(),
-            core::alloc::Layout::new::<SharedAllocation<FaderLane>>(),
+        // #1312 D5, #1346 D6: every lane is a latest-target cell set, one `Arc` allocation each,
+        // charged by the allocation's own layout. The input lane's is charged when requested
+        // (#1254 D1).
+        for (present, layout) in [
+            (
+                true,
+                core::alloc::Layout::new::<SharedAllocation<MatrixLane>>(),
+            ),
+            (
+                true,
+                core::alloc::Layout::new::<SharedAllocation<FaderLane>>(),
+            ),
+            (
+                control.input_lane,
+                core::alloc::Layout::new::<SharedAllocation<InputLane>>(),
+            ),
         ] {
-            processor.add_layout(layout).ok_or_else(|| {
-                diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &control_path(control),
-                )
-            })?;
-        }
-        if control.input_lane {
-            let queue = bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity)
-                .map_err(|_| {
-                diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &control_path(control),
-                )
-            })?;
-            processor
-                .add_layout(
-                    core::alloc::Layout::from_size_align(
-                        queue.ring_header_bytes,
-                        queue.ring_header_align,
-                    )
-                    .map_err(|_| {
-                        diag(
-                            "builtin.resource.arithmetic_overflow",
-                            &control_path(control),
-                        )
-                    })?,
-                )
-                .and_then(|_| {
-                    core::alloc::Layout::from_size_align(
-                        queue.slot_payload_bytes,
-                        queue.slot_payload_align,
-                    )
-                    .ok()
-                    .and_then(|layout| processor.add_layout(layout))
-                })
-                .ok_or_else(|| {
+            if present {
+                processor.add_layout(layout).ok_or_else(|| {
                     diag(
                         "builtin.resource.arithmetic_overflow",
                         &control_path(control),
                     )
                 })?;
+            }
         }
         // The public producer identity and the sealed control identity are retained separately.
         for _ in 0..2 {
@@ -5020,12 +5323,13 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 /// the `LIVE` term. A per-node processor is not a bank slot and the collapse dispatch never asks
 /// it anything -- `GraphRuntimeProcessor::channel_symmetry` is the scalar-tail surface, read by
 /// the prepare-time pool classification -- but the term is folded anyway, by the same
-/// `admit` call the banked drain makes, so the two shapes cannot disagree about what a record
-/// meant. If a later phase gives the scalar tail a collapse, the answer is already correct here.
+/// [`InputReader::drain`] the banked drain makes, so the two shapes cannot disagree about what a
+/// value meant. If a later phase gives the scalar tail a collapse, the answer is already correct
+/// here.
 #[cfg(any(test, feature = "test-support"))]
 struct LiveControlInputProcessor {
     input: InputBuiltins,
-    control: Consumer<TrackInputRecord>,
+    control: InputReader,
     /// This track's live channel-symmetry terms, retained across blocks exactly as
     /// `EffectControlLane::symmetry` is and for the same reason.
     live: ChannelSymmetryWitness,
@@ -5033,34 +5337,7 @@ struct LiveControlInputProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlInputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let available = self.control.available_at_entry();
-        for _ in 0..available {
-            let Ok(record) = self.control.try_pop() else {
-                break;
-            };
-            self.live.admit(&record);
-            match record {
-                TrackInputRecord::TrimDb {
-                    lanes,
-                    db,
-                    smoothing_samples,
-                } => self
-                    .input
-                    .set_trim_db(lanes, db, smoothing_samples)
-                    .map_err(render_error)?,
-                TrackInputRecord::PolarityInvert {
-                    lanes,
-                    inverted,
-                    smoothing_samples,
-                } => self
-                    .input
-                    .set_polarity_invert(lanes, inverted, smoothing_samples),
-                TrackInputRecord::PreparedFilter { target } => self
-                    .input
-                    .apply_prepared_filter(target)
-                    .map_err(render_error)?,
-            }
-        }
+        self.drain_controls(block.live_snapshot)?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.input.process(block);
@@ -5081,6 +5358,31 @@ impl GraphRuntimeProcessor for LiveControlInputProcessor {
     }
     fn response_snapshot_native_id(&self) -> Option<&'static str> {
         Some("miso.builtin.input-filters")
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl LiveControlInputProcessor {
+    /// The input cells' drain under the block's `snapshot` (#1346 D2, D3).
+    fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let input = &mut self.input;
+        self.control
+            .drain(snapshot, &mut self.live, |record| match record {
+                TrackInputRecord::TrimDb {
+                    lanes,
+                    db,
+                    smoothing_samples,
+                } => input.set_trim_db(lanes, db, smoothing_samples),
+                TrackInputRecord::PolarityInvert {
+                    lanes,
+                    inverted,
+                    smoothing_samples,
+                } => {
+                    input.set_polarity_invert(lanes, inverted, smoothing_samples);
+                    Ok(())
+                }
+                TrackInputRecord::PreparedFilter { target } => input.apply_prepared_filter(target),
+            })
+            .map_err(render_error)
     }
 }
 
@@ -6537,14 +6839,15 @@ mod tests {
             let lanes = u64::from(width.lanes());
             let banks = sizes.len() as u64;
             let node_bytes = core::mem::size_of::<GraphNodeId>() as u64;
-            // The struct **plus** the per-lane live-control consumer array it owns. #210 phase 3
+            // The struct **plus** the per-lane live-control reader array it owns. #210 phase 3
             // gave the input bank the same shape the fader and matrix banks already had: one
-            // `Option<Consumer<_>>` per lane, allocated whether or not live controls are attached,
+            // `Option<InputReader>` per lane (a queue consumer until #1346), allocated whether or
+            // not live controls are attached,
             // so that a banked session's retained payload does not depend on whether the host
             // leased one. Written out here rather than read off `strip_processor_bytes`, which is
             // the function under test.
             let processor_bytes = core::mem::size_of::<BuiltinBankProcessor>() as u64
-                + core::mem::size_of::<Option<Consumer<TrackInputRecord>>>() as u64 * lanes;
+                + core::mem::size_of::<Option<InputReader>>() as u64 * lanes;
             let plane_bytes = u64::from(quantum) * lanes * 4;
             let string_lengths: Vec<u64> = groups
                 .iter()
@@ -7297,7 +7600,6 @@ mod tests {
         let controls = (0..n)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(4).expect("queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -7704,7 +8006,6 @@ mod tests {
         let controls = (0..n)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(8).expect("queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -8169,7 +8470,6 @@ mod tests {
         let controls = (0..n)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(8).expect("queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: false,
             })
@@ -10325,16 +10625,16 @@ mod tests {
             },
         };
         for bound in [&mut collapsed, &mut separate] {
-            bound
-                .track_controls
-                .iter_mut()
-                .find(|control| control.track_id.as_ref() == pair_graph_tail_id())
-                .expect("selected tail controls")
-                .input
-                .as_mut()
-                .expect("input lane requested")
-                .try_push(command)
-                .expect("input queue");
+            bound.test_only_write(|controls, stamp| {
+                controls
+                    .iter_mut()
+                    .find(|control| control.track_id.as_ref() == pair_graph_tail_id())
+                    .expect("selected tail controls")
+                    .input
+                    .as_mut()
+                    .expect("input lane requested")
+                    .write(stamp, command);
+            });
         }
         let collapsed_host = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
         let collapsed_asymmetric = std::mem::take(&mut *collapsed_capture.lock().unwrap());
@@ -10951,12 +11251,14 @@ mod tests {
                 &mut fixture.paired.fader.bank,
                 &mut fixture.paired.fader.controls,
                 snapshot,
+                EVERY_LANE,
             )
             .unwrap();
             drain_matrix_controls(
                 &mut fixture.paired.matrix.bank,
                 &mut fixture.paired.matrix.controls,
                 snapshot,
+                EVERY_LANE,
             )
             .unwrap();
             let before_fader =
@@ -11149,7 +11451,8 @@ mod tests {
                 builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
             let matrix_before =
                 builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
-            fixture.paired.apply_pending().unwrap();
+            fixture.paired.fader.apply_pending(EVERY_LANE).unwrap();
+            fixture.paired.matrix.apply_pending(EVERY_LANE).unwrap();
             // `apply_pending` alone has moved the paired side to where the separate stages' block
             // drain moves theirs, in every bank word.
             let snapshot = fixture.snapshot();
@@ -12405,7 +12708,6 @@ mod tests {
         let controls = (0..8)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(4).expect("nonzero queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -12474,7 +12776,6 @@ mod tests {
         let controls = (0..8)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(4).expect("control queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -12528,7 +12829,6 @@ mod tests {
         let controls = (0..3)
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
-                queue_capacity: NonZeroUsize::new(4).expect("queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -13105,7 +13405,6 @@ mod tests {
             &[],
             &[TrackControlRequest {
                 track_id: "vocal".to_owned(),
-                queue_capacity: NonZeroUsize::new(1).expect("queue"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],
@@ -13203,7 +13502,6 @@ mod tests {
                 .enumerate()
                 .map(|(index, id)| TrackControlRequest {
                     track_id: id.clone(),
-                    queue_capacity: NonZeroUsize::new(1).expect("queue"),
                     superseded: LiveValuesSuperseded::default(),
                     input_lane: live.contains(&index),
                 })
@@ -14051,14 +14349,23 @@ mod tests {
         assert!(classes.into_iter().all(core::convert::identity));
     }
 
-    /// The plan-swap drain consumes every record present at entry, past a refused one (issue
-    /// #1276 D4). The bank never drains again after the carry, so a record left in its queue is
-    /// an acknowledged edit lost with the retired plan.
+    /// The plan-swap drain applies every pending value past a refused one (issue #1276 D4, #1346
+    /// D5), and so does the block drain, which returns the first refusal after the last value. The
+    /// bank never drains again after the carry, so a value left in a cell is an acknowledged edit
+    /// lost with the retired plan.
     ///
-    /// Red mutation: let the carry drain stop at the first refused apply, as the block drain does
-    /// -> lane 0's later trim and lane 1's trim stay queued and the trims never move.
+    /// Lane 0 holds a NaN trim (the apply is refused) and an inversion, which the canonical order
+    /// applies after it; lane 1 holds a trim. Admission would refuse a NaN trim; it stands in for
+    /// any apply that fails.
+    ///
+    /// Red mutation: let the reader's `drain` stop applying after the first refused apply (apply
+    /// only while `first_error` is still `Ok`) -> the block arm leaves lane 0's inversion and
+    /// lane 1's trim unapplied. `drain_for_carry` applying nothing turns the carry arm red. The
+    /// carry arm's `Err(_) if carry` count-and-continue is not what this test defends: replacing
+    /// it with a return stays green, because the drain applies every value either way and
+    /// `drain_for_carry` reports a returned error as one refusal, which is the count here.
     #[test]
-    fn the_carry_drain_applies_every_record_past_a_refused_one() {
+    fn the_input_drains_apply_every_value_past_a_refused_one() {
         // A `Vec`, so a target without AVX2 iterates one width without a single-element loop.
         let backends = vec![
             #[cfg(target_feature = "avx2")]
@@ -14066,39 +14373,52 @@ mod tests {
             Backend::Simd4,
         ];
         for backend in backends {
-            carry_drain_applies_every_record_past_a_refused_one(backend);
+            for carry in [true, false] {
+                input_drain_applies_every_value_past_a_refused_one(backend, carry);
+            }
         }
     }
 
-    fn carry_drain_applies_every_record_past_a_refused_one(backend: Backend) {
+    fn input_drain_applies_every_value_past_a_refused_one(backend: Backend, carry: bool) {
         let width = BankWidth::for_backend(backend).expect("a banking backend");
         let input = || {
             BuiltinChain::new(48_000, BuiltinParameters::default())
                 .expect("chain")
                 .into_input_builtins()
         };
-        let queue = || {
-            bounded_spsc::<TrackInputRecord>(
-                NonZeroUsize::new(4).expect("depth"),
-                QueueGeneration(0),
-            )
-            .expect("queue")
-        };
-        let (mut first, first_control) = queue();
-        let (mut second, second_control) = queue();
-        let silence = |db: f32| TrackInputRecord::TrimDb {
-            lanes: BuiltinLaneSelector::Both,
-            db,
-            smoothing_samples: 0,
-        };
-        // Admission would refuse a NaN trim; it stands in for any apply that fails.
-        first.try_push(silence(f32::NAN)).expect("room");
-        first.try_push(silence(-144.0)).expect("room");
-        second.try_push(silence(-144.0)).expect("room");
-        let mut controls: Vec<Option<Consumer<TrackInputRecord>>> =
-            (0..width.lanes()).map(|_| None).collect();
-        controls[0] = Some(first_control);
-        controls[1] = Some(second_control);
+        let superseded = LiveValuesSuperseded::new();
+        let (mut first, first_reader) = input_lane_cells(&superseded);
+        let (mut second, second_reader) = input_lane_cells(&superseded);
+        let mut gate = TestOnlyGate::new();
+        gate.write_published(|stamp| {
+            first.write(
+                stamp,
+                TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: f32::NAN,
+                    smoothing_samples: 0,
+                },
+            );
+            first.write(
+                stamp,
+                TrackInputRecord::PolarityInvert {
+                    lanes: BuiltinLaneSelector::Both,
+                    inverted: true,
+                    smoothing_samples: 0,
+                },
+            );
+            second.write(
+                stamp,
+                TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -144.0,
+                    smoothing_samples: 0,
+                },
+            );
+        });
+        let mut controls: Vec<Option<InputReader>> = (0..width.lanes()).map(|_| None).collect();
+        controls[0] = Some(first_reader);
+        controls[1] = Some(second_reader);
         let mut processor = BuiltinBankProcessor {
             bank: BuiltinInputBank::new(backend, width, vec![input(), input()]).expect("bank"),
             controls: controls.into_boxed_slice(),
@@ -14107,24 +14427,460 @@ mod tests {
             frames_processed: 0,
         };
 
-        assert_eq!(
-            processor.drain_for_carry(),
-            1,
-            "the NaN trim is refused and counted"
-        );
-        for lane in 0..2 {
-            for channel in 0..2 {
-                let trim = processor.bank.trim_signed(lane, channel);
-                assert!(
-                    trim.abs() < 1.0e-6,
-                    "lane {lane} channel {channel} trim {trim}"
+        if carry {
+            assert_eq!(
+                processor.drain_for_carry(EVERY_LANE),
+                1,
+                "the NaN trim is refused and counted"
+            );
+        } else {
+            assert_eq!(
+                processor.drain_controls(gate.snapshot(), EVERY_LANE, false),
+                Err(BuiltinParameterError::GainDomain),
+                "the block drain returns the first refusal"
+            );
+        }
+        for channel in 0..2 {
+            assert_eq!(
+                processor.bank.trim_signed(0, channel),
+                -1.0,
+                "lane 0 channel {channel}: the inversion after the refused trim was applied"
+            );
+            let trim = processor.bank.trim_signed(1, channel);
+            assert!(
+                trim.abs() < 1.0e-6,
+                "lane 1 channel {channel}: the trim after lane 0's refusal was applied: {trim}"
+            );
+        }
+    }
+
+    /// One input-bank processor with lane 0 live, and the writer and gate that feed it.
+    fn live_input_processor(
+        backend: Backend,
+        superseded: &LiveValuesSuperseded,
+    ) -> (BuiltinBankProcessor, InputCells, TestOnlyGate) {
+        let width = BankWidth::for_backend(backend).expect("a banking backend");
+        let input = BuiltinChain::new(48_000, BuiltinParameters::default())
+            .expect("chain")
+            .into_input_builtins();
+        let (cells, reader) = input_lane_cells(superseded);
+        let mut controls: Vec<Option<InputReader>> = (0..width.lanes()).map(|_| None).collect();
+        controls[0] = Some(reader);
+        (
+            BuiltinBankProcessor {
+                bank: BuiltinInputBank::new(backend, width, vec![input]).expect("bank"),
+                controls: controls.into_boxed_slice(),
+                live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                process_calls: 0,
+                frames_processed: 0,
+            },
+            cells,
+            TestOnlyGate::new(),
+        )
+    }
+
+    /// Both planes of one block of a fixed signal, as bits, through a bank's `process`.
+    fn input_bank_bits(bank: &mut BuiltinInputBank) -> Vec<u32> {
+        const FRAMES: usize = 192;
+        let width = bank.width().lanes() as usize;
+        let signal = |plane: f32| -> Vec<f32> {
+            (0..FRAMES * width)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.07 + plane)
+                .collect()
+        };
+        let (mut left, mut right) = (signal(0.0), signal(1.0));
+        bank.process(&mut left, &mut right, FRAMES as u32);
+        left.iter()
+            .chain(&right)
+            .map(|value| value.to_bits())
+            .collect()
+    }
+
+    fn input_test_backends() -> Vec<Backend> {
+        // A `Vec`, so a target without AVX2 iterates one width without a single-element loop.
+        vec![
+            #[cfg(target_feature = "avx2")]
+            Backend::Simd8,
+            Backend::Simd4,
+        ]
+    }
+
+    /// The input cells drain trim, then polarity, then filter section 0, then section 1, whatever
+    /// order they were written in (#1346 D2).
+    ///
+    /// The oracle is the bank itself, driven by direct calls in that order. Trim and polarity
+    /// share one coefficient and the last call's window wins, so with a 0-sample trim window and a
+    /// 64-sample polarity window the order moves bits: the reversed order is rendered too, to show
+    /// the comparison can see it.
+    ///
+    /// Red mutation: drain polarity before trim in `InputReader::drain` -> the drained bank
+    /// renders the reversed twin's bits, not the canonical twin's.
+    #[test]
+    fn input_cells_drain_in_the_canonical_order_whatever_the_write_order() {
+        let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
+        let (low, high) = (prepared.targets[0], prepared.targets[1]);
+        for backend in input_test_backends() {
+            let superseded = LiveValuesSuperseded::new();
+            let (mut processor, mut cells, mut gate) = live_input_processor(backend, &superseded);
+            // The reverse of the canonical order, in one transaction.
+            gate.write_published(|stamp| {
+                cells.write(stamp, TrackInputRecord::PreparedFilter { target: high });
+                cells.write(stamp, TrackInputRecord::PreparedFilter { target: low });
+                cells.write(
+                    stamp,
+                    TrackInputRecord::PolarityInvert {
+                        lanes: BuiltinLaneSelector::Both,
+                        inverted: true,
+                        smoothing_samples: 64,
+                    },
+                );
+                cells.write(
+                    stamp,
+                    TrackInputRecord::TrimDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -12.0,
+                        smoothing_samples: 0,
+                    },
+                );
+            });
+            processor
+                .begin_block(0, gate.snapshot())
+                .expect("the drain");
+
+            let twin = |polarity_first: bool| {
+                let width = BankWidth::for_backend(backend).expect("a banking backend");
+                let input = BuiltinChain::new(48_000, BuiltinParameters::default())
+                    .expect("chain")
+                    .into_input_builtins();
+                let mut bank = BuiltinInputBank::new(backend, width, vec![input]).expect("bank");
+                let trim = |bank: &mut BuiltinInputBank| {
+                    bank.set_trim_db(0, BuiltinLaneSelector::Both, -12.0, 0)
+                        .expect("trim");
+                };
+                let polarity = |bank: &mut BuiltinInputBank| {
+                    bank.set_polarity_invert(0, BuiltinLaneSelector::Both, true, 64)
+                        .expect("polarity");
+                };
+                if polarity_first {
+                    polarity(&mut bank);
+                    trim(&mut bank);
+                } else {
+                    trim(&mut bank);
+                    polarity(&mut bank);
+                }
+                bank.apply_prepared_filter(0, low).expect("section 0");
+                bank.apply_prepared_filter(0, high).expect("section 1");
+                input_bank_bits(&mut bank)
+            };
+            let canonical = twin(false);
+            assert_ne!(
+                canonical,
+                twin(true),
+                "{backend:?}: the order must be visible in the bits, or the comparison proves nothing"
+            );
+            assert_eq!(
+                input_bank_bits(&mut processor.bank),
+                canonical,
+                "{backend:?}: the drain applied the cells in the canonical order"
+            );
+        }
+    }
+
+    /// The witness folds from the cells' final contents (#1346 D3): equal channel words are one
+    /// `Both` record and keep the lane's `LIVE` term, however they were written; unequal words, a
+    /// lone channel, and a differing ramp window clear it.
+    ///
+    /// Red mutation: admit a fixed `Desymmetrize` for every drained value -> the first two cases
+    /// (a `Both` write, and the two channels written separately to equal words) clear `LIVE` and
+    /// retire the mono collapse. Admit a fixed `Preserve` -> the last three cases keep `LIVE`.
+    #[test]
+    fn the_input_witness_folds_from_the_final_cell_contents() {
+        fn trim(lanes: BuiltinLaneSelector, db: f32, smoothing_samples: u32) -> TrackInputRecord {
+            TrackInputRecord::TrimDb {
+                lanes,
+                db,
+                smoothing_samples,
+            }
+        }
+        type Writes = fn(&mut InputCells, LiveStamp<'_>);
+        let cases: [(&str, bool, Writes); 5] = [
+            ("a Both write", true, |cells, stamp| {
+                cells.write(stamp, trim(BuiltinLaneSelector::Both, -6.0, 32));
+            }),
+            (
+                "the channels written separately to equal words",
+                true,
+                |cells, stamp| {
+                    cells.write(stamp, trim(BuiltinLaneSelector::Left, -6.0, 32));
+                    cells.write(stamp, trim(BuiltinLaneSelector::Right, -6.0, 32));
+                },
+            ),
+            ("unequal values", false, |cells, stamp| {
+                cells.write(stamp, trim(BuiltinLaneSelector::Left, -6.0, 32));
+                cells.write(stamp, trim(BuiltinLaneSelector::Right, -9.0, 32));
+            }),
+            (
+                "equal values over different windows",
+                false,
+                |cells, stamp| {
+                    cells.write(stamp, trim(BuiltinLaneSelector::Left, -6.0, 32));
+                    cells.write(stamp, trim(BuiltinLaneSelector::Right, -6.0, 64));
+                },
+            ),
+            ("a lone channel", false, |cells, stamp| {
+                cells.write(stamp, trim(BuiltinLaneSelector::Right, -6.0, 32));
+            }),
+        ];
+        for backend in input_test_backends() {
+            for (label, preserved, writes) in cases {
+                let superseded = LiveValuesSuperseded::new();
+                let (mut processor, mut cells, mut gate) =
+                    live_input_processor(backend, &superseded);
+                gate.write_published(|stamp| writes(&mut cells, stamp));
+                processor
+                    .begin_block(0, gate.snapshot())
+                    .expect("the drain");
+                assert_eq!(
+                    processor.live[0].holds(ChannelSymmetryWitness::LIVE),
+                    preserved,
+                    "{backend:?}: {label}"
                 );
             }
         }
-        for control in processor.controls.iter_mut().flatten() {
-            assert!(
-                control.try_pop().is_err(),
-                "every record present at entry is consumed"
+    }
+
+    /// Any number of edits between two blocks is accepted, the block applies the last of each
+    /// cell, and the session count records every replaced value (#1346 gate 1, at the bank).
+    ///
+    /// 30 `Both` trim edits and then 30 `Both` HPF edits, each its own transaction, then one
+    /// block. A twin that wrote only the last of each renders the same bits. Each `Both` edit
+    /// writes two cells, so each kind adds `2 x 29` replaced writes.
+    ///
+    /// Red mutation: count the replaced writes of the left cell only -> 58 instead of 116. Apply
+    /// the oldest value instead of the newest -> the bits differ from the twin's.
+    #[test]
+    fn many_input_edits_before_one_block_apply_the_last_and_count_each_replaced_value() {
+        let hpf = |index: usize| {
+            let pair =
+                builtins::prepare_input_filter_pair(48_000, 100.0 + 10.0 * index as f32, 8_000.0)
+                    .expect("pair");
+            TrackInputRecord::PreparedFilter {
+                target: pair.targets[0],
+            }
+        };
+        let trim = |index: usize| TrackInputRecord::TrimDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -1.0 - index as f32,
+            smoothing_samples: 16,
+        };
+        for backend in input_test_backends() {
+            let many = LiveValuesSuperseded::new();
+            let (mut processor, mut cells, mut gate) = live_input_processor(backend, &many);
+            for index in 0..30 {
+                gate.write_published(|stamp| cells.write(stamp, trim(index)));
+            }
+            for index in 0..30 {
+                gate.write_published(|stamp| cells.write(stamp, hpf(index)));
+            }
+            processor
+                .begin_block(0, gate.snapshot())
+                .expect("the drain");
+
+            let single = LiveValuesSuperseded::new();
+            let (mut twin, mut twin_cells, mut twin_gate) = live_input_processor(backend, &single);
+            twin_gate.write_published(|stamp| {
+                twin_cells.write(stamp, trim(29));
+                twin_cells.write(stamp, hpf(29));
+            });
+            twin.begin_block(0, twin_gate.snapshot())
+                .expect("the drain");
+
+            assert_eq!(
+                many.get(),
+                116,
+                "{backend:?}: 2 x 29 for each of the two kinds"
+            );
+            assert_eq!(single.get(), 0, "{backend:?}: nothing was replaced");
+            assert_eq!(
+                input_bank_bits(&mut processor.bank),
+                input_bank_bits(&mut twin.bank),
+                "{backend:?}: the block applied the last value of each cell"
+            );
+        }
+    }
+
+    /// A block reads each cell under its own snapshot (#1346 D2): a value stamped above it waits
+    /// for the block whose snapshot covers it, and the earlier one applies now.
+    ///
+    /// Red mutation: drain with `LiveSnapshot::ALL` in `begin_block` -> the first block applies
+    /// the second revision's trim too.
+    #[test]
+    fn the_input_drain_reads_under_the_blocks_snapshot() {
+        for backend in input_test_backends() {
+            let superseded = LiveValuesSuperseded::new();
+            let (mut processor, mut cells, mut gate) = live_input_processor(backend, &superseded);
+            let trim = |db| TrackInputRecord::TrimDb {
+                lanes: BuiltinLaneSelector::Both,
+                db,
+                smoothing_samples: 0,
+            };
+            gate.write_published(|stamp| cells.write(stamp, trim(-6.0)));
+            let first = gate.snapshot();
+            gate.write_published(|stamp| cells.write(stamp, trim(-12.0)));
+            let second = gate.snapshot();
+
+            // The coefficient a trim of `db` settles to, from a bank that was told it directly.
+            let settled = |db: f32| {
+                let width = BankWidth::for_backend(backend).expect("a banking backend");
+                let input = BuiltinChain::new(48_000, BuiltinParameters::default())
+                    .expect("chain")
+                    .into_input_builtins();
+                let mut bank = BuiltinInputBank::new(backend, width, vec![input]).expect("bank");
+                bank.set_trim_db(0, BuiltinLaneSelector::Both, db, 0)
+                    .expect("trim");
+                bank.trim_signed(0, 0).to_bits()
+            };
+            processor.begin_block(0, first).expect("the first block");
+            let after_first = processor.bank.trim_signed(0, 0).to_bits();
+            processor.begin_block(64, second).expect("the second block");
+            let after_second = processor.bank.trim_signed(0, 0).to_bits();
+            assert_eq!(
+                after_first,
+                settled(-6.0),
+                "{backend:?}: the first block applied revision 1"
+            );
+            assert_eq!(
+                after_second,
+                settled(-12.0),
+                "{backend:?}: the second block applied revision 2"
+            );
+            assert_eq!(superseded.get(), 0, "no value was replaced unread");
+        }
+    }
+
+    /// Each builtin bank reports exactly the lanes that hold a reader (#1346; the lane mask
+    /// `rack`'s `BankChain::new` slot guard reads, #1504 D3). The guard's first disjunct is
+    /// `live_lanes() == 0`, so a bank that reports 0 for a lane that does drain makes it vacuous for
+    /// that bank, and nothing else in the tree notices: no reachable builtin configuration can
+    /// make the guard fire.
+    ///
+    /// Four shapes: the input bank, the fader bank and the matrix bank, each with readers on lanes
+    /// 0 and 2, and the fused pair (fader readers on lanes 0 and 2, matrix readers on lanes 1 and
+    /// 2), whose mask is the union of its two stages. A bank with no reader reports 0 (an
+    /// `input_lane: false` strip).
+    ///
+    /// Red mutation: make any one of the four `live_lanes` return 0 -> that shape's assertion
+    /// fails; report every lane instead of the readers' lanes -> the exact masks fail; report one
+    /// stage of the fused pair instead of the union -> `0b111` fails.
+    #[test]
+    fn every_builtin_bank_reports_exactly_the_lanes_that_hold_a_reader() {
+        fn sparse<T>(lanes: usize, readers: Vec<(usize, T)>) -> Box<[Option<T>]> {
+            let mut controls: Vec<Option<T>> = (0..lanes).map(|_| None).collect();
+            for (lane, reader) in readers {
+                controls[lane] = Some(reader);
+            }
+            controls.into_boxed_slice()
+        }
+        for backend in input_test_backends() {
+            let width = BankWidth::for_backend(backend).expect("a banking backend");
+            let lanes = width.lanes() as usize;
+            let superseded = LiveValuesSuperseded::new();
+            let parameters = vec![BuiltinParameters::default(); 4];
+            let input = |controls: Box<[Option<InputReader>]>| BuiltinBankProcessor {
+                bank: BuiltinInputBank::new(
+                    backend,
+                    width,
+                    (0..4)
+                        .map(|_| {
+                            BuiltinChain::new(48_000, BuiltinParameters::default())
+                                .expect("chain")
+                                .into_input_builtins()
+                        })
+                        .collect(),
+                )
+                .expect("input bank"),
+                controls,
+                live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                process_calls: 0,
+                frames_processed: 0,
+            };
+            let fader = |controls: Box<[Option<FaderReader>]>| FaderBankProcessor {
+                bank: BuiltinFaderBank::new(backend, width, parameters.clone())
+                    .expect("fader bank"),
+                controls,
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+            let matrix = |controls: Box<[Option<MatrixReader>]>| MatrixBankProcessor {
+                bank: BuiltinMatrixBank::new(
+                    backend,
+                    width,
+                    parameters.iter().map(|p| (p.matrix, 0)).collect(),
+                )
+                .expect("matrix bank"),
+                controls,
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+
+            let input_reader = || input_lane_cells(&superseded).1;
+            let fader_reader = || fader_lane(&superseded).1;
+            let matrix_reader = || matrix_lane(&superseded).1;
+
+            assert_eq!(
+                input(sparse(
+                    lanes,
+                    vec![(0, input_reader()), (2, input_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the input bank"
+            );
+            assert_eq!(
+                fader(sparse(
+                    lanes,
+                    vec![(0, fader_reader()), (2, fader_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the fader bank"
+            );
+            assert_eq!(
+                matrix(sparse(
+                    lanes,
+                    vec![(0, matrix_reader()), (2, matrix_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the matrix bank"
+            );
+            let pair = make_fader_matrix(
+                Box::new(fader(sparse(
+                    lanes,
+                    vec![(0, fader_reader()), (2, fader_reader())],
+                ))),
+                Box::new(matrix(sparse(
+                    lanes,
+                    vec![(1, matrix_reader()), (2, matrix_reader())],
+                ))),
+            );
+            let Ok(pair) = pair else {
+                panic!("{backend:?}: an eligible pair");
+            };
+            assert_eq!(
+                pair.live_lanes(),
+                0b111,
+                "{backend:?}: the fused pair is the union of its two stages"
+            );
+
+            // A strip prepared without its live lane holds no reader: nothing to drain.
+            assert_eq!(input(sparse::<InputReader>(lanes, vec![])).live_lanes(), 0);
+            assert_eq!(fader(sparse::<FaderReader>(lanes, vec![])).live_lanes(), 0);
+            assert_eq!(
+                matrix(sparse::<MatrixReader>(lanes, vec![])).live_lanes(),
+                0
             );
         }
     }
@@ -14142,8 +14898,8 @@ mod tests {
     /// reaches the section, and the witness records what the record did.
     ///
     /// Red mutation: make the drain loop `continue` past every record without applying it -> the
-    /// coefficient never moves. Red mutation: drop `self.live.admit(&record)` -> the per-lane arm
-    /// keeps claiming symmetry.
+    /// coefficient never moves. Red mutation: drop `witness.admit(&record)` from
+    /// `InputReader::drain` -> the per-lane arm keeps claiming symmetry.
     #[test]
     fn the_per_node_live_control_input_processor_drains_and_folds_its_witness() {
         let parameters = BuiltinParameters {
@@ -14161,13 +14917,9 @@ mod tests {
             let input = BuiltinChain::new(48_000, parameters)
                 .expect("chain")
                 .into_input_builtins();
-            let (producer, control) = bounded_spsc::<TrackInputRecord>(
-                NonZeroUsize::new(8).expect("depth"),
-                QueueGeneration(0),
-            )
-            .expect("queue");
+            let (cells, control) = input_lane_cells(&LiveValuesSuperseded::new());
             (
-                producer,
+                (cells, TestOnlyGate::new()),
                 LiveControlInputProcessor {
                     input,
                     control,
@@ -14177,14 +14929,17 @@ mod tests {
         };
 
         // A `Both` retarget moves the coefficient and preserves every term.
-        let (mut producer, mut processor) = build();
-        producer
-            .try_push(TrackInputRecord::TrimDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -144.0,
-                smoothing_samples: 0,
-            })
-            .expect("queue");
+        let ((mut cells, mut gate), mut processor) = build();
+        gate.write_published(|stamp| {
+            cells.write(
+                stamp,
+                TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -144.0,
+                    smoothing_samples: 0,
+                },
+            );
+        });
         let mut left = [1.0_f32; 4];
         let mut right = [1.0_f32; 4];
         processor
@@ -14204,18 +14959,21 @@ mod tests {
             "a `Both` retarget is symmetry-preserving on the per-node arm too"
         );
 
-        // A prepared filter target uses the same frozen queue and preserves the same witness
+        // A prepared filter target uses the same cells and preserves the same witness
         // rule. The first sample is the old current coefficient; sample A+64 reaches the target.
-        let (mut producer, mut processor) = build();
+        let ((mut cells, mut gate), mut processor) = build();
         let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
-        producer
-            .try_push(TrackInputRecord::PreparedFilter {
-                target: builtins::PreparedInputFilterTarget {
-                    lanes: BuiltinLaneSelector::Both,
-                    ..prepared.targets[0]
+        gate.write_published(|stamp| {
+            cells.write(
+                stamp,
+                TrackInputRecord::PreparedFilter {
+                    target: builtins::PreparedInputFilterTarget {
+                        lanes: BuiltinLaneSelector::Both,
+                        ..prepared.targets[0]
+                    },
                 },
-            })
-            .expect("queue");
+            );
+        });
         let mut left = [1.0_f32; 65];
         let mut right = [1.0_f32; 65];
         processor
@@ -14241,14 +14999,17 @@ mod tests {
         );
 
         // A per-lane retarget declines the `LIVE` term and moves one plane only.
-        let (mut producer, mut processor) = build();
-        producer
-            .try_push(TrackInputRecord::PolarityInvert {
-                lanes: BuiltinLaneSelector::Right,
-                inverted: true,
-                smoothing_samples: 0,
-            })
-            .expect("queue");
+        let ((mut cells, mut gate), mut processor) = build();
+        gate.write_published(|stamp| {
+            cells.write(
+                stamp,
+                TrackInputRecord::PolarityInvert {
+                    lanes: BuiltinLaneSelector::Right,
+                    inverted: true,
+                    smoothing_samples: 0,
+                },
+            );
+        });
         let mut left = [1.0_f32; 4];
         let mut right = [1.0_f32; 4];
         processor
@@ -14315,7 +15076,6 @@ mod tests {
     fn live_control_requests_are_validated_sealed_and_charged_per_track() {
         let compiled = session();
         let track = compiled.normalized_model().tracks[0].id.as_str().to_owned();
-        let depth = NonZeroUsize::new(3).expect("nonzero");
 
         let baseline = prepare_session_builtins(&compiled, &[], caps()).expect("baseline");
         let attached = prepare_session_builtins_with_live_controls(
@@ -14323,7 +15083,6 @@ mod tests {
             &[],
             &[TrackControlRequest {
                 track_id: track.clone(),
-                queue_capacity: depth,
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],
@@ -14358,13 +15117,11 @@ mod tests {
             &[
                 TrackControlRequest {
                     track_id: track.clone(),
-                    queue_capacity: depth,
                     superseded: LiveValuesSuperseded::default(),
                     input_lane: true,
                 },
                 TrackControlRequest {
                     track_id: track.clone(),
-                    queue_capacity: depth,
                     superseded: LiveValuesSuperseded::default(),
                     input_lane: true,
                 },
@@ -14387,7 +15144,6 @@ mod tests {
             &[],
             &[TrackControlRequest {
                 track_id: "no-such-track".to_owned(),
-                queue_capacity: depth,
                 superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],

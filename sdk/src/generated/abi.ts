@@ -270,9 +270,14 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved",
+          "name": "liveValuesSuperseded",
           "offset": 48,
-          "type": "u64[4]"
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 56,
+          "type": "u64[3]"
         }
       ]
     },

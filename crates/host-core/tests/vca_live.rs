@@ -1362,15 +1362,18 @@ fn batch(
                 .follow(route, &|strip, lane| solo.effective_mute(strip, lane))
         );
         let entry = *mirrors.routes.get(route).expect("live route");
-        live.handles.route_controls[route]
-            .set(
-                entry.gain_db,
-                entry.matrix,
-                entry.mute,
-                entry.source_lane_muted,
-                0,
-            )
-            .expect("route queue room");
+        live.gate
+            .write_published(|stamp| {
+                live.handles.route_controls[route].set(
+                    stamp,
+                    entry.gain_db,
+                    entry.matrix,
+                    entry.mute,
+                    entry.source_lane_muted,
+                    0,
+                )
+            })
+            .expect("an in-domain send record");
         reach.route_records += 1;
         reach.vca_muted_followed +=
             usize::from(mirrors.vca.vca_mute(entry.source_strip).contains(&true));
@@ -1387,7 +1390,7 @@ const BATCHES: usize = 8;
 /// sends from every tap and bus-to-bus sends is prepared with live controls. Before each block a
 /// random batch -- VCA dB and mute moves (one lane or both), member fader moves, solo toggles and
 /// user mutes -- goes through `LiveVcaState`, the strip-mute owner and the route mirror, and their
-/// owed records are pushed at zero smoothing, or the batch is refused and rolled back. Every block
+/// owed records are written at zero smoothing, or the batch is refused and rolled back. Every block
 /// renders the bits of a plan freshly prepared from the session the test edited the same way.
 ///
 /// A randomized differential: judged by what its generator reaches (asserted below), the staging

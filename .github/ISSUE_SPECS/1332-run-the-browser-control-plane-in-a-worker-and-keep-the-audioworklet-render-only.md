@@ -296,6 +296,8 @@ mode, how many control allocations ran in the worklet.
    - `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`,
      `bash scripts/check-workspace-policy.sh`
 
+Root note (2026-10-12, by named exception, from #1530 open question 1): this slice adds a gate that runs the observation wait (#1530) on a realtime `AudioContext` through the rewired worklet and proves no one-block gap between `renderedQuanta` and the observation drain; #1530's `OfflineAudioContext` renders in a burst and cannot detect it.
+
 ## Test value
 
 - Gate 1: turns red if the worklet's joined instance runs on the wrong stack or TLS, or reads
@@ -322,6 +324,8 @@ mode, how many control allocations ran in the worklet.
 #1331's verdict, including the real iOS device and the memory maximum, gates this slice. #1333
 supplies the runtime counter and the const, destructor-free thread locals. The ports of D7 carry
 #1057's edit API messages, so its design note fixes what they serve.
+
+Root note (2026-10-13): *Share one in-flight status read in the browser host* (#1536) lands before this slice, and the Worker rewire keeps its sharing rule.
 
 ## Successor slices
 

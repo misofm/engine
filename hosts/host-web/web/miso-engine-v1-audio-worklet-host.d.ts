@@ -58,24 +58,29 @@
 // The worklet validates a whole submission -- shape, addressing, domain, and free queue room on the
 // lanes that keep a queue -- before it pushes or writes a single record. A refused batch admits
 // nothing, so a half-applied fader move cannot exist. A strip's fader, mute and pan or matrix
-// values are held in latest-target cells, not queues (issue 1312): a flood of those edits is never
-// refused for room, and a later value for the same cell replaces the earlier one. Effect, input
-// trim/polarity and live-send records keep bounded per-destination queues, and a flood of those is
-// refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host
-// locally when its own in-flight bound is reached, and by the engine when one of those queues has
-// no room.
+// values, an input's trim, polarity and filter values, a live send's gain, matrix and mute, and an
+// effect's parameter, bypass and prepared-target values are held in latest-target cells, not queues
+// (issues 1312, 1346, 1347, 1345): a flood of those edits is never refused for room, and a later
+// value for the same cell replaces the earlier one. Only an observation subscription is a queue
+// record: each effect keeps one bounded queue, one slot per declared tap, so it stays in order, and
+// a submission that outruns it is refused before it reaches the queue. A submission names each
+// observation tap at most once: a second `ObserveSubscribe` or `ObserveUnsubscribe` for the same
+// tap is `Malformed`. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host locally when its
+// own in-flight bound is reached, and by the engine when an effect's observation queue has no room
+// because earlier submissions are not yet drained; a render clears it.
 //
 // ## Application timing is exact
 //
-// Every live-control stage -- matrix/pan, fader/mute, and each driven effect -- takes its pending
-// control at the top of the block, before it touches a sample: the fader, mute and pan or matrix
-// stages read their cells, and the other stages drain their queue. `appliedAtSample` on the
+// Every live-control stage -- input, matrix/pan, fader/mute, send, and each driven effect -- takes
+// its pending control at the top of the block, before it touches a sample: the input, fader, mute,
+// pan or matrix, send and effect stages read their cells under the block's one snapshot, and an
+// effect stage also drains its observation queue. `appliedAtSample` on the
 // acknowledgement is the first sample of the next rendered block, when the target is applied.
 // Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
 // target at A+64; a response captured after A reports the accepted target, not an in-ramp curve.
 //
 // A batch may address several kinds at once. It is still one transaction: the free-room check is
-// per destination queue, and one full queue refuses the whole batch, including the records bound
+// per observation queue, and one full queue refuses the whole batch, including the records bound
 // for queues that had room and the cell values it carries.
 //
 // ## What metering costs
@@ -94,6 +99,12 @@
 // and they never supply or inherit the `firstSample`/`endSample` peak timestamps. The additive
 // `generation`, `validity` and `lossCount` fields make lease resets, producer resets and dropped
 // peak windows visible without changing the peak array.
+//
+// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+// has published. `masterGrDb` is `null` when the designated strip has none.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
@@ -321,7 +332,8 @@ export const enum MisoCommandKind {
 export const enum MisoCommandReason {
   /// The submission was admitted whole.
   None = 0,
-  /// Unknown kind, nonzero reserved word, non-finite value, or a field set for the wrong kind.
+  /// Unknown kind, nonzero reserved word, non-finite value, a field set for the wrong kind, or a
+  /// submission that names one observation tap more than once.
   Malformed = 1,
   /// `trackIndex` is not a strip of the compiled session: it is at or past `tracks.length +
   /// submixes.length` of `sessionMap()`. The spelling is kept (issue 1213, DESIGN P17).
@@ -339,8 +351,14 @@ export const enum MisoCommandReason {
   Domain = 6,
   /// Well formed and correctly addressed; this ABI version cannot apply that kind.
   UnsupportedKind = 7,
-  /// A bounded control queue (an effect, input trim/polarity or live-send lane) had no room;
-  /// nothing was admitted. Fader, mute and pan or matrix values are cells and never return it.
+  /// An effect's bounded observation queue had no room for the `ObserveSubscribe` or
+  /// `ObserveUnsubscribe` records the submission queues because earlier submissions are not yet
+  /// drained; nothing was admitted, and a render clears it. The reason is also returned with the internal result
+  /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
+  /// revision past the gate's ceiling); that batch wrote nothing. Fader, mute, pan or matrix,
+  /// input trim, polarity and filter, live-send, and effect parameter, bypass and prepared-target
+  /// values are cells, and so are the member values a `VcaFaderDb` or `VcaMute` writes: none of
+  /// them returns it for want of room.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
@@ -659,6 +677,12 @@ export interface MisoMeterFrame {
   /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
+  ///
+  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+  /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+  /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+  /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+  /// has published. `masterGrDb` is `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
   /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///
@@ -794,7 +818,10 @@ export interface MisoWebBootOptions {
   maximumMemoryBytes: bigint;
   /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
   spectrumHopFrames: number;
-  /// Per-track control-queue depth in records, or `0n` to attach no control channel (issue 137).
+  /// Nonzero accepts live commands, `0n` attaches no control channel (issue 137). The number sizes
+  /// no plan queue: every strip, send and effect value is a latest-target cell, and an effect's
+  /// observation queue holds one subscription per declared tap. It is the main-realm host's bound
+  /// on commands in flight, past which `command()` returns `RESULT_BACKPRESSURE` locally.
   liveControlCommandQueueRecords: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
   liveControlMeterBlocks: bigint;
@@ -802,8 +829,8 @@ export interface MisoWebBootOptions {
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`,
-  /// because a subscription rides the effect's own command queue.
+  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`: a
+  /// subscription is a live command, and a session with no control channel accepts none.
   liveControlObservationTaps: bigint;
   /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
   /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
@@ -860,6 +887,14 @@ export interface MisoStatus {
   readonly quantumFrames: number;
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
+  /// The session's count of live values that a later committed value replaced before a block
+  /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). For one script of
+  /// strip fader, mute and pan edits that stages at most one write per cell in a submission it
+  /// equals the C ABI's count. It does not for a script the two hosts stage differently: the
+  /// browser also counts the extra writes one submission makes to one cell (send edits in wire
+  /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
+  /// writing no cell, for input, route, VCA and submix edits.
+  readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
 }
 

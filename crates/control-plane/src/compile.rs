@@ -10,8 +10,10 @@ pub struct CompiledChildren<A: ControlAdapter> {
     pub plan: PlanState<A>,
 }
 
-/// Every live queue's depth: each strip's input queue and each effect's queue hold 16 records
-/// (#1053 D4). The fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
+/// The control-queue depth the C ABI passes to preparation (`Some` attaches live controls). It
+/// sizes no queue: every strip, effect and route lane is a set of latest-target cells with no
+/// depth (#1312, #1345, #1346, #1347). An effect's observation queue would hold one slot per
+/// declared tap, and the C ABI binds none (it asks for no observation taps).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -19,7 +21,7 @@ pub const LIVE_QUEUE_DEPTH: NonZeroUsize = host_core::STRIP_LIVE_QUEUE_DEPTH;
 
 /// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
 /// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
-/// no route lane (#1225). An effect lane's depth is `min(LIVE_QUEUE_DEPTH, automation capacity)`.
+/// no route lane (#1225). An effect lane is its latest-target cells (#1345).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]

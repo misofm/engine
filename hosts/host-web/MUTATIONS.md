@@ -17,7 +17,7 @@
 | `web-audioworklet-identity.py` artifact lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record another module's `wasmSha256` in a release change | `--self-test`: `**FAIL** artifact-lineage` |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `drain_controls` call in `LiveControlMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
-| `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's |
+| `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted: an observation subscription never changes audio, so the flood's PCM equality could not fail, and the fader, matrix and effect values it once flooded are cells with no queue to fill (#1312, #1345). The typed backpressure of a second operation on one tap is asserted by `tests::observation_misuse_is_typed_and_all_or_nothing`, `tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit` and `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push`). Batch verdict 2 NIT, same date: the claim "arming a tap never changes audio" is now held by host-core `effect_observation.rs::every_observation_leg_renders_the_corpus_to_the_same_bytes` (E1: the armed render equals the unarmed render bit for bit) and by the browser `observation-identity` gate (armed and disarmed offline renders have one digest)* |
 | `tests::unknown_targets_are_typed_and_leave_the_engine_untouched` (#137 E4) | delete the `track >= track_count` leg in `admit_commands` | the unknown-track record is refused as `UNSUPPORTED` instead of `INVALID_ARGUMENT`/`UNKNOWN_TRACK` |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
 | `tests::native_command_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runCommandTimeline` (#137 E2) | change the matrix retarget's expected `applied_at_sample` to `2 * QUANTUM` | the native assertion fails; moving the drain in `LiveControlMatrixProcessor::process` instead moves both digests together, which is the point |
@@ -42,7 +42,7 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| 140-11 | the free-room pass reads `ready.command_wanted[0]` instead of `ready.command_wanted[slot]`, so a fader flood is checked against the matrix queue's count | `host-web/src/lib.rs` | `tests::a_mixed_batch_is_one_transaction_across_every_queue` | RED (`not even the matrix record in the refused batch reached the engine`) |
+| 140-11 | the free-room pass reads `ready.command_wanted[0]` instead of `ready.command_wanted[slot]`, so a fader flood is checked against the matrix queue's count | `host-web/src/lib.rs` | `tests::a_mixed_batch_is_one_transaction_across_every_queue` | RED (`not even the matrix record in the refused batch reached the engine`) *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: stale since #1312: a fader value is a latest-target cell with no room pass, so this mutation no longer checks a fader flood against a queue count; the room pass guards the observation queues only)* |
 | 140-12 | the metadata emitter hardcodes `liveUpdatable: false` for every effect parameter again | `tools/parameter-metadata/src/lib.rs` | `scripts/check-parameter-metadata-v1.py` on the emitted document | RED (`FAIL parameter metadata: effect liveUpdatable follows automatable`) |
 
 ## Issue #143 — the effect observation surface
@@ -89,16 +89,169 @@ webkit:   all qualification gates passed (26.5)
 
 The row subscribes to the compressor's declared tap, renders sixteen blocks, and requires:
 `trackGrDb` positive and finite, `masterGrDb` equal to the designated track's own reading,
-`firstSample` strictly monotonic with the windows tiling, an unsubscribe that actually stops the
-traffic, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
-audio**. Four self-test mutations run against every browser's real result:
+`firstSample` strictly monotonic with the windows tiling, a never-armed tap publishing no
+reduction, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
+audio**. (The row once also required an unsubscribe to stop the traffic; that real-browser gate was
+removed by #1345 Amendment 7, see the notes below, and the Rust test
+`a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading` holds the claim.) Self-test
+mutations run against every browser's real result:
 
 | mutation | gate |
 |---|---|
 | `observation-armed` (the eval's named case, `observationArmed = 0`) | `an armed tap published no reduction at all` |
-| `observation-unsubscribe` | `an unsubscribed tap kept publishing` |
+| `observation-disarmed` (was `observation-unsubscribe`; the offline run that never subscribes must report no reduction) | `a tap that was never armed published a reduction` |
 | `observation-identity` | `arming a declared tap moved a rendered sample` |
 | `observation-window` | `observation windows did not advance monotonically and tile` |
+
+*Note, 2026-10-13 (#1345 Amendment 7, split, root 2026-10-13).* The real-browser
+`observation-unsubscribe` gate is removed: `runObservationUnsubscribeRun`, `unsubscribe-session.json`
+and its `qualificationSessionSources` row, the gate in `run.mjs` and its four result-field mutations
+(`observation-unsubscribe`, `-silent`, `-short`, `-norender`), the two page mutations
+(`skip-unsubscribe`, `feed-ends-at-boundary`) and the eleventh render-allocation row
+(`observation-unsubscribe`; the gate counts ten again). The notes and tables below that describe them
+are kept as history and marked removed; the gate moves to successor S1 ("Qualify observation
+unsubscribe on a real AudioContext in three browsers"), which starts from the saved patch
+(`/home/bl/misofm/submix-verdicts/b3-acceptance/split/observation-unsubscribe-gate.patch`). The
+removal also took the code only that gate called: the bounded waits, the suspended-context poll, the
+trusted-click resume (`resumeThroughClick`, `resumeUntil`, `renderUntil`), `sampleContext` and the stall
+classifier (`classifyStallSignature`, its printing in `run.mjs` and `stallSignatureProofs()`), because
+no real-context gate remains in `qualification.js` to call them; the patch carries them. What stays:
+the offline "disarmed" identity run (its zero-reduction check is now the `observation-disarmed` gate),
+the `resume-clicks` gate (now two SDK clicks, none without the SDK) and its three mutations, and the
+`spectrum-query-closed` handler fix.
+
+*Note, 2026-10-12 (stream B batch-3 verdict B1, #1345 Amendment 5; the gate described is removed by Amendment 7).* The engine admits one
+observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), so the raw `host.observe`
+unsubscribe of this row, sent before any render, was refused with typed backpressure on all three
+browsers. Firefox has no `OfflineAudioContext.suspend`, so the unsubscribe now runs on a real
+`AudioContext` held suspended between steps (`runObservationUnsubscribeRun`): feed the region,
+subscribe, resume until a frame arrives, suspend, unsubscribe, seek the source back and feed the
+region again, resume until sixteen more blocks have rendered. The `observation-unsubscribe` mutation
+now sets `observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1`, and the gate's message
+reads `an unsubscribed tap kept publishing, or the run never exercised the armed tap` followed by
+the run's numbers. The offline "disarmed" run never subscribes; it still feeds the identity gate
+and must report no reduction. A render-allocation row, `observation-unsubscribe`, makes eleven.
+
+*Note, 2026-10-12 (batch verdict 2, B2; removed by #1345 Amendment 7 with the gate and its bounded waits).* Every wait of `runObservationUnsubscribeRun` is bounded
+at 10 s, the bound `sdk-response-entry.ts` uses, and a stall fails the gate as `<kind> timeout at
+<step>` (kind `suspend`, `resume` or `await`) with the context state; a timeout is never a pass, a
+skip or a retry. The first `suspend()` of the new context is not awaited (it is only a request; a bounded
+poll replaces the await); a bounded poll requires `context.state` to be `suspended` before boot and
+again before the unsubscribe, and the run records both states. New mutation
+`observation-unsubscribe-context-running` sets the second recorded state to `running`; the
+`observation-unsubscribe` gate must then fail (the same gate, the same message). *Page-level checks
+(not committed; chromium, firefox and webkit, one run each):* with `context.suspend` stubbed to
+resolve without suspending after boot and the "before the unsubscribe" check replaced by
+`context.state`, the recorded state is `running` and the `observation-unsubscribe` gate is red in
+all three browsers; with the check in place the same stub fails the run as `suspend timeout at
+before the unsubscribe`. With the stub from the start, the check in place fails as `suspend timeout
+at the new context before boot` (chromium creates its context running; run on chromium only); with that first check
+removed too, `createHost` refuses the running context (`miso.error.v1`, result 1) in all three.
+*Engine-side red check (not a committed mutation):* with the page's unsubscribe replaced by a
+stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
+failed; with the unsubscribe sent, 0.
+
+*Note, 2026-10-12 (#1345 Amendment 6, root: one resume, no suspend after it; the unsubscribe run is removed by Amendment 7).* This note supersedes the two
+notes above for the unsubscribe run: `runObservationUnsubscribeRun` resumes its real `AudioContext`
+once, through one trusted click, and never suspends it before the final close. The render between the
+subscribe and the unsubscribe is proved, not arranged: the host status read after the subscribe
+resolved (`R1`) must be exceeded by the status read just before the unsubscribe. The deleted
+`contextStateBeforeUnsubscribe` check and its `observation-unsubscribe-context-running` mutation went
+with the suspend. The run has its own session document, `unsubscribe-session.json`, with a 512-block
+source (the observation document's sixteen blocks cannot hold the armed blocks, a render and sixteen
+blocks after the acknowledgement; `observation-session.json` is unchanged and the run uses no seek). It
+feeds a +-0.5 square wave (a constant would be removed by the strip's input high-pass within a few
+blocks, so a later block could not tell signal from silence), boots the default 5,120-frame ring and a
+one-block meter window, and keeps the source twelve blocks ahead of the render: every meter frame tops
+the ring up to twelve blocks past the block the frame closed, with the blocks sent back to back
+(the feed asks the processor for nothing; a feed that read the status and awaited one acknowledgement
+per block starved on WebKit and Firefox and dropped the signal for several blocks). The gate
+(`unsubscribeVerdict`, shared with the page mutations) requires the armed tap to publish a positive
+reduction, `R2 > R1`, `trackGrDb == 0` on **every** frame the page received after the unsubscribe
+acknowledgement (the acknowledgement and the frames use one FIFO port, so those frames were polled
+after the tap was disarmed; no frame and no block after the boundary is excluded), at least sixteen
+blocks of such frames, and a track peak above 0.05 on every such frame. The host publishes no source
+underrun count, so the per-block peak is the evidence that no block of zeros was rendered. Under
+Amendment 6 `resume-clicks` declares two SDK clicks and one gate click.
+
+Result-field mutations **(removed 2026-10-13, #1345 Amendment 7; history)** (`mutate()` in `run.mjs`,
+each required to fail `<browser>: ...` on every browser's real result):
+
+| mutation | change | gate |
+|---|---|---|
+| `observation-unsubscribe` (a) | `maximumTrackGrDbAfterAcknowledgement = 1` | `observation-unsubscribe` |
+| `observation-unsubscribe-silent` (b) | `minimumPeakAfterAcknowledgement = 0` | the same gate: a zero from silence |
+| `observation-unsubscribe-short` (c) | `blocksAfterAcknowledgement = 15` | the same gate: fewer than sixteen blocks |
+| `observation-unsubscribe-norender` | `renderedBeforeUnsubscribe = renderedAfterSubscribe` | the same gate: no render between the two |
+
+Page mutations **(removed 2026-10-13, #1345 Amendment 7; history)** (`unsubscribePageMutationProofs` in `run.mjs`, under `--self-test-mutations`, a fresh
+page of every browser; each prints its numbers, requires the verdict to refuse them, and requires the
+verdict to accept them again when only the one field that should refuse them is repaired, so it proves
+which check turned red):
+
+| mutation | defect applied in the page | refused by |
+|---|---|---|
+| (d) `skip-unsubscribe` | the unsubscribe is never sent (a fabricated result 0 stands in) | `maximumTrackGrDbAfterAcknowledgement` > 0 on every frame after the "acknowledgement" |
+| (e) `feed-ends-at-boundary` | the source feed stops when the acknowledgement arrives | `minimumPeakAfterAcknowledgement` below the floor, with `maximumTrackGrDbAfterAcknowledgement` 0 and 16 or more blocks, so only the floor sees it |
+
+*Test value.* (a) defends the claim that an unsubscribed tap leaves the frame. (b) and (e): a zero
+reduction that comes from a source that stopped feeding, which the reduction check alone would pass.
+(c): a gate that proves nothing from a handful of frames. The `norender` mutation: an unsubscribe sent
+with no render beyond the subscribe, which the engine would refuse with backpressure and which the
+Amendment-5 suspend used to arrange by hand. (d): a gate whose reduction check cannot tell a disarmed
+tap from an armed one; no result-field mutation can show that, because it never touches the browser.
+
+*Note, 2026-10-12 (batch verdict 2, B2 diagnosis and second round).* Every `resume()` of a real
+`AudioContext` of the page now runs inside a trusted click. WebKit starts or restarts an
+`AudioContext` only inside a user activation and otherwise leaves `resume()` pending. The page
+declares its click plan (`resumeClickPlan`: the two SDK controls, when the SDK workloads run, and the
+two `data-qualification-resume` buttons (one since Amendment 6) of `resumeThroughClick`; since Amendment 7 the plan is the two SDK
+controls only and empty without the SDK, the buttons having gone with the gate), `run.mjs` clicks exactly those
+controls, counts its clicks and runs the page under one 300 s deadline, and the page counts every
+`AudioContext.resume()` by whether `window.event` was a trusted click. The result carries
+`resumes: { declared, inClick, direct, planned, clicksPerformed }`; the `resume-clicks` gate requires
+`direct` 0 and the other four equal. The unsubscribe run had no recovery: the former `resumeUntil` kick
+(`suspend()` then another click) was removed because it is a retry, and a context that did not pull its
+graph failed as `stall timeout at <step> after 10000 ms` with the context state, `currentTime` and the
+host's status (`renderedQuanta`) sampled right after the resume and at the timeout. That stall
+sampling (`sampleContext`, `renderUntil`) is itself removed by Amendment 7. Three committed
+self-test mutations of the real result, each required to fail with `<browser>: resume-clicks:`:
+
+| mutation | change | gate |
+|---|---|---|
+| `resume-clicks-direct` | `resumes.direct = 1` | `resume-clicks`: a real AudioContext was resumed outside a trusted click |
+| `resume-clicks-missing` | `resumes.clicksPerformed` one fewer than declared | `resume-clicks`: the harness did not click exactly the declared controls |
+| `resume-clicks-extra` | `resumes.clicksPerformed` one more than declared | the same gate |
+
+**The stall signature (root ruling, 2026-10-12, stream B batch 3; removed 2026-10-13, #1345 Amendment 7: the classifier, its printing and `stallSignatureProofs()` had no caller once the unsubscribe gate went, and are in the saved patch for S1; history).** A `stall timeout` failure carries a
+structured `stallSignature` (`classifyStallSignature` in `qualification.js`), and `run.mjs` prints it as
+`<browser>: stall-signature: {...}` and keeps it in the failure's `qualificationError.value`. It is
+`full: true` only if the context state is "running" at the resume and at the timeout, `currentTime` and
+`renderedQuanta` are equal at both, at least two status replies were answered in the window (polled every
+250 ms, each bounded to 1 s; the processor answers from its port handler, so an answered reply shows
+`process()` was not on the stack) and `lastResult` is 0 at both. `--self-test-mutations` also runs
+`stallSignatureProofs()` once: a full record must stay full and each of eight records, each missing one
+condition (state not running at the timeout or the resume, `currentTime` moved, `renderedQuanta` moved,
+one reply, no reply, `lastResult` 6, unanswered timeout sample), must give `full: false`.
+Applied to the classifier in the working tree (red; reverted: green): dropping the `renderedQuanta`
+equality gives `a record without renderedQuanta moved was classified full`; `answered >= 2` -> `>= 1`
+gives `a record without one status reply ...`; dropping the `lastResult` test at the timeout gives
+`a record without last result not 0 ...`.
+
+*Page-level checks (not committed; chromium and webkit, no busy loops):* with the first
+`resumeThroughClick` replaced by a direct `context.resume()`, both browsers go red as `resume timeout at
+the replayed region to render (click)` (the harness waits for the first control, the page offers the next
+one, and no run reaches the result; `/tmp/claude-1002/b2r2/logs/mut-direct-chromium.log` and
+`mut-direct-webkit.log`); with `resumeClickPlan` declaring one control the page never offers, chromium
+fails `resume-clicks` with `{"declared":5,"inClick":4,"direct":0,"planned":5,"clicksPerformed":4}`
+(`/tmp/claude-1002/b2r2/logs/mut-missing-chromium.log`). Before the click existed,
+the gate's first `resume()` called directly with the page idle for 6 s after the SDK phase failed as
+`resume timeout at a frame from the armed tap` on WebKit (`/tmp/claude-1002/b2diag/logs/mut-A-webkit.log`);
+with the click it passed (`mut-B`).
+*The kick's hang count, one sourced figure:* a script `suspend()` followed by a script or click `resume()`
+as the recovery left the minimal page (a real `AudioWorkletNode`, no engine code, 40 fresh contexts per
+run, 32 busy loops, WebKit) hung with `resume()` never returning in 3 of 8 runs
+(`/tmp/claude-1002/b2diag/drv5.out`; the `HANG` lines of runs 2, 6 and 8).
 
 ### And the same mutation against a real engine, in a real browser
 
@@ -190,7 +343,7 @@ restored between rows.
 | P3-M38 | the `polarity_invert` boolean-exact check is dropped | same | RED |
 | P3-M39 | a trim record accepts a rack byte | same | RED |
 | P3-M40 | `channel = 255` is admitted as `Both` | same (+1) | RED |
-| P3-M41 | `channel = both` lowers to a single-lane record | `a_both_lane_trim_command_is_one_record_and_one_queue_slot` | RED — the `both` arm renders the `left` arm's bits. The queue-slot half of that test does **not** catch this, and the two halves are asserted together for exactly that reason |
+| P3-M41 | `channel = both` lowers to a single-lane record | `a_both_lane_trim_command_is_one_record_and_one_queue_slot` | RED — the `both` arm renders the `left` arm's bits. The queue-slot half of that test does **not** catch this, and the two halves are asserted together for exactly that reason *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_both_lane_trim_command_addresses_both_lanes` (#1346), whose queue-slot half went with the input queue)* |
 | P3-M42 | a refused submission commits the solo transaction instead of rolling it back | `trim_and_polarity_leave_the_solo_transaction_closed` (+1) | RED — a solo bit survives a batch its *trim* record refused |
 | P3-M43 | the admission couples a trim record to the solo composition | `a_trim_is_not_a_mute_and_solo_does_not_move_it` | RED — a trim ride sets the strip's user mute, and clearing a solo no longer restores what the caller set |
 
@@ -402,16 +555,16 @@ Each row was applied, its test run red, and the tree restored.
 | `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix` decode) | decode `values` as `[v0, v2, v1, v3]` | the mirror differs from the edited values |
 | `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, the send band) | push a send's record onto the next send's queue | trial 0: the output's bits differ |
 | `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, a stale mirror field) | `routeGainDb` stages its record but leaves the mirror's gain | the mirror keeps the seed gain |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the mirror committed before the room check) | `ready.routes.commit()` as each send record is staged | the domain refusal leaves the mirror at -9 dB |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the send band's room) | `queue_available` reports `u32::MAX` for every send queue | the overfilled send queue fails half-way: result 255, not backpressure |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, push before validation) | push each send record in pass one | the domain refusal leaves send 0's queue at 3 of 4 |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the mirror committed before the room check) | `ready.routes.commit()` as each send record is staged | the domain refusal leaves the mirror at -9 dB *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347))* |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the send band's room) | `queue_available` reports `u32::MAX` for every send queue | the overfilled send queue fails half-way: result 255, not backpressure *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347); the send queue this mutation overfilled no longer exists, so the mutation cannot be applied)* |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, push before validation) | push each send record in pass one | the domain refusal leaves send 0's queue at 3 of 4 *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347); the send queue pushed to no longer exists, so the mutation cannot be applied (its counterpart is a cell write before validation))* |
 | `tests::send_records_are_shape_checked` (D1) | drop the `effect_index != 0` rule | the record with an effect word is admitted (reason 0) |
 | `tests::send_edits_admit_and_render_without_allocating` (gate 7) | allocate an 8-byte `Vec` per staged send record | `admission/render allocated` (3) |
 | `tests::the_exact_retained_budget_charges_the_send_lanes` (#1221 verdict MINOR-1) | leave `route_control_resources.total_bytes` out of the bridge rows | the retained delta between depths 8 and 64 is 0, not the lanes' |
 | K3 follow-up (verdict MINOR-1/2, V1): `tests::a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits` | `compile_ready` seeds the send mirror with `\|_, _\| false` | RED here and in #1224's `a_one_lane_mute_follows_into_its_own_source_column` |
 | K3 follow-up (V8) | the record is built with `[false; 2]`, not `next.source_lane_muted` | RED in this test only |
 | K3 follow-up (V2) | `route_slot` omits `+ self.effect_controls.len()` | RED here (inserts run), in gate 2 (refused at index 0, not 1) and in #1224's `a_delayed_send_follows_like_an_explicit_send_mute` |
-| K3 follow-up (V6): `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, admitted then refused) | `ready.routes.commit()` dropped on success | RED here and in #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` |
+| K3 follow-up (V6): `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, admitted then refused) | `ready.routes.commit()` dropped on success | RED here and in #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror`, and #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` is now `a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole` (#1347))* |
 | K3 follow-up (verdict MINOR-4, V3): `tests::the_exact_retained_budget_charges_the_send_lanes` (absolute check) | the bridge rows charge `route_control_resources.queue_bytes`, not `total_bytes` | RED |
 | K3 follow-up (V4) | the mirror and shadow bytes dropped from the bridge rows | RED |
 | `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 18;` after `COMMAND_VCA_MUTE = 17` (issue #1245; it was 16 after `COMMAND_ROUTE_MATRIX = 15` under issue #1222) | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
@@ -450,7 +603,7 @@ Each row was applied, its test run red, and the tree restored. "Audio" rows ran 
 |---|---|---|
 | deliverable 3 (a): `tests::a_follow_never_pushes_a_redundant_send_record` (gate 2) | `delta` yields every following route, changed or not | `solo drums` is refused: `delta` yields the unchanged `drums-verb`, whose strip staged no mute record (`malformed`); gates 3, 5, 9 and the staging test go red too. With that guard also bypassed (a missing strip record read as ramp 0), the red is `only bass-room follows`: a redundant `drums-verb` record was pushed |
 | deliverable 3 (b): `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1) | the follow pass placed before the solo coalescing pass | `solo vocal` is refused (`malformed`): no strip mute record is staged yet for the follow's ramp; gates 2, 3, 4, 9 and the staging test go red too. The red is the `malformed` guard's: gate 1 checks settled blocks only; with the guard replaced by a ramp-0 fallback, the audio red is `a_solo_follow_ramps_at_the_solo_window` (K3 follow-up row below) |
-| deliverable 3 (c): `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3) | push each follow record as it is built, before the room check | `solo: send queues`: `bass-room`'s queue lost a slot on a refused batch |
+| deliverable 3 (c): `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3) | push each follow record as it is built, before the room check | `solo: send queues`: `bass-room`'s queue lost a slot on a refused batch *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole` (#1347); its full-queue half was deleted with the send queue, so this mutation cannot be applied)* |
 | `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1, audio) | no follow pass (`if false && …`) | `soloed vs booted muted: block 6 sample 0: 0.031146944 vs 0.6195009` -- the measured leak |
 | gates 4, 5 and 6 (audio) | no follow pass | gate 4 `[false, false] -> [true, false]` block 4; gate 5 `bus lanes [true, true]` block 4; gate 6 `muted` block 5 sample 102 (frame 742 = the edit at 256 + 486) |
 | gate 1 and gate 6 (audio) | build the follow record with the mirror's old `source_lane_muted` | gate 1 at block 6 sample 0; gate 6 `muted` at block 5 sample 102 |
@@ -484,7 +637,7 @@ tree restored (driver and log: the #1245 attempt 1 record).
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::a_live_vca_ride_lands_on_a_fresh_plans_bits` (gate 1) and `tests::a_member_move_and_a_vca_move_compose` (gate 2) | kind 3 on a reached strip stages its own value, not the effective one | both: the live output's bits differ from the fresh plan's |
-| gate 1, gate 2, `tests::a_vca_batch_that_overfills_a_queue_is_refused_whole` (gate 4) | the VCA fader pass stages on the next strip's fader queue | all three |
+| gate 1, gate 2, `tests::a_vca_batch_that_overfills_a_queue_is_refused_whole` (gate 4) | the VCA fader pass stages on the next strip's fader queue | all three *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted (#1347: rewritten in attempt 1 as `a_vca_batch_with_a_late_refusal_is_refused_whole`, deleted in attempt 2); the send queue it overfilled no longer exists)* |
 | `tests::a_vca_move_that_changes_no_effective_value_stages_nothing` (gate 3) | the VCA fader pass stages every reached lane, changed or not | gate 3 only: fader room moves |
 | gate 4 and `tests::vca_records_are_addressed_and_shape_checked` (gate 6) | the VCA state commits as a ride is read | both: a refused submission leaves the VCA mirror moved |
 | gate 4 | the VCA state is never committed on success | gate 4: the admitted ride is rolled back by the next refusal |

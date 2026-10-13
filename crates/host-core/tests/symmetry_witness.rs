@@ -198,8 +198,8 @@ fn render(console: &mut Console, blocks: usize) {
 }
 
 fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
-    let producer = console
-        .handles
+    let Console { handles, gate, .. } = console;
+    let producer = handles
         .effect_controls
         .iter_mut()
         .find(|producer| {
@@ -214,11 +214,9 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
         value,
     } = record
     {
-        support::push_eq_parameter(producer, parameter_index, channel, value);
+        support::push_eq_parameter(producer, gate, parameter_index, channel, value);
     } else {
-        producer
-            .try_push(record)
-            .expect("room in the bounded queue");
+        support::write_effect(producer, gate, record);
     }
 }
 
@@ -609,36 +607,28 @@ fn a_left_channel_command_declines_exactly_one_lane() {
     );
 }
 
-/// Two per-lane EQ **target** writes that leave the channels agreeing still decline the lane.
+/// Two per-lane EQ **target** writes that leave the channels agreeing, applied in one block, keep
+/// the lane; written apart, or to different words, they decline it.
 ///
-/// # The contract this pins, as it stands after issue #1004
+/// # The contract this pins, after decision 15's cells (issue #1345 D3)
 ///
-/// The EQ is a prepared-target owner: every edit reaches the drain as designed
-/// `PreparedTarget`s, never as `Parameter` spans. A `Left` edit followed by a `Right` edit to the
-/// same value is two owner transactions, so two **one-channel targets** with equal words -- and
-/// they land the two channels on identical designed words, so the *recompute* (each effect's
-/// `channel_symmetry`) says symmetric while the *event* hook says a one-channel write was
-/// admitted. The hook declines, and that is still the rule for targets: a target FIFO has no
-/// last-wins staging, so equal last targets per channel do not mean equal state (`[Left A, Both C,
-/// Right A]` leaves the channels at `C` and `A`), and #1004 deliberately does not pair them. The
-/// SDK's symmetric both-channel EQ edit is one `Both` target and never reaches this path.
+/// The EQ is a prepared-target owner: every edit reaches the drain as designed targets in cells,
+/// one per `(slot, channel)`. A `Left` edit and a `Right` edit to the same value are two owner
+/// transactions that write the two channel cells with equal designed words. The lane folds its
+/// witness from the cells' final contents: two cells applied in one block with equal words are one
+/// both-channel write (and are applied once, as a `Both` target), so the lane keeps `LIVE`. This is
+/// the structural form of #1004's pairing rule. It was not the rule while targets were a FIFO: a
+/// FIFO has no last-wins staging, so equal last targets per channel did not mean equal state, and
+/// the pair declined. A cell holds the last write, so equal words mean equal state, given that
+/// `LIVE` held before (the channels were doing identical work).
 ///
-/// **This is not the rule for `Parameter` spans.** Since #1004 a `Left` span and its bit-equal
-/// `Right` twin staged in one drain -- how the web host lowers a both-channel command on a
-/// `PerLane` parameter (`into_effect_records`) -- keep `LIVE`, because the effect applies both
-/// halves by the same code from the same value. The test beside this one,
-/// `twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it`, pins that half. Do not
-/// "restore" a decline for twin spans on the strength of this test.
+/// What still declines: a pair split across two blocks (each block sees a lone write), words that
+/// differ, and `[Left A, Both C, Right A]` (the cells end at `C` and `A`).
 ///
-/// Declining here is the safe direction (a missed collapse, never a wrong render), and the
-/// re-engagement rule is where a lane earns its way back -- on proven state equality, not on the
-/// words agreeing.
-///
-/// Red mutation: delete `self.symmetry.admit(&record)` from `EffectControlLane::stage` -> this
-/// fails. Defer one-channel targets into the pairing rule as #1004's rejected prototype did -> this
-/// fails too.
+/// Red mutations: fold each applied target cell as a lone write (never pairing) -> the first test
+/// fails; pair any two applied target cells whatever their words -> the other two fail.
 #[test]
-fn two_per_lane_writes_that_agree_still_decline_the_lane() {
+fn two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane() {
     let (_session, mut console) = prepare(&mono_session());
     let [before, lanes] = census(&console);
     assert_eq!(before, lanes, "the fixture starts fully eligible");
@@ -652,8 +642,42 @@ fn two_per_lane_writes_that_agree_still_decline_the_lane() {
     render(&mut console, 8);
     assert_eq!(
         census(&console),
+        [before, lanes],
+        "two one-channel EQ targets with equal words, applied in one block, are one both-channel write"
+    );
+}
+
+#[test]
+fn two_per_lane_target_writes_split_across_blocks_or_unequal_decline_the_lane() {
+    let (_session, mut console) = prepare(&mono_session());
+    let [before, lanes] = census(&console);
+    assert_eq!(before, lanes, "the fixture starts fully eligible");
+    push(&mut console, "eq2", parameter(ParameterChannel::Left, -6.0));
+    render(&mut console, 1);
+    push(
+        &mut console,
+        "eq2",
+        parameter(ParameterChannel::Right, -6.0),
+    );
+    render(&mut console, 8);
+    assert_eq!(
+        census(&console),
         [before - 1, lanes],
-        "one-channel EQ targets decline the lane even though the words now agree"
+        "a pair split across two blocks is two lone writes"
+    );
+
+    let (_session, mut console) = prepare(&mono_session());
+    push(&mut console, "eq3", parameter(ParameterChannel::Left, -6.0));
+    push(
+        &mut console,
+        "eq3",
+        parameter(ParameterChannel::Right, -9.0),
+    );
+    render(&mut console, 8);
+    assert_eq!(
+        census(&console),
+        [before - 1, lanes],
+        "one-channel EQ targets with different words decline the lane"
     );
 }
 
@@ -664,16 +688,16 @@ const COMPRESSOR_SESSION: &str =
 
 /// Twin `Parameter` spans keep the lane; a lone half, or a twin one ulp apart, declines it.
 ///
-/// The span half of the contract `two_per_lane_writes_that_agree_still_decline_the_lane` states
-/// for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
+/// The span half of the contract `two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane`
+/// states for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
 /// parameter and the same value, drained in one block, stage as adjacent twin spans; the
 /// compressor validates and applies `pending[0][p]` and `pending[1][p]` by the same code from the
 /// same value, so the two channels stay in bit-equal state and `LIVE` is kept. Any one-channel
 /// write whose twin is missing or differs clears it, exactly as before #1004.
 ///
-/// Red mutations: delete the deferral in `EffectControlLane::stage` (fold every record at once,
-/// the pre-#1004 drain) -> the twin assertion fails; make `spans_pair` return `true` -> the lone
-/// and near-twin assertions fail.
+/// Red mutations: fold each applied one-channel cell as a lone write (never pairing the two
+/// cells of a parameter) -> the twin assertion fails; pair any two applied cells whatever their
+/// words -> the lone and near-twin assertions fail.
 #[test]
 fn twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it() {
     let mut model = parse_session_json(COMPRESSOR_SESSION).expect("fixture parses");
@@ -694,17 +718,16 @@ fn twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it() {
         value,
     };
     let raw = |console: &mut Console, track_id: &str, record: EffectControlRecord| {
-        console
-            .handles
+        let Console { handles, gate, .. } = console;
+        let producer = handles
             .effect_controls
             .iter_mut()
             .find(|producer| {
                 producer.track_id.as_ref() == track_id
                     && producer.address == LiveEffectAddress::console(0)
             })
-            .expect("a control channel for the compressor")
-            .try_push(record)
-            .expect("room in the bounded queue");
+            .expect("a control channel for the compressor");
+        support::write_effect(producer, gate, record);
     };
 
     // Twins, three times, as a ride would send them.
@@ -858,15 +881,51 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
     );
 }
 
-/// A subscription is not a parameter write. Red mutation: make the `Observe` arm of
-/// `symmetry_event` return `Desymmetrize` -> this fails.
+/// A subscription is not a parameter write: arming a tap changes what is read after a block and
+/// never the lane's words, so it cannot move the witness.
+///
+/// The compressor declares a tap; the EQ declares none, so no queue exists for a subscription to
+/// ride there. Red mutation: fold each drained subscription into the witness as a one-channel
+/// write (clear `LIVE` in `EffectControlLane::drain_observations`) -> this fails.
 #[test]
 fn an_observe_record_never_moves_the_witness() {
-    let (_session, mut console) = prepare(&mono_session());
+    let mut model = parse_session_json(COMPRESSOR_SESSION).expect("fixture parses");
+    for track in &mut model.tracks {
+        track.right_source_channel = track.left_source_channel;
+    }
+    let document = canonical_session_json(&model).expect("mutated fixture canonicalizes");
+    let request = HostLiveControlRequest {
+        observation_taps: 4,
+        ..live_controls()
+    };
+    let (_session, mut prepared, handles) =
+        prepare_host_session_with_live_controls(&document, &caps(), &request).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    let mut console = Console {
+        prepared,
+        handles,
+        gate,
+        block: 0,
+    };
     let [before, lanes] = census(&console);
-    push(
-        &mut console,
-        "eq1",
+    assert_eq!(before, lanes, "the mono compressor fixture starts eligible");
+    let Console { handles, gate, .. } = &mut console;
+    let producer = handles
+        .effect_controls
+        .iter_mut()
+        .find(|producer| {
+            producer.track_id.as_ref() == "comp2"
+                && producer.address == LiveEffectAddress::console(0)
+        })
+        .expect("a control channel for the compressor");
+    support::write_effect(
+        producer,
+        gate,
         EffectControlRecord::Observe {
             tap_index: 0,
             armed: true,

@@ -75,7 +75,7 @@ pub use compile::{
 };
 #[cfg(feature = "test-support")]
 pub use control::{
-    ProviderEpoch, TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase,
+    EffectCellRow, ProviderEpoch, TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase,
     TestTransactionSnapshot, test_lifecycle_counters, test_reset_lifecycle_observer,
 };
 

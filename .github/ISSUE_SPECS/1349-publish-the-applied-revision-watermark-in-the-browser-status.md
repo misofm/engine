@@ -159,3 +159,7 @@ the browser's own `applied_at_sample` arithmetic.
   watermark-and-counters exports, and the `SessionState::watermark()` accessor D3 reuses.
 - *Report live_values_superseded in the browser status and prove both hosts drain strip cells
   alike* (#1399): it takes offset 48 first.
+
+## Amendment (root, 2026-10-13): status size
+
+D2's "size stays 80" is superseded: `WebStatus` is 88 bytes, set by *Report source underruns in the browser status* (#1537), which adds `source_underrun_blocks` at offset 80. This issue's three watermark words keep offsets 56, 64 and 72, and its gate on the record size reads 88.

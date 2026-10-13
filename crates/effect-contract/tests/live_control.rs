@@ -1,159 +1,181 @@
-//! Issue #140 A: the live-control staging seam.
+//! Issue #140 A, rewritten for decision 15's latest-target cells (issue #1345): the live-control
+//! staging seam.
 //!
 //! These are the gates for the two things the render path may never get wrong: the spans a drain
 //! produces are already in the contract's canonical order (so every effect's own validator accepts
 //! them rather than counting them as `invalid_spans`), and the bypass shunt reproduces the dry
 //! signal delayed by exactly the effect's declared latency (so bypass preserves PDC).
 
+#[path = "support/lane_rig.rs"]
+mod lane_rig;
+
 use effect_contract::{
-    AutomationSpanKind, BypassShunt, EffectControlLane, EffectControlRecord,
-    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
+    BypassShunt, EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
+    ParameterChannelPolicy,
 };
-use engine::realtime::{QueueGeneration, bounded_spsc};
+use lane_rig::{Rig, both, left, right, target};
 
-fn depth(value: usize) -> core::num::NonZeroUsize {
-    core::num::NonZeroUsize::new(value).expect("nonzero queue depth")
-}
-
-fn idle() -> PreparedAutomationSpan {
-    PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
-        channel: ParameterChannel::Both,
-        parameter_index: u32::MAX,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: 0.0,
-        end_value: 0.0,
-    }
-}
-
-fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControlRecord {
-    EffectControlRecord::Parameter {
-        parameter_index: index,
-        channel,
-        value,
-    }
-}
-
-fn prepared_target(slot: u32, channel: ParameterChannel, marker: u32) -> EffectControlRecord {
-    EffectControlRecord::PreparedTarget(PreparedEffectTarget {
-        slot,
-        channel,
-        words: [marker; PREPARED_EFFECT_TARGET_WORDS],
-    })
+/// A shape with `Left`/`Right` cells for each `PerLane` index and one `Both` cell for each
+/// `Shared` one.
+fn shape(per_lane: &[u32], shared: &[u32], target_slots: usize) -> EffectLaneShape {
+    let mut live: Vec<(u32, ParameterChannelPolicy)> = per_lane
+        .iter()
+        .map(|index| (*index, ParameterChannelPolicy::PerLane))
+        .chain(
+            shared
+                .iter()
+                .map(|index| (*index, ParameterChannelPolicy::Shared)),
+        )
+        .collect();
+    live.sort_by_key(|(index, _)| *index);
+    EffectLaneShape::from_live_parameters(live, target_slots)
 }
 
 #[test]
 fn prepared_control_record_stays_within_the_frozen_sixty_four_byte_bound() {
     assert!(core::mem::size_of::<EffectControlRecord>() <= 64);
-    assert_eq!(PREPARED_EFFECT_TARGET_WORDS, 12);
+    assert_eq!(effect_contract::PREPARED_EFFECT_TARGET_WORDS, 12);
 }
 
+/// Prepared targets are cells: the last write to each `(slot, channel)` is the one applied, and a
+/// block applies at most one target per cell. `[Left A, Both C, Left Z]` leaves the left cell at Z
+/// and the right at C, and the replaced writes are counted.
+///
+/// Test value: a target lane that stays a FIFO (three targets staged), or one that applies the
+/// first write of a cell.
 #[test]
-fn prepared_targets_retain_fifo_order_for_overlapping_selectors() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new_with_target_staging(consumer, false);
-    for record in [
-        prepared_target(3, ParameterChannel::Left, 0x11),
-        prepared_target(3, ParameterChannel::Both, 0x22),
-        prepared_target(3, ParameterChannel::Left, 0x33),
-    ] {
-        producer.try_push(record).expect("room");
-    }
-
-    let mut staging = [idle(); 4];
-    let staged = lane.stage(&mut staging, 0, None);
+fn prepared_targets_are_cells_where_the_last_write_wins() {
+    let mut rig = Rig::new(shape(&[], &[], 6), 0);
+    rig.commit(&[
+        target(3, ParameterChannel::Left, 0x11),
+        target(3, ParameterChannel::Both, 0x22),
+        target(3, ParameterChannel::Left, 0x33),
+    ])
+    .expect("cells");
+    let staged = rig.stage();
     assert_eq!(staged.staged, 0);
-    assert_eq!(staged.staged_targets, 3);
-    assert!(!staged.target_error);
-    assert!(staged.staged + staged.staged_targets <= 3);
-    let targets = lane.prepared_targets();
+    assert_eq!(staged.staged_targets, 2);
+    let targets = rig.lane.prepared_targets();
     assert_eq!(
         targets
             .iter()
             .map(|target| (target.slot, target.channel, target.words[0]))
             .collect::<Vec<_>>(),
         vec![
-            (3, ParameterChannel::Left, 0x11),
-            (3, ParameterChannel::Both, 0x22),
             (3, ParameterChannel::Left, 0x33),
+            (3, ParameterChannel::Right, 0x22),
         ],
-        "prepared selectors are applied as a FIFO: left X, both Y, left Z"
+        "the left cell holds the third write, the right cell the second"
+    );
+    assert_eq!(
+        rig.superseded.get(),
+        2,
+        "the left cell replaced two writes, the right none"
     );
 }
 
+/// A lane without target cells refuses a target, writes nothing and stages nothing.
+///
+/// Test value: a target accepted by a lane that has nowhere to hold it (a dropped value that was
+/// acknowledged).
 #[test]
-fn unsupported_lane_has_no_target_storage_and_reports_target_error() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(2), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    assert!(!lane.has_target_staging());
-    assert_eq!(lane.target_staging_retained_bytes(), 0);
-    producer
-        .try_push(prepared_target(1, ParameterChannel::Left, 0x44))
-        .expect("room");
-
-    let mut staging = [idle(); 2];
-    let staged = lane.stage(&mut staging, 0, None);
-    assert_eq!(staged.staged, 0);
-    assert_eq!(staged.staged_targets, 0);
-    assert!(staged.target_error);
-    assert!(lane.prepared_targets().is_empty());
+fn a_lane_without_target_slots_refuses_a_target_and_writes_nothing() {
+    let mut rig = Rig::new(shape(&[0], &[], 0), 0);
+    assert_eq!(
+        rig.commit(&[target(1, ParameterChannel::Left, 0x44)]),
+        Err(EffectWriteRefusal::Target)
+    );
+    assert_eq!(rig.pin.last_published(), 0, "a refusal uses no revision");
+    let staged = rig.stage();
+    assert_eq!((staged.staged, staged.staged_targets), (0, 0));
+    assert!(rig.lane.prepared_targets().is_empty());
+    // A slot past the owner's slots is refused the same way.
+    let mut rig = Rig::new(shape(&[], &[], 2), 0);
+    assert_eq!(
+        rig.commit(&[target(2, ParameterChannel::Both, 1)]),
+        Err(EffectWriteRefusal::Target)
+    );
 }
 
+/// A prepared-target owner's lane has no parameter cells: its parameters ride its targets, so a
+/// bare parameter record is refused rather than rendered through a second path.
+///
+/// Test value: a target owner that silently falls back to render-time semantic design.
 #[test]
-fn prepared_lane_refuses_raw_semantic_records_and_resets_target_prefix() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(2), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new_with_target_staging(consumer, false);
-    producer
-        .try_push(parameter(7, ParameterChannel::Left, 0.5))
-        .expect("room");
-    let mut staging = [idle(); 2];
-    let semantic = lane.stage(&mut staging, 0, None);
-    assert_eq!(semantic.staged, 0);
-    assert_eq!(semantic.staged_targets, 0);
-    assert!(semantic.target_error);
-    assert!(lane.prepared_targets().is_empty());
+fn a_target_owners_lane_refuses_a_bare_parameter_and_resets_its_target_prefix() {
+    let mut rig = Rig::new(shape(&[], &[], 6), 0);
+    assert_eq!(
+        rig.commit(&[left(7, 0.5)]),
+        Err(EffectWriteRefusal::NotLive)
+    );
+    let staged = rig.stage();
+    assert_eq!((staged.staged, staged.staged_targets), (0, 0));
 
-    producer
-        .try_push(prepared_target(2, ParameterChannel::Both, 0x55))
-        .expect("room");
-    let target = lane.stage(&mut staging, 128, None);
-    assert_eq!(target.staged_targets, 1);
-    assert!(!target.target_error);
-    assert_eq!(lane.prepared_targets()[0].words[0], 0x55);
+    rig.commit(&[target(2, ParameterChannel::Both, 0x55)])
+        .expect("a target");
+    let staged = rig.stage();
+    assert_eq!(staged.staged_targets, 1);
+    assert_eq!(rig.lane.prepared_targets()[0].words[0], 0x55);
 
-    // The next entry snapshot has no records. The old prefix must not remain visible to a
-    // processor that sees an empty block.
-    let fresh = lane.stage(&mut staging, 256, None);
-    assert_eq!(fresh.staged, 0);
-    assert_eq!(fresh.staged_targets, 0);
-    assert!(lane.prepared_targets().is_empty());
+    // The next block has nothing new. The old prefix must not remain visible to a processor that
+    // sees an empty block.
+    let staged = rig.stage();
+    assert_eq!((staged.staged, staged.staged_targets), (0, 0));
+    assert!(rig.lane.prepared_targets().is_empty());
 }
 
-/// Red mutation: delete the `existing > key` insertion leg in `EffectControlLane::stage` so
-/// records are appended in arrival order -> the emitted keys are `[(3,Left), (1,Right), (1,Left)]`
-/// and the ordering assertion fails on the first pair.
+/// The checked write refuses a parameter the lane has no cell for, and a channel its policy does
+/// not take, and in either case writes nothing.
+///
+/// Test value: a `Left` write to a `Shared` parameter reaching a cell (every launch effect counts
+/// such a span as invalid, so the value would be lost after an ack).
+#[test]
+fn a_record_without_a_cell_is_refused_and_writes_nothing() {
+    let mut rig = Rig::new(shape(&[1], &[2], 0), 1);
+    assert_eq!(
+        rig.commit(&[both(1, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(
+        rig.commit(&[left(2, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(
+        rig.commit(&[right(2, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(
+        rig.commit(&[left(0, 1.0)]),
+        Err(EffectWriteRefusal::NotLive)
+    );
+    assert_eq!(
+        rig.commit(&[left(9, 1.0)]),
+        Err(EffectWriteRefusal::NotLive)
+    );
+    assert_eq!(
+        rig.commit(&[EffectControlRecord::Observe {
+            tap_index: 0,
+            armed: true,
+            window_blocks: 0,
+        }]),
+        Err(EffectWriteRefusal::Observe),
+        "a subscription is a queue record, not a cell"
+    );
+    assert_eq!(rig.pin.last_published(), 0);
+    assert_eq!(rig.stage().staged, 0);
+}
+
+/// Red mutation: stage the parameter groups in write order instead of the shape's order -> the
+/// emitted keys are `[(3,Left), (1,Right), (1,Left)]` and the ordering assertion fails on the
+/// first pair.
 #[test]
 fn a_drain_emits_the_contract_canonical_span_order() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    // Deliberately reverse-ordered arrival.
-    for record in [
-        parameter(3, ParameterChannel::Left, 0.5),
-        parameter(1, ParameterChannel::Right, 0.25),
-        parameter(1, ParameterChannel::Left, 0.125),
-    ] {
-        producer.try_push(record).expect("room");
-    }
-    let mut staging = [idle(); 8];
-    let staged = lane.stage(&mut staging, 4_096, None);
+    let mut rig = Rig::new(shape(&[1, 3], &[], 0), 0);
+    // Deliberately reverse-ordered writes.
+    rig.commit_each(&[left(3, 0.5), right(1, 0.25), left(1, 0.125)]);
+    let staged = rig.stage();
     assert_eq!(staged.staged, 3);
-    assert_eq!(staged.dropped, 0);
-    let keys: Vec<(u32, ParameterChannel)> = staging[..3]
+    let keys: Vec<(u32, ParameterChannel)> = rig.staging[..3]
         .iter()
         .map(|span| (span.parameter_index, span.channel))
         .collect();
@@ -166,74 +188,98 @@ fn a_drain_emits_the_contract_canonical_span_order() {
         ],
         "spans must leave the drain in (parameter_index, channel) order"
     );
-    for span in &staging[..3] {
-        assert_eq!(span.kind, AutomationSpanKind::Point);
-        assert_eq!(span.start_sample, 4_096);
-        assert_eq!(span.end_sample, 4_096);
+    for span in &rig.staging[..3] {
+        assert_eq!(span.kind, effect_contract::AutomationSpanKind::Point);
+        assert_eq!(span.start_sample, 0);
+        assert_eq!(span.end_sample, 0);
         assert_eq!(
             span.start_value.to_bits(),
             span.end_value.to_bits(),
             "a Point span's endpoints are bit-identical, which is what every effect checks"
         );
     }
+    let staged = rig.stage();
+    assert_eq!(staged.staged, 0);
+    rig.commit(&[left(3, 0.75)]).expect("a cell");
+    rig.stage();
+    assert_eq!(
+        rig.staging[0].start_sample,
+        128 * 2,
+        "the second block's sample"
+    );
 }
 
-/// Red mutation: drop the `replace` branch so a repeated target inserts a second span -> the
-/// staged count is 3 instead of 2 and the duplicate breaks every effect's "not a duplicate" rule.
+/// A repeated write collapses last-wins: one span per cell, the newest value, and each replaced
+/// write counted once.
+///
+/// Test value: a duplicate staged span (breaks every effect's "not a duplicate" rule), or the
+/// oldest value applied.
 #[test]
-fn a_repeated_target_collapses_last_wins() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    for record in [
-        parameter(2, ParameterChannel::Left, 1.0),
-        parameter(0, ParameterChannel::Right, -1.0),
-        parameter(2, ParameterChannel::Left, 7.0),
-    ] {
-        producer.try_push(record).expect("room");
-    }
-    let mut staging = [idle(); 4];
-    let staged = lane.stage(&mut staging, 0, None);
+fn a_repeated_write_collapses_last_wins_and_is_counted() {
+    let mut rig = Rig::new(shape(&[0, 2], &[], 0), 0);
+    rig.commit_each(&[left(2, 1.0), right(0, -1.0), left(2, 7.0)]);
+    let staged = rig.stage();
     assert_eq!(staged.staged, 2);
-    assert_eq!(staging[0].parameter_index, 0);
-    assert_eq!(staging[1].parameter_index, 2);
-    assert_eq!(staging[1].start_value, 7.0, "the last record wins");
+    assert_eq!(rig.staging[0].parameter_index, 0);
+    assert_eq!(rig.staging[1].parameter_index, 2);
+    assert_eq!(rig.staging[1].start_value, 7.0, "the last write wins");
+    assert_eq!(rig.superseded.get(), 1);
 }
 
-/// A drain leaves the queue empty and the next block stages nothing, which is what makes the
-/// browser host's in-flight count an exact free-slot count rather than an estimate.
+/// A drain leaves the cells read: the next block stages nothing.
 #[test]
-fn a_drained_queue_stages_nothing_on_the_next_block() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    producer
-        .try_push(parameter(1, ParameterChannel::Left, 0.5))
-        .expect("room");
-    let mut staging = [idle(); 4];
-    assert_eq!(lane.stage(&mut staging, 0, None).staged, 1);
-    assert_eq!(lane.stage(&mut staging, 128, None).staged, 0);
+fn a_drained_cell_stages_nothing_on_the_next_block() {
+    let mut rig = Rig::new(shape(&[1], &[], 0), 0);
+    rig.commit(&[left(1, 0.5)]).expect("a cell");
+    assert_eq!(rig.stage().staged, 1);
+    assert_eq!(rig.stage().staged, 0);
 }
 
 /// Bypass is not a span: it is retained state that survives blocks with no traffic.
 #[test]
 fn bypass_is_retained_state_and_produces_no_span() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    assert!(!lane.bypassed());
-    producer
-        .try_push(EffectControlRecord::Bypass(true))
-        .expect("room");
-    let mut staging = [idle(); 4];
-    assert_eq!(
-        lane.stage(&mut staging, 0, None).staged,
-        0,
-        "bypass is not a span"
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    assert!(!rig.lane.bypassed());
+    rig.commit(&[EffectControlRecord::Bypass(true)])
+        .expect("a cell");
+    assert_eq!(rig.stage().staged, 0, "bypass is not a span");
+    assert!(rig.lane.bypassed());
+    assert_eq!(rig.stage().staged, 0);
+    assert!(
+        rig.lane.bypassed(),
+        "bypass survives a block with no traffic"
     );
-    assert!(lane.bypassed());
-    assert_eq!(lane.stage(&mut staging, 128, None).staged, 0);
-    assert!(lane.bypassed(), "bypass survives a block with no traffic");
+}
+
+/// A transaction lands in one block: values stamped above the block's snapshot wait, and every
+/// cell of the revision (bypass, parameter, target) applies in the block whose snapshot covers it.
+///
+/// Test value: an effect lane read without the snapshot (a revision's bypass applied a block
+/// before its parameters, or a value of an unpublished revision applied at all).
+#[test]
+fn a_transaction_lands_in_one_block_under_the_blocks_snapshot() {
+    let mut rig = Rig::new(shape(&[1], &[], 2), 0);
+    let revision = rig.pin.last_published() + 1;
+    {
+        let stamp = rig.pin.stamp(revision).expect("a legal revision");
+        for record in [
+            EffectControlRecord::Bypass(true),
+            left(1, 0.5),
+            right(1, 0.5),
+            target(0, ParameterChannel::Both, 0x77),
+        ] {
+            rig.writer.write(stamp, record).expect("cells");
+        }
+    }
+    // Written, not published: a block that snapshots now does not see any of it.
+    let staged = rig.stage();
+    assert_eq!((staged.staged, staged.staged_targets), (0, 0));
+    assert!(!rig.lane.bypassed());
+    rig.pin.publish(&rig.gate, revision);
+    let staged = rig.stage();
+    assert_eq!((staged.staged, staged.staged_targets), (2, 1));
+    assert!(rig.lane.bypassed(), "the bypass lands with the parameters");
+    assert_eq!(rig.superseded.get(), 0);
 }
 
 /// Red mutation: make `BypassShunt::capture` skip the `pdc_delay_block` exchange -> the dry block
@@ -295,20 +341,30 @@ fn the_shunt_preserves_signed_zero() {
     assert_eq!(out_right.map(f32::to_bits), right.map(f32::to_bits));
 }
 
-/// The staging window cannot be overrun: preparation caps the queue at the automation capacity,
-/// and a violated cap is counted rather than written past the end.
+/// The deferred-mask path: a value written above the snapshot stays pending and is read by the
+/// first block whose snapshot covers it, exactly once.
 #[test]
-fn a_full_window_counts_the_overflow_instead_of_overrunning() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
-    let mut lane = EffectControlLane::new(consumer, false);
-    for index in 0..5_u32 {
-        producer
-            .try_push(parameter(index, ParameterChannel::Left, index as f32))
-            .expect("room");
+fn a_value_above_the_snapshot_waits_and_is_applied_once() {
+    let mut rig = Rig::new(shape(&[], &[4], 0), 0);
+    rig.commit(&[both(4, 1.0)]).expect("a cell");
+    let covered = rig.gate.snapshot();
+    let revision = rig.pin.last_published() + 1;
+    {
+        let stamp = rig.pin.stamp(revision).expect("a legal revision");
+        rig.writer.write(stamp, both(4, 2.0)).expect("a cell");
     }
-    let mut staging = [idle(); 2];
-    let staged = lane.stage(&mut staging, 0, None);
-    assert_eq!(staged.staged, 2);
-    assert_eq!(staged.dropped, 3);
+    // The first block reads under the older snapshot: the first value, and the newer one waits.
+    let staged = rig.stage_under(covered);
+    assert_eq!(staged.staged, 1);
+    assert_eq!(rig.staging[0].start_value, 1.0);
+    rig.pin.publish(&rig.gate, revision);
+    let staged = rig.stage();
+    assert_eq!(staged.staged, 1);
+    assert_eq!(rig.staging[0].start_value, 2.0);
+    assert_eq!(rig.stage().staged, 0, "applied once");
+    assert_eq!(
+        rig.superseded.get(),
+        0,
+        "nothing was replaced before a snapshot covered it"
+    );
 }

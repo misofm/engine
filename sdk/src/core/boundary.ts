@@ -299,6 +299,12 @@ export interface EngineStatus {
   readonly quantumFrames: number;
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
+  /**
+   * The session's count of live values a later write replaced before render read them
+   * (`live_values_superseded`, decision 15 D15-2). It only grows, and one session counts across
+   * its plans.
+   */
+  readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
 }
 
@@ -459,6 +465,7 @@ export class WasmBoundary {
       quantumFrames: status.u32("quantumFrames"),
       nextAbsoluteSample: status.u64("nextAbsoluteSample"),
       renderedQuanta: status.u64("renderedQuanta"),
+      liveValuesSuperseded: status.u64("liveValuesSuperseded"),
       memoryBytes: this.#exports.memory.buffer.byteLength,
     });
   }

@@ -147,7 +147,9 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
     `consumer.begin_block()`, and asserts that the count rose by at most 1. After the change a call
     pops at most the one block it counted. Today it pops again whenever the producer refills the
     queue between two passes of the loop.
-  - Run 20,000 blocks. Record the run time.
+  - Run 200,000 blocks. Record the run time.
+  - Amendment (root, 2026-10-12): D5 runs 200,000 blocks; the race catches its defect only in some
+    runs at 20,000; no loom model needed now.
 - **D6. The re-observe phases stay tested.** The existing
   `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` (`:2286`) is the case for phase 2:
   its anchored seek with a passed anchor discards the first new-generation block after the
@@ -238,3 +240,79 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (Sonnet 5.5, on `codex/d15-stream-b3` at `8c0deee2c`)
+
+Changed: `acquire_current_block` is the D1 shape (count at entry, phase 1, one re-observe outside
+both loops, phase 2 bounded by the blocks left from the first count); `settle_block` and a
+`note_sanitized_samples` helper follow it, one blank line between each item and the blank line
+before `is_unobserved_generation`; the D2 comment is the one-slot argument; D5 is
+`the_acquire_does_not_pop_a_block_published_after_its_count`; `bench-support.workspace = true` in
+`crates/source/Cargo.toml` and its one `Cargo.lock` line. The D5 producer submits when its view of
+the data queue is empty (`available_capacity() == capacity()`, private fields, in-crate test).
+
+- **Gate 1.** `cargo test --locked -p source`: 38 lib tests (every existing one plus D5) and the two
+  integration tests pass. D5 takes about 0.04 s for 20,000 blocks (41.7 ms in the recorded run).
+- **Gate 2 (red on the parent).** D5 and the dev-dependency applied to `8c0deee2c`'s `lib.rs`,
+  32 CPUs: first run failed, then ten more runs: 7 of 10 failed
+  (`the acquire popped 2 blocks, one was queued at its entry`, at blocks 467 to 18,740). Not tuned.
+- **Gate 3.** Export of this change with markers in place of the blank lines around
+  `acquire_current_block` (before its doc comment, and before `is_unobserved_generation`'s doc
+  comment): `realtime policy: ok (101 marked regions in 27 files)`; the same around
+  `observe_seek_at_block_boundary`: ok. Control: the same markers on the parent's acquire report
+  `marked realtime unbounded try_pop drain (bound it with available_at_entry)` at its `try_pop`.
+- **Gate 4 (mutations, each alone, then reverted).**
+  - phase 2 removed (`return` after the re-observe's `settle_block`):
+    `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` fails (only test red).
+  - re-observe removed: the same test fails (only test red).
+  - bound reverted to `self.transfer_block_count`: D5 fails in 9 of 10 runs.
+- **Gate 5.** `target/release/audit capi`: `allocations 0`, `deallocations 0`, `syscalls 0`,
+  `pcm_digest cb10fbface44a3a4`, identical to the parent's. Browser module built twice
+  (`build-web-audioworklet.sh --named-twin`): base shipped module `99c743a6...`, head `8e2bb4ab...`
+  (ARTIFACT CHANGED as the spec expects). Function-level comparison of the two named twins by
+  function name (`wasm-objdump -d`, call indices normalized): 2,800 base functions, 2,801 head
+  functions; the one added is `PcmSourceConsumer::settle_block`, and the one changed is
+  `PcmSourceConsumer::acquire_current_block`; no other function body differs. On the head,
+  `check-web-audioworklet.sh --without-metadata-regeneration` (including its call-graph gate),
+  `check-browser-expected-resources.py --artifacts`, `strip-wasm-names.py check` and
+  `test-web-audioworklet.sh` pass with the base's pins; `cargo test --locked --release -p
+  wasm-gates --features math/lane` (G5, G6) passes; no pin, fixture or digest changed. The
+  `artifact-identity` job, `check-scalar-oracle-absent` and the three browser legs run in CI only.
+- **Gate 6.** `cargo fmt --all -- --check`, `cargo clippy --locked -p source --all-targets -- -D
+  warnings`, `scripts/check-realtime-policy.sh`, `scripts/check-workspace-policy.sh` exit 0
+  (clippy prints the two existing `clippy.toml` `fast_db` warnings, on the parent too).
+  `scripts/check-cross-targets.sh`: PASS. `cargo test --locked -p host-core -p capi -p graph`: pass.
+
+### Attempt 1 follow-ups (Sonnet 5.5, on `codex/d15-stream-b3`)
+
+Applies the verdict of attempt 1 (PASS) and the root amendment.
+
+- **Amendment (root, 2026-10-12).** D5 runs 200,000 blocks. `the_acquire_does_not_pop_a_block_published_after_its_count`
+  now uses `BLOCKS = 200_000`.
+- **MINOR-1.** The proof comment in `acquire_current_block` names `observe_seek_at_block_boundary`
+  as the one function that pops the one-slot queue, with its three callers (this acquire,
+  `prepare_seek`, `begin_block_observe`), all on the consumer's thread.
+- **NIT-1.** The D5 test doc says the test races a real host thread and is red on most runs of the
+  defect, not on every run; a green run on a reverted bound is not proof.
+- **NIT-2.** The attempt 1 sentence now says one blank line between each item (the code layout,
+  which D1 asks for, is unchanged).
+- **Red rates at 200,000 blocks (10 runs each, 32 CPUs, test binary run directly).**
+
+  | Product code | debug | release |
+  |---|---|---|
+  | parent `8c0deee2c` with D5 added | 10 of 10 red | 10 of 10 red |
+  | head with the bound reverted (`available = self.transfer_block_count`) | 10 of 10 red | 8 of 10 red |
+  | head | 0 of 10 red | 0 of 10 red |
+
+  For comparison, at 20,000 blocks the verdict measured 6 of 10 (parent, debug) and 1 of 10
+  (reverted, release).
+- **Head run time.** 200,000 blocks take 0.385 s in debug and 0.264 s in release (the test's own
+  timing line).
+- **Gates.** `cargo fmt --all -- --check`, `cargo clippy --locked -p source --all-targets -- -D
+  warnings`, `cargo test --locked -p source` (debug and release: 38 lib tests and the integration
+  tests pass), `scripts/check-realtime-policy.sh` (ok, 106 marked regions) and
+  `scripts/check-workspace-policy.sh` pass. The code change is one test constant and comments, so no
+  shipped function body changes; the worklet chain runs once on the head of the follow-up series
+  (recorded in the #1399 follow-ups).

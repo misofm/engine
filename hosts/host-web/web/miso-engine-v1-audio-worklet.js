@@ -893,7 +893,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // A subscription rides the effect's own command queue, so capacity without one has no delivery
+    // A subscription is a live command, so capacity without a control channel has no delivery
     // path; a master designation with no capacity would report a number nothing produces.
     if ((options.liveControlObservationTaps !== 0n && options.liveControlCommandQueueRecords === 0n)
         || (options.liveControlMasterTrackPlusOne !== 0n
@@ -945,7 +945,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const view = this.statusView;
     if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
         || view.getUint32(28, true) !== 0
-        || [48, 56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
+        || [56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -956,6 +956,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       quantumFrames: view.getUint32(24, true),
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
+      liveValuesSuperseded: view.getBigUint64(48, true),
     });
   }
 

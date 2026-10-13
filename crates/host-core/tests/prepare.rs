@@ -84,6 +84,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         &live_controls,
         &meters,
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("selected observers");
     assert_eq!(handles.meters.len(), 2);
@@ -103,6 +104,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         &live_controls,
         &invalid,
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     ) else {
         panic!("unknown metric bit must be rejected");
     };
@@ -397,6 +399,7 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         &live_controls,
         &[],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("live-control preparation");
     assert_eq!(
@@ -419,7 +422,15 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         .max()
         .unwrap_or(0);
     let shared_factory = handles.effect_controls[0].owner().unwrap().factory();
+    // Each EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells, and
+    // none for parameters (its parameters ride its targets): the EQ has six target slots.
+    let writer_array = (2
+        * 6
+        * size_of::<engine::realtime::CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>(
+        )) as u64;
     for producer in &handles.effect_controls {
+        payload += writer_array;
+        largest_owned = largest_owned.max(writer_array);
         let owner = producer.owner().expect("live EQ owner");
         assert!(std::sync::Arc::ptr_eq(shared_factory, owner.factory()));
         for bytes in [
@@ -484,6 +495,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &live_controls,
         &[],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("live-control preparation");
     let admitted = prepared
@@ -508,6 +520,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &live_controls,
         &[],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("exact graph plus effect budget must admit");
     let mut below = caps();
@@ -518,6 +531,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &live_controls,
         &[],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     ) {
         Ok(_) => panic!("one byte below graph plus effect budget must refuse"),
         Err(failure) => failure,

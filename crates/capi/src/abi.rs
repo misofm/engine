@@ -340,10 +340,8 @@ pub struct Watermark {
     /// The absolute render sample at the start of the block that reported `revision`.
     /// Never early. It is the start of the first block that begins after the commit's last write,
     /// so at most one block after the submit returns (while a replacement plan is pending: the
-    /// block that adopts it). A live value of that revision can apply earlier, in
-    /// any block that ran between the submit's first push and its revision store. One
-    /// transaction's values can spread across those blocks until #1502, #1503, #1504, #1312 and
-    /// #1345 have all landed, which together make it exact.
+    /// block that adopts it). Every live value of that revision takes effect together, in the
+    /// block that `first_sample` names.
     pub first_sample: u64,
     /// The OR of the `OUTCOME_*` flags over the revisions the last advance covered.
     pub outcome_flags: u64,

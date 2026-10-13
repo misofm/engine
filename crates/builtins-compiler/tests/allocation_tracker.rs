@@ -484,23 +484,23 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     );
 }
 
-/// Input trim records drained into a running graph allocate and free nothing, through the banked
+/// Input trim values drained into a running graph allocate and free nothing, through the banked
 /// drain (`BuiltinBankProcessor::begin_block`) of the fixture's full cohort (eight lanes on an
 /// 8-lane (AVX2) build, four on a 4-lane one) and its one-lane tail.
 ///
-/// Every track's input queue receives a `TrimDb { Both, -6 / -12 dB, 256 }` on each of four
+/// Every track's input cells receive a `TrimDb { Both, -6 / -12 dB, 256 }` on each of four
 /// blocks, so each drain retargets a ramp still in flight; the uncommanded twin shows the records
 /// took effect, so an allocation-free pass cannot come from a drain that did nothing.
 ///
 /// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
 /// `qualification_phase_constants_and_zero_render_allocations`), retired with its capture
-/// tooling. The fader and matrix queues are gated by the test above; before this, the input
-/// queue's `TrimDb` arm had no allocation gate in CI.
+/// tooling. The fader and matrix cells are gated by the test above; before this, the input
+/// cells' `TrimDb` arm had no allocation gate in CI.
 ///
 /// Red mutation: allocate in the banked drain's `TrimDb` arm (`vec![smoothing_samples][0]` for
 /// the window) -> the first ridden block counts nine allocations and nine frees, one per track.
 #[test]
-fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
+fn actual_input_trim_cell_drain_allocates_and_frees_nothing() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -516,18 +516,18 @@ fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
     let mut moved = false;
     for block in 0..4_u64 {
         let db = if block % 2 == 0 { -6.0 } else { -12.0 };
-        for control in &mut ridden.track_controls {
-            control
-                .input
-                .as_mut()
-                .expect("input lane requested")
-                .try_push(TrackInputRecord::TrimDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db,
-                    smoothing_samples: 256,
-                })
-                .expect("input queue room");
-        }
+        ridden.test_only_write(|controls, stamp| {
+            for control in controls {
+                control.input.as_mut().expect("input lane requested").write(
+                    stamp,
+                    TrackInputRecord::TrimDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db,
+                        smoothing_samples: 256,
+                    },
+                );
+            }
+        });
         audit_graph_render(&mut ridden, &mut ridden_output, block * 64);
         audit_graph_render(&mut quiet, &mut quiet_output, block * 64);
         moved |= ridden_output != quiet_output;
@@ -1360,11 +1360,11 @@ fn assert_phase_two_allocator_layouts_match_the_checked_resource_report(track_co
 }
 
 /// Issue #1254 gate 3: a fader-and-matrix request (`input_lane: false`) on every track charges
-/// exactly what preparation allocates -- two rings per track, not three -- and an all-lanes
-/// request still does. A ring that is allocated but not charged, or charged but not allocated,
+/// exactly what preparation allocates -- two cell sets per track, not three -- and an all-lanes
+/// request still does. A cell set that is allocated but not charged, or charged but not allocated,
 /// turns the layout comparison red.
 #[test]
-fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_input_lane() {
+fn live_control_cells_are_charged_exactly_as_allocated_with_and_without_the_input_lane() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1374,7 +1374,6 @@ fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_inpu
         (0..4)
             .map(|index| TrackControlRequest {
                 track_id: format!("track-{index}"),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: LiveValuesSuperseded::default(),
                 input_lane,
             })
@@ -1423,7 +1422,7 @@ fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_inpu
     }
     assert!(
         retained[0] < retained[1],
-        "dropping the input lane must drop its ring: {retained:?}"
+        "dropping the input lane must drop its cells: {retained:?}"
     );
 }
 

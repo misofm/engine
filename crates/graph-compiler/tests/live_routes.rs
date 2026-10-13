@@ -14,17 +14,17 @@
 //! the plan leaves unwritten shows.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use bench_support::producer::render_while_producing;
-use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use builtins_compiler::{
+    BuiltinCompileCaps, LiveValuesSuperseded, TestOnlyWriteGate, prepare_session_builtins,
+};
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use engine::realtime::{
-    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
-    bounded_spsc_retained_payload,
+    PlanRevisionGate, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
 };
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphEdgeId, GraphNodeBinding, GraphNodeId,
@@ -48,8 +48,6 @@ const QUANTUM: usize = 128;
 const HOST_SENTINEL: f32 = 7.0;
 /// The true-peak limiter's prepared latency at 48 kHz.
 const LIMITER_LATENCY_48K: usize = 486;
-/// The queue depth every gate attaches with, unless it says otherwise.
-const DEPTH: usize = 8;
 
 // ---- Sessions ---------------------------------------------------------------------------------
 
@@ -394,6 +392,12 @@ fn bindings(artifact: &PreparedGraphBuiltinsArtifact, feeds: &Feeds) -> GraphRun
 /// One bound plan, its live-route producers (empty when none were attached) and its block count.
 struct Bound {
     plan: PreparedRenderPlan,
+    /// The plan's gate handle: every write is a transaction stamped from it (#1347 D4).
+    gate: Option<PlanRevisionGate>,
+    /// The session's `live_values_superseded` count the lanes add to.
+    superseded: LiveValuesSuperseded,
+    /// The snapshot revision the last rendered block applied under.
+    snapshot: u64,
     producers: Vec<GraphRouteControlProducer>,
     block: u64,
     pcm: Vec<f32>,
@@ -403,43 +407,49 @@ impl Bound {
     /// `model` compiled, with route controls attached when `live`, and bound to `feeds`.
     fn new(model: &SessionModel, feeds: &Feeds, live: bool) -> Self {
         let mut artifact = compile(model);
+        let superseded = LiveValuesSuperseded::new();
         let producers = if live {
             artifact
-                .attach_route_live_controls(NonZeroUsize::new(DEPTH).expect("depth"))
+                .attach_route_live_controls(&superseded)
                 .expect("route controls attach")
         } else {
             Vec::new()
         };
         let bindings = bindings(&artifact, feeds);
-        let plan = artifact
+        let mut plan = artifact
             .into_bound(bindings)
             .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
             .plan;
+        let gate = plan.take_revision_gate();
         Self {
             plan,
+            gate,
+            superseded,
+            snapshot: 0,
             producers,
             block: 0,
             pcm: vec![0.0; QUANTUM * 2],
         }
     }
 
-    fn producer(&mut self, route: &str) -> &mut GraphRouteControlProducer {
-        self.producers
+    /// One transaction: write `record` to `route`'s cell under the next revision and publish it.
+    fn write(&mut self, route: &str, record: RouteControlRecord) {
+        let producer = self
+            .producers
             .iter_mut()
             .find(|producer| &*producer.route_id == route)
-            .unwrap_or_else(|| panic!("route {route} is live"))
-    }
-
-    fn push(&mut self, route: &str, record: RouteControlRecord) {
-        self.producer(route)
-            .try_push(record)
-            .unwrap_or_else(|full| panic!("route {route}'s queue is full: {full:?}"));
+            .unwrap_or_else(|| panic!("route {route} is live"));
+        self.gate
+            .as_mut()
+            .expect("the gate stays with the plan")
+            .write_published(|stamp| producer.write(stamp, record));
     }
 
     /// Renders one block into `self.pcm`, allocating nothing itself.
     fn render_in_place(&mut self) {
         self.pcm.fill(HOST_SENTINEL);
-        self.plan
+        let report = self
+            .plan
             .render(
                 RenderIo {
                     output: PlanarBufferMut::try_new(&mut self.pcm, 2, QUANTUM, QUANTUM)
@@ -450,6 +460,7 @@ impl Bound {
                 },
             )
             .expect("render");
+        self.snapshot = report.live_snapshot.revision();
         self.block += 1;
     }
 
@@ -661,7 +672,7 @@ fn the_block_in_which_a_mute_ramp_ends_is_mixed_whole() {
     let model = two_into_bus(R0, R1);
     let mut live = Bound::new(&model, &feeds, true);
     let muted = Values { mute: true, ..R0 };
-    live.push("r0", muted.record(480));
+    live.write("r0", muted.record(480));
     let actual = live.render(blocks);
     let mixes = graph::test_only_route_mix_counts();
     assert_eq!(
@@ -693,6 +704,141 @@ fn the_block_in_which_a_mute_ramp_ends_is_mixed_whole() {
     assert_planes(&actual, &expected, 0..frames, "every block");
 }
 
+/// #1347 gate 2. A ramp in flight, then a new target in the cell: the next block starts from the
+/// coefficients the route is at, not from the old target and not from rest, and ramps to the new
+/// target over the new length. `r0` ramps to a new level over 480 samples from block 0; before
+/// block 2 (frame 256, `k = 256`) a second value is written, to ramp over 300 samples; the bus
+/// equals the scalar oracle with `r0` mixed by the first ramp's `c(k)` for frames 0-255 and by
+/// the second ramp from `c(256)` after.
+///
+/// Test value: a cell read that retargets from the new target or from the old one (a click), or
+/// that restarts the first ramp's position.
+#[test]
+fn a_new_cell_value_ramps_from_the_coefficients_the_route_is_at() {
+    let blocks = 5;
+    let frames = blocks * QUANTUM;
+    let feeds = two_feeds(frames);
+    let model = two_into_bus(R0, R1);
+    let first = Values {
+        gain_db: 4.0,
+        matrix: [0.2, 0.7, -0.5, 0.6],
+        mute: false,
+    };
+    let second = Values {
+        gain_db: -9.0,
+        matrix: [-0.4, 0.1, 0.3, 0.95],
+        mute: false,
+    };
+    let mut live = Bound::new(&model, &feeds, true);
+    live.write("r0", first.record(480));
+    let mut actual = live.render(2);
+    live.write("r0", second.record(300));
+    let rest = live.render(blocks - 2);
+    for plane in 0..2 {
+        actual[plane].extend_from_slice(&rest[plane]);
+    }
+
+    let (t0, t1) = (&feeds["t0"], &feeds["t1"]);
+    let (start, open) = (R0.coefficients(), R1.coefficients());
+    let (first_target, second_target) = (first.coefficients(), second.coefficients());
+    let in_flight = ramp_at(start, first_target, 480, 256);
+    assert_ne!(in_flight, first_target, "the first ramp is still in flight");
+    assert_ne!(in_flight, start, "and has left its start");
+    let mut expected = [vec![0.0; frames], vec![0.0; frames]];
+    for n in 0..frames {
+        let c = if n < 256 {
+            ramp_at(start, first_target, 480, n as u32 + 1)
+        } else {
+            ramp_at(in_flight, second_target, 300, (n - 256) as u32 + 1)
+        };
+        let (zero_l, zero_r) = mix_frame(c, t0[0][n], t0[1][n]);
+        let (one_l, one_r) = mix_frame(open, t1[0][n], t1[1][n]);
+        (expected[0][n], expected[1][n]) = unity(zero_l + one_l, zero_r + one_r);
+    }
+    assert_planes(&actual, &expected, 0..frames, "a retarget during a ramp");
+}
+
+/// #1347 D3. A route reads its cell under the block's snapshot `S`: a value stamped above `S`
+/// waits, and the value below it is applied at once. `r0` is written at revision 1 and published;
+/// a second value is written at revision 2 and not yet published. Block 0 (`S = 1`) applies the
+/// first and counts nothing; once revision 2 is published, block 1 applies the second. Each block
+/// equals a twin that wrote the same values with both published before their block.
+///
+/// Test value: a route drain that reads `LiveSnapshot::ALL` (the second value applied a block
+/// early, before its revision is covered), or one that drops a deferred value (never applied).
+#[test]
+fn a_route_cell_value_above_the_blocks_snapshot_waits_for_its_revision() {
+    let blocks = 3;
+    let feeds = two_feeds(blocks * QUANTUM);
+    let model = two_into_bus(R0, R1);
+    let (a, b) = (
+        Values {
+            gain_db: 4.0,
+            matrix: [0.2, 0.7, -0.5, 0.6],
+            mute: false,
+        },
+        Values {
+            gain_db: -9.0,
+            matrix: [-0.4, 0.1, 0.3, 0.95],
+            mute: false,
+        },
+    );
+    let mut live = Bound::new(&model, &feeds, true);
+    live.write("r0", a.record(0));
+    let revision = {
+        let gate = live.gate.as_mut().expect("the plan's gate");
+        let revision = gate.last_published() + 1;
+        let stamp = gate.stamp(revision).expect("a legal revision");
+        let producer = live
+            .producers
+            .iter_mut()
+            .find(|producer| &*producer.route_id == "r0")
+            .expect("r0 is live");
+        producer.write(stamp, b.record(0));
+        revision
+    };
+    let mut actual = live.render(1);
+    assert_eq!(
+        live.snapshot,
+        revision - 1,
+        "block 0 is covered up to the first value"
+    );
+    assert_eq!(
+        graph::test_only_route_drained_counts()[route_index(&model, "r0")],
+        1
+    );
+    live.gate
+        .as_mut()
+        .expect("the plan's gate")
+        .publish(revision);
+    let rest = live.render(2);
+    assert_eq!(
+        graph::test_only_route_drained_counts()[route_index(&model, "r0")],
+        2
+    );
+    for plane in 0..2 {
+        actual[plane].extend_from_slice(&rest[plane]);
+    }
+    assert_eq!(live.superseded.get(), 0, "nothing was replaced unread");
+
+    let mut twin = Bound::new(&model, &feeds, true);
+    twin.write("r0", a.record(0));
+    let mut expected = twin.render(1);
+    twin.write("r0", b.record(0));
+    let rest = twin.render(2);
+    for plane in 0..2 {
+        expected[plane].extend_from_slice(&rest[plane]);
+    }
+    assert_planes(&actual, &expected, 0..blocks * QUANTUM, "a deferred value");
+    assert!(
+        (QUANTUM..2 * QUANTUM).any(|frame| !same(
+            actual[0][frame],
+            Bound::new(&model, &feeds, true).render(2)[0][frame]
+        )),
+        "the second value is audible in block 1"
+    );
+}
+
 /// #1217 verdict-2 NIT-1, the arena form. Both sends into bus `b` are live and mixing; before
 /// block 2 both are muted by a step. Bus `b`'s buffer held block 1's sum, and from block 2 every
 /// input is inactive, so the sum must store `+0.0` itself: the output is exact `+0.0`.
@@ -710,8 +856,8 @@ fn a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero() {
         before[0].iter().all(|sample| *sample != 0.0),
         "the bus carries audio first"
     );
-    live.push("r0", Values { mute: true, ..R0 }.record(0));
-    live.push("r1", Values { mute: true, ..R1 }.record(0));
+    live.write("r0", Values { mute: true, ..R0 }.record(0));
+    live.write("r1", Values { mute: true, ..R1 }.record(0));
     let after = live.render(blocks - 2);
     for (plane, samples) in after.iter().enumerate() {
         if let Some(frame) = samples.iter().position(|sample| sample.to_bits() != 0) {
@@ -815,9 +961,9 @@ fn a_delayed_send_round_trips_through_mute_without_a_cut_or_stale_audio() {
 
     let mut live = Bound::new(&model, &feeds, true);
     let open = R0.coefficients();
-    live.push("c-b", Values { mute: true, ..R0 }.record(480));
+    live.write("c-b", Values { mute: true, ..R0 }.record(480));
     let mut actual = live.render(unmute_block);
-    live.push("c-b", R0.record(480));
+    live.write("c-b", R0.record(480));
     let rest = live.render(blocks - unmute_block);
     for plane in 0..2 {
         actual[plane].extend_from_slice(&rest[plane]);
@@ -946,7 +1092,7 @@ fn a_settled_live_edit_equals_a_fresh_plan() {
             let mut live = Bound::new(&model, &feeds, true);
             let mut actual = live.render(push_block);
             for id in &edited {
-                live.push(id, values[id].record(lengths[id]));
+                live.write(id, values[id].record(lengths[id]));
             }
             let rest = live.render(blocks - push_block);
             for plane in 0..2 {
@@ -969,89 +1115,92 @@ fn a_settled_live_edit_equals_a_fresh_plan() {
 
 // ---- Gate 5 -----------------------------------------------------------------------------------
 
-/// Gate 5. The queue is bounded and the drain lossless:
+/// How many writes the cell gates make between two renders: far past the 16 a queue held.
+const WRITES: usize = 40;
+
+/// Gate 5. A route's lane is one latest-target cell, and its read is lossless about the newest:
 ///
-/// * `depth + 1` pushes without a render: the last is refused with its record handed back, and
-///   the queue holds exactly `depth`;
-/// * one render applies exactly those `depth` records (the drained-record counter), in order: the
-///   output equals a plan sent only the last of them, and differs from one sent them reversed;
-/// * the refused record, pushed again, is applied at the next block;
-/// * a record pushed while the route is inactive is applied at the next block: an unmute after a
+/// * `WRITES` writes without a render, each infallible: one render applies exactly one value (the
+///   applied-value counter), the last: the output equals a plan sent only the last of them, and
+///   differs from one sent them reversed;
+/// * the session's `live_values_superseded` count grows by `WRITES - 1` (the replaced writes);
+/// * a value written again is applied at the next block, once;
+/// * a value written while the route is inactive is applied at the next block: an unmute after a
 ///   settled mute is audible there, with a fresh unmuted plan's bits;
 /// * `RouteControlRecord::new` refuses `length = 2^22 + 1` and a mute with a nonzero target.
 ///
-/// Test value: red if the drain drops or reorders a record, or is skipped while the route is
-/// inactive. It cannot see an unbounded drain (single-threaded, that applies exactly what a bounded
-/// one does); the bound is structural: the drain loops over `available_at_entry()`, at most the
-/// queue's capacity (#1220 verdict MINOR-2).
+/// Test value: red if a read skips the newest value or applies an older one, miscounts the
+/// replaced writes, or is skipped while the route is inactive. The cell's bounded-memory and
+/// no-torn-read properties are the primitive's own (#1432).
 #[test]
-fn the_drain_is_bounded_and_lossless() {
+fn the_last_of_many_writes_is_applied_and_an_inactive_route_still_reads() {
     let blocks = 8;
     let frames = blocks * QUANTUM;
     let feeds = two_feeds(frames);
     let model = two_into_bus(R0, R1);
     let r0 = route_index(&model, "r0");
     let mut rng = Rng::new(5);
-    let records: Vec<RouteControlRecord> = (0..=DEPTH)
-        .map(|index| rng.values(false).record(37 + 50 * index as u32))
+    let records: Vec<RouteControlRecord> = (0..WRITES)
+        .map(|index| rng.values(false).record(37 + 5 * index as u32))
         .collect();
 
     let mut live = Bound::new(&model, &feeds, true);
-    for record in &records[..DEPTH] {
-        live.push("r0", *record);
+    for record in &records {
+        live.write("r0", *record);
     }
-    assert_eq!(
-        live.producer("r0").free(),
-        0,
-        "the queue holds exactly depth records"
-    );
-    let refused = live.producer("r0").try_push(records[DEPTH]);
-    assert_eq!(
-        refused.map_err(|full| full.record),
-        Err(records[DEPTH]),
-        "the record past depth is refused and handed back"
-    );
     let first = live.render(1);
-    assert_eq!(graph::test_only_route_drained_counts()[r0], DEPTH as u64);
-    assert_eq!(live.producer("r0").free(), DEPTH);
+    assert_eq!(
+        graph::test_only_route_drained_counts()[r0],
+        1,
+        "one value, not {WRITES}"
+    );
+    assert_eq!(live.superseded.get(), (WRITES - 1) as u64);
 
     let mut last_only = Bound::new(&model, &feeds, true);
-    last_only.push("r0", records[DEPTH - 1]);
+    last_only.write("r0", records[WRITES - 1]);
     let expected = last_only.render(1);
+    assert_eq!(last_only.superseded.get(), 0);
     assert_planes(
         &first,
         &expected,
         0..QUANTUM,
-        "depth records in one drain against the last",
+        "many writes in one read against the last",
     );
     let mut reversed = Bound::new(&model, &feeds, true);
-    for record in records[..DEPTH].iter().rev() {
-        reversed.push("r0", *record);
+    for record in records.iter().rev() {
+        reversed.write("r0", *record);
     }
     let reversed = reversed.render(1);
     assert!(
         (0..QUANTUM).any(|frame| !same(reversed[0][frame], first[0][frame])),
-        "the order of a drain is observable, or the in-order check is vacuous"
+        "the last write is observable, or the last-wins check is vacuous"
     );
 
-    live.push("r0", records[DEPTH]);
+    live.write("r0", records[0]);
     live.render(1);
     assert_eq!(
         graph::test_only_route_drained_counts()[r0],
-        DEPTH as u64 + 1,
-        "a record that arrives later is applied in a later block"
+        2,
+        "a value that arrives later is applied in a later block, once"
     );
+    live.render(1);
+    assert_eq!(
+        graph::test_only_route_drained_counts()[r0],
+        2,
+        "an applied value is not applied again"
+    );
+    assert_eq!(live.superseded.get(), (WRITES - 1) as u64);
 
-    // An unmute pushed while the route is inactive.
+    // An unmute written while the route is inactive.
     let mut live = Bound::new(&model, &feeds, true);
-    live.push("r0", Values { mute: true, ..R0 }.record(0));
+    live.write("r0", Values { mute: true, ..R0 }.record(0));
     let mut actual = live.render(3);
     assert_eq!(
         graph::test_only_route_mix_counts()[r0],
         0,
         "the muted send is inactive"
     );
-    live.push("r0", R0.record(0));
+    live.write("r0", R0.record(0));
     let unmuted = live.render(blocks - 3);
     for plane in 0..2 {
         actual[plane].extend_from_slice(&unmuted[plane]);
@@ -1083,14 +1232,14 @@ fn the_drain_is_bounded_and_lossless() {
 
 // ---- Gate 6 -----------------------------------------------------------------------------------
 
-/// Gate 6. A producer thread pushes records to every live route of gate 1's session while this
-/// thread renders, and every block applies at least one of them; after the first block, every
-/// render allocates and frees nothing on the render thread (`bench_support::alloc`'s
-/// thread-scoped counters). Each block waits for a queued record, not for the producer's progress
-/// (`bench_support::producer`, issue #1250).
+/// Gate 6. A producer thread writes every live route of gate 1's session while this thread
+/// renders, and every block applies at least one value; after the first block, every render
+/// allocates and frees nothing on the render thread (`bench_support::alloc`'s thread-scoped
+/// counters). Each block waits for a transaction published past the previous block's snapshot, not
+/// for the producer's progress (`bench_support::producer`, issue #1250).
 ///
-/// Test value: red if the drain, a record's application or the activity write allocates or frees
-/// on the render thread.
+/// Test value: red if the cell read, a value's application or the activity write allocates or
+/// frees on the render thread.
 #[test]
 fn live_routes_render_without_allocating() {
     let mut rng = Rng::new(6);
@@ -1099,6 +1248,7 @@ fn live_routes_render_without_allocating() {
     let feeds = mixed_feeds(blocks * QUANTUM);
     let mut live = Bound::new(&model, &feeds, true);
     let producers = core::mem::take(&mut live.producers);
+    let gate = live.gate.take().expect("the plan's gate");
     let records: Vec<RouteControlRecord> = (0..32)
         .map(|index| {
             rng.values(index % 3 == 0)
@@ -1106,25 +1256,31 @@ fn live_routes_render_without_allocating() {
         })
         .collect();
     let mut index = 0;
+    let snapshot = core::cell::Cell::new(live.snapshot);
     assert_installed();
     render_while_producing(
         blocks,
-        producers,
-        |producers| {
-            for producer in producers.iter_mut() {
-                // A full queue refuses the record, and still holds records for the next block.
-                let _full = producer.try_push(records[index % records.len()]);
-                index += 1;
-            }
+        (gate, producers),
+        |(gate, producers)| {
+            // One transaction writes every route, then publishes.
+            gate.write_published(|stamp| {
+                for producer in producers.iter_mut() {
+                    producer.write(stamp, records[index % records.len()]);
+                    index += 1;
+                }
+            });
         },
-        |producers| producers.iter().any(|producer| producer.free() < DEPTH),
+        // A transaction is published past the last block's snapshot, so the next block's covers
+        // it and applies the values it wrote.
+        |(gate, _)| gate.last_published() > snapshot.get(),
         |block| {
             let before: u64 = graph::test_only_route_drained_counts().iter().sum();
             let mark = current_thread_counters();
             live.render_in_place();
             let delta = current_thread_delta_since(mark);
             let after: u64 = graph::test_only_route_drained_counts().iter().sum();
-            assert!(after > before, "block {block} applied a record");
+            snapshot.set(live.snapshot);
+            assert!(after > before, "block {block} applied a value");
             if block > 0 {
                 assert_eq!(
                     (delta.allocations, delta.reallocations, delta.deallocations),
@@ -1202,7 +1358,7 @@ fn no_live_route_folds() {
     assert_eq!(live.plan.bank_route_folds(), 0, "no live route folds");
     let mut actual = live.render(1);
     sends[3] = rng.values(false);
-    live.push("t3-bus", sends[3].record(480));
+    live.write("t3-bus", sends[3].record(480));
     let rest = live.render(blocks - 1);
     for plane in 0..2 {
         actual[plane].extend_from_slice(&rest[plane]);
@@ -1233,7 +1389,7 @@ fn retained(
     let mut artifact = compile(model);
     let producers = if live {
         artifact
-            .attach_route_live_controls(NonZeroUsize::new(DEPTH).expect("depth"))
+            .attach_route_live_controls(&LiveValuesSuperseded::new())
             .expect("attach")
     } else {
         Vec::new()
@@ -1252,12 +1408,12 @@ fn retained(
 }
 
 /// Gate 8 (VERIFY-2 MINOR 5). `route_control_resources` equals the D8 formula computed here from
-/// the route count, the queue depth and the route IDs, and covers what the attach and the bind
+/// the route count and the route IDs, and covers what the attach and the bind
 /// retain beyond the same plan without route controls. Once for a plan with no silencing gate,
 /// whose route-activity table the attach charges, and once with a muted route, whose table the
 /// compile-time estimate already charged.
 ///
-/// Test value: red if a queue, a lane or owner box, a route ID or an uncharged route-activity table
+/// Test value: red if a cell, a lane or owner box, a route ID or an uncharged route-activity table
 /// is left out of the charge the next slice admits against the host's caps.
 #[test]
 fn route_control_resources_cover_the_allocation() {
@@ -1270,11 +1426,12 @@ fn route_control_resources_cover_the_allocation() {
 
         let routes = producers.len() as u64;
         assert_eq!(routes, 2);
-        let payload = bounded_spsc_retained_payload::<RouteControlRecord>(
-            NonZeroUsize::new(DEPTH).expect("depth"),
-        )
-        .expect("layout");
-        let queue = payload.total_bytes().expect("queue bytes") as u64;
+        // One `Arc` allocation per route: the owner counts, the cell's three slots (six words, a
+        // revision and a sequence each) and the dirty word.
+        let cell = (2 * core::mem::size_of::<usize>()
+            + core::mem::size_of::<engine::realtime::LatestCell<6>>()
+            + core::mem::size_of::<engine::realtime::DirtyWord>()) as u64;
+        assert_eq!(cell, 2 * 8 + 3 * (6 * 4 + 8 + 8) + 8, "the cell's layout");
         let owner = (core::mem::size_of::<RouteControlLane>()
             + core::mem::size_of::<GraphRouteControlBinding>()
             + LIVE_ROUTE_OWNER_BYTES) as u64;
@@ -1290,16 +1447,16 @@ fn route_control_resources_cover_the_allocation() {
             graph::route_activity_bound_bytes(prepared_routes, nodes).expect("bound")
         };
         assert_eq!(resources.routes, routes);
-        assert_eq!(resources.queue_bytes, routes * queue);
+        assert_eq!(resources.cell_bytes, routes * cell);
         assert_eq!(resources.owner_bytes, routes * owner);
         assert_eq!(resources.producer_table_bytes, table);
         assert_eq!(resources.route_id_bytes, ids);
         assert_eq!(resources.activity_bytes, activity);
         assert_eq!(
             resources.total_bytes,
-            routes * queue + routes * owner + table + ids + activity
+            routes * cell + routes * owner + table + ids + activity
         );
-        assert!(resources.largest_allocation_bytes >= payload.largest_allocation_bytes() as u64);
+        assert!(resources.largest_allocation_bytes >= cell);
 
         let added = with
             .checked_sub(without)
@@ -1342,7 +1499,7 @@ fn route_control_resources_cover_the_attached_state() {
     let mut artifact = compile(&model);
     let mark = current_thread_counters();
     let producers = artifact
-        .attach_route_live_controls(NonZeroUsize::new(DEPTH).expect("depth"))
+        .attach_route_live_controls(&LiveValuesSuperseded::new())
         .expect("attach");
     let window = current_thread_delta_since(mark);
     let attached = window
@@ -1372,13 +1529,17 @@ fn route_control_resources_cover_the_attached_state() {
 fn route_controls_attach_once() {
     let model = two_into_bus(R0, R1);
     let mut artifact = compile(&model);
-    let depth = NonZeroUsize::new(DEPTH).expect("depth");
+    let superseded = LiveValuesSuperseded::new();
     assert_eq!(
-        artifact.attach_route_live_controls(depth).map(|p| p.len()),
+        artifact
+            .attach_route_live_controls(&superseded)
+            .map(|p| p.len()),
         Ok(2)
     );
     assert_eq!(
-        artifact.attach_route_live_controls(depth).map(|p| p.len()),
+        artifact
+            .attach_route_live_controls(&superseded)
+            .map(|p| p.len()),
         Err(GraphRouteControlError::AlreadyAttached)
     );
 }

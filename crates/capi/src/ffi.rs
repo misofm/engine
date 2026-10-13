@@ -745,13 +745,6 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                     .set(b"control.plan.backpressure");
                 RESULT_BACKPRESSURE
             }
-            Err(CommandError::LiveBackpressure) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.live.backpressure");
-                RESULT_BACKPRESSURE
-            }
             Err(CommandError::CompileRejected(failure)) => {
                 session.last_error.borrow_mut().set(&failure_bytes(failure));
                 RESULT_COMPILE_REJECTED

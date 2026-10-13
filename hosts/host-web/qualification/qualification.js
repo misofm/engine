@@ -396,16 +396,19 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, in a real browser.
+/// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
-/// the tap is armed when rendering starts. That is the eval's shape and it is also E1's leg (c)
-/// against leg (d) in a browser: the two renders must produce **identical PCM**, because arming a
-/// declared tap may not move a sample.
+/// the tap is armed when rendering starts. That is E1's leg (c) against leg (d) in a browser: the
+/// two renders must produce **identical PCM**, because arming a declared tap may not move a sample.
 ///
-/// `armed` is `true` for the first run and `false` for the second, which subscribes and then
-/// immediately unsubscribes -- so the second run proves that an unsubscribe actually stops the
-/// traffic rather than merely being accepted.
+/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The
+/// engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), and an
+/// offline context renders only inside one `startRendering` call (Firefox has no
+/// `OfflineAudioContext.suspend`), so a subscribe followed at once by an unsubscribe is refused with
+/// typed backpressure here. That an unsubscribe stops a tap's reading is proved by the Rust test
+/// `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading` (`hosts/host-web`), not by
+/// this page (#1345 Amendment 7).
 async function runObservationRun(createHost, sessionDocument, armed) {
   const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -455,13 +458,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = await host.observe({ subscriptions: [subscription] });
-  let unsubscribed = null;
-  if (!armed) {
-    unsubscribed = await host.observe({
-      subscriptions: [{ ...subscription, armed: false }],
-    });
-  }
+  const subscribed = armed ? await host.observe({ subscriptions: [subscription] }) : null;
 
   const rendered = await context.startRendering();
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
@@ -482,13 +479,11 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   }
   return {
     meterLeaseResult: meterLease.result,
-    subscribeResult: subscribed.result,
-    subscribeReason: subscribed.reason,
-    bindings: subscribed.bindings.length,
-    frameSlot: subscribed.bindings[0]?.frameSlot ?? -1,
-    windowBlocks: subscribed.bindings[0]?.windowBlocks ?? -1,
-    unsubscribeResult: unsubscribed === null ? null : unsubscribed.result,
-    unsubscribeBindings: unsubscribed === null ? null : unsubscribed.bindings.length,
+    subscribeResult: subscribed === null ? null : subscribed.result,
+    subscribeReason: subscribed === null ? null : subscribed.reason,
+    bindings: subscribed === null ? 0 : subscribed.bindings.length,
+    frameSlot: subscribed?.bindings[0]?.frameSlot ?? -1,
+    windowBlocks: subscribed?.bindings[0]?.windowBlocks ?? -1,
     frames: frames.length,
     trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
     peakWidth: frames.length === 0 ? -1 : frames[0].peaks,
@@ -505,7 +500,36 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   };
 }
 
-/// Issue #143 E12: the observation row, both runs.
+/// Every control the page asks the harness to click, in the order the page offers them, as selectors
+/// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
+/// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
+/// when the page resumed a context any other way, offered another control, or did not offer one.
+/// The two controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
+/// only when the SDK qualification does; without it the plan is empty.
+export function resumeClickPlan(sdkEnabled) {
+  if (!sdkEnabled || !WebAssembly.validate(SIMD128_PROBE)) return [];
+  return ["#spectrum-collection-resume", "#spectrum-hop-resume"];
+}
+
+/// Count every `AudioContext.resume()` of the page, split by whether it ran synchronously inside a
+/// trusted click handler (`window.event` is that click) or anywhere else (`direct`). Offline contexts
+/// are not counted: they need no activation. The count is part of the result, so a `resume()` that
+/// is not inside a click handler (an SDK workload's, or one added later) turns the
+/// `resume-clicks` gate red whatever the browser happens to allow.
+function countResumes() {
+  const record = { inClick: 0, direct: 0 };
+  if (typeof AudioContext !== "function") return record;
+  const resume = AudioContext.prototype.resume;
+  AudioContext.prototype.resume = function countedResume(...args) {
+    const event = window.event;
+    if (event?.type === "click" && event.isTrusted) record.inClick += 1;
+    else record.direct += 1;
+    return resume.apply(this, args);
+  };
+  return record;
+}
+
+/// Issue #143 E12: the observation row and its two offline runs.
 async function runObservationQualification(createHost, sessionDocument) {
   const armed = await runObservationRun(createHost, sessionDocument, true);
   const disarmed = await runObservationRun(createHost, sessionDocument, false);
@@ -718,6 +742,7 @@ async function runStagingReadQualification(createHost, sessionDocument) {
 }
 
 export async function runQualification() {
+  const resumeRecord = countResumes();
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
     liveControlResponse, observationResponse,
@@ -869,6 +894,9 @@ export async function runQualification() {
       { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
     ],
     sdkResponse,
+    // Every `AudioContext.resume()` of the page, for the `resume-clicks` gate: `declared` is the click
+    // plan's length, which `run.mjs` also holds the harness to.
+    resumes: { declared: resumeClickPlan(sdkResponse !== null).length, ...resumeRecord },
   };
 }
 

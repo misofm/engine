@@ -208,7 +208,6 @@ pub mod test_only_phase_profile {
 }
 
 use core::cell::Cell;
-use core::num::NonZeroUsize;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -957,6 +956,7 @@ pub struct RouteControlRecord {
 }
 
 impl RouteControlRecord {
+    // REALTIME_POLICY_BEGIN
     /// `None` when `length > ROUTE_RAMP_LENGTH_MAXIMUM`, or when `mute` is true and any target
     /// coefficient is not `+0.0` (bitwise): a muted route's coefficients are the four `+0.0` its
     /// gate gives ([`gated_route_coefficients`]).
@@ -988,14 +988,76 @@ impl RouteControlRecord {
     pub const fn length(&self) -> u32 {
         self.length
     }
+    // REALTIME_POLICY_END
 }
 
-/// The render-side half of one live route's record queue (issue #1220 D6).
+/// Words of one route cell: the four target coefficients' bits, the mute flag and the ramp length
+/// (#1347 D1). A target and its ramp are one unit, so they share one cell.
+pub(crate) const ROUTE_CELL_WORDS: usize = 6;
+
+impl RouteControlRecord {
+    /// The cell words `[ll, lr, rl, rr, mute, length]`.
+    pub(crate) fn to_words(self) -> [u32; ROUTE_CELL_WORDS] {
+        let [ll, lr, rl, rr] = self.target;
+        [
+            ll.to_bits(),
+            lr.to_bits(),
+            rl.to_bits(),
+            rr.to_bits(),
+            u32::from(self.mute),
+            self.length,
+        ]
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// The record a cell's words hold: `None` for words no record wrote, which render skips. The
+    /// words come from [`Self::to_words`], so the check is the constructor's own.
+    pub(crate) fn from_words(words: [u32; ROUTE_CELL_WORDS]) -> Option<Self> {
+        let [ll, lr, rl, rr, mute, length] = words;
+        if mute > 1 {
+            return None;
+        }
+        Self::new(
+            [
+                f32::from_bits(ll),
+                f32::from_bits(lr),
+                f32::from_bits(rl),
+                f32::from_bits(rr),
+            ],
+            mute == 1,
+            length,
+        )
+    }
+    // REALTIME_POLICY_END
+}
+
+/// What one live route shares between its writer (control) and its reader (render): one
+/// latest-target cell and its dirty word (#1347 D1).
+pub(crate) struct RouteLane {
+    pub(crate) cell: engine::realtime::LatestCell<ROUTE_CELL_WORDS>,
+    pub(crate) dirty: engine::realtime::DirtyWord,
+}
+
+impl RouteLane {
+    fn new() -> Self {
+        Self {
+            cell: engine::realtime::LatestCell::new(),
+            dirty: engine::realtime::DirtyWord::new(),
+        }
+    }
+}
+
+/// The render-side half of one live route's latest-target cell (issue #1220 D6, #1347 D1): the
+/// shared cell, the reader's last applied sequence, the dirty reader and the session's
+/// `live_values_superseded` count.
 ///
-/// Built only by [`PreparedGraphPlan::attach_route_controls`]; its route op drains it at the start
-/// of every block.
+/// Built only by [`PreparedGraphPlan::attach_route_controls`]; its route op reads it under the
+/// block's live snapshot at the start of every block.
 pub struct RouteControlLane {
-    pub(crate) consumer: engine::realtime::Consumer<RouteControlRecord>,
+    pub(crate) lane: std::sync::Arc<RouteLane>,
+    pub(crate) reader: engine::realtime::CellReader,
+    pub(crate) dirty: engine::realtime::DirtyReader,
+    pub(crate) superseded: engine::realtime::LiveValuesSuperseded,
 }
 
 /// One live route's lane, carried **beside** the prepared routes (issue #1220 D6), as
@@ -1004,15 +1066,16 @@ pub struct RouteControlLane {
 pub struct GraphRouteControlBinding {
     /// The route node this lane drives.
     pub node: GraphNodeId,
-    /// Consumer half of the bounded queue; the producer stays on the control plane.
+    /// Reader half of the latest-target cell; the writer stays on the control plane.
     pub control: Box<RouteControlLane>,
 }
 
-/// The control-plane half of one live route's record queue (issue #1220 D7).
+/// The control-plane half of one live route's latest-target cell (issue #1220 D7, #1347 D2).
 pub struct GraphRouteControlProducer {
     /// The route's session ID.
     pub route_id: Box<str>,
-    producer: engine::realtime::Producer<RouteControlRecord>,
+    lane: std::sync::Arc<RouteLane>,
+    writer: engine::realtime::CellWriter<ROUTE_CELL_WORDS>,
     /// The bytes of the plan's route-activity table that this attach added and the compile-time
     /// estimate did not charge (D8): the same for every producer of one attach.
     activity_bytes: u64,
@@ -1020,23 +1083,35 @@ pub struct GraphRouteControlProducer {
     activity_largest: u64,
 }
 
-/// A full live-route queue: the record was not queued, and is handed back.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RouteQueueFull {
-    pub record: RouteControlRecord,
+impl GraphRouteControlProducer {
+    /// Write `record` as the route's newest target, stamped with the revision of the transaction
+    /// that commits it. A write cannot fail and never waits, however many writes render has not
+    /// read: render ramps to the newest and counts each replaced one.
+    ///
+    /// Validation is [`RouteControlRecord::new`]'s, made before any write. The caller publishes the
+    /// stamp's revision on the plan's gate after every write of the transaction; a value is not
+    /// applied before that (#1312 D7).
+    pub fn write(&mut self, stamp: engine::realtime::LiveStamp<'_>, record: RouteControlRecord) {
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            record.to_words(),
+        );
+    }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRouteControlProducer {
-    /// How many records the queue can accept now.
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight, which a
+    /// quiescent test thread guarantees.
+    #[doc(hidden)]
     #[must_use]
-    pub fn free(&self) -> usize {
-        self.producer.available_capacity()
-    }
-    /// Queue one record; a full queue refuses it and hands it back. Nothing is dropped.
-    pub fn try_push(&mut self, record: RouteControlRecord) -> Result<(), RouteQueueFull> {
-        self.producer
-            .try_push(record)
-            .map_err(|full| RouteQueueFull { record: full.value })
+    pub fn test_only_write_count(&self) -> u64 {
+        engine::realtime::CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
     }
 }
 
@@ -1048,8 +1123,6 @@ pub enum GraphRouteControlError {
     /// A route into a submix is also a node the plan requires a processor for; a live route is
     /// never a [`GraphNodeBinding`] (its op would not mix).
     BoundRoute,
-    /// A queue of this depth cannot be allocated.
-    QueueCapacity,
 }
 
 /// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
@@ -1065,11 +1138,12 @@ pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
 /// `route_activity_bound_bytes`, an upper bound.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RouteControlResources {
-    /// Live routes: one queue, one lane, one binding, one owner and one producer each.
+    /// Live routes: one cell, one lane, one binding, one owner and one producer each.
     pub routes: u64,
-    /// Each queue's retained ring header and slots
-    /// (`engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>`).
-    pub queue_bytes: u64,
+    /// Each route's one shared allocation, the `Arc` of its latest-target cell and dirty word
+    /// (`SharedAllocation<RouteLane>`: the cell's three slots, the dirty word and the owner
+    /// header). Exact (#1347 D1).
+    pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
     /// (held until bind) and the boxed render-side owner bind builds.
     pub owner_bytes: u64,
@@ -1096,21 +1170,14 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         return RouteControlResources::default();
     }
     let routes = count(producers.len());
-    let mut queue_bytes = 0_u64;
+    // Every route's shared allocation is the same type, so the same bytes.
+    let cell = count(core::mem::size_of::<
+        engine::realtime::SharedAllocation<RouteLane>,
+    >());
+    let cell_bytes = routes.saturating_mul(cell);
     let mut route_id_bytes = 0_u64;
-    let mut largest = 0_u64;
+    let mut largest = cell;
     for producer in producers {
-        let payload = NonZeroUsize::new(producer.producer.capacity()).and_then(|capacity| {
-            engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>(capacity).ok()
-        });
-        let (total, single) = payload.map_or((u64::MAX, u64::MAX), |payload| {
-            (
-                count(payload.total_bytes().unwrap_or(usize::MAX)),
-                count(payload.largest_allocation_bytes()),
-            )
-        });
-        queue_bytes = queue_bytes.saturating_add(total);
-        largest = largest.max(single);
         // The producer's copy and the binding's node-ID copy.
         route_id_bytes =
             route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
@@ -1140,12 +1207,12 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         .max(activity_largest);
     RouteControlResources {
         routes,
-        queue_bytes,
+        cell_bytes,
         owner_bytes,
         producer_table_bytes,
         route_id_bytes,
         activity_bytes,
-        total_bytes: queue_bytes
+        total_bytes: cell_bytes
             .saturating_add(owner_bytes)
             .saturating_add(producer_table_bytes)
             .saturating_add(route_id_bytes)
@@ -1372,7 +1439,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     }
     /// Copy `predecessor`'s lane `predecessor_lane` -- its whole input-section state and its live
     /// channel-symmetry terms -- into this bank's lane `lane`, at the swap block (issue #1276
-    /// D2). The caller has drained `predecessor`'s live queues first
+    /// D2). The caller has drained `predecessor`'s live cells first
     /// ([`Self::drain_for_carry`]). `false` (the default) copies nothing. Render-thread code:
     /// allocation-free and bounded.
     fn adopt_input_lane(
@@ -1384,16 +1451,30 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         let _ = (lane, predecessor, predecessor_lane);
         false
     }
-    /// Apply every live-control record waiting at entry to lane state, exactly as
-    /// [`Self::begin_block`] would at the next block, before a plan swap exports this bank's
-    /// lanes (issue #1276 D4). A record drained here takes effect on the successor's first
-    /// sample, the sample it would have reached without the swap.
+    /// Apply every live-control record waiting at entry in the input cells of the lanes in
+    /// `lanes` (bit `n` is lane `n`) to lane state, exactly as [`Self::begin_block`] would at the
+    /// next block, before a plan swap exports those lanes (issue #1276 D4). A record drained here
+    /// takes effect on the successor's first sample, the sample it would have reached without the
+    /// swap.
     ///
-    /// Every record present at entry is consumed: one whose apply is refused is counted and the
-    /// drain goes on, so no later record of the lane or the bank stays behind in a queue that
-    /// never renders again. Returns the refused count, which admission validation makes zero.
-    /// The default drains nothing and returns zero.
-    fn drain_for_carry(&mut self) -> usize {
+    /// `lanes` names the lanes the swap carries, and only those. A lane the swap restarts is not
+    /// read, so the writes its cells replaced are not counted in `live_values_superseded` (#1312
+    /// D2): the count does not depend on which lanes share a bank, and so not on the lane width.
+    ///
+    /// Every record of a named lane present at entry is consumed: one whose apply is refused is
+    /// counted and the drain goes on, so no later record of the lane or the bank stays behind in
+    /// a queue that never renders again. Returns the refused count, which admission validation
+    /// makes zero. The default drains nothing and returns zero.
+    fn drain_for_carry(&mut self, lanes: u8) -> usize {
+        let _ = lanes;
+        0
+    }
+    /// [`Self::drain_for_carry`] for the strip stage `owner`: apply every pending fader, mute or
+    /// matrix value of the lanes in `lanes` to lane state (issue #1277 D8). Only the cells of
+    /// `owner`'s half are read: in a fused bank the other owner's half is another call. The
+    /// default drains nothing and returns zero.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        let _ = (owner, lanes);
         0
     }
     /// Which strip stage this bank is and how many populated lanes it can hand over or take at a
@@ -1419,7 +1500,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// Copy `predecessor`'s lane `predecessor_lane` -- the whole state of `owner`'s stage: its
     /// gains, mutes or matrix and any ramp in flight -- into this bank's lane `lane`, at the swap
     /// block (issue #1277 D8). The caller has applied `predecessor`'s pending live values first
-    /// ([`Self::drain_for_carry`]). `false` (the default) copies nothing. Render-thread code:
+    /// ([`Self::drain_strip_for_carry`]). `false` (the default) copies nothing. Render-thread code:
     /// allocation-free and bounded.
     fn adopt_strip_lane(
         &mut self,
@@ -1430,6 +1511,13 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     ) -> bool {
         let _ = (owner, lane, predecessor, predecessor_lane);
         false
+    }
+    /// The lanes (bit `n` is lane `n`) whose [`Self::begin_block`] drains a live lane, or `0` for
+    /// a bank with none. `BuiltinStage` forwards it to `rack::BankStage::live_lanes`, which
+    /// `BankChain::new` checks against the slot's active lanes in a debug build, off the render
+    /// thread (#1504 D3). The default `0` is a bank that holds no live lane.
+    fn live_lanes(&self) -> u8 {
+        0
     }
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
@@ -1481,7 +1569,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     ///
     /// `snapshot` is the block's live snapshot `S` (#1504): the revision render read from the
     /// running plan's gate at the start of the block. A drain that reads live cells reads under
-    /// it; a drain of a queue ignores it until its lane moves to cells. The bank stage hands every
+    /// it; an observation queue is a FIFO and ignores it. The bank stage hands every
     /// bank the block's own, once per block, whether or not the block's audio is silent: silence
     /// may skip a bank's processing and never this drain.
     fn begin_block(
@@ -1789,19 +1877,21 @@ impl PreparedGraphPlan {
         self.program = self.lower_from_current_fields();
         Ok(self)
     }
-    /// Give every route into a submix input a live lane (issue #1220 D1, D7): one bounded queue of
-    /// `depth` records per route, in canonical route-ID order, whose producers are returned.
+    /// Give every route into a submix input a live lane (issue #1220 D1, D7, #1347 D1): one
+    /// latest-target cell per route, in canonical route-ID order, whose producers are returned.
+    /// Every lane adds the replaced writes it finds to `superseded`, the session's count.
     ///
     /// Runs after compile and before bind. Routes into an output keep their prepared constants,
     /// their fold and their structural edits. Bind turns each lane's route op into a live route,
-    /// which drains its queue at the start of every block and ramps by the indexed ramp; a live
-    /// route never folds (VERIFY-2 M3). Without this call the plan binds what it bound before.
+    /// which reads its cell under the block's live snapshot at the start of every block and
+    /// ramps by the indexed ramp; a live route never folds (VERIFY-2 M3). Without this call the
+    /// plan binds what it bound before.
     ///
-    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]), when a route into
-    /// a submix is a node the plan requires a processor for, or when `depth` cannot be allocated.
+    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]) or when a route into
+    /// a submix is a node the plan requires a processor for.
     pub fn attach_route_controls(
         &mut self,
-        depth: NonZeroUsize,
+        superseded: &engine::realtime::LiveValuesSuperseded,
     ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
         if self.route_controls.is_some() {
             return Err(GraphRouteControlError::AlreadyAttached);
@@ -1858,18 +1948,20 @@ impl PreparedGraphPlan {
             let GraphNodeId::Route { route_id } = node else {
                 continue;
             };
-            let (producer, consumer) = engine::realtime::bounded_spsc::<RouteControlRecord>(
-                depth,
-                engine::realtime::QueueGeneration(0),
-            )
-            .map_err(|_| GraphRouteControlError::QueueCapacity)?;
+            let lane = std::sync::Arc::new(RouteLane::new());
             bindings.push(GraphRouteControlBinding {
                 node: node.clone(),
-                control: Box::new(RouteControlLane { consumer }),
+                control: Box::new(RouteControlLane {
+                    lane: std::sync::Arc::clone(&lane),
+                    reader: engine::realtime::CellReader::new(),
+                    dirty: engine::realtime::DirtyReader::new(),
+                    superseded: superseded.clone(),
+                }),
             });
             producers.push(GraphRouteControlProducer {
                 route_id: route_id.as_str().into(),
-                producer,
+                lane,
+                writer: engine::realtime::CellWriter::new(),
                 activity_bytes,
                 activity_largest,
             });
@@ -2499,8 +2591,8 @@ pub struct GraphBindingBlock<'a> {
     pub first_sample: u64,
     /// The block's live snapshot `S` (#1504): the revision render read from the running plan's
     /// gate at the start of the block. A processor that drains live values reads under it and
-    /// drains once in every block, whether or not its audio is silent. A drain of a queue ignores
-    /// it until its lane moves to cells. A caller that renders a processor outside a plan names
+    /// drains once in every block, whether or not its audio is silent. An observation queue is a
+    /// FIFO and ignores it. A caller that renders a processor outside a plan names
     /// the snapshot it means; [`LiveSnapshot::ALL`] applies every value written.
     pub live_snapshot: LiveSnapshot,
 }
@@ -7258,31 +7350,56 @@ mod tests {
         collected
     }
 
-    fn control_pair(
-        depth: usize,
-    ) -> (
-        engine::realtime::Producer<effect_contract::EffectControlRecord>,
-        Box<EffectControlLane>,
-    ) {
-        let (producer, consumer) =
-            engine::realtime::bounded_spsc::<effect_contract::EffectControlRecord>(
-                core::num::NonZeroUsize::new(depth).expect("depth"),
-                engine::realtime::QueueGeneration(0),
-            )
-            .expect("queue");
-        (producer, Box::new(EffectControlLane::new(consumer, false)))
+    /// The gain fixture's lane: one `PerLane` parameter, so a `Left` and a `Right` cell.
+    fn control_pair() -> (effect_contract::EffectCellWriter, Box<EffectControlLane>) {
+        let (writer, lane) = effect_contract::effect_control_lane(
+            effect_contract::EffectLaneSpec {
+                shape: effect_contract::EffectLaneShape::from_descriptor(&GAIN_DESCRIPTOR, 0),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &engine::realtime::LiveValuesSuperseded::new(),
+        )
+        .expect("the gain fixture's lane");
+        (writer, Box::new(lane))
+    }
+
+    /// Control's end of the fixture: its cell writer and the plan's gate handle. A push is one
+    /// transaction: stamp the next revision, write the cell, publish the revision.
+    struct LiveControl {
+        writer: effect_contract::EffectCellWriter,
+        gate: engine::realtime::PlanRevisionGate,
+    }
+
+    impl LiveControl {
+        fn new(writer: effect_contract::EffectCellWriter, plan: &mut PreparedRenderPlan) -> Self {
+            Self {
+                writer,
+                gate: plan.take_revision_gate().expect("the plan's gate handle"),
+            }
+        }
+
+        fn push(&mut self, record: effect_contract::EffectControlRecord) {
+            let revision = self.gate.last_published() + 1;
+            let stamp = self.gate.stamp(revision).expect("a legal revision");
+            self.writer
+                .write(stamp, record)
+                .expect("the fixture has a cell for the record");
+            self.gate.publish(revision);
+        }
     }
 
     /// #140 A / E1 for the dynamic rack: an admitted parameter command takes effect on the first
     /// sample of the next rendered block, and not one sample before.
     ///
-    /// Red mutation: move the `live.stage(..)` drain in `execute_op`'s `LiveControlEffect`
+    /// Red mutation: move the `live.stage(..)` call in `execute_op`'s `LiveControlEffect`
     /// arm to *after* `effect.processor.process(block)` -> the command lands one block late and
     /// the `block 1` assertion below fails on its first sample.
     #[test]
     fn a_live_control_parameter_command_applies_at_the_next_block_boundary() {
-        let (mut producer, control) = control_pair(4);
+        let (writer, control) = control_pair();
         let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
         let block0 = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(
             &block0[..4],
@@ -7290,13 +7407,11 @@ mod tests {
             "unity before any command"
         );
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Parameter {
-                parameter_index: 0,
-                channel: ParameterChannel::Left,
-                value: 0.5,
-            })
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel: ParameterChannel::Left,
+            value: 0.5,
+        });
         let block1 = render_live_control_blocks(&mut plan, 1, 1);
         assert_eq!(
             &block1[..4],
@@ -7310,6 +7425,48 @@ mod tests {
         );
     }
 
+    /// A per-node effect reads its cells under the block's live snapshot (#1504, #1345): a value
+    /// stamped with a revision the gate has not yet published is not applied by the block that
+    /// finds it, and is applied by the first block after its revision is published.
+    ///
+    /// Test value: red if the per-node effect's `stage` reads under `LiveSnapshot::ALL` (or any
+    /// snapshot but the block's own), which applies a transaction's value before the rest of it
+    /// can be seen; the bank path has its own test, and no other covers this path.
+    #[test]
+    fn a_per_node_effect_waits_for_the_revision_that_covers_its_value() {
+        let (writer, control) = control_pair();
+        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
+        let revision = producer.gate.last_published() + 1;
+        {
+            let stamp = producer.gate.stamp(revision).expect("a legal revision");
+            producer
+                .writer
+                .write(
+                    stamp,
+                    effect_contract::EffectControlRecord::Parameter {
+                        parameter_index: 0,
+                        channel: ParameterChannel::Left,
+                        value: 0.5,
+                    },
+                )
+                .expect("the fixture has a cell for the record");
+        }
+        let before = render_live_control_blocks(&mut plan, 0, 1);
+        assert_eq!(
+            &before[..4],
+            &[0.0, 1.0, 2.0, 3.0],
+            "the value is written but its revision is not published: the block leaves it alone"
+        );
+        producer.gate.publish(revision);
+        let after = render_live_control_blocks(&mut plan, 1, 1);
+        assert_eq!(
+            &after[..4],
+            &[2.0, 2.5, 3.0, 3.5],
+            "the first block after the publish carries it from its first sample"
+        );
+    }
+
     /// Live bypass returns the dry signal delayed by exactly the effect's declared latency, so
     /// every PDC route timing the compiler derived from that latency stays correct.
     ///
@@ -7318,16 +7475,15 @@ mod tests {
     #[test]
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
-        let (mut producer, control) = control_pair(4);
+        let (writer, control) = control_pair();
         let mut plan =
             live_control_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
-        producer
-            .try_push(effect_contract::EffectControlRecord::Parameter {
-                parameter_index: 0,
-                channel: ParameterChannel::Left,
-                value: 0.0,
-            })
-            .expect("room");
+        let mut producer = LiveControl::new(writer, &mut plan);
+        producer.push(effect_contract::EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel: ParameterChannel::Left,
+            value: 0.0,
+        });
         let wet = render_live_control_blocks(&mut plan, 0, 2);
         // Latency 2 with a zero gain: the first two samples are the line's zeros, then zeros.
         assert!(
@@ -7335,9 +7491,7 @@ mod tests {
             "a zero gain silences the wet path"
         );
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Bypass(true))
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Bypass(true));
         let bypassed = render_live_control_blocks(&mut plan, 2, 1);
         assert_eq!(
             &bypassed[..4],
@@ -7346,9 +7500,7 @@ mod tests {
         );
         assert_eq!(&bypassed[4..], &[-6.0, -7.0, -8.0, -9.0]);
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Bypass(false))
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Bypass(false));
         let restored = render_live_control_blocks(&mut plan, 3, 1);
         assert!(
             restored[..4].iter().all(|value| *value == 0.0),
@@ -7371,7 +7523,7 @@ mod tests {
     fn idle_live_controls_change_no_rendered_bit() {
         for latency in [0_u64, 3] {
             let mut without = live_control_effect_plan(latency, None, Box::new(SampleIndexSource));
-            let (_producer, control) = control_pair(4);
+            let (_writer, control) = control_pair();
             let mut with =
                 live_control_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
             let plain = render_live_control_blocks(&mut without, 0, 4);
@@ -7384,20 +7536,19 @@ mod tests {
         }
     }
 
-    /// The staging window cannot overflow, because preparation caps the queue at the effect's
-    /// automation capacity; a violated cap would be counted here rather than written past the end.
+    /// Both of the gain fixture's cells are written and staged in one block: the window is the
+    /// effect's automation capacity, which holds the lane's two cells.
     #[test]
-    fn the_live_control_effect_drops_nothing_within_its_prepared_capacity() {
-        let (mut producer, control) = control_pair(2);
+    fn the_live_control_effect_applies_every_cell_within_its_window() {
+        let (writer, control) = control_pair();
         let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-            producer
-                .try_push(effect_contract::EffectControlRecord::Parameter {
-                    parameter_index: 0,
-                    channel,
-                    value: 2.0,
-                })
-                .expect("room");
+            producer.push(effect_contract::EffectControlRecord::Parameter {
+                parameter_index: 0,
+                channel,
+                value: 2.0,
+            });
         }
         let block = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(&block[..4], &[0.0, 2.0, 4.0, 6.0]);

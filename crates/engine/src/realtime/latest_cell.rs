@@ -618,6 +618,28 @@ impl CellReader {
         }
     }
 
+    /// [`Self::read`], and when it applies a write, the writes it replaced join `superseded`
+    /// (#1312 D2). This is the only way to write a [`LiveValuesSuperseded`], so the count's
+    /// single-writer rule is the reader's own: render, the cell's one reader.
+    pub fn read_counted<const N: usize>(
+        &mut self,
+        cell: &LatestCell<N>,
+        snapshot: LiveSnapshot,
+        stage: &mut DirtyReader,
+        bit: u32,
+        superseded: &LiveValuesSuperseded,
+    ) -> CellRead<N> {
+        let read = self.read(cell, snapshot, stage, bit);
+        if let CellRead::Applied {
+            superseded: replaced,
+            ..
+        } = read
+        {
+            superseded.add(replaced);
+        }
+        read
+    }
+
     /// The plan-swap carry only: the written slot with the greatest sequence, if that sequence is
     /// above the last applied one. It changes nothing: no read-modify-write, and the last applied
     /// sequence stays as it was, as do the dirty word and the deferred mask.
@@ -648,6 +670,80 @@ impl CellReader {
     }
 }
 // REALTIME_POLICY_END
+
+/// The layout of an `Arc<T>` allocation: the two counts, then `T` (the allocation `Arc::new`
+/// makes). A resource plan charges each shared lane or count by `Layout::new::<SharedAllocation<T>>()`.
+#[repr(C)]
+pub struct SharedAllocation<T> {
+    strong: core::sync::atomic::AtomicUsize,
+    weak: core::sync::atomic::AtomicUsize,
+    value: T,
+}
+
+/// The session's count of live values a later write replaced before render read them (D15-2,
+/// #1312 D2): `live_values_superseded`.
+///
+/// One per session, shared by every plan the session prepares and by every kind of lane that holds
+/// cells (strips #1312 and #1346, routes #1347, effects #1345). Render is its only writer, with a load, a
+/// saturating add and a store (never a read-modify-write: a plan swap hands render from one plan
+/// to the next on the same single render thread, so two writers never overlap); control reads it.
+/// A clone shares the count.
+#[derive(Clone, Debug, Default)]
+pub struct LiveValuesSuperseded(std::sync::Arc<core::sync::atomic::AtomicU64>);
+
+impl LiveValuesSuperseded {
+    /// A count at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
+    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
+    /// session charges it once (#1312 D2).
+    #[must_use]
+    pub fn retained_bytes() -> u64 {
+        u64::try_from(
+            core::alloc::Layout::new::<SharedAllocation<core::sync::atomic::AtomicU64>>().size(),
+        )
+        .expect("a count allocation's size fits u64")
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl LiveValuesSuperseded {
+    /// The writes counted so far: a relaxed load. Control reads it for the counters, and render
+    /// reads it after each block to publish it in the browser's status (#1399).
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Render: add `count` replaced writes. Saturating. A load and a store, not a read-modify-write,
+    /// because render is the count's only writer. The method is private to this module, so the only
+    /// caller is [`CellReader::read_counted`], which render's drains call: only a cell read writes
+    /// the count. `read_counted` is public, so a reader built over a stamped cell could call it
+    /// elsewhere; the rule rests on who holds the readers, not on a type barrier (#1347 attempt 2,
+    /// n1).
+    fn add(&self, count: u64) {
+        if count != 0 {
+            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+            self.0.store(
+                now.saturating_add(count),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+impl PartialEq for LiveValuesSuperseded {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LiveValuesSuperseded {}
 
 #[cfg(all(test, not(loom)))]
 mod tests {

@@ -18,8 +18,6 @@
 //! always banks on a vector backend (#1098), so a case that needs a per-node instance there folds the
 //! strip into every track's inserts ([`inserts`]), whose remainder renders per node.
 
-use core::num::NonZeroUsize;
-
 use bench_support::alloc::{
     self as bench_alloc, Mode, assert_installed, current_thread_counters,
     current_thread_delta_since,
@@ -198,13 +196,22 @@ struct Bound {
     shape: Shape,
 }
 
+/// The observation capacity a host asks for when it attaches live controls (zero for none).
+type ObservationTaps = u32;
+
 /// Prepare, compile and bind `model` at `dispatch`, with live controls on every effect when
-/// `live_controls` is set, measuring what the preparation leaves live.
+/// `live_controls` is set (and observation queues on the effects that declare taps, up to that
+/// many), measuring what the preparation leaves live.
 ///
 /// The measured window starts at effect preparation, so it frees nothing it did not allocate, and
 /// ends with the bound plan and nothing else alive: the live controls' producers, which a host
 /// keeps beside the plan and charges separately, are dropped inside it.
-fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool) -> Bound {
+fn bind(
+    model: &SessionModel,
+    dispatch: Backend,
+    spans: u32,
+    live_controls: Option<ObservationTaps>,
+) -> Bound {
     let session = compile_session(model, compile_caps()).expect("compiled session");
     let registry = launch_native_effect_registry().expect("launch registry");
     let bypassed: Vec<(String, String)> = model
@@ -229,12 +236,14 @@ fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool
         })
         .collect();
     assert_installed();
+    // The session's `live_values_superseded` count is one allocation the host charges once per
+    // session, not an owner of any lane: it is made before the measured window.
+    let superseded = engine::realtime::LiveValuesSuperseded::new();
     let mark = current_thread_counters();
     let mut effects =
         prepare_native_session_effects(&session, registry, effect_caps(spans)).expect("effects");
-    let producers = live_controls.then(|| {
-        attach_effect_live_controls(&mut effects, NonZeroUsize::new(8).expect("depth"))
-            .expect("live controls")
+    let producers = live_controls.map(|taps| {
+        attach_effect_live_controls(&mut effects, &superseded, taps).expect("live controls")
     });
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -347,7 +356,7 @@ fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
         ),
     ] {
         let tracks = model.tracks.len();
-        let mut bound = bind(&model, Backend::current(), u32::MAX, false);
+        let mut bound = bind(&model, Backend::current(), u32::MAX, None);
         if tracks == 1 {
             assert_eq!(bound.shape.banks, 0, "{label}: one track banks nothing");
             assert_eq!(bound.shape.bypassed_per_node, 1, "{label}: per node");
@@ -416,12 +425,12 @@ fn a_bypass_or_live_controls_are_charged_at_least_what_they_retain() {
                 console(tracks, masks)
             }
         };
-        let plain = bind(&session([0, 0, 0]), Backend::current(), SPANS, false);
+        let plain = bind(&session([0, 0, 0]), Backend::current(), SPANS, None);
         let owned = bind(
             &session(masks),
             Backend::current(),
             SPANS,
-            live_controls_attached,
+            live_controls_attached.then_some(0),
         );
         if tracks == 1 {
             assert_eq!(owned.shape.banks, 0, "{label}: one track banks nothing");
@@ -449,6 +458,103 @@ fn a_bypass_or_live_controls_are_charged_at_least_what_they_retain() {
         assert!(
             charged >= retained,
             "{label}: the estimate charges {charged} bytes for an owner that retains {retained}"
+        );
+    }
+}
+
+/// Gate 2, the witness: a lane's own accounting (`retained_resources` of the lane and of its
+/// writer) is the bytes the audited allocator sees the lane's construction leave live.
+///
+/// `effect-contract`'s lane accounting is what `graph-compiler`'s estimate sums and what the lib
+/// test `effect_control_resource_uses_independent_queue_and_owner_arithmetic` takes as its witness
+/// for a lane's heap. This is the independent reading that makes that witness one: the allocator
+/// counts the bytes, and the accounting is compared with it, for the EQ (target cells, no
+/// parameter cell) and the compressor (parameter cells), with and without an observation queue.
+///
+/// Red mutation: leave a lane array out of `EffectControlLane::retained_resources` (for example
+/// `dirty`) -> the accounting falls short of the allocator.
+#[test]
+fn a_lanes_own_accounting_is_what_the_allocator_sees() {
+    assert_installed();
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let superseded = engine::realtime::LiveValuesSuperseded::new();
+    for id in ["miso.parametric-eq", "miso.compressor"] {
+        let factory = registry.get_shared_ascii(id).expect("launch effect");
+        let slots = factory
+            .target_preparation()
+            .map_or(0, |capability| capability.target_slots());
+        for depth in [0, 1] {
+            let mark = current_thread_counters();
+            let (writer, lane) = effect_contract::effect_control_lane(
+                effect_contract::EffectLaneSpec {
+                    shape: effect_contract::EffectLaneShape::from_descriptor(
+                        factory.descriptor(),
+                        slots,
+                    ),
+                    bypass: false,
+                    observation_depth: depth,
+                },
+                &superseded,
+            )
+            .expect("a lane");
+            let window = current_thread_delta_since(mark);
+            let seen = window
+                .requested_bytes
+                .checked_sub(window.released_bytes)
+                .expect("construction frees nothing it did not allocate");
+            let accounted =
+                lane.retained_resources().total_bytes + writer.retained_resources().total_bytes;
+            assert!(accounted > 0, "{id}: a lane retains something");
+            assert_eq!(
+                accounted, seen,
+                "{id} with {depth} observation slots: the accounting says {accounted} bytes, the \
+                 allocator saw {seen}"
+            );
+        }
+    }
+}
+
+/// Gate 2, observation: an effect that declares a tap gets a queue, and the estimate charges
+/// exactly what bind retains for it, banked and per node.
+///
+/// Two plans differ only in the observation capacity the host asks for (none, then one tap), so
+/// the difference of the two audited allocator readings is the queues' bytes: each lane's ring and
+/// slots, and, in a bank, the `(lane index, queue)` table that the bank takes out of its lanes.
+/// The estimate's difference must equal it. A bank charges one table entry for every lane that has
+/// a queue and none for a lane that has none; the compressor and the limiter declare a tap, the
+/// EQ does not.
+///
+/// Red mutation: charge the table per bank lane at `Option<Consumer>` size (what the estimate did
+/// before this gate) -> the untapped banks are over-charged, the tapped ones under-charged, and the
+/// banked difference falls 768 bytes short (two banks of eight lanes at 48 bytes).
+#[test]
+fn an_observed_lanes_queue_is_charged_exactly_what_bind_retains() {
+    const SPANS: u32 = 128;
+    let lanes = host_lanes();
+    for (label, tracks) in [("per-node", 1_usize), ("banked", lanes)] {
+        let model = if tracks == 1 {
+            inserts(tracks, [0, 0, 0])
+        } else {
+            console(tracks, [0, 0, 0])
+        };
+        let untapped = bind(&model, Backend::current(), SPANS, Some(0));
+        let tapped = bind(&model, Backend::current(), SPANS, Some(1));
+        let retained = tapped
+            .live
+            .checked_sub(untapped.live)
+            .unwrap_or_else(|| panic!("{label}: observation queues retain nothing"));
+        let charged = tapped
+            .estimate
+            .checked_sub(untapped.estimate)
+            .unwrap_or_else(|| panic!("{label}: observation queues lower the estimate"));
+        println!("{label}: retained {retained} B, charged {charged} B");
+        assert!(
+            retained > 0,
+            "{label}: an observed effect retains a queue, or this proves nothing"
+        );
+        assert_eq!(
+            charged, retained,
+            "{label}: the estimate charges {charged} bytes for queues that retain {retained}"
         );
     }
 }
@@ -502,7 +608,7 @@ fn a_mixed_session_bypass_renders_without_allocating() {
         } else {
             inserts(TRACKS, MASKS)
         };
-        let mut bound = bind(&model, dispatch, 32, false);
+        let mut bound = bind(&model, dispatch, 32, None);
         let shape = &bound.shape;
         if console_leg {
             assert_eq!(

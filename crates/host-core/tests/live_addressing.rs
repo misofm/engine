@@ -237,6 +237,14 @@ fn addressed<'a>(
     producer
 }
 
+/// The plan's gate handle: live values are cells, written under a stamp of it.
+fn gate_of(prepared: &mut PreparedHost) -> engine::realtime::PlanRevisionGate {
+    prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle")
+}
+
 #[test]
 fn a_live_bypass_reaches_the_addressed_lane() {
     let (mut base, _) = prepare(&document(None));
@@ -244,9 +252,12 @@ fn a_live_bypass_reaches_the_addressed_lane() {
     let mut renders = Vec::new();
     for (address, instance) in ADDRESSES {
         let (mut prepared, mut handles) = prepare(&document(None));
-        addressed(&mut handles, address, instance)
-            .try_push(EffectControlRecord::Bypass(true))
-            .expect("room in the bounded queue");
+        let mut gate = gate_of(&mut prepared);
+        support::write_effect(
+            addressed(&mut handles, address, instance),
+            &mut gate,
+            EffectControlRecord::Bypass(true),
+        );
         let live = render(&mut prepared);
         let (mut oracle, _oracle_handles) = prepare(&document(Some((TRACK, instance))));
         let oracle = render(&mut oracle);
@@ -272,24 +283,28 @@ fn a_live_bypass_reaches_the_addressed_lane() {
 fn a_live_parameter_reaches_the_addressed_lane() {
     let (mut base, _) = prepare(&document(None));
     let base = render(&mut base);
-    let ride = |producer: &mut host_core::EffectControlProducer| {
+    let ride = |producer: &mut host_core::EffectControlProducer,
+                gate: &mut engine::realtime::PlanRevisionGate| {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-            support::push_eq_parameter(producer, BAND_GAIN_INDEX, channel, -18.0);
+            support::push_eq_parameter(producer, gate, BAND_GAIN_INDEX, channel, -18.0);
         }
     };
     let mut renders = Vec::new();
     for (address, instance) in ADDRESSES {
         let (mut prepared, mut handles) = prepare(&document(None));
-        ride(addressed(&mut handles, address, instance));
+        let mut gate = gate_of(&mut prepared);
+        ride(addressed(&mut handles, address, instance), &mut gate);
         let live = render(&mut prepared);
         // The same ride, sent to the channel found by the instance's own identity.
         let (mut oracle, mut oracle_handles) = prepare(&document(None));
+        let mut oracle_gate = gate_of(&mut oracle);
         ride(
             oracle_handles
                 .effect_controls
                 .iter_mut()
                 .find(|producer| &*producer.track_id == TRACK && &*producer.effect_id == instance)
                 .expect("a channel for the instance"),
+            &mut oracle_gate,
         );
         let oracle = render(&mut oracle);
         assert!(

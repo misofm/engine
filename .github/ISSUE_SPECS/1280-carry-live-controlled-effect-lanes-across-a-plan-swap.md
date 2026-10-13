@@ -23,8 +23,13 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   spans or prepared targets, and `process_inner` (`rack/src/lib.rs:1294`) applies them in the same
   block. Draining at the carry would stage values into a plan that never renders again (#1269's
   blocker X3).
-- On `main`, `EffectControlLane` (`live.rs:125`) holds a queue consumer, a prepared-target FIFO,
-  the live `bypass` flag and the live symmetry terms. Carrying a queue would need an inherited
+- On `main` before #1345, `EffectControlLane` (`live.rs:125`) held a queue consumer, a
+  prepared-target FIFO, the live `bypass` flag and the live symmetry terms. **After #1345
+  (root note, 2026-10-12, stream B batch-3 verdict): the observation queue's consumer is no longer
+  in `EffectControlLane`. It lives in `LiveControlEffectBankStage::observe_queues`
+  (`crates/rack/src/lib.rs` ~1162, taken out of each lane at bind, drained at ~1530).** Anything
+  below that says the carry reaches the observation FIFO through `EffectControlLane` reaches it
+  through that stage field. Carrying a queue would need an inherited
   consumer and an admission limit on the successor, which is a new BACKPRESSURE for a live value.
   Decision 15 forbids that (D15-2). So this slice lands after *Hold effect parameter, bypass and
   EQ-target values in latest-target cells* (#1345), and carries **cells**:
@@ -83,7 +88,9 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 
   The carried slots are preallocated with the lane, one per cell, and cleared after that block.
   Nothing is refused and nothing is dropped.
-- **D3. Pending Observe records.** The carry drains the predecessor's observation FIFO with the
+- **D3. Pending Observe records.** (After #1345 the FIFO's consumer is
+  `LiveControlEffectBankStage::observe_queues`, not `EffectControlLane`; root note, 2026-10-12.)
+  The carry drains the predecessor's observation FIFO with the
   bounded drain and applies each record to the predecessor's `ObservationLane`, at the boundary
   where the predecessor's next block would apply it. Observation output is not audio, and the
   observer carry (*Carry meter and effect observation state across a plan swap*, #1327) then

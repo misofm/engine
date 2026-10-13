@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ARENA_SILENCE_BUFFER, ArenaStereoPair, DisjointArena, LiveSnapshot, RenderError,
+    ARENA_SILENCE_BUFFER, ArenaStereoPair, CellRead, DisjointArena, LiveSnapshot, RenderError,
     ResponseSnapshotAvailability, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
     ResponseSnapshotSection, ResponseSnapshotSink,
 };
@@ -889,30 +889,42 @@ impl LiveRoute {
         }
     }
 
-    /// D5: apply, in order, exactly the records available at entry, each ramping from the
-    /// coefficients the route is at (D3). Later records wait for a later block; none is dropped.
-    /// Returns how many were applied.
+    /// #1347 D3: read the route's cell under the block's snapshot `S` and, if it holds a value not
+    /// applied before, retarget once from the coefficients the route is at to that value over its
+    /// ramp, exactly as one drained record did before the cells. Returns how many values were
+    /// applied: `0` or `1`.
     ///
-    /// `snapshot` is the block's live snapshot `S` (#1504): the route's queue lane ignores it until
-    /// the lane moves to a cell (#1347). The drain runs in every block, active route or not.
+    /// The cell holds the newest value whose revision is `<= S`, never a newer or torn one, and
+    /// never skips it (#1312 D1). When it applies sequence `s` after `p`, the `s - p - 1` writes
+    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The drain runs
+    /// in every block, active route or not (#1504 D3). It allocates nothing and takes no lock.
     #[inline]
     fn drain(&mut self, snapshot: LiveSnapshot) -> usize {
-        let _ = snapshot;
-        let available = self.control.consumer.available_at_entry();
+        let control = &mut *self.control;
         let mut applied = 0;
-        for _ in 0..available {
-            let Ok(record) = self.control.consumer.try_pop() else {
-                break;
-            };
-            debug_assert!(record.length() <= crate::ROUTE_RAMP_LENGTH_MAXIMUM);
-            self.ramp = IndexedRamp::new(
-                self.ramp.coefficients_at(self.position),
-                record.target(),
-                record.length(),
-            );
-            self.mute = record.mute();
-            self.position = 0;
-            applied += 1;
+        if control.dirty.pending(&control.lane.dirty) & 1 != 0
+            && let CellRead::Applied { words, .. } = control.reader.read_counted(
+                &control.lane.cell,
+                snapshot,
+                &mut control.dirty,
+                0,
+                &control.superseded,
+            )
+        {
+            // Only `write` fills the cell, from a validated record, so the words decode; words no
+            // record wrote retarget nothing.
+            let record = crate::RouteControlRecord::from_words(words);
+            debug_assert!(record.is_some(), "a route cell held words no record wrote");
+            if let Some(record) = record {
+                self.ramp = IndexedRamp::new(
+                    self.ramp.coefficients_at(self.position),
+                    record.target(),
+                    record.length(),
+                );
+                self.mute = record.mute();
+                self.position = 0;
+                applied = 1;
+            }
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);
@@ -1229,19 +1241,20 @@ pub(crate) struct LiveControlEffect {
 }
 
 impl LiveControlEffect {
-    /// Drain this effect's live-control lane and stage the block's spans (issue #143 D3, #1504).
+    // REALTIME_POLICY_BEGIN
+    /// Read this effect's live-control cells under the block's live snapshot `S`, stage the
+    /// block's spans, and drain its observation queue (issue #143 D3, #1504, #1345).
     ///
-    /// `snapshot` is the block's live snapshot `S`: the queue lane ignores it until the lane moves
-    /// to cells (#1345). Called once in every block, before a sample of the block is touched.
+    /// Called once in every block, before a sample of the block is touched, in no loop (#1345
+    /// D10): the lane's own queue drain is the per-node path's drain.
     #[inline]
     fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
-        let _ = snapshot;
-        self.control.stage(
-            &mut self.spans,
-            first_sample,
-            self.observation.as_deref_mut(),
-        )
+        let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
+        self.control
+            .drain_observations(first_sample, self.observation.as_deref_mut());
+        staged
     }
+    // REALTIME_POLICY_END
 
     fn new(
         effect: GraphPreparedEffect,
@@ -1276,12 +1289,17 @@ impl LiveControlEffect {
         ]
         .into_boxed_slice();
         // The live drain's pairing rule needs the window to be exactly the effect's automation
-        // capacity (issue #1012). Checked here, at bind, off the render thread; this node builder
-        // is infallible, so a violation is a bind-time panic, as `stage_for`'s validated width is.
-        // A channel-less lane stages nothing.
+        // capacity (issue #1012), and a block stages one span for every live parameter cell it
+        // reads, with no deferral (#1345 D4), so the window holds the lane's cells. Checked here,
+        // at bind, off the render thread; this node builder is infallible, so a violation is a
+        // bind-time panic, as `stage_for`'s validated width is. A channel-less lane stages
+        // nothing.
         if live {
             effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
                 .expect("a live-control effect's staging window is its automation capacity");
+            control
+                .check_window(spans.len())
+                .expect("a live-control effect's staging window holds every live parameter cell");
         }
         Self {
             observation,
@@ -3600,13 +3618,6 @@ fn execute_op(
             // call, so a batch that changes a threshold and arms its tap lands on one sample
             // timeline by construction rather than by two clocks agreeing.
             let staged = live.stage(snapshot, first_sample);
-            // Preparation refuses a queue deeper than the effect's automation capacity, so a full
-            // drain can never produce more distinct spans than the window holds. This is the
-            // invariant, not a runtime policy: in release it costs nothing.
-            debug_assert_eq!(staged.dropped, 0, "live-control staging window overflowed");
-            if staged.target_error {
-                return Err(RenderError::InvalidEnvelope);
-            }
             let automation = &live.spans[..staged.staged];
             let bypassed = live.control.bypassed();
             // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and
@@ -4121,6 +4132,11 @@ impl BankStage for BuiltinStage {
     ) -> Result<(), RenderError> {
         self.0.begin_block(first_sample, snapshot)
     }
+    /// The lanes whose drain reads live cells, forwarded: [`BankChain::new`]'s slot guard (#1504 D3)
+    /// reads it, so a builtin bank's live lanes are checked like an effect bank's.
+    fn live_lanes(&self) -> u8 {
+        self.0.live_lanes()
+    }
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }
@@ -4163,6 +4179,50 @@ fn builtin_processor_mut(
         .as_any_mut()?
         .downcast_mut::<BuiltinStage>()?;
     Some(stage.0.as_mut())
+}
+
+/// Bit `lane` of a carry mask. A bank has at most eight lanes, the width of the `u8` mask: debug
+/// builds refuse a lane beyond it, and a release build drops it from the mask rather than adding a
+/// panic edge to the realtime path.
+fn lane_bit(lane: u16) -> u8 {
+    debug_assert!(
+        u32::from(lane) < u8::BITS,
+        "a bank lane beyond the carry mask width"
+    );
+    1_u8.checked_shl(u32::from(lane)).unwrap_or(0)
+}
+
+/// The lanes of the predecessor bank of `moves[first]` that the input moves from `first` on carry:
+/// bit `n` is lane `n`. `moves` is sorted by predecessor location, so a bank's moves are
+/// adjacent. Bounded by the bank's move count; allocation-free.
+fn carried_input_lane_mask(moves: &[crate::GraphLaneMove], first: usize) -> u8 {
+    let Some(head) = moves.get(first) else {
+        return 0;
+    };
+    moves
+        .iter()
+        .skip(first)
+        .take_while(|step| {
+            step.predecessor.unit == head.predecessor.unit
+                && step.predecessor.slot == head.predecessor.slot
+        })
+        .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
+}
+
+/// [`carried_input_lane_mask`] for the strip moves of `moves[first]`'s owner.
+fn carried_strip_lane_mask(moves: &[crate::GraphStripMove], first: usize) -> u8 {
+    let Some(head) = moves.get(first) else {
+        return 0;
+    };
+    moves
+        .iter()
+        .skip(first)
+        .take_while(|step| {
+            step.predecessor.unit == head.predecessor.unit
+                && step.predecessor.slot == head.predecessor.slot
+        })
+        .filter(|step| step.owner == head.owner)
+        .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
 }
 
 /// The populated lane at `at` of a builtin bank whose input lanes carry: its chain and processor.
@@ -4437,10 +4497,13 @@ impl crate::runtime::Runtime {
     /// Run the builtin-input section of a carry program at the swap block (issue #1276 D4-D6).
     ///
     /// `moves` is sorted by predecessor location. Each predecessor chain is disengaged once, when
-    /// it rendered its last block collapsed (D5), and each predecessor bank drains its live
-    /// queues once (D4), before any lane of it is copied. Then every lane is copied, and its
-    /// successor chain inherits the predecessor chain's channel agreement. Bounded by
-    /// `moves.len()`; allocation-free. The caller has checked [`Self::can_carry_input_lanes`].
+    /// it rendered its last block collapsed (D5), and each predecessor bank drains the cells of
+    /// the lanes `moves` carries once (D4), before any of them is copied. A lane the swap
+    /// restarts is not drained, so the writes it replaced are not counted in
+    /// `live_values_superseded`, whatever bank it shares with a carried lane (#1312 D2). Then
+    /// every lane is copied, and its successor chain inherits the predecessor chain's channel
+    /// agreement. Bounded by `moves.len()` and the bank width; allocation-free. The caller has
+    /// checked [`Self::can_carry_input_lanes`].
     pub(crate) fn carry_input_lanes(
         &mut self,
         predecessor: &mut Self,
@@ -4448,7 +4511,7 @@ impl crate::runtime::Runtime {
     ) {
         let mut disengaged: Option<u32> = None;
         let mut drained: Option<(u32, u16)> = None;
-        for step in moves {
+        for (index, step) in moves.iter().enumerate() {
             let Some((chain, slot, predecessor_lane)) =
                 input_lane_mut(&mut predecessor.units, step.predecessor)
             else {
@@ -4465,7 +4528,7 @@ impl crate::runtime::Runtime {
             if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
                 // Admission validated every record, so none is refused; a refused one is still
                 // consumed, and the rest of the bank's records with it.
-                let refused = from.drain_for_carry();
+                let refused = from.drain_for_carry(carried_input_lane_mask(moves, index));
                 debug_assert_eq!(
                     refused, 0,
                     "an admitted input record was refused at the carry"
@@ -4514,18 +4577,22 @@ impl crate::runtime::Runtime {
 
     /// Run the strip section of a carry program at the swap block (issue #1277 D8).
     ///
-    /// `moves` is sorted by predecessor location. Each predecessor bank applies every pending
-    /// live value once ([`GraphPreparedBuiltinBankProcessor::drain_for_carry`], the block drain
-    /// under `LiveSnapshot::ALL`) before any lane of it is copied. Then every lane is copied. The
-    /// caller has checked [`Self::can_carry_strip_lanes`]. Bounded by `moves.len()`;
-    /// allocation-free.
+    /// `moves` is sorted by predecessor location. Each predecessor bank applies the pending live
+    /// values of the lanes `moves` carries for one owner once
+    /// ([`GraphPreparedBuiltinBankProcessor::drain_strip_for_carry`], the block drain under
+    /// `LiveSnapshot::ALL`) before any lane of that owner is copied. A lane the swap restarts is
+    /// not drained, so the writes it replaced are not counted in `live_values_superseded`,
+    /// whatever bank it shares with a carried lane (#1312 D2). Then every lane is copied. The
+    /// caller has checked [`Self::can_carry_strip_lanes`]. Bounded by `moves.len()` and the bank
+    /// width; allocation-free.
     pub(crate) fn carry_strip_lanes(
         &mut self,
         predecessor: &mut Self,
         moves: &[crate::GraphStripMove],
     ) {
-        let mut drained: Option<(u32, u16)> = None;
-        for step in moves {
+        // The bank each owner's half was last drained for: fader, then matrix.
+        let mut drained: [Option<(u32, u16)>; 2] = [None; 2];
+        for (index, step) in moves.iter().enumerate() {
             let Some((chain, slot, predecessor_lane)) =
                 strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
             else {
@@ -4534,15 +4601,20 @@ impl crate::runtime::Runtime {
             let Some(from) = builtin_processor_mut(chain, slot) else {
                 continue;
             };
-            if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
+            let half = match step.owner {
+                crate::BuiltinStripOwner::Fader => 0,
+                crate::BuiltinStripOwner::Matrix => 1,
+            };
+            if drained[half] != Some((step.predecessor.unit, step.predecessor.slot)) {
                 // Admission validated every value, so none is refused; a refused one is still
                 // consumed, and the rest of the bank's values with it.
-                let refused = from.drain_for_carry();
+                let refused =
+                    from.drain_strip_for_carry(step.owner, carried_strip_lane_mask(moves, index));
                 debug_assert_eq!(
                     refused, 0,
                     "an admitted strip value was refused at the carry"
                 );
-                drained = Some((step.predecessor.unit, step.predecessor.slot));
+                drained[half] = Some((step.predecessor.unit, step.predecessor.slot));
             }
             let Some((chain, slot, lane)) =
                 strip_lane_mut(&mut self.units, step.owner, step.successor)
@@ -9224,6 +9296,43 @@ mod tests {
                 *sample *= 2.0;
             }
             Ok(())
+        }
+    }
+
+    /// A builtin bank that drains live lanes `mask` (bit `n` is lane `n`).
+    struct LiveLaneBank(u8);
+    impl GraphPreparedBuiltinBankProcessor for LiveLaneBank {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn live_lanes(&self) -> u8 {
+            self.0
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    /// A builtin bank's live lanes reach the chain's slot guard (#1346; #1504 D3): `BuiltinStage`
+    /// forwards `live_lanes`, so `BankChain::new`'s assertion that a slot with a live lane is
+    /// active sees the builtin banks the strip cells moved onto.
+    ///
+    /// Red mutation: drop `BuiltinStage::live_lanes` (the trait default `0`) -> every mask reads
+    /// `0` and the guard is vacuous for builtin banks again.
+    #[test]
+    fn a_builtin_stage_forwards_its_banks_live_lanes() {
+        for mask in [0b0000_u8, 0b0001, 0b0101, 0b1111, 0b1000_0001] {
+            let stage = BuiltinStage(Box::new(LiveLaneBank(mask)));
+            assert_eq!(BankStage::live_lanes(&stage), mask);
         }
     }
 

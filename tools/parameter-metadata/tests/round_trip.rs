@@ -594,6 +594,10 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
                     tap.id.0
                 );
                 assert_eq!(result, RESULT_OK);
+                // A tap's queue slot holds one subscription until a block drains it, and these are
+                // separate submissions, so the next one waits for a render (flow control, #1345
+                // D2); one submission cannot name the tap twice.
+                assert_eq!(host.render_next(), RESULT_OK);
             }
         }
         assert_eq!(host.render_next(), RESULT_OK);

@@ -11,6 +11,15 @@ compressor insert makes a group of seven per-node instances bank, and removing o
 fall apart. Both directions continue bit for bit, live state included. The carry moves the state at
 the swap block, and the predecessor never renders again.
 
+## Note (root, 2026-10-12, stream B batch-3 verdict)
+
+After #1345 a bank lane's observation queue consumer lives in
+`LiveControlEffectBankStage::observe_queues` (`crates/rack/src/lib.rs` ~1162), taken out of its
+`EffectControlLane` at bind. A per-node `LiveControlEffect` keeps its consumer in its
+`EffectControlLane` (`crates/graph/src/runtime.rs` ~1230, drained by `drain_observations`). A
+lane's move between a bank and a per-node instance therefore moves the consumer between those two
+homes as well as the cells; #1280's D3 states the carry rule.
+
 ## Context
 
 - An insert group banks only when it is full. The planner pads only console groups (`pads`,

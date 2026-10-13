@@ -1019,7 +1019,8 @@ fn strip_index(tracks: &[Box<str>], submixes: &[Box<str>], id: &str) -> Option<u
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
-/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value.
+/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value;
+/// or the submission names one observation tap more than once (#1345 D2).
 pub const COMMAND_REASON_MALFORMED: u32 = 1;
 /// `track_index` is not a track of the compiled session.
 pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
@@ -1124,6 +1125,12 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 /// Gain-reduction slots are latest independently aged effect folds and do not inherit this span.
 /// A consumer correlates the peak span against a command's `applied_at_sample` rather than against
 /// a wall clock.
+///
+/// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+/// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+/// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+/// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+/// has published. `masterGrDb` is `null` when the designated strip has none.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebMeterHeader {
@@ -1223,12 +1230,15 @@ pub struct WebBootOptions {
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     pub maximum_memory_bytes: u64,
-    /// Per-track live-control queue depth in records, or `0` to accept no live command and
-    /// allocate no command staging (issue #137 D1).
+    /// Whether the plan accepts live commands: nonzero allocates the command staging and accepts
+    /// them, `0` accepts none and allocates no command staging (issue #137 D1). The number sizes
+    /// nothing in the plan: every fader, mute, matrix, input, send and effect value is a
+    /// latest-target cell (issues #1312, #1345, #1346, #1347), and an effect's observation queue
+    /// holds one subscription per declared tap (#1345 D2). Only the JS port's in-flight bound
+    /// reads it as a count. The word keeps its frozen name and offset in the boot options.
     ///
-    /// Zero still leaves every strip's fader/mute and matrix/pan cells on the plan (and its queues
-    /// at the engine's own depth, [`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a
-    /// strip's mute for its own transitions, and no command can reach them (issues #1326, #1312).
+    /// Zero still leaves every strip's cells on the plan: the engine ramps a strip's mute for its
+    /// own transitions, and no command can reach them (issues #1326, #1312).
     pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -1241,7 +1251,7 @@ pub struct WebBootOptions {
     /// at all (issue #143 D3, level 1).
     ///
     /// Requires `live_control_command_queue_records != 0`: a subscription rides the effect's own
-    /// command queue, so observation without live controls has no delivery path.
+    /// observation queue, so observation without live controls has no delivery path.
     pub live_control_observation_taps: u64,
     /// The designated master strip index (tracks first, then submixes) **plus one**, or `0` for
     /// none (issue #143 D6). `T + j + 1` designates submix `j` (issue #1213 D5), so a mix bus
@@ -1306,8 +1316,19 @@ pub struct WebStatus {
     pub next_absolute_sample: u64,
     /// Number of successful rendered quanta.
     pub rendered_quanta: u64,
+    /// The session's `live_values_superseded` count (decision 15, D15-2): the writes to live
+    /// values that a later committed value replaced before the block that would have applied them,
+    /// summed over every cell the session holds (a `Both` record counts in each channel cell).
+    /// Loaded after every rendered block, so it is never behind the last one. It counts in the
+    /// C ABI's unit (`COUNTERS_GET`): each read adds the writes it replaced. For one script of
+    /// strip fader, mute and pan edits that stages at most one write per cell in a submission, it
+    /// equals the C ABI's count. It does not for a script the two hosts stage differently: the
+    /// browser also counts the extra writes one submission makes to one cell (send edits in wire
+    /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
+    /// writing no cell, for input, route, VCA and submix edits.
+    pub live_values_superseded: u64,
     /// Required-zero expansion words.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 3],
 }
 
 /// Exact retained-resource projection for the browser bridge and production artifacts.
@@ -1525,6 +1546,11 @@ struct ReadyOwnership {
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
     controls: Vec<TrackControlProducer>,
+    /// The session's `live_values_superseded` count (#1312 D2): one count, made once by
+    /// [`compile_ready`], which every cell reader of every plan the session prepares adds to, and
+    /// which the status reports (#1399). A successor plan the session prepares must be given this
+    /// same count.
+    live_values_superseded: host_core::LiveValuesSuperseded,
     /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
     /// stamps those writes from this handle and publishes their revision on it, as the control
     /// plane does through its provider epoch; the plan's own render takes its snapshot from the
@@ -1532,9 +1558,11 @@ struct ReadyOwnership {
     /// never moved while a stamp is open: every revision stamped here is published in the same
     /// admission.
     plan_gate: engine::realtime::PlanRevisionGate,
-    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
-    /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
-    /// reaches its queue with one index and no search.
+    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense slot
+    /// order [`ReadyOwnership::effect_slot`] computes (a staged command's `queue_slot`), so an
+    /// addressed command reaches its cells and its observation queue with one index and no search. The producer's
+    /// parameter, bypass and EQ-target values are latest-target cells (#1345); only an
+    /// observation subscription is a queue record.
     effect_controls: Box<[Option<EffectControlProducer>]>,
     /// Issue #1222: one live send producer per route into a submix, in canonical route-ID order
     /// (`HostLiveControlHandles::route_controls`), so a send command's live-route index reaches
@@ -1548,9 +1576,16 @@ struct ReadyOwnership {
     /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
     /// or without submixes.
     effect_base: Box<[u32]>,
-    /// Room needed per destination queue by the submission being validated. Allocated at
-    /// compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
+    /// Room needed per destination queue by the submission being validated: the observation
+    /// subscriptions it queues on each effect (every other record is a cell write and wants none).
+    /// Allocated at compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
     command_wanted: Box<[u32]>,
+    /// The observation taps the submission being validated has named, one bit per tap, one word per
+    /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
+    /// An `Observe` record overwrites its tap's whole state at the block that drains it and one
+    /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
+    /// `command_wanted` at the top of every submission.
+    observe_named: Box<[u32]>,
     /// Decoded submission staging. Two entries per staged record, because one wire record
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * strip_count` for the coalesced solo emission (issue #210 phase 1, per strip
@@ -1566,20 +1601,21 @@ struct ReadyOwnership {
     /// transaction shadow, committed or rolled back with `solo` and `routes`. Empty -- and
     /// allocated nothing -- for a session without VCAs or without live controls.
     vcas: LiveVcaState,
-    /// Records admitted per destination queue since the last successful render.
+    /// Observation subscriptions admitted per effect queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every live-control
-    /// stage drains its whole queue at the top of every block, so a successful render empties every
-    /// control queue. That is what makes this an exact free-slot count rather than an estimate,
-    /// and it is what lets a submission be refused *before* anything is pushed.
+    /// stage drains its whole observation queue at the top of every block, so a successful render
+    /// empties every control queue. That is what makes this an exact free-slot count rather than
+    /// an estimate, and it is what lets a submission be refused *before* anything is queued.
     in_flight: Box<[u32]>,
-    /// Whether any record has been admitted since the last successful render.
+    /// Whether any subscription has been queued since the last successful render.
     ///
     /// This keeps command-free blocks from walking every destination counter. It is set at each
     /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
     has_in_flight_commands: bool,
     /// Per-strip semantic input-filter shadows (tracks, then submixes; issue #1213 D1), retained
-    /// only when input queues exist.
+    /// only when commands are enabled. They stay the control-side authority for the designed
+    /// pair (#1346 D6); the strip's input cells hold the prepared targets.
     input_filter_shadows: Box<[BuiltinInputShadow]>,
     /// The compiled session rate used by input-filter semantic validation.
     sample_rate_hz: u32,
@@ -1760,9 +1796,9 @@ impl ReadyOwnership {
     /// |---|---|
     /// | `0 .. strips` | strip `s`'s matrix/pan cell (#1312: no queue, no room) |
     /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
-    /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity queue (#210 phase 3) |
-    /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
-    /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
+    /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity/filter cells (#1346: no queue, no room) |
+    /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)`; their values are cells (#1345), their subscriptions the only queue |
+    /// | `3 * strips + E ..` | live send `r`'s cell, by live-route index (issue #1222 D4; #1347: no queue, no room) |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.
@@ -1785,33 +1821,18 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
-    /// The free room of one destination queue. The matrix and fader bands are latest-target cells
-    /// (#1312), which have no room to want and are never asked: they answer `None`, as an
-    /// unaddressable queue does.
+    /// The free room of one destination queue. The matrix, fader, input and send bands are
+    /// latest-target cells (#1312, #1346, #1347), which have no room to want and are never asked:
+    /// they answer `None`, as an unaddressable queue does. An effect's values are cells too
+    /// (#1345); its queue is its observation queue, one slot per declared tap.
     fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
-        if slot < tracks * 2 {
+        if slot < tracks * 3 {
             return None;
         }
-        if slot < tracks * 3 {
-            return u32::try_from(
-                // #1254 D4: a strip prepared without its input lane is unaddressable here, like an
-                // absent effect lane; a plan that takes commands always has it and an option-0
-                // plan takes none (it refuses every command first), so this never fires.
-                self.controls
-                    .get(slot - tracks * 2)?
-                    .input
-                    .as_ref()?
-                    .available_capacity(),
-            )
-            .ok();
-        }
         let effect = slot - tracks * 3;
-        if let Some(route) = effect.checked_sub(self.effect_controls.len()) {
-            return u32::try_from(self.route_controls.get(route)?.free()).ok();
-        }
         let producer = self.effect_controls.get(effect)?.as_ref()?;
-        u32::try_from(producer.producer().available_capacity()).ok()
+        u32::try_from(producer.observe_available_capacity()).ok()
     }
 
     /// The dense destination-queue index of live send `route` (issue #1222 D4): the band after
@@ -1821,8 +1842,9 @@ impl ReadyOwnership {
             .then(|| self.strip_count() * 3 + self.effect_controls.len() + route)
     }
 
-    /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
-    /// free-room pass has already ruled out, or on a cell record, which is never pushed.
+    /// Queue one admitted observation subscription on its effect. `Err` only on a full queue,
+    /// which the free-room pass has already ruled out, or on a cell record (a strip's, a send's or
+    /// an effect's parameter or bypass), which is never queued.
     fn push(
         &mut self,
         slot: usize,
@@ -1831,22 +1853,23 @@ impl ReadyOwnership {
     ) -> Result<(), ()> {
         let tracks = self.strip_count();
         match record {
-            // The strips' fader, mute and matrix values are cells, written under the batch's
-            // stamp by the admission itself (`write_strip_cells`), never pushed.
-            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) => Err(()),
-            AdmittedCommand::Input(record) => {
-                let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
-                let input = producer.input.as_mut().ok_or(())?;
-                input.try_push(record).map_err(|_| ())
-            }
-            AdmittedCommand::Route(record) => {
-                let route = (slot - tracks * 3)
-                    .checked_sub(self.effect_controls.len())
-                    .ok_or(())?;
-                let producer = self.route_controls.get_mut(route).ok_or(())?;
-                producer.push(record).map_err(|_| ())
-            }
-            AdmittedCommand::Effect(record) => {
+            // The strips' fader, mute, matrix and input values and the sends' targets are cells,
+            // written under the batch's stamp by the admission itself (`write_strip_cells`),
+            // never pushed.
+            AdmittedCommand::Matrix(_)
+            | AdmittedCommand::Fader(_)
+            | AdmittedCommand::Input(_)
+            | AdmittedCommand::Route(_) => Err(()),
+            AdmittedCommand::Effect(
+                EffectControlRecord::Parameter { .. }
+                | EffectControlRecord::PreparedTarget(_)
+                | EffectControlRecord::Bypass(_),
+            ) => Err(()),
+            AdmittedCommand::Effect(EffectControlRecord::Observe {
+                tap_index,
+                armed,
+                window_blocks,
+            }) => {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
@@ -1856,11 +1879,10 @@ impl ReadyOwnership {
                     .ok_or(())?
                     .as_mut()
                     .ok_or(())?;
-                producer.try_push(record).map_err(|_| ())?;
-                if let EffectControlRecord::Observe {
-                    tap_index, armed, ..
-                } = record
-                    && let Some(mask) = self.observation_armed.get_mut(effect)
+                producer
+                    .try_push_observe(tap_index, armed, window_blocks)
+                    .map_err(|_| ())?;
+                if let Some(mask) = self.observation_armed.get_mut(effect)
                     && tap_index < u32::BITS
                 {
                     let bit = 1_u32 << tap_index;
@@ -1876,14 +1898,18 @@ impl ReadyOwnership {
         }
     }
 
-    /// Preflight one effect record before any publication or observation mutation.
+    /// Preflight one effect record before any cell write or observation mutation.
     ///
     /// The host admission pass owns the original wire index, so this check belongs beside
     /// lowering rather than in [`Self::push`].  A prepared-capable owner must reject an
     /// unlowered semantic parameter before a mixed batch can mutate another destination.  The
-    /// checked producer still runs the same check at publication as an invariant guard; this
-    /// pass is what preserves the original wire index and whole-batch refusal contract.
+    /// checked producer still runs the same check at the write as an invariant guard; this pass
+    /// is what preserves the original wire index and whole-batch refusal contract. An
+    /// observation subscription is not a cell and is room-checked, not preflighted.
     fn preflight_effect(&self, slot: usize, record: EffectControlRecord) -> Result<(), ()> {
+        if matches!(record, EffectControlRecord::Observe { .. }) {
+            return Ok(());
+        }
         let effect_base = self.strip_count().checked_mul(3).ok_or(())?;
         let effect = slot.checked_sub(effect_base).ok_or(())?;
         let producer = self
@@ -2215,7 +2241,8 @@ impl AudioWorkletEngineHost {
                 reserved0: 0,
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
-                reserved: [0; 4],
+                live_values_superseded: 0,
+                reserved: [0; 3],
             },
             resources,
             command_report: empty_command_report(),
@@ -2339,6 +2366,12 @@ impl AudioWorkletEngineHost {
     /// in decibels per strip in the same order and the master's. With no submixes every word is
     /// where it always was. Gain reduction is the latest fold from each independently aged effect
     /// observation and does not share the peak interval in [`WebMeterHeader`].
+    ///
+    /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
+    /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
+    /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
+    /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
+    /// has published. `masterGrDb` is `null` when the designated strip has none.
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
@@ -3271,8 +3304,11 @@ impl AudioWorkletEngineHost {
             Ok(report) => {
                 self.status.next_absolute_sample = report.next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
-                // Issue #137 D1: the matrix stage drained every control queue at the top of this
-                // block, so the exact free-slot count is the whole capacity again. Command-free
+                // #1399: the session's count, loaded after the block that added to it, so the
+                // status is never behind the last rendered block.
+                self.status.live_values_superseded = ready.live_values_superseded.get();
+                // Issue #137 D1: every effect stage drained its observation queue at the top of
+                // this block, so the exact free-slot count is the whole capacity again. Command-free
                 // blocks have no counters to clear and skip the dense write pass entirely.
                 if ready.has_in_flight_commands {
                     #[cfg(test)]
@@ -3885,7 +3921,6 @@ struct CommandRejection {
 fn owner_command_reason(error: host_core::EffectControlOwnerError) -> u32 {
     use host_core::EffectControlOwnerError;
     match error {
-        EffectControlOwnerError::Capacity => COMMAND_REASON_BACKPRESSURE,
         EffectControlOwnerError::Domain => COMMAND_REASON_DOMAIN,
         EffectControlOwnerError::Parameter => COMMAND_REASON_UNKNOWN_PARAMETER,
         EffectControlOwnerError::Unsupported | EffectControlOwnerError::NotAutomatable => {
@@ -4352,9 +4387,9 @@ impl CommandRecord {
                 }))
             }
             // #210 phase 3. The shape rules are `faderDb`'s, because the two parameters share a
-            // domain and a smoothing law; the destination is the input queue rather than the
-            // fader one, which `admit_commands_staged` decides from the lowered variant exactly as
-            // it already decides between the matrix and fader bands.
+            // domain and a smoothing law; the destination is the strip's input cells (#1346)
+            // rather than the fader ones, which `admit_commands_staged` decides from the lowered
+            // variant exactly as it already decides between the matrix and fader bands.
             COMMAND_TRIM_DB => {
                 if self.rack != RACK_NOT_APPLICABLE
                     || self.values[1..].iter().any(|value| *value != 0.0)
@@ -4559,10 +4594,11 @@ impl CommandRecord {
         else {
             return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
         };
-        // A parameter the descriptor says cannot be automated has no write path at all. No launch
-        // effect declares one, which is why this is `UNSUPPORTED_KIND` and not `DOMAIN`.
+        // A parameter the descriptor says cannot be automated at the block rate has no live cell
+        // (#1345 D1: one cell per `Block`-rate parameter), so it has no write path at all. No
+        // launch effect declares one, which is why this is `UNSUPPORTED_KIND` and not `DOMAIN`.
         if !parameter.automatable
-            || parameter.automation_rate == effect_contract::AutomationRate::None
+            || parameter.automation_rate != effect_contract::AutomationRate::Block
         {
             return Err(COMMAND_REASON_UNSUPPORTED_KIND);
         }
@@ -4682,8 +4718,29 @@ fn admit_commands(
     }
 }
 
-/// Write the admitted fader, mute and matrix/pan records of one batch into the strips' cells as
-/// one transaction (#1312 D7), then publish its revision on the plan's gate.
+/// Whether `staged` writes a cell: a fader, mute, matrix/pan, input trim or polarity record, a
+/// send's target, an effect's parameter or bypass value, a prepared builtin input-filter marker
+/// with at least one target, or an EQ owner's marker (its targets are cells).
+fn writes_strip_cells(staged: &StagedCommand) -> bool {
+    match staged.kind {
+        StagedCommandKind::Command(
+            AdmittedCommand::Matrix(_)
+            | AdmittedCommand::Fader(_)
+            | AdmittedCommand::Input(_)
+            | AdmittedCommand::Route(_),
+        ) => true,
+        StagedCommandKind::Command(AdmittedCommand::Effect(record)) => {
+            !matches!(record, EffectControlRecord::Observe { .. })
+        }
+        StagedCommandKind::PreparedOwner(marker) => {
+            marker.kind == PreparedOwnerKind::Eq || marker.target_count != 0
+        }
+    }
+}
+
+/// Write the admitted fader, mute, matrix/pan, input trim, polarity, prepared-filter, send and
+/// effect values of one batch into the strips', sends' and effects' cells as one transaction
+/// (#1312 D7, #1345 D5, #1346 D6, #1347 D4), then publish its revision on the plan's gate.
 ///
 /// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
 /// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
@@ -4694,25 +4751,15 @@ fn write_strip_cells(
     ready: &mut ReadyOwnership,
     lowered: usize,
     strip_count: usize,
+    companion: Option<&PreparedCompanion<'_>>,
 ) -> Result<(), CommandRejection> {
-    let writes_cells = ready.command_decoded[..lowered].iter().any(|staged| {
-        matches!(
-            staged.kind,
-            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
-        )
-    });
-    if !writes_cells {
-        return Ok(());
-    }
-    let first_wire_index = ready.command_decoded[..lowered]
+    let Some(first_wire_index) = ready.command_decoded[..lowered]
         .iter()
-        .find(|staged| {
-            matches!(
-                staged.kind,
-                StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
-            )
-        })
-        .map_or(0, |staged| staged.original_wire_index);
+        .find(|staged| writes_strip_cells(staged))
+        .map(|staged| staged.original_wire_index)
+    else {
+        return Ok(());
+    };
     let revision = ready.plan_gate.last_published().saturating_add(1);
     let Ok(stamp) = ready.plan_gate.stamp(revision) else {
         return Err(CommandRejection {
@@ -4747,6 +4794,130 @@ fn write_strip_cells(
                     .expect("a staged fader record addresses a strip with a cell producer")
                     .fader
                     .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Route(record)) => {
+                // The send band follows the effects; the staging pass resolved the route index.
+                ready
+                    .route_controls
+                    .get_mut(
+                        slot.checked_sub(strip_count * 3 + ready.effect_controls.len())
+                            .expect("a staged send record sits in the send band"),
+                    )
+                    .expect("a staged send record addresses a live route's cell producer")
+                    .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Input(record)) => {
+                ready
+                    .controls
+                    .get_mut(
+                        slot.checked_sub(strip_count * 2)
+                            .expect("a staged input record sits in the input band"),
+                    )
+                    .and_then(|control| control.input.as_mut())
+                    .expect("the room pass checked this strip's input cells")
+                    .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Effect(
+                record @ (EffectControlRecord::Parameter { .. } | EffectControlRecord::Bypass(_)),
+            )) => {
+                ready
+                    .effect_controls
+                    .get_mut(
+                        slot.checked_sub(strip_count * 3)
+                            .expect("a staged effect record sits in the effect band"),
+                    )
+                    .and_then(Option::as_mut)
+                    .expect("a staged effect record addresses a prepared effect producer")
+                    .write(stamp, record)
+                    .expect("the staging pass preflighted this effect record");
+            }
+            StagedCommandKind::PreparedOwner(marker) if marker.kind == PreparedOwnerKind::Eq => {
+                let effect = slot
+                    .checked_sub(strip_count * 3)
+                    .expect("an Eq owner marker sits in the effect band");
+                let mut targets = [effect_contract::PreparedEffectTarget {
+                    slot: 0,
+                    channel: effect_contract::ParameterChannel::Both,
+                    words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                }; host_core::EQ_TARGET_CAPACITY];
+                let mut target_count = 0_usize;
+                if let Some(companion) = companion {
+                    for index in 0..companion.target_count {
+                        let target = companion_target(companion, index)
+                            .expect("the companion's targets were decoded while staging");
+                        // `prepared_queue_address` for an EQ target: the effect band slot, which
+                        // is this marker's exactly when the address resolves to it. Spelled out
+                        // because the open stamp borrows the plan's gate, and that function
+                        // borrows all of `ready`.
+                        let addressed = target.rack != RACK_NOT_APPLICABLE
+                            && live_effect_address(u32::from(target.rack), target.effect_index)
+                                .and_then(|address| {
+                                    let track = target.track_index as usize;
+                                    let addressed = dense_effect_slot(
+                                        *ready.effect_base.get(track)?,
+                                        *ready.rack_effects.get(track)?,
+                                        address,
+                                    )?;
+                                    (addressed < ready.effect_controls.len()).then_some(addressed)
+                                })
+                                .is_some_and(|addressed| strip_count * 3 + addressed == slot);
+                        if addressed {
+                            targets[target_count] = target.target;
+                            target_count += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    target_count, marker.target_count as usize,
+                    "the targets written are the targets staged"
+                );
+                ready
+                    .effect_controls
+                    .get_mut(effect)
+                    .and_then(Option::as_mut)
+                    .expect("an Eq owner marker addresses a prepared effect producer")
+                    .publish_candidate_targets(
+                        stamp,
+                        marker.base_revision,
+                        &targets[..target_count],
+                    )
+                    .expect("the owner's targets were preflighted");
+            }
+            StagedCommandKind::PreparedOwner(marker)
+                if marker.kind == PreparedOwnerKind::BuiltinInput =>
+            {
+                let track = slot
+                    .checked_sub(strip_count * 2)
+                    .expect("a builtin input owner marker sits in the input band");
+                let mut written = 0_usize;
+                if let Some(companion) = companion {
+                    for index in 0..companion.target_count {
+                        let target = companion_target(companion, index)
+                            .expect("the companion's targets were decoded while staging");
+                        // `prepared_queue_address` for a builtin input target: the strip's input
+                        // band slot, which is this marker's exactly when the strip index is. It is
+                        // spelled out because the open stamp borrows the plan's gate, and that
+                        // function borrows all of `ready`.
+                        let addressed = target.rack == RACK_NOT_APPLICABLE
+                            && target.effect_index == 0
+                            && target.track_index as usize == track;
+                        if addressed {
+                            let target = companion_builtin_target(target)
+                                .expect("the builtin target was validated while staging");
+                            ready
+                                .controls
+                                .get_mut(track)
+                                .and_then(|control| control.input.as_mut())
+                                .expect("the room pass checked this strip's input cells")
+                                .write(stamp, TrackInputRecord::PreparedFilter { target });
+                            written += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    written, marker.target_count as usize,
+                    "the targets written are the targets staged"
+                );
             }
             _ => {}
         }
@@ -4783,6 +4954,7 @@ fn admit_commands_staged(
         None => None,
     };
     ready.command_wanted.fill(0);
+    ready.observe_named.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
         result: match reason {
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
@@ -5055,8 +5227,9 @@ fn admit_commands_staged(
             // Issue #1222 D4: a send kind moves one field of its mirror and stages one record
             // built from the whole mirror, through the prepared route's own coefficient function.
             // The mirror is touched only once the record is built, and every later record in the
-            // batch reads it, so several edits of one send stage one record each, in wire order,
-            // and the render plane, applying them in order, settles on the last.
+            // batch reads it, so several edits of one send stage one record each, in wire order;
+            // the send's cell holds the last, and render applies only that one and counts the
+            // others as superseded.
             COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX => {
                 // No live commands: the app did not opt in, so the session has no write path for
                 // any send.
@@ -5088,9 +5261,9 @@ fn admit_commands_staged(
                         command.smoothing_samples,
                     )
                     .map_err(|error| match error {
-                        RouteControlError::Domain
-                        | RouteControlError::Length
-                        | RouteControlError::Full => refuse(COMMAND_REASON_DOMAIN, index),
+                        RouteControlError::Domain | RouteControlError::Length => {
+                            refuse(COMMAND_REASON_DOMAIN, index)
+                        }
                     })?;
                 let moved = match edit {
                     RouteEdit::GainDb(gain_db) => ready.routes.set_gain_db(track, gain_db),
@@ -5186,6 +5359,27 @@ fn admit_commands_staged(
                     staged[0] = command
                         .into_observe_record(descriptor, observed)
                         .map_err(|reason| refuse(reason, index))?;
+                    // One submission names each tap once: a record overwrites its tap's whole
+                    // state and the submission drains in one block, so the second record would
+                    // be a supersession the engine must not make (D15-2: Observe records are
+                    // never superseded) and would not fit the tap's queue slot. Refused here,
+                    // at this record's wire index, before the room pass, any write or the stamp.
+                    let AdmittedCommand::Effect(EffectControlRecord::Observe { tap_index, .. }) =
+                        staged[0]
+                    else {
+                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                    };
+                    let bit = 1_u32
+                        .checked_shl(tap_index)
+                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+                    let named = ready
+                        .observe_named
+                        .get_mut(effect)
+                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+                    if *named & bit != 0 {
+                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                    }
+                    *named |= bit;
                     1
                 } else {
                     command
@@ -5283,7 +5477,19 @@ fn admit_commands_staged(
         let Some(wanted) = ready.command_wanted.get_mut(slot) else {
             return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
         };
-        *wanted = wanted.saturating_add(produced as u32);
+        // Only an observation subscription is a queue record; every other record is a cell
+        // write and wants no room (#1345 D2).
+        let queued = staged
+            .iter()
+            .take(produced)
+            .filter(|record| {
+                matches!(
+                    record,
+                    AdmittedCommand::Effect(EffectControlRecord::Observe { .. })
+                )
+            })
+            .count();
+        *wanted = wanted.saturating_add(queued as u32);
         for record in staged.into_iter().take(produced) {
             let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                 return Err(refuse(COMMAND_REASON_MALFORMED, index));
@@ -5306,13 +5512,6 @@ fn admit_commands_staged(
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             for (lanes, db) in ready.vcas.fader_delta(strip).into_iter().flatten() {
-                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                    return Err(refuse(
-                        COMMAND_REASON_UNSUPPORTED_KIND,
-                        vca_fader_first_wire_index as usize,
-                    ));
-                };
-                *wanted = wanted.saturating_add(1);
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -5365,13 +5564,6 @@ fn admit_commands_staged(
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             for (lanes, muted) in ready.solo.strip_delta(strip).into_iter().flatten() {
-                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                    return Err(refuse(
-                        COMMAND_REASON_UNSUPPORTED_KIND,
-                        count.saturating_sub(1),
-                    ));
-                };
-                *wanted = wanted.saturating_add(1);
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -5403,8 +5595,9 @@ fn admit_commands_staged(
     // Every effective-mute change stages a strip mute record covering its lane, so one always
     // exists; a follow without one is refused rather than guessed.
     //
-    // Nothing is pushed here: the records join the room check below with every other staged
-    // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
+    // Nothing is written here: the records join the batch's one cell write below with every
+    // other staged entry, and the mirror's lanes move under its shadow, after every record is
+    // built.
     if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
         let follow_start = lowered;
         let route_base = strip_count * 3 + ready.effect_controls.len();
@@ -5460,10 +5653,6 @@ fn admit_commands_staged(
                 )
                 .map_err(|_| refuse(COMMAND_REASON_DOMAIN, wire_index as usize))?;
             let slot = route_base + route;
-            let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, wire_index as usize));
-            };
-            *wanted = wanted.saturating_add(1);
             let Some(staged) = ready.command_decoded.get_mut(lowered) else {
                 return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             };
@@ -5573,14 +5762,10 @@ fn admit_commands_staged(
             if let Err(error) =
                 producer.preflight_candidate_targets(marker.base_revision, &targets[..target_count])
             {
-                // Combined capacity is checked below, including earlier ordinary records on this
-                // queue. That pass must report the first contributing original command's index.
-                if error != host_core::EffectControlOwnerError::Capacity {
-                    return Err(refuse(
-                        owner_command_reason(error),
-                        marker.first_wire_index as usize,
-                    ));
-                }
+                return Err(refuse(
+                    owner_command_reason(error),
+                    marker.first_wire_index as usize,
+                ));
             }
         } else {
             let track = marker
@@ -5640,16 +5825,8 @@ fn admit_commands_staged(
             validate_builtin_target_set(shadow, &targets[..target_count])
                 .map_err(|_| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?;
         }
+        // An owner's targets are cells (#1345, #1346): they want no room.
         marker.target_count = target_count as u32;
-        ready.command_wanted[marker.queue_slot as usize] = ready.command_wanted
-            [marker.queue_slot as usize]
-            .checked_add(marker.target_count)
-            .ok_or_else(|| {
-                refuse(
-                    COMMAND_REASON_BACKPRESSURE,
-                    marker.first_wire_index as usize,
-                )
-            })?;
         if let Some(staged) = ready.command_decoded.get_mut(entry) {
             staged.kind = StagedCommandKind::PreparedOwner(marker);
         }
@@ -5688,7 +5865,36 @@ fn admit_commands_staged(
         if slot < strip_count * 2 {
             continue;
         }
+        // So is the input band (#1346): no room to want, but the strip must hold the cells. A
+        // strip prepared without its input lane is unaddressable here, like an absent effect lane
+        // (#1254 D4); a plan that takes commands always has it and an option-0 plan takes none
+        // (it refuses every command first), so this never fires.
+        if slot < strip_count * 3 {
+            if ready
+                .controls
+                .get(slot - strip_count * 2)
+                .and_then(|control| control.input.as_ref())
+                .is_none()
+            {
+                return Err(refuse(
+                    COMMAND_REASON_UNSUPPORTED_KIND,
+                    staged.original_wire_index as usize,
+                ));
+            }
+            continue;
+        }
+        // The send band follows the effects (#1347): a send's target is a cell, which has no room
+        // to want. Its route index was resolved while staging.
+        if slot >= strip_count * 3 + ready.effect_controls.len() {
+            continue;
+        }
+        // An effect's queue is its observation queue (#1345 D2): the subscriptions this
+        // submission queues must fit it. Its parameter, bypass and target values are cells and
+        // want none.
         let needed = ready.command_wanted[slot];
+        if needed == 0 {
+            continue;
+        }
         let Some(available) = ready.queue_available(slot) else {
             return Err(refuse(
                 COMMAND_REASON_UNSUPPORTED_KIND,
@@ -5708,97 +5914,34 @@ fn admit_commands_staged(
     // is published as soon as the batch's cells are written, whatever the later passes do: the
     // writes are made, so the revision that reveals them must follow, or a later batch would
     // reveal them under its own.
-    write_strip_cells(ready, lowered, strip_count)?;
+    write_strip_cells(ready, lowered, strip_count, companion.as_ref())?;
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
         match staged.kind {
-            // Cells were written above.
-            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_)) => {}
+            // Cells were written above: the strips', the sends' and the effects' values, and the
+            // owners' targets.
+            StagedCommandKind::Command(
+                AdmittedCommand::Matrix(_)
+                | AdmittedCommand::Fader(_)
+                | AdmittedCommand::Input(_)
+                | AdmittedCommand::Route(_)
+                | AdmittedCommand::Effect(
+                    EffectControlRecord::Parameter { .. } | EffectControlRecord::Bypass(_),
+                ),
+            )
+            | StagedCommandKind::PreparedOwner(_) => {}
+            // A prepared target reaches a lane only through its owner's transaction, and
+            // `preflight_effect` refuses a raw one while staging.
+            StagedCommandKind::Command(AdmittedCommand::Effect(
+                EffectControlRecord::PreparedTarget(_),
+            )) => unreachable!("a raw prepared target was refused while staging"),
+            // The only queue record: an observation subscription, in order (#1345 D2).
             StagedCommandKind::Command(record) => {
                 ready
                     .push(slot, record, applied_at_sample)
                     .expect("the free-room pass checked this record's room");
                 ready.in_flight[slot] += 1;
-                ready.has_in_flight_commands = true;
-            }
-            StagedCommandKind::PreparedOwner(marker) => {
-                // Past the stamp (or the last check, without cells) nothing here fails: each step
-                // is an `expect` on an invariant the staging passes above checked (root's D7
-                // ruling).
-                if marker.kind == PreparedOwnerKind::Eq {
-                    let effect = slot
-                        .checked_sub(strip_count * 3)
-                        .expect("an Eq owner marker sits in the effect band");
-                    let mut targets = [effect_contract::PreparedEffectTarget {
-                        slot: 0,
-                        channel: effect_contract::ParameterChannel::Both,
-                        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-                    }; host_core::EQ_TARGET_CAPACITY];
-                    let mut target_count = 0_usize;
-                    if let Some(companion) = companion.as_ref() {
-                        for index in 0..companion.target_count {
-                            let target = companion_target(companion, index)
-                                .expect("the companion's targets were decoded while staging");
-                            let addressed = prepared_queue_address(
-                                ready,
-                                target.track_index as usize,
-                                target.rack,
-                                target.effect_index,
-                            )
-                            .is_some_and(|(addressed, kind)| {
-                                kind == PreparedOwnerKind::Eq && addressed == slot
-                            });
-                            if addressed {
-                                targets[target_count] = target.target;
-                                target_count += 1;
-                            }
-                        }
-                    }
-                    ready
-                        .effect_controls
-                        .get_mut(effect)
-                        .and_then(Option::as_mut)
-                        .expect("an Eq owner marker addresses a prepared effect producer")
-                        .publish_candidate_targets(marker.base_revision, &targets[..target_count])
-                        .expect("the owner's targets were preflighted");
-                } else {
-                    let mut target_count = 0_usize;
-                    if let Some(companion) = companion.as_ref() {
-                        for index in 0..companion.target_count {
-                            let target = companion_target(companion, index)
-                                .expect("the companion's targets were decoded while staging");
-                            let addressed = prepared_queue_address(
-                                ready,
-                                target.track_index as usize,
-                                target.rack,
-                                target.effect_index,
-                            )
-                            .is_some_and(|(addressed, kind)| {
-                                kind == PreparedOwnerKind::BuiltinInput && addressed == slot
-                            });
-                            if addressed {
-                                let target = companion_builtin_target(target)
-                                    .expect("the builtin target was validated while staging");
-                                ready
-                                    .push(
-                                        slot,
-                                        AdmittedCommand::Input(TrackInputRecord::PreparedFilter {
-                                            target,
-                                        }),
-                                        applied_at_sample,
-                                    )
-                                    .expect("the free-room pass checked this record's room");
-                                target_count += 1;
-                            }
-                        }
-                    }
-                    assert_eq!(
-                        target_count, marker.target_count as usize,
-                        "the targets pushed are the targets staged"
-                    );
-                }
-                ready.in_flight[slot] += marker.target_count;
                 ready.has_in_flight_commands = true;
             }
         }
@@ -6360,7 +6503,7 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.abi_version",
         ));
     }
-    // Issue #143: observation capacity requires a command queue to carry the subscription, and a
+    // Issue #143: observation capacity requires a control channel to carry the subscription, and a
     // master designation must be a plausible track index. The session-level range check is the
     // facade's; this one only refuses what cannot be a track index at all.
     if options.reserved0 != 0 {
@@ -6657,7 +6800,6 @@ fn prepare_caps(
             total.checked_add(u32::try_from(lane.segments.len()).ok()?)
         })
         .unwrap_or(u32::MAX)
-        .max(u32::try_from(options.live_control_command_queue_records).unwrap_or(u32::MAX))
         .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
@@ -6703,6 +6845,10 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
     let lanes = live_lanes(options);
     let commands_enabled = options_enable_commands(options);
+    // #1312 D2, #1399: the session's `live_values_superseded` count, made here once, before any
+    // plan is prepared. Every plan the session prepares takes this count, so host-core charges
+    // none for it and the report below charges it once, as a bridge allocation.
+    let live_values_superseded = host_core::LiveValuesSuperseded::new();
     // Issue #1209 D3: one meter per strip, the tracks then the submixes, in the strip order
     // host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair.
     let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
@@ -6729,6 +6875,7 @@ fn compile_ready(
                 &live_controls,
                 request,
                 lanes,
+                &live_values_superseded,
             )
             .map_err(BootFailure::preparation)?;
             (
@@ -6745,6 +6892,7 @@ fn compile_ready(
                     &live_controls,
                     request,
                     lanes,
+                    &live_values_superseded,
                 )
                 .map_err(BootFailure::preparation)?;
             (
@@ -6760,6 +6908,7 @@ fn compile_ready(
                 &live_controls,
                 &meters,
                 lanes,
+                &live_values_superseded,
             )
             .map_err(BootFailure::preparation)?;
             (host, handles, None)
@@ -6773,11 +6922,14 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     // Charged because the browser bridge retains them: the facade's control table and ID arena
     // (`control_retained_bytes` is exactly those two), the compiled session model, and the
-    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor.
+    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor,
+    // and the session's `live_values_superseded` count (#1399), the one allocation every plan of
+    // the session shares and host-core's graph row therefore leaves out.
     let ready_metadata = checked_sum_prepare([
         engine.control_retained_bytes,
         engine.session_model_bytes,
         engine.inventory_retained_bytes,
+        host_core::LiveValuesSuperseded::retained_bytes(),
     ])?;
     let mut bridge_metadata = report
         .bridge_metadata_bytes
@@ -7036,7 +7188,7 @@ fn compile_ready(
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
     };
     // Retained bridge state the browser owns for its live sends (issue #1222; #1221 verdict
-    // MINOR-1): every byte the route lanes add -- queues, render-side owners, the producer table
+    // MINOR-1): every byte the route lanes add -- cells, render-side owners, the producer table
     // this host keeps as host-core built it, the route IDs and the activity table -- which the
     // compile-time graph estimate deliberately leaves out, plus the mirror and its shadow.
     let route_mirror_bytes = u64::try_from(routes.len())
@@ -7252,6 +7404,7 @@ fn compile_ready(
     let ready = ReadyOwnership {
         commands_enabled,
         controls: handles.strip_controls,
+        live_values_superseded,
         plan_gate,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),
@@ -7263,6 +7416,7 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
+        observe_named: boxed_zero_u32(total_effects as usize)?,
         command_decoded: boxed_command_staging(
             strip_count,
             routes.len(),
