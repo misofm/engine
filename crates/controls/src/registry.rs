@@ -2,7 +2,7 @@
 
 use session::SessionModel;
 
-use crate::address::{ControlAddress, Lane, Owner, Section};
+use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, check};
 use crate::effective::{MonitorOverlay, effective};
 use crate::error::ControlError;
@@ -82,6 +82,44 @@ pub fn list(
     }
     session_rows::push_rows(&mut rows, model);
     rows.into_iter()
+}
+
+/// The descriptor of one non-effect row at `sample_rate`, without a model: for a host that checks
+/// a write against the row before it holds the session (decision 17, slice S7c).
+///
+/// `control` is the row ID in its table: a builtin ID for `strip` and `builtins`, an own-row ID
+/// otherwise. A strip's row is active (the host checks the strip's pan or matrix shape itself), and
+/// a route's row is the row of a route into a submix, the class the browser admits. `None` for an
+/// effect section (the console and the inserts), whose rows come from the effect descriptors, and
+/// for an ID that no table of that owner has.
+#[must_use]
+pub fn row_descriptor(
+    owner: OwnerKind,
+    section: SectionKind,
+    control: u32,
+    sample_rate: u32,
+) -> Option<ControlDescriptor> {
+    match (owner, section) {
+        (OwnerKind::Strip, SectionKind::Builtins) => builtin_rows::row(control)
+            .map(|row| builtin_rows::shaped_descriptor(row, sample_rate, true)),
+        (OwnerKind::Strip, SectionKind::Own) => strip::ROWS
+            .iter()
+            .find(|row| row.id == control)
+            .map(|row| row.descriptor),
+        (OwnerKind::Route, SectionKind::Own) => route::ROWS
+            .iter()
+            .find(|row| row.id == control)
+            .map(|row| row.descriptor),
+        (OwnerKind::Vca, SectionKind::Own) => vca::ROWS
+            .iter()
+            .find(|row| row.id == control)
+            .map(|row| row.descriptor),
+        (OwnerKind::Session, SectionKind::Own) => session_rows::ROWS
+            .iter()
+            .find(|row| row.id == control)
+            .map(|row| row.descriptor),
+        _ => None,
+    }
 }
 
 /// The rows of one owner, in listing order.

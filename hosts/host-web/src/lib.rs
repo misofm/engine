@@ -25,6 +25,7 @@ use builtins::{
 use builtins_compiler::{
     MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
+use controls::{ControlDescriptor, ControlError, Lane, OwnerKind, SectionKind};
 use effect_contract::{
     EffectControlRecord, ObservationCost, ObservationDescriptor, ParameterChannel,
     ParameterChannelPolicy, parameter_value_valid,
@@ -840,6 +841,10 @@ pub const COMMAND_MATRIX: u32 = 2;
 /// Retarget a lane fader in decibels over an explicit ramp window (live since issue #140 B).
 pub const COMMAND_FADER_DB: u32 = 3;
 /// Set a lane mute, as a fader endpoint over the same ramp window (live since issue #140 B).
+///
+/// `values[0]` is exactly `0.0` or `1.0`: the core's boolean rule (`controls::check`), which
+/// refuses `-0.0` as the session grammar and the C ABI do, for this kind and for polarity, send
+/// mute, VCA mute and solo alike (decision 17, slice S7c D3).
 pub const COMMAND_MUTE: u32 = 4;
 /// Set an effect parameter (live since issue #140 A).
 pub const COMMAND_EFFECT_PARAM: u32 = 5;
@@ -1593,26 +1598,201 @@ impl SessionRamps {
     }
 
     /// The length a record of `row` carries for `word`: the session's own for the sentinel, else
-    /// the word.
+    /// the word. The core's resolver does it (decision 17, slice S7c D4).
     const fn resolve(&self, row: LiveRampRow, word: u32) -> u32 {
-        if word == SESSION_DEFAULT_RAMP {
-            self.live.for_row(row)
-        } else {
-            word
-        }
+        self.live.resolve(
+            row,
+            if word == SESSION_DEFAULT_RAMP {
+                None
+            } else {
+                Some(word)
+            },
+        )
     }
 
     /// [`Self::resolve`] for a strip's pan or matrix record (#1054 D5): the sentinel becomes the
     /// strip's own window when its prepared pan or matrix has one, else the `pan_ms` length. A
     /// strip index past the table is the `pan_ms` length; admission refuses such a record next.
     fn resolve_strip_pan(&self, strip: usize, word: u32) -> u32 {
-        if word == SESSION_DEFAULT_RAMP {
-            self.strip_pan
-                .get(strip)
-                .copied()
-                .unwrap_or(self.live.pan_samples)
+        // The strip's own window comes first; `strip_pan` already holds the `pan_ms` length for a
+        // strip whose pan or matrix has none.
+        let edit = if word == SESSION_DEFAULT_RAMP {
+            self.strip_pan.get(strip).copied()
         } else {
-            word
+            Some(word)
+        };
+        self.live.resolve(LiveRampRow::Pan, edit)
+    }
+}
+
+/// The core's descriptors of the rows the browser's live kinds write (decision 17, slice S7c D1).
+///
+/// Resolved once at boot, where the host already allocates, from `controls::row_descriptor`; every
+/// value check of an admitted record is `controls::check` against one of these, so the browser
+/// states no range or boolean rule of its own. `ReadyOwnership` holds the table; #S10 replaces it
+/// with the core's own list.
+#[derive(Clone, Copy)]
+struct WebControlRows {
+    /// A strip's builtin `fader_db`, `mute`, `trim_db`, `polarity_invert` and `pan`.
+    fader_db: ControlDescriptor,
+    mute: ControlDescriptor,
+    trim_db: ControlDescriptor,
+    polarity_invert: ControlDescriptor,
+    pan: ControlDescriptor,
+    /// A strip's builtin `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr`.
+    matrix: [ControlDescriptor; 4],
+    /// A strip's own `solo`.
+    solo: ControlDescriptor,
+    /// A route's own `gain_db` and `mute`, on a route into a submix.
+    route_gain_db: ControlDescriptor,
+    route_mute: ControlDescriptor,
+    /// A route's own `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr`.
+    route_matrix: [ControlDescriptor; 4],
+    /// A VCA's own `offset_db` and `mute`.
+    vca_offset_db: ControlDescriptor,
+    vca_mute: ControlDescriptor,
+}
+
+impl WebControlRows {
+    /// The descriptors at `sample_rate`; `None` if a table row is not the row named here (a drift
+    /// the boot refuses rather than admits).
+    fn new(sample_rate: u32) -> Option<Self> {
+        let row = |owner, section, control: u32, name: &str| {
+            controls::row_descriptor(owner, section, control, sample_rate)
+                .filter(|descriptor| descriptor.name == name)
+        };
+        let builtin = |control, name| row(OwnerKind::Strip, SectionKind::Builtins, control, name);
+        let route = |control, name| row(OwnerKind::Route, SectionKind::Own, control, name);
+        Some(Self {
+            polarity_invert: builtin(1, "polarity_invert")?,
+            trim_db: builtin(2, "trim_db")?,
+            fader_db: builtin(5, "fader_db")?,
+            mute: builtin(6, "mute")?,
+            matrix: [
+                builtin(7, "matrix_ll")?,
+                builtin(8, "matrix_lr")?,
+                builtin(9, "matrix_rl")?,
+                builtin(10, "matrix_rr")?,
+            ],
+            pan: builtin(12, "pan")?,
+            solo: row(OwnerKind::Strip, SectionKind::Own, 2, "solo")?,
+            route_gain_db: route(1, "gain_db")?,
+            route_mute: route(2, "mute")?,
+            route_matrix: [
+                route(3, "matrix_ll")?,
+                route(4, "matrix_lr")?,
+                route(5, "matrix_rl")?,
+                route(6, "matrix_rr")?,
+            ],
+            vca_offset_db: row(OwnerKind::Vca, SectionKind::Own, 1, "offset_db")?,
+            vca_mute: row(OwnerKind::Vca, SectionKind::Own, 2, "mute")?,
+        })
+    }
+}
+
+/// The browser's reason for a refusal of the core's validator: `control.domain` is `DOMAIN`, and
+/// `control.lane` and `control.ramp.fixed` are the `MALFORMED` a wrong channel or a stray word
+/// always was (decision 17, slice S7c D2).
+const fn control_reason(error: ControlError) -> u32 {
+    match error {
+        ControlError::Domain => COMMAND_REASON_DOMAIN,
+        _ => COMMAND_REASON_MALFORMED,
+    }
+}
+
+/// `controls::check` of one wire value against one row of the table, on `lane`, with no explicit
+/// ramp (the ramp word is resolved and bounded apart from the value).
+fn check_value(descriptor: &ControlDescriptor, lane: Lane, value: f32) -> Result<(), u32> {
+    controls::check(descriptor, lane, value, None).map_err(control_reason)
+}
+
+/// The core's lane for a builtin lane selector.
+const fn control_lane(lanes: BuiltinLaneSelector) -> Lane {
+    match lanes {
+        BuiltinLaneSelector::Left => Lane::Left,
+        BuiltinLaneSelector::Right => Lane::Right,
+        BuiltinLaneSelector::Both => Lane::Both,
+    }
+}
+
+/// The live mirrors as the core's effective-value inputs (decision 17, slice S7c D5): the
+/// browser's one temporary view, deleted by #S10 with the mirrors.
+///
+/// Reads only; every read is a checked access and nothing allocates, because `command_submit`
+/// runs render-locked. Strips are in the strip order the mirrors use.
+///
+/// A live send reports its follow term alone (`mute: false`): the route mirror keeps a send's own
+/// mute apart from the source lanes it follows, because a record carries both, so
+/// `controls::effective_gate` over this view is exactly the follow-zeroed lanes (the record's
+/// silenced flag adds the send's own mute).
+#[derive(Clone, Copy)]
+struct WebEffectiveView<'a> {
+    vcas: &'a LiveVcaState,
+    solo: &'a LiveControlSoloState,
+    routes: &'a LiveRouteState,
+}
+
+impl<'a> WebEffectiveView<'a> {
+    const fn new(
+        vcas: &'a LiveVcaState,
+        solo: &'a LiveControlSoloState,
+        routes: &'a LiveRouteState,
+    ) -> Self {
+        Self { vcas, solo, routes }
+    }
+
+    /// One strip's effective values.
+    fn strip(&self, strip: usize, any_solo: bool) -> controls::EffectiveStrip {
+        controls::effective_strip(self, strip, any_solo)
+    }
+
+    /// One live send's follow gate, per source lane.
+    fn follow_gate(&self, route: usize, any_solo: bool) -> [bool; 2] {
+        let Some(entry) = self.routes.get(route) else {
+            return [false; 2];
+        };
+        controls::effective_gate(self, route, &self.strip(entry.source_strip, any_solo))
+    }
+}
+
+impl controls::EffectiveInputs for WebEffectiveView<'_> {
+    fn strip_count(&self) -> usize {
+        self.solo.strip_count()
+    }
+
+    fn own_fader(&self, strip: usize) -> ([f32; 2], [bool; 2]) {
+        (
+            self.vcas.own_db(strip).unwrap_or([0.0; 2]),
+            [0, 1].map(|lane| self.solo.user_mute(strip, lane)),
+        )
+    }
+
+    fn soloed(&self, strip: usize) -> bool {
+        self.solo.solo(strip)
+    }
+
+    fn solo_safe(&self, strip: usize) -> bool {
+        self.solo.solo_safe(strip)
+    }
+
+    fn reach(&self, strip: usize) -> &[usize] {
+        self.vcas.reach_of(strip)
+    }
+
+    fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]) {
+        self.vcas.vca_values(vca).unwrap_or(([0.0; 2], [false; 2]))
+    }
+
+    fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    fn route(&self, route: usize) -> controls::EffectiveRouteInput {
+        let entry = self.routes.get(route);
+        controls::EffectiveRouteInput {
+            mute: false,
+            follows_mute: entry.is_some_and(|entry| entry.follows_mute),
+            source_strip: entry.map_or(usize::MAX, |entry| entry.source_strip),
         }
     }
 }
@@ -1689,6 +1869,9 @@ struct ReadyOwnership {
     vcas: LiveVcaState,
     /// Issue #1364 D2: what an absent ramp length resolves to, computed once at preparation.
     ramps: SessionRamps,
+    /// The core's descriptors of the rows the live kinds write, resolved once at preparation
+    /// (decision 17, slice S7c D1).
+    rows: WebControlRows,
     /// Observation subscriptions admitted per effect queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every live-control
@@ -4440,7 +4623,7 @@ impl CommandRecord {
     /// place of the prepared `FaderMuteBuiltins`. A track with no live controls still refuses them
     /// -- with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is
     /// legal and this *session* has no write path -- which is exactly what the reason means.
-    fn into_track_record(self) -> Result<AdmittedCommand, u32> {
+    fn into_track_record(self, rows: &WebControlRows) -> Result<AdmittedCommand, u32> {
         match self.kind {
             COMMAND_PAN => {
                 if self.rack != RACK_NOT_APPLICABLE
@@ -4450,6 +4633,8 @@ impl CommandRecord {
                 {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
+                check_value(&rows.pan, Lane::Left, self.values[0])?;
+                check_value(&rows.pan, Lane::Right, self.values[1])?;
                 let matrix = pan_matrix(self.values[0], self.values[1])
                     .map_err(|_| COMMAND_REASON_DOMAIN)?;
                 Ok(AdmittedCommand::Matrix(TrackControlRecord {
@@ -4460,6 +4645,9 @@ impl CommandRecord {
             COMMAND_MATRIX => {
                 if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
                     return Err(COMMAND_REASON_MALFORMED);
+                }
+                for (row, value) in rows.matrix.iter().zip(self.values) {
+                    check_value(row, Lane::Both, value)?;
                 }
                 let matrix = Matrix2x2 {
                     ll: self.values[0],
@@ -4481,10 +4669,7 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS`.
-                if !(-144.0..=24.0).contains(&self.values[0]) {
-                    return Err(COMMAND_REASON_DOMAIN);
-                }
+                check_value(&rows.fader_db, control_lane(lanes), self.values[0])?;
                 Ok(AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
                     lanes,
                     db: self.values[0],
@@ -4498,9 +4683,7 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                if self.values[0] != 0.0 && self.values[0] != 1.0 {
-                    return Err(COMMAND_REASON_DOMAIN);
-                }
+                check_value(&rows.mute, control_lane(lanes), self.values[0])?;
                 Ok(AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: self.values[0] == 1.0,
@@ -4518,12 +4701,7 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS`. It is
-                // the same range `fader_db` carries and is spelled again rather than shared, which
-                // is this file's convention: the comment names the authority.
-                if !(-144.0..=24.0).contains(&self.values[0]) {
-                    return Err(COMMAND_REASON_DOMAIN);
-                }
+                check_value(&rows.trim_db, control_lane(lanes), self.values[0])?;
                 Ok(AdmittedCommand::Input(TrackInputRecord::TrimDb {
                     lanes,
                     db: self.values[0],
@@ -4538,9 +4716,7 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                if self.values[0] != 0.0 && self.values[0] != 1.0 {
-                    return Err(COMMAND_REASON_DOMAIN);
-                }
+                check_value(&rows.polarity_invert, control_lane(lanes), self.values[0])?;
                 Ok(AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
                     lanes,
                     inverted: self.values[0] == 1.0,
@@ -4554,10 +4730,10 @@ impl CommandRecord {
     /// Check one send record's fixed shape and read its value (issue #1222 D1).
     ///
     /// `rack` and `channel` are `255`, `effect_index` and `parameter_id` are `0`, and every value
-    /// word past the kind's own is `0.0`; anything else is `MALFORMED`, as the fader kinds rule. A
-    /// `routeMute` value other than exactly `0.0` or `1.0` is `DOMAIN`, as `mute` rules. The gain
-    /// and matrix domains are the prepared route's, checked when the record is built.
-    fn into_route_edit(self) -> Result<RouteEdit, u32> {
+    /// word past the kind's own is `0.0`; anything else is `MALFORMED`, as the fader kinds rule.
+    /// The value is checked against the send's own rows by the core (`DOMAIN`); the prepared
+    /// route's coefficient function checks it again when the record is built.
+    fn into_route_edit(self, rows: &WebControlRows) -> Result<RouteEdit, u32> {
         let own = match self.kind {
             COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE => 1,
             COMMAND_ROUTE_MATRIX => 4,
@@ -4572,14 +4748,20 @@ impl CommandRecord {
             return Err(COMMAND_REASON_MALFORMED);
         }
         match self.kind {
-            COMMAND_ROUTE_GAIN_DB => Ok(RouteEdit::GainDb(self.values[0])),
+            COMMAND_ROUTE_GAIN_DB => {
+                check_value(&rows.route_gain_db, Lane::Both, self.values[0])?;
+                Ok(RouteEdit::GainDb(self.values[0]))
+            }
             COMMAND_ROUTE_MUTE => {
-                if self.values[0] != 0.0 && self.values[0] != 1.0 {
-                    return Err(COMMAND_REASON_DOMAIN);
-                }
+                check_value(&rows.route_mute, Lane::Both, self.values[0])?;
                 Ok(RouteEdit::Mute(self.values[0] == 1.0))
             }
-            _ => Ok(RouteEdit::Matrix(self.values)),
+            _ => {
+                for (row, value) in rows.route_matrix.iter().zip(self.values) {
+                    check_value(row, Lane::Both, value)?;
+                }
+                Ok(RouteEdit::Matrix(self.values))
+            }
         }
     }
 
@@ -4589,7 +4771,7 @@ impl CommandRecord {
     /// (else `MALFORMED`), an offset in `[-144, 24]` dB or a mute of exactly `0.0` or `1.0` (else
     /// `DOMAIN`) -- plus the route kinds' `effect_index` and `parameter_id` of `0` (else
     /// `MALFORMED`), which kinds 3 and 4 do not check.
-    fn into_vca_edit(self) -> Result<VcaEdit, u32> {
+    fn into_vca_edit(self, rows: &WebControlRows) -> Result<VcaEdit, u32> {
         if !matches!(self.kind, COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE)
             || self.rack != RACK_NOT_APPLICABLE
             || self.effect_index != 0
@@ -4599,16 +4781,12 @@ impl CommandRecord {
             return Err(COMMAND_REASON_MALFORMED);
         }
         let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
+        let lane = control_lane(lanes);
         if self.kind == COMMAND_VCA_FADER_DB {
-            // The declared domain of `fader_db`, which a VCA offset shares (#1239).
-            if !(-144.0..=24.0).contains(&self.values[0]) {
-                return Err(COMMAND_REASON_DOMAIN);
-            }
+            check_value(&rows.vca_offset_db, lane, self.values[0])?;
             return Ok(VcaEdit::FaderDb(lanes, self.values[0]));
         }
-        if self.values[0] != 0.0 && self.values[0] != 1.0 {
-            return Err(COMMAND_REASON_DOMAIN);
-        }
+        check_value(&rows.vca_mute, lane, self.values[0])?;
         Ok(VcaEdit::Mute(lanes, self.values[0] == 1.0))
     }
 
@@ -4619,16 +4797,14 @@ impl CommandRecord {
     /// staged once, coalesced, at the end of the submission's first pass. The shape rules are
     /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
     /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
-    const fn into_solo_request(self) -> Result<bool, u32> {
+    fn into_solo_request(self, rows: &WebControlRows) -> Result<bool, u32> {
         if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
             return Err(COMMAND_REASON_MALFORMED);
         }
         if self.values[1] != 0.0 || self.values[2] != 0.0 || self.values[3] != 0.0 {
             return Err(COMMAND_REASON_MALFORMED);
         }
-        if self.values[0] != 0.0 && self.values[0] != 1.0 {
-            return Err(COMMAND_REASON_DOMAIN);
-        }
+        check_value(&rows.solo, Lane::Both, self.values[0])?;
         Ok(self.values[0] == 1.0)
     }
 
@@ -5141,7 +5317,7 @@ fn admit_commands_staged(
             | COMMAND_TRIM_DB
             | COMMAND_POLARITY_INVERT => {
                 staged[0] = command
-                    .into_track_record()
+                    .into_track_record(&ready.rows)
                     .map_err(|reason| refuse(reason, index))?;
                 let slot = match staged[0] {
                     AdmittedCommand::Fader(_) => strip_count + track,
@@ -5156,6 +5332,9 @@ fn admit_commands_staged(
                 // every reaching VCA's offset, clamped -- for the covered lanes. Two different
                 // lane values split a `Both` command into one `Left` and one `Right` record. A
                 // strip no VCA reaches (`set_member_db` refuses it) lowers exactly as before.
+                //
+                // Decision 17 C7, slice S7c D5: the effective value is `controls::effective_strip`'s.
+                // The fader does not read the solo term, so the `any_solo` it is given is moot.
                 if let AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
                     lanes,
                     db,
@@ -5163,8 +5342,10 @@ fn admit_commands_staged(
                 }) = staged[0]
                     && ready.vcas.set_member_db(track, lanes, db)
                 {
-                    let left = ready.vcas.effective_db(track, 0);
-                    let right = ready.vcas.effective_db(track, 1);
+                    let [left, right] =
+                        WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+                            .strip(track, false)
+                            .fader_db;
                     let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
                         for (position, (lane, db)) in [
                             (BuiltinLaneSelector::Left, left),
@@ -5206,13 +5387,14 @@ fn admit_commands_staged(
             // shares one strip-scoped solo term; only a one-lane VCA mute splits a `Both` command
             // into two per-lane records (below).
             //
-            // Issue #1213 D3 (VERIFY-2 M4): the effective value is read from the solo state's one
-            // composition, which knows a submix is solo-safe; it is never spelled again here. An
+            // Issue #1213 D3 (VERIFY-2 M4): the effective value is read from the core's one
+            // composition (`controls::effective_strip`), which knows a submix is solo-safe; it is
+            // never spelled again here. An
             // inline `muted || (any_solo && !solo)` would stage `muted: true` for a bus *unmute*
             // under any track solo.
             COMMAND_MUTE => {
                 let lowered_record = command
-                    .into_track_record()
+                    .into_track_record(&ready.rows)
                     .map_err(|reason| refuse(reason, index))?;
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
@@ -5225,14 +5407,6 @@ fn admit_commands_staged(
                 else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, index));
                 };
-                // Issue #1245 D3 (amendment A1): an earlier kind 17 in this batch may have moved
-                // this strip's VCA mute term; refresh it before the mute composes.
-                if vca_mute_seen
-                    && ready.vcas.reaches(track)
-                    && !ready.solo.set_vca_mute(track, ready.vcas.vca_mute(track))
-                {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
-                }
                 if !ready.solo.set_user_mute(track, lanes, muted) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
@@ -5243,8 +5417,14 @@ fn admit_commands_staged(
                 // mirrors each lane separately. When the covered lanes agree -- always, for a
                 // session without VCAs -- it stages the one record it staged before.
                 mute_seen = true;
-                let left = ready.solo.effective_mute(track, 0);
-                let right = ready.solo.effective_mute(track, 1);
+                //
+                // Decision 17 C7, slice S7c D5: the effective mute is `controls::effective_strip`'s,
+                // read over the mirrors as they stand now, so an earlier kind 17 or kind 9 in this
+                // batch is already in it.
+                let [left, right] = {
+                    let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
+                    view.strip(track, controls::any_solo(&view)).mute
+                };
                 let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
                     for (position, (lane, muted)) in [
                         (BuiltinLaneSelector::Left, left),
@@ -5282,7 +5462,7 @@ fn admit_commands_staged(
             // toggles would otherwise fan out up to `2 * strip_count` records *per transition*.
             COMMAND_SOLO => {
                 let engaged = command
-                    .into_solo_request()
+                    .into_solo_request(&ready.rows)
                     .map_err(|reason| refuse(reason, index))?;
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
@@ -5317,7 +5497,7 @@ fn admit_commands_staged(
                     return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
                 }
                 match command
-                    .into_vca_edit()
+                    .into_vca_edit(&ready.rows)
                     .map_err(|reason| refuse(reason, index))?
                 {
                     VcaEdit::FaderDb(lanes, db) => {
@@ -5367,7 +5547,7 @@ fn admit_commands_staged(
                     return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
                 };
                 let edit = command
-                    .into_route_edit()
+                    .into_route_edit(&ready.rows)
                     .map_err(|reason| refuse(reason, index))?;
                 let mut next = current;
                 match edit {
@@ -5634,7 +5814,18 @@ fn admit_commands_staged(
     if vca_fader_seen {
         for strip in 0..strip_count {
             let slot = strip_count + strip;
-            for (lanes, db) in ready.vcas.fader_delta(strip).into_iter().flatten() {
+            if !ready.vcas.reaches(strip) {
+                continue;
+            }
+            let fader_db = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+                .strip(strip, false)
+                .fader_db;
+            for (lanes, db) in ready
+                .vcas
+                .fader_delta(strip, fader_db)
+                .into_iter()
+                .flatten()
+            {
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -5669,24 +5860,21 @@ fn admit_commands_staged(
     // the ramp is the last kind 9 or 17 record's, and the records answer to the first one's wire
     // index.
     if solo_seen || vca_mute_seen {
-        // Issue #1245 D3 (amendment A1): every reached strip's VCA mute term reaches the one
-        // strip-mute owner once, before its delta is read, so the cost is one pass over the reach
-        // pairs per batch however many kind 17 records it carries.
-        if vca_mute_seen {
-            for strip in 0..strip_count {
-                if ready.vcas.reaches(strip)
-                    && !ready.solo.set_vca_mute(strip, ready.vcas.vca_mute(strip))
-                {
-                    return Err(refuse(
-                        COMMAND_REASON_MALFORMED,
-                        coalesce_first_wire_index as usize,
-                    ));
-                }
-            }
-        }
+        // Decision 17 C7, slice S7c D5: every strip's effective mute is the core's, read over the
+        // mirrors as the batch left them (a kind 17 already moved the VCA state), with the solo
+        // term computed once for the pass. The pass writes only the emitted mirror, which neither
+        // the solo term nor the VCA mute reads.
+        let any_solo = controls::any_solo(&WebEffectiveView::new(
+            &ready.vcas,
+            &ready.solo,
+            &ready.routes,
+        ));
         for strip in 0..strip_count {
             let slot = strip_count + strip;
-            for (lanes, muted) in ready.solo.strip_delta(strip).into_iter().flatten() {
+            let mute = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+                .strip(strip, any_solo)
+                .mute;
+            for (lanes, muted) in ready.solo.strip_delta(strip, mute).into_iter().flatten() {
                 let Some(entry) = ready.command_decoded.get_mut(lowered) else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
                 };
@@ -5724,9 +5912,11 @@ fn admit_commands_staged(
     if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
         let follow_start = lowered;
         let route_base = strip_count * 3 + ready.effect_controls.len();
-        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
-        for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &effective_mute)
-        {
+        // Decision 17 C7, slice S7c D5: each send's follow gate is `controls::effective_gate`'s.
+        let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
+        let any_solo = controls::any_solo(&view);
+        let follow_gate = |route: usize| view.follow_gate(route, any_solo);
+        for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &follow_gate) {
             let (Some(entry), Some(producer)) =
                 (ready.routes.get(route), ready.route_controls.get(route))
             else {
@@ -5786,10 +5976,11 @@ fn admit_commands_staged(
             };
             lowered += 1;
         }
-        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
         for staged in follow_start..lowered {
             let route = ready.command_decoded[staged].queue_slot as usize - route_base;
-            if !ready.routes.follow(route, &effective_mute) {
+            let lanes = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+                .follow_gate(route, any_solo);
+            if !ready.routes.follow(route, lanes) {
                 return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             }
         }
@@ -7177,9 +7368,10 @@ fn compile_ready(
     // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
     // because that order is the addressing authority for every queue, meter and command index.
     // One seed per strip (issue #1213 D3): the tracks, soloable, then the submixes, solo-safe, each
-    // seeded from its own session fader mutes. Issue #1242 D3: each also carries its VCA mute
-    // from the same composition the compilers baked (`controls::effective`, in strip order),
-    // before the solo state and the live-send mirror are built from it.
+    // seeded from its own session fader mutes. Issue #1242 D3, decision 17 C7: each also carries
+    // its effective mute from the same composition the compilers baked (`controls::effective`, in
+    // strip order), which is what the render plane has been told, before the solo state and the
+    // live-send mirror are built from it.
     let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
     prepared_mutes
         .try_reserve_exact(strip_count)
@@ -7205,7 +7397,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [track.fader.left_mute, track.fader.right_mute],
             solo_safe: false,
-            vca_mute: effective_faders.strips[prepared_mutes.len()].vca_mute,
+            effective_mute: effective_faders.strips[prepared_mutes.len()].mute,
         });
     }
     for submix in &model.submixes {
@@ -7217,7 +7409,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [submix.fader.left_mute, submix.fader.right_mute],
             solo_safe: true,
-            vca_mute: effective_faders.strips[prepared_mutes.len()].vca_mute,
+            effective_mute: effective_faders.strips[prepared_mutes.len()].mute,
         });
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
@@ -7307,8 +7499,13 @@ fn compile_ready(
     let routes = if route_controls.is_empty() {
         LiveRouteState::empty()
     } else {
-        LiveRouteState::try_new(model, &|strip, lane| solo.effective_mute(strip, lane))
-            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
+        LiveRouteState::try_new(model, &|strip, lane| {
+            effective_faders
+                .strips
+                .get(strip)
+                .is_some_and(|effective| effective.mute[lane])
+        })
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
     };
     // Retained bridge state the browser owns for its live sends (issue #1222; #1221 verdict
     // MINOR-1): every byte the route lanes add -- cells, render-side owners, the producer table
@@ -7353,6 +7550,9 @@ fn compile_ready(
     // on the control thread, and charged like the other retained tables.
     let ramps =
         SessionRamps::try_new(model).ok_or_else(|| fixed_diagnostic("web.resource.allocation"))?;
+    // Decision 17, slice S7c D1: the core's descriptor of every row the live kinds write.
+    let rows = WebControlRows::new(session.sample_rate().0)
+        .ok_or_else(|| fixed_diagnostic("web.live_controls.rows"))?;
     let live_state_retained = vcas
         .retained_bytes()
         .checked_add(ramps.retained_bytes())
@@ -7558,6 +7758,7 @@ fn compile_ready(
         solo,
         vcas,
         ramps,
+        rows,
         route_controls,
         routes,
         in_flight: boxed_zero_u32(queue_count)?,

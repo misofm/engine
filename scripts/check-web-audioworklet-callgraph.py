@@ -190,15 +190,6 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     },
     "miso_engine_web_v1_meter_poll": {},
     "miso_engine_web_v1_command_submit": {
-        "_RNvMNtCs_9host_core16live_route_stateNtB2_14LiveRouteState6follow": (
-            2,
-            "the `effective_mute: &dyn Fn(usize, usize) -> bool` predicate, once per lane, when a "
-            "route follows its source strip's mute",
-        ),
-        "_RNvNtCs_9host_core16live_route_state14followed_lanes": (
-            2,
-            "the same `effective_mute: &dyn Fn` predicate, once per lane",
-        ),
         "_RNvMs0_NtCs_15effect_compiler7controlNtB5_18EffectControlOwner4edit": (
             1,
             "`factory.descriptor()` on the owner's `Arc<dyn NativeEffectFactory>`",

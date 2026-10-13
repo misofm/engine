@@ -57,11 +57,21 @@ pub(crate) fn is_active(id: u32, shape: &MatrixOrPan) -> bool {
     }
 }
 
-/// The control descriptor of a builtin row at a sample rate.
+/// The control descriptor of a builtin row at a sample rate, for a strip in `shape`.
 pub(crate) fn descriptor(
     row: &BuiltinParameterDescriptor,
     sample_rate: u32,
     shape: &MatrixOrPan,
+) -> ControlDescriptor {
+    shaped_descriptor(row, sample_rate, is_active(row.id, shape))
+}
+
+/// The control descriptor of a builtin row at a sample rate, with `active` given: the row of a
+/// host that holds no model (it checks the strip's shape itself).
+pub(crate) fn shaped_descriptor(
+    row: &BuiltinParameterDescriptor,
+    sample_rate: u32,
+    active: bool,
 ) -> ControlDescriptor {
     let (minimum, maximum) = match row.domain {
         BuiltinParameterDomain::BooleanExact => (0.0, 1.0),
@@ -92,7 +102,7 @@ pub(crate) fn descriptor(
         class: row.class,
         scope: ControlScope::Model,
         family: row.family,
-        active: is_active(row.id, shape),
+        active,
     }
 }
 

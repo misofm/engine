@@ -32,7 +32,7 @@ mod session_rows;
 mod strip;
 mod vca;
 
-pub use address::{ControlAddress, Lane, Owner, Section};
+pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use descriptor::{
     Choice, ControlDescriptor, ControlScope, EFFECTIVE_SLICE, Lanes, Motion, ROUTE_SLICE, check,
 };
@@ -46,4 +46,4 @@ pub use effective::{
 };
 pub use error::ControlError;
 pub use live_ramps::LiveRamps;
-pub use registry::{ControlRow, get, list, set};
+pub use registry::{ControlRow, get, list, row_descriptor, set};

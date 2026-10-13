@@ -23,6 +23,33 @@ pub enum Owner {
     Vca(StableId),
 }
 
+/// The field-free kind of an [`Owner`]: what a host that holds no model names a row's owner by
+/// (decision 17, slice S7c). Slice S3 gives the kinds wire codes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum OwnerKind {
+    /// [`Owner::Session`].
+    Session,
+    /// [`Owner::Strip`].
+    Strip,
+    /// [`Owner::Route`].
+    Route,
+    /// [`Owner::Vca`].
+    Vca,
+}
+
+impl Owner {
+    /// The field-free kind of this owner.
+    #[must_use]
+    pub const fn kind(&self) -> OwnerKind {
+        match self {
+            Self::Session => OwnerKind::Session,
+            Self::Strip(_) => OwnerKind::Strip,
+            Self::Route(_) => OwnerKind::Route,
+            Self::Vca(_) => OwnerKind::Vca,
+        }
+    }
+}
+
 /// The part of an owner that a control belongs to.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Section {
@@ -36,7 +63,31 @@ pub enum Section {
     Inserts(StableId),
 }
 
+/// The field-free kind of a [`Section`], as [`OwnerKind`] is of an [`Owner`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SectionKind {
+    /// [`Section::Own`].
+    Own,
+    /// [`Section::Builtins`].
+    Builtins,
+    /// [`Section::Console`].
+    Console,
+    /// [`Section::Inserts`].
+    Inserts,
+}
+
 impl Section {
+    /// The field-free kind of this section.
+    #[must_use]
+    pub const fn kind(&self) -> SectionKind {
+        match self {
+            Self::Own => SectionKind::Own,
+            Self::Builtins => SectionKind::Builtins,
+            Self::Console(_) => SectionKind::Console,
+            Self::Inserts(_) => SectionKind::Inserts,
+        }
+    }
+
     /// The section's stable code: the `RackName` codes (inserts 2, builtins 4, console 5) and
     /// `own` 6, appended.
     #[must_use]
