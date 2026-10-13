@@ -1533,10 +1533,12 @@ version = "0.1.0"
 dependencies = [
  "bench-support",
  "builtins",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "host-core",
  "host-web",
+ "serde_json",
  "sha2 0.11.0",
 ]
 

@@ -110,7 +110,7 @@ fn link_mode_of(code: f32) -> Option<LinkMode> {
 }
 
 /// The choices of the link modes an effect supports, or `None` when it supports only one.
-fn link_choices(descriptor: &EffectDescriptor) -> Option<&'static [Choice]> {
+pub(crate) fn link_choices(descriptor: &EffectDescriptor) -> Option<&'static [Choice]> {
     match descriptor.supported_link_modes.bits() {
         3 => Some(&LINK_CHOICES_MAXIMUM),
         5 => Some(&LINK_CHOICES_AVERAGE),
@@ -182,7 +182,7 @@ pub(crate) fn parameter_descriptor(parameter: &'static ParameterDescriptor) -> C
 }
 
 /// The bypass row of an instance of `effect_id`.
-fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
+pub(crate) fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
     let class = match effect_id {
         DELAY_ID => ruled_live_not_built(
             DELAY_BYPASS_ISSUE,
@@ -209,7 +209,10 @@ fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
 }
 
 /// The link-mode row of an insert of `effect_id` whose supported modes are `choices`.
-fn link_mode_descriptor(effect_id: &str, choices: &'static [Choice]) -> ControlDescriptor {
+pub(crate) fn link_mode_descriptor(
+    effect_id: &str,
+    choices: &'static [Choice],
+) -> ControlDescriptor {
     let class = if effect_id == MULTIBAND_ID {
         ruled_live_not_built(
             MULTIBAND_LINK_ISSUE,

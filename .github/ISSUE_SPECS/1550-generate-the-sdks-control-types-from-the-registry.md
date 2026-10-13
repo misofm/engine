@@ -100,3 +100,26 @@ Commands: `cargo test --locked -p parameter-metadata`, `bash scripts/check-sdk-g
 ## Supersedes and shrinks
 
 - None.
+
+## Implementation record
+
+- **The accessor.** `controls::table_rows(RowSource)` and `controls::effect_table_rows(effect_id)`
+  (`crates/controls/src/tables.rs`) return `TableRow`s: the row ID, its descriptor, `at_rate` for
+  the rate-keyed maximum, `into_output` for a route row's case on a route into the output, and
+  `on_submix`.
+- **Names.** `name` is the declared machine name (snake_case) for every row; `displayName` is the
+  human label. The older `effects` block still writes the display name as `name` and is unchanged
+  (non-goal).
+- **Shape of the JSON row.** `step` is the catalog's own `step` object (`unit`, `size`,
+  `precision`, `ladder`), so `precision` and `ladder` are inside `step`, as in `builtins` and
+  `effects`. Additions the field list did not name, each needed to state a core fact: `reasonIssue`
+  (the issue of `ruledLiveNotBuilt`), `onSubmix: false` on a strip row a submix lacks (solo), and
+  `active` inside a route row's `intoSubmix` and `intoOutput` cases (`follows_mute` does not apply
+  to a route into the output). A route row's `automatable` is also per case, because it follows
+  the class. `maximum` is a number, or an object keyed by the four launch rates when it differs by
+  rate (`hpf_hz`, `lpf_hz`).
+- **The SDK.** `controls.ts` holds `CONTROLS` (the `controls` key of the metadata) and the types;
+  `catalog.ts` leaves the `controls` key out, so it is unchanged. `ControlAddress` names a control
+  by its machine name, per owner and section, so an unknown or misplaced name does not compile.
+- **Gate 1** is `round_trip.rs::controls_object` (JSON against the tables) with
+  `crates/controls/tests/tables.rs` (every row `list` gives is in the tables, equal descriptor).

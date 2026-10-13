@@ -49,6 +49,16 @@
 //! rows use the fixed `"linear64CoefficientUpdates"` policy because the command carries prepared
 //! coefficient targets; their `liveUpdatable` flag is derived from `"blockTarget"`.
 //!
+//! # Decision 17, slice S2b (`controls`)
+//!
+//! The top-level `controls` object lists the rows of the `controls` crate's tables (`stripOwn`,
+//! `builtins`, `routeOwn`, `vcaOwn`, `sessionOwn`, and `effects` by effect ID). It is written
+//! from `controls::table_rows` and `controls::effect_table_rows` and from no list of its own, so
+//! a row added to a table reaches the SDK's `controls.ts` when the metadata is regenerated. The
+//! keys before it keep their bytes. A row's `name` is the declared machine name (the identifier);
+//! `displayName` is the label a person reads, which the `effects` block above still writes as
+//! `name`.
+//!
 //! # Issue #242 (parameter lattice and named step sizes)
 //!
 //! Each parameter carries a populated `"step"` object: the row's decimal step, the unit that
@@ -88,6 +98,10 @@ use builtins::{
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
     BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz,
     builtin_parameter_unit,
+};
+use controls::{
+    ControlClass, ControlDescriptor, ControlKind, ControlScope, EffectTableRows, Family,
+    LiveRampRow, Motion, RebuildReason, RowSource, TableRow, Taper, effect_table_rows, table_rows,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -293,8 +307,254 @@ pub fn render() -> String {
         effect(&mut out, descriptor, response);
         append!(&mut out, "{}\n", comma(index, registry.len()));
     }
-    out.push_str("  ]\n}\n");
+    out.push_str("  ],\n");
+    controls_object(&mut out, registry);
+    out.push_str("}\n");
     out
+}
+
+/// The `controls` object (decision 17, slice S2b): the row tables of the `controls` crate, one
+/// list per row source and one entry per launch effect.
+///
+/// Nothing here names a row. Every row comes from `controls::table_rows` or
+/// `controls::effect_table_rows`, so a row added to a table reaches this document, and from it the
+/// SDK's `controls.ts`, when the metadata is regenerated. A row's `name` is the declared machine
+/// name; `displayName` is the label a person reads.
+fn controls_object(out: &mut String, registry: &effect_contract::NativeEffectRegistry) {
+    out.push_str("  \"controls\": {\n");
+    let sources = [
+        ("stripOwn", RowSource::StripOwn),
+        ("builtins", RowSource::Builtins),
+        ("routeOwn", RowSource::RouteOwn),
+        ("vcaOwn", RowSource::VcaOwn),
+        ("sessionOwn", RowSource::SessionOwn),
+    ];
+    for (name, source) in sources {
+        append!(out, "    \"{name}\": [\n");
+        let rows = table_rows(source);
+        for (index, row) in rows.iter().enumerate() {
+            out.push_str("      ");
+            control_row(out, row);
+            append!(out, "{}\n", comma(index, rows.len()));
+        }
+        out.push_str("    ],\n");
+    }
+    out.push_str("    \"effects\": {\n");
+    for (index, descriptor) in registry.descriptors().enumerate() {
+        let EffectTableRows {
+            bypass,
+            parameters,
+            link_mode,
+        } = effect_table_rows(descriptor.id.as_str()).expect("a registry effect has rows");
+        append!(out, "      \"{}\": {{\n", escape(descriptor.id.as_str()));
+        out.push_str("        \"bypass\": ");
+        control_row(out, &bypass);
+        out.push_str(",\n        \"parameters\": [\n");
+        for (row, parameter) in parameters.iter().enumerate() {
+            out.push_str("          ");
+            control_row(out, parameter);
+            append!(out, "{}\n", comma(row, parameters.len()));
+        }
+        out.push_str("        ],\n        \"linkMode\": ");
+        match &link_mode {
+            Some(row) => control_row(out, row),
+            None => out.push_str("null"),
+        }
+        append!(out, "\n      }}{}\n", comma(index, registry.len()));
+    }
+    out.push_str("    }\n  }\n");
+}
+
+/// One row of a table as one line of JSON.
+///
+/// The fields that depend on the rate are emitted per launch rate when they differ across the four
+/// (`maximum`); the fields that depend on a route's destination are emitted per case
+/// (`intoSubmix`, `intoOutput`), each case carrying the class and whether the row applies.
+fn control_row(out: &mut String, row: &TableRow) {
+    let descriptor = &row.descriptor;
+    append!(
+        out,
+        "{{ \"control\": {}, \"name\": \"{}\", \"displayName\": \"{}\", \"displayUnit\": \"{}\", \
+\"unit\": \"{}\", \"kind\": \"{}\", \"minimum\": {}, \"maximum\": ",
+        row.control,
+        escape(descriptor.name),
+        escape(descriptor.display_name),
+        escape(descriptor.display_unit),
+        unit_name(descriptor.unit),
+        control_kind_name(descriptor.kind),
+        number(descriptor.minimum),
+    );
+    let maxima = LAUNCH_RATES_HZ.map(|rate| row.at_rate(rate).maximum);
+    if maxima
+        .iter()
+        .all(|maximum| maximum.to_bits() == maxima[0].to_bits())
+    {
+        out.push_str(&number(maxima[0]));
+    } else {
+        out.push_str("{ ");
+        for (index, (rate, maximum)) in LAUNCH_RATES_HZ.iter().zip(maxima).enumerate() {
+            append!(
+                out,
+                "\"{rate}\": {}{}",
+                number(maximum),
+                if index + 1 == LAUNCH_RATES_HZ.len() {
+                    ""
+                } else {
+                    ", "
+                }
+            );
+        }
+        out.push_str(" }");
+    }
+    append!(
+        out,
+        ", \"disabledValue\": {}, \"default\": {}, \"taper\": \"{}\", \"step\": ",
+        optional_number(descriptor.disabled_value),
+        number(descriptor.default),
+        taper_name(descriptor.taper),
+    );
+    step_object(out, descriptor.lattice);
+    out.push_str(", \"choices\": [");
+    for (index, choice) in descriptor.choices.iter().enumerate() {
+        append!(
+            out,
+            "{{ \"value\": {}, \"label\": \"{}\" }}{}",
+            number(choice.value),
+            escape(choice.label),
+            if index + 1 == descriptor.choices.len() {
+                ""
+            } else {
+                ", "
+            }
+        );
+    }
+    append!(
+        out,
+        "], \"ramp\": \"{}\", \"scope\": \"{}\", \"family\": \"{}\", \"lanes\": \"{}\"",
+        match descriptor.motion {
+            Motion::Ramp(ramp) => ramp_name(ramp),
+            Motion::Fixed => "fixed",
+        },
+        match descriptor.scope {
+            ControlScope::Model => "model",
+            ControlScope::Monitor => "monitor",
+        },
+        family_name(descriptor.family),
+        match descriptor.lanes {
+            controls::Lanes::PerLane => "perLane",
+            controls::Lanes::Shared => "shared",
+        },
+    );
+    if let Some(output) = row.into_output {
+        out.push_str(", \"intoSubmix\": ");
+        class_case(out, descriptor, descriptor.class, true);
+        out.push_str(", \"intoOutput\": ");
+        class_case(out, descriptor, output.class, output.active);
+    } else {
+        out.push_str(", ");
+        class_fields(out, descriptor, descriptor.class);
+        if !row.on_submix {
+            out.push_str(", \"onSubmix\": false");
+        }
+    }
+    out.push_str(" }");
+}
+
+/// A route row's class under one destination.
+fn class_case(out: &mut String, descriptor: &ControlDescriptor, class: ControlClass, active: bool) {
+    out.push_str("{ ");
+    class_fields(out, descriptor, class);
+    append!(out, ", \"active\": {active} }}");
+}
+
+/// `class`, `reason`, `reasonIssue`, `reopen` and `automatable` of a row under `class`.
+///
+/// `automatable` is the descriptor's own computation, never a second rule (a live model value that
+/// render reads).
+fn class_fields(out: &mut String, descriptor: &ControlDescriptor, class: ControlClass) {
+    let under = ControlDescriptor {
+        class,
+        ..*descriptor
+    };
+    let (name, reason, issue, reopen) = match class {
+        ControlClass::Live => ("live", None, None, None),
+        ControlClass::Derived => ("derived", None, None, None),
+        ControlClass::RebuildOnly { reason, reopen } => {
+            let (name, issue) = rebuild_reason(reason);
+            ("rebuildOnly", Some(name), issue, Some(reopen))
+        }
+    };
+    append!(
+        out,
+        "\"class\": \"{name}\", \"reason\": {}, \"reasonIssue\": {}, \"reopen\": {}, \
+\"automatable\": {}",
+        reason.map_or_else(|| "null".to_owned(), |text| format!("\"{text}\"")),
+        issue.map_or_else(|| "null".to_owned(), |issue| issue.to_string()),
+        reopen.map_or_else(|| "null".to_owned(), |text| format!("\"{}\"", escape(text))),
+        under.automatable(),
+    );
+}
+
+const fn rebuild_reason(reason: RebuildReason) -> (&'static str, Option<u32>) {
+    match reason {
+        RebuildReason::NewMemory => ("newMemory", None),
+        RebuildReason::NewGraph => ("newGraph", None),
+        RebuildReason::ProcessingOrder => ("processingOrder", None),
+        RebuildReason::Latency => ("latency", None),
+        RebuildReason::Glitch => ("glitch", None),
+        RebuildReason::Optimisation => ("optimisation", None),
+        RebuildReason::Correctness => ("correctness", None),
+        RebuildReason::RuledLiveNotBuilt { issue } => ("ruledLiveNotBuilt", Some(issue)),
+    }
+}
+
+const fn control_kind_name(kind: ControlKind) -> &'static str {
+    match kind {
+        ControlKind::Continuous => "continuous",
+        ControlKind::Toggle => "toggle",
+        ControlKind::Enumeration => "enumeration",
+    }
+}
+
+const fn taper_name(taper: Taper) -> &'static str {
+    match taper {
+        Taper::Linear => "linear",
+        Taper::Logarithmic => "logarithmic",
+        Taper::Exponential => "exponential",
+        Taper::Decibel => "decibel",
+        Taper::Stepped => "stepped",
+    }
+}
+
+const fn family_name(family: Family) -> &'static str {
+    match family {
+        Family::StripLevel => "stripLevel",
+        Family::StripMatrix => "stripMatrix",
+        Family::StripInput => "stripInput",
+        Family::Route => "route",
+        Family::Effect => "effect",
+        Family::Setting => "setting",
+    }
+}
+
+const fn ramp_name(ramp: LiveRampRow) -> &'static str {
+    match ramp {
+        LiveRampRow::Fader => "fader",
+        LiveRampRow::InputTrim => "inputTrim",
+        LiveRampRow::SendGain => "sendGain",
+        LiveRampRow::VcaOffset => "vcaOffset",
+        LiveRampRow::LinkGlide => "linkGlide",
+        LiveRampRow::Mute => "mute",
+        LiveRampRow::Solo => "solo",
+        LiveRampRow::PolarityInvert => "polarityInvert",
+        LiveRampRow::SendMute => "sendMute",
+        LiveRampRow::SendFollowsMute => "sendFollowsMute",
+        LiveRampRow::VcaMute => "vcaMute",
+        LiveRampRow::BypassCrossfade => "bypassCrossfade",
+        LiveRampRow::Pan => "pan",
+        LiveRampRow::Matrix => "matrix",
+        LiveRampRow::SendMatrix => "sendMatrix",
+    }
 }
 
 fn comma(index: usize, total: usize) -> &'static str {

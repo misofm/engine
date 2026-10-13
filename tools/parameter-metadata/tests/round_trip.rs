@@ -711,3 +711,303 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
     };
     AudioWorkletEngineHost::boot(json.as_bytes(), options).is_ok()
 }
+
+// Decision 17, slice S2b: the `controls` object is the `controls` crate's row tables, row for row.
+
+mod controls_object {
+    use controls::{
+        ControlClass, ControlKind, Family, LiveRampRow, Motion, RebuildReason, RowSource, TableRow,
+        Taper, effect_table_rows, table_rows,
+    };
+    use effect_compiler::launch_native_effect_registry;
+    use parameter_metadata::{LAUNCH_RATES_HZ, render};
+    use serde_json::Value;
+
+    /// The JSON number as the `f32` it was written from.
+    fn f32_of(value: &Value) -> f32 {
+        value.as_f64().expect("a number") as f32
+    }
+
+    fn optional_f32(value: &Value) -> Option<f32> {
+        (!value.is_null()).then(|| f32_of(value))
+    }
+
+    fn reason_name(reason: RebuildReason) -> (&'static str, Option<u32>) {
+        match reason {
+            RebuildReason::NewMemory => ("newMemory", None),
+            RebuildReason::NewGraph => ("newGraph", None),
+            RebuildReason::ProcessingOrder => ("processingOrder", None),
+            RebuildReason::Latency => ("latency", None),
+            RebuildReason::Glitch => ("glitch", None),
+            RebuildReason::Optimisation => ("optimisation", None),
+            RebuildReason::Correctness => ("correctness", None),
+            RebuildReason::RuledLiveNotBuilt { issue } => ("ruledLiveNotBuilt", Some(issue)),
+        }
+    }
+
+    /// The class fields of `object` equal `class`, and its `automatable` equals what the
+    /// descriptor computes under that class.
+    fn assert_class(object: &Value, class: ControlClass, automatable: bool, what: &str) {
+        let (name, reason, issue, reopen) = match class {
+            ControlClass::Live => ("live", None, None, None),
+            ControlClass::Derived => ("derived", None, None, None),
+            ControlClass::RebuildOnly { reason, reopen } => {
+                let (name, issue) = reason_name(reason);
+                ("rebuildOnly", Some(name), issue, Some(reopen))
+            }
+        };
+        assert_eq!(object["class"], name, "{what} class");
+        assert_eq!(object["reason"].as_str(), reason, "{what} reason");
+        assert_eq!(
+            object["reasonIssue"].as_u64(),
+            issue.map(u64::from),
+            "{what} issue"
+        );
+        assert_eq!(object["reopen"].as_str(), reopen, "{what} reopen");
+        assert_eq!(object["automatable"], automatable, "{what} automatable");
+    }
+
+    fn assert_row(json: &Value, row: &TableRow, what: &str) {
+        let descriptor = &row.descriptor;
+        assert_eq!(json["control"], row.control, "{what} control");
+        assert_eq!(json["name"], descriptor.name, "{what} name");
+        assert_eq!(
+            json["displayName"], descriptor.display_name,
+            "{what} displayName"
+        );
+        assert_eq!(
+            json["displayUnit"], descriptor.display_unit,
+            "{what} displayUnit"
+        );
+        assert_eq!(
+            json["unit"],
+            match descriptor.unit {
+                effect_contract::ParameterUnit::Db => "db",
+                effect_contract::ParameterUnit::Hz => "hz",
+                effect_contract::ParameterUnit::Milliseconds => "milliseconds",
+                effect_contract::ParameterUnit::Samples => "samples",
+                effect_contract::ParameterUnit::Linear => "linear",
+                effect_contract::ParameterUnit::Ratio => "ratio",
+            },
+            "{what} unit"
+        );
+        assert_eq!(
+            json["kind"],
+            match descriptor.kind {
+                ControlKind::Continuous => "continuous",
+                ControlKind::Toggle => "toggle",
+                ControlKind::Enumeration => "enumeration",
+            },
+            "{what} kind"
+        );
+        assert_eq!(
+            f32_of(&json["minimum"]),
+            descriptor.minimum,
+            "{what} minimum"
+        );
+        // A maximum that depends on the rate is an object keyed by each launch rate.
+        let maxima = LAUNCH_RATES_HZ.map(|rate| row.at_rate(rate).maximum);
+        if maxima.iter().all(|maximum| *maximum == maxima[0]) {
+            assert_eq!(f32_of(&json["maximum"]), maxima[0], "{what} maximum");
+        } else {
+            let by_rate = json["maximum"].as_object().expect("a rate-keyed maximum");
+            assert_eq!(by_rate.len(), LAUNCH_RATES_HZ.len(), "{what} maximum rates");
+            for (rate, maximum) in LAUNCH_RATES_HZ.iter().zip(maxima) {
+                assert_eq!(
+                    f32_of(&by_rate[&rate.to_string()]),
+                    maximum,
+                    "{what} maximum {rate}"
+                );
+            }
+        }
+        assert_eq!(
+            optional_f32(&json["disabledValue"]),
+            descriptor.disabled_value,
+            "{what}"
+        );
+        assert_eq!(
+            f32_of(&json["default"]),
+            descriptor.default,
+            "{what} default"
+        );
+        assert_eq!(
+            json["taper"],
+            match descriptor.taper {
+                Taper::Linear => "linear",
+                Taper::Logarithmic => "logarithmic",
+                Taper::Exponential => "exponential",
+                Taper::Decibel => "decibel",
+                Taper::Stepped => "stepped",
+            },
+            "{what} taper"
+        );
+        let lattice = descriptor.lattice;
+        assert_eq!(
+            json["step"]["size"],
+            lattice.step.to_string(),
+            "{what} step"
+        );
+        assert_eq!(
+            json["step"]["precision"], lattice.precision,
+            "{what} precision"
+        );
+        for (size, key) in [
+            (effect_contract::StepSize::Xs, "xs"),
+            (effect_contract::StepSize::Sm, "sm"),
+            (effect_contract::StepSize::Md, "md"),
+            (effect_contract::StepSize::Lg, "lg"),
+            (effect_contract::StepSize::Xl, "xl"),
+        ] {
+            assert_eq!(
+                json["step"]["ladder"][key],
+                lattice.ladder.multiple(size),
+                "{what} {key}"
+            );
+        }
+        let choices = json["choices"].as_array().expect("choices");
+        assert_eq!(choices.len(), descriptor.choices.len(), "{what} choices");
+        for (json, choice) in choices.iter().zip(descriptor.choices) {
+            assert_eq!(f32_of(&json["value"]), choice.value, "{what} choice value");
+            assert_eq!(json["label"], choice.label, "{what} choice label");
+        }
+        assert_eq!(
+            json["ramp"],
+            match descriptor.motion {
+                Motion::Fixed => "fixed",
+                Motion::Ramp(ramp) => match ramp {
+                    LiveRampRow::Fader => "fader",
+                    LiveRampRow::InputTrim => "inputTrim",
+                    LiveRampRow::SendGain => "sendGain",
+                    LiveRampRow::VcaOffset => "vcaOffset",
+                    LiveRampRow::LinkGlide => "linkGlide",
+                    LiveRampRow::Mute => "mute",
+                    LiveRampRow::Solo => "solo",
+                    LiveRampRow::PolarityInvert => "polarityInvert",
+                    LiveRampRow::SendMute => "sendMute",
+                    LiveRampRow::SendFollowsMute => "sendFollowsMute",
+                    LiveRampRow::VcaMute => "vcaMute",
+                    LiveRampRow::BypassCrossfade => "bypassCrossfade",
+                    LiveRampRow::Pan => "pan",
+                    LiveRampRow::Matrix => "matrix",
+                    LiveRampRow::SendMatrix => "sendMatrix",
+                },
+            },
+            "{what} ramp"
+        );
+        assert_eq!(
+            json["scope"],
+            match descriptor.scope {
+                controls::ControlScope::Model => "model",
+                controls::ControlScope::Monitor => "monitor",
+            },
+            "{what} scope"
+        );
+        assert_eq!(
+            json["family"],
+            match descriptor.family {
+                Family::StripLevel => "stripLevel",
+                Family::StripMatrix => "stripMatrix",
+                Family::StripInput => "stripInput",
+                Family::Route => "route",
+                Family::Effect => "effect",
+                Family::Setting => "setting",
+            },
+            "{what} family"
+        );
+        assert_eq!(
+            json["lanes"],
+            match descriptor.lanes {
+                controls::Lanes::PerLane => "perLane",
+                controls::Lanes::Shared => "shared",
+            },
+            "{what} lanes"
+        );
+        if let Some(output) = row.into_output {
+            // A route row states its class under each destination, and none at the top.
+            assert!(json.get("class").is_none(), "{what} has no top-level class");
+            let into_submix = &json["intoSubmix"];
+            assert_class(
+                into_submix,
+                descriptor.class,
+                descriptor.automatable(),
+                what,
+            );
+            assert_eq!(into_submix["active"], true, "{what} active into a submix");
+            let into_output = &json["intoOutput"];
+            let under_output = controls::ControlDescriptor {
+                class: output.class,
+                ..*descriptor
+            };
+            assert_class(into_output, output.class, under_output.automatable(), what);
+            assert_eq!(
+                into_output["active"], output.active,
+                "{what} active into the output"
+            );
+        } else {
+            assert_class(json, descriptor.class, descriptor.automatable(), what);
+            assert_eq!(
+                json.get("onSubmix").map(|value| value == false),
+                (!row.on_submix).then_some(true),
+                "{what} onSubmix"
+            );
+        }
+    }
+
+    fn assert_rows(json: &Value, rows: &[TableRow], what: &str) {
+        let json = json
+            .as_array()
+            .unwrap_or_else(|| panic!("{what} is a list"));
+        assert_eq!(json.len(), rows.len(), "{what} row count");
+        for (json, row) in json.iter().zip(rows) {
+            assert_row(json, row, &format!("{what}/{}", row.descriptor.name));
+        }
+    }
+
+    #[test]
+    fn the_controls_object_is_the_row_tables_row_for_row() {
+        let document: Value = serde_json::from_str(&render()).expect("the document is JSON");
+        let controls = &document["controls"];
+        for (key, source) in [
+            ("stripOwn", RowSource::StripOwn),
+            ("builtins", RowSource::Builtins),
+            ("routeOwn", RowSource::RouteOwn),
+            ("vcaOwn", RowSource::VcaOwn),
+            ("sessionOwn", RowSource::SessionOwn),
+        ] {
+            assert_rows(&controls[key], &table_rows(source), key);
+        }
+        // A rate-keyed maximum is emitted for the two filters and for no other row.
+        let rate_keyed: Vec<_> = controls["builtins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["maximum"].is_object())
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(rate_keyed, ["hpf_hz", "lpf_hz"]);
+
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let effects = controls["effects"].as_object().expect("effects by ID");
+        assert_eq!(effects.len(), registry.len(), "one entry per launch effect");
+        for descriptor in registry.descriptors() {
+            let id = descriptor.id.as_str();
+            let rows = effect_table_rows(id).expect("a launch effect has rows");
+            let json = &effects[id];
+            assert_row(&json["bypass"], &rows.bypass, &format!("{id}/bypass"));
+            assert_rows(&json["parameters"], &rows.parameters, id);
+            // Every parameter the effect declares is a row, by its declared machine name.
+            let names: Vec<_> = json["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect();
+            let declared: Vec<_> = descriptor.parameters.iter().map(|p| p.name).collect();
+            assert_eq!(names, declared, "{id} parameter names");
+            match &rows.link_mode {
+                Some(row) => assert_row(&json["linkMode"], row, &format!("{id}/link_mode")),
+                None => assert!(json["linkMode"].is_null(), "{id} has no link-mode row"),
+            }
+        }
+    }
+}
