@@ -536,7 +536,7 @@ five-attempt rule is a hard delivery stop). The issue splits:
   subscribes, held to zero reduction by the `observation-disarmed` gate and to bit-identical audio by
   `observation-identity`), and the contract text (both `.d.ts` twins and the `lib.rs` docs).
 * **The real-browser unsubscribe proof moves to successor S1,** "Qualify observation unsubscribe on a
-  real AudioContext in three browsers" (the number is assigned when root files it). S1 starts from the
+  real AudioContext in three browsers" (#1535, filed by root 2026-10-13). S1 starts from the
   saved patch, which re-adds the gate:
   `/home/bl/misofm/submix-verdicts/b3-acceptance/split/observation-unsubscribe-gate.patch` (the full
   pre-split files are beside it in `split/before/`).
@@ -576,6 +576,27 @@ the `spectrum-query-closed` handler fix in `sdk-response-entry.ts`; the `resume-
 three mutations, which now declare the two SDK clicks only (none without the SDK) and no gate click.
 The `BROWSER_DEPLOYMENT_MATRIX.md` and `generate-matrix.mjs` sentence "requires an unsubscribe to actually stop the
 traffic" now reads "requires a never-armed tap to publish no reduction".
+
+**Acceptance on the split head** (`4858c4c14`; evidence in
+`/home/bl/misofm/submix-verdicts/b3-acceptance/split-head/`, summary in `summary.md`):
+
+* *Job sets.* Every `run:` step of the `lint` (32) and `test-release` (9, loom leg included) jobs of
+  `qualification.yml`, exact commands under `nice -n 10`: 41 of 41 pass.
+* *Artifact and chain.* `build-web-audioworklet.sh --named-twin` as the `artifact` job: wasm sha256
+  `c62037d2201d3723436ee825801aa6517fd50e4438541f642b8904bd9043b90e`, not `e60b505c...`. The earlier
+  artifact was built before `806de000a`, whose 12 added doc-comment lines in `hosts/host-web/src/lib.rs`
+  moved 75 embedded panic-location line numbers by 12 (same size, 75 bytes differ, every difference a
+  line number); no code changed. The named-twin check, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, the scalar-oracle gate, the hermetic
+  `test-web-audioworklet.sh`, the V8 spill gate and the five SDK checks of the `sdk` job all pass.
+* *Browsers, CI command, `--check-matrix --self-test-mutations`.* Unloaded (each run started at 1-minute
+  load below 4, 1.2 to 2.9): chromium 10 of 10, firefox 10 of 10, webkit 10 of 10, zero failures.
+  Leg ii (browser and 4 busy loops on CPUs 0-3, loops started below load 4): chromium 10 of 10 (load
+  3.9 to 5.5), firefox 10 of 10 (3.8 to 7.7), webkit 9 of 10 (2.5 to 8.8). The one failure is WebKit
+  `sdk-spectrum-hop` (`actual browser H1024 did not preserve Worklet metadata, ...`), the signature
+  `main` shows in its leg ii (2 of 40 there). No `observation-unsubscribe` or `browser-execution`
+  failure, and every passing run proved `observation-disarmed` and the three `resume-clicks`
+  mutations red.
 
 **Test value.** `observation-disarmed` defends the claim that a tap nobody armed publishes no
 reduction (a host that folded an unarmed tap into the frame turns it red, and the armed-versus-unarmed
