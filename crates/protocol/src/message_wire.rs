@@ -529,6 +529,125 @@ pub struct ControlAddress {
     pub lane: Option<ParameterChannel>,
 }
 
+impl ControlOwnerKind {
+    /// The wire kind of the control core's owner kind.
+    #[must_use]
+    pub const fn from_controls(kind: controls::OwnerKind) -> Self {
+        match kind {
+            controls::OwnerKind::Session => Self::Session,
+            controls::OwnerKind::Strip => Self::Strip,
+            controls::OwnerKind::Route => Self::Route,
+            controls::OwnerKind::Vca => Self::Vca,
+        }
+    }
+
+    /// The control core's owner kind of this wire kind.
+    #[must_use]
+    pub const fn to_controls(self) -> controls::OwnerKind {
+        match self {
+            Self::Session => controls::OwnerKind::Session,
+            Self::Strip => controls::OwnerKind::Strip,
+            Self::Route => controls::OwnerKind::Route,
+            Self::Vca => controls::OwnerKind::Vca,
+        }
+    }
+}
+
+impl ControlSection {
+    /// The wire section of the control core's section kind.
+    #[must_use]
+    pub const fn from_controls(kind: controls::SectionKind) -> Self {
+        match kind {
+            controls::SectionKind::Inserts => Self::Inserts,
+            controls::SectionKind::Builtins => Self::Builtins,
+            controls::SectionKind::Console => Self::Console,
+            controls::SectionKind::Own => Self::Own,
+        }
+    }
+}
+
+impl ControlAddress {
+    /// The wire address of a control core address, with every text copied by `text` (so a host
+    /// that must not abort on allocation failure passes a fallible copy). The one conversion of
+    /// the kind, section and lane codes: the control list and `SET_CONTROL` both use it.
+    ///
+    /// # Errors
+    ///
+    /// The first error `text` returns.
+    pub fn try_from_controls<E>(
+        address: &controls::ControlAddress,
+        mut text: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<Self, E> {
+        let owner_id = match &address.owner {
+            controls::Owner::Session => None,
+            controls::Owner::Strip(id) | controls::Owner::Route(id) | controls::Owner::Vca(id) => {
+                Some(id)
+            }
+        };
+        let slot_id = match &address.section {
+            controls::Section::Own | controls::Section::Builtins => None,
+            controls::Section::Console(id) | controls::Section::Inserts(id) => Some(id),
+        };
+        Ok(Self {
+            owner_kind: ControlOwnerKind::from_controls(address.owner.kind()),
+            owner_id: owner_id.map(|id| text(id.as_str())).transpose()?,
+            section: ControlSection::from_controls(address.section.kind()),
+            slot_id: slot_id.map(|id| text(id.as_str())).transpose()?,
+            control: Some(address.control),
+            lane: Some(ParameterChannel::from_session(address.lane)),
+        })
+    }
+}
+
+impl From<&controls::ControlAddress> for ControlAddress {
+    fn from(address: &controls::ControlAddress) -> Self {
+        match Self::try_from_controls(address, |text| {
+            Ok::<_, core::convert::Infallible>(text.to_owned())
+        }) {
+            Ok(address) => address,
+            Err(never) => match never {},
+        }
+    }
+}
+
+/// The control core's address of a wire address: refused as `INVALID_FIELD` unless it names one
+/// lane of one control and its owner and slot IDs agree with its kind and section (the rules of
+/// a control row of the list).
+impl TryFrom<&ControlAddress> for controls::ControlAddress {
+    type Error = DecodeError;
+
+    fn try_from(address: &ControlAddress) -> Result<Self, DecodeError> {
+        let id = |text: &Option<String>| {
+            text.as_deref()
+                .map(|text| session::StableId::parse(text).ok_or(DecodeError::InvalidField))
+                .transpose()
+        };
+        let owner = match (address.owner_kind, id(&address.owner_id)?) {
+            (ControlOwnerKind::Session, None) => controls::Owner::Session,
+            (ControlOwnerKind::Strip, Some(id)) => controls::Owner::Strip(id),
+            (ControlOwnerKind::Route, Some(id)) => controls::Owner::Route(id),
+            (ControlOwnerKind::Vca, Some(id)) => controls::Owner::Vca(id),
+            _ => return Err(DecodeError::InvalidField),
+        };
+        let section = match (address.section, id(&address.slot_id)?) {
+            (ControlSection::Own, None) => controls::Section::Own,
+            (ControlSection::Builtins, None) => controls::Section::Builtins,
+            (ControlSection::Console, Some(id)) => controls::Section::Console(id),
+            (ControlSection::Inserts, Some(id)) => controls::Section::Inserts(id),
+            _ => return Err(DecodeError::InvalidField),
+        };
+        let (Some(control), Some(lane)) = (address.control, address.lane) else {
+            return Err(DecodeError::InvalidField);
+        };
+        Ok(Self {
+            owner,
+            section,
+            control,
+            lane: lane.into_session(),
+        })
+    }
+}
+
 /// One row of the control list. A header row opens an owner or a section; a control row is one
 /// value.
 #[derive(Clone, Debug, PartialEq)]
@@ -3247,6 +3366,17 @@ pub(crate) fn write_control_list_page(
 }
 
 fn write_control_address(sink: &mut dyn Sink, address: &ControlAddress) -> Result<(), EncodeError> {
+    sink.nested_spec(control_entry::ADDRESS, &mut |sink| {
+        write_control_address_fields(sink, address)
+    })
+}
+
+/// The fields of one address message, the one encoder of the address: the control list's rows and
+/// the `SET_CONTROL` edit both write it. The caller has validated the address.
+fn write_control_address_fields(
+    sink: &mut dyn Sink,
+    address: &ControlAddress,
+) -> Result<(), EncodeError> {
     let fields = control_address::SPEC.field_count(&[
         (
             control_address::OWNER_ID,
@@ -3262,32 +3392,58 @@ fn write_control_address(sink: &mut dyn Sink, address: &ControlAddress) -> Resul
         ),
         (control_address::LANE, usize::from(address.lane.is_some())),
     ])?;
-    sink.nested_spec(control_entry::ADDRESS, &mut |sink| {
-        sink.message_header(fields)?;
+    sink.message_header(fields)?;
+    write_spec!(
+        sink,
+        control_address::OWNER_KIND,
+        &[address.owner_kind.code()]
+    )?;
+    if let Some(id) = &address.owner_id {
+        write_spec!(sink, control_address::OWNER_ID, id.as_bytes())?;
+    }
+    write_spec!(sink, control_address::SECTION, &[address.section.code()])?;
+    if let Some(id) = &address.slot_id {
+        write_spec!(sink, control_address::SLOT_ID, id.as_bytes())?;
+    }
+    if let Some(control) = address.control {
+        write_spec!(sink, control_address::CONTROL, &control.to_le_bytes())?;
+    }
+    if let Some(lane) = address.lane {
         write_spec!(
             sink,
-            control_address::OWNER_KIND,
-            &[address.owner_kind.code()]
+            control_address::LANE,
+            &[schema::parameter_channel_wire(lane)]
         )?;
-        if let Some(id) = &address.owner_id {
-            write_spec!(sink, control_address::OWNER_ID, id.as_bytes())?;
-        }
-        write_spec!(sink, control_address::SECTION, &[address.section.code()])?;
-        if let Some(id) = &address.slot_id {
-            write_spec!(sink, control_address::SLOT_ID, id.as_bytes())?;
-        }
-        if let Some(control) = address.control {
-            write_spec!(sink, control_address::CONTROL, &control.to_le_bytes())?;
-        }
-        if let Some(lane) = address.lane {
-            write_spec!(
-                sink,
-                control_address::LANE,
-                &[schema::parameter_channel_wire(lane)]
-            )?;
-        }
-        Ok(())
-    })
+    }
+    Ok(())
+}
+
+/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
+/// list's one address encoding, with `control` and `lane` present. An address that breaks the
+/// list's rules is `InvalidField`.
+pub(crate) fn write_set_control_address(
+    sink: &mut dyn Sink,
+    address: &controls::ControlAddress,
+) -> Result<(), EncodeError> {
+    let address = ControlAddress::from(address);
+    if !control_address_is_valid(sink.limits(), &address, ControlRowKind::Control) {
+        return Err(EncodeError::InvalidField);
+    }
+    write_control_address_fields(sink, &address)
+}
+
+/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
+/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
+/// unallocated owner, section or lane code included.
+pub(crate) fn decode_set_control_address(
+    message: Message<'_>,
+) -> Result<controls::ControlAddress, DecodeError> {
+    let limits = message.limits();
+    let address = decode_control_address(limits, message)?;
+    if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
+        return Err(DecodeError::InvalidField);
+    }
+    controls::ControlAddress::try_from(&address)
 }
 
 fn write_control_entry(sink: &mut dyn Sink, entry: &ControlEntry) -> Result<(), EncodeError> {
@@ -3457,13 +3613,13 @@ fn decode_control_list_page(
 }
 
 fn decode_control_address(
-    codec: &ProtocolCodec,
+    limits: crate::ProtocolLimits,
     message: Message<'_>,
 ) -> Result<ControlAddress, DecodeError> {
     let message = message.schema_spec(&control_address::SPEC)?;
     let text = |spec: schema::FieldSpec| {
         optional_spec!(message, spec)?
-            .map(|value| read_string(codec, value).map(str::to_owned))
+            .map(|value| read_string_within(limits, value).map(str::to_owned))
             .transpose()
     };
     Ok(ControlAddress {
@@ -3499,7 +3655,7 @@ fn decode_control_entry(
     let handle = read_u32(one_spec!(message, e::HANDLE)?)?;
     let row_kind = ControlRowKind::from_code(read_u8(one_spec!(message, e::ROW_KIND)?)?)?;
     let address = decode_control_address(
-        codec,
+        limits,
         Message::nested_at_depth(one_spec!(message, e::ADDRESS)?, limits, 2)?,
     )?;
     // A field outside the row's kind is refused, never skipped.
@@ -4599,7 +4755,11 @@ fn decode_backpressure(
 }
 
 fn read_string<'a>(codec: &ProtocolCodec, value: &'a [u8]) -> Result<&'a str, DecodeError> {
-    if value.len() > codec.limits().max_string_bytes {
+    read_string_within(codec.limits(), value)
+}
+
+fn read_string_within(limits: crate::ProtocolLimits, value: &[u8]) -> Result<&str, DecodeError> {
+    if value.len() > limits.max_string_bytes {
         return Err(DecodeError::LimitExceeded);
     }
     core::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)

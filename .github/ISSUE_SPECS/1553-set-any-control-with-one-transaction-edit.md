@@ -172,3 +172,14 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   (an explicit length against another, or against none) is refused at the later edit with the new
   code `control.ramp.conflict` (`ControlError::RampConflict`, path `edits[i]`), before any write;
   equal lengths agree. A per-kind edit is not a control write and keeps its last-edit-decides rule.
+- **D13. One address codec (batch 2 review fold; amends D11).** `SET_CONTROL` writes and reads its
+  address with the control list's own encoder and decoder (`write_control_address_fields`,
+  `decode_control_address` in `message_wire.rs`) and holds it to the list's rules for a control
+  row, so there is one code table and one status: every refusal of an address, an unallocated
+  owner, section or lane code included, is `INVALID_FIELD` (D11 said `INVALID_TLV` for the codes;
+  the registry document always said `INVALID_FIELD`). The conversions between the wire address and
+  `controls::ControlAddress` are `From<&controls::ControlAddress> for protocol::ControlAddress`,
+  `ControlAddress::try_from_controls` (a fallible copy of each ID, for the host-core list builder)
+  and `TryFrom<&protocol::ControlAddress> for controls::ControlAddress`; a test ties the owner,
+  section and lane codes of both sides.
+

@@ -2567,3 +2567,131 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
 fn hex(bytes: &[u8]) -> String {
     engine::hex_lower(bytes)
 }
+
+/// Batch 2 review fold item 4: the control core's owner, section and lane codes are the wire
+/// tables' codes, variant for variant, and the one conversion between the two address types is a
+/// round trip that refuses what a control row cannot be.
+///
+/// Red if either side gains, renumbers or drops a kind without the other (the list would then
+/// carry an address that `SET_CONTROL` reads as another row), or if the conversion invents an
+/// owner or slot ID.
+#[test]
+fn the_control_core_and_the_wire_tables_agree_on_every_code() {
+    let mut core_owners: Vec<u8> = controls::OwnerKind::ALL
+        .map(controls::OwnerKind::code)
+        .to_vec();
+    core_owners.sort_unstable();
+    assert_eq!(core_owners, ControlOwnerKind::CODES);
+    for kind in controls::OwnerKind::ALL {
+        let wire = ControlOwnerKind::from_controls(kind);
+        assert_eq!(wire.code(), kind.code());
+        assert_eq!(wire.to_controls(), kind);
+        assert_eq!(ControlOwnerKind::from_code(kind.code()), Ok(wire));
+    }
+    let mut core_sections: Vec<u8> = controls::SectionKind::ALL
+        .map(controls::SectionKind::code)
+        .to_vec();
+    core_sections.sort_unstable();
+    assert_eq!(core_sections, ControlSection::CODES);
+    for kind in controls::SectionKind::ALL {
+        let wire = ControlSection::from_controls(kind);
+        assert_eq!(wire.code(), kind.code());
+        assert_eq!(ControlSection::from_code(kind.code()), Ok(wire));
+    }
+    for (lane, code) in [
+        (controls::Lane::Left, 1),
+        (controls::Lane::Right, 2),
+        (controls::Lane::Both, 3),
+    ] {
+        assert_eq!(ParameterChannel::from_session(lane) as u8, code);
+        assert_eq!(schema::session_parameter_channel_wire(lane), code);
+    }
+
+    let id = |text: &str| session::StableId::parse(text).expect("stable id");
+    let shapes = [
+        (controls::Owner::Session, controls::Section::Own),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Builtins,
+        ),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Inserts(id("eq")),
+        ),
+        (
+            controls::Owner::Strip(id("vocal")),
+            controls::Section::Console(id("desk")),
+        ),
+        (controls::Owner::Route(id("send")), controls::Section::Own),
+        (controls::Owner::Vca(id("grp")), controls::Section::Own),
+    ];
+    for (owner, section) in shapes {
+        let address = controls::ControlAddress {
+            owner,
+            section,
+            control: 9,
+            lane: controls::Lane::Left,
+        };
+        let wire = ControlAddress::from(&address);
+        assert_eq!(controls::ControlAddress::try_from(&wire), Ok(address));
+    }
+    let wire = ControlAddress {
+        owner_kind: ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section: ControlSection::Builtins,
+        slot_id: None,
+        control: Some(1),
+        lane: Some(ParameterChannel::Both),
+    };
+    assert!(controls::ControlAddress::try_from(&wire).is_ok());
+    for (name, broken) in [
+        (
+            "no control",
+            ControlAddress {
+                control: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "no lane",
+            ControlAddress {
+                lane: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "strip without an ID",
+            ControlAddress {
+                owner_id: None,
+                ..wire.clone()
+            },
+        ),
+        (
+            "builtins with a slot",
+            ControlAddress {
+                slot_id: Some("eq".to_owned()),
+                ..wire.clone()
+            },
+        ),
+        (
+            "inserts without a slot",
+            ControlAddress {
+                section: ControlSection::Inserts,
+                ..wire.clone()
+            },
+        ),
+        (
+            "an ID that is not a stable ID",
+            ControlAddress {
+                owner_id: Some("Not Stable".to_owned()),
+                ..wire.clone()
+            },
+        ),
+    ] {
+        assert_eq!(
+            controls::ControlAddress::try_from(&broken),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+}

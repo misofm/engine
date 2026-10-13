@@ -2086,7 +2086,8 @@ fn set_control_round_trips_every_address_shape_and_ramp() {
 
 /// #1553 D2: the address of a set requires its `control` and `lane`, and breaks the list's rules
 /// when the owner ID or the slot ID is present or absent against its kind or section: each is
-/// refused at decode, and an unallocated owner or section code is `InvalidTlv`.
+/// refused at decode, and an unallocated owner, section or lane code is `InvalidField` too: the
+/// list's one address decoder answers both messages.
 ///
 /// Red if a set decodes an address that names no control, a lane-less address, a strip without an
 /// ID or a builtins section with a slot.
@@ -2160,6 +2161,6 @@ fn set_control_refuses_an_address_that_breaks_its_rules() {
         ("lane 0", parse(2, Some("vocal"), 4, None, Some(5), Some(0))),
         ("lane 4", parse(2, Some("vocal"), 4, None, Some(5), Some(4))),
     ] {
-        assert_eq!(result, Err(DecodeError::InvalidTlv), "{name}");
+        assert_eq!(result, Err(DecodeError::InvalidField), "{name}");
     }
 }

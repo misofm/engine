@@ -1511,95 +1511,16 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
 }
 
 /// The control address of a `SetControl` edit: the control list's address message, in which a set
-/// requires the `control` and the `lane`.
+/// requires the `control` and the `lane`. Its encoder and decoder are the list's (`message_wire`).
 fn tx_control_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
 ) -> Result<(), EncodeError> {
-    use schema::control_address as a;
-    let owner_id = match &address.owner {
-        controls::Owner::Session => None,
-        controls::Owner::Strip(id) | controls::Owner::Route(id) | controls::Owner::Vca(id) => {
-            Some(id)
-        }
-    };
-    let slot_id = match &address.section {
-        controls::Section::Own | controls::Section::Builtins => None,
-        controls::Section::Console(id) | controls::Section::Inserts(id) => Some(id),
-    };
-    tx_start_message(
-        sink,
-        a::SPEC.field_count(&[
-            (a::OWNER_ID, usize::from(owner_id.is_some())),
-            (a::SLOT_ID, usize::from(slot_id.is_some())),
-            (a::CONTROL, 1),
-            (a::LANE, 1),
-        ])?,
-    )?;
-    tx_u8(sink, a::OWNER_KIND, address.owner.kind().code())?;
-    if let Some(id) = owner_id {
-        tx_id(sink, a::OWNER_ID, id)?;
-    }
-    tx_u8(sink, a::SECTION, address.section.code())?;
-    if let Some(id) = slot_id {
-        tx_id(sink, a::SLOT_ID, id)?;
-    }
-    tx_u32(sink, a::CONTROL, address.control)?;
-    tx_u8(
-        sink,
-        a::LANE,
-        schema::session_parameter_channel_wire(address.lane),
-    )
+    crate::message_wire::write_set_control_address(sink, address)
 }
 
 fn parse_control_address(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
-    use controls::{Owner, OwnerKind, Section, SectionKind};
-    use schema::control_address as a;
-    let message = message.schema_spec(&a::SPEC)?;
-    let optional = |spec: FieldSpec| message.optional_one(spec.id, spec.wire.raw());
-    let owner_code = read_u8_exact(one_spec!(message, a::OWNER_KIND)?)?;
-    let owner_kind = OwnerKind::ALL
-        .into_iter()
-        .find(|kind| kind.code() == owner_code)
-        .ok_or(DecodeError::InvalidTlv)?;
-    let owner_id = optional(a::OWNER_ID)?.map(stable_id).transpose()?;
-    let section_code = read_u8_exact(one_spec!(message, a::SECTION)?)?;
-    let section_kind = SectionKind::ALL
-        .into_iter()
-        .find(|kind| kind.code() == section_code)
-        .ok_or(DecodeError::InvalidTlv)?;
-    let slot_id = optional(a::SLOT_ID)?.map(stable_id).transpose()?;
-    // A set names one lane of one control; both are required.
-    let control = optional(a::CONTROL)?
-        .map(read_u32_exact)
-        .transpose()?
-        .ok_or(DecodeError::InvalidField)?;
-    let lane = optional(a::LANE)?
-        .map(|code| schema::session_parameter_channel_from_wire(read_u8_exact(code)?))
-        .transpose()?
-        .ok_or(DecodeError::InvalidField)?;
-    // The owner ID is present exactly for a strip, route or VCA, and the slot ID exactly for the
-    // console and inserts sections; the same rules as the control list's address.
-    let owner = match (owner_kind, owner_id) {
-        (OwnerKind::Session, None) => Owner::Session,
-        (OwnerKind::Strip, Some(id)) => Owner::Strip(id),
-        (OwnerKind::Route, Some(id)) => Owner::Route(id),
-        (OwnerKind::Vca, Some(id)) => Owner::Vca(id),
-        _ => return Err(DecodeError::InvalidField),
-    };
-    let section = match (section_kind, slot_id) {
-        (SectionKind::Own, None) => Section::Own,
-        (SectionKind::Builtins, None) => Section::Builtins,
-        (SectionKind::Console, Some(id)) => Section::Console(id),
-        (SectionKind::Inserts, Some(id)) => Section::Inserts(id),
-        _ => return Err(DecodeError::InvalidField),
-    };
-    Ok(controls::ControlAddress {
-        owner,
-        section,
-        control,
-        lane,
-    })
+    crate::message_wire::decode_set_control_address(message)
 }
 
 fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeError> {

@@ -9,13 +9,13 @@ use effect_contract::{EffectDescriptor, ParameterUnit, StepUnit};
 use protocol::{
     ControlAddress, ControlBody, ControlClass, ControlEntry, ControlFamily, ControlKind,
     ControlListPage, ControlListRequest, ControlOwnerHeader, ControlOwnerHeaderKind,
-    ControlOwnerKind, ControlProvider, ControlRampRow, ControlReason, ControlRouteEnds, ControlRow,
-    ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
-    ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
-    CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterChannel, ParameterHandle, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, SampleTime, TelemetryConfiguration, TelemetryCounters,
-    TransportSetRequest, TransportSnapshot, TransportState,
+    ControlProvider, ControlRampRow, ControlReason, ControlRouteEnds, ControlRow, ControlScope,
+    ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord, ControlTaper,
+    ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue, CountersRequest,
+    Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EnumChoice,
+    ParameterHandle, ParameterProviderError, ParameterUnit as ProtocolUnit, SampleTime,
+    TelemetryConfiguration, TelemetryCounters, TransportSetRequest, TransportSnapshot,
+    TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -715,34 +715,12 @@ fn contract(identity: &EffectIdentity) -> Option<&'static EffectDescriptor> {
         .map(|factory| factory.descriptor())
 }
 
-/// The wire address of a control row's address.
+/// The wire address of a control row's address, from the protocol's one conversion with a
+/// fallible copy of each ID.
 fn wire_address(
     address: &controls::ControlAddress,
 ) -> Result<ControlAddress, SessionControlProviderError> {
-    let (owner_kind, owner_id) = match &address.owner {
-        Owner::Session => (ControlOwnerKind::Session, None),
-        Owner::Strip(id) => (ControlOwnerKind::Strip, Some(id)),
-        Owner::Route(id) => (ControlOwnerKind::Route, Some(id)),
-        Owner::Vca(id) => (ControlOwnerKind::Vca, Some(id)),
-    };
-    let (section, slot_id) = match &address.section {
-        Section::Own => (ControlSection::Own, None),
-        Section::Builtins => (ControlSection::Builtins, None),
-        Section::Console(id) => (ControlSection::Console, Some(id)),
-        Section::Inserts(id) => (ControlSection::Inserts, Some(id)),
-    };
-    Ok(ControlAddress {
-        owner_kind,
-        owner_id: owner_id.map(|id| try_string(id.as_str())).transpose()?,
-        section,
-        slot_id: slot_id.map(|id| try_string(id.as_str())).transpose()?,
-        control: Some(address.control),
-        lane: Some(match address.lane {
-            session::ParameterChannel::Left => ParameterChannel::Left,
-            session::ParameterChannel::Right => ParameterChannel::Right,
-            session::ParameterChannel::Both => ParameterChannel::Both,
-        }),
-    })
+    ControlAddress::try_from_controls(address, try_string)
 }
 
 /// The wire row of one control: its descriptor, with the value left at `0.0`. `effect` is the
@@ -975,6 +953,8 @@ mod tests {
 
     use effect_contract::{AutomationRate, ParameterChannel as PreparedChannel};
     use effect_contract::{ParameterChannelPolicy, ParameterDomain};
+
+    use protocol::{ControlOwnerKind, ParameterChannel};
 
     use super::*;
 

@@ -161,6 +161,12 @@ impl<'a> Fields<'a> {
         Ok(Self::raw(&bytes[8..], count))
     }
 
+    /// The limits this message was validated against; the defaults for an unvalidated test view.
+    pub(crate) fn limits(&self) -> ProtocolLimits {
+        self.validation
+            .map_or_else(ProtocolLimits::default, |(limits, _)| limits)
+    }
+
     pub(crate) fn nested_value(&self, bytes: &'a [u8]) -> Result<Self, DecodeError> {
         match self.validation {
             Some((limits, depth)) => {
