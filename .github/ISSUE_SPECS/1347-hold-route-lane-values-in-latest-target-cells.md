@@ -88,7 +88,7 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
    (`RouteQueueFull`, `COMMAND_REASON_BACKPRESSURE` on a send kind) are deleted with
    `RouteQueueFull`; gate 1 replaces them.
 5. **Realtime and workspace.** `cargo build --locked --release -p audit -p capi &&
-   target/release/audit capi` (all violation counts 0); `cargo run --locked --release -q -p realtime-policy`;
+   target/release/audit capi` (all violation counts 0); `bash scripts/check-realtime-policy.sh`;
    `bash scripts/check-graph-policy.sh`; `bash scripts/check-web-audioworklet.sh`;
    `cargo test --locked -p graph --features test-support`; `cargo test --locked -p host-web
    --features test-support`; `cargo test --locked -p host-core --features

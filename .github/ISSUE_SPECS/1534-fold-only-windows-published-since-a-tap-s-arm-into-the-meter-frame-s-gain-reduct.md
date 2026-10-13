@@ -166,7 +166,7 @@ interval.
      at step 6 only.
 2. **Twins.** `bash scripts/check-sdk-generated.sh` (the two `.d.ts` files are byte-identical).
 3. **Realtime and worklet.** Same commands as `qualification.yml`:
-   - `bash scripts/check-realtime-policy.sh`;
+   - `cargo run --locked --release -q -p realtime-policy`;
    - `bash scripts/build-web-audioworklet.sh --named-twin <empty dir T> <empty dir A>`, then
      `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration A T/miso-engine-v1-audio-worklet.simd128.named.wasm`
      (export set, call graph: no new panic or allocation path from `process()`);

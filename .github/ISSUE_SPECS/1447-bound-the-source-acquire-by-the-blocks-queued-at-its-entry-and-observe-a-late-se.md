@@ -119,7 +119,7 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
     forbidden-body predicate covers it. The optional sanitized-sample helper (below) sits there
     too. Nothing else goes between the acquire and that blank line.
   - The two `let` lines are the count form that the drain rule accepts
-    (the count form of the drain-bound rule of `tools/realtime-policy`; tool slices
+    (`scripts/check-realtime-policy.sh:208-228` on `b8392df66`, `:206-226` on `main`; tool slices
     B1a-D6 and B1a-D8). `rest` never exceeds the blocks left from the first count, so the call
     pops at most `available` blocks.
   - The rewrite is equivalent to today's loop on every block counted at entry: phase 1 is the
@@ -134,7 +134,7 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
   compiles out of release builds.
 - **D4. No region markers here.** Tool slice B2b-1 marks this function (with `settle_block`, D1),
   `observe_seek_at_block_boundary` and `PcmSourceProducer::take_recycled_block`. Write the
-  function so that it passes `cargo run --locked --release -q -p realtime-policy` when it is marked (gate 3).
+  function so that it passes `bash scripts/check-realtime-policy.sh` when it is marked (gate 3).
 - **D5. A producer/render concurrency test** in `crates/source/src/lib.rs`'s `mod tests`, built on
   `bench_support::producer::render_while_producing`. Add `bench-support.workspace = true` to
   `[dev-dependencies]` in `crates/source/Cargo.toml`.
@@ -192,7 +192,7 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
    tune it without root.
 3. **The gate accepts the new shape (PR evidence).** On an export of this change, with markers in
    place of the blank lines around `acquire_current_block` (and, in a second run, around
-   `observe_seek_at_block_boundary`), `cargo run --locked --release -q -p realtime-policy` prints
+   `observe_seek_at_block_boundary`), `bash scripts/check-realtime-policy.sh` prints
    `realtime policy: ok (..)`. Stream J's tool is not on `main` while this issue runs (its batch
    pushes once): B2b-1 marks and checks this function, and B2b-2's gate 3 holds the re-observe red
    if it moves back into the first loop.
@@ -214,7 +214,7 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
      passes with the base's pins (`check-browser-expected-resources.py --artifacts`, the browser
      legs' native-digest gates, `wasm-gates` G5 and G6, the C ABI audit's `pcm_digest`).
 6. `cargo fmt --all -- --check`, `cargo clippy --locked -p source --all-targets -- -D warnings`,
-   `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-workspace-policy.sh` exit 0.
+   `bash scripts/check-realtime-policy.sh` and `bash scripts/check-workspace-policy.sh` exit 0.
 
 *Test value.*
 - D5 is red if the acquire pops a block published after its count, the producer-chase defect of a

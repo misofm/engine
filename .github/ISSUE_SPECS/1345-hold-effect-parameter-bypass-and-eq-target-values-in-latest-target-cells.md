@@ -122,7 +122,7 @@ Superseded values are counted by #1312's `live_values_superseded`.
    (`crates/capi/src/runtime/live_tests.rs:1943`, `:2016`, `:2419`, `:2680`); gate 1 replaces
    them. Rewrite the browser effect-band backpressure assertions the same way.
 7. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
-   (all violation counts 0); `cargo run --locked --release -q -p realtime-policy`;
+   (all violation counts 0); `bash scripts/check-realtime-policy.sh`;
    `bash scripts/check-effect-contract.sh`; `bash scripts/check-web-audioworklet.sh`; the browser
    legs of `qualification.yml`'s `browser` job.
 8. **Workspace.** `cargo test --locked -p effect-contract`; `cargo test --locked -p
@@ -191,13 +191,12 @@ on `6b9067ede`).
   the render path whose body pops a queue holds that pop in its own body, in the counted form that
   the realtime drain rule accepts:
   - the count is read once at entry, `let available = <recv>.available_at_entry()[.min(<cap>)];`
-    (the `map_or(0, <Type>::available_at_entry)` form is withdrawn: root ruling rj3-e, 2026-10-12), and the pop's innermost loop is
+    or the `map_or(0, <Type>::available_at_entry)` form, and the pop's innermost loop is
     `for _ in 0..available` or the `while available != 0 { available -= 1; .. }` form (tool slices
     B1a-D6 and B1a-D8);
   - every loop around it is a finite form (tool slice B1b-D1) that selects a different lane's queue
     on each pass (#1418 Amendment 1, D1), as `for lane in self.lanes.iter_mut()` does;
   - the pop's receiver is the counted receiver (#1426 Amendment 1, D1).
-  - (Pointer, root ruling rj3-e, 2026-10-12.) The `live.rs:366` rewrite to a direct `<recv>.try_pop()` call, and the count to `<recv>.available_at_entry()`, belongs to this issue. Tool slice B2a (#1442, its root Amendment 4) withdraws the `.map(<path>)` pop and the `map_or` count; J's gate 1 refuses exactly `live.rs:366` until J rebases onto this issue.
 
   **The shape (fourth review, MAJOR-5).** #1418's invariance rule lets the selecting loop name the
   lane only in its binding and in the receivers of `available_at_entry` and `try_pop`. So:

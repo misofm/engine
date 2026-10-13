@@ -153,7 +153,7 @@ removed because it cannot change a result.
    of gate 4 pass unchanged. Record in the attempt record the argument of "Context, When the filter
    changes the mask" for this tree, and that `executor.carry_strips` takes a move set only in
    `install_builtin_strip_carry`.
-3. **Realtime.** `bash scripts/check-realtime-policy.sh` passes. The D2 helper is outside every
+3. **Realtime.** `cargo run --locked --release -q -p realtime-policy` passes. The D2 helper is outside every
    marked region; the marked-region count does not change.
 4. **Workspace.**
    - `cargo test --locked -p host-core --all-features --test successor_swap a_fused_strip_move_without_its_other_half_is_refused`

@@ -204,7 +204,7 @@ All anchors are on `main` at `8c0deee2c`.
    - `bash scripts/check-workspace-policy.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
    - No realtime gate: the render path does not change. Run
-     `bash scripts/check-realtime-policy.sh` once to show it.
+     `cargo run --locked --release -q -p realtime-policy` once to show it.
 
 ## Test value
 
