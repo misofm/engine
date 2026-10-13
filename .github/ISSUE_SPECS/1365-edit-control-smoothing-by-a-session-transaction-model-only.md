@@ -120,7 +120,13 @@ ordinary session transaction" holds.
    epoch, no pending plan, render bit-identical to an unedited engine.
 4. **New lengths apply** (same file, new). Set `mute_ms` to 0 by transaction, then mute: the next
    block equals a control booted muted, so the step is in effect. Set it to 20 and unmute: the
-   first block after the commit is ramping.
+   first block after the commit is ramping. Rebuild leg (batch verdict 2, m1): one transaction
+   that sets `control_smoothing` to the hard switch, rebuilds the plan with a content edit and
+   retargets the carried strips (a mute on the even tracks, a fader level on the odd ones, a matrix on
+   the last) renders bit-identically to the same transaction on a session that already says hard
+   switch, differs from the same rebuild under the default table, and allocates nothing in any
+   render call after the swap. The test is `a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild`
+   (`crates/capi/src/runtime/live_tests.rs`).
 5. **Classifier** (`crates/host-core/tests/live_delta.rs`, new). A delta that changes only
    `control_smoothing` is `Ok` with no records. One that also moves a fader carries the new
    length on its `FaderDb` record.
@@ -148,6 +154,10 @@ ordinary session transaction" holds.
 - Gate 3 turns red if the mask misses the key, so the edit rebuilds and resets the source rings.
 - Gate 4 turns red if `LiveRamps` is read from the pre-commit model, so the edit takes effect one
   transaction late.
+- Gate 4's rebuild leg (batch verdict 2, m1) turns red if the successor's carry retargets are built
+  from the pre-commit model's lengths (`LiveRamps::for_session(committed)` in `join_strips`, so a
+  rebuild transaction's own `control_smoothing` takes effect one transaction late). The other gate 4
+  tests commit live and never rebuild, and the host-core join tests pass the lengths in.
 - Gate 5 turns red if the classifier treats a set, a change or a clear of the key as structure, or
   if it does not forward the ramps it is given to its records. It cannot see a caller that builds
   those ramps from the pre-commit model, because `classify_live_delta` takes them as an argument;
@@ -229,6 +239,8 @@ gate 4's same-transaction row, which runs through the C ABI.
 | M3 | delete `masked.control_smoothing = current.control_smoothing` in `classify_live_delta` | gate 3 (`model_only_edits_commit_without_a_plan_rebuild`), gate 4 (both tests, the edit rebuilds) and gate 5 (both host-core tests) red |
 | M4 | `commit_live` builds `LiveRamps::for_session` from the pre-commit model | gate 4 red: `a_control_smoothing_edit_makes_the_next_mute_a_step` fails in its "in the mute's transaction" row (block 0 is not the muted control), and `a_control_smoothing_edit_gives_the_next_unmute_its_ramp` fails (the unmute steps) |
 
+| M5 | `join_strips` builds `LiveRamps::for_session(committed)` instead of `for_session(model)` (`crates/host-core/src/prepare.rs`, batch verdict 2, m1) | gate 4's rebuild leg red: `a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild` fails at "the transaction's own lengths govern its rebuild's retargets". It is the only failing test: `cargo test -p capi --no-fail-fast` (87 tests, every binary), `-p host-core` and `-p control-plane` otherwise pass. Reverted: green |
+
 Every mutated file was restored from a copy and the tree was clean afterwards (`git status` showed only the
 intended files); the full suites below ran after the last revert.
 
@@ -264,9 +276,9 @@ table is `SessionRamps` (`LiveRamps::for_session` plus one pan window per strip)
 has no session transaction and no committed model (this spec's non-goal; #1309). A new boot builds a
 fresh `SessionRamps`. The issue that adds the first browser path to commit a model-only edit is
 *Admit browser live edits in the Worker through the committed model* (#1382, after #1309). It must
-drop `SessionRamps` (the classifier resolves an absent length with `LiveRamps::resolve` over the
-committed model, #1394 D5) or refresh it on every model-only commit, and it must add a test that goes
-red without that. Until then a cached table cannot go stale.
+drop `SessionRamps` (D6 as ruled 2026-10-12: the classifier resolves an absent length with
+`LiveRamps::resolve` over the committed model, #1394 D5), and it must add a test that goes red
+without that. The earlier option to refresh it on every model-only commit is superseded. Until then a cached table cannot go stale.
 
 **Batch follow-ups** (stream E2 batch, after the PASS verdict
 `docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1365-attempt1.md`).
@@ -423,3 +435,25 @@ realtime-policy`; `scripts/check-workspace-policy.sh`; the `test-debug-a` leg (1
 (`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`); `check-sdk-generated.sh`,
 `check-sdk-types.sh` and `check-sdk-headless.sh`.
+
+### Batch verdict 2 follow-ups (stream E2 batch, rebased tree)
+
+Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
+
+- *m1, the rebuild leg of gate 4.* The claim that a `control_smoothing` edit in a rebuild transaction governs its
+  retargets (`live_delta.rs`, `docs/C_ABI_V1_QUALIFICATION.md`, the port note above) had no test: the mutant
+  `for_session(committed)` in `join_strips` survived every suite. `a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild`
+  (`crates/capi/src/runtime/live_tests.rs`, beside the other gate 4 tests) applies one transaction
+  `[SetControlSmoothing(hard switch), content edit, mute on the even tracks, fader level on the odd ones, a matrix on the
+  last]` to the default session and compares six rebuilt blocks, bit for bit, with the same transaction without the
+  length edit on a session booted on the hard switch; it also asserts a difference from the default table, so the
+  comparison is not vacuous, and counts allocations and frees in each of the six render calls (0). Test value:
+  red if the successor's carry retargets read the pre-commit model's lengths; no existing test catches it.
+  Mutation M5 above: red, and the only red test; reverted: green. `capi_retained_bytes` is unchanged at 282,303 of
+  282,432 (a test adds no retained bytes).
+- *n9, the stale option.* The Amendment 1 note named "drop `SessionRamps` or refresh it on every model-only commit".
+  #1382 D6, as ruled 2026-10-12, drops it; the note now says so and marks the refresh option superseded.
+
+Gates: `cargo fmt --all -- --check`; clippy `--workspace --all-targets --all-features -D warnings`; `-p capi` (87 in
+the lib); `audit capi` (0 allocations, 0 syscalls, `pcm_digest` 76525e7ef9e78cf4, as before). The rest of the gate
+list is in #1364's record of the same name.

@@ -966,6 +966,126 @@ fn a_rebuilds_carried_strip_retargets_over_its_edits_own_ramp() {
     );
 }
 
+/// Gate 4 (#1365), the rebuild leg ("batch verdict 2, m1"): one transaction changes
+/// `control_smoothing`, rebuilds the plan with a content edit and retargets the carried strips: a
+/// mute on the even tracks, a fader level on the odd ones, a matrix on the last. Three blocks and
+/// one more run first; the swap, a seek, and six blocks follow, with no allocation or free in any
+/// of them. `smoothing` is either put into that transaction (the session booted on the default
+/// table) or already in the document (the same transaction without the edit).
+fn control_smoothing_rebuild_run(
+    smoothing: ControlSmoothing,
+    in_transaction: bool,
+) -> Vec<Vec<f32>> {
+    let base = long_session(10, 48_000);
+    let document = if in_transaction {
+        base
+    } else {
+        long_session_with(10, 48_000, Some(smoothing))
+    };
+    let mut rig = Rig::new(&document);
+    let model = parse_session_json(&document).expect("model");
+    for _ in 0..4 {
+        rig.step();
+    }
+    let mut edits = Vec::new();
+    if in_transaction {
+        edits.push(SessionEdit::SetControlSmoothing {
+            control_smoothing: Some(smoothing),
+        });
+    }
+    edits.push(content_edit(&model));
+    let last = model.tracks.len() - 1;
+    for (index, track) in model.tracks.iter().enumerate() {
+        let id = track.id.as_str();
+        if index % 2 == 0 {
+            edits.push(fader_edit(
+                id,
+                DualMonoFader {
+                    left_mute: true,
+                    right_mute: true,
+                    ..track.fader.clone()
+                },
+            ));
+        } else {
+            edits.push(fader_edit(
+                id,
+                DualMonoFader {
+                    left_db: -6.0,
+                    right_db: 3.0,
+                    ..track.fader.clone()
+                },
+            ));
+        }
+    }
+    edits.push(SessionEdit::SetTrackMatrixOrPan {
+        track_id: model.tracks[last].id.clone(),
+        matrix_or_pan: MatrixOrPan::Matrix {
+            ll: 0.75,
+            lr: 0.125,
+            rl: -0.25,
+            rr: 0.5,
+            smoothing_samples: 0,
+        },
+        ramp_samples: None,
+    });
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 1, "a content edit prepares a candidate");
+    rig.render();
+    rig.seek_to_start();
+    let rebuilt = (0..6)
+        .map(|block| {
+            let (pcm, used) = rig.step_counted();
+            assert_eq!(
+                (used.allocations, used.deallocations),
+                (0, 0),
+                "rebuilt block {block} allocated or freed"
+            );
+            pcm
+        })
+        .collect();
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(rig.plan),
+        (1, 0),
+        "the swap carried the input sections, so a fresh compile is no oracle"
+    );
+    rebuilt
+}
+
+/// Gate 4 (#1365), the rebuild leg ("batch verdict 2, m1"): a transaction that changes
+/// `control_smoothing` and rebuilds the plan retargets its carried strips (mute, fader level and
+/// matrix) over that transaction's new lengths. Putting the hard switch into the rebuilding
+/// transaction sounds exactly like the same transaction on a session that already says hard switch,
+/// and not like the same rebuild under the default table.
+///
+/// Test value: red if the successor's carry retargets are built from the pre-commit model's
+/// lengths (`LiveRamps::for_session(committed)` in `join_strips`), so a rebuild transaction's own
+/// `control_smoothing` takes effect one transaction late. Gate 4's other tests commit live and
+/// never rebuild, and the join tests in host-core pass the lengths in.
+#[test]
+fn a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild() {
+    bench_support::alloc::assert_installed();
+    let blocks = |run: Vec<Vec<f32>>| run.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>();
+    let hard = HARD_SWITCH.expect("the hard switch");
+    let in_transaction = blocks(control_smoothing_rebuild_run(hard, true));
+    let in_document = blocks(control_smoothing_rebuild_run(hard, false));
+    assert_eq!(
+        in_transaction, in_document,
+        "the transaction's own lengths govern its rebuild's retargets"
+    );
+    let default_table = blocks(control_smoothing_rebuild_run(
+        ControlSmoothing {
+            mute_ms: 10.0,
+            fader_ms: 20.0,
+            pan_ms: 20.0,
+        },
+        true,
+    ));
+    assert_ne!(
+        in_transaction, default_table,
+        "the default table ramps those retargets, so the comparison is not vacuous"
+    );
+}
+
 fn left_db_edit(track_id: &str, left_db: f32) -> SessionEdit {
     fader_edit(
         track_id,
