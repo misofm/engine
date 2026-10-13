@@ -1,0 +1,154 @@
+# Subscribe and read observations through the core's frames in the browser and the SDK
+
+Slice S27a of decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`, design points C1,
+C9 and C13). Split from the planner's S27: this slice moves the browser and the SDK onto the core's
+`Observe` edit and `OBSERVATION_READ`; #1590 deletes what is left of the browser's own observation
+path and the SDK's own sharing. Code anchors verified on `main` `df585e503`. Feature sprint mode
+(owner, 2026-10-13): one implementer, normal tests, a batch review; no per-attempt verifier or
+mutation runs.
+
+## Product outcome
+
+A browser or headless app subscribes to observation taps exactly as a C ABI app does: the SDK
+sends `Observe` edits in a `SESSION_TRANSACTION_APPLY` frame and reads with `OBSERVATION_READ`,
+both through the core's command entry. A subscription survives plan rebuilds in the browser too.
+`ObservationSubscription.armed()` resolves with the sample at which every selection of the
+subscription is in effect, from the arm tag that render published. The browser's command kinds 7
+and 8 and its last command export are gone.
+
+## Context
+
+- **The SDK's path today.** `ObservationSubscriptionOwner` (`sdk/src/core/observation-subscriptions.ts:471`)
+  builds kind-7/8 lane edits (`#edit`, `:866-879`, through `EffectEdits.observe`,
+  `sdk/src/core/live-controls.ts:989`) and submits them (`#submit`, `:881`); it reads through
+  `ObservationSubscriptionTransport.readObservations` (`:141-160`), which the browser serves
+  through the worklet's read (`sdk/src/browser/engine.ts:607-630`;
+  `hosts/host-web/web/miso-engine-v1-audio-worklet.js:1125`) and the headless engine through the
+  module's read export (`sdk/src/core/boundary.ts:706`). Receipts carry `appliedAtSample`
+  (`observation-subscriptions.ts:107`, `:118`) from the command report.
+- **What #1565 leaves.** Kinds 7 and 8 (`hosts/host-web/src/lib.rs:861`, `:863`) are the only
+  command kinds; `admit_commands_staged` keeps only the observation path; the export
+  `miso_engine_web_v1_command_submit` (`hosts/host-web/src/ffi.rs:4015`) runs them on the worklet
+  thread; the staging is allocated only with observation taps (#1565 D4).
+- **The core path.** #1584 (`Observe` edit, the binding table, capacity on every plan, and its D7a:
+  the browser refuses `Observe` with `observation.unavailable` until this slice), #1585 (arm state in the slot, arm tags in the reply),
+  #1586 (`OBSERVATION_READ`, `ObservationIndex`, read-only observers). #1562 D1 gives the browser
+  one command entry (`miso_engine_web_v1_control_*` and the internal `control` port message), and
+  #1563 gives the SDK the frame codec (`sdk/src/core/control-frame.ts`).
+- **The settle rules.** The #1057 design note, section 8.4, "How `armed()` settles"
+  (`docs/handoffs/one-edit-api/1057-design-note.md:1457`).
+- **Browser qualification.** *Qualify the browser observation wait against the real AudioWorklet
+  in three browsers* (#1530) and *Qualify observation unsubscribe on a real AudioContext in three
+  browsers* (#1535) add real-browser gates on today's path.
+
+## Decisions frozen for this slice
+
+- **D1. The browser's control half owns observation.** The browser's preparer keeps every plan's
+  effect observation handles: the acknowledging readers go with the render half to #1582's meter
+  fold, and the control half's `SessionState` builds #1586's `ObservationIndex` from observers.
+  Every browser plan carries observation capacity for every declared tap (#1584 D7). The browser's
+  control half sets `ProviderFeatures::observation` (#1584 D7a) and capability bit 15 (#1586), so
+  it accepts `Observe` and serves `OBSERVATION_READ`.
+- **D2. Kinds 7 and 8 go.** `COMMAND_OBSERVE_SUBSCRIBE`, `COMMAND_OBSERVE_UNSUBSCRIBE`, what is
+  left of `admit_commands_staged`, `into_observe_record`, the command staging buffer
+  (`BUFFER_COMMAND`; the value 6 is never reused), `miso_engine_web_v1_command_submit`, `miso_engine_web_v1_command_report_ptr`,
+  `WebCommandReport` and every `COMMAND_*` and `COMMAND_REASON_*` constant are deleted, with their
+  rows in `tools/parameter-metadata/src/abi_layout.rs`, `tools/realtime-policy/render-thread-exports.json`,
+  `scripts/check-web-audioworklet.sh` (the `command_submit` allocation leg), the shipped host's
+  `.d.ts` twins and `scripts/test-web-audioworklet.mjs`. One producer now writes each observation
+  queue: the control half.
+- **D3. The SDK sends frames.** `ObservationSubscriptionTransport` becomes
+  `{ apply(edits: readonly ObserveEdit[]): Promise<ObserveApplyReply>; read(selections):
+  Promise<ObservationReadPage>; ... }`, implemented by the browser engine over the `control`
+  message and by the headless engine over the module's control entry, both with #1563's codec.
+  `ObserveEdit` addresses by strip ID and console slot or insert ID (never an index). The reply
+  gives `observe_arm_tags` and `removed_arm_tags` (#1585 D5). Every typed refusal becomes a
+  `MisoEngineError` whose diagnostic is the core's code; `observation.backpressure` keeps today's
+  retry rule (the browser waits for one render up to `requestDeadlineMs`; headless throws at once).
+- **D4. `armed()` replaces `appliedAtSample`.** `ObservationSubscription` and its receipt lose
+  `appliedAtSample` and gain `armed(): Promise<bigint>`, which settles once, by section 8.4's
+  rules: it resolves when, for every selection, a read reports the binding's tag armed, with the
+  largest of their arm samples; it rejects with `wrongState` and `sdk.observation.closed` on close
+  first, `sdk.engine.disposed` on disposal, `sdk.observation.owner_removed` when a reply lists the
+  binding's tag as removed, and with `internal` and `sdk.observation.superseded` when a read shows
+  a newer tag on a pending binding. `readLatest()` and the notifications read rows from
+  `OBSERVATION_READ` (its `arm_tag`, `arm_sample` and window fields).
+- **D5. The sharing stays in the SDK for now.** The owner still counts references per tap and
+  window, so each SDK binding holds exactly one core reference. #1590 deletes it.
+- **D6. The parity script.** `hosts/host-web/tests/protocol_cross_host.rs` (#1570) gains one
+  `Observe` arm, two render blocks and one `OBSERVATION_READ`; both legs return byte-identical
+  frames.
+
+## Deliverables
+
+1. D1 in the browser preparer and `hosts/host-web/src/lib.rs`; D2 in host-web, the worklet
+   scripts, the checkers and the generated mirrors.
+2. D3-D5 in `sdk/src/core/observation-subscriptions.ts`, `sdk/src/core/observation.ts`,
+   `sdk/src/browser/engine.ts`, `sdk/src/headless/engine.ts`, `sdk/src/core/boundary.ts`.
+3. D6; the SDK evals; the host-web tests that used kinds 7 and 8, each rewritten to send `Observe`
+   through #1562's entry and keep its claim, or deleted because a core test holds the claim (the
+   PR lists each one).
+
+## Authorized paths
+
+- `hosts/host-web/src/{lib.rs,ffi.rs,tests.rs}`, `hosts/host-web/web/*.js`,
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `hosts/host-web/tests/protocol_cross_host.rs`,
+  `hosts/host-web/qualification/{qualification.js,run.mjs}`.
+- `crates/control-plane/src/control.rs` and the browser's provider features (D1).
+- `tools/parameter-metadata/src/abi_layout.rs`, `tools/parameter-metadata/tests/abi_layout.rs`,
+  `tools/realtime-policy/render-thread-exports.json`, `scripts/check-web-audioworklet.sh`,
+  `scripts/check-abi-layout-v1.py` and its self-test fixture, `scripts/test-web-audioworklet.mjs`.
+- `sdk/src/**` (observation files, the two engines, `boundary.ts`, generated files by regeneration
+  only), `sdk/test/{observation-evals.mjs,observation-subscription-evals.mjs,browser-evals.mjs,headless-path-evals.mjs}`,
+  `sdk/assets/miso-engine-v1-abi-layout.json` (regenerated).
+
+## Non-goals
+
+- No deletion of the observation map and read exports or of the `Web*Observation*` records
+  (#1590). No change to the meter lease or the meter frame.
+- No new browser export.
+
+## Objective gates
+
+Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked -p control-plane --features test-support`,
+`cargo run --locked --release -q -p realtime-policy`, #1534 gate 3's worklet commands,
+`bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh <artifacts>`,
+`bash scripts/check-sdk-generated.sh <artifacts>`, `python3 -B scripts/check-sdk-deletions.py`,
+`bash scripts/sdk-package.sh check <artifacts>`, and the browser qualification run of #1530 and
+#1535 on Chromium, Firefox and WebKit.
+
+1. **Same frames on both hosts.** D6's step is byte-identical on the two legs.
+2. **armed().** On the headless engine: `subscribe` returns before any render; `armed()` stays
+   pending until a render applies the arm, then resolves with the arm sample the read reports. Close
+   before that rejects `sdk.observation.closed`; removing the effect in a transaction rejects
+   `sdk.observation.owner_removed`.
+3. **Rebuilds keep subscriptions in the browser.** A subscribed compressor tap keeps reporting after
+   a structural transaction that adds a track (the windows continue), on the headless engine and in
+   the browser evals.
+4. **Old kinds refused.** A command record with kind 7 or 8 cannot be submitted: the export is gone
+   from the shipped module's export set (`check-web-audioworklet.sh`'s exact list).
+5. **Real browsers.** #1530's observation-wait gate and #1535's unsubscribe gate pass on the new
+   path in three browsers.
+6. **Realtime.** The worklet's render-locked allocation count stays exactly zero over the
+   qualification runs.
+
+## Test value
+
+- Gate 1 turns red if the browser and the C ABI answer the same subscription differently.
+- Gate 2 turns red if `armed()` resolves before render applied the arm or on another arm's tag.
+- Gate 3 turns red if the browser still drops subscriptions at a rebuild.
+- Gate 4 turns red if a second producer can still write an observation queue.
+- Gate 5 turns red if the frame path regresses the real-context wait or unsubscribe.
+- Gate 6 turns red if the switch adds an allocation to the audio thread.
+
+## Dependencies
+
+- #1584, #1585, #1586; #1562 (the command entry), #1565 (kinds 7 and 8 left alone), #1563 (the
+  frame codec), #1570 (the parity script).
+- #1530 and #1535 (their gates exist first; this slice keeps them green).
+- `hosts/host-web/src/lib.rs` is stream H's file; `sdk/src/browser/engine.ts` follows `STREAMS.md`
+  row 104. This slice rebases after them.
+
+## Supersedes and shrinks
+
+- None.

@@ -93,13 +93,9 @@ changed or added owners start fresh.
   `S` (D15-8 (round-5 amendment)). D2's section runs in that adoption block, as at any swap, so its
   observers carry with no overlapping window and nothing published twice. This slice adds no other
   mode.
-- **D5. Both hosts.** Everything is in engine (the record type and accessor only), host-core,
-  graph, rack, builtins and effect-contract.
-  - The browser's readers live in its plan's host attachment. #1381 D3 calls D3's pairing
-    functions from the attachment hook in the swap block, so the browser has no other carry code.
-    *Replace the running browser session in the Rust host* (#1290) gates the result: the browser's
-    `meter_generation` does not advance across a structural apply that carries every meter.
-  - The C ABI has nothing to carry (Context).
+- **D5. Both hosts.** Everything is in engine (the record type and accessor only), host-core, graph, rack, builtins and effect-contract.
+  - The browser's readers live in its plan's host attachment. #1381 D3 calls D3's pairing functions from the attachment hook in the swap block, so the browser has no other carry code. *Replace the running browser session in the Rust host* (#1290) gates the result: the browser's `meter_generation` does not advance across a structural apply that carries every meter.
+  - **Decision 17 amendment (2026-10-13).** The C ABI now has state to carry: since #1581 every C ABI plan holds one strip meter per strip, and since #1584 its effects' observation taps. Its readers live on the control thread, so #1587 calls D3's two pairing functions there, when the control plane promotes the adopted plan. This issue adds no C ABI code; its gates stay as written.
 - **D6. A fresh meter joins the carried window grid.** A host that folds meters as one group
   needs every meter's windows to match: the browser requires equal `window_sequence`,
   `start_sample`, `end_sample` and `frames` across the group (`hosts/host-web/src/lib.rs:3485-3500`).

@@ -50,7 +50,7 @@ toggles, the browser and the C ABI render the same bits.
   non-zero word, the `SESSION_DEFAULT_RAMP` sentinel included, is `MALFORMED`. The SDK's `bypass`
   keeps writing 0 and gains no ramp option.
 - **D3. Where admission lives.** If *Admit browser live edits in the Worker through the committed
-  model* (#1382) has merged when this lands, the bypass command lowers to `SetEffectBypass` and
+  model* (#1562) has merged when this lands, the bypass command lowers to `SetEffectBypass` and
   the shared classifier's #1341 producer already fills the length. This slice then changes no
   admission code and delivers D4 and the gates. Otherwise D1 goes in `into_effect_records`.
 - **D4. Docs.** `COMMAND_EFFECT_BYPASS`, the shipped-host `EffectBypass` kind and the SDK's
@@ -131,3 +131,5 @@ toggles, the browser and the C ABI render the same bits.
 - *Crossfade the bypass switch over the session ramp* (#1341).
 - *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364): the
   `LiveRamps` host-web keeps, and the parity test this slice extends.
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1563. The SDK's `bypass` becomes a `SET_CONTROL` on the effect section's control `0`, which the core crossfades on both hosts (#1341). `COMMAND_EFFECT_BYPASS` is deleted by #1565. Order note: if #1341 lands before #1563, the cross-host parity test (#1560) shows the browser's step against the C ABI's crossfade; root orders #1341 accordingly.

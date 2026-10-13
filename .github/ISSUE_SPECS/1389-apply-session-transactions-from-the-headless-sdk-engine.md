@@ -134,7 +134,7 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
 - *Diff a replacement document against the committed model and export replace from the browser
   engine module* (#1386).
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
-- *Admit browser live edits in the Worker through the committed model* (#1382).
+- *Admit browser live edits in the Worker through the committed model* (#1562).
 - *Build and encode session transactions in the SDK* (#1383).
 - *Encode the session, submix, output, route, automation and VCA edits in the SDK* (#1385).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).

@@ -253,7 +253,6 @@ and SDK are the rewritten slices #1293-#1297.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
-- *Admit browser live edits in the Worker through the committed model* (#1382).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Publish the applied-revision watermark in the browser status* (#1349).
 - *Give every browser plan live strip fader and mute lanes* (#1326): the transitions on the
@@ -264,3 +263,5 @@ and SDK are the rewritten slices #1293-#1297.
 - *Move browser source submission and seeks into the Worker* (#1387): the producers' owner.
 - *Prepare every browser preparation branch concurrently, as a successor too, in host-core* (#1401).
 - *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).
+
+#1382 removed from the dependencies by decision 17 (root, 2026-10-13): #1562 (formerly #1382, amended) depends on this issue's rebuild arm.

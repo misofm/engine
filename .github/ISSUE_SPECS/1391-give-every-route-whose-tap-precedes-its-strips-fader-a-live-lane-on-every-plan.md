@@ -165,3 +165,5 @@ its master already does not fold.
 - *Give every browser plan live strip fader and mute lanes* (#1326).
 - Followed by *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) and
   *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325).
+
+**Decision 17 amendment (2026-10-13).** The live-edit half becomes a class rule: this issue flips the rows of an output route whose tap precedes the fader from `RebuildOnly(Optimisation)` to `Live` in `controls`, and #1557's route lowering serves them. Its D2 becomes "the lane is attached when the route's rows are live" (`controls::live_lanes`, #1555; `control_queue_depth` is deleted). Its render lane work (the per-route attach and the kept fold) stays here.

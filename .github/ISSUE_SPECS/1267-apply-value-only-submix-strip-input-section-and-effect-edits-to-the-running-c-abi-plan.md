@@ -133,3 +133,5 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+**Decision 17 amendment (2026-10-13).** Superseded: the effect half by #1554 (the effect family on every strip) and the input half by #1556 (the strip-input family on every strip). Close as superseded when #1556 merges.

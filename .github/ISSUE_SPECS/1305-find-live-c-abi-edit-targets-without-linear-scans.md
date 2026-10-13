@@ -184,3 +184,5 @@ transaction; that is out of scope here.
 - No allocation, lock or unbounded work enters the render thread; this issue changes none of it.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1554 (each changed owner is lowered once and no unchanged owner is visited; effect producers are found by `partition_point`) and #1552 (the catalog's `parameter_handle` scan is deleted; values refresh from the committed model). Close as superseded when #1554 merges.

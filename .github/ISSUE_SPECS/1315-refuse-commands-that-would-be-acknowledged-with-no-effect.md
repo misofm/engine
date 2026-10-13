@@ -142,3 +142,5 @@ advertises command `0x0006` (`crates/protocol/src/message_wire.rs:3496`, `:3512`
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for D3's path.
+
+**Decision 17 amendment (2026-10-13).** Which values stored automation may target is decided by each control row's computed `automatable` (#1566); `BUILTIN_AUTOMATION_TARGETS` and `effect_automation_diagnostics` are deleted. `AUTOMATION_ENQUEUE` addresses by a table of control addresses (#1567), and this issue's refusal of the command (D1-D3) stays until automation renders.

@@ -51,8 +51,7 @@ counter the C ABI does not serve is refused with a type.
 - **D2. Typed refusal of unserved counters.** `ControlProvider::telemetry_configure` returns
   `Result<TelemetryConfiguration, ParameterProviderError>`. A configuration naming a counter ID
   outside the served set is `ParameterProviderError::NotFound`, which the controller answers with
-  `StatusCode::NotFound`; the stored configuration does not change. Meter handles use the same
-  path in #1352.
+  `StatusCode::NotFound`; the stored configuration does not change. Meter tables use the same path in #1583 (decision 17 amendment, 2026-10-13), which supersedes #1352 and adds `ParameterProviderError::InvalidField` for a meter period that is not a multiple of the plan's meter window.
 - **D3. Own values, refreshed by the service step.**
   - #1348 D1 has landed the refresh. `SessionState::service` runs `refresh_provider_counters`
     before `collect_render_activity` (`crates/control-plane/src/control.rs:1028`) and again after

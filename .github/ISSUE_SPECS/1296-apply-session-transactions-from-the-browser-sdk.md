@@ -39,7 +39,7 @@ committed session.
   (`session_wire.rs:74`).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332) adds
   `engine.instanceMode` (`"worker" | "single"`). *Admit browser live edits in the Worker through the
-  committed model* (#1382) commits every live edit to the committed model, so live edits advance
+  committed model* (#1562) commits every live edit to the committed model, so live edits advance
   the committed revision too. The watermark reaches the page through *Publish the applied-revision
   watermark in the browser status* (#1349) and #1294's `watermark` event.
 - The document diff behind `replaceSession` runs in Rust in the control half: *Diff a replacement
@@ -71,7 +71,7 @@ committed session.
     engine is disposed. While the AudioContext is suspended it stays pending: the warm-successor
     deadline counts render samples (D15-17).
   `SessionTransaction` and its builder come from #1383. `revision` follows every committed reply,
-  from `apply`, `replaceSession` and live edits (#1382).
+  from `apply`, `replaceSession` and live edits (#1562).
 - **D2. No validation pass outside the control plane.** The browser engine does not scratch-boot an
   edit: the control plane validates and prepares off the audio thread (D15-10). A sample rate or
   quantum change is refused by the engine with its typed result.
@@ -172,7 +172,7 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
 - *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325).
 - *Give every browser plan live strip fader and mute lanes* (#1326).
 - *Build and encode session transactions in the SDK* (#1383).
-- *Admit browser live edits in the Worker through the committed model* (#1382).
+- *Admit browser live edits in the Worker through the committed model* (#1562).
 - *Publish the applied-revision watermark in the browser status* (#1349).
 
 Dependent: *Apply session transactions from the headless SDK engine* (#1389).

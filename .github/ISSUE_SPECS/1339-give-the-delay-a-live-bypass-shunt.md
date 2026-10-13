@@ -229,3 +229,5 @@ the lift is heard with the tail already in place.
 - The final deletion of `lowers_session_bypass`, `PREPARED_BYPASS_EFFECTS`'s last entry and
   `LiveRebuild::PreparedBypass` is in *Give the multiband compressor a live bypass shunt* (#1340),
   which lands after this one.
+
+**Decision 17 amendment (2026-10-13).** The delay's bypass is the control row at control `0` of its effect section, `RebuildOnly(RuledLiveNotBuilt { issue: 1339 })` (#1549), so lifting it is a rebuild on the C ABI (#1554). Last step of this issue: flip that row to `Live`; no protocol or host code.

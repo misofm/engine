@@ -168,3 +168,5 @@ preparation tests now guard the shared domain.
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+**Decision 17 amendment (2026-10-13).** The declared fader domain is the `fader_db` row of `BUILTIN_PARAMETER_DESCRIPTORS`, which `controls::check` reads (#1546). This issue's scope, the two preparation copies in `prepare_sections` and `gain_path`, is unchanged. Its non-goal that host-web's admission keeps its own literal is overridden: #1548 replaces those literals with `controls::check`.

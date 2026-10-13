@@ -152,3 +152,5 @@ Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
 - *n6.* A1.1's test-value sentence now states only what A1.1 catches: a non-canonical encoding of the three values. It
   names field 1 written for `null` and `-0` written as `+0` as cases it does not catch (decode then re-encode writes the
   same bytes); A1.2's `null` case catches the first.
+
+**Decision 17 amendment (2026-10-13).** #1561 retires `SetControlSmoothing` (`0x0008`), `SetRouteChannelMatrix`, `SetRouteGainDb`, `SetRouteMute`, `SetRouteFollowsMute` (`0x0504`-`0x0507`) and `SetVcaFader` (`0x0702`); their values are `SET_CONTROL` edits. This issue encodes only the remaining structural ops. The stored automation target is a control address (#1566).

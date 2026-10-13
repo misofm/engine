@@ -8,7 +8,7 @@ the worklet only renders. The rest of D15-10 is split into ordered slices: the p
 *Ship the browser module with one imported shared memory at every instantiation site* (#1380), and
 the successors, in order: *Move browser source submission and seeks into the Worker* (#1387),
 *Swap and retire browser plans through the Worker's service loop* (#1381) and *Admit browser live
-edits in the Worker through the committed model* (#1382).
+edits in the Worker through the committed model* (#1562).
 
 ## Product outcome
 
@@ -169,7 +169,7 @@ mode, how many control allocations ran in the worklet.
     - a control-plane-to-worklet `MessageChannel` port.
   - In `worker` mode the host routes control messages to the Worker. In `single` mode it routes
     them to the worklet's own control handler.
-  - Later slices add their messages on these ports (#1294, #1381, #1382).
+  - Later slices add their messages on these ports (#1294, #1381, #1562).
   - The Worker and worklet messages are internal (D15-11). They are not
   documented in `shipped-host.d.ts` and do not appear in the SDK's public types.
 - **D8. Policy gates are rewritten to the new invariants, never deleted** (round-1 C4,
@@ -232,7 +232,7 @@ mode, how many control allocations ran in the worklet.
   *Swap and retire browser plans through the Worker's service loop* (#1381).
 - No change to where commands, sources, meters, observations or spectrum are admitted or read
   in this slice. They stay on the worklet thread and must be allocation-free there (gate 2).
-  Live edits move to the Worker in #1382.
+  Live edits move to the Worker in #1562.
 - No toolchain change (#1334). No module-shape change (#1380). No new static
   allocation gate (#1333).
 
@@ -331,4 +331,4 @@ Root note (2026-10-13): *Share one in-flight status read in the browser host* (#
 
 - *Move browser source submission and seeks into the Worker* (#1387), next.
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
-- *Admit browser live edits in the Worker through the committed model* (#1382).
+- *Admit browser live edits in the Worker through the committed model* (#1562).

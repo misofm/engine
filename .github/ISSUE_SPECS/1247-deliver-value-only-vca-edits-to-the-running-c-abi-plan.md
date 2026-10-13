@@ -193,3 +193,5 @@ same commit.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054)
 - *Carry an optional per-edit ramp length on live session edits* (#1394), for D5
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1558. VCA offset, mute, membership and VCA add or remove become live through `controls::effective`: the classifier masks the whole `vcas` list and lowers members' effective faders and mutes and each changed follow gate. D4's count check on the live path and D6's "no mirror" are kept as #1558 D6 and D9. A VCA add or remove advances the control list's `structure_epoch`. This issue closes as superseded when #1558 merges.

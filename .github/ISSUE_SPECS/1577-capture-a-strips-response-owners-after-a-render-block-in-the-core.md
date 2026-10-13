@@ -1,0 +1,168 @@
+# Capture a strip's response owners after a render block in the core
+
+Slice S20a of decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`, design points C1
+and C13), first half of the planner's S20: the core capture. #1578 serves it on the protocol and
+the C ABI. Code anchors verified on `main` `df585e503`. Feature sprint mode (owner, 2026-10-13):
+one implementer, normal tests, a batch review; no per-attempt verifier or mutation runs.
+
+## Product outcome
+
+The control plane can ask the render thread for one strip's response owners, and get them back
+from the first successful block of the newest plan, with no allocation, lock or syscall on the
+render thread. The control thread then composes the track response with #1576's function. This is
+the one render-half step that both hosts use: the C ABI from #1578, the browser from #1579.
+
+## Context
+
+- **The plan belongs to the render thread.** `PlanState` (`crates/control-plane/src/plan.rs:62`)
+  owns the `RealtimePlanOwner`; its `render` (`:253-275`) renders through `render_contiguous` and
+  publishes the active epoch. The control thread never borrows the plan. The C ABI's render entry
+  calls it (`crates/capi/src/ffi.rs:928`); after *Swap and retire browser plans through the
+  Worker's service loop* (#1381) the browser worklet renders through it too.
+- **A capture is valid only at a boundary.** `PreparedRenderPlan::copy_response_snapshot`
+  (`crates/engine/src/realtime/plan.rs:845`) refuses after a failed render; #1576 D3 adds the
+  owner-level `RealtimePlanOwner::copy_response_snapshot`.
+- **An allocation-free sink exists.** `ResponseSnapshotCollector` (`crates/host-core/src/response.rs:227-358`)
+  preallocates strings and fixed section arrays in `new` and copies without allocating;
+  `finish` (allocating) runs on the control side.
+- **Move-only queues exist.** `engine::realtime::bounded_spsc_move`
+  (`crates/engine/src/realtime/spsc.rs:250`): a full push returns the value to its producer; a pop
+  transfers it once.
+- **Construction.** `compile_children` (`crates/control-plane/src/compile.rs:751`) makes the plan
+  exchange (`:827`), the provider (`:854`) and `PlanState::new` (`:916`). A replacement plan's
+  provider epoch is pushed at `crates/control-plane/src/control.rs:1314`. `SessionState::service`
+  (`:1059-1065`) is the deferred-work step both hosts call.
+- **IDs.** A `StableId` is at most 127 bytes (`crates/session/src/id.rs:10-14`); a response owner
+  has at most `RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS` (6) sections per side
+  (`crates/effect-contract/src/lib.rs:33`).
+
+## Decisions frozen for this slice
+
+- **D1. The job.** A new module `crates/host-core/src/response_capture.rs` holds
+  `ResponseCaptureJob { tag: u64, plan_epoch: u64, strip_id: String, collector:
+  ResponseSnapshotCollector, outcome: CaptureOutcome }` (fields private), with
+  `CaptureOutcome::{Pending, Captured(RealtimeResponseSnapshot), Stale,
+  Failed(ResponseSnapshotError)}`. The control side allocates every job. `strip_id` has capacity
+  127; the collector is sized for `1 + the session's console slot count + the strip's insert
+  count` owners, 6 sections and 127-byte identities, from the committed model.
+- **D2. The channel.** `response_capture_channel() -> Result<(ResponseCaptureClient,
+  ResponseCaptureServer), ResponseCaptureSetupError>` builds two `bounded_spsc_move` queues of
+  capacity 1 of `Box<ResponseCaptureJob>`: requests (control to render) and replies (render to
+  control). It is built once per session, at boot, on the control thread.
+- **D3. The render step.** `ResponseCaptureServer::after_block(&mut self, owner: &mut
+  RealtimePlanOwner)`, called by `PlanState::render` after `render_contiguous` returns `Ok` and
+  never after an error. It holds at most one job:
+  1. with no job held, it tries one pop (one atomic load when the queue is empty);
+  2. if the active epoch is lower than the job's `plan_epoch`, it keeps the job;
+  3. if the active epoch is higher, the outcome is `Stale`;
+  4. if they are equal and the outcome is `Pending`, it runs `owner.copy_response_snapshot(strip,
+     collector)` once and records `Captured` or `Failed`;
+  5. a job whose outcome is not `Pending` is pushed to the replies; a full push keeps it for the
+     next block (the job is never dropped and never captured twice on the render thread).
+  The step sits in a `REALTIME_POLICY_BEGIN`/`END` region. It allocates, frees, locks and logs
+  nothing; its cost is bounded by the collector's capacity, fixed when the control side armed it.
+- **D4. The control side.** `ResponseCaptureClient` (held by `SessionControlProvider`, given at
+  `try_new`) has:
+  - `set_newest_plan_epoch(&mut self, epoch: u64)`: set at boot and whenever a replacement
+    plan's epoch is pushed (`control.rs:1314`). The value never decreases (a debug assertion).
+    No `control-plane` path withdraws a published candidate today (`PlanPublisher::withdraw`,
+    `crates/engine/src/realtime/plan_exchange.rs:545`, has no caller there); a later slice that
+    adds one must also re-arm a held capture;
+  - `arm(&mut self, model: &SessionModel, strip_id: &str, grid: ResponsePreviewGrid, channels:
+    ResponseChannels) -> Result<u64, ResponseCaptureRefusal>`: checks, in this order and before
+    any write, an unknown strip (`UnknownStrip`), a capture already pending (`Pending`), the
+    points and the grid at the session rate (`Grid`, the #1572 rules); then allocates the job with
+    the next tag (from 1, per session) and the newest epoch, and pushes it. A full push is
+    `Pending` and changes nothing;
+  - `poll(&mut self, model: &SessionModel) -> Option<ResponseReady>`: pops one reply. `Captured`:
+    `collector.finish` and #1576's `compose_track_response` with the armed grid and channels.
+    `Stale`: if the strip is still in `model`, a new job (same tag, newest epoch, a new bound) is
+    pushed and `poll` returns `None`; else the result is `StripRemoved`. `Failed(e)`: the mapped
+    failure. `poll` returns each request's `ResponseReady` once;
+  - `release(&mut self)`: ends the pending state. Until it is called, `arm` answers `Pending`, so
+    one session has at most one capture in flight. In this slice `test_take_track_response` calls
+    it; #1578 calls it when the host dequeues the `RESPONSE_READY` event.
+  - `ResponseReady { tag: u64, strip_id: Box<str>, result: Result<TrackResponse,
+    ResponseCaptureFailure> }`; `ResponseCaptureFailure::{StripRemoved, Unsupported, Capacity,
+    Internal}` with codes `response.strip.removed`, `response.effect.unsupported`,
+    `response.limit` and `response.capture` (`MissingTrack` maps to `StripRemoved`; an
+    `UnsupportedProvider` composition to `Unsupported`).
+- **D5. Wiring in control-plane.** `compile_children` builds the channel and passes the client
+  to the provider and the server to `PlanState::new`. `SessionState::service` polls the client
+  after `synchronize_plan_epochs` and keeps the result in a new `response_ready:
+  Option<ResponseReady>` field; #1578 turns it into an event. The protocol controller gains one
+  accessor that lends the provider mutably and the committed session immutably at the same time
+  (`provider_and_session_mut`), because `poll` needs both. Under `test-support`, `SessionState`
+  exposes `test_arm_track_response(strip_id, grid, channels)` and `test_take_track_response()`.
+
+## Deliverables
+
+1. D1-D4 in `crates/host-core/src/response_capture.rs`, the provider's client field and the methods that
+   forward to it (`set_newest_plan_epoch`, `arm`, `poll`, `release`) in
+   `crates/host-core/src/control_provider.rs`, exports in `crates/host-core/src/lib.rs`.
+2. D3's call in `crates/control-plane/src/plan.rs`; D5 in `crates/control-plane/src/{compile.rs,
+   control.rs}`; the accessor in `crates/protocol/src/controller.rs`.
+3. The tests below.
+
+## Authorized paths
+
+- `crates/host-core/src/{response_capture.rs,response.rs,control_provider.rs,lib.rs}`.
+- `crates/control-plane/src/{plan.rs,compile.rs,control.rs}`, `crates/control-plane/Cargo.toml`
+  (dev-dependency `bench-support`), new `crates/control-plane/tests/response_capture.rs`.
+- `crates/protocol/src/controller.rs` (the accessor only).
+
+## Non-goals
+
+- No protocol message, no event, no C header change (#1578).
+- No browser change (#1579). The capture semantics stay applied (#779): no committed-model
+  composition.
+
+## Objective gates
+
+Commands: `cargo test --locked -p host-core --all-features`,
+`cargo test --locked -p control-plane --features test-support`,
+`cargo test --locked -p capi`, `cargo build --locked --release -p realtime-policy &&
+./target/release/realtime_policy`.
+
+All in `crates/control-plane/tests/response_capture.rs` (its own `ControlAdapter`,
+`compile_children`, `PlanState::render` and `SessionState::service`), on a 48 kHz session with two
+tracks, input filters, an EQ insert and an EQ console slot:
+
+1. **One capture.** Arm track 1: before any render, `service` yields nothing. Render one block and
+   call `service`: the result has tag 1 and equals `compose_track_response` of a capture that the
+   test takes from the same `PlanState` (`test_owner_mut`, `crates/control-plane/src/plan.rs:221`)
+   after the same block.
+2. **Applied values.** Commit a live EQ band-gain edit, arm, render one block: the curve shows the
+   new gain and `captured_sample` is the block's end.
+3. **Newest plan.** Arm, then commit a structural edit that adds an insert to track 1, then render:
+   the result includes the new insert. Arm on track 2, then commit an edit that removes track 2,
+   then render twice with `service` between: the result is `StripRemoved`. The tag never changes
+   for one request.
+4. **Refusals change nothing.** A second `arm` while one is pending is `Pending`; an unknown strip
+   is `UnknownStrip`; 4097 points is `Grid`. After each, the next armed capture still gets tag 2.
+5. **Realtime.** The file links `bench_support::alloc` and calls `assert_installed()` first. The
+   render thread's thread-scoped counters read `allocations == 0 && frees == 0` around each of
+   200 render calls while the control thread arms a capture every 4 blocks and polls between them
+   (statics warmed first). The realtime policy binary passes.
+
+## Test value
+
+- Gate 1 turns red if the render step copies other owners than the plan holds, or the control side
+  composes them differently.
+- Gate 2 turns red if the capture reads the committed model instead of the plan's applied targets.
+- Gate 3 turns red if a capture is answered from a plan older than the newest structure, or never
+  answered after its strip is removed.
+- Gate 4 turns red if a refused request leaves a job, a tag or a pending flag behind.
+- Gate 5 turns red if the render step allocates, frees or drops a job.
+
+## Dependencies
+
+- #1576 (the composer and the owner-level capture), #1572 (`ResponseChannels`, the grid rules).
+- *Swap and retire browser plans through the Worker's service loop* (#1381) is not needed for the
+  C ABI; it puts the browser on the same `PlanState::render` (used by #1579).
+- `crates/control-plane`, `crates/protocol` and the render half are stream B's: rebase after
+  stream B's open slices that touch `plan.rs`, `compile.rs` and `control.rs`.
+
+## Supersedes and shrinks
+
+- None.

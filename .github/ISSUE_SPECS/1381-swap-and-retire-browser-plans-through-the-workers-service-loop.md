@@ -227,7 +227,7 @@ the Rust host* (#1290) publishes through.
 ## Non-goals
 
 - No structural edit (#1290). No live edit in the Worker (*Admit browser live edits in the Worker
-  through the committed model*, #1382).
+  through the committed model*, #1562).
 - No warm-successor deadline check (*Check the warm-successor deadline in the browser Worker's
   service loop and report its outcome*, #1361).
 - No watermark words in the browser status block (#1349).
@@ -327,3 +327,5 @@ the Rust host* (#1290) publishes through.
 - *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).
 - *Carry meter and effect observation state across a plan swap* (#1327).
 - *Carry spectrum capture state across a plan swap* (#1395).
+
+**Decision 17 amendment (2026-10-13).** This slice lands as filed. #1596 then removes the spectrum capture from `RenderCompanions` and D3's **Spectrum** pairing bullet: the browser's spectrum readers move to the control plane in the Worker and are paired at promotion, as on the C ABI (#1593 D5).

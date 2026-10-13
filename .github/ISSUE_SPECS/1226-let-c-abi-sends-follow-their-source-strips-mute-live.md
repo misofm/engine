@@ -190,3 +190,5 @@ one all-or-nothing commit.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054)
 - *Carry an optional per-edit ramp length on live session edits* (#1394), for D5
+
+**Decision 17 amendment (2026-10-13).** Superseded by #1558. A send's follow gate is an output of the one effective-value function (`controls::effective`), which preparation and the classifier both use; #1558 removes `LiveRebuild::FollowedMute` and `followed_mute_changes`, masks `follows_mute`, and lowers each changed gate as one route record. D7's mirror setter is not needed: the browser's own mirror is deleted by #1565. This issue closes as superseded when #1558 merges.

@@ -72,8 +72,8 @@ route state if gate 2 shows that they are missing too.
     bit with another);
   - `assert_vca_refusal` (`:14170`);
   - `follow_render` with `SOLO_FOLLOW_TRACKS` (`:12390`, `:12487`).
-- **#1382 replaces this code later.** *Admit browser live edits in the Worker through the committed
-  model* (#1382, stream H) D5 deletes host-web's VCA composition pass. On `codex/d15-stream-b3`, D5
+- **#1562 replaces this code later.** *Admit browser live edits in the Worker through the committed
+  model* (#1562, stream H; formerly #1382 D5) deletes host-web's VCA composition pass. On `codex/d15-stream-b3`, #1382's D5
   (`1382-…md:121-125`) only says that composition tests "move … or are deleted", so it does not
   yet name this test. The render half of this test (gate 1, step 5) is the part that carries over to
   the shared path.
@@ -85,7 +85,7 @@ route state if gate 2 shows that they are missing too.
 - **D2. Two checks in one test.**
   - The mirror check (`assert_vca_refusal`'s snapshot) fails at the point of the defect.
   - The render check (`vca_lockstep` against a reference host that never saw the refused batch)
-    shows what the app hears, and it does not depend on the browser's mirror. #1382 can carry it
+    shows what the app hears, and it does not depend on the browser's mirror. #1562 can carry it
     over.
 - **D3. The refused batch also rides the VCA.** Record 0 is a valid ride of the same VCA to a third
   value, and record 1 names an unknown VCA. The refusal therefore rolls back a real VCA change.
@@ -140,7 +140,7 @@ Each has a test-value doc comment in the file's usual form.
    - With step 3's snapshot check removed (local edit, not committed), M13 still turns the test red
      at step 5. `live`'s mirror says the VCA is already at `back`, so the step 4 ride stages
      nothing, and `live` stays at `ride` while `reference` returns. This shows that the render half
-     has its own catch for #1382 to carry.
+     has its own catch for #1562 to carry.
    - On the unmutated tree the test is green. Record both runs in the attempt record.
 2. **Sibling commits.** Run the browser tests once with `ready.solo.commit();` deleted and once with
    `ready.routes.commit();` deleted, and record red or green with the failing test's name. For each
@@ -170,7 +170,7 @@ batch rolls back past a rendered change.
 
 - None open for the code. The browser VCA admission landed with #1245. It runs on any tree that has
   #1347.
-- It must land before H #1382, which replaces the code under test. Root amends #1382 D5 to add: "The
+- It must land before H #1562, which replaces the code under test. Root amends #1562 (formerly #1382 D5) to add: "The
   render half of `a_refused_batch_does_not_undo_a_committed_vca_batch` (and its solo and route
   siblings, if any) moves to the shared path; it is not deleted."
 - `vca_ride_host`'s second argument is the boot word that the sibling issue *Make the browser
@@ -182,7 +182,7 @@ batch rolls back past a rendered change.
 - Stream B, after #1345. It is test-only and can be folded into the current `codex/d15-stream-b3`
   batch next to #1345, or the next B batch.
 - `hosts/host-web/src/tests.rs` row ("about 30 slices ... edit it"): in any order with the rest;
-  the later slice rebases. It must land before H #1332 and #1382, like the other B slices in the
+  the later slice rebases. It must land before H #1332 and #1562, like the other B slices in the
   `hosts/host-web/src/lib.rs` row.
 - Owner of the code: browser VCA admission is #1245's (decision 13,
   `docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`; umbrella #1239). In decision 15, host-web
@@ -192,3 +192,5 @@ batch rolls back past a rendered change.
 ## Attempt record
 
 - Attempt 1: not started.
+
+**Decision 17 amendment (2026-10-13).** The shared-path half (a refused batch of a VCA offset, a solo and an out-of-domain pan changes nothing, and the next 8 blocks equal a run without it) is #1559 gate 3. The browser half stays this issue's until #1565 deletes host-web's VCA, solo and route mirrors and their commit; this issue then closes as superseded by #1565.

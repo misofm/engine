@@ -160,3 +160,5 @@ swap"), which decision 15 rejects (D15-14). Only a changed or added capture star
   location table, the move section and the carry record.
 - *Prepare every browser preparation branch concurrently, as a successor too, in host-core* (#1401),
   for the successor entry points the gates use.
+
+**Decision 17 amendment (2026-10-13).** D1 and D2 are unchanged. D5's "The C ABI has nothing to carry" ends with #1593: the C ABI gains spectrum captures, and its control plane pairs them with D3's `pair_carried` when it promotes the adopted candidate, on the control thread, from a pairing list built by D1's key at preparation. #1596 moves the browser to the same control-side pairing, so from then on no host pairs spectrum readers in the swap block.
