@@ -1741,6 +1741,12 @@ impl<'a> WebEffectiveView<'a> {
         Self { vcas, solo, routes }
     }
 
+    /// Whether some soloable strip is soloed, computed once per admitted batch: `cache` holds the
+    /// answer until a solo record moves a solo bit (it is then cleared). Allocation-free.
+    fn any_solo(&self, cache: &mut Option<bool>) -> bool {
+        *cache.get_or_insert_with(|| controls::any_solo(self))
+    }
+
     /// One strip's effective values.
     fn strip(&self, strip: usize, any_solo: bool) -> controls::EffectiveStrip {
         controls::effective_strip(self, strip, any_solo)
@@ -5277,6 +5283,9 @@ fn admit_commands_staged(
     let mut coalesce_smoothing = 0_u32;
     // Issue #1224 D3: whether any strip mute record was staged, so the follow pass below runs.
     let mut mute_seen = false;
+    // Decision 17 C7 (batch 1 review MINOR 1): `controls::any_solo` walks every strip, so it runs
+    // once per batch, on first use, and again only after a kind 9 record moved a solo bit.
+    let mut any_solo_cache: Option<bool> = None;
     // Issue #1245 D3: a VCA ride (kind 16) stages nothing itself; the VCA fader pass below stages
     // every reached member's changed lanes once, at the first kind 16 record's wire index, with
     // the last one's ramp.
@@ -5423,7 +5432,7 @@ fn admit_commands_staged(
                 // batch is already in it.
                 let [left, right] = {
                     let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
-                    view.strip(track, controls::any_solo(&view)).mute
+                    view.strip(track, view.any_solo(&mut any_solo_cache)).mute
                 };
                 let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
                     for (position, (lane, muted)) in [
@@ -5475,6 +5484,7 @@ fn admit_commands_staged(
                 if !ready.solo.set_solo(track, engaged) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
+                any_solo_cache = None;
                 if !solo_seen && !vca_mute_seen {
                     coalesce_first_wire_index = index as u32;
                 }
@@ -5864,11 +5874,8 @@ fn admit_commands_staged(
         // mirrors as the batch left them (a kind 17 already moved the VCA state), with the solo
         // term computed once for the pass. The pass writes only the emitted mirror, which neither
         // the solo term nor the VCA mute reads.
-        let any_solo = controls::any_solo(&WebEffectiveView::new(
-            &ready.vcas,
-            &ready.solo,
-            &ready.routes,
-        ));
+        let any_solo = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+            .any_solo(&mut any_solo_cache);
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             let mute = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
@@ -5914,7 +5921,7 @@ fn admit_commands_staged(
         let route_base = strip_count * 3 + ready.effect_controls.len();
         // Decision 17 C7, slice S7c D5: each send's follow gate is `controls::effective_gate`'s.
         let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
-        let any_solo = controls::any_solo(&view);
+        let any_solo = view.any_solo(&mut any_solo_cache);
         let follow_gate = |route: usize| view.follow_gate(route, any_solo);
         for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &follow_gate) {
             let (Some(entry), Some(producer)) =
