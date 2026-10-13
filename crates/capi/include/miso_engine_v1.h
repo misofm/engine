@@ -70,9 +70,8 @@ extern "C" {
  * engine applied the transaction in its required field 2, edit-path (a U8), known when the
  * command returns and in the same frame as the new revision: 1 = live (records went to the
  * running plan's live lanes, no plan was prepared), 2 = model_only (committed, and the delta
- * holds no record for render: a session ID, a profile ID, the stored automation or identical
- * values), 3 = rebuild (a successor plan was prepared and published, whatever else the
- * transaction held). Zero and every other value are refused by the decoder. An exact replay of
+ * holds no record for render: any transaction whose effective values do not change), 3 = rebuild
+ * (a successor plan was prepared and published, whatever else the transaction held). Zero and every other value are refused by the decoder. An exact replay of
  * the request returns the same bytes, the path included. A fallback to a rebuild after submit
  * and a supersession are not in the response; the watermark's outcome flags report them. After
  * a live edit or a replacement the host goes on submitting every source the transaction left

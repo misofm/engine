@@ -375,6 +375,36 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
   ramp, a live edit renders the bits of a plan prepared from the committed session (the filters
   from a common silence, `-0.0` samples included); gated at 44.1 and 96 kHz, with zero render
   allocations and frees.
+- **Tail on every strip.** Every C ABI plan carries an input lane per strip, so every strip reports
+  the rate's live input bound even with both filters off (before #1556 such a strip reported its
+  prepared design's bound, zero without a filter). The bound is a function of the rate alone
+  (`builtins::input_section_live_bound_table`); `tail_samples` of a plan with no infinite-tail
+  effect is that figure, and measured so on the bare parity sessions at one and ten tracks:
+
+  | Rate | `tail_samples` (`T`) | Seconds | Exact rest, peak up to +24 dBFS | Exact rest, any sanitized input |
+  | --- | --- | --- | --- | --- |
+  | 44.1 kHz | 704,010 | 15.97 | 1,067,207 | 2,384,997 |
+  | 48 kHz | 699,952 | 14.58 | 1,061,497 | 2,372,008 |
+  | 88.2 kHz | 704,018 | 7.98 | 1,071,057 | 2,388,800 |
+  | 96 kHz | 699,960 | 7.29 | 1,065,688 | 2,376,147 |
+
+  A strip's figures add along a path as PDC composes tails (`graph-compiler/src/pdc.rs`: a node's
+  tail is added to the largest tail that reaches it), so a track routed through a submix reports
+  the sum of both strips' and the effects' tails on its path. The graph tail cap is not limited by
+  host preparation (`u64::MAX`), so no session is refused for it. **Host impact:** a host that waits
+  `tail_samples` after its last source ends before it stops rendering, to let the output ring
+  out, now waits that long on every plan, about 7 to 16 seconds, where a plan whose filters were
+  all off waited none. The bound is an upper bound: `T` is the time after which the output is below
+  -144 dB of the input peak for every history of live values, not a prediction for the session at
+  hand, so a host that wants to stop sooner ends on its own silence test. The reason is browser
+  parity (decision 17, C6): the core attaches the live lanes to every plan on both hosts, so the
+  browser and the C ABI report the same tail for the same session, and the live bound is the one
+  that holds for every history of live trim and filter targets. No render path reads these
+  values: silence skipping inside the effects is driven by each lane's own count of zero input
+  samples (`lane::silence_frames`, 3,764 to 8,192 samples), not by the tail or the exact-rest
+  bounds, and `PreparedBuiltinsSession::input_bounds` (the exact-rest figures above) has no reader
+  outside tests, so a larger bound costs no render work. The tail feeds only the PDC composition
+  and the reported `tail_samples`.
 
 ## Live sends: gain, mute and matrix (#1557)
 
@@ -400,7 +430,10 @@ A plan with no route into a submix attaches none and renders as before.
   route's mute). Otherwise it ramps over the longest of the changed rows' lengths: `gain_db` over
   `fader_ms`, the matrix over `pan_ms`, each replaceable by the edit's own `ramp_samples` (an
   explicit `0` is a step). A transaction that changes the gain with length 240 and the matrix with
-  length 480 gives one record of 480.
+  length 480 gives one record of 480. A gate that its source strip's mute moved, and not an edit of
+  the route, takes the source's `Mute` length instead, and that length governs the whole record,
+  also when the gain or the matrix moved with it: see the ramps of "Live VCAs and follows" (#1558)
+  below.
 - **Resources.** The route cells, lanes and render-side owners are charged in
   `capi_retained_bytes` and in the replacement peak as `route_control_resources.total_bytes`, an
   upper bound; the producer table and route IDs are observed exactly by `resource_lifecycle`.
@@ -434,7 +467,8 @@ VCA move that leaves every member clamped at +24 dB writes nothing.
   unchanged.
 - **Successors.** A rebuild that also changes a VCA or a followed mute carries each strip's fader
   and mute stage and retargets it to its effective value (#1277 D5). The sends it prepares start at
-  their gate; carrying a send's ramp across a plan swap is #1284.
+  their gate, so a following send can step at the swap while its source strip ramps; carrying a
+  send's ramp across a plan swap is #1284.
 - **Rendering.** After the ramp, a live edit renders the bits of a plan prepared from the
   committed session; gated at four rates in `live_tests` and under 20 races of
   `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`, which add VCA
@@ -479,8 +513,9 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
   bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
   bypass edits" below.
-- **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
-  `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
+- **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
+  `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
+  preparation diagnostic a rebuild gives), and every other field.
 - **Timing (#1053 D2, #1312).** A committed fader, mute or pan/matrix value reaches render no
   later than the first block whose render call begins after the submit returns or, while a
   replacement plan is pending, at that plan's adoption, which the watermark reports. Every such
