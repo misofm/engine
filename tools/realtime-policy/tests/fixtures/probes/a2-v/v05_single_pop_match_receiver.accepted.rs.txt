@@ -1,0 +1,12 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>, kind: Kind) {
+        if let Ok(record) = match kind {
+            Kind::A => &mut self.left_consumer_for_the_lane,
+            Kind::B => &mut self.right_consumer_for_the_lane,
+        }
+        .try_pop()
+        {
+            self.apply(record);
+        }
+    }
+}

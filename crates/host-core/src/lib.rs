@@ -72,7 +72,7 @@
 //!   (`scripts/check-web-audioworklet-callgraph.py`), which fails if anything reachable from the
 //!   render export can call an allocator, a deallocator or drop glue.
 //! * `render` performs no allocation, no lock, no syscall, no logging and no structural mutation.
-//!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
+//!   `tools/realtime-policy` enforces the source-level half of that;
 //!   `tools/audit` and the browser call-graph gate enforce the binary half.
 //! * **A native render entry borrows the caller's floating-point environment; it never adopts it**
 //!   (issue #146). A native audio thread may run with hardware FTZ and DAZ set (see

@@ -37,6 +37,7 @@ members = [
     "tools/wasm-gate-corpus",
     "tools/wasm-gate-guest",
     "tools/parameter-metadata",
+    "tools/realtime-policy",
     "tools/session-validator",
     "tools/wasm-gates",
 ]

@@ -140,7 +140,7 @@ the same.
    - `cargo fmt --all -- --check`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
    - `bash scripts/check-workspace-policy.sh`
-   - `bash scripts/check-realtime-policy.sh`, run once to show that no region moved.
+   - `cargo run --locked --release -q -p realtime-policy`, run once to show that no region moved.
 
 ## Test value
 

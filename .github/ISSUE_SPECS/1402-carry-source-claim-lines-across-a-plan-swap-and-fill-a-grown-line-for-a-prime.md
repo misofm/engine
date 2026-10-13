@@ -102,7 +102,7 @@ successor with a raw-frame prime at the first ready block* (#1355) calls with th
 4. Commands:
    - `cargo test --locked -p graph --features graph/test-support`
    - `cargo test --locked -p host-core --features host-core/test-support --test latency_growth`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 

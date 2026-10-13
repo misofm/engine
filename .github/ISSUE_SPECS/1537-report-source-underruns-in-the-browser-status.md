@@ -201,7 +201,7 @@ catches?
    *Test value:* turns red if `EngineStatus` omits the word or `status()` reads it by a wrong name
    from the generated layout.
 5. **Realtime and artifact** (as `qualification.yml` runs them):
-   - `bash scripts/check-realtime-policy.sh`;
+   - `cargo run --locked --release -q -p realtime-policy`;
    - `bash scripts/build-web-audioworklet.sh --named-twin <empty T> <empty A>`, then
      `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration A T/miso-engine-v1-audio-worklet.simd128.named.wasm`
      (no new panic or allocation path from `process()`);

@@ -60,7 +60,7 @@
 //! # Why this file carries `unsafe`
 //!
 //! This file is the one new unsafe site of issue #146 -- one file, two reasons, allowlisted by
-//! `scripts/check-realtime-policy.sh` and `scripts/check-lane-policy.sh` and recorded in
+//! `tools/realtime-policy` and `scripts/check-lane-policy.sh` and recorded in
 //! `docs/REALTIME_DEPENDENCY_POLICY.md`:
 //!
 //! 1. On `aarch64` there is no stable `core::arch` intrinsic for FPCR, so `mrs`/`msr` are issued

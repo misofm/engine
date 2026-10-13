@@ -1,0 +1,98 @@
+// REALTIME_POLICY_BEGIN
+fn input_process() {}
+fn input_lane_states() -> [[u8; 4]; 2] {
+    let gains: [u8; 4] = core::array::from_fn(|lane| lane as u8);
+    let trims: [u8; 4] = std::array::from_fn(|lane| lane as u8);
+    [gains, trims]
+}
+fn drain_lane_pairs(control: &mut Consumer<Record>) -> [usize; 2] {
+    let mut applied = [0; 2];
+    for lane in 0..2 {
+        let available = control.available_at_entry();
+        // `available` is fixed at entry: a push during this drain waits for the next block.
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            applied[lane] += apply(lane, record);
+        }
+    }
+    applied
+}
+fn drain_two_lanes(controls: &mut [Consumer<Record>; 2]) {
+    for lane in 0..2 {
+        let available = controls[lane].available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = controls[lane].try_pop() else {
+                break;
+            };
+            apply(lane, record);
+        }
+    }
+}
+impl LaneBank {
+    fn drain_lane_fields(&mut self) {
+        for lane in 0..self.lanes {
+            let control = &mut self.controls[lane];
+            let available = control.available_at_entry().min(MAX_RECORDS_PER_BLOCK);
+            if available == 0 {
+                continue;
+            }
+            debug_assert!(available <= MAX_RECORDS_PER_BLOCK);
+            #[allow(clippy::needless_range_loop)]
+            for _ in 0..available {
+                let Ok(record) = control.try_pop() else {
+                    break;
+                };
+                apply(lane, record);
+            }
+        }
+    }
+}
+fn drain_lane_constant(controls: &mut [Consumer<Record>; LANES]) {
+    for lane in 0..LANES {
+        let available = controls[lane].available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = controls[lane].try_pop() else {
+                break;
+            };
+            apply(lane, record);
+        }
+    }
+}
+fn drain_zipped_lanes(controls: &mut [Consumer<Record>], gains: &[f32]) {
+    for (control, gain) in controls.iter_mut().zip(gains) {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply_scaled(*gain, record);
+        }
+    }
+}
+fn drain_lane_slice(controls: &mut [Consumer<Record>]) {
+    for control in controls {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply(0, record);
+        }
+    }
+}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn input_process_mono() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn fader_process() {}
+fn fader_process_plane() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn matrix_process() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn meter_observe() {}
+// REALTIME_POLICY_END

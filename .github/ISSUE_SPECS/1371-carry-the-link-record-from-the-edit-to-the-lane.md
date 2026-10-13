@@ -152,7 +152,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit && ./target/release/audit capi`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
      `cargo fmt --all -- --check`; `bash scripts/check-workspace-policy.sh`;
-     `bash scripts/check-realtime-policy.sh`
+     `cargo run --locked --release -q -p realtime-policy`
 
 ## Test value
 

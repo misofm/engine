@@ -209,7 +209,7 @@ bits. This closes decision 14's F4 for the multiband compressor.
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
    - `cargo fmt --all -- --check`
    - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-effect-runtime-policy.sh`,
-     `bash scripts/check-realtime-policy.sh`
+     `cargo run --locked --release -q -p realtime-policy`
    - `bash scripts/check-cross-targets.sh` and `scripts/run-aarch64-tests.sh` (CI
      `aarch64-debug`/`aarch64-release` when no arm64 host)
 

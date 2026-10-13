@@ -16,3 +16,19 @@
 - `bash scripts/check-realtime-policy.sh` and its self-test pass in CI.
 
 Found by the #936 attempt 1 implementer and verification.
+
+## Evidence
+
+Closed by tool slice A2 (#1439), attempt 1, on `codex/d15-stream-j3`.
+
+- Negative fixture: the case `forbidden-turbofish-collect` in `tools/realtime-policy/tests/policy/forbidden.rs`
+  (`a_spelling_the_line_scan_missed_is_a_finding`). A marked function holding
+  `items.iter().collect::<Vec<_>>()` gives the class "marked realtime forbidden-body predicate". The awk gate
+  passes the same tree (parity run: awk exit 0, tool exit 1), so the hole was real. Mutation: matching only
+  `.collect(` turns that test red.
+- Workspace: `cargo run --locked --release -q -p realtime-policy` prints
+  `realtime policy: ok (93 marked regions in 26 files)`, the same counts as
+  `bash scripts/check-realtime-policy.sh`, so the real regions hold no turbofish collect.
+- Verdict: `docs/handoffs/decision-15-2026-10-05/verdicts/stream-j3/1439-attempt1.md` (written by the verifier; this issue closes
+  only on its PASS).
+- The closing steps that need GitHub (D6 steps 3 and 4) run after the batch push, not in this attempt.

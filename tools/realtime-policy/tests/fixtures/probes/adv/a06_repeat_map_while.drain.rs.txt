@@ -1,0 +1,5 @@
+fn drain(q: &mut Consumer<Record>) {
+    core::iter::repeat(())
+        .map_while(|()| q.try_pop().ok())
+        .for_each(apply);
+}

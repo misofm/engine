@@ -1,0 +1,3 @@
+fn drain(q: &mut Consumer<Record>) {
+    (0..).map_while(|_| q.try_pop().ok()).for_each(apply);
+}

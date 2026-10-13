@@ -4,7 +4,7 @@ Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
 Root rescoped *Require every loop around a realtime drain to drain a different queue on each pass*
 (#1418) after its two verdicts. Root's ruling: replace the awk gate with a tool that reads Rust's
-syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
+syntax tree. Do not add a fourth layer of patterns. The work has ten slices:
 
 - **C1 (#1445):** an operator script that syncs edited specs to their GitHub bodies, with a self-test. It
   has no dependency and may land first.
@@ -16,6 +16,8 @@ syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
 - **B1b (#1441):** the drain-bound rule's outer loops, attributes and constructors, the remaining ported
   cases, the synthetic twins and the marker on `drain_controls`.
 - **B2a (#1442):** refuse pops in closures, macros and function values; commit the probe corpus.
+- **#1519:** refuse every source that rustc reads and the walk does not (`#[path]` forms, `include!`); split out of B2a by
+  a root ruling of 2026-10-11 (rj3-c R2).
 - **C2 (#1446):** delete the awk gate and its self-test. CI then runs only the tool.
 - **The #1448 guard commit** ("H #1448's guard, landed by J after C2"; root ruling 2 on the fourth
   review, option (C)): the two region markers around `poll_meters`, whose code stream H's #1448
@@ -26,7 +28,7 @@ syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
 - **B2b-2 (#1444):** the call rule (a call to a popping function in a marked loop or closure). It waits for
   #1345 (Amendment 1) in stream B.
 
-The order is A1 → A2 → B1a → B1b → B2a → C2 → the #1448 guard commit → B2b-1 → B2b-2, with C1
+The order is A1 → A2 → B1a → B1b → B2a → #1519 → C2 → the #1448 guard commit → B2b-1 → B2b-2, with C1
 before C2. #1418 (Amendment 1) and #1426 (Amendment 1) come after the whole batch is on `main`, in
 the tool. No production code changes in this slice.
 
@@ -159,8 +161,8 @@ from `:440` on move down by one.
   Gate 6 holds the shipped artifacts unchanged.
 - **D3. The walk fails closed (C11).**
   - **Scan roots.** The walk visits `crates`, `hosts` and `tools` under the root. It skips
-    exactly the directories named `target` or `node_modules`. Neither holds a compiled `.rs`
-    file, and the skip is the tool's only ignore rule. It considers every other regular file whose
+    exactly the directories named `target` or `node_modules`. The walk reads no .rs file under these directories. #1519 D1 (d) refuses a `mod` item that reaches them; Cargo target autodiscovery, `[[bin]] name` without `path`, and dependency or member paths that reach them are staged for #1527 (#1438 limit 3). The skip
+    is the tool's only ignore rule. It considers every other regular file whose
     name ends in `.rs`.
   - **Each of these is a finding, never a skip:**
     - a scan root that does not exist or is not a directory;
@@ -347,6 +349,11 @@ from `:440` on move down by one.
   verdict, and the branch is pushed once, at the batch boundary. The batch also carries the #1448
   guard commit, after C2 and before B2b-1. B2b-1 waits for the three production issues and B2b-2
   for #1345 (Amendment 1), so the batch boundary waits for them on `main`.
+  - **Root amendment (2026-10-13).** #1443 and #1444 are not in the J3 batch; they land in a
+    follow-up J batch after J3 merges, because the batch should not wait for slices that were
+    blocked until B3 merged. The sentence above ("the whole set lands in one J batch", and the
+    batch boundary waiting for B2b-1 and B2b-2 on `main`) stands as the original decision and is
+    superseded for those two slices only. The #1448 guard commit stays in J3.
   - Inside the batch, both gates run until C2's commit, and the Hazards' two-gates rule applies to
     each commit before it. No CI run sees a commit between A1 and C2, because the batch pushes
     once. The gap is still safe: each slice's local gates run the awk gate, every slice before C2
@@ -404,6 +411,22 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
   (`Path::join`).
 - **Over-refusal is acceptable, a false pass is not.** Where the tool cannot classify something,
   it refuses (D3, D6).
+- **(root Amendment 2, 2026-10-11; the "Amendment (root, 2026-10-08)" below is Amendment 1.)** The text that follows is root's final ruling, adopted verbatim from an adversarial review, and #1440 to #1446 refer to it.
+  **Threat model (root ruling 2026-10-11).** The tool judges the workspace's own source: every token of every `.rs` file under the scan roots, and every file rustc reads as source from them. The walk refuses a `#[path]`, an `include!` or a proc macro that would put source where it cannot read it. Over that source it fails closed: a form outside its accepted grammar is refused. Over-refusal is acceptable; a false pass is not. Where a rule trusts a name (Q and `debug_assert`), the trusted-name scan refuses every definition, import, rename or macro-emitted use of that name under the roots that the rule's text does not allow. The limits are exactly these:
+  1. code outside the workspace source: registry crates as `Cargo.lock` pins them (their macros, proc macros, traits and types), the compiler and the standard library;
+  2. type-level behaviour the tool cannot read, wherever the type is defined: auto-deref through a `Deref`/`DerefMut` impl (#1440 Hazards, a.3), and which impl a method call resolves to;
+  3. a limit that a slice's spec lists for a later slice of this program to close (#1441 D4), until that slice lands.
+     Staged for #1527 (root ruling, 2026-10-12): a dependency key that gives a crate the extern name `core`, `std` or `alloc` in a TOML form the line-based manifest rule cannot read (inline tables, dotted keys, spaced header dots, quoted table names, escaped keys); a workspace member or path dependency outside the scan roots; a compiler crate attribute injected through `RUSTFLAGS` or `RUSTDOCFLAGS`, or through the `.cargo` config (`rustdocflags`, `include`, an `@argfile`). Each form is staged for #1527.
+  4. Macro metaprogramming (owner decision, 2026-10-11): an identifier, item name, path, attribute or
+file path that a macro expansion builds from parts — a `macro_rules!`/`macro` fragment or `tt`
+substituted into an item, attribute, `use` or call position, a metavariable expression (`${..}`),
+an attribute or derive macro. The tool judges every written token, inside macro token trees too, by
+the rules the tool applies to written tokens in that place, and refuses each direct form those rules
+name: D1 (a) (#1519) refuses every `path` in a written attribute inside a macro token tree, whatever
+its value; B2a-D2 refuses every `try_pop` token in a macro token tree in a region. It does not model what
+an expansion assembles; the written gates `${`, `feature(` and `proc_macro*` stay refused. Code written to defeat the tool this way is outside its claim. Limit 4 also covers a compiler flag that a script or workflow assembles at run time from parts (root ruling, 2026-10-12, #1527 D7).
+  (Placement: item 4 was added by root's ruling of 2026-10-12 (rj3-e), which records the owner's decision of 2026-10-11. Q is the pair `try_pop`, `available_at_entry`, defined in #1442 root Amendment 4. The other three limits are unchanged.)
+  A verifier finding inside one of these limits is recorded in the issue's evidence and is not a FAIL. Only a root ruling adds or widens a limit; an implementer or a verifier cannot. A documentation or record sentence that claims more than the tool does is a finding as usual.
 
 ## Objective gates
 
@@ -526,3 +549,165 @@ carried it). Root's ruling (3), verbatim:
   awk gate report it.
 - The doc's "Unsafe-code ownership" section is #1489's; it lists the allowlist as `main` holds it.
 
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`)
+
+Implemented on `2a589d360` (main with stream B batch 1 and #1445 merged). Production code changes:
+none. Edits outside `tools/realtime-policy/`: `Cargo.toml` (one member), `Cargo.lock` (the new package's
+entry only), `scripts/check-realtime-policy.sh` (the exclusion line: the Amendment's five removals only),
+`.github/workflows/qualification.yml` (`audit-native`: `-p realtime-policy` on the release build, the step
+renamed, one new step running `./target/release/realtime_policy`).
+
+**Measured differences from the spec's numbers.**
+- **The allowlist is 19 paths, not 14.** The spec's list of 18 predates #1489/#1494, which added five
+  lane/host-core/capi/wasm-gates test files to the awk exclusion line:
+  `crates/lane/tests/fp_env.rs`, `crates/lane/tests/g6_ftz_inert.rs`, `crates/capi/src/runtime/tests.rs`,
+  `crates/host-core/tests/fp_environment.rs`, `tools/wasm-gates/tests/g6_full_corpus_ftz.rs`. Each holds
+  `unsafe` code by the awk regex, and `rg -l` over the tree finds exactly
+  19 files matching the regex, which are exactly the 24 awk entries minus the five Amendment removals.
+  `Policy::workspace()` carries those 19 (D5 says to copy `:29` as `main` holds it).
+- Floors 26 files and 93 regions (batch 1 is on `main`); the real tree has 562 tracked `.rs` files under
+  `crates hosts tools`. All lex and parse where required.
+- `Lit::Verbatim` cannot come from source text (syn builds it only from a macro-fragment placeholder
+  `(/*ERROR*/)`), so no `visit_lit` arm exists; every other node kind that carries `Verbatim` has an arm
+  and a row in the Verbatim case (item, trait item, impl item, foreign item, expression, pattern, type,
+  type-parameter bound).
+
+**Case port decisions.**
+- D10's 17 `unsafe-*` cases are 16 distinct rows: `unsafe-outside-exact-allowlist` and
+  `unsafe-outside-rack-benchmark-main` are the same file and text (`tools/bench/src/other.rs`), so the
+  duplicate is dropped (a copy would answer no defect). The 16 rows plus the dropped-allowlist-entry row
+  (Amendment gate), the macro case, the finding-place case and the mention/other-spelling case are in
+  `tests/policy/unsafe_ownership.rs`.
+- `open-tail-valid` is ported as `an_open_tail_is_misordered` ({misordered, file floor, region floor}).
+  The prepended unmarked `oracle_drain` of the script's case was first left out; verdict follow-up 1 below
+  ports it.
+- The base tree is `create_fixture`'s output at `2a589d360`, 36 files as `*.rs.txt` under
+  `tests/fixtures/base`; it counts 93 regions in 26 files (pad_1 holds 14).
+- Retired, as D10 says: the 22 tool-failure injections and the 5 counter-mutants.
+- New cases beyond the spec's list: a scan root that is a file; an unreadable `.rs` file (fails, rather than
+  passes untested, when the tests run as root); `[const]`-bound and the other Verbatim rows; a lookalike
+  `targets` directory is scanned; links to files with another name are ignored; nested files under every
+  root; marker cases for multi-line raw strings, nested block comments, a line comment that mentions `/*`,
+  a bare `:`, multi-byte text before a marker, CRLF and a final marker without a newline; sort order of the
+  findings. Each is in the mutation table below.
+
+**Gates.**
+1. `cargo run --locked --release -q -p realtime-policy` prints `realtime policy: ok (93 marked regions in
+   26 files)`; `bash scripts/check-realtime-policy.sh` prints the same counts.
+2. `cargo test --locked -p realtime-policy`: 50 passed (the `policy` test binary; one binary, so a failing
+   case names itself). `target/tmp` holds no leftover tree afterwards.
+3. Parity, 82 case trees materialized by a throwaway patch of `Tree::drop` (reverted, not committed) and run
+   through gawk 5.2.1 `check-realtime-policy.sh` and the release binary: 63 agree (18 both pass, 45 both
+   fail), 19 differ, every one a listed deliberate difference:
+   - D6 (class change): `markers-end-before-begin`, `markers-nested`, `open-tail` (awk pass, tool fail);
+   - D5: `unsafe-mentions` (awk fail on text in comments/strings, tool pass);
+   - D3, new findings (awk pass, tool fail): `walk-dir-named-rs`, `walk-rs-link`, `walk-not-utf8`,
+     `walk-lex-error`, `walk-parse-error`, `walk-ffi-parse-error`, and the eight
+     `walk-verbatim-{item,trait-item,impl-item,foreign-item,expression-in-a-function,pattern,type,bound}`;
+   - D3, skip rule (awk fail on `unsafe`/markers in `target` and `node_modules`, tool pass):
+     `walk-skipped-directories`.
+   - Both fail by different classes: the missing-root cases (`walk-missing-tools`, `walk-root-is-file`,
+     `binary-missing-tools`) and `walk-no-realtime-module` (both fail). The unlistable-directory and
+     unreadable-file trees lose their condition when copied, so I rebuilt them by hand: awk exits 2 (an `rg`
+     error), the tool exits 1; the directory-symlink tree: awk passes, tool fails (deliberate, D3).
+4. Mutations (each applied alone to the committed code; `git checkout` reverted it). "red" is the tests that
+   failed; the spec's list first.
+   - spsc.rs out of the allowlist: 39 red incl. the base tree and `unsafe_code_outside_the_allowlist`...; gate 1
+     reports `spsc.rs:50: unsafe { cursor.unsync_load() }` and exits 1.
+   - D6 block-comment test dropped (`starts_inside_block_comment` returns false): `a_marker_line_inside_a_block_comment_is_malformed`.
+   - A group's span as a leaf: 42 red; gate 1 reports the real markers of `crates/builtins-compiler/src/lib.rs` as malformed.
+   - Missing root skipped: `a_missing_scan_root_is_a_finding`, `a_scan_root_that_is_a_file_is_a_finding`,
+     `binary::a_root_with_a_missing_scan_root_exits_one`. Unlistable directory skipped:
+     `a_directory_that_cannot_be_listed_is_a_finding`.
+   - Misordered markers accepted: `an_end_before_its_begin_is_misordered`, `two_begins_in_a_row_are_misordered`,
+     `an_open_tail_is_misordered`.
+   - File floor lowered by one (`files + 1 < floor`): `the_file_floor_fires_when_a_marked_file_loses_its_markers` and six more.
+     Region floor lowered by one: `the_region_floor_fires_when_a_region_is_dropped_and_the_markers_still_pair` and four more.
+   - `run` returns 0 after findings: `findings_exit_one_and_print_one_line_each_on_stderr`,
+     `findings_without_a_place_print_without_one`, `findings_are_sorted_by_class_then_path`,
+     `binary::a_root_with_a_missing_scan_root_exits_one`.
+   - `main` ignores `run`'s code: `binary::a_root_with_a_missing_scan_root_exits_one`,
+     `binary::two_arguments_exit_two`.
+   - Amendment: `crates/soft-clip/tests/allocation.rs` given an unsafe block in the real tree: the awk gate
+     and the tool both report it. Re-adding that entry, or the `wasm-gate-guest` entry, to
+     `Policy::workspace()`: `the_dropped_allowlist_entries_are_findings` (the case covers all five paths).
+   - Defects of the new tests, one red each unless noted: `:`-without-space accepted
+     (`a_longer_word_or_a_bare_colon_is_malformed`); prefix allowlist match
+     (`unsafe_code_outside_the_allowlist_is_a_finding`); macro bodies not scanned
+     (`unsafe_code_inside_a_macro_body_is_a_finding`); `unsafe trait`/attribute flagged
+     (`mentions_and_the_other_spellings_are_not_unsafe_code`); only-brace-group rule (6 red); line-spanning
+     leaf test dropped (`a_marker_written_in_a_string_literal...`, `...doc_comment...`); non-matching
+     mentions ignored (5 red); `/*` inside a line comment opens a comment
+     (`a_line_comment_opening_a_block_comment_text_does_not_open_one`); non-nesting block comments;
+     `.rs` symlink / directory symlink / other-link refusal, `x.rs` directory, lossy UTF-8, unreadable file
+     skipped, `target` or `node_modules` not skipped, prefix skip, lex error ignored, `crates/capi/src/ffi.rs`
+     not always parsed, marked files not parsed, parse error ignored, each of the eight Verbatim arms and
+     the two visitor descents dropped (`syntax_the_parser_keeps_verbatim_is_a_finding`), relative root not
+     joined, no-argument root, two-argument code, swapped success line, misorder parity, unmatched check
+     removed, realtime-module check removed, regions not summed, no sort (`findings_are_sorted_by_class_then_path`),
+     column counted as bytes (`a_marker_after_multibyte_text_is_still_a_marker`), CR not stripped
+     (`markers_with_crlf_line_endings_are_regions`), marker/misordered line off by one (the two finding-place
+     assertions). Two mutants first showed untested behavior (finding line of a malformed and of a misordered
+     marker); both got an assertion and then went red.
+5. Run time, release binary: real tree 0.75-0.86 s (3 runs); the base tree plus one synthetic marked file of
+   20,004 lines (3,334 regions): 0.13-0.14 s; the awk gate on the real tree: 0.58 s. `audit-native` step
+   time is CI-only. Local release build of the crate: 9.5 s with `syn` compiled, 13.9 s with `syn`,
+   `proc-macro2` and `quote` rebuilt.
+6. `libcapi.a` sha256 `4f3df3d5...c682`, `libcapi.so` `ade7f6d0...4fb`: identical at the parent `2a589d360`
+   (two clean builds) and at the change. The `artifact-identity` job is CI-only.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh` (and the awk self-test
+   `test-realtime-policy.sh`), `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+   `check-script-reachability.py`: all exit 0.
+
+**Open items.**
+- A file with thousands of marker lines inside one huge block comment makes the block-comment scan
+  quadratic in the comment's size; not reachable by a real tree and fails only in time. Not chased.
+- `Policy::workspace()`'s floors have no test of their own: the case policy replaces them, and gate 1 is the
+  only check of the real values (the awk gate checks them too until C2).
+- The unlistable-directory and unreadable-file cases fail when the tests run as root, by design (D9).
+
+**Verdict follow-ups (attempt 1 verdict PASS; applied after it, before the batch merge).**
+Spec-number notes from the verdict: D5's "14 paths" is 19 on this tree (the five test-file rows that
+#1489/#1494 added under STREAMS' named exception, listed above), and D10's "Unsafe (17)" is 16 (one exact
+duplicate dropped). The decisions are root's and are not edited here.
+1. MINOR-1 (coordinator option A, port faithfully). `the_file_floor_fires_when_a_marked_file_loses_its_markers`
+   and `findings_without_a_place_print_without_one` now delete only the marker lines of
+   `crates/builtins/src/lib.rs` (`strip_marker_lines`, the script's `sed -i "/REALTIME_POLICY/d"`), so the
+   file keeps its four `try_pop` drains; `an_open_tail_is_misordered` prepends the script's unmarked
+   `oracle_drain` to every marked file that does not open with `#!`. This keeps #1443 D8 ("these cases gain
+   {unmarked try_pop}") true: all three of its cases (`open-tail-valid`, `marked-file-count-floor`,
+   `no-marked-files-uses-floor`, the last already filtering marker lines) now carry an unmarked `try_pop`.
+2. MINOR-2: with the drain prepended, the doc comment of `an_open_tail_is_misordered` is true.
+3. MINOR-3: `a_missing_realtime_module_is_a_finding` asserts the exact set {missing module, file floor,
+   region floor}.
+4. NIT-1: `visit_expr` skips an empty `Expr::Verbatim` (syn's spelling of `;;`, no tokens, nothing hidden;
+   it was reported at line 1). New test `an_empty_statement_in_a_marked_file_is_not_a_finding`.
+5. NIT-2: `unsafe_code_inside_a_macro_body_is_a_finding` also has a `m! { unsafe {} }` call row (D11's macro
+   case is the definition body; this row is the call's token tree).
+6. NIT-3: kept the branch (it fails closed) and tested it: `a_fifo_named_like_a_source_file_is_a_finding`
+   (`mkfifo`; a socket path overflows `sun_path` under the long target dir) and
+   `a_fifo_with_another_name_is_ignored`.
+7. NIT-4 not changed: `main` keeps its `current_dir()` failure branch (exit 1, a failure line). A one-statement
+   `main` would have to pass an empty working directory to `run` and rely on a later scan-root failure; the
+   explicit branch is fail-closed with a clearer message. NIT-5 not changed: the append gives the same claim
+   with a cleaner class set, as the verdict says.
+
+Mutations for the changed and new tests (each applied alone to the code, then reverted; `cargo test --locked
+-p realtime-policy` after each; 53 green after the revert):
+- empty `Expr::Verbatim` reported again: 1 red, `an_empty_statement_in_a_marked_file_is_not_a_finding`.
+- groups after `!` skipped in `unsafe_scan`: 1 red, `unsafe_code_inside_a_macro_body_is_a_finding` (it
+  survived all 50 earlier tests).
+- FIFO branch removed from the walk: 1 red, `a_fifo_named_like_a_source_file_is_a_finding` (survived before).
+  Every non-regular file flagged whatever its name: 1 red, `a_fifo_with_another_name_is_ignored`.
+- `MissingRealtimeModule` plus an extra class: 1 red, `a_missing_realtime_module_is_a_finding` (the old
+  `contains` assertion stays green).
+- `strip_marker_lines` drops the whole file again (the old rewrite): 3 red (the helper's own assertion fires
+  in the file-floor, no-marked-files and run-floors cases).
+- misordered markers accepted: 3 red, still including `an_open_tail_is_misordered` with the drain present.
+Gates: `cargo test --locked -p realtime-policy` 53 passed; the release binary prints `realtime policy: ok (93
+marked regions in 26 files)`; `cargo fmt --all -- --check`; `cargo clippy --locked -p realtime-policy
+--all-targets -- -D warnings`; `check-workspace-policy.sh`, `check-realtime-policy.sh`,
+`test-realtime-policy.sh`: all exit 0. (A first draft asserted `contains("try_pop")` on a literal path;
+`check-workspace-policy.sh` refused it as a source-text read, so the guard moved into the helper.)

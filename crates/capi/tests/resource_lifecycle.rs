@@ -2433,7 +2433,7 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
 /// scope, so a failed assertion cannot hang the join. A copy of
 /// `bench_support::producer::StopOnDrop`, kept because naming anything from `bench_support` links
 /// its `#[global_allocator]`, which conflicts with this file's counting allocator at compile time
-/// (#1251 D4). The plan-swap race keeps its own copy in `plan_swap_race.rs` (#1273).
+/// (#1251 D4). `plan_swap_race.rs` uses the shared guard.
 struct StopOnDrop<'a>(&'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {
@@ -3374,7 +3374,7 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
 // written before the word was named passes -- and the two remaining reserved words (#1243 named
 // `maximum_vcas` after it) still refuse when nonzero. It lives here, not in a file of its own,
 // because this file is the C ABI's approved owner of exported-C `unsafe` calls
-// (`scripts/check-realtime-policy.sh`).
+// (`tools/realtime-policy`).
 
 const SUBMIX_FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/observation-frame-shape.json");

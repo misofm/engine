@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice A2 of nine (C1 (#1445), A1 (#1438), A2, B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice A2 of ten (C1 (#1445), A1 (#1438), A2, B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds).
 - A1 built `tools/realtime-policy`: the crate, the binary, the walk, unsafe ownership, markers,
   floors and the case harness.
@@ -223,3 +223,207 @@ one lower (A1's Problem lists them).
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`)
+
+Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code changed. Edits:
+`tools/realtime-policy/**` and this spec, plus #948's Evidence section. No `Cargo.toml` or `Cargo.lock` change
+(`syn` 2.0.119 and `proc-macro2` 1.0.107 only; no `quote`).
+
+**What is where.**
+- `src/leaf.rs`: the token stream flattened to leaves (word, literal, punctuation, group delimiters). A1's marker
+  pass now reads it too (its private copy is gone).
+- `src/boundary.rs` (D1): a `syn` visitor records the containers (file; the braces of `mod`, `impl`, `trait`,
+  `extern`; blocks; every group of a macro's token tree) with the children of each, and every attribute. A child
+  starts at its first leaf after its outer attributes. Markers are placed by one sweep over the containers. The
+  finding names the outermost item or statement that holds the marker ("a match expression", "a call
+  expression", "a let statement", "a struct", ...), or "an attribute".
+- `src/forbidden.rs` (D2): the region's leaves rendered as text (one space only between two words, literals
+  rendered empty), 37 substring patterns (the awk's 36 literals plus `.collect::<`) and the `async` keyword token.
+  One finding per line, on the line where the spelling starts.
+- `src/whole_plan.rs` (D3): production items (all but a top-level `mod tests` under exactly `#[cfg(test)]`);
+  `ExprReference` over `*plan` through parentheses; the token rule in every macro's tokens (`macro_rules!`
+  bodies included).
+- New classes: `RegionSplits(&'static str)`, `RegionSplitsMacroTree`, `ForbiddenBody`, `MissingCapiFfi`,
+  `NoRenderEntry`, `WholePlanReference`.
+
+**Deviations from the spec's numbers and text.**
+- Real-tree line numbers are the branch's, not the spec's: the gate-expander region is `:1022-1041` (spec
+  `:1014`/`:1033`), the transient-shaper region `:613-726` (spec `:587-703`), the effect-contract region
+  `:231-537` (same). Measured with a temporary print (not committed): of 93 regions, exactly one has a macro-tree
+  container (gate-expander, both markers in one group) and exactly two have markers in different containers
+  (effect-contract, transient-shaper; neither involves a macro tree). The rack marker (`:628`) passes only by the
+  attribute rule.
+- `Policy::always_parsed` is gone (a public field of A1). D3 parses `crates/capi/src/ffi.rs` anyway, so the
+  library parses that one path by the constant `whole_plan::CAPI_FFI`; the A1 parse-error case
+  (`walk-ffi-parse-error`) still holds. "missing crates/capi/src/ffi.rs" is a bare finding, as the missing
+  realtime module is.
+- D2 runs on any file with regions, even when the file does not parse (the parse error is its own finding).
+- D1 names the node by the outermost statement or item that holds the marker, not the innermost expression: the
+  tree has no other place to stand once the container's children are the rule.
+- The spec's "region nodes" (maximal nodes between the markers) are not built as a type: no A2 rule reads them.
+  The container/children layout in `boundary.rs` is what B1a extends (a region's nodes are the children of its
+  innermost container that lie between the markers).
+- Case counts: D4's nine whole-plan cases are three tests (the five forms in `every_form_of_a_whole_plan_borrow_is_a_finding`;
+  at-line-end and after-a-comment-line in `layout_does_not_hide_a_whole_plan_borrow`; the missing file and the
+  entry point only in tests in `a_missing_file_or_a_render_entry_only_in_tests_is_a_finding`). The nine
+  forbidden-body cases are one table test. 53 tests became 77.
+
+**Gates.**
+1. `cargo run --locked --release -q -p realtime-policy` prints `realtime policy: ok (93 marked regions in 26
+   files)`; `bash scripts/check-realtime-policy.sh` prints the same.
+2. `cargo test --locked -p realtime-policy`: 77 passed (one `policy` binary).
+3. Parity: 185 case trees (every tree the harness builds, kept by a throwaway patch of `Tree::drop`, reverted)
+   through gawk `check-realtime-policy.sh` and the release binary: 130 agree (44 both pass, 86 both fail), 55
+   differ. 20 are A1's (markers `markers-end-before-begin`, `markers-nested`, `open-tail`; `unsafe-mentions`;
+   the walk cases `walk-dir-named-rs`, `-rs-link`, `-fifo`, `-not-utf8`, `-lex-error`, `-parse-error`,
+   `-ffi-parse-error`, `-skipped-directories` and the eight `walk-verbatim-*`). The 35 of this slice, each a
+   listed deliberate difference:
+   - D1 (awk pass, tool fail, 21): `boundary-in-match-arms`, `-in-call-arguments`, `-in-struct-fields`,
+     `-in-enum-variants`, `-in-parameters`, `-in-let-initializer`, `-before-else`, `-in-method-chain`,
+     `-in-impl-header`, `-in-struct-expression`, `-in-closure-parameters`, `-in-attribute`, `-only-begin-splits`,
+     `-only-end-splits`, `-finding-place` (the split findings); `boundary-begin-in-macro-end-after`,
+     `-begin-before-macro-end-inside`, `-begin-in-outer-group-end-in-inner`,
+     `-begin-in-group-end-two-groups-deeper`, `-between-two-macro-calls`, `-block-to-macro-group` (the
+     macro-boundary finding).
+   - D2 (7 awk pass, tool fail): `forbidden-turbofish-collect`, `-split-across-lines`, `-split-vec` (the
+     `Vec`/`::new` split), `-spaced-path`, `-spaced-call`, `-spaced-macro`, `-async-no-space`; and (awk fail,
+     tool pass): `forbidden-words-in-comments-and-literals`. The `path:line:` prefix match of the script's regex
+     shows in no case tree.
+   - D3 (awk pass, tool fail, 2): `whole-plan-after-tests`, `whole-plan-in-macro-rules`; (awk fail, tool pass,
+     4): `whole-plan-macro-call` (`&*plan(1)`), `-macro-index` (`&*plan[0]`), `-macro-path` (`&*plan::DEFAULT`),
+     `whole-plan-tree-lookalikes` (the tree forms of the same call, index and path).
+   - Agree, though the spec listed `cfg(any(test, ..))` as a difference: both gates refuse the `cfg-any-test` and
+     `cfg-test-helpers` trees. The awk stops only at a `#[cfg(test)]` line followed by `mod tests {`, so it scans
+     those modules too. No tree separates the two gates there.
+   - Difference found by the verifier (MINOR-2), not in the spec's list: a `#[cfg(test)]` module `tests` that has
+     another outer attribute (`#[allow(dead_code)]` between or before the lines). The awk stops only at a
+     `#[cfg(test)]` line directly before `mod tests {`, so it scans that module and fails on the test module's
+     `&*plan`; the tool skips the module (D3: "outer attributes include exactly `#[cfg(test)]`") and passes. Cases:
+     `whole-plan-cfg-test-then-allow` and `whole-plan-allow-then-cfg-test`. The spec's D3 case list does not name
+     this shape, but the case pins the "include" wording of D3 and is cheap, so it is added. The tool is narrower
+     than the awk only for test code, never for production code.
+4. Mutations, each applied alone, then reverted (`cargo test` after each; 77 green on the revert). "red" lists
+   the tests that went red; the spec's seven first.
+   - Skip macro token trees in D2: 1 red, `a_spelling_the_line_scan_missed_is_a_finding` (the user-macro rows).
+   - D2 on raw line text: 3 red, `a_finding_names_the_line_where_the_spelling_starts` (split `Vec`),
+     `a_forbidden_word_in_a_comment_or_a_literal_passes`, `a_spelling_the_line_scan_missed_is_a_finding`.
+   - Drop D1's child split check: 3 red, `a_marker_inside_a_node_is_refused`,
+     `either_marker_alone_can_split_a_node`, `a_boundary_finding_names_the_marker_line` (gate 1 stays green: the
+     real tree has no split marker). Drop the attribute split check: 1 red, `a_marker_inside_an_attribute_is_refused`.
+   - Drop D1's macro-boundary check: 1 red, `a_region_that_crosses_a_macro_token_tree_is_refused`.
+   - Drop D1's macro-tree container: 2 red, `a_region_inside_a_macro_body_is_tokens_and_passes` and the crossing
+     test; gate 1 refuses `crates/gate-expander/src/lib.rs:1022` and `:1041` ("splits a macro item").
+   - Drop D1's attribute rule (a child starts at its first leaf): 2 red,
+     `a_marker_between_attributes_and_their_item_is_a_boundary`, `a_marker_inside_an_attribute_is_refused`; gate 1
+     refuses `crates/rack/src/lib.rs:628` ("splits a method"). Skip only the first attribute: 1 red (the
+     several-attributes row, which the one-attribute row did not catch), gate 1 red on rack.
+   - Narrow D3 to items before `mod tests`: 2 red, `a_whole_plan_borrow_after_the_test_module_is_a_finding`,
+     `a_whole_plan_borrow_inside_a_macro_is_a_finding` (the macro row sits in the entry point, which is before the
+     tests; the second red is the `macro_rules!` row appended after them).
+   - Further, one red each unless noted: `.collect::<` dropped (`a_spelling_the_line_scan_missed...`); `async`
+     rule dropped (same); literals kept as text (`..._in_a_comment_or_a_literal_passes`); word-boundary
+     matching (`a_longer_identifier_still_matches`); whole file scanned (`only_the_tokens_between_the_markers_are_read`);
+     only the first region scanned (6 red); no space between words (`adjacent_words_do_not_join_into_a_spelling`,
+     which survived all 76 earlier tests until it was added); a finding per match instead of per line
+     (`findings_are_one_per_line`); forbidden scan only under the realtime root
+     (`a_forbidden_spelling_in_a_region_is_a_finding`); match end taken as the line
+     (`a_finding_names_the_line_where_the_spelling_starts`); nested macro groups not containers (the
+     two-groups-deeper row; the first version of the row survived); crossing check on one side only (each
+     side: the crossing test); crossing flagged for one container (`a_region_inside_a_macro_body_is_tokens_and_passes`);
+     any container change a crossing (3 red incl. `a_region_may_span_the_end_of_an_impl`); no `mod`, `impl`,
+     `trait`, `extern` or block container (`a_marker_between_the_children_of_a_container_is_a_boundary`; the
+     `impl` and block ones also red elsewhere; gate 1 stays green for block); only the begin or only the end marker
+     checked (`either_marker_alone_can_split_a_node`; the end-only one 3 red); the finding at the region's begin
+     instead of the marker (`either_marker_alone_can_split_a_node`, after its line assertions were added: it
+     survived before); the crossing finding at the end marker (the crossing test, after its line assertion was
+     added: it survived before); stale-container pop dropped from the sweep (5 red); statement name `an
+     expression` (3 red); D3 test module accepted under any `cfg` or any name
+     (`only_a_cfg_test_module_named_tests_is_skipped`); no parenthesis peel (`every_form_of_...`); `mut`
+     borrows ignored in the tree (`every_form_of_...`) and in macros (`a_whole_plan_borrow_inside_a_macro...`);
+     macro group form `(*plan)` off (same); each of `.`, `(`, `[`, `::` as a continuation off
+     (`borrows_that_are_not_the_whole_plan_pass`, one red each); a single colon read as `::` (survived until the
+     `whole-plan-before-a-colon` row was added); a prefix match on `plan` in macros and in the tree
+     (`borrows_that_are_not_the_whole_plan_pass`); render-entry check off or test module counted
+     (`a_missing_file_or_a_render_entry_only_in_tests...`); missing file not reported (same); finding line off by
+     one (`layout_does_not_hide_a_whole_plan_borrow`).
+5. Run time, release binary: real tree 1.02-1.04 s (A1: 0.75-0.86 s;
+   with the D1 and D2 calls removed it is 0.75 s here, so the two cost about 0.28 s: 0.12 s is the children's
+   `Spanned` spans, the rest the second and third flattening of the marked files' tokens). Machine load is not the cause: the verifier measured 1.01 s three times at load average 2.0, against 0.59 s for the awk gate, so the extra 0.4 s is the D1 and D2 passes. Base tree plus one
+   synthetic marked file of 20,004 lines (3,334 regions): 0.04 s (A1: 0.13 s). The awk gate: 0.58 s. Not tuned.
+6. Shipped artifacts: nothing outside `tools/realtime-policy` and `.github/ISSUE_SPECS` changed against the
+   parent `e5fa8319b` (`git diff --stat e5fa8319b..HEAD -- . ':!tools/realtime-policy'` is empty before the spec
+   commit), `cargo tree -e normal,features -p capi` names no `realtime-policy`, and two clean builds of
+   `cargo build --locked --release -p capi` give identical digests: `libcapi.a` `3431f546...a3394`, `libcapi.so`
+   `0213cd82...8ca6d`. (A1's digests were taken at `2a589d360`; `crates/engine/src/realtime/plan.rs` has changed since, in #1422.)
+   The `artifact-identity` job is CI-only.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh`, `test-realtime-policy.sh`,
+   `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-script-reachability.py`: all exit 0. (A first
+   draft of `whole_plan.rs` held the text of an unsafe fn in a test row and the awk gate refused it; the rows are
+   built from `UNSAFE` now.)
+
+**Test value (the one-sentence answer, per new test).**
+- `a_marker_inside_a_node_is_refused` / `either_marker_alone_can_split_a_node`: red if a marker inside a match,
+  call, struct, let, if/else, method chain, parameter list or impl header is accepted, or only one marker of a
+  region is judged.
+- `a_marker_inside_an_attribute_is_refused`: red if an attribute that precedes its item is not whole.
+- `a_marker_between_attributes_and_their_item_is_a_boundary`: red if the attribute rule skips fewer than all
+  outer attributes (the real rack marker follows six doc lines).
+- `a_marker_between_the_children_of_a_container_is_a_boundary`: red if `mod`, `impl`, `trait`, `extern` or a
+  block is not a container.
+- `a_region_may_span_the_end_of_an_impl`: red if any change of container is refused (the real effect-contract and
+  transient-shaper regions).
+- `a_region_inside_a_macro_body_is_tokens_and_passes`: red if a macro's groups are not containers or a region
+  inside one is refused (the real gate-expander region).
+- `a_region_that_crosses_a_macro_token_tree_is_refused`: red if a region from a macro group into syntax, or
+  between two groups, is accepted, on either side, at any depth.
+- `a_boundary_finding_names_the_marker_line`: red if a finding names the wrong line or text.
+- `forbidden::*`: the ported table is red if a forbidden spelling in a marked function is missed in any of the
+  nine places; `a_spelling_the_line_scan_missed_is_a_finding` is red if the predicate falls back to line text, skips
+  macro trees, drops the turbofish (#948) or `async`; `a_forbidden_word_in_a_comment_or_a_literal_passes` is red
+  if literals are scanned as text; `a_longer_identifier_still_matches` is red if word boundaries are added;
+  `adjacent_words_do_not_join_into_a_spelling` is red if the rendering joins words; `only_the_tokens_between_the_markers_are_read`
+  is red if the scan covers the file or one region; `findings_are_one_per_line` and
+  `a_finding_names_the_line_where_the_spelling_starts` are red if a finding is per match or on the wrong line.
+- `whole_plan::*`: red if a form of a whole-plan borrow is missed in the tree or a macro, an item after the test
+  module is not scanned, `cfg(any(test, ..))` or another module name is skipped, a call, index, path, field or
+  `&raw` form is flagged, or the render-entry and missing-file checks go.
+
+**Open items.**
+- The region-nodes type is not built (nothing reads it in A2); B1a extends `boundary.rs`'s layout.
+- Run time: D1 and D2 add about 0.28 s on the real tree; children could be computed only for containers that hold
+  a marker, and the three flattenings of a marked file could be one. Not done (a diminishing return, 0.04 s on the
+  synthetic file).
+- D6 steps 3-5 (sync of #948's body, the comment, the close, and removing its spec at the next batch) wait for
+  the batch push; the verdict path in #948's Evidence is the expected one.
+- A string in a macro's tokens that names a forbidden spelling is a literal and passes, as in a function body;
+  the same holds for text built at run time. The predicate reads spellings, as the regex did.
+
+### Verdict follow-ups (attempt 1 verdict PASS: MINOR-1, MINOR-2, NIT-2)
+
+- **MINOR-1.** New test `forbidden::every_forbidden_spelling_is_a_finding`: 38 rows (37 spellings plus the `async`
+  keyword), each a marked one-line function that holds that spelling only, with the exact finding asserted (path,
+  line, source text). The rows are written in the test; nothing reads `src/forbidden.rs`. The `.await` row
+  ("await-only") opens its region inside an `async fn` body, so only `.await` makes it forbidden. The old
+  `forbidden-await` row of `a_spelling_the_line_scan_missed_is_a_finding` (`async fn probe() { other().await; }`)
+  went red on the `async` keyword and not on `.await`; it is deleted (the new `async-block` and `await-only` rows cover
+  each rule). Test value: red if any single spelling is deleted or mistyped in the pattern table, which no other test
+  catches (M8 `.await` and M9 `Tcp` left all 77 tests green). Mutations, each alone and then reverted:
+  `.await` disabled: 1 red (this test); `Tcp` disabled: 1 red; `Arc::clone` disabled: 1 red; revert: 78 green.
+  Finding: `eprintln!` contains `println!`, so disabling `eprintln!` alone stays green (78 green). The `eprintln!`
+  pattern is redundant while `println!` is in the table; the row exists and passes, but no test can distinguish
+  that pattern. Not removed: A2-D2 fixes the 37-pattern list.
+- **MINOR-2.** Recorded in gate 3's D3 differences above. New test
+  `whole_plan::another_attribute_beside_cfg_test_still_skips_the_module` (two passing trees). Test value: red if
+  the test-module rule demands that `#[cfg(test)]` is the only outer attribute. Mutation: add
+  `module.attrs.len() == 1` to `is_test_module`: 1 red (this test); revert: green.
+- **NIT-2.** Gate 5 note corrected above. Re-measured here: 1.00-1.01 s (three runs; machine load was 7.2).
+- Gates after the follow-ups: `cargo test --locked -p realtime-policy` 79 passed (A2 had 77; +2 tests, one row
+  deleted from an existing test); release binary and `check-realtime-policy.sh` print
+  `realtime policy: ok (93 marked regions in 26 files)`; `cargo fmt --all -- --check`,
+  `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and `check-workspace-policy.sh` exit 0.
+
+**Batch follow-up (root, 2026-10-12): `eprintln!` beside `println!`.** `eprintln!` is redundant beside `println!` in
+the 37-pattern list, because the `println!` substring matches inside `eprintln!`. It stays in the list because
+A2-D2 fixes the list at 37 patterns; the decision text is unchanged.

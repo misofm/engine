@@ -1690,6 +1690,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realtime-policy"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

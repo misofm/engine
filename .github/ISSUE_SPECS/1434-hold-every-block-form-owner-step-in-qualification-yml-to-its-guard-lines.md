@@ -150,3 +150,84 @@ paths above stay; these are added.
 **Non-goals (added).** The AArch64 doctest line (`scripts/run-aarch64-tests.sh:147`) is outside
 `qualification.yml` and stays out, as the Non-goals above say for owners outside it. Root files it
 separately if wanted.
+
+## Amendment 2 (root, 2026-10-12)
+
+Source: the attempt-1 verdict of *Check realtime regions with a Rust syntax-tree tool ...* (#1446,
+`/home/bl/misofm/submix-verdicts/1446-attempt1.md`, NIT-2 and NIT-3). Root ruled on 2026-10-12 to fold
+the drafted successor into this issue instead of filing a new one. The decisions, gates and paths
+above, and Amendment 1, stay as written; these are added. CI tooling only: the checker and its
+self-test, no workflow edit.
+
+**Problem (measured on `codex/d15-stream-j3` at `e6dd440e0`, with #1446's `realtime_policy` owner
+entry).** Each case below was applied to a scratch copy of `qualification.yml`; `python3 -B
+scripts/check-ci-path-routing.py --root <copy>` exits 0 (accepted) for every one.
+- **`continue-on-error` on an owner is not refused (NIT-2).** `check_qualification_deduplicated_owners`
+  (`scripts/check-ci-path-routing.py:777-791`) over `DEDUPLICATED_OWNERS` (`:743-756`, four jobs:
+  `artifact-gates`, `lint`, `test-release`, `audit-native`) refuses a deleted owner command, a job
+  `if:` other than the full route and a step-level `if:`. It accepts `continue-on-error: true` (and
+  `${{ true }}`) on the `audit-native` step "Realtime source policy (tools/realtime-policy)" and
+  `continue-on-error: true` on the `audit-native` job. Either makes a failing owner pass with every
+  job green. The same holds for every owner. `UNMASKABLE` (`:577`) already refuses job-level
+  `continue-on-error` for `artifact`, the record job, `artifact-identity` and two self-test jobs, but
+  not for these four.
+- **Nothing pins where the tool's tests run (NIT-3).** `tools/realtime-policy` is a workspace member
+  (`Cargo.toml:40`). Its tests run only in `test-debug-a`'s step "Workspace debug tests ..."
+  (`qualification.yml:624-634`): `cargo test --locked --workspace --all-targets` with 20 `--exclude`
+  values, none of them `realtime-policy`. No other job runs `cargo test` for it (`audit-native`
+  builds the binary only). Adding `--exclude realtime-policy` there (to that step alone, or to it and
+  its doctest twin) leaves the checker at exit 0, and the suite that defends the realtime source
+  policy no longer runs.
+- **The census of other `continue-on-error` lines.** Two exist in `qualification.yml`, at `:1209` and
+  `:1218`: the best-effort telemetry steps of the `verdict` job (`if: always()`, design section 11).
+  They are not owners and stay. `nightly.yml` has none.
+
+**Relation to the items above (no rewrite).**
+- *D2 (step-level `continue-on-error` on owner steps)* covers the step half of NIT-2. A2-D1 extends
+  D2 to the job level, and fixes the step test as presence-based (any value), so D2's helper serves
+  both. D2's other masking constructs (`set +e`, `|| true`, ...) stay D2's alone; A2 adds none.
+- *Amendment 1 (A1-D2, `test-debug-a`'s two steps compared for equal packages)* treats an `--exclude`
+  added to both steps as green ("the pairing, not the values, is the claim"). That is the blind spot
+  of NIT-3: A2-D2 pins a value, namely that `realtime-policy` is in `test-debug-a`'s resolved
+  package set. A1-D2 stays as written; the two checks run side by side and neither replaces the
+  other.
+
+**Decisions.**
+- **A2-D1. Any `continue-on-error` key on an owner job or step is refused, whatever its value.** In
+  `check_qualification_deduplicated_owners`, for each owner job: no `continue-on-error` key at job
+  level, and none in the step whose `run:` holds an owner command. `false` is refused too: it is a
+  no-op nobody needs, a `${{ ... }}` value can turn truthy later, and a presence test is the
+  fail-closed rule that needs no expression parser. The message names the job, the step and #1044.
+- **A2-D2. `test-debug-a` must run the realtime-policy tests.** The checker reads the commands of
+  `test-debug-a` (`step_commands`, `:895-916`, which already joins `\` continuations) and requires a
+  `cargo test` command that is either `--workspace` with no `--exclude realtime-policy`, or names `-p
+  realtime-policy`, with `--all-targets` and none of `NON_INTEGRATION_TARGET_SELECTORS` (`:884`) or
+  `--`. The doctest twin is out of scope: the tool has no doctest claim. A command that fails this
+  rule fails the checker, naming #1446.
+
+**Added gates.**
+- **A2-G1. Six mutation cases**, each `workflow_mutation_fails("qualification.yml", ...)`, each
+  accepted by the checker at this issue's parent commit and refused with the change:
+  1. step-level `continue-on-error: true` on `audit-native`'s "Realtime source policy" step;
+  2. job-level `continue-on-error: true` on `audit-native`;
+  3. `continue-on-error: false` on that step (the presence rule); one loop covers the other owners;
+  4. `--exclude realtime-policy` added to `test-debug-a`'s "Workspace debug tests" step alone;
+  5. the same flag added to that step and its doctest step (the A1-D2 blind spot);
+  6. `--workspace` replaced by `-p engine` on that step (`realtime-policy` not in the resolved set).
+- **A2-G2. Each rule has a catch (PR evidence).** Remove A2-D1 and A2-D2 from the checker in turn: at
+  least one A2-G1 case turns red each time, and no existing case already catches it.
+- **A2-G3.** `python3 -B scripts/check-script-reachability.py` exits 0 (with gate 4's
+  `check-workspace-policy.sh`).
+
+*Test value (Amendment 2).* Cases 1 to 3 are red when an edit makes a failing owner step or job
+report success while every job stays green, which no existing case catches (D2 refuses only the
+step-level form on the steps it names, and `UNMASKABLE` omits these four jobs). Cases 4 to 6 are red
+when an edit drops `realtime-policy`'s own suite from CI, which today leaves the checker at exit 0;
+case 5 is the one A1-D2 passes by design.
+
+**Evidence (added).** For each A2-G1 case, the exit status at the parent commit and with the change;
+the `continue-on-error` census above, re-run at the PR head.
+
+**Dependencies (added).** The `realtime_policy` owner entry in `DEDUPLICATED_OWNERS` and the
+`tools/realtime-policy` crate land with the J3 batch (#1446). This issue therefore lands after the J3
+batch is on `main`, and the re-measurement of the line numbers above is part of the implementation.

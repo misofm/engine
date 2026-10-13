@@ -524,10 +524,8 @@ jobs:
         run: |
           bash scripts/check-protocol-control-policy.sh
           bash scripts/test-protocol-control-policy.sh
-      - name: Realtime source policy and mutation tests
+      - name: Realtime audit and artifact evidence leak gates
         run: |
-          bash scripts/check-realtime-policy.sh
-          bash scripts/test-realtime-policy.sh
           bash scripts/check-realtime-audit-leak.sh
           bash scripts/test-realtime-audit-leak.sh
           bash scripts/check-artifact-evidence-leak.sh
@@ -763,8 +761,10 @@ jobs:
       # instead of each re-paying its own release compile (design §5: this is what moves 470s of
       # tools/audit unit-test execution and ~330s of per-crate release re-runs out of the debug
       # workspace run without losing their claims).
-      - name: Build release audit, bench, capi, and session-validator binaries
-        run: cargo build --locked --release -p audit -p bench -p capi -p session-validator
+      - name: Build release audit, bench, capi, session-validator, and realtime-policy binaries
+        run: cargo build --locked --release -p audit -p bench -p capi -p session-validator -p realtime-policy
+      - name: Realtime source policy (tools/realtime-policy)
+        run: ./target/release/realtime_policy
       - name: Audit and console-workload unit tests in release
         run: cargo test --locked --release -p audit -p bench -p console-workload
       - name: Issue-544 C ABI runtime caller audit

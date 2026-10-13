@@ -1,0 +1,19 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>, kind: Kind) {
+        match kind {
+            Kind::A
+                if self.enabled_for_the_current_block_of_the_lane
+                    && self.other_condition_that_is_long =>
+            {
+                let available = control.available_at_entry();
+                for _ in 0..available {
+                    let Ok(record) = control.try_pop() else {
+                        break;
+                    };
+                    self.apply(record);
+                }
+            }
+            _ => {}
+        }
+    }
+}

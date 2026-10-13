@@ -197,7 +197,7 @@ between render calls.
    - `cargo test --locked -p graph -p host-core -p capi --features graph/test-support,host-core/test-support,builtins-compiler/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `bash scripts/check-graph-policy.sh`, `bash scripts/check-host-core-policy.sh`,
-     `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh`,
+     `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-cross-targets.sh`,
      `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

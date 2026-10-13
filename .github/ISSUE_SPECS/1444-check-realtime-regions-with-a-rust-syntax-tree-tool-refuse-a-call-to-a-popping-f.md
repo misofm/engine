@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B2b-2 of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2; A1's spec lists what
+This is slice B2b-2 of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2; A1's spec lists what
 each holds).
 - B2b-1 put every non-test pop in a marked region or on the control-side allowlist, and made the
   one restructure this slice needs.
@@ -166,6 +166,10 @@ outside the repository.
   and shares a name with a method that a marked loop or closure calls will refuse that loop. The
   fix is a restructure (D3), named by root.
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 1, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 

@@ -1,0 +1,11 @@
+fn drain(control: &mut Consumer<Record>) {
+    /* outer /* inner } */ still comment { */
+    /** doc } */
+    // not a doc here }
+    loop {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

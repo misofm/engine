@@ -1,0 +1,14 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while matches!(
+            self.control_lane_consumer_for_this_strip
+                .state_of_the_ring(),
+            RingState::HasRecords | RingState::Overflowed
+        ) {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

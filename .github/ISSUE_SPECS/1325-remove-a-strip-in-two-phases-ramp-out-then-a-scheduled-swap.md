@@ -230,7 +230,7 @@ two render calls, so the ramp starts at `p`).
    - `cargo test --locked -p host-core -p capi --features host-core/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` (as in
      qualification.yml's `audit-native` job)
-   - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
+   - `bash scripts/check-host-core-policy.sh`, `cargo run --locked --release -q -p realtime-policy`,
      `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

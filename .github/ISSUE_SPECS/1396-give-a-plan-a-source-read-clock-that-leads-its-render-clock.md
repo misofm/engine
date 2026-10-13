@@ -141,7 +141,7 @@ both clocks.
    - `cargo test --locked -p graph`, `cargo test --locked -p source`
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

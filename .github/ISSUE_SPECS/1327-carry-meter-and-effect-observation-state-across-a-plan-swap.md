@@ -165,7 +165,7 @@ changed or added owners start fresh.
 6. Commands:
    - `cargo test --locked -p engine -p builtins -p builtins-compiler -p effect-contract -p rack -p graph -p host-core --features builtins-compiler/test-support,rack/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit && bash scripts/trace-graph-audit.sh target/release/audit`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
 ## Test value

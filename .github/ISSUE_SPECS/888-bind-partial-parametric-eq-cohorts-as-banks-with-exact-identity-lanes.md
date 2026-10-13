@@ -24,7 +24,7 @@ No other effect (compressor is a separate issue). No kernel change. No change to
 
 1. New graph-compiler test: sessions with 1..W-1 EQ tracks bind one bank with identity lanes (assert on the plan).
 2. New end-to-end test: for those sessions, rendered PCM is bit-identical to the same session rendered with banking disabled (scalar per node), on random input and on the EQ fixtures.
-3. `scripts/check-graph-determinism.sh`, `scripts/check-parametric-eq-render-contract.sh`, `scripts/check-effect-runtime-policy.sh`, `scripts/check-realtime-policy.sh` pass; `cargo test -p graph-compiler -p parametric-eq -p graph` green.
+3. `scripts/check-graph-determinism.sh`, `scripts/check-parametric-eq-render-contract.sh`, `scripts/check-effect-runtime-policy.sh`, `tools/realtime-policy` pass; `cargo test -p graph-compiler -p parametric-eq -p graph` green.
 
 ## Dependencies
 
@@ -34,7 +34,7 @@ No other effect (compressor is a separate issue). No kernel change. No change to
 
 - Work only from this body. Read the cited functions first; do not survey the workspace.
 - Class A means the change moves no rendered bit: same arithmetic in the same order, fewer passes, loads, stores, copies or branches. Every gate below that says "bit-identical" is a hard stop, not a tolerance.
-- Render paths stay allocation-free, lock-free and syscall-free (`scripts/check-realtime-policy.sh` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
+- Render paths stay allocation-free, lock-free and syscall-free (`tools/realtime-policy` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.

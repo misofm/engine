@@ -1,0 +1,3 @@
+// REALTIME_POLICY_BEGIN
+fn buffer() {}
+// REALTIME_POLICY_END

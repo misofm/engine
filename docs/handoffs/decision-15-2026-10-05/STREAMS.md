@@ -572,6 +572,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
     `continue-on-error` line and its comment, and the file's header bullet for that job) and `scripts/test-test-support-ci.py` (#1481: two
     rewrapped lines).
 - **Depends on:** S0; #1303 and #1384 need A (#1277, #1285); the tool batch (#1445 to #1444) needs stream B batch 1 (#1309, #1343, #1314, #1311, #1348), B #1447, H #1448, H #1449 and B #1345 (Amendment 1) on `main`; #1418 and #1426 need the tool batch.
+- **Root note (2026-10-13):** #1443 and #1444 are not in the J3 batch; they run as a follow-up J batch after J3 merges, because the batch should not wait for slices that were blocked until B3 merged. The "#1448 guard" commit lands in J3, and #1443 stays open. The "tool batch" wording above and in the rows below means J3 plus that follow-up batch.
 - **Parallel-safe with:** all, except the tool batch's waits above and the hot-file rows for its marker commits.
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
@@ -616,6 +617,12 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 38 | #1481 | Make the nightly vectorization report pass on main and report its failures | — | — |
 | 39 | #1489 | Correct the realtime dependency policy's unsafe-ownership statements | — | H #1488 (preferred; else its D-M2 exception clause) |
 | 40 | #1496 | Prove that every export the worklets call after construction is render-locked | #1446 | H #1488, H #1492 |
+| 41 | #1527 | Read workspace manifests and build config as TOML for the realtime tool's claims | #1519, #1442 (either order with #1446) | — |
+| 42 | #1528 | Close the remaining render-lock proof gaps in the realtime-policy tool | the J3 batch on `main` | — |
+| 43 | #1529 | Prove a real allocation inside a render-lock window is counted, natively and in the shipped wasm module | the J3 batch on `main`; after #1528 or either order | — |
+
+**#1527 (root, 2026-10-12)** runs after #1519 and #1442 and in either order with #1446 (neither depends on the
+other); it takes over #1442's dependency-key manifest rule, which #1442's attempt-3 verdict failed.
 
 **#1444 waits for B #1345 (Amendment 1): accepted by root, 2026-10-05**, in place of the earlier
 "not ordered against #1345" for this one slice.

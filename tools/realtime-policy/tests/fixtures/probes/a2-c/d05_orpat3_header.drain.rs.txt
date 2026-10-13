@@ -1,0 +1,10 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while let Ok(Record::GainChangeForTheLane(x))
+        | Ok(Record::PanChangeForTheLane(x))
+        | Ok(Record::TrimChangeForTheLane(x)) = control.try_pop()
+        {
+            self.apply(x);
+        }
+    }
+}

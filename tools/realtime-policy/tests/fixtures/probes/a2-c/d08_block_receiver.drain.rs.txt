@@ -1,0 +1,12 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while let Ok(record) = {
+            let lane_index_for_the_block = self.current_lane_index_for_the_block;
+            &mut self.consumers[lane_index_for_the_block]
+        }
+        .try_pop()
+        {
+            self.apply(record);
+        }
+    }
+}

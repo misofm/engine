@@ -1,0 +1,2 @@
+#![allow(unsafe_code)]
+unsafe fn read_mxcsr() {}

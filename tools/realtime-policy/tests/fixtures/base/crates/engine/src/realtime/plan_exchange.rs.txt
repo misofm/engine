@@ -1,0 +1,31 @@
+// REALTIME_POLICY_BEGIN
+fn exchange_plane() {}
+impl Exchange {
+    fn enter_block(&mut self) {
+        if self.pending.is_none()
+            && let Ok(candidate) = self.publication.try_pop()
+        {
+            self.pending = Some(candidate);
+        }
+    }
+    fn retire_one(&mut self) {
+        for lane in 0..self.lanes {
+            self.clear(lane);
+        }
+        {
+            let Ok(retired) = self.retirement.try_pop() else {
+                return;
+            };
+            self.retire(retired);
+        }
+    }
+    fn retire_lanes(&mut self) {
+        for lane in 0..self.lanes {
+            self.clear(lane);
+        }
+        if let Ok(retired) = self.retirement.try_pop() {
+            self.retire(retired);
+        }
+    }
+}
+// REALTIME_POLICY_END

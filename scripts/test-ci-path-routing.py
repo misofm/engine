@@ -767,6 +767,20 @@ def test_generated_once_mutations(checker) -> None:
         for name, commands in checker.DEDUPLICATED_OWNERS.items():
             for command in commands:
                 workflow_mutation_fails("qualification.yml", command + "\n", "true\n")
+        # The tool's step conditioned (a step-level `if:` keeps it in the file but off a route),
+        # and the job moved off the full route.
+        workflow_mutation_fails(
+            "qualification.yml",
+            "      - name: Realtime source policy (tools/realtime-policy)\n        run: ./target/release/realtime_policy\n",
+            "      - name: Realtime source policy (tools/realtime-policy)\n"
+            "        if: needs.route.outputs.math_closure == 'true'\n"
+            "        run: ./target/release/realtime_policy\n")
+        workflow_mutation_fails(
+            "qualification.yml",
+            "    name: release audit, trace, and fixture gates\n"
+            "    needs: route\n    if: needs.route.outputs.route == 'full'\n",
+            "    name: release audit, trace, and fixture gates\n"
+            "    needs: route\n    if: needs.route.outputs.math_closure == 'true'\n")
         workflow_mutation_fails(
             "qualification.yml",
             "      - name: Hermetic browser host and worklet tests\n        run: |\n",

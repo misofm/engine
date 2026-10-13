@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B2b-1 of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446), B2b-1, B2b-2 (#1444); A1's spec lists what
+This is slice B2b-1 of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446), B2b-1, B2b-2 (#1444); A1's spec lists what
 each holds).
 - B1a and B1b ported `main`'s drain rule; B2a refused pops in closures, macros and function values.
 - **B2b-1 (this issue)** closes the limit "a pop outside every region" (root rulings R2 and R4,
@@ -18,7 +18,7 @@ each holds).
   the call rule needs (D6), so that every line that moves in `crates/builtins-compiler/src/lib.rs`
   moves in this one marker commit.
 - It waits for three production issues, which bound the render-thread drains first (root rulings
-  R1 and R2), and it comes after C2 and the #1448 guard commit in the J batch (Dependencies).
+  R1 and R2), and it comes after C2 and the #1448 guard commit, in the follow-up J batch after J3 (root, 2026-10-13; Dependencies).
 
 Production changes: region markers in three files, and one restructure of test-support code (D6).
 
@@ -96,6 +96,11 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
      resolved by Rust's default lookup (`x.rs` or `x/mod.rs` beside a `lib.rs`, `main.rs` or
      `mod.rs`; under `<stem>/` beside any other file; through enclosing inline modules) or by its
      `#[path]` (relative to the declaring file's directory, or to the inline module's directory).
+     (root Amendment 2) Rule 3 resolves only the `#[path]` forms that #1442 D8 accepts: a plain
+     relative `.rs` string literal with no `..`, `target` or `node_modules` component. D8 refuses every other
+     `#[path]` (every `path` in `cfg_attr` arguments or in a macro token tree, and every `$p` metavariable,
+     included) and every `include!` of source before this resolver runs, so the resolver never has to
+     resolve one.
 
   A file that no declaration reaches is not test code. No module is exempt by its name.
   - So `#[cfg(any(test, feature = "test-support"))]` and `#[cfg(feature = "test-support")]` are not
@@ -268,6 +273,12 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
 
 ## #1448 guard (this slice's first commit)
 
+**Root amendment (2026-10-13).** #1443 is not in the J3 batch; it lands in a follow-up J batch
+after J3 merges, because the batch should not wait for slices that were blocked until B3 merged.
+The "#1448 guard" commit lands in J3, ahead of the rest of this slice, and #1443 stays open after
+J3 merges. The guard commit has its own verdict, `docs/handoffs/decision-15-2026-10-05/verdicts/stream-j3/1448-guard-attempt1.md`;
+the original text below is unchanged.
+
 This section is the spec of the commit "H #1448's guard, landed by J after C2" (root ruling 2 on
 the fourth review, option (C)). It was #1448's D5. It lives here because #1448 (stream H, *Bound the
 browser meter poll by each queue's count at entry*) closes at its own PASS and its spec leaves
@@ -301,6 +312,48 @@ this slice's first commit, after C2, and is judged in this slice's verdict.
 *Test value.* The markers are the committed guard of #1448's bound: gates 2 and 3 show that a
 change that restores the capacity bound or the minimum form is refused, which no host-web test
 can show on today's thread layout (no producer runs during the call).
+
+### Attempt record: the guard commit (stream J3, 2026-10-12, on `a37144f24`)
+
+- **Markers.** `hosts/host-web/src/lib.rs:3438` (blank line before `poll_meters`'s doc comment) and
+  `:3789` (blank line after its closing brace) became the BEGIN and END comments. Both blanks were
+  present; the diff is two lines replaced, no line moves.
+- **Floors (G-D2).** Re-measured by raising each floor until the tool fired: 95 regions, 26 files.
+  The region floor in `Policy::workspace()` is 94 -> 95; the file floor stays 26 (`lib.rs` was
+  already marked). `tests/policy` fixtures keep `BASE_REGIONS = 94`: they are the base fixture
+  tree's own count, not the workspace's.
+- **Gate 1.** `cargo run --locked --release -p realtime-policy` on the real tree: the only finding
+  is `crates/effect-contract/src/live.rs:366` (pre-#1345, expected); nothing for
+  `hosts/host-web/src/lib.rs`, so the tool accepts `poll_meters`.
+- **Gate 2.** Scratch export with `98d4a1534^`'s `lib.rs`, `poll_meters` marked by name: the tool
+  refuses `hosts/host-web/src/lib.rs:3466: && let Ok(snapshot) = meter.consumer.try_pop()` (drain
+  class, "bound it with available_at_entry").
+- **Gate 3.** Scratch export with the markers around the minimum-bound mutant (mode 1: `available =
+  METER_QUEUE_DEPTH` folded by `available.min(count + usize::from(pending.is_some()))`, `passes =
+  available`, no per-queue count): refused at `lib.rs:3497: if let Ok(snapshot) =
+  meter.consumer.try_pop()` (drain class).
+- **Gate 4.** `scripts/build-web-audioworklet.sh --module-only` with the markers: shipped module
+  `9784d3509dba6bfd8188b00fc48f9ae4f20020ef9583cbc409cea1d079878d9c`, the digest recorded in #1446
+  at the parent: UNCHANGED.
+- **Gate 5.** `cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh`, clippy for
+  `host-web` (`--all-targets -D warnings`) and `cargo test --locked -p realtime-policy` (186
+  passed) exit 0.
+
+### Root Amendment 1 (2026-10-11): gate 5 and `.llvmbc`
+
+Authority: root decision under the owner's delegation, after the #1441 attempt-1 verdict (SP-1) and
+an adversarial review (ACCEPT WITH CHANGES). Root adopted the review's insertion verbatim. Gate 5
+allows a difference in the `.llvmbc` section of the `libcapi.a` members, because rustc's embedded
+bitcode carries each source file's checksum, so any byte change to a source file changes it, and no
+linker copies it into a shipped image. Marked "(root Amendment 1)" in place.
+
+### Root Amendment 2 (2026-10-11): `#[path]` resolution and the threat model
+
+Authority: root decisions under the owner's delegation (J3 rulings of 2026-10-11, adopted verbatim
+from an adversarial review). Each is placed where it belongs and marked "(root Amendment 2)":
+
+- **D1 rule 3** resolves only the `#[path]` forms that #1442 D8 accepts.
+- **Hazards** refers to #1438's threat model.
 
 ## Authorized paths
 
@@ -336,6 +389,10 @@ can show on today's thread layout (no producer runs during the call).
   marker raises the floors there. STREAMS names this as a standing exception for every stream
   (STREAMS).
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 
@@ -359,7 +416,8 @@ can show on today's thread layout (no producer runs during the call).
 5. **Shipped artifacts.** Markers that replace blank lines move nothing. The builtins-compiler
    markers and the restructure move lines in that file. So `artifact-identity` may report ARTIFACT
    CHANGED, and the `libcapi` digests may differ, only in `core::panic::Location` line fields and
-   line tables (root's ruling on the second review's MAJOR-8; this is the one marker commit it
+   line tables and the `.llvmbc` section of the `libcapi.a` members (root Amendment 1, SP-1;
+   root's ruling on the second review's MAJOR-8; this is the one marker commit it
    names). PR evidence, as the stream-J2 batch verdict made it: the function-level comparison of
    the base and head named twins shows no other difference, the render closure is
    byte-identical, and every rendered-digest gate passes with the base's pins (no PCM moved). Any
@@ -396,6 +454,7 @@ can show on today's thread layout (no producer runs during the call).
   first commit (section "#1448 guard"); the rest of the slice follows it, because D2 refuses an
   unmarked render-thread pop. C2 needs only A1 to B2a to cover every check of the awk gate (fourth review, BLOCKER-1, option B's
   measurement), so it moves before this slice.
+- After: #1519.
 - After (other streams), root rulings R1 and R2:
   - stream B, *Bound the source acquire by the blocks queued at its entry, and observe a late seek
     outside the loop*;

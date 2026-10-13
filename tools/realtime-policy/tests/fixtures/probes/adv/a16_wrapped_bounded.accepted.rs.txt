@@ -1,0 +1,13 @@
+impl LaneDrain {
+    fn drain_controls_for_lane(&mut self) {
+        let available_records_for_this_lane = self
+            .control_lane_consumer_for_this_strip
+            .available_at_entry();
+        for _ in 0..available_records_for_this_lane {
+            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

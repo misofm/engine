@@ -19,19 +19,19 @@
 //! render thread after boot wraps its body in `render_locked`, and
 //! `miso_engine_web_v1_render_allocation_count` reports the allocator calls made inside those
 //! windows. "Either AudioWorklet" is the engine worklet (`process()` and its port handlers) and the
-//! SDK's PCM-feed worklet, whose `process()` drains its shared rings before it renders. The set:
-//!
-//! - the three exports the static gate checks: `render`, `command_submit`, `meter_poll`;
-//! - the staging reads: `observation_read`, `track_response_capture`, `spectrum_read`,
-//!   `spectrum_stream_read`;
-//! - the pointer, capacity and byte-count accessors of the three stagings that the worklet calls
-//!   after boot;
-//! - source control: `source_submit` and `source_seek` (the feed's `process()` and its attach
-//!   node's `prepare-seek` handler, and the engine worklet's source and seek handlers);
-//! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
-//!   `eq_target_config_ptr` and `input_filters_config_copy`;
-//! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start`,
-//!   `spectrum_stream_stop`, `spectrum_select` and `spectrum_stream_select` (issue #1492).
+//! SDK's PCM-feed worklet, whose `process()` drains its shared rings before it renders. The one
+//! list of that set is the table `tools/realtime-policy/render-thread-exports.json`. Each entry
+//! names an export (without the `miso_engine_web_v1_` prefix), the worklet handlers that call it
+//! after boot, and whether its body is one `render_locked` call (`wrapped`). The
+//! `tools/realtime-policy` tool proves that every `wrapped` entry's body is that call, and both
+//! worklet harnesses (`scripts/test-web-audioworklet.mjs` and `sdk/test/browser-pcm-evals.mjs`)
+//! fail when a worklet calls an export that the table does not list. This header does not repeat
+//! the names: the table is the list, and a name set here would drift from it. The wrapped entries
+//! cover the render, command, meter, source, live-control, observation, track-response and
+//! spectrum exports, with the pointer, capacity and byte-count accessors of their stagings that
+//! the worklets call after boot (issues #1488 and #1492). The two entries with `wrapped: false`
+//! are the named exceptions below, each with its reason in the table. Boot is outside the rule,
+//! as the next paragraph says.
 //!
 //! Two post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
 //! and is also the boot-failure path; and `render_allocation_count`, the reader of the count. Boot

@@ -1,0 +1,8 @@
+fn drain(control: &mut Consumer<Record>) {
+    while unsafe { core::ptr::read_volatile(&1u8) } != 0 {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

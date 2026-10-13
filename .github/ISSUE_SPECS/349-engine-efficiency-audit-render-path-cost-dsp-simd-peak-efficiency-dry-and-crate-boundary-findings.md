@@ -38,7 +38,7 @@ meter delivery; broader RT10 open, #714 superseded. No original-finding credit.
     fewer instructions/loads/stores/copies/branches. Class B = moves a rendered bit; flag only.
   - No runtime SIMD dispatch; only `crates/lane` names `wide` or intrinsics
     (`scripts/check-lane-policy.sh`); `unsafe_code = "deny"` workspace-wide.
-  - Render is zero alloc/free/lock/syscall/I/O/log/panic-path (`scripts/check-realtime-policy.sh`,
+  - Render is zero alloc/free/lock/syscall/I/O/log/panic-path (`tools/realtime-policy`,
     `docs/REALTIME_DEPENDENCY_POLICY.md`).
   - Honest-null rulings are not re-proposed without new evidence (`docs/rulings/README.md`).
   - Already-named floor gap terms (`docs/rulings/effect-floor-accounting.md` boundaries 2–5):
@@ -52,7 +52,7 @@ meter delivery; broader RT10 open, #714 superseded. No original-finding credit.
    a matching GitHub issue whose body is the finding verbatim plus the gates listed under it.
 2. Implement only that finding. The verification gate named in the finding is the acceptance gate;
    for class-A render-path findings the standing bit-identity fixtures and
-   `scripts/check-realtime-policy.sh` are mandatory in addition.
+   `tools/realtime-policy` are mandatory in addition.
 3. A finding whose premise turns out false on inspection is closed with a one-paragraph null note
    appended to this tracker, not silently skipped.
 4. Do not implement a class-B finding. Open an owner-ruling request that cites it.
@@ -356,7 +356,7 @@ ends with a **"Things I checked that are fine"** list — read it before re-audi
 ## Evidence requirements per implemented row
 
 1. The finding's own verification gate, green.
-2. For render-path rows: `scripts/check-realtime-policy.sh` and the workspace fixture bit-identity
+2. For render-path rows: `tools/realtime-policy` and the workspace fixture bit-identity
    suite green; the named console-benchmark row re-measured once (descriptive).
 3. A one-paragraph note on this tracker: row id, commit, measured before/after where applicable, or
    the null result if the premise did not hold.

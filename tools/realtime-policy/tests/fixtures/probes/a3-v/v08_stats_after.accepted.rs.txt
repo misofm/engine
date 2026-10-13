@@ -1,0 +1,12 @@
+impl Strip {
+    fn drain(&mut self, control: &mut Consumer<Record>) {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            match control.try_pop() {
+                Ok(record) => apply(record),
+                Err(_) => break,
+            }
+        }
+        self.drained += available;
+    }
+}

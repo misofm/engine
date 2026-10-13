@@ -1,0 +1,10 @@
+fn drain(control: &mut Consumer<Record>) {
+    #[allow(unused_mut)]
+    let mut available = control.available_at_entry();
+    for _ in 0..available {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

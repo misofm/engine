@@ -52,8 +52,8 @@ and obtain explicit review. Unsafe code must not leak through a public API. A `p
 `# Safety` section states the caller's contract is not a leak: the compiler makes every caller take
 on that contract in an `unsafe` block of its own (#1494's control-word writers below).
 
-The authority is the unsafe allowlist of `scripts/check-realtime-policy.sh` (its `unsafe source
-exclusions` line), the list that CI runs; this section lists it, one entry per path, and adds
+The authority is the unsafe allowlist of `tools/realtime-policy` (`UNSAFE_ALLOWLIST` in
+`src/policy.rs`), the list that CI runs; this section lists it, one entry per path, and adds
 nothing to it. `scripts/check-bench-policy.sh` holds the matching exact set of
 `#![allow(unsafe_code)]` files under `tools/`; `scripts/check-lane-policy.sh`, through
 `scripts/policies/lane-source.toml`, confines raw architecture intrinsics to `softfma.rs` and
@@ -78,7 +78,7 @@ that is not listed here needs a new decision, not an edit to a pattern.
 
 `crates/graph` is entirely free of unsafe code. (`crates/engine/src/arch` was a third owner until
 #84 phase A deleted it: the per-target kernels moved to `crates/lane`, and the exemption was
-removed from `scripts/check-realtime-policy.sh` in the same change.)
+removed from the realtime policy gate (then `scripts/check-realtime-policy.sh`) in the same change.)
 
 ### Lane intrinsics
 
@@ -147,10 +147,10 @@ every render; it does not anchor a value held entirely in registers, and
 product that a release build really does schedule outside the guard until the test anchors it
 itself.
 
-The exemption is the file, not the crate: `scripts/check-realtime-policy.sh` and
+The exemption is the file, not the crate: `tools/realtime-policy` and
 `scripts/check-lane-policy.sh` (through `scripts/policies/lane-source.toml`) both name `fpenv.rs`
 explicitly, and both have a mutation test that proves a third lane file does not inherit it
-(`scripts/test-realtime-policy.sh`, `scripts/test-lane-policy.sh`, `fpenv_extra.rs`).
+(`cargo test -p realtime-policy`, `scripts/test-lane-policy.sh`, `fpenv_extra.rs`).
 
 ### Control-word test writers
 
@@ -231,16 +231,16 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
 
 1. **The exports either worklet calls on its AudioWorklet thread after boot.** The engine worklet
    (`hosts/host-web/web/miso-engine-v1-audio-worklet.js`, `process()` and its port handlers)
-   calls `render`, `command_submit`, `prepared_command_submit`, `meter_lease`, `meter_poll`,
-   `eq_target_config_copy`, `eq_target_config_ptr`, `input_filters_config_copy`, `source_submit`,
-   `source_seek`, `observation_read`, `observation_result_ptr`, `observation_result_bytes`,
-   `track_response_capture`, `track_response_result_ptr`, `track_response_result_bytes`,
-   `spectrum_arm`, `spectrum_cancel`, `spectrum_read`, `spectrum_select`,
-   `spectrum_stream_select`, `spectrum_stream_start`, `spectrum_stream_stop`,
-   `spectrum_stream_read`, `spectrum_target_id_ptr`, `spectrum_target_id_capacity`,
-   `spectrum_capture_ptr`, `spectrum_capture_bytes`, `spectrum_capture_capacity`,
-   `spectrum_stream_metadata_ptr`, `spectrum_stream_metadata_bytes`, `dispose` and
-   `render_allocation_count` (each `miso_engine_web_v1_`-prefixed). The SDK's PCM-feed worklet
+   calls the exports that the table `tools/realtime-policy/render-thread-exports.json` lists.
+   The table is the one list of set 1. Each entry names an export without its
+   `miso_engine_web_v1_` prefix, the worklet handlers that call it after boot, and whether its
+   body is one `render_locked` call (`wrapped`). It has two `wrapped: false` entries, `dispose`
+   and `render_allocation_count`, each with its reason. `tools/realtime-policy` proves that every
+   `wrapped` entry's body is that call. The harnesses `scripts/test-web-audioworklet.mjs` and
+   `sdk/test/browser-pcm-evals.mjs` fail when a worklet calls an export that the table does not
+   list. This document does not repeat the names, so that they cannot drift from the table.
+   The table lists the PCM-feed worklet's calls too (worklet `feed`); their sites are below.
+   The SDK's PCM-feed worklet
    (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`) calls `source_submit` (`:386`)
    and `source_seek` (`:445`) at the top of its `process()` (`:306-328`) before it renders, and
    `source_seek` again from its attach node's `prepare-seek` handler (`:539`).
@@ -370,9 +370,9 @@ gone. #1033 removed `tools/native-pcm-runner` and its exemption.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or
 render-reachable dependency.
 
-`scripts/check-realtime-policy.sh` extracts explicitly marked render-reachable regions and rejects
+`tools/realtime-policy` extracts explicitly marked render-reachable regions and rejects
 allocation/growth, locks, waits, I/O, logging, networking, process/thread APIs, and async surfaces.
-Its mutation suite (`scripts/test-realtime-policy.sh`) proves allocation, lock, log, and
+Its test suite (`cargo test -p realtime-policy`) proves allocation, lock, log, and
 unsafe-scope violations are rejected, including unsafe code in a file beside an allowlisted one
 (`tools/audit/src/other.rs` beside `capi.rs`) and at the paths of retired exceptions. Runtime
 mutation probes (`tools/audit/src/realtime.rs`, `--probe`) separately prove the realtime

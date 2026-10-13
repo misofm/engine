@@ -1,0 +1,13 @@
+#![allow(unsafe_code)]
+unsafe fn capi_boundary() {}
+pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(plan: *mut Plan) -> u32 {
+    let _ = unsafe { &*plan.cast::<HandleHeader>() };
+    let _ = unsafe { &mut *plan_state(plan) };
+    let _ = unsafe { &(*plan).queries };
+    // Never `&*plan` or `&mut *plan`: a query may run while render holds the state.
+    0
+}
+#[cfg(test)]
+mod tests {
+    fn fixture(plan: *mut Plan) { let _ = unsafe { &*plan }; }
+}

@@ -1,0 +1,13 @@
+impl LaneDrain {
+    fn drain_controls_for_lane(&mut self) {
+        for _ in 0..self
+            .control_lane_consumer_for_this_strip
+            .capacity_of_the_ring_in_records_total()
+        {
+            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

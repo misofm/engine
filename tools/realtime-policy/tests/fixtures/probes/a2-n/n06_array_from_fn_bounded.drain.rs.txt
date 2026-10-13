@@ -1,0 +1,13 @@
+fn drain_matrix_controls(control: &mut Consumer<Record>, limits: &[usize]) {
+    let applied: [usize; 2] = core::array::from_fn(|lane| {
+        let available = control.available_at_entry();
+        let mut applied = 0;
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            applied += apply(lane, record);
+        }
+        applied
+    });
+}

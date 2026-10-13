@@ -1,0 +1,12 @@
+impl LaneDrainForTheStrip {
+    fn match_receiver_header(&mut self) {
+        while let Ok(record) = match self.lane_selector_for_this_block {
+            Lane::Left => &mut self.left_consumer,
+            Lane::Right => &mut self.right_consumer,
+        }
+        .try_pop()
+        {
+            let _ = record;
+        }
+    }
+}

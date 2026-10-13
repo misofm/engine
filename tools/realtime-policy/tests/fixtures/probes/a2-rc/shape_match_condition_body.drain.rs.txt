@@ -1,0 +1,15 @@
+impl LaneDrainForTheStrip {
+    fn match_condition_body(&mut self, control: &mut Consumer<Record>) {
+        while match self.lane_selector_for_this_block {
+            Lane::Left => &self.left_consumer,
+            Lane::Right => &self.right_consumer,
+        }
+        .has_records()
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

@@ -204,7 +204,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
      `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh`,
      `bash scripts/test-web-audioworklet.sh`
    - `node hosts/host-web/qualification/generate-matrix.mjs --check`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

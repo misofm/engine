@@ -737,7 +737,9 @@ def check_metadata_skip_elsewhere(root: pathlib.Path) -> None:
 # - test-release: a release `cargo test` runs `m3_determinism` on the x86-64-v3 build
 #   (`.cargo/config.toml`, no RUSTFLAGS override on the command; see runs_m3_on_config_flags), and
 #   the cfg line shows cargo builds `math` with FMA there, the claim of the retired
-#   "Math M3 digests on an FMA-enabled build" step.
+#   "Math M3 digests on an FMA-enabled build" step;
+# - audit-native: the prebuilt tools/realtime-policy binary holds the realtime source policy, whose
+#   awk copy #1446 removed from lint.
 DEDUPLICATED_OWNERS = {
     "artifact-gates": ("bash scripts/test-web-audioworklet.sh",),
     "lint": (
@@ -750,6 +752,7 @@ DEDUPLICATED_OWNERS = {
         "cargo rustc --locked --release -p math --lib -- --print cfg | "
         "grep -x 'target_feature=\"fma\"'",
     ),
+    "audit-native": ("./target/release/realtime_policy",),
 }
 FULL_ROUTE_IF = "needs.route.outputs.route == 'full'"
 M3_TEST = "m3_determinism"

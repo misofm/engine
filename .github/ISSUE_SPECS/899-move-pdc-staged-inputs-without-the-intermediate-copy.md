@@ -19,7 +19,7 @@ No change to PDC sample counts or ring sizing.
 ## Objective gates
 
 1. New lane test: for random rings, cursors and inputs the new kernel's output and ring state equal copy-then-`pdc_delay_block`.
-2. Existing PDC sample-count fixtures and `scripts/check-graph-determinism.sh` pass; `scripts/check-lane-policy.sh`, `scripts/check-realtime-policy.sh`.
+2. Existing PDC sample-count fixtures and `scripts/check-graph-determinism.sh` pass; `scripts/check-lane-policy.sh`, `tools/realtime-policy`.
 
 ## Dependencies
 
@@ -29,7 +29,7 @@ None.
 
 - Work only from this body. Read the cited functions first; do not survey the workspace.
 - Class A means the change moves no rendered bit: same arithmetic in the same order, fewer passes, loads, stores, copies or branches. Every gate below that says "bit-identical" is a hard stop, not a tolerance.
-- Render paths stay allocation-free, lock-free and syscall-free (`scripts/check-realtime-policy.sh` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
+- Render paths stay allocation-free, lock-free and syscall-free (`tools/realtime-policy` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.

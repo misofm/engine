@@ -18,6 +18,20 @@ await import("./test-prepared-control.mjs");
 const preparedAbiLayout = JSON.parse(await readFile(
   new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
 ));
+// Issue #1496 D1/D3: the exports either AudioWorklet calls after construction are one table,
+// `tools/realtime-policy/render-thread-exports.json`, which the realtime-policy tool also reads to
+// prove each wrapped entry's body is a `render_locked` call. This suite records the calls the real
+// engine worklet makes once its processor has posted `miso.ready.v1`, and fails on a call the
+// table does not list for the engine worklet.
+const renderThreadTable = JSON.parse(await readFile(
+  new URL("../tools/realtime-policy/render-thread-exports.json", import.meta.url), "utf8",
+));
+assert.equal(renderThreadTable.table, "render-thread-exports");
+const renderThreadPrefix = renderThreadTable.prefix;
+assert.equal(typeof renderThreadPrefix, "string");
+const engineRenderThreadExports = new Set(renderThreadTable.exports
+  .filter((entry) => entry.callers.some((caller) => caller.worklet === "engine"))
+  .map((entry) => entry.name));
 const unsupportedPreparationModuleBytes = Uint8Array.from([
   0, 97, 115, 109, 1, 0, 0, 0,
   1, 5, 1, 96, 0, 1, 127,
@@ -3011,6 +3025,34 @@ async function testProcessor() {
   let throwInstance = false;
   let throwReadyPost = false;
   let processorPortFactory = null;
+  // Issue #1496 D3: a call counts once the processor that made it has posted `miso.ready.v1`;
+  // everything before is construction. The recording proxy is installed by the stubbed
+  // `WebAssembly.Instance`, which every processor of this suite (the cases and the qualification
+  // boot alike) constructs, and `readyPorts` is the only state it reads.
+  const readyPorts = new WeakSet();
+  const recordedPostConstructionCalls = new Set();
+  let latestPort = null;
+  // A read of an export after ready is recorded as well as each call, so a worklet that reaches
+  // for an export the fakes do not define is named instead of failing as a bare TypeError, and a
+  // function the worklet cached before ready is still recorded when it is called later.
+  const recordingExports = (exports, port) => new Proxy(exports, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof property !== "string" || !property.startsWith(renderThreadPrefix)) return value;
+      const name = property.slice(renderThreadPrefix.length);
+      if (readyPorts.has(port)) {
+        recordedPostConstructionCalls.add(name);
+        // The fakes define only the exports the cases exercise. An unlisted export that they do
+        // not define would stop the run with a bare TypeError before the final check names it.
+        if (value === undefined && !engineRenderThreadExports.has(name)) return () => 0;
+      }
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        if (readyPorts.has(port)) recordedPostConstructionCalls.add(name);
+        return Reflect.apply(value, receiver, args);
+      };
+    },
+  });
   class FakePort {
     onmessage = null;
     posts = [];
@@ -3025,6 +3067,14 @@ async function testProcessor() {
   class FakeProcessor {
     constructor() {
       this.port = processorPortFactory?.() ?? new FakePort();
+      latestPort = this.port;
+      const port = this.port;
+      const post = port.postMessage;
+      port.postMessage = function (message, ...rest) {
+        const result = Reflect.apply(post, this, [message, ...rest]);
+        if (message?.tag === "miso.ready.v1") readyPorts.add(port);
+        return result;
+      };
     }
   }
   globalThis.AudioWorkletProcessor = FakeProcessor;
@@ -3036,7 +3086,7 @@ async function testProcessor() {
     constructor() {
       instanceCount += 1;
       if (throwInstance) throw new Error("synthetic instantiation failure");
-      this.exports = nextFake.exports;
+      this.exports = recordingExports(nextFake.exports, latestPort);
     }
   };
   try {
@@ -3664,6 +3714,18 @@ async function testProcessor() {
       document: processorSessionDocument,
       mainRealmTextEncoder: originalTextEncoder,
     });
+
+    // Issue #1496 D3. The cases above reach the engine worklet's render, command, source, seek and
+    // meter paths, so the recording is not empty; an empty one would mean the proxy lost its hook.
+    // A call that the table does not list for the engine worklet is a post-construction export
+    // that no `render_locked` rule has been asked to prove.
+    for (const name of ["render", "command_submit", "source_submit", "meter_poll"]) {
+      assert.ok(recordedPostConstructionCalls.has(name),
+        `the recording proxy saw the engine worklet call ${name} after construction`);
+    }
+    const unlisted = [...recordedPostConstructionCalls].filter((name) => !engineRenderThreadExports.has(name));
+    assert.deepEqual(unlisted, [],
+      `the engine worklet calls these exports after construction, and tools/realtime-policy/render-thread-exports.json does not list them for it: ${unlisted.map((name) => renderThreadPrefix + name).join(", ")}`);
   } finally {
     globalThis.AudioWorkletProcessor = originalProcessor;
     globalThis.registerProcessor = originalRegister;

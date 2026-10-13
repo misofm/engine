@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B1b of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b, B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice B1b of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b, B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds):
 
 - B1a ported the drain rule's mapping, scope resolver, pops, counts, reads and innermost bound,
@@ -52,10 +52,15 @@ three floor messages are `:1408`, `:1410` and `:1414`.
   - any of these, optionally followed by `.enumerate()` and by one or more
     `.zip(<literal | fields | &fields | &mut fields>)` steps (the D8b pass loop has two);
   - the closure of `core::array::from_fn` or `std::array::from_fn`.
+    *Withdrawn by root, 2026-10-11 (#1442 Amendment 3): the array::from_fn outer-loop exception no longer exists. A pop inside any closure is refused.*
 
   `while` and `loop` around a bounded drain are refused. The loop and the slice parameter's `fn`
-  signature must lie in the pop's region (B1a-D1). This row is `main`'s rule as it stands. #1418
-  (Amendment 1) adds "and selects a different queue" to it.
+  signature must lie in the pop's region (B1a-D1). This row is `main`'s rule as it stands. The
+  tool's `<bound>` is stricter than the awk's `path`, which also accepts zero-argument method
+  calls and bracket indexes (`0..self.controls.len()`, `0..a[i]`). Both are refused: they run code
+  the tool cannot see. This over-refusal is accepted. Widening it needs a ruling. (root Amendment 1,
+  SP-4; test value: red if the outer bound grammar accepts a method call or an index without a
+  ruling.) #1418 (Amendment 1) adds "and selects a different queue" to it.
   - **In a B1a-D8b per-queue form,** the pass loop and every loop between it and the set loop
     must be one of these finite forms. `for _ in 0..passes`, with `passes` the `1 + Σ` sum of the
     counters, is the `0..<bound>` form. The loops that enclose the set loop are the drain's outer
@@ -63,13 +68,17 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - **D2. Attributes and items** (`:100-102`, `:214-217`, `:263-265`).
   - A count binding with a `cfg`-family attribute (`cfg`, `cfg_attr`, or a path ending in either)
     is refused.
-  - A `static`, `const` or `use` in the region that can name `<count>` (a glob `use` included) is
-    refused, wherever it sits in the block.
+  - An item of any kind in the region that declares `<count>`, its alias source or the slice
+    parameter as its name (`const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`,
+    `trait`, `mod`), or a `use` that can name it (a glob `use` included), is refused, wherever it
+    sits in the block. A unit struct with comparison and `SubAssign` impls redirects an alias as a
+    `const` does. (root Amendment 1, NEW-1)
 - **D3. Constructors** (`:115-117`, `:290-291`, `:370-371`, `:384`).
   - `from_fn`, `repeat_with` and `successors`, path-qualified or bare, are refused anywhere in a
     region. `core::array::from_fn` and `std::array::from_fn` are the exceptions; `array::from_fn`
     after `use core::array` is refused, as today.
   - A pop directly in an `array::from_fn` closure is refused.
+    *Withdrawn by root, 2026-10-11 (#1442 Amendment 3): the array::from_fn outer-loop exception no longer exists. A pop inside any closure is refused.*
 - **D4. Limits that stay** (stated in the drain rule's module documentation, which replaces
   `:79-141`):
   - recursion;
@@ -125,6 +134,66 @@ three floor messages are `:1408`, `:1410` and `:1414`.
     passes, stop and report it.
   - New: a region opened inside a loop's body, around an otherwise counted drain (refused, B1a-D1
     with D1's region test); the D6 twins (accepted).
+  - root Amendment 1 adds the cases named in D2 (`unit-struct-shadows-the-alias-source`), D9
+    (`region-ends-in-a-deeper-block`, and the rewritten `boundary-spans-two-blocks` and
+    `boundary-only-end-splits`) and D10 (four cases), each with its mutation (gate 4).
+
+- **D9. A region ends where it can hold the rest of its block** (amends A2-D1, #1439, which is
+  closed; root Amendment 1, SP-2).
+  - END's innermost container must be BEGIN's innermost container or one that encloses it.
+  - A region whose END sits in a container that does not enclose BEGIN's is refused (boundary
+    class), whatever it holds. It would end inside a block that continues past END, and an item
+    after END would then name a binding of the region for the whole block unseen.
+  - BEGIN inside an `impl` with END after the `impl` (`live.rs:231`,
+    `transient-shaper/src/lib.rs:613`) stays accepted.
+  - The macro-token-tree refusal is unchanged.
+  - The case `boundary-spans-two-blocks` becomes refused, and `boundary-only-end-splits` expects
+    both findings (a superseded case is rewritten in the same PR).
+  - The awk gate keeps this hole until C2. Both gates run, so the tool's refusal covers it.
+  - New case `region-ends-in-a-deeper-block` (the first verdict's probe, refused). Test value: red
+    if a region may end inside a block it does not wholly hold, which lets an item after END
+    shadow the count.
+- **D10. Macros and attributes that can declare an item** (closes a limit the first verdict found;
+  root Amendment 1, SP-3).
+  - From the first binding the drain rule reads for a pop (the count, its alias source, or the
+    start of the slice parameter's `fn` body) to the end of the span below, these refuse the drain
+    (root ratification 2026-10-11, after the attempt-2 verdict, replaces the literal "end of the
+    innermost bounding loop"):
+    - every macro invocation in statement position (`name!(..);`, `name![..];`, `name! {..}`) or
+      item position;
+    - every item that carries an attribute other than `cfg`, `allow`, `expect`, `warn`, `deny`,
+      `forbid` or `doc`.
+  - **The span.** Root ratification 2026-10-11: the D10 span is widened to close
+    item-macro-after-the-loop-in-an-inner-block. For a `let` binding the span ends at the end of
+    the statement, in the binding's own block, that holds the pop. Root ruling 2026-10-11, applying
+    the item-2 ruling: for a slice-parameter binding the span is the whole `fn` body, because a
+    parameter's block is the `fn` body (an item anywhere in the body shadows the parameter; this
+    closes the attempt-2 probes b04, a statement macro after the slice loop that expands to a
+    `const` shadowing the parameter, and b05, a derive at the same place).
+  - `debug_assert_eq!` and `debug_assert_ne!` are refused under D10: an accepted over-refusal.
+    Widening the exemption needs a root ruling (B2a-D2's trust scan checks only the name
+    `debug_assert`).
+  - A `macro_rules!` item name is not hygienic, and a derive or attribute macro emits items beside
+    its item: either can declare a `const`, `static` or unit struct that shadows the binding for
+    the whole block.
+  - `debug_assert!` is exempt while B2a-D2 trusts it (no file under the roots shadows it).
+    Untrusted, it is refused like any other macro.
+  - Macros in expression position are not in this rule: they cannot declare an item in the
+    enclosing block. (A trailing `m!()` with no semicolon is an expression and cannot expand to an
+    item.)
+  - The #1440 D8b rule (root Amendment 1) is unchanged.
+  - New cases: `item-macro-shadows-the-count` (`shadow!();`, refused; test value: red if a
+    statement macro in the drain's span is not refused);
+    `braced-item-macro-shadows-the-slice-parameter` (`shadow! {}` against a slice parameter,
+    refused; red if braced statement macros, or the span from a slice parameter's `fn` body, are
+    missed); `derive-on-an-item-in-the-drain` (refused; red if an item that carries a derive or
+    attribute macro is not refused); `untrusted-debug-assert-in-the-loop` (`macro_rules!
+    debug_assert` in the file plus `debug_assert!(true);` in a counted loop, refused; red if the
+    `debug_assert!` exemption ignores B2a-D2's trust state).
+  - Production, measured by a grep of the five real drains and `poll_meters`: the only statement
+    macro in a span is `debug_assert!` at `crates/graph/src/runtime.rs:903`; `live.rs:376`
+    `matches!` is in expression position; there are no items in any drain span. The implementer
+    re-measures with the tool.
 
 ## Authorized paths
 
@@ -153,6 +222,10 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - **`crates/builtins-compiler/src/lib.rs` is a hot file.** Find `impl BuiltinBankProcessor` and
   `fn drain_controls` by name, not by line.
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 
@@ -172,12 +245,29 @@ three floor messages are `:1408`, `:1410` and `:1414`.
    - read an enclosing loop outside the region as an outer loop (B1a-D1): the region-in-a-loop
      case passes;
    - drop the constructor check: `from_fn` and `repeat_with`;
-   - any mutation that B1a moved here (B1a gate 4).
+   - any mutation that B1a moved here (B1a gate 4);
+   - (root Amendment 1) accept END in any container: `region-ends-in-a-deeper-block`;
+   - (root Amendment 1) require the same container: `a_region_may_span_the_end_of_an_impl`, and
+     the real tree then fails at `live.rs:231` and `transient-shaper/src/lib.rs:613`;
+   - (root Amendment 1) restrict the item scan to `static`, `const` and `use`:
+     `unit-struct-shadows-the-alias-source`;
+   - (root Amendment 1) allow statement macros: `item-macro-shadows-the-count` and
+     `braced-item-macro-shadows-the-slice-parameter`;
+   - (root Amendment 1) always exempt `debug_assert!`: `untrusted-debug-assert-in-the-loop`;
+   - (root Amendment 1) refuse `debug_assert!` too: the base route twin, and the real tree then
+     fails at `crates/graph/src/runtime.rs:903`.
 5. **Run time (PR evidence).** As B1a's gate 5.
 6. **Shipped artifacts unchanged.** D5's markers replace blank lines, so no line moves. The
-   `artifact-identity` job reports the worklet module UNCHANGED, and the `libcapi` digests are
-   identical, as A1's gate 6 measures them. There is no fallback: if a marker would move a line,
-   D5 is skipped and B2b-1 places it.
+   `artifact-identity` job reports the worklet module UNCHANGED. PR evidence, built as A1's gate 6
+   builds them (parent twice first, then the change, in one checkout):
+   - the sha256 of `libcapi.so` is identical;
+   - `libcapi.a` holds the same members in the same order;
+   - each member is byte-identical after `objcopy --remove-section=.llvmbc`.
+
+   `.llvmbc` is rustc's embedded bitcode. It carries each source file's checksum, so any byte
+   change to a source file changes it, and no linker copies it into a shipped image. Any other
+   difference fails. There is no fallback: if a marker would move a line, D5 is skipped and B2b-1
+   places it. (root Amendment 1, SP-1)
 7. `cargo fmt --all -- --check`,
    `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
    `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh` and
@@ -208,3 +298,399 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+### Root Amendment 1 (2026-10-11): the first verdict's spec problems
+
+Authority: root decisions under the owner's delegation, after the attempt-1 verdict PASS
+(`/home/bl/misofm/submix-verdicts/1441-attempt1.md`: SP-1 to SP-4) and an adversarial review of
+root's drafts (ACCEPT WITH CHANGES). Root adopted the review's texts verbatim. Each is placed where
+it belongs and marked "(root Amendment 1)":
+
+- **SP-1** Gate 6 compares `libcapi.a` members after removing `.llvmbc`. Only `.llvmbc` differs
+  between the parent and D5's markers; the `.so` and the worklet module are identical.
+- **SP-2** D9 (END's container encloses BEGIN's), not "same block", because that would refuse
+  `live.rs:231` and `transient-shaper/src/lib.rs:613`.
+- **NEW-1** D2's item scan covers every item kind, because a unit struct with comparison and
+  `SubAssign` impls redirects an alias source as a `const` does. It lands before #1446 deletes the
+  awk.
+- **SP-3** D10 (statement and item macros, and attributes that emit items).
+- **SP-4** D1 keeps the refusal of `0..x.len()` and `0..a[i]`.
+- Attempt 2 also closes the first verdict's MINOR-1 (document the `&mut` iterator-in-field or
+  local limit in the tool's documentation), MINOR-2 (state the remaining limits) and NIT-1 (gate 6
+  evidence: only `.llvmbc` differs).
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`, base `1e03edf19`)
+
+Commits: `993b85745` (D5 and both floors), `10f867f65` (rules, cases, twins), and three small follow-ups. Edits:
+`tools/realtime-policy/**`, `crates/builtins-compiler/src/lib.rs` (two comment lines),
+`scripts/check-realtime-policy.sh` (floor line and comment), `scripts/test-realtime-policy.sh` (pad loop, its
+comment, the region-floor message) and this spec. No `Cargo.toml` or `Cargo.lock` change.
+
+**What is where.**
+- `src/drain/outer.rs` (D1): `finite` judges every loop of the pop's path between the region's top node and the
+  innermost bounding loop: a B1a-D8 bounded loop (`count::bounds`), `for P in 0..<bound>`, the collection forms
+  with any `.enumerate()` and `.zip(..)` steps, a slice or array parameter, or the `array::from_fn` closure.
+- `src/drain/items.rs` (D2, D3): two token scans over the region's leaves (`names_item`, `constructor_lines`). They
+  read macro token trees and `macro_rules!` bodies too.
+- `src/drain/count.rs`: `under_cfg` and the item check, in `counted` and in the alias branch.
+- `src/drain/tree.rs`: `is_loop_at` and `array_from_fn_call` (the closure argument of `core::array::from_fn` or
+  `std::array::from_fn` is a loop of the tree rule); `src/drain/scope.rs`: `BindingKind::Param { ty }`.
+- `src/drain/mod.rs`: `check` scans each region for constructors whether or not a pop stands in it; `bounded`
+  judges the outer loops; the module documentation states D4's limits and D7's over-refusals.
+- `src/boundary.rs`: `leaves_between`, `marker_start`, `RegionNodes::bounds`. `src/policy.rs`: region floor 94.
+
+**Real tree (re-measured).** `drain_controls` is at `crates/builtins-compiler/src/lib.rs:460-515`; the blank lines
+were `:459` and `:516` (the spec's `:451`/`:508` are `main`'s). It still pops (`:482`) and now has a `carry` argument
+and a `let Self { .. } = self;` destructure. D5 applied: the two markers replace the two blank lines, so no line
+moves. `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh` both print
+`realtime policy: ok (94 marked regions in 26 files)`. The cell slices have not landed on this branch: the marked
+pops are `lib.rs:482`, `:1084` (fader), `:1128` (matrix), `live.rs:366`, `runtime.rs:900`.
+Floors: regions 93 to 94 in `Policy::workspace()` and the awk floor line; files stay 26. The awk self-test's pad file
+`pad_1.rs` 14 to 15 regions and its message `ninety-three` to `ninety-four`. The tool's own base tree needed the same
+region (`pad_1.rs.txt` 14 to 15, `BASE_REGIONS` 94), because its `run.rs` cases run `Policy::workspace()` on the
+base tree.
+
+**Deviations and notes.**
+1. **`<bound>` grammar.** D1 states the integer literal or an identifier with `.field` and `::segment` steps (the
+   same `cap` as D6), and the tool follows it. The awk's `path` also accepts zero-argument method calls and a
+   bracket index (`0..self.controls.len()`, `0..a[i]`), so the tool refuses `0..x.len()` where the awk passes. No
+   real region needs it and no ported case holds it. Widening it is one change in `shapes::cap`'s caller
+   (`outer::range_to_a_bound`). Open item for root: decide whether D1's `main`-parity wording means the awk's path.
+2. **The tree rule treats only the `array::from_fn` closure as a loop.** Every other `from_fn`, `repeat_with` and
+   `successors` is refused by its token. With both mechanisms on every `from_fn`, no mutation could turn the
+   ported `from_fn` case red alone. Now the token scan owns `from_fn`/`bare_from_fn`/`repeat_with` (gate 4,
+   constructor mutation), and the tree rule owns `array_from_fn_pop`.
+3. **The item scan is token-based over the whole region** (`static [mut] name`, `const name`, a `use` whose tokens
+   up to `;` hold the name or `*`), as the awk's `item()`. The resolver is unchanged; `scope.rs` documents that
+   rules which read a binding ask `names_item`. The scan covers the count, its alias source and a slice
+   parameter. The per-queue roots are not asked (D2 names `<count>` only).
+4. **A `cfg`-family attribute** means the last path segment is `cfg` or `cfg_attr` (the spec's words); the awk
+   matched any identifier starting with `cfg`. It is checked on the entry binding and on the alias source.
+5. **Slice parameter:** the parameter is a plain name (`name` or `mut name`) of type `&[T]`, `&mut [T]`, `&[T; N]`
+   (any lifetime) or `[T; N]`; its `fn` signature and the loop lie in the region (`region.holds(signature.core,
+   loop.end)`); and `words_in(name, body_open, loop.full) == 0`.
+6. **Base-tree twins (D6).** The base already held `drain_fader_records`, `stage_records`, the `plan_exchange`
+   pops, and (A1) `drain_lane_pairs` (an `array::from_fn` drain) and `drain_two_lanes`. Added: the `drain_controls`
+   twin (`let Self { .. } = self`, `controls.iter_mut().enumerate()`, `let .. else` with `.as_mut()`) in the first
+   `builtins-compiler` region, and the route `drain` twin (`self.control.consumer`, a `debug_assert!` in the loop)
+   in `graph/runtime.rs`'s first region. No region was added.
+7. **Cases.** The 14 deferred cases are rows of `ported.rs` (kebab names) and all expect {drain class}. The
+   region-in-a-loop case existed (`loop-around-the-region`, `loop`); B1b adds `finite-loop-around-the-region`
+   (`for _ in 0..4` outside the region), which is the case that tells the mutation "read the enclosing loop as an
+   outer loop" apart from the unconditional refusal. 131 tests (121 before).
+8. **`libcapi.a` digest.** The parent (`1e03edf19`) builds `libcapi.a` `3431f546ec53477d...` and `libcapi.so`
+   `0213cd820e2715de...`; with D5's markers the `.so` is identical and the `.a` is `2aa32d808165aef3...`. Three
+   objects of the archive differ (`builtins_compiler`, `graph_compiler`, `host_core`); their code and data sections are
+   identical, and only `.llvmbc` (embedded bitcode, which carries each source file's checksum) differs; every `.debug_*`
+   section is identical (corrected in attempt 2 from "`.debug*` and `.llvmbc`", the first verdict's NIT-1). A comment in place of a blank line cannot leave that unchanged. The worklet module is byte-identical:
+   `scripts/build-web-audioworklet.sh --module-only` at the parent and at the change both give `9784d3509dba6bfd...`
+   (the CI `artifact-identity` job is not run here). Open item for root: gate 6's "libcapi digests identical" holds
+   for the `.so` and for the code of the `.a`, not for the `.a` bytes.
+9. Not changed: B1a's per-queue window, terminal-call and macro-and-attribute rules; a doc sentence in
+   `per_queue/mod.rs` says the loops around the form are judged by `outer`. STREAMS' hot-file row and its
+   "ninety-three" floor message (`docs/handoffs/.../STREAMS.md`) are root's files and are not edited.
+
+**Gates.**
+1. Real tree: both gates print `ok (94 marked regions in 26 files)` (above).
+2. `cargo test --locked -p realtime-policy`: 131 passed.
+3. Parity (the B1a method: an instrumented copy of `scripts/test-realtime-policy.sh` outside the repository runs the
+   awk gate and the release binary on every `expect_failure` tree, 96): awk fails on all 96. The tool fails on all
+   96: 55 with the drain class (B1a's 41 plus the 14 deferred cases) and 41 without it (A1 and A2 cases,
+   `open-tail-last-file` and `region-ends-in-comment`, the two D10 class changes). No tree passes the tool. The
+   verdicts agree on all 57 ported cases.
+4. Mutations: below.
+5. Run time, release binary: real tree 1.05 s, 1.05 s, 1.06 s (B1a: 1.03-1.04 s; the awk gate 0.64 s). The base
+   tree plus one marked file of 3,006 lines (`for lane in 0..cfg.lanes` around 300 counted drains): 0.07 s with the
+   same count name 300 times and 0.07 s with 300 distinct names. Not tuned.
+6. See deviation 8. Outside the authorized paths only the two comment lines of `lib.rs` changed.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-realtime-policy.sh`, `test-realtime-policy.sh` (with the raised pad), `check-workspace-policy.sh` and
+   `check-bench-policy.sh` all exit 0.
+
+**Mutations** (each applied alone, `cargo test` and the real tree after each, then reverted by `git checkout`;
+131 green and the real tree ok after every revert). "red" lists tests and rows; the real tree still passed under
+every one, except where marked *. The spec's named cases are first.
+- Accept a `cfg` binding: `count-under-cfg` (ported) and the four `count-under-*`/`alias-source-under-cfg` rows.
+- Drop the `static`/`const`/`use` check: `count-shadowed-by-block-static` and
+  `outer-over-slice-parameter-shadowed-by-block-const` (ported), with five count rows.
+- Accept any `for` as an outer loop: `outer-repeat` and `paren-open-range-outer` (ported), with the rest of the
+  outer ported cases and nine refusal rows.
+- Read an enclosing loop outside the region as an outer loop: `finite-loop-around-the-region` (alone;
+  `loop-around-the-region` stays red because a `loop` is not finite).
+- Drop the constructor check: `from-fn`, `bare-from-fn` and `repeat-with` (ported) and nine rows.
+- B1a mutations moved here: none (B1a's gate 4 names no deferred case).
+- New rules, one red test each unless noted: raw prefix not stripped (`raw-identifier-from-fn`); longer path ending
+  in `array::from_fn` accepted; any root for `array::from_fn`; constructors scanned over the whole file
+  (`constructors-outside-every-region`); constructors checked only in a region with a pop (nine rows); generic
+  arguments ignored by the outer exemption (`outer-array-from-fn-with-generic-arguments`); the `array::from_fn`
+  closure not a loop (`array-from-fn-pop`, `std-array-from-fn-pop`, `array-from-fn-block-pop`, the generic-argument
+  row); never a finite outer (the base tree and the three `outer-*-array-from-fn` rows); `loop` accepted as an
+  outer (`outer-loop`, the per-queue `loop` pass count and `loop` around the form, `bounded-drain-inside-outer-loop`);
+  `while` accepted (`outer-while-condition`, `-while-let`, `wrapped-outer-while`); range start, inclusive range and
+  open end (one row each); any adapter after the base (`outer-reversed`, `-taken`, `-cycled`,
+  `outer-zip-then-cycle`); slice parameter type unchecked (`outer-vec-parameter-by-value`,
+  `outer-over-iterator-parameter`); a destructured parameter takes the type
+  (`outer-slice-parameter-with-a-pattern`); signature outside the region
+  (`slice-parameter-outside-the-region`); mention before the loop unchecked
+  (`outer-slice-parameter-rebound-by-a-macro`; `outer-over-rebound-slice-parameter` stays red through the resolver
+  alone); `use` arm dropped; `static mut` not skipped; any `static`/`const` refuses; any `use` refuses; `cfg` only
+  (`count-under-cfg-attr`); first path segment; any attribute (the two `*-under-allow` rows); first attribute only;
+  alias source unchecked; only the nearest outer loop judged (`outer-finite-loop-inside-an-unbounded-one`, the
+  `never-ends` row, `per_queue_inside_an_unbounded_outer_loop`); outer loops not judged (B1a's state: the three
+  per-queue cases, 16 rows and 8 ported cases); bounded `for` or `while` not an outer
+  (`outer-counted-for-header`, `outer-counted-while`); zip reference or literal arm dropped (`outer-zip-chain`);
+  impl method body not found (`outer-slice-parameter-of-a-method`).
+- D6 twins: receiver of an entry count limited to one field: the route twin (`graph/runtime.rs`) fails in the base
+  tree, and the real `runtime.rs:900`*; outer collection root must be a parameter: the `drain_controls` twin fails
+  in the base tree, and the real `lib.rs:482`*.
+
+**Test value (the one-sentence answer, per new test).**
+- `the_finite_outer_loops_pass`: red if any finite form of D1 (bound, reference, `iter`, adapters, slice or array
+  parameter, bounded loop, `array::from_fn`) is refused, which no earlier case or base-tree shape pins.
+- `the_outer_loops_that_may_not_end_are_refused`: red if a loop that can run forever, or that D1 and D7 cannot
+  prove finite, is accepted as an outer loop.
+- `a_slice_parameter_of_a_function_outside_the_region_is_not_read`: red if a signature outside the region is read.
+- `an_item_that_can_name_the_count_refuses_the_drain`: red if a `const`, `static mut` or `use` (glob, name, nested)
+  that can shadow the count or the slice parameter is not seen, or if an unrelated item refuses.
+- `a_count_binding_that_may_not_be_compiled_is_refused`: red if `cfg_attr`, a `cfg` path, a `cfg` after another
+  attribute or a `cfg` alias source is missed, or if any attribute refuses.
+- `a_constructor_that_loops_is_refused_anywhere_in_a_region`: red if a constructor with no pop, a raw spelling, a
+  longer or foreign path or a macro token escapes, or if the exempt `array::from_fn` paths, or a constructor outside
+  every region, are refused.
+- `a_pop_directly_in_an_array_from_fn_closure_is_refused`: red if the closure of `std::array::from_fn` is no loop.
+- `finite-loop-around-the-region` (in `a_loop_that_encloses_the_region_is_refused`): red if an enclosing loop outside
+  the region is judged as an outer loop.
+- `per_queue_inside_a_finite_outer_loop`, `per_queue_inside_an_unbounded_outer_loop`,
+  `per_queue_pass_count_loop_may_not_end`: red if the loops around a D8b form, the pass count loop included, are
+  refused when finite or left unjudged when not.
+- The D6 twins (base tree): red if the port refuses the `drain_controls` or route shape.
+
+**Open items.**
+- Root: deviation 1 (`.len()` and index bounds) and deviation 8 (`libcapi.a` bytes).
+- STREAMS: the hot-file row to "J tool slice B1b", and the floor message text, are root's edits.
+- B2a: the closure and macro transparency and its two superseded B1a tests, as B1a's record says.
+
+## Attempt record (attempt 2, J batch branch `codex/d15-stream-j3`, base `1a33b2f6d`)
+
+Commits: `f9a26b706` (root Amendment 1, specs only) and the implementation commit that holds this record.
+Edits: `tools/realtime-policy/**` and the specs. No production code, `Cargo.toml` or `Cargo.lock` change (`git diff
+1a33b2f6d -- crates hosts scripts` is empty), so gate 6 (`.so`, `.a` members and the worklet module) holds trivially.
+
+Placement (coordinator's choice, recorded with root Amendment 1): D10 (SP-3) is implemented in this issue's attempt 2,
+not in #1442. B2a-D2's trust state (`src/drain/shadow.rs`, `Facts::of(file, trust_debug_assert)`) already exists on
+the branch (`bfed03af6`), so D10 needs no forward reference.
+
+**What is where.**
+- D9: `src/boundary.rs` (`Layout::encloses`; `check` adds `Class::RegionEndsInsideAContainer`, on the end marker's
+  line, when neither marker is in a macro token tree and the end's container does not enclose the begin's). The
+  macro-token-tree refusal is first and unchanged. `src/report.rs`: the new class.
+- D2 (NEW-1): `src/drain/items.rs` `names_item` reads `const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`,
+  `trait` and `mod` followed by the name, and `use`.
+- D10: `src/drain/facts.rs` records macro invocations in statement or item position (`item_macros`; a trusted
+  `debug_assert!` is left out) and items whose first non-inert attribute is not `cfg`, `allow`, `expect`, `warn`, `deny`,
+  `forbid` or `doc` (`attributed_items`; `cfg_attr`, a derive, a bare or path attribute count). `src/drain/mod.rs`
+  `declares_an_item`/`read_span` judge the span of every binding a bounding rule read; `Ctx::note_read`, `mark` and
+  `rewind` collect the reads, and `count::bounds` takes back the reads of a loop that does not bound. `count.rs` notes
+  the count and its alias source, `outer.rs` a slice parameter.
+- Documentation (MINOR-1, MINOR-2): the module documentation of `drain/mod.rs` and `drain/outer.rs` states D9, D10, the
+  widened D2, the `<bound>` strictness (SP-4), and the known false passes. (Corrected in attempt 3, the second
+  verdict's MAJOR-1: the SP-2 and SP-3 holes were not all gone. A slice parameter's D10 span ended at the body statement
+  that holds the pop, so a statement macro or a derive after the loop, at the body's level, passed. Attempt 3 closes it.)
+  The ones that remain are the `&mut` iterator in a field or a local (an infinite `0..` held in a local passes), a
+  collection root that an item shadows (below), and the registry-crate `debug_assert` macro.
+- Tests: `tests/policy/boundary.rs` (the three D9 cases; `boundary-spans-two-blocks` is now refused and
+  `boundary-only-end-splits` expects both findings), `tests/policy/drain/outer.rs` (the item kinds and
+  `unit_struct_shadows_the_alias_source`), `tests/policy/drain/declarations.rs` (D10), `indirect.rs` (the two B2a tests
+  that count the base tree's findings under a shadowed `debug_assert` now expect the route twin as well: D10).
+  No committed #1442 probe verdict changed (118 probes, all green).
+
+**Deviation from the ruling's text (for root).** D10 says the span ends at "the end of the innermost bounding loop".
+That leaves a false pass: items of a block are visible in the whole block, so a macro invoked after the loop, in an
+inner block between the binding and the loop, shadows the count. rustc 1.97.1:
+`let available = 1usize; { for _ in 0..available { n += 1; } shadow!(); }` runs the loop 3 times (the macro declares
+`const available: usize = 3;`). So the span ends at the end of the statement of the binding's own block that holds the
+pop (for a slice parameter: the statement of the `fn` body). An item in the binding's own block cannot shadow the `let`
+(E0005 for a `const`, a type error for a unit struct, and a `let` wins over a `fn`), so nothing further is needed. It
+is a superset of the ruled span (a macro after the loop and before the end of the enclosing statement is refused too);
+`item-macro-after-the-loop-in-an-inner-block` pins it, and the mutation "span ends at the innermost loop" turns it red.
+The real tree passes under both spans. Root: ratify, or order the literal span (a one-line change in `read_span`).
+
+**Real tree (re-measured).** `cargo run --locked --release -q -p realtime-policy` and
+`bash scripts/check-realtime-policy.sh`: `ok (94 marked regions in 26 files)`, as before. `live.rs:231` (END `:537`) and
+`transient-shaper/src/lib.rs:613` (END `:726`) stay accepted under D9; the only statement macro in a drain span is
+`debug_assert!` at `crates/graph/src/runtime.rs:903`, exempt while trusted; no drain span holds an item. Release run
+time 1.27 s (B2a: 1.27 s). Not tuned.
+
+**Gates.**
+1. Real tree: above.
+2. `cargo test --locked -p realtime-policy`: 149 passed (140 before; +3 D9, +1 D2, +5 D10).
+3. Parity (the B1a method: an instrumented copy of `scripts/test-realtime-policy.sh` outside the repository runs the
+   release binary on each of the 96 `expect_failure` trees): the awk fails all 96, the tool fails all 96; 55 of the 57
+   ported drain cases report the drain class, the other two are B1a-D10's class changes (`drain-open-tail-last-file`,
+   `drain-region-ends-in-comment`), and no other case reports the drain class. The verdicts agree on all 57.
+4. Mutations: below.
+5. Run time: above.
+6. No shipped source changed (above).
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-realtime-policy.sh` and `test-realtime-policy.sh` exit 0.
+
+**Mutations** (each applied alone, `cargo test` and the real tree after each, source restored). Red lists tests and rows.
+- D9, accept END in any container (`else if false`): `a_region_that_ends_in_another_block_is_refused`
+  (`boundary-spans-two-blocks`), `a_region_that_ends_in_a_deeper_block_is_refused` (`region-ends-in-a-deeper-block`),
+  `..._after_a_slice_parameter_is_refused`, `either_marker_alone_can_split_a_node` (`boundary-only-end-splits`). Real tree ok.
+- D9, require the same container (`end != begin`): `a_region_may_span_the_end_of_an_impl` (`boundary-spans-impl-end`),
+  `a_boundary_finding_names_the_marker_line`, `either_marker_alone_can_split_a_node` (`boundary-only-begin-splits`),
+  `forms::a_region_spanning_the_end_of_an_impl_reads_its_nodes` and the ported `region-spanning-an-impl` and
+  `count-from-closed-region-function`. The real tree fails at `live.rs:537` and `transient-shaper/src/lib.rs:726`.
+- D2, scan restricted to `const`, `static` and `use`: `unit_struct_shadows_the_alias_source`
+  (`unit-struct-shadows-the-alias-source`) and the rows `count-shadowed-by-block-{struct,enum,union,fn,type,trait,mod}`
+  and `slice-shadowed-by-block-struct`. Real tree ok.
+- D2, `names_item` always false: all 16 shadow rows (count and slice), `unit-struct-shadows-the-alias-source`, the ported
+  `outer-over-slice-parameter-shadowed-by-block-const` and `count-shadowed-by-block-static`, and probes
+  `s10_block_static_shadow` and `e12_slice_param_shadowed_by_use`. Real tree ok. Before this attempt the three
+  `slice-shadowed-*` rows stayed green under this mutation: their loop `for _ in rounds` pops once per pass with no count and
+  was refused anyway. They are rebuilt as a counted drain inside the slice loop (`slice_shadowed_by`), so they now defend
+  the scan on the slice parameter.
+- D10, allow statement macros: `item-macro-shadows-the-count`, `bracketed-...`, `braced-...`,
+  `item-macro-after-the-loop-in-an-inner-block`, `braced-item-macro-shadows-the-slice-parameter`,
+  `untrusted-debug-assert-in-the-loop`, and the 8 `a_debug_assert_that_a_file_shadows..` rows with the parent-module case.
+  Real tree ok.
+- D10, always exempt `debug_assert!`: `untrusted-debug-assert-in-the-loop` and the same 9 B2a rows (they now count the
+  route twin). Real tree ok.
+- D10, refuse `debug_assert!` too: every test that builds the base tree (the base route twin refuses); the real tree
+  fails at `crates/graph/src/runtime.rs:900`, the pop of the drain that holds `:903`'s `debug_assert!`.
+- D10, attributes never emit items (extra, for the derive case): the five refused attribute rows
+  (`derive-on-an-item-in-the-drain`, `cfg-attr-...`, `plain-attribute-...`, `path-attribute-...`,
+  `derive-after-an-allowed-attribute`). Every attribute emits items: the eight accepted rows (`cfg`, the five lint
+  levels, `doc`, a doc comment). Real tree ok under both.
+- D10, every macro counts (extra): `expression-macro-in-the-drain`, `trailing-macro-expression-in-the-drain`,
+  `trusted-debug-assert-in-the-loop`; the real tree fails at `live.rs:366` and `runtime.rs:900`.
+- D10, span ends at the innermost loop (the ruling's literal text): `item-macro-after-the-loop-in-an-inner-block` alone.
+  Real tree ok.
+- D10, span starts at the file: `item-macro-before-the-count` and `item-macro-in-another-function`. Real tree fails
+  at several drains (`lib.rs:1128`, `live.rs:366`, `runtime.rs:900`, ...).
+- D10, a slice parameter is not noted as a read: `braced-item-macro-shadows-the-slice-parameter` alone. Real tree ok.
+
+**Test value (the one-sentence answer, per new test).**
+- `a_region_that_ends_in_another_block_is_refused`, `..._in_a_deeper_block_is_refused` and `..._after_a_slice_parameter_is_refused`:
+  red if a region may end inside a block it does not wholly hold, which lets an item after END shadow the count or the
+  slice parameter; nothing else reads those items.
+- `a_region_may_span_the_end_of_an_impl` (rewritten): red if D9 is read as "same container" and refuses `live.rs:231` and
+  `transient-shaper/src/lib.rs:613`.
+- `either_marker_alone_can_split_a_node` (rewritten): red if END's container is not judged for where the region ends.
+- `an_item_that_can_name_the_count_refuses_the_drain` (extended and repaired) and `unit_struct_shadows_the_alias_source`:
+  red if the item scan reads only `static`, `const` and `use`, or if the slice-parameter rows hold a drain that the scan
+  alone separates from the finite outer loop.
+- `a_statement_macro_between_the_count_and_the_end_of_its_block_is_refused`: red if a statement macro (any delimiter) in
+  the span, or one after the loop in an inner block, is not refused.
+- `a_statement_macro_in_the_body_of_a_function_with_a_slice_loop_is_refused`: red if a braced macro, or the span from a
+  slice parameter's `fn` body, is missed.
+- `an_attribute_that_can_emit_an_item_refuses_the_drain`: red if a derive, an attribute macro, a bare attribute or
+  `cfg_attr` on an item is not refused, or if `cfg`, a lint level or `doc` is.
+- `a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused`: red if an expression macro, a trailing macro with no `;`,
+  a macro before the count, a macro in another function or a trusted `debug_assert!` is refused.
+- `an_untrusted_debug_assert_in_the_loop_refuses_the_drain`: red if the `debug_assert!` exemption ignores B2a-D2's trust.
+
+**Open items.**
+- Root: the span deviation above (ratify or order the literal span).
+- Root: **a collection root that an item shadows** is a false pass. `struct controls; impl controls { fn iter_mut(&self) ->
+  core::iter::Repeat<u8> { core::iter::repeat(0) } } for _ in controls.iter_mut() { <counted drain> }` passes the tool
+  (verified: 95 regions; the awk gate passes it too, so it is not a regression) and runs without end. D2 names the count, its alias source and the slice parameter, not the root of
+  `&<fields>` or `<fields>.iter()`. Closing it is `!ctx.names_item(root)` in `outer::collection` plus a spec line; it needs a
+  ruling and a re-measure of the real tree. The module documentation lists it as a limit meanwhile.
+- `debug_assert_eq!` and `debug_assert_ne!` are not exempt: a statement of either in a drain span is refused (D10 names
+  only `debug_assert!`). No drain span holds one.
+
+## Attempt record (attempt 3, J batch branch `codex/d15-stream-j3`, base `418c9c343`)
+
+Verdict on attempt 2: FAIL (`/home/bl/misofm/submix-verdicts/1441-attempt2.md`): MAJOR-1, MINOR-1, NIT-1, and spec problems
+SP-A to SP-D. This is the last attempt of the three the issue allows.
+
+Commits: `0f8852cba` (spec only: root's rulings, below) and the implementation commit that holds this record.
+Edits: `tools/realtime-policy/**` and the specs. No production code, `Cargo.toml` or `Cargo.lock` change (`git diff
+418c9c343 -- crates hosts scripts Cargo.toml Cargo.lock` is empty), so gate 6 holds as in attempt 2.
+
+**Root's rulings, recorded (2026-10-11).**
+- D10 span, `let`: the span ends at the end of the statement, in the binding's own block, that holds the pop. Root
+  ratification; it closes item-macro-after-the-loop-in-an-inner-block (attempt 2's open item 1, SP-A).
+- D10 span, slice parameter: the whole `fn` body, because a parameter's block is the `fn` body. Root ruling, applying the
+  item-2 ruling; it closes the verdict's b04 and b05.
+- `debug_assert_eq!` and `debug_assert_ne!` are refused under D10: an accepted over-refusal. Widening the exemption needs a
+  root ruling (open item 3).
+- SP-C: #1446 gate 5 drops the copied "There is no fallback" sentence. SP-D: D10's trailing `m!()` sentence stays.
+- #1442 gains a description of the source shape of the F2 `proc-macro-fn` row and of F1's reproducer.
+- The collection-root shadowing hole (attempt 2's open item 2, SP-B) is **not** implemented here: it is #1442 attempt 2.
+  The module documentation still lists it as a known false pass.
+
+**What changed (all in `tools/realtime-policy`).**
+- MAJOR-1: `src/drain/mod.rs` `read_span`: for `BindingKind::Param` the span is `(body.full, body.end)`, the whole `fn`
+  body. The `let` span is unchanged.
+- The three false texts are corrected: the `declares_an_item` doc (now says what each span is and points at `read_span`),
+  the `read_span` doc ("a parameter's block is the body, and an item anywhere in the body shadows it"), and the D10 bullet of
+  the module documentation (an item in a `let`'s own block cannot shadow it; for a parameter the span is the whole body).
+  The attempt-2 record's "The SP-2 and SP-3 limits are gone" carries a correction note (above). The module documentation
+  also records that `debug_assert_eq!` and `debug_assert_ne!` are not exempt.
+- MINOR-1: new test `a_loop_that_does_not_bound_takes_back_only_its_own_reads` (two rows, below).
+- NIT-1: `a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused` is deleted. D9 never reads the region's
+  contents, so the row defended nothing the count-form row does not.
+- The slice-parameter D10 test is extended and renamed `a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_refused`
+  (three rows: `braced-item-macro-shadows-the-slice-parameter` as before, plus `item-macro-after-the-slice-loop-shadows-the-slice-parameter`
+  (b04) and `derive-after-the-slice-loop-shadows-the-slice-parameter` (b05)). `over_slice` takes `before` and `after`.
+
+**Mutations** (each applied alone, `cargo test --locked -p realtime-policy` and the release tool on the real tree, source
+restored after each; `diff` against the saved source is empty).
+- Slice-parameter span ends at the body statement that holds the pop (attempt 2's code): red are exactly
+  `item-macro-after-the-slice-loop-shadows-the-slice-parameter` and `derive-after-the-slice-loop-shadows-the-slice-parameter`
+  (148 passed, 1 failed: the extended test). Real tree ok.
+- Reads are not rewound (`rewind` does nothing): red is exactly `failed-alias-read-does-not-extend-the-span`
+  (148 passed, 1 failed). Real tree ok.
+- Reads are rewound to zero (`truncate(0)`): red is exactly `per-queue-in-a-slice-loop-with-a-shadowing-macro`
+  (148 passed, 1 failed). Real tree ok.
+- Green on the restored source: 149 passed.
+
+**Test value (one sentence per new or changed test).**
+- `a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_refused`: red if a slice parameter's D10
+  span stops at the body statement that holds the pop, so a statement macro or a derive after the loop at the body's level
+  (which can declare a `const` that shadows the parameter and turns the loop into one that never ends) passes.
+- `a_loop_that_does_not_bound_takes_back_only_its_own_reads`: red if a failed bounding attempt keeps its stale reads (the
+  alias-source `let` of a finite outer loop then extends a span over a harmless macro: over-refusal), or forgets reads that
+  an earlier rule noted (a per-queue form in a slice-parameter loop then loses the parameter, and a macro that redeclares it
+  as `0..` passes: a false pass). The attempt-2 verdict showed that neither mutation turned any test red.
+- Deleted: `a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused` (defended nothing the count-form row
+  does not).
+
+**Gates (re-measured on this branch).**
+1. Real tree: `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh`: both
+   `realtime policy: ok (94 marked regions in 26 files)`, as before.
+2. `cargo test --locked -p realtime-policy`: 149 passed (149 before: +1 rewind test, -1 deleted D9 row; the slice test is
+   renamed and has two more rows).
+3. Parity (the attempt-2 method: an instrumented copy of `scripts/test-realtime-policy.sh`, outside the commit, runs the
+   release binary on each of the 96 `expect_failure` trees): the tool refuses all 96; 57 rows expect the drain class and 55
+   report it, the other two being B1a-D10's `drain-open-tail-last-file` and `drain-region-ends-in-comment`; no other row
+   reports the drain class. Same as attempt 2.
+4. Mutations: above.
+5. Run time, release binary on the real tree: 2.71 s, 2.58 s, 3.07 s (attempt 2: 1.27-1.37 s). The machine carried other
+   builds during the runs (load average 32.9, 29.0, 17.3); the change adds one span computation per read binding and
+   no loop. Not tuned, not re-run.
+6. No shipped source changed.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `scripts/check-workspace-policy.sh`, `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` exit 0.
+
+**Open items.**
+- `debug_assert_eq!`, `debug_assert_ne!`: an accepted over-refusal (ruling above). No drain span holds one.
+- A collection root that an item shadows (r01, r02, b01, b06): #1442 attempt 2; still a known false pass in the module
+  documentation.
+
+### Attempt 3 verdict (root rescope, 2026-10-11)
+
+Verdict: FAIL (`/home/bl/misofm/submix-verdicts/1441-attempt3.md`): one MAJOR (MAJOR-1: an item named `core` or
+`std` redirects the `array::from_fn` outer loop; probes f02 to f05; a false pass in both gates, in the code since
+attempt 1). Every attempt-2 finding is closed. Root's ruling (rj3-c, 2026-10-11) adopts the review's R1 text verbatim.
+The record and the close comment read exactly:
+
+"Attempt 3 FAIL (MAJOR-1). Budget spent; no attempt 4. Root rescope (2026-10-11): MAJOR-1 (the core/std
+path trust of the array::from_fn exception) and the collection-root hole (r01, r02, b01, b06) move to
+#1442. The remaining scope has no BLOCKER or MAJOR (attempt-3 verdict)."
+
+#1441 closes after the batch push with that record (not "at merge", not kept open). MAJOR-1's rule text is
+#1442 D1 (Option A, root Amendment 3), not D3. #1442 Amendment 3 carries the rule text for both items.

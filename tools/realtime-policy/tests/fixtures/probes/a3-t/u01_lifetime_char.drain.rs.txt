@@ -1,0 +1,10 @@
+fn drain<'a>(control: &'a mut Consumer<Record>, tag: &'a u8) {
+    let _c = 'a';
+    let _b = b'x';
+    'outer: while *tag != b'{' {
+        let Ok(record) = control.try_pop() else {
+            break 'outer;
+        };
+        apply(record);
+    }
+}

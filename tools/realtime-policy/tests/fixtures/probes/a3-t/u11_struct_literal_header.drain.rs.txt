@@ -1,0 +1,11 @@
+struct Span {
+    end: usize,
+}
+fn drain(control: &mut Consumer<Record>) {
+    for _ in 0..(Span { end: usize::MAX }).end {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

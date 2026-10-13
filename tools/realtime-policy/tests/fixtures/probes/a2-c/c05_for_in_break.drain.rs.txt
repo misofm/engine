@@ -1,0 +1,13 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        for record_index_for_the_lane_with_a_rather_long_name_xxxxxxxxxx in self
+            .control_lane_consumer_for_this_strip
+            .indices_of_records_pending_for_the_block()
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

@@ -1,0 +1,9 @@
+impl Strip {
+    fn take_one_each(&mut self) {
+        for control in self.controls.iter_mut() {
+            if let Ok(record) = control.try_pop() {
+                apply(record);
+            }
+        }
+    }
+}

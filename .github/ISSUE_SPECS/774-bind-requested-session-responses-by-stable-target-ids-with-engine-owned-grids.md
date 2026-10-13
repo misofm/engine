@@ -153,7 +153,7 @@ cargo clippy --locked -p host-core -p builtins-compiler --all-targets --all-feat
 cargo fmt --all -- --check
 bash scripts/check-host-core-policy.sh
 bash scripts/check-builtins-policy.sh
-bash scripts/check-realtime-policy.sh
+cargo run --locked --release -q -p realtime-policy
 CARGO_TARGET_DIR=target/session-response-wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo check --locked --release --target wasm32-unknown-unknown -p host-core
 CARGO_TARGET_DIR=target/session-response-wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p host-core
 ```

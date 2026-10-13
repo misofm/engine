@@ -3486,7 +3486,7 @@ impl AudioWorkletEngineHost {
     pub(crate) fn live_control_solo(&self) -> Option<&LiveControlSoloState> {
         self.ready.as_ref().map(|ready| &ready.solo)
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Drain every finished meter window into the frame buffer (issue #137 D2).
     ///
     /// Returns the number of complete windows folded by this call. Zero work happens without the
@@ -3837,7 +3837,7 @@ impl AudioWorkletEngineHost {
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows
     }
-
+    // REALTIME_POLICY_END
     fn finish_commands(&mut self, result: u32, reason: u32, index: u32, admitted: u32) -> u32 {
         self.command_report.result = result;
         self.command_report.reason = reason;

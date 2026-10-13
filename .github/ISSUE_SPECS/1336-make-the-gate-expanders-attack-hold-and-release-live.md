@@ -171,7 +171,7 @@ the same track rendered alone.
    - `cargo test --locked --release -p audit -p bench -p console-workload`
    - `cargo run --locked -p conformance --example conformance_fixtures -- --check`
    - `bash scripts/check-sdk-generated.sh`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-effect-runtime-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-effect-runtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `bash scripts/build-web-audioworklet.sh --named-twin <B> <A>`, then
      `bash scripts/check-web-audioworklet.sh <A> <B>/miso-engine-v1-audio-worklet.simd128.named.wasm`,

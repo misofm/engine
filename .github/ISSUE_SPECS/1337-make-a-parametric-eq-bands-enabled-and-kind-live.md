@@ -162,7 +162,7 @@ Filters for Musical Applications", DAFx-14. **Latency:** 0. **Tail:** unchanged 
     - `cargo run --locked -p conformance --example conformance_fixtures -- --check`
     - `cargo build --locked --release -p audit && ./target/release/audit parametric-eq --blocks 100000`
     - `cargo test --locked --release -p audit -p bench -p console-workload`
-    - `bash scripts/check-parametric-eq-render-contract.sh`; `bash scripts/check-realtime-policy.sh`;
+    - `bash scripts/check-parametric-eq-render-contract.sh`; `cargo run --locked --release -q -p realtime-policy`;
       `bash scripts/check-effect-runtime-policy.sh`; `bash scripts/check-workspace-policy.sh`
     - `bash scripts/check-sdk-generated.sh`; `bash scripts/check-sdk-types.sh`
     - `bash scripts/build-web-audioworklet.sh --named-twin <B> <A>`, then

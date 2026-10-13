@@ -165,9 +165,8 @@ of the three-attempt budget.
 
 ### Attempt 1 under Amendment 1 (implementer, 2026-10-05)
 
-Status: implemented for 11 of the 12 pairs; the `crates/engine/src/realtime/plan.rs:539` pair is
-**pending** (stream B's area, sequenced after stream B's batch 1 is on `main`). Its
-`compile_fail` already runs under the new `test-debug-a` step; only its twin and its comment wait.
+Status: implemented for 12 of 12 pairs; the `plan.rs` pair landed in stream J batch 3 (see "The
+`plan.rs` pair" below), after stream B's batch 1 reached `main`.
 
 **D1.** `test-debug-a` gains "Workspace doctests", `test-debug-b` gains "DSP crates doctests", each
 the job's whole-package command with `--all-targets` replaced by `--doc` (same `--exclude`/`-p`
@@ -243,7 +242,7 @@ in the table's twin column (or removed).
 | CanonicalFpEnv Sync | twin line 293 | `compile_fail` line 285 |
 
 In every rename run the `compile_fail` itself stayed green, which is the wrong-reason defect the
-twin exists to catch. `plan.rs:539`: pending.
+twin exists to catch. `plan.rs`: see "The `plan.rs` pair".
 
 **Gate 4.** `check-test-support-ci.py`, `test-test-support-ci.py`, `check-ci-path-routing.py`,
 `test-ci-path-routing.py`, `check-workspace-policy.sh`: all exit 0. Also `cargo fmt --all --check`
@@ -251,6 +250,47 @@ and the lint job's `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --
 `shellcheck` is not installed here; `bash -n` passes.
 
 **Gate 5.** Pending the batch's single PR run (wall times of the new steps to be recorded there).
+
+### The `plan.rs` pair (stream J batch 3)
+
+`PreparedRenderPlan` in `crates/engine/src/realtime/plan.rs`: the fence was at `:557` on this branch
+(the spec's `:539` is stale; re-measured). Only its doc comment changed. Its helper is renamed
+`requires_sync` to `requires`, so the pair shares the name. The `compile_fail` keeps `T: Sync`; the
+twin is the same snippet with `T: Send`, and a comment names E0277 and says stable rustdoc does not
+check it.
+
+| `compile_fail` | Forbidden construct | Twin | rustc today |
+|---|---|---|---|
+| `PreparedRenderPlan` | bound `T: Sync` | bound `T: Send` | E0277 |
+
+Reason check (fence flipped to a plain doctest once): exactly two errors, both E0277, "`Cell<()>`
+cannot be shared between threads safely" and "`dyn PreparedPlanExecutor` cannot be shared between
+threads safely"; no other error. So no snippet needed a fix.
+
+Gate 3 (`cargo test --locked -p engine --doc`; each run reverted):
+
+| Run | Result |
+|---|---|
+| rename: `PreparedRenderPlan` to `PreparedRenderPlam` in both `use` lines | exit 101; twin (line 569) red, E0432 and E0425; `compile_fail` (line 560) still ok (the wrong-reason defect the twin catches) |
+| delete: `T: Sync` to `T: Send` in the `compile_fail` | exit 101; `compile_fail` (line 560) red; twin ok |
+
+Gate 1 for the pair: `cargo test --locked -p engine --doc` exit 0, 2 doctests (1 `compile_fail`, 1
+twin). With this pair the exact `test-debug-a` "Workspace doctests" command (`qualification.yml`
+lines 639-647) runs 23 doctests, all ok, measured on this branch: engine 2 (`plan.rs` lines 560 and
+569), graph-compiler 12 (6 `compile_fail` + 6 twins), host-core 9 (6 `compile_fail` + 3 twins). Of the
+host-core 9, five are this issue's (`render_session.rs` 50, 55, 63; `prepare.rs` 517, 526) and four are
+#1416's `route_controls.rs` doctests (`compile_fail` at lines 43, 58, 72 and the twin at 86), already
+on `main` at `2a589d360`. So 19 doctests come from this issue's fences and twins and 4 from #1416; any
+later slice adds to the total. *Test value.* The twin
+is red if `PreparedRenderPlan` is renamed or its re-export moves while the `compile_fail` stays green
+for an unresolved-import reason.
+
+Gates: `cargo fmt --all -- --check`, `cargo clippy --locked -p engine --all-targets`,
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked -p engine --no-deps`, `check-workspace-policy.sh` and
+`check-realtime-policy.sh`: exit 0. Shipped AudioWorklet module (doc lines move panic `Location`s in
+`plan.rs`, as NIT-2): `9784d350...` (3129194 B); `check-web-audioworklet.sh
+--without-metadata-regeneration` and `check-browser-expected-resources.py --artifacts` exit 0. Expect
+ARTIFACT CHANGED in the PR's `artifact-identity` summary.
 
 ### Follow-ups (stream J batch 2 follow-ups worker; verdict `1422-attempt1.md` and root rulings)
 

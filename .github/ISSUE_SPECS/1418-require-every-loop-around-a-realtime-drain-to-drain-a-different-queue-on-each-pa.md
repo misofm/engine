@@ -80,7 +80,7 @@ drains a different queue, so both pass D1. The other marked drain cited here,
   changes with that loop's pass. Walk outward from the count's receiver (`<path>` in
   `<path>.available_at_entry()`):
   - the receiver's root identifier is bound by the loop's pattern (`for control in ..`,
-    `for (lane, control) in ..`) or by an `array::from_fn` closure's parameter; or
+    `for (lane, control) in ..`) or by an `array::from_fn` closure's parameter (withdrawn: Amendment 2); or
   - the receiver is indexed by exactly one identifier the loop's pattern binds
     (`controls[lane]`, `self.controls[lane]`; not `controls[lane % 2]` and not `controls[0]`); or
   - the receiver's root is bound inside the loop by `let`, `let .. else` or `if let`, from
@@ -96,7 +96,7 @@ drains a different queue, so both pass D1. The other marked drain cited here,
   holds each queue once. Iterating `&mut <fields>` yields distinct elements, and an SPSC consumer
   is not `Clone`, so each element is a different queue. Say this in the comment.
 - **D4. The fixture.** Move `drain_lane_pairs` from the valid fixture to an expected failure, and
-  add an `array::from_fn` case over `controls[lane]` to the valid fixture in its place. Add a valid
+  add an `array::from_fn` case over `controls[lane]` to the valid fixture in its place (now an expected failure: Amendment 2). Add a valid
   two-level case (D1's last example) and a valid `let Some(control) = control.as_mut() else`
   case in the shape of `drain_controls`. Add expected failures for: `0..usize::MAX` (above),
   `0..control.capacity()`, the `[(); usize::MAX]` parameter, `&mut rounds` over `0_u32..`,
@@ -460,7 +460,7 @@ rescope, not a failed attempt 3.
 gawk and mawk also gave different results (mawk's eval stack). Root's ruling is to replace the
 tool, not to add a fourth layer of patterns.
 
-*Check realtime regions with a Rust syntax-tree tool* (slices C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446),
+*Check realtime regions with a Rust syntax-tree tool* (slices C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446),
 B2b-1 (#1443) and B2b-2 (#1444); "the tool issue" below) moves every check into `tools/realtime-policy`. That tool
 reads `syn`'s syntax tree, and the tool issue deletes the awk script (C2). This issue then changes
 the tool's drain rule, not awk.
@@ -499,7 +499,7 @@ The committed synthetic cases (Cases) keep every shape tested, whatever the real
   value on each pass:
   - the lone, non-`mut` pattern of a `0..<bound>` loop;
   - the index slot of a trailing `.enumerate()` (not over `&mut` of an iterator);
-  - an `array::from_fn` closure parameter.
+  - an `array::from_fn` closure parameter (withdrawn: Amendment 2).
   - **Invariance.** Inside the selecting loop, the base and every root the walk read are named
     only in two places:
     - the binding the walk read;
@@ -609,7 +609,7 @@ The committed synthetic cases (Cases) keep every shape tested, whatever the real
 
   n03, s04, e01, e04 and e08 duplicate D4 cases.
 - **Accepted cases:**
-  - from D4: `array::from_fn` over `controls[lane]`, and the two-level `BankSet::drain_banks`;
+  - from D4: `array::from_fn` over `controls[lane]` (now an expected failure: Amendment 2), and the two-level `BankSet::drain_banks`;
   - from the attempts:
     - `drain_fader_records` (`let .. else` with `.as_mut()`);
     - `drain_optional_controls` (`if let` with `.as_mut()`);
@@ -741,7 +741,7 @@ Added:
 No other case reaches these.
 
 **Dependencies, as amended.**
-- After (same stream): the whole J tool batch on `main` (C1, A1, A2, B1a, B1b, B2a, C2, the #1448
+- After (same stream): the whole J tool batch on `main` (C1, A1, A2, B1a, B1b, B2a, #1519, C2, the #1448
   guard commit, B2b-1 and B2b-2). This issue is outside the batch (root, 2026-10-05). The batch
   pushes once, and B2b-2 waits for #1345 (Amendment 1), so this issue comes after B2b-2 and after
   #1345.
@@ -750,3 +750,15 @@ No other case reaches these.
 - Not ordered against #1312, #1346 and #1347 (root's ruling, 2026-10-05). Real-tree claims are
   re-measured (above).
 - Before: #1426.
+
+## Amendment 2 (root, 2026-10-11): a drain inside any closure is refused
+
+Root ruling rj3-c R2 (2026-10-11, MAJOR-1 of the #1441 attempt-3 verdict, Option A; the text is in #1442 D1,
+root Amendment 3). The tool refuses a pop inside any closure, the closure of `core::array::from_fn` and
+`std::array::from_fn` included, and withdraws the B1b-D1/D3 outer-loop exception for that closure. This
+issue therefore changes:
+- a drain inside any closure, `from_fn` included, is refused. D1's `array::from_fn` closure-parameter root
+  and the index form's `array::from_fn` closure parameter are withdrawn;
+- D4's `array::from_fn` case over `controls[lane]` becomes a refused case (an expected failure expecting
+  {drain}), in place of the valid-fixture case; the accepted-cases line for it follows;
+- `drain_lane_pairs` stays an expected failure (D4), and its base-tree text follows #1442 Amendment 3.

@@ -1,0 +1,13 @@
+fn drain_matrix_controls(control: &mut Consumer<Record>) {
+    let available = control.available_at_entry();
+    let mut remaining = usize::MAX;
+    #[cfg(debug_assertions)]
+    let mut remaining = available;
+    while remaining != 0 {
+        remaining -= 1;
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

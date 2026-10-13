@@ -1,0 +1,8 @@
+fn drain_matrix_controls(control: &mut Consumer<Record>) {
+    loop {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

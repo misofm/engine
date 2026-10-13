@@ -1,0 +1,13 @@
+fn drain(control: &mut Consumer<Record>) {
+    let _a = '\'';
+    let _b = '\\';
+    let _c = '\u{7b}';
+    let _d = '"';
+    let _e = b'\'';
+    loop {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

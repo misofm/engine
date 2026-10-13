@@ -1,0 +1,8 @@
+fn drain(control: &mut Consumer<Record>) -> Record {
+    let record = loop {
+        if let Ok(record) = control.try_pop() {
+            break record;
+        }
+    };
+    record
+}

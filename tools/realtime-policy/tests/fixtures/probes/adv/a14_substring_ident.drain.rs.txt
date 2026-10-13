@@ -1,0 +1,9 @@
+fn drain(control: &mut Consumer<Record>) {
+    let not_available_at_entry_cap = control.capacity();
+    for _ in 0..not_available_at_entry_cap {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

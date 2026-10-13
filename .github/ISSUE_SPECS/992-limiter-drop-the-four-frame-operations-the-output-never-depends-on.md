@@ -121,7 +121,7 @@ Steps:
    * M2: the link arm keyed on `!link_max`. Gates 3 and 4 go red.
    * M3: drop the first product instead of the seed. E1b goes red.
    * M4: the bypass arm inverted. Gate 4 goes red.
-6. **Realtime and wasm.** `tests/allocation.rs`, `check-realtime-policy.sh`, `check-lane-policy.sh`,
+6. **Realtime and wasm.** `tests/allocation.rs`, `tools/realtime-policy`, `check-lane-policy.sh`,
    and `check-web-audioworklet.sh`: the roster row stays one function, and the rule-3 count does
    not drop. The vector count falls, which the shape gate absorbs.
 7. **Codegen (recorded).** The uniform frame loop loses its six `vblendvps` and gains two

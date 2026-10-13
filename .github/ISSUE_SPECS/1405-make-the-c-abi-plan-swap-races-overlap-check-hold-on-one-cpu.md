@@ -75,7 +75,7 @@ All 111 failures were this assertion, at `:572`. In the same iterations, the `ca
    a render call (for example, holding the producers' lock across `render`), the test fails with
    the vacuity message within its bound. This is PR evidence.
 3. `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features --
-   -D warnings`; `bash scripts/check-realtime-policy.sh` and `bash scripts/test-realtime-policy.sh`;
+   -D warnings`; `cargo run --locked --release -q -p realtime-policy` and `cargo test --locked -p realtime-policy`;
    `bash scripts/check-workspace-policy.sh` and `bash scripts/test-workspace-policy.sh`;
    `test-debug-a`.
 

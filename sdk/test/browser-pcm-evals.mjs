@@ -32,6 +32,33 @@ import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
 
+// Issue #1496 D1/D3: the exports either AudioWorklet calls after construction are one table,
+// `tools/realtime-policy/render-thread-exports.json`, which the realtime-policy tool also reads to
+// prove each wrapped entry's body is a `render_locked` call. Every engine fake below that the PCM
+// feed worklet drives is already constructed and ready, so each `miso_engine_web_v1_*` export the
+// feed reaches through its `exports` is a post-construction call. `recordFeedCalls` wraps those
+// exports; the last test of this file fails on a call the table does not list for the feed.
+const renderThreadTable = JSON.parse(await readFile(new URL("../../tools/realtime-policy/render-thread-exports.json", import.meta.url), "utf8"));
+assert.equal(renderThreadTable.table, "render-thread-exports");
+const feedRenderThreadExports = new Set(renderThreadTable.exports.filter((entry) => entry.callers.some((caller) => caller.worklet === "feed")).map((entry) => entry.name));
+const recordedFeedCalls = new Set();
+function recordFeedCalls(exports) {
+  const prefix = renderThreadTable.prefix;
+  return new Proxy(exports, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof property !== "string" || !property.startsWith(prefix)) return value;
+      const name = property.slice(prefix.length);
+      recordedFeedCalls.add(name);
+      // An unlisted export that the fake does not define would stop the run with a bare TypeError
+      // before the last test names it.
+      if (value === undefined && !feedRenderThreadExports.has(name)) return () => 0;
+      if (typeof value !== "function") return value;
+      return (...args) => { recordedFeedCalls.add(name); return Reflect.apply(value, receiver, args); };
+    },
+  });
+}
+
 test("actual Wasm paused seek accepts target PCM before the first quantum with old queues full", async () => {
   const asset = await MisoEngineAsset.load(await moduleBytes());
   const document = new TextEncoder().encode(sessionDocument({ frames: 480_000 }));
@@ -365,7 +392,7 @@ test("actual Wasm control-port preparation releases full stale SAB before exact 
   class Engine {
     constructor() {
       this.quantumFrames = 128; this.maximumSourceChannels = 2;
-      this.exports = exports; this.handle = handle; this.memoryBuffer = exports.memory.buffer;
+      this.exports = recordFeedCalls(exports); this.handle = handle; this.memoryBuffer = exports.memory.buffer;
       this.sourceIdPointer = exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourceId"));
       this.sourceIdCapacity = exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "sourceId"));
       this.sourcePcm = new Float32Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourcePcm")), 256);
@@ -497,7 +524,7 @@ function runPrelude(source, { tracking = false, mutate = false, capacity = 2, in
       this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
       this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
       this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
-      this.exports = { memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return seekResult; }, miso_engine_web_v1_source_submit: (_h, _id, generation, start, channels, frames, end) => { submissions.push({ generation, start, channels, frames, end, pcm: [...this.sourcePcm] }); return typeof submitResult === "function" ? submitResult() : submitResult; } };
+      this.exports = recordFeedCalls({ memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return seekResult; }, miso_engine_web_v1_source_submit: (_h, _id, generation, start, channels, frames, end) => { submissions.push({ generation, start, channels, frames, end, pcm: [...this.sourcePcm] }); return typeof submitResult === "function" ? submitResult() : submitResult; } });
     }
     process() { return true; }
   }
@@ -874,4 +901,12 @@ test("observer drops PCM reused during copy before sequence publication, and see
       assert.equal(observer.pull((chunk) => { assert.equal(chunk.startFrame, 20n); assert.deepEqual([...chunk.planes[0]], [0, 0, 0, 0]); }), 1);
     }
   }
+});
+
+test("the PCM feed worklet calls only exports that the render-thread table lists for it", () => {
+  // The actual-Wasm and prelude tests above drive the feed's process drain and both seek paths,
+  // so the recording is not empty; an empty one would mean the proxy lost its hook.
+  for (const name of ["source_submit", "source_seek"]) assert.ok(recordedFeedCalls.has(name), `the recording proxy saw the feed worklet call ${name}`);
+  const unlisted = [...recordedFeedCalls].filter((name) => !feedRenderThreadExports.has(name));
+  assert.deepEqual(unlisted, [], `the feed worklet calls these exports after construction, and tools/realtime-policy/render-thread-exports.json does not list them for it: ${unlisted.map((name) => renderThreadTable.prefix + name).join(", ")}`);
 });

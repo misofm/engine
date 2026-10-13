@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice C2 of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2, B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice C2 of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2, B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds).
 - A1 to B2a moved every check of `scripts/check-realtime-policy.sh` into `tools/realtime-policy`.
   The fourth review measured that A1 to B2a cover the awk gate (its BLOCKER-1, option B), so C2
@@ -134,6 +134,14 @@ keeps its line count.
   outputs go in the Evidence. If C1 is not on `main`, this slice waits for it.
 - **D7. STREAMS.** Root names C2's cross-stream edits as D15-0 exceptions (STREAMS).
 
+### Root Amendment 1 (2026-10-11): gate 5 and `.llvmbc`
+
+Authority: root decision under the owner's delegation, after the #1441 attempt-1 verdict (SP-1) and
+an adversarial review (ACCEPT WITH CHANGES). Root adopted the review's text verbatim. Gate 5 carries
+the same text as #1441 gate 6, because D4 edits comments in shipped crates: any byte change to a
+source file changes the `.llvmbc` section of the `libcapi.a` members and nothing else. Marked
+"(root Amendment 1)" in place.
+
 ## Authorized paths
 
 - `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` (deleted). Stream J
@@ -177,6 +185,10 @@ keeps its line count.
   STREAMS). After this slice the floors live only in `Policy::workspace()`.
 - **Every later pop or region edits `Policy::workspace()`** (B2b-1, Hazards): the STREAMS standing
   exception covers it.
+- **Threat model (root Amendment 2, 2026-10-11).** Deleting the awk gate leaves this tool as the only
+  check. Its threat model, with its closed list of limits, is the "Threat model (root ruling
+  2026-10-11)" bullet in #1438 Hazards. A finding inside a listed limit is recorded, not a FAIL, and
+  only a root ruling adds or widens a limit.
 
 ## Objective gates
 
@@ -193,9 +205,16 @@ keeps its line count.
      `python3 -B scripts/test-script-reachability.py`;
    - `bash scripts/check-workspace-policy.sh`;
    - `cargo fmt --all -- --check`.
-5. **Shipped artifacts unchanged.** Every edited comment keeps its line count, so
-   `artifact-identity` reports the worklet module UNCHANGED, and the `libcapi` digests are
-   identical, as A1's gate 6 measures them.
+5. **Shipped artifacts unchanged.** Every edited comment keeps its line count. The
+   `artifact-identity` job reports the worklet module UNCHANGED. PR evidence, built as A1's gate 6
+   builds them (parent twice first, then the change, in one checkout):
+   - the sha256 of `libcapi.so` is identical;
+   - `libcapi.a` holds the same members in the same order;
+   - each member is byte-identical after `objcopy --remove-section=.llvmbc`.
+
+   `.llvmbc` is rustc's embedded bitcode. It carries each source file's checksum, so any byte
+   change to a source file changes it, and no linker copies it into a shipped image. Any other
+   difference fails. (root Amendment 1, SP-1)
 6. **CI.** The batch's `qualification` run shows `audit-native` running the tool, and `lint`
    running no awk gate.
 7. **GitHub.** After the batch push, C1's script exits 0 on `<base>..<batch tip>`, and its
@@ -217,7 +236,7 @@ keeps its line count.
 
 ## Dependencies
 
-- After (same stream): B2a and C1.
+- After (same stream): B2a (#1442), #1519 and C1. If any of them spends its budget without PASS, C2 does not land in this batch.
 - Before (same stream, in the same batch): the commit "H #1448's guard, landed by J after C2"
   (B2b-1's first commit, spec in its "#1448 guard" section), then the rest of B2b-1, then B2b-2. #1418 (Amendment 1) and #1426 (Amendment 1) come after the
   whole batch is on `main`.
@@ -228,3 +247,111 @@ keeps its line count.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day. The command-form edits are one scripted pass (D5); the judgment is in about
   21 specs that name the bare path.
+
+## Attempt 1 record
+
+Base `b45d4836c` (`codex/d15-stream-j3`). Everything below was measured on this branch.
+
+**Re-measured, differing from the Problem.** The Problem's line numbers moved: `qualification.yml`
+step at `:527-534` (awk lines `:529-530`) is the same; `resource_lifecycle.rs` comment is at `:3022`
+(not `:2988`); `REALTIME_DEPENDENCY_POLICY.md` mentions were at `:55`, `:81`, `:150-153`, `:368-370`
+(not `:52`, `:84`, `:120`, `:132`); `REALTIME_MEMORY.md:83`. Real tree: 94 marked regions in 26 files
+(`git grep -c '^\s*// REALTIME_POLICY_BEGIN'`), equal to `Policy::workspace()`'s floors. Open specs:
+80 numbered specs name a script (gh open set read once); 67 were edited, 13 mention lines were left
+(below). `.github/ISSUE_SPECS/` also holds 58 specs of closed issues, 180 mentions, none edited.
+
+**What changed**
+- Deleted `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` (D1). `scripts/lib/gate.sh` kept.
+- `qualification.yml`, `lint`: deleted the two awk lines, step renamed "Realtime audit and artifact
+  evidence leak gates" (four leak-gate lines kept). `audit-native` (`if:` is the full-route condition)
+  still runs `./target/release/realtime_policy`; the tool's tests run in `test-debug-a`'s workspace test.
+- `scripts/check-ci-path-routing.py`: `"audit-native": ("./target/release/realtime_policy",)` in
+  `DEDUPLICATED_OWNERS`, with a header comment line naming the claim.
+- `scripts/test-ci-path-routing.py`: the owner loop covers the deletion mutation of the new entry; two
+  explicit cases added: the tool's step given a step-level `if:`, and `audit-native` moved off the full route.
+- Comment-only edits (each keeps its line count; `git diff --numstat` is 1/1 or 2/2 per file):
+  `crates/engine/src/realtime/observe.rs:18` ("an approved-unsafe list of exactly two files" becomes "its
+  approved-unsafe list"), `crates/engine/src/realtime/watermark.rs:32`, `crates/lane/src/fpenv.rs:63`,
+  `crates/lane/src/softfma.rs:16` and `:30`, `crates/capi/tests/resource_lifecycle.rs:3022`,
+  `crates/host-core/src/lib.rs:75`, `tools/bench-support/src/lib.rs:12`, `scripts/check-bench-policy.sh:210`.
+- Docs: `REALTIME_DEPENDENCY_POLICY.md` six lines (the allowlist authority now says `tools/realtime-policy`
+  (`UNSAFE_ALLOWLIST` in `src/policy.rs`) in place of the false "`unsafe source exclusions` line"; the
+  mutation suite is now `cargo test -p realtime-policy`, which has the third-lane-file and `other.rs` cases
+  in `tests/policy/unsafe_ownership.rs`); `REALTIME_MEMORY.md:83`.
+- Specs (D5): one scripted pass for the command form (`bash scripts/check-realtime-policy.sh` to
+  `cargo run --locked --release -q -p realtime-policy`, `bash scripts/test-realtime-policy.sh` to
+  `cargo test --locked -p realtime-policy`), bare path to `tools/realtime-policy`; the diff was reviewed
+  line by line. Hand edits: #1447's line anchor `:208-228` became "the count form of the drain-bound rule
+  of `tools/realtime-policy`"; #1482's "(or the tool)" was dropped with the script name.
+
+**Mentions left unchanged in open specs (D5 history or time-bound), with reason**
+- #1345:219, :228, :229, :233, :234, :238 (D9 and its "added" paths, gate 9 and gate 10): they authorise
+  and gate edits to the awk scripts for stream B3's commits that land before this one, and say "Stream J's
+  tool is not on `main` yet". Same reason as the nine tool specs. Root: after the batch merges, #1345's
+  gate 9 has no awk script to run. Its D9 floors move to `Policy::workspace()`.
+- #1447:27: a measurement the awk gate gave on `origin/main` (Problem, history).
+- #1422:290: evidence record of its `plan.rs` pair.
+- #349:205 and :315: finding rows (`RT-16`, `IO-14`) with line anchors into the old script (findings index).
+- #881:122, :179, :398: attempt 1 and attempt 2 evidence records.
+- #948:5, :16, :31: #948 closes with A2 (D5).
+- #1443:37, #1444:27, the nine tool specs, #1519 (6) and #1418, #1426: D5 lists them; #1519 is the tenth
+  tool slice and its mentions are its own attempt records and gates for commits before this one.
+- `crates/graph/tests/MUTATIONS.md` (12) and `docs/handoffs/**`, `BRIEFS/` (3): history (D4, D5).
+- Specs of closed issues (58 files, 180 mentions): not edited.
+
+**Gates**
+1. `cargo run --locked --release -q -p realtime-policy` exits 1 with exactly one finding:
+   `marked realtime unbounded try_pop drain ... crates/effect-contract/src/live.rs:366` (pre-#1345;
+   stream B3's #1345 rewrites that function; J rebases onto it before the batch gate). No exception added,
+   `live.rs` not touched. Nothing else is refused.
+2. `cargo test --locked -p realtime-policy`: 186 passed, 0 failed.
+3. `git grep` for either script name lists only the mentions above, plus none in code, workflows, scripts or
+   docs outside `docs/handoffs/` and `MUTATIONS.md`.
+4. exit 0: `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-script-reachability.py` (118
+   files reached), `test-script-reachability.py` (20 cases), `check-workspace-policy.sh`,
+   `check-bench-policy.sh`, `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy
+   --all-targets -- -D warnings`; `cargo check` of engine, lane, host-core, bench-support and `capi --tests`.
+   *Mutation:* with the new `DEDUPLICATED_OWNERS` entry removed, `test-ci-path-routing.py` exits 1
+   (`#1044 mutation was accepted ... Realtime source policy (tools/realtime-policy)`); restored, it exits 0.
+   Test value: the new cases defend the tool's `audit-native` step and job `if:` being edited off the full
+   route or conditioned, which no other table entry covers.
+5. Shipped artifacts: `libcapi.so` sha256 `0213cd820e2715de...` at the parent (two builds) and at the
+   change. `libcapi.a`: parent `2aa32d808165aef3...` twice (reproducible), change `fd2c8d49063a2f2c...`; 387
+   members, same names and order; 5 members differ raw and 0 differ after
+   `objcopy --remove-section=.llvmbc`. The worklet module, built with
+   `scripts/build-web-audioworklet.sh --module-only`, is `9784d3509dba6bfd...` at the parent and at the change.
+   (The `artifact-identity` job is CI only.)
+6, 7. CI and GitHub: after the batch push (C1's script and its `--check`).
+
+**Rebase plan (root, 2026-10-12).** At the rebase onto stream B3, J re-applies D5 only to the specs that are still
+open then, and drops the D5 edits to any spec that B3 closed (a closed spec leaves `.github/ISSUE_SPECS/`). If
+#1447 is still open, J fixes the contradiction in its gate 3 (it names the awk script that this slice deletes). J
+moves #1345 D9's awk floor raises into `Policy::workspace()`, because #1345's gate 9 has no awk script to run once
+this slice has landed.
+
+**Rebase onto stream B3 (J3 worker, 2026-10-13; `origin/main` at `88272d08b`).** 68 commits replayed; backup
+branch `j3-pre-rebase-backup` at `2ff0816e7`. Both #1345 and #1447 are in `main` and closed on GitHub.
+- Conflicts. `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` conflicted in the first
+  tool commit (`#1438`) and in the `#1441` commit (B3 raised the floors to 27 files and 118 regions and
+  added `design_bound_cache.rs` to the awk allowlist): each took main's text for the commits before the
+  deletion, and the `#1446` commit deletes both (modify/delete resolved as delete). `crates/builtins-compiler/src/lib.rs`
+  conflicted in the `#1441` commit: B3 already marks `drain_controls` (and the neighbouring helpers), so main's
+  text stands and that commit's marker edit is empty there. The `#1446` commit's D5 pass touched
+  `.github/ISSUE_SPECS/1445-*` (deleted on main with its issue's close): the edit is dropped. No other
+  conflict; the comment-only edits (`observe.rs`, `watermark.rs`, `fpenv.rs`, `softfma.rs`,
+  `resource_lifecycle.rs`, `host-core/src/lib.rs`, `plan.rs`, `ffi.rs`, `render_lock.rs`) and #1448's
+  `poll_meters` markers (blank lines at `lib.rs:3489` and `:3840`, bounding the function exactly) applied
+  cleanly, with line counts kept.
+- D5 re-applied. Open specs B3 added after the pass (#1521, #1523, #1534, #1537, #1538) took the command
+  substitution (`bash scripts/check-realtime-policy.sh` to `cargo run --locked --release -q -p realtime-policy`).
+  The D5 edits to the specs of the four issues B3 closed (#1345, #1346, #1347, #1447) are dropped (their specs
+  return to main's text). #1447 is closed, so the gate 3 contradiction needs no fix. Mentions left as
+  history are the ones listed above, plus #948 (still open on GitHub; left, as before).
+- #1471's allowlist: `crates/capi/tests/design_bound_cache.rs` joins `UNSAFE_ALLOWLIST` (20 entries); it
+  mirrors the awk entry B3 added. The release tool's 7 findings there are gone and nothing else changed.
+- #1345 D9's floors moved into `Policy::workspace()`: 27 files and 119 regions (was 26 and 95). The awk gate's
+  last floors on main were 27 and 118; the tool also counts #1448's `poll_meters` region (119). `git grep`
+  of `// REALTIME_POLICY_BEGIN` gives 119 in 27 files. The pre-#1345 finding at
+  `crates/effect-contract/src/live.rs:366` is gone (#1345 rewrote the function). `target/release/realtime_policy`
+  prints `realtime policy: ok (119 marked regions in 27 files)`. The test base tree keeps its own counts
+  (26 files, 94 regions): the case policy replaces the floors, so no case reads the workspace values.

@@ -272,7 +272,7 @@ host-core join are *Carry source-claim lines across a plan swap and fill a grown
 4. Commands:
    - `cargo test --locked -p graph-compiler`
    - `cargo test --locked -p graph --features graph/test-support`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 

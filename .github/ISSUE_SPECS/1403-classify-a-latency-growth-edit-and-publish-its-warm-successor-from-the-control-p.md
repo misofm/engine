@@ -209,7 +209,7 @@ no swap and the same host commands, timed on the source-read clock.
 5. Commands:
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `cargo test --locked -p host-core --features host-core/test-support`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

@@ -134,7 +134,7 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
    - `cargo test --locked -p capi`
    - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-cross-targets.sh`
    - `bash scripts/check-workspace-policy.sh`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value
