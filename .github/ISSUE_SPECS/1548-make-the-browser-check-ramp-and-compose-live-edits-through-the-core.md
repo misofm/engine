@@ -110,6 +110,14 @@ browser's command kinds and wire stay as they are.
   `SessionRamps`, `admit_commands_staged`'s composition sites, `ReadyOwnership`'s new table, the
   boot seed), `hosts/host-web/src/tests.rs`, `hosts/host-web/Cargo.toml` (the `controls`
   dependency), `Cargo.lock`.
+- `scripts/check-web-audioworklet-callgraph.py` (added in the batch 1 review fold): the two
+  `INDIRECT_SITES` rows of `command_submit` for `LiveRouteState::follow` and `followed_lanes`
+  named the `effective_mute: &dyn Fn` predicate that this slice deleted, so the gate would have
+  kept expecting indirect calls that no longer exist.
+- `scripts/check-parameter-metadata-v1.py` (added in the batch 1 review fold, found by the gate run
+  below): #1550 added the top-level `controls` object, and the schema validator that
+  `check-web-audioworklet.sh` runs refused the document as an unknown top-level key. It now allows
+  the key and pins that the object has its seven parts; its self-test carries the red mutation.
 
 ## Non-goals
 
@@ -139,6 +147,17 @@ host-web/test-support --tests`; the browser artifact gates
    source lanes equal `controls::effective(model', &overlay)` of the model the batch would commit.
 4. **Realtime.** The call-graph gate passes with no new trap owner, and the render-locked
    allocation count stays exactly zero in the existing host-web allocation tests.
+
+**Gate record (batch 1 review fold, tree `ba2f89df6` plus the schema-validator fix above).**
+`bash scripts/build-web-audioworklet.sh --named-twin <twin-dir> <artifact-dir>` built (shipped
+module `7b6c0ffa...03898f`, 3 243 311 B; named twin 3 699 017 B), and
+`bash scripts/check-web-audioworklet.sh <artifact-dir> <twin>` exited 0. The call-graph lines:
+`render` closure 9, 5 traps, one trap owner (`PreparedRenderPlan::render_inner`), 3 indirect sites
+over 2 members, no destructor registration, no atomic wait; `meter_poll` closure 9, 2 traps, 0
+indirect sites; `command_submit` (allocation-only) closure 76, 154 traps, 9 indirect sites over 3
+members, no destructor registration, no atomic wait. The first run of the gate failed at the
+metadata schema check (the `controls` key, above), not at the call graph; the second run, after the
+validator fix, passed in full.
 
 ## Test value
 
