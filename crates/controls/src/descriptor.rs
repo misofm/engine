@@ -9,10 +9,6 @@ use crate::address::Lane;
 use crate::error::ControlError;
 use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
 
-/// The issue that makes a route into a submix live (decision 17, slice S6, #1557); its last step
-/// flips the route rows from rebuild-only to live.
-pub const ROUTE_SLICE: u32 = 1557;
-
 /// The issue that makes VCA offset and mute, and a send's `follows_mute`, live on the C ABI
 /// (decision 17, slice S7a, #1558).
 pub const EFFECTIVE_SLICE: u32 = 1558;

@@ -77,8 +77,8 @@ capi's epoch row charges the state inventory each epoch keeps.
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
-structural, compiling and swapping a replacement plan, until *Deliver value-only send and
-submix-strip edits to the running C ABI plan* (#1225) lands.
+structural, compiling and swapping a replacement plan, except the live values of a strip (#1554,
+#1556) and of a send into a submix (#1557, section "Live sends" below).
 
 A caller bounds submix strips through `miso_engine_v1_compile_limits.maximum_submixes` (#1206), an
 in-place V1 amendment: the word is the former `reserved[0]`, at offset 176, followed by
@@ -340,7 +340,8 @@ two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
 must raise both. #1256 attached no input, effect or route lane, so rendering, `latency_samples`,
 `tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the input lane
-(#1556, section "Live strip input" below) and the route lane (#1225) are attached later. #1257
+(#1556, section "Live strip input" below) and the route lane (#1557, section "Live sends" below)
+are attached later. #1257
 delivers fader, mute and pan edits through them (next section).
 
 ## Live strip input: trim, polarity and the input filters (#1556)
@@ -374,6 +375,37 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
   ramp, a live edit renders the bits of a plan prepared from the committed session (the filters
   from a common silence, `-0.0` samples included); gated at 44.1 and 96 kHz, with zero render
   allocations and frees.
+
+## Live sends: gain, mute and matrix (#1557)
+
+A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
+the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
+live revision through `SET_CONTROL` or the per-kind route edits; no plan is prepared and the plan
+epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
+for decision 14's fold reason, at any tap, and `follows_mute` stays a rebuild until #1558. **A
+route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
+(`controls::live_lanes`), so a C ABI plan with a route into a submix attaches one latest-target
+cell per such route (`graph::route_control_resources`, charged in `capi_retained_bytes` and
+admitted against the graph cap) and the route's constants are no longer folded into the epilogue.
+A plan with no route into a submix attaches none and renders as before.
+
+- **Record.** One per changed route, in canonical route-ID order: the four coefficients
+  `graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)` returns, and
+  whether the route is silenced. These are the constants preparation folds into a route, so a
+  settled send renders the bits of a plan prepared from the committed session. A record is emitted
+  only when the folded target or the gate changes: a gain or matrix edit on a muted send gives
+  none, and the later unmute carries the new values. A gain or matrix outside the route domain, or
+  an edit ramp above 4,194,304 samples, is the rebuild's refusal.
+- **Ramps.** If the gate changes, the record ramps over `mute_ms` (or the edit's own length for the
+  route's mute). Otherwise it ramps over the longest of the changed rows' lengths: `gain_db` over
+  `fader_ms`, the matrix over `pan_ms`, each replaceable by the edit's own `ramp_samples` (an
+  explicit `0` is a step). A transaction that changes the gain with length 240 and the matrix with
+  length 480 gives one record of 480.
+- **Resources.** The route cells, lanes and render-side owners are charged in
+  `capi_retained_bytes` and in the replacement peak as `route_control_resources.total_bytes`, an
+  upper bound; the producer table and route IDs are observed exactly by `resource_lifecycle`.
+- **Rendering.** The route lane adds no latency or tail, and no render block allocates or frees
+  (gated by `send_values_are_live_and_render_the_prepared_plan_bits`).
 
 ## Value-only track edits on the running plan (#1257)
 
@@ -413,8 +445,7 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
   bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
   bypass edits" below.
-- **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
-  edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
+- **Rebuild.** Everything else replaces the plan exactly as before: any edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
   `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
 - **Timing (#1053 D2, #1312).** A committed fader, mute or pan/matrix value reaches render no
@@ -477,7 +508,7 @@ channel in place of the parameters; the render-side staging window is raised to 
 parameter cell. capi keeps the producers with the plan's provider epoch;
 each EQ's producer owns its prepared-target owner. #1264 writes live effect parameter edits to
 their cells, and #1265 publishes live EQ targets through the owners (below). The input lane is
-#1556's (below); no route lane is attached.
+#1556's and the route lane is #1557's (both below).
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and

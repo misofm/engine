@@ -599,6 +599,8 @@ struct HostHalf {
     /// One producer per prepared effect instance, with each EQ's owner, kept as capi keeps them
     /// (#1263 D2).
     effects: Box<[host_core::EffectControlProducer]>,
+    /// One producer per route into a submix, kept as capi keeps them (#1557 D4).
+    routes: Box<[host_core::RouteControlProducer]>,
 }
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
@@ -625,8 +627,9 @@ fn host_half_counting(
         .unwrap_or_else(|_| panic!("the reference session's compile caps"));
     let store = protocol::SessionStore::new(model, compile_caps)
         .unwrap_or_else(|_| panic!("the reference session compiles"));
-    // The same request capi makes (#1256 D1, #1263 D1: fader/mute, matrix/pan, input and effect lanes,
-    // no route lane; #1556), spelled here independently, and inside the caller's observed
+    // The same request capi makes (#1256 D1, #1263 D1, #1556, #1557: fader/mute, matrix/pan, input,
+    // effect and route lanes; the route lane has a producer only for a route into a submix),
+    // spelled here independently, and inside the caller's observed
     // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
     // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
     // count bytes capi does not keep.
@@ -637,7 +640,7 @@ fn host_half_counting(
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
-            routes: false,
+            routes: true,
         },
         None,
         superseded,
@@ -646,6 +649,7 @@ fn host_half_counting(
     let host_core::HostLiveControlHandles {
         strip_controls,
         effect_controls,
+        route_controls,
         ..
     } = handles;
     HostHalf {
@@ -653,6 +657,7 @@ fn host_half_counting(
         prepared,
         strips: strip_controls.into_boxed_slice(),
         effects: effect_controls.into_boxed_slice(),
+        routes: route_controls.into_boxed_slice(),
     }
 }
 
@@ -693,7 +698,7 @@ impl HostHalf {
             host_core::HostLiveLanes {
                 strip_input: true,
                 effects: true,
-                routes: false,
+                routes: true,
             },
             Some(&mut cache),
             &host_core::LiveValuesSuperseded::default(),
@@ -708,7 +713,8 @@ impl HostHalf {
     /// The session's canonical JSON is charged once, with its model in the graph row. The epoch
     /// term is the source producers' control table and ID arena, the strip producers' table
     /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
-    /// owned payload (#1263), from host-core's walk over them, the plan state inventory the
+    /// owned payload (#1263), from host-core's walk over them, the send producers' graph charge
+    /// (#1557, `route_control_resources`), the plan state inventory the
     /// epoch keeps for its successor (#1273 D5), and the design-bound seed (#1471,
     /// [`Self::bound_seed_bytes`]). The prepared-protocol term is the
     /// response buffer, the affine token, the replay cache and the parameter catalog.
@@ -739,6 +745,7 @@ impl HostHalf {
         let epoch = self.prepared.report.control_retained_bytes
             + strips
             + effects
+            + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             + self.bound_seed_bytes(compile_limits);
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
@@ -771,6 +778,7 @@ fn freed_by_drop<T>(value: T) -> u64 {
 /// the producers share with the plan is freed -- and counted -- with the plan that renders from
 /// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
 struct HostOwners {
+    routes: u64,
     effects: u64,
     strips: u64,
     sources: u64,
@@ -818,6 +826,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         prepared,
         strips,
         effects,
+        routes,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -836,6 +845,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_catalog,
     } = prepared;
     let owners = HostOwners {
+        routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
@@ -845,7 +855,8 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         inventory: freed_by_drop(inventory),
     };
     assert_eq!(
-        owners.effects
+        owners.routes
+            + owners.effects
             + owners.strips
             + owners.sources
             + owners.catalog
@@ -853,7 +864,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.store
             + owners.inventory,
         host_live,
-        "the seven owners hold every byte the host-core half retains"
+        "the eight owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -870,10 +881,10 @@ impl CompileObservation {
     /// The completeness claim for capi's own row, to the byte, from observations only.
     ///
     /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left live
-    /// beyond its host-core half -- plus the five host-allocated owners capi keeps: the effect and
-    /// strip live-control producers (#1263, #1256), the source control table and ID arena, the
-    /// parameter catalog, and the plan state inventory (#1273 D5). Each of the six terms on the
-    /// left is observed. An owner row dropped from capi's accounting
+    /// beyond its host-core half -- plus the host-allocated owners capi keeps: the effect, strip
+    /// and send live-control producers (#1263, #1256, #1557), the source control table and ID
+    /// arena, the parameter catalog, and the plan state inventory (#1273 D5). Each term on the
+    /// left is observed, but the send producers', which is the graph function's total. An owner row dropped from capi's accounting
     /// (the verifier's `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi
     /// allocates but does not charge, or spare capacity in a charged one (the catalog's enum-choice
     /// vectors before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a
@@ -894,8 +905,13 @@ impl CompileObservation {
             });
         let decode_field_rounding =
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
+        // The send producers' row is `graph::route_control_resources`' total (#1557 D5): the
+        // producer table and IDs, which `assert_host_owners_are_charged` observes exactly, and the
+        // cells and render-side owners the plan holds, which only this upper bound charges.
+        let route_charge = self.host_report.route_control_resources.total_bytes;
         assert_eq!(
             capi_allocated
+                + route_charge
                 + self.owners.effects
                 + self.owners.strips
                 + self.owners.sources
@@ -905,8 +921,8 @@ impl CompileObservation {
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
-             decode-field rounding, all observed (left), against \
-             `capi_retained_bytes` (right)"
+             decode-field rounding, all observed (left; the send producers' row is the graph \
+             function's total), against `capi_retained_bytes` (right)"
         );
     }
 
@@ -941,6 +957,19 @@ impl CompileObservation {
                 .total_bytes()
                 .expect("the effect producers' charge"),
             "{label}: effect producer table, its IDs and the EQ owners"
+        );
+        // The send producers: a table of `GraphRouteControlProducer`s and one copy of each route
+        // ID, which is the part of `route_control_resources` this owner holds. The rest of its
+        // total (cells, lanes, render-side owners, the binding's ID copy) is the plan's.
+        let routes = self.host_report.route_control_resources;
+        assert_eq!(
+            owners.routes,
+            routes.producer_table_bytes + routes.route_id_bytes / 2,
+            "{label}: send producer table and its route IDs"
+        );
+        assert!(
+            owners.routes <= routes.total_bytes,
+            "{label}: the send producers' charge covers what they retain"
         );
         assert_eq!(
             owners.strips, self.strip_table_charge,
@@ -1747,7 +1776,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
-            routes: false,
+            routes: true,
         },
         host_core::SuccessorBase {
             inventory: &current_host.prepared.inventory,

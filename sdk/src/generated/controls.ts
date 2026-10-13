@@ -719,11 +719,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -765,11 +765,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -811,11 +811,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -857,11 +857,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -903,11 +903,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {
@@ -949,11 +949,11 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1557,
-        "reopen": "The route slice (decision 17, S6) builds the live path and flips this row to live.",
-        "automatable": false,
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
         "active": true
       },
       "intoOutput": {

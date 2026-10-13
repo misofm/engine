@@ -11,19 +11,20 @@
 //! This is the one classifier, and it keeps no list of fields: `controls` says which model fields
 //! are control values and whether each is live or rebuild-only, and this module lowers a live
 //! change to records, one lowering per [`controls::Family`]. A later slice widens it in place with
-//! a new arm of the lowering (the input records are #1556's; route records #1557, derived values #1558); it
-//! does not add a second classifier.
+//! a new arm of the lowering (the input records are #1556's, the route records #1557's, derived values
+//! #1558); it does not add a second classifier.
 
 use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
     INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
+use crate::route_controls::{RouteControlError, RouteControlRecord, route_record};
 use builtins::{
     BuiltinLaneSelector, PreparedInputFilterTarget, checked_trim_gain, validate_input_filter_pair,
     validate_prepared_input_filter_target,
 };
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
-use controls::{ControlClass, Family, Owner, RebuildReason, Section};
+use controls::{ControlClass, Effective, Family, MonitorOverlay, Owner, RebuildReason, Section};
 use effect_compiler::{
     LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
     resolve_initial_values,
@@ -33,8 +34,8 @@ use effect_contract::{
     ParameterChannel, PreparedEffectTarget,
 };
 use session::{
-    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, SessionModel, StableId, StripRef,
-    canonical_session_json,
+    EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks,
+    Route, RouteSource, SessionModel, StableId, StripRef, canonical_session_json,
 };
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
@@ -109,6 +110,18 @@ pub struct LiveEffectRecords<'a> {
     pub targets: Option<Vec<PreparedEffectTarget>>,
 }
 
+/// The record of one route into a submix whose live values change (#1557 D2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveRouteRecord<'a> {
+    /// The route's ID, borrowed from the post-commit model. A producer is found by it
+    /// ([`crate::route_producer_position`]).
+    pub route_id: &'a str,
+    /// The send's new target, its gate and its ramp length: what
+    /// `graph_compiler::route_coefficients` gives for the post-commit values, which is what
+    /// preparation folds into the route's constants.
+    pub record: RouteControlRecord,
+}
+
 /// A live delta: the records that bring the running plan to the post-commit model.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveDelta<'a> {
@@ -118,6 +131,8 @@ pub struct LiveDelta<'a> {
     /// One entry per effect instance that has at least one parameter record: by track in
     /// normalized order, then in chain order (`pre_insert` slots, inserts, `post_insert` slots).
     pub effects: Vec<LiveEffectRecords<'a>>,
+    /// One entry per route into a submix that has a record, in canonical route-ID order (#1557 D2).
+    pub routes: Vec<LiveRouteRecord<'a>>,
 }
 
 /// Why a delta needs a plan rebuild.
@@ -129,7 +144,8 @@ pub enum LiveRebuild {
     /// insert set or order, an effect's identity, quality or sidechain, a profile's other fields,
     /// or any other field no control row describes.
     Structure,
-    /// A fader or pan/matrix value is outside the domain its render-side setter accepts, or an
+    /// A fader, pan/matrix or input value is outside the domain its render-side setter accepts, a
+    /// send's gain or matrix is outside the route domain or its ramp is too long, or an
     /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
     /// preparation diagnostic it always has.
     Domain,
@@ -175,7 +191,7 @@ pub enum LiveRebuild {
 ///    moved: an unknown parameter or a unit mismatch has no row.
 /// 6. Each changed owner is lowered once per family (`lower`): a strip's input trim, polarity and
 ///    filters (#1556), a strip's fader and mute, a strip's pan or matrix, an effect instance's
-///    bypass and parameters. An unchanged owner is
+///    bypass and parameters, a send's gain, mute and matrix (#1557). An unchanged owner is
 ///    never lowered. A lowering's domain refusal is [`LiveRebuild::Domain`]; a strip whose mute
 ///    changes while a `follows_mute` route sends from it is [`LiveRebuild::FollowedMute`].
 ///
@@ -198,7 +214,8 @@ pub enum LiveRebuild {
 /// the same dB bits), a `Mute` per lane whose mute changes (one `Both` when both change to the
 /// same value), a matrix record when a lowered coefficient's bits change, and the strip's input
 /// records (a `TrimDb` and a `PolarityInvert` by the same rules, then the filter targets
-/// [`InputFilterPreparer`] designs for the changed cutoffs, #1556). A fader move on a
+/// [`InputFilterPreparer`] designs for the changed cutoffs, #1556). A send into a submix gets one
+/// record when its folded target or its gate changes (`route_records`). A fader move on a
 /// lane that stays muted still gets its record, so the stage remembers the gain for a later
 /// unmute. An effect record is emitted only for a resolved value whose bits change: a `Both`
 /// value rewritten as equal per-lane values gives none.
@@ -268,6 +285,7 @@ pub fn classify_live_delta<'a>(
     let changes = controls::changed_controls(current, next, next.sample_rate_hz)
         .ok_or(LiveRebuild::Structure)?;
     let mut work: Vec<Work> = Vec::new();
+    let mut routes: Vec<StableId> = Vec::new();
     for change in &changes {
         let descriptor = &change.descriptor;
         match descriptor.class {
@@ -281,9 +299,18 @@ pub fn classify_live_delta<'a>(
         if descriptor.family == Family::Setting {
             continue;
         }
-        let Owner::Strip(strip) = &change.address.owner else {
-            // A route or a VCA row is rebuild-only or derived in this slice.
-            return Err(LiveRebuild::Structure);
+        let strip = match &change.address.owner {
+            Owner::Strip(strip) => strip,
+            // A live route row is a send into a submix (#1557); an output route's rows are
+            // rebuild-only above.
+            Owner::Route(route) if descriptor.family == Family::Route => {
+                if routes.last() != Some(route) {
+                    routes.push(route.clone());
+                }
+                continue;
+            }
+            // A VCA row is rebuild-only or derived in this slice.
+            _ => return Err(LiveRebuild::Structure),
         };
         if work.last().is_none_or(|last| last.strip != *strip) {
             work.push(Work::new(strip.clone()));
@@ -298,7 +325,8 @@ pub fn classify_live_delta<'a>(
                 }
             }
             Family::StripInput => item.input = true,
-            Family::Route => item.unlowered = Some(Family::Route),
+            // A route's row has a route owner, handled above.
+            Family::Route => return Err(LiveRebuild::Structure),
             Family::Setting => {}
         }
     }
@@ -324,35 +352,65 @@ pub fn classify_live_delta<'a>(
             input: Vec::new(),
         };
         let families = item
-            .unlowered
+            .input
+            .then_some(Family::StripInput)
             .into_iter()
-            .chain(item.input.then_some(Family::StripInput))
             .chain(item.level.then_some(Family::StripLevel))
             .chain(item.matrix.then_some(Family::StripMatrix));
         for family in families {
-            let target = Target {
+            let subject = Subject::Strip(Target {
                 before,
                 after,
                 instance: None,
-            };
-            match lower(family, &ctx, &target)? {
+            });
+            match lower(family, &ctx, &subject)? {
                 Lowered::Fader(fader) => records.fader = fader,
                 Lowered::Matrix(matrix) => records.matrix = matrix,
                 Lowered::Input(input) => records.input = input,
-                Lowered::Effect(_) | Lowered::Nothing => {}
+                Lowered::Effect(_) | Lowered::Route(_) | Lowered::Nothing => {}
             }
         }
         if records.fader[0].is_some() || records.matrix.is_some() || !records.input.is_empty() {
             delta.strips.push(records);
         }
         for section in &item.instances {
-            let target = Target {
+            let subject = Subject::Strip(Target {
                 before,
                 after,
                 instance: Some(section),
-            };
-            if let Lowered::Effect(Some(effect)) = lower(Family::Effect, &ctx, &target)? {
+            });
+            if let Lowered::Effect(Some(effect)) = lower(Family::Effect, &ctx, &subject)? {
                 delta.effects.push(effect);
+            }
+        }
+    }
+    if !routes.is_empty() {
+        // The effective values of each model are what preparation reads the source lanes' mutes
+        // from (decision 17, C7); computed once for every changed route.
+        let effective = [
+            controls::effective(current, &MonitorOverlay::default()),
+            controls::effective(next, &MonitorOverlay::default()),
+        ];
+        for id in &routes {
+            let before = route_of(current, id).ok_or(LiveRebuild::Structure)?;
+            let after = route_of(next, id).ok_or(LiveRebuild::Structure)?;
+            let ctx = Context {
+                current,
+                next,
+                ramps,
+                edit: StripEditRamps::default(),
+            };
+            let subject = Subject::Route(RouteTarget {
+                before,
+                after,
+                source_muted: [
+                    source_lane_muted(current, &effective[0], before),
+                    source_lane_muted(next, &effective[1], after),
+                ],
+                edit: RouteEditRamps::of(edit_ramps, id),
+            });
+            if let Lowered::Route(Some(record)) = lower(Family::Route, &ctx, &subject)? {
+                delta.routes.push(record);
             }
         }
     }
@@ -368,8 +426,6 @@ struct Work {
     matrix: bool,
     /// A trim, polarity, HPF or LPF row changed (#1556).
     input: bool,
-    /// A live row of a family that this slice cannot lower changed (#1557).
-    unlowered: Option<Family>,
     /// The effect sections with a changed row, in chain order.
     instances: Vec<Section>,
 }
@@ -381,7 +437,6 @@ impl Work {
             level: false,
             matrix: false,
             input: false,
-            unlowered: None,
             instances: Vec::new(),
         }
     }
@@ -400,7 +455,68 @@ struct Context<'m> {
     edit: StripEditRamps,
 }
 
-/// What a lowering is of: a strip in both models, or one effect instance of it.
+/// The route `id` of `model`.
+fn route_of<'m>(model: &'m SessionModel, id: &StableId) -> Option<&'m Route> {
+    model.routes.iter().find(|route| route.id == *id)
+}
+
+/// The source lanes whose matrix column the route zeroes: its source strip's effective lane mutes
+/// when it follows them, else none. The value `graph-compiler` gates a prepared route with.
+fn source_lane_muted(model: &SessionModel, effective: &Effective, route: &Route) -> [bool; 2] {
+    if !route.follows_mute {
+        return [false; 2];
+    }
+    let source = match &route.source {
+        RouteSource::Track { track_id, .. } => track_id,
+        RouteSource::Submix { submix_id, .. } => submix_id,
+    };
+    model
+        .strips()
+        .position(|strip| strip.id == source)
+        .and_then(|index| effective.strips.get(index))
+        .map_or([false; 2], |strip| strip.mute)
+}
+
+/// The per-edit ramp lengths of one route's three rows, looked up once from the transaction's
+/// [`EditRamps`] (#1557 D3): the `(Route, RouteGain)`, `(Route, RouteMute)` and
+/// `(Route, RouteMatrix)` entries. `None` is "the edit gave no length": the session's applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RouteEditRamps {
+    gain: Option<u32>,
+    mute: Option<u32>,
+    matrix: Option<u32>,
+}
+
+impl RouteEditRamps {
+    fn of(edit_ramps: &EditRamps, id: &StableId) -> Self {
+        if edit_ramps.is_empty() {
+            return Self::default();
+        }
+        let target = EditRampTarget::Route(id.clone());
+        Self {
+            gain: edit_ramps.get(&target, EditRampRow::RouteGain),
+            mute: edit_ramps.get(&target, EditRampRow::RouteMute),
+            matrix: edit_ramps.get(&target, EditRampRow::RouteMatrix),
+        }
+    }
+}
+
+/// What a lowering is of: a strip (or one of its effect instances), or a route.
+enum Subject<'s, 'm, 'a> {
+    Strip(Target<'s, 'm, 'a>),
+    Route(RouteTarget<'m, 'a>),
+}
+
+/// A route into a submix in both models.
+struct RouteTarget<'m, 'a> {
+    before: &'m Route,
+    after: &'a Route,
+    /// The source lane mutes the route zeroes, in `[before, after]`.
+    source_muted: [[bool; 2]; 2],
+    edit: RouteEditRamps,
+}
+
+/// What a strip lowering is of: a strip in both models, or one effect instance of it.
 struct Target<'s, 'm, 'a> {
     before: StripRef<'m>,
     after: StripRef<'a>,
@@ -414,6 +530,7 @@ enum Lowered<'a> {
     Matrix(Option<TrackControlRecord>),
     Input(Vec<TrackInputRecord>),
     Effect(Option<LiveEffectRecords<'a>>),
+    Route(Option<LiveRouteRecord<'a>>),
     Nothing,
 }
 
@@ -434,15 +551,25 @@ pub fn take_lowered_owner_count() -> usize {
 /// (decision 17, C6). A family whose rows are live decides here what a change of them costs the
 /// plan; the classifier above decides only that it is live.
 ///
-/// `Route` is unreachable in this slice (its rows are rebuild-only until #1557 adds its arm) and
-/// refuses defensively.
+/// A strip family given a route subject, or the reverse, is a classifier fault and refuses as a
+/// structure change.
 fn lower<'a>(
     family: Family,
     ctx: &Context<'_>,
-    target: &Target<'_, '_, 'a>,
+    subject: &Subject<'_, '_, 'a>,
 ) -> Result<Lowered<'a>, LiveRebuild> {
     #[cfg(feature = "test-support")]
     LOWERED_OWNERS.with(|count| count.set(count.get() + 1));
+    let target = match (family, subject) {
+        (Family::Route, Subject::Route(route)) => {
+            return route_records(ctx, route).map(Lowered::Route);
+        }
+        (Family::Setting, _) => return Ok(Lowered::Nothing),
+        (Family::Route, Subject::Strip(_)) | (_, Subject::Route(_)) => {
+            return Err(LiveRebuild::Structure);
+        }
+        (_, Subject::Strip(target)) => target,
+    };
     let (before, after) = (&target.before, &target.after);
     match family {
         Family::StripLevel => {
@@ -473,9 +600,68 @@ fn lower<'a>(
             ctx.edit,
         )
         .map(Lowered::Input),
-        Family::Setting => Ok(Lowered::Nothing),
-        Family::Route => Err(LiveRebuild::Structure),
+        Family::Setting | Family::Route => Ok(Lowered::Nothing),
     }
+}
+
+/// The record that brings a send from `before`'s live values to `after`'s (#1557 D2, D3), when the
+/// target the render plane holds changes.
+///
+/// The target is `graph_compiler::route_coefficients` of the route's gain, matrix and mute with
+/// its source lane mutes ([`route_record`]), exactly what preparation folds into the route's
+/// constants, so a settled send is bit-identical to a prepared one. It is compared as bits, with
+/// the gate: a gain or matrix edit on a muted send leaves the silenced `+0.0` target as it was and
+/// gives no record, and the later unmute carries the new values.
+///
+/// The ramp is the `SendMute` row's when the gate changes, else the longest of the changed rows'
+/// lengths (`SendGain`, `SendMatrix`), each through [`LiveRamps::resolve`] (an explicit `0` is a
+/// step).
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] when either value set is outside the route domain, or a ramp is longer
+/// than the cell's maximum.
+fn route_records<'a>(
+    ctx: &Context<'_>,
+    target: &RouteTarget<'_, 'a>,
+) -> Result<Option<LiveRouteRecord<'a>>, LiveRebuild> {
+    let (before, after) = (target.before, target.after);
+    let matrix = |route: &Route| {
+        let matrix = &route.channel_matrix;
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
+    };
+    let build = |route: &Route, muted: [bool; 2], length: u32| {
+        route_record(route.gain_db, matrix(route), route.mute, muted, length).map_err(|error| {
+            match error {
+                RouteControlError::Domain | RouteControlError::Length => LiveRebuild::Domain,
+            }
+        })
+    };
+    let prior = build(before, target.source_muted[0], 0)?;
+    let current = build(after, target.source_muted[1], 0)?;
+    let bits = |record: &RouteControlRecord| record.target().map(f32::to_bits);
+    let gate_changed = prior.mute() != current.mute();
+    if !gate_changed && bits(&prior) == bits(&current) {
+        return Ok(None);
+    }
+    let edit = target.edit;
+    let length = if gate_changed {
+        ctx.ramps.resolve(LiveRampRow::SendMute, edit.mute)
+    } else {
+        let gain = (before.gain_db.to_bits() != after.gain_db.to_bits())
+            .then(|| ctx.ramps.resolve(LiveRampRow::SendGain, edit.gain));
+        let matrix = (matrix(before).map(f32::to_bits) != matrix(after).map(f32::to_bits))
+            .then(|| ctx.ramps.resolve(LiveRampRow::SendMatrix, edit.matrix));
+        gain.into_iter()
+            .chain(matrix)
+            .max()
+            .unwrap_or_else(|| ctx.ramps.resolve(LiveRampRow::SendMute, edit.mute))
+    };
+    let record = build(after, target.source_muted[1], length)?;
+    Ok(Some(LiveRouteRecord {
+        route_id: after.id.as_str(),
+        record,
+    }))
 }
 
 /// The input records that bring a strip's input section from `before`'s values to `after`'s

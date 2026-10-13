@@ -1272,6 +1272,11 @@ fn push_delta(
                 input.write(stamp, record);
             }
         }
+        for route in &delta.routes {
+            let index = host_core::route_producer_position(&handles.route_controls, route.route_id)
+                .expect("route lane");
+            handles.route_controls[index].write(stamp, route.record);
+        }
     });
 }
 
@@ -2624,10 +2629,16 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
         .iter()
         .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
         .expect("the send into the bus");
+    // The send into the bus is live (#1557); what it follows waits for the effective slice.
     assert_eq!(
         classify(&bus, |next| next.routes[send].gain_db = -1.0),
+        Ok(Vec::new())
+    );
+    let following = with_bus(true);
+    assert_eq!(
+        classify(&following, |next| next.routes[send].follows_mute = false),
         Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-            issue: 1557
+            issue: 1558
         }))
     );
     // A live fader edit does not hide a rebuild-only edit, or a structural one.
@@ -2809,4 +2820,388 @@ fn one_edit_lowers_one_owner() {
         }),
         (2, 1)
     );
+}
+
+// Issue #1557: the route family (a send's gain, mute and matrix).
+
+/// One route record, owned: the route's ID, its target, whether it silences, its ramp length.
+type RouteRecordRow = (String, [f32; 4], bool, u32);
+
+fn classify_routes_with(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+) -> Result<Vec<RouteRecordRow>, LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, ramps, edit_ramps).map(|delta| {
+        assert!(
+            delta.strips.is_empty() && delta.effects.is_empty(),
+            "a send edit moves no strip and no effect"
+        );
+        delta
+            .routes
+            .iter()
+            .map(|route| {
+                (
+                    route.route_id.to_owned(),
+                    route.record.target(),
+                    route.record.mute(),
+                    route.record.length(),
+                )
+            })
+            .collect()
+    })
+}
+
+fn classify_routes(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<Vec<RouteRecordRow>, LiveRebuild> {
+    classify_routes_with(current, edit, STEP, &EditRamps::new())
+}
+
+/// The index of the send into the bus of [`with_bus`].
+fn send_index(model: &SessionModel) -> usize {
+    model
+        .routes
+        .iter()
+        .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .expect("the send into the bus")
+}
+
+fn matrix_of(route: &session::Route) -> [f32; 4] {
+    let matrix = &route.channel_matrix;
+    [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
+}
+
+fn folded(gain_db: f32, matrix: [f32; 4], mute: bool, source_lane_muted: [bool; 2]) -> [f32; 4] {
+    graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)
+        .expect("in the route domain")
+}
+
+/// Gate 1. Red if a send record carries other bits than the coefficients preparation folds from the
+/// post-commit values, or is emitted for a send whose held target does not change: a gain edit on a
+/// muted send (the silenced `+0.0` target stays as it was) or a sign-of-zero rewrite. The unmute
+/// then carries the gain the muted edit set.
+#[test]
+fn send_records_are_the_folded_target_of_the_post_commit_values() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let id = current.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&current.routes[send]);
+    let gain = current.routes[send].gain_db;
+
+    assert_eq!(classify_routes(&current, |_| {}), Ok(Vec::new()));
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = -6.0),
+        Ok(vec![(
+            id.clone(),
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    let swapped = [0.0, 1.0, 1.0, 0.0];
+    assert_eq!(
+        classify_routes(&current, |next| {
+            let m = &mut next.routes[send].channel_matrix;
+            (m.ll, m.lr, m.rl, m.rr) = (0.0, 1.0, 1.0, 0.0);
+        }),
+        Ok(vec![(
+            id.clone(),
+            folded(gain, swapped, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].mute = true),
+        Ok(vec![(id.clone(), [0.0; 4], true, 0)])
+    );
+
+    // A gain edit on a muted send gives no record, and the later unmute carries the new gain.
+    let muted = edited(&current, |model| model.routes[send].mute = true);
+    assert_eq!(
+        classify_routes(&muted, |next| next.routes[send].gain_db = -6.0),
+        Ok(Vec::new())
+    );
+    let edited_while_muted = edited(&muted, |model| model.routes[send].gain_db = -6.0);
+    assert_eq!(
+        classify_routes(&edited_while_muted, |next| next.routes[send].mute = false),
+        Ok(vec![(
+            id,
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+}
+
+/// Gate 1. Red if a following send's record ignores the source lane mutes (the rebuilt plan would
+/// zero a column the record leaves), or zeroes them for a send that does not follow.
+#[test]
+fn a_following_send_record_zeroes_the_muted_source_lane() {
+    let base = with_bus(true);
+    let send = send_index(&base);
+    let source = base
+        .tracks
+        .iter()
+        .position(|track| {
+            matches!(&base.routes[send].source, RouteSource::Track { track_id, .. } if *track_id == track.id)
+        })
+        .expect("the send's source track");
+    let id = base.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&base.routes[send]);
+    let current = edited(&base, |model| model.tracks[source].fader.left_mute = true);
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = -3.0),
+        Ok(vec![(
+            id.clone(),
+            folded(-3.0, matrix, false, [true, false]),
+            false,
+            0
+        )])
+    );
+    // Both lanes muted: the send is silenced by its source, and a gain edit changes nothing.
+    let both = edited(&current, |model| {
+        model.tracks[source].fader.right_mute = true
+    });
+    assert_eq!(
+        classify_routes(&both, |next| next.routes[send].gain_db = -3.0),
+        Ok(Vec::new())
+    );
+    // The same edit on a send that does not follow keeps both columns.
+    let plain = edited(&with_bus(false), |model| {
+        model.tracks[source].fader.left_mute = true
+    });
+    assert_eq!(
+        classify_routes(&plain, |next| next.routes[send].gain_db = -3.0),
+        Ok(vec![(
+            id,
+            folded(-3.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+}
+
+/// Gate 3. Red if a changed field moves faster than its own row's ramp, or a mute toggle takes a
+/// gain's length.
+#[test]
+fn send_records_carry_the_longest_changed_rows_ramp_and_a_mute_takes_its_own() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let target = EditRampTarget::Route(current.routes[send].id.clone());
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let length = |edit: &EditRamps, change: fn(&mut SessionModel, usize)| {
+        let records =
+            classify_routes_with(&current, |next| change(next, send), session_ramps, edit)
+                .expect("a live send edit");
+        assert_eq!(records.len(), 1);
+        records[0].3
+    };
+    let gain_and_matrix = |next: &mut SessionModel, send: usize| {
+        next.routes[send].gain_db = -6.0;
+        next.routes[send].channel_matrix.lr = 0.5;
+    };
+    // Session lengths: the gain's 100 and the matrix's 200 give 200.
+    assert_eq!(length(&EditRamps::new(), gain_and_matrix), 200);
+    // The edits' own lengths, 240 and 480: one record of 480.
+    let mut edits = EditRamps::new();
+    edits.set(&target, EditRampRow::RouteGain, Some(240));
+    edits.set(&target, EditRampRow::RouteMatrix, Some(480));
+    assert_eq!(length(&edits, gain_and_matrix), 480);
+    // A row that did not change does not lengthen the ramp.
+    assert_eq!(
+        length(&edits, |next, send| next.routes[send].gain_db = -6.0),
+        240
+    );
+    // The gate changes: the mute row governs, whatever else moved.
+    let mut edits = EditRamps::new();
+    edits.set(&target, EditRampRow::RouteMute, Some(7));
+    edits.set(&target, EditRampRow::RouteGain, Some(900));
+    let mute_and_gain = |next: &mut SessionModel, send: usize| {
+        next.routes[send].mute = true;
+        next.routes[send].gain_db = -6.0;
+    };
+    assert_eq!(length(&edits, mute_and_gain), 7);
+    assert_eq!(length(&EditRamps::new(), mute_and_gain), 300);
+    // An explicit zero is a step.
+    let mut step = EditRamps::new();
+    step.set(&target, EditRampRow::RouteGain, Some(0));
+    assert_eq!(
+        length(&step, |next, send| next.routes[send].gain_db = -6.0),
+        0
+    );
+}
+
+/// Gate 4 (classifier half). Red if a send value the route domain refuses, or a ramp the cell
+/// cannot hold, is acked live: the rebuild's preparation refuses it with its own diagnostic.
+#[test]
+fn send_values_outside_the_route_domain_need_a_rebuild() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = f32::NAN),
+        Err(LiveRebuild::Domain)
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = 1.0e6),
+        Err(LiveRebuild::Domain)
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].channel_matrix.ll = 1.0e6),
+        Err(LiveRebuild::Domain)
+    );
+    // The value is checked whether or not the send is muted.
+    let muted = edited(&current, |model| model.routes[send].mute = true);
+    assert_eq!(
+        classify_routes(&muted, |next| next.routes[send].gain_db = f32::INFINITY),
+        Err(LiveRebuild::Domain)
+    );
+    let mut too_long = EditRamps::new();
+    too_long.set(
+        &EditRampTarget::Route(current.routes[send].id.clone()),
+        EditRampRow::RouteGain,
+        Some((1 << 22) + 1),
+    );
+    assert_eq!(
+        classify_routes_with(
+            &current,
+            |next| next.routes[send].gain_db = -6.0,
+            STEP,
+            &too_long
+        ),
+        Err(LiveRebuild::Domain)
+    );
+}
+
+/// Gate 2. Red if a route into the output loses its fold through a live edit: its gain, mute and
+/// matrix are rebuilds for the optimisation reason, at any tap.
+#[test]
+fn output_route_values_stay_rebuilds() {
+    let mut model = two_tracks();
+    model.routes[0].source = RouteSource::Track {
+        track_id: model.tracks[0].id.clone(),
+        tap: SendTap::PreFader,
+    };
+    let current = normalized(&model);
+    assert!(matches!(
+        current.routes[0].destination,
+        RouteDestination::OutputInput { .. }
+    ));
+    for edit in [
+        (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
+        |next| next.routes[0].mute = true,
+        |next| next.routes[0].channel_matrix.lr = 0.5,
+    ] {
+        assert_eq!(
+            classify_routes(&current, edit),
+            Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation))
+        );
+    }
+}
+
+/// Gate 1, Gate 5. Red if a pushed send record renders other bits than a plan prepared from the
+/// post-commit model: gain, matrix and mute on one send, and the later unmute of a send whose gain
+/// moved while it was muted. The live plan has the route lane, so its send loses its fold.
+#[test]
+fn pushed_send_records_render_the_rebuilt_plan() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let next = normalized(&edited(&current, |next| {
+        next.routes[send].gain_db = -6.0;
+        let m = &mut next.routes[send].channel_matrix;
+        (m.ll, m.lr, m.rl, m.rr) = (0.25, 0.75, -0.5, 1.0);
+    }));
+    let delta = classify_live_delta(&current, &next, STEP, &EditRamps::new()).expect("live");
+    assert_eq!(delta.routes.len(), 1);
+
+    let current_compiled = compile(&current);
+    let request = HostLiveControlRequest::default();
+    let (mut live, mut handles) =
+        prepare_host_runtime_with_live_controls(&current_compiled, &caps(), &request)
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+    assert_eq!(handles.route_controls.len(), 1);
+    let mut gate = live
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    push_delta(&mut handles, &mut gate, &delta);
+    let prepare = |compiled: &session::CompiledSession| {
+        prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+    };
+    let planes = feed(4_096);
+    let expected = render(&mut prepare(&compile(&next)), &planes);
+    assert_ne!(
+        expected,
+        render(&mut prepare(&current_compiled), &planes),
+        "the edit changes the output"
+    );
+    assert_eq!(render(&mut live, &planes), expected);
+
+    // Mute, then a gain move while muted (no record), then the unmute.
+    let muted = normalized(&edited(&next, |model| model.routes[send].mute = true));
+    let mute = classify_live_delta(&next, &muted, STEP, &EditRamps::new()).expect("live");
+    push_delta(&mut handles, &mut gate, &mute);
+    let moved = normalized(&edited(&muted, |model| model.routes[send].gain_db = -12.0));
+    let held = classify_live_delta(&muted, &moved, STEP, &EditRamps::new()).expect("live");
+    assert!(held.routes.is_empty());
+    let unmuted = normalized(&edited(&moved, |model| model.routes[send].mute = false));
+    let unmute = classify_live_delta(&moved, &unmuted, STEP, &EditRamps::new()).expect("live");
+    assert_eq!(unmute.routes.len(), 1);
+    push_delta(&mut handles, &mut gate, &unmute);
+    let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
+    let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
+    assert!(
+        second_half.iter().any(|bits| f32::from_bits(*bits) != 0.0),
+        "the reference window is not silent"
+    );
+    assert_eq!(
+        render_blocks(&mut live, &planes, BLOCKS..2 * BLOCKS),
+        second_half
+    );
+}
+
+/// Gate 1. Red if the classifier lowers other routes than the one that changed, or emits its
+/// records out of canonical route-ID order, or the producer lookup is not by route ID.
+#[cfg(feature = "test-support")]
+#[test]
+fn one_send_edit_lowers_one_route_and_records_are_in_route_id_order() {
+    let current = many_strips();
+    let sends: Vec<usize> = current
+        .routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sends.len(), 4);
+    host_core::take_lowered_owner_count();
+    let records = classify_routes(&current, |next| next.routes[sends[2]].gain_db = -6.0)
+        .expect("a live edit");
+    assert_eq!(host_core::take_lowered_owner_count(), 1);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].0, current.routes[sends[2]].id.as_str());
+    let all = classify_routes(&current, |next| {
+        for &send in &sends {
+            next.routes[send].gain_db = -6.0;
+        }
+    })
+    .expect("a live edit");
+    let ids: Vec<&str> = all.iter().map(|row| row.0.as_str()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted);
+    assert_eq!(ids.len(), 4);
 }

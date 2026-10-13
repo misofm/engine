@@ -134,7 +134,9 @@ pub use engine::realtime::{
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::take_lowered_owner_count;
 #[cfg(feature = "control-provider")]
-pub use live_delta::{LiveDelta, LiveRebuild, LiveStripRecords, classify_live_delta};
+pub use live_delta::{
+    LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
+};
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
@@ -162,6 +164,7 @@ pub use response::{
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
+    route_producer_position, route_record,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{LiveControlMuteDelta, LiveControlSoloState, StripMuteSeed};

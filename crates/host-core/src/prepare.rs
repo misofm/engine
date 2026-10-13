@@ -481,9 +481,9 @@ pub struct HostLiveControlHandles {
     ///
     /// A browser session that opted in to live commands prepares with [`HostLiveLanes::ALL`] and
     /// gets these; one that did not prepares with [`HostLiveLanes::FADER_AND_MATRIX`] (#1326 D3)
-    /// and gets none. C ABI plans prepare with the fader, matrix and effect lanes and no route
-    /// lane (#1053 D5, #1256, #1263) and get none; their route lanes arrive with the slice that
-    /// pushes to them (#1225). A settled record's bits are a static route's by construction,
+    /// and gets none. A C ABI plan prepares with the lanes [`controls::live_lanes`] chooses from
+    /// the session's live rows (decision 17, C6): a session with a route into a submix gets these
+    /// (#1557). A settled record's bits are a static route's by construction,
     /// because [`RouteControlProducer::record`] takes its target from
     /// `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
     /// route's constants with.

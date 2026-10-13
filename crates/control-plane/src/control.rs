@@ -2,11 +2,13 @@
 
 use super::*;
 
-/// One plan's live fader/mute and matrix/pan producers (#1256 D2), kept with its provider epoch.
+/// One plan's live fader/mute, matrix/pan, input and send producers (#1256 D2, #1557 D4), kept with
+/// its provider epoch.
 ///
-/// `controls` is in `HostLiveControlHandles::strips` order: the tracks, then the submixes. Each
-/// producer's `input` is `None`, because the C ABI attaches no input lane. `commit_live` pushes a
-/// value-only transaction's records through them (#1257). The rings are `Arc`s shared with the
+/// `controls` is in `HostLiveControlHandles::strips` order: the tracks, then the submixes. A
+/// producer's `input` is `Some` when the plan carries the input lane (#1556). `routes` is in
+/// canonical route-ID order, one producer per route into a submix when the plan carries the route
+/// lane (#1557). `commit_live` pushes a value-only transaction's records through them (#1257). The rings are `Arc`s shared with the
 /// plan's consumers, so they outlive whichever of the plan and the epoch drops first, and the last
 /// owner to drop frees them, on the control thread: `synchronize_plan_epochs` drops a reclaimed
 /// plan before its provider.
@@ -14,6 +16,9 @@ pub(crate) struct StripLanes {
     pub(crate) controls: Box<[host_core::TrackControlProducer]>,
     /// How many leading entries of `controls` are tracks.
     pub(crate) track_count: usize,
+    /// One producer per route into a submix, in canonical route-ID order; empty when the plan
+    /// carries no route lane.
+    pub(crate) routes: Box<[host_core::RouteControlProducer]>,
 }
 
 /// One epoch's worth of host-owned source producers, strip live-control producers and effect
@@ -271,6 +276,9 @@ pub struct TestTransactionSnapshot<Row> {
     /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
     /// matrix)`. A cell's count is its write sequence (#1312 D3).
     pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
+    /// How many writes every send producer's cell has taken, current epoch first, then each
+    /// pending candidate: `(epoch, route ID, writes)` (#1557).
+    pub route_cells: Vec<(u64, Box<str>, u64)>,
     /// How many writes every effect producer's bypass cell, parameter cells, then target cells,
     /// have taken, current epoch first, then each pending candidate: `(epoch, strip ID, effect
     /// instance ID, writes per cell)`. A cell's count is its write sequence (#1345 D1).
@@ -836,6 +844,18 @@ where
                     })
                 })
                 .collect(),
+            route_cells: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.strips.routes.iter().map(|producer| {
+                        (
+                            provider.epoch,
+                            Box::<str>::from(producer.route_id()),
+                            producer.test_only_write_count(),
+                        )
+                    })
+                })
+                .collect(),
             effect_cells: core::iter::once(&self.providers)
                 .chain(&self.pending_providers)
                 .flat_map(|provider| {
@@ -1341,7 +1361,8 @@ where
     /// changes, and a refusal after an owner was begun discards every begun owner (`OpenOwners`).
     ///
     /// Every live value is a latest-target cell (#1312, #1345): a strip's fader, mute and
-    /// matrix/pan values, its input trim, polarity and filter targets (#1556), an effect's parameter values, its bypass and an EQ's targets. A write
+    /// matrix/pan values, its input trim, polarity and filter targets (#1556), a send's folded
+    /// target and gate (#1557), an effect's parameter values, its bypass and an EQ's targets. A write
     /// needs no room, so nothing refuses a delta for room and nothing turns it into a rebuild
     /// because it outgrew a queue. After the predicate and the test fault hook, the commit takes
     /// its stamp from the newest epoch's gate as its last fallible step (D7). Only then does it
@@ -1441,6 +1462,25 @@ where
                 return LiveCommit::Done(Err(CommandError::Internal));
             }
             resolved_effects.push(index);
+        }
+
+        // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
+        // route-ID order. A record for a route with no producer is an internal fault, found
+        // before the first write.
+        let route_lanes = &mut strips.routes;
+        let mut resolved_routes = Vec::new();
+        if resolved_routes
+            .try_reserve_exact(delta.routes.len())
+            .is_err()
+        {
+            return LiveCommit::Done(Err(CommandError::Internal));
+        }
+        for route in &delta.routes {
+            let Some(index) = host_core::route_producer_position(route_lanes, route.route_id)
+            else {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            };
+            resolved_routes.push(index);
         }
 
         // 2b. A strip with input records has an input writer, and every filter target passes the
@@ -1567,6 +1607,9 @@ where
                     input.write(stamp, record);
                 }
             }
+        }
+        for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
+            route_lanes[index].write(stamp, route.record);
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
             let producer = &mut owners.effects[index];

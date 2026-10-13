@@ -161,6 +161,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
     effect_controls: host_core::EffectControlResources,
+    route_controls: host_core::RouteControlResources,
     bound_seed_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
@@ -213,6 +214,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let effect_row = effect_controls
         .total_bytes()
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    // The send producers (#1557 D5): `graph::route_control_resources` of the attached lanes, the
+    // producer table, the route IDs, the cells and the render-side owners. As the effect row
+    // above, a conservative upper bound: host-core's preparation admission adds the same total to
+    // the graph row, and the plan-side parts are charged here too. Zero without a route lane.
+    let route_row = route_controls.total_bytes;
     let control_table_row = host_core::control_table_bytes(source_count)
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let source_id_row = host_core::source_id_arena_bytes(source_id_bytes)
@@ -224,6 +230,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         inventory_bytes,
         strip_table_bytes,
         effect_row,
+        route_row,
         // #1471 Amendment 2 D4: each epoch keeps the design bounds its plan's preparation used,
         // one exact-size boxed slice, for its successor's preparation to read.
         bound_seed_bytes,
@@ -283,7 +290,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // The effect row is several allocations; its own largest one stands for it.
     let largest = [control_table_row, source_id_row, strip_table_bytes]
         .into_iter()
-        .chain([effect_controls.largest_allocation_bytes(), bound_seed_bytes])
+        .chain([
+            effect_controls.largest_allocation_bytes(),
+            route_controls.largest_allocation_bytes,
+            bound_seed_bytes,
+        ])
         .chain(fixed_allocation_rows)
         .chain(adapter_allocation_rows.iter().copied())
         .chain(prepared_protocol_allocation_rows)
@@ -308,6 +319,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
+    route_controls: host_core::RouteControlResources,
     bound_seed_bytes: u64,
     limits: ControlLimits,
 ) -> Result<CapiResources, CompileFailure> {
@@ -347,6 +359,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         provider,
         inventory.retained_bytes(),
         effect_controls,
+        route_controls,
         bound_seed_bytes,
     )
 }
@@ -625,11 +638,14 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strip_controls,
         track_count,
         effect_controls,
+        route_controls,
         ..
     } = handles;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,
+        // #1557 D4: the send producers, at exactly one entry per route lane the plan attached.
+        routes: route_controls.into_boxed_slice(),
     };
     // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
     // boxed slice is the allocation host-core walked for `effect_control_resources`.
@@ -639,6 +655,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         &prepared.control_catalog,
         &prepared.inventory,
         prepared.report.effect_control_resources,
+        prepared.report.route_control_resources,
         bound_seed.retained_bytes(),
         limits,
     )?;

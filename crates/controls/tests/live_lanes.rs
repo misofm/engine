@@ -14,10 +14,12 @@ fn rows(model: &session::SessionModel) -> Vec<ControlRow> {
 /// attached for a row that is not live (a session with no effect would pay for effect cells).
 #[test]
 fn the_effect_lane_follows_the_effect_rows() {
-    // No effect, no effect row, no lane. With today's classes only the input rows are live (#1556).
+    // No effect, no effect row, no lane. With today's classes the input rows (#1556) and the
+    // fixture's one send into a submix (#1557) are live.
     let mut model = fixture();
     let input_only = LiveLanes {
         strip_input: true,
+        routes: true,
         ..LiveLanes::default()
     };
     assert_eq!(live_lanes(&model), input_only);
@@ -49,7 +51,7 @@ fn the_effect_lane_follows_the_effect_rows() {
 }
 
 /// Red if the input or route lane ignores its family, or if a row that is not live asks for a
-/// lane: the test table flips every route row to live, then every input row to rebuild-only.
+/// lane: the test table flips every route row to derived, then every input row to derived.
 #[test]
 fn a_live_route_or_input_row_asks_for_its_lane() {
     let model = fixture();
@@ -65,20 +67,22 @@ fn a_live_route_or_input_row_asks_for_its_lane() {
         assert!(changed > 0, "the fixture lists a {family:?} row");
         LiveLanes::of_rows(table)
     };
-    // The input rows are live today (#1556); the route rows are not.
+    // The input rows (#1556) and the send's rows (#1557) are live today.
     let today = LiveLanes::of_rows(rows(&model));
-    assert!(today.strip_input && !today.routes);
+    assert!(today.strip_input && today.routes);
     assert_eq!(
-        set(Family::Route, ControlClass::Live),
+        set(Family::Route, ControlClass::Derived),
         LiveLanes {
             strip_input: true,
-            routes: true,
             ..LiveLanes::default()
         }
     );
     assert_eq!(
         set(Family::StripInput, ControlClass::Derived),
-        LiveLanes::default()
+        LiveLanes {
+            routes: true,
+            ..LiveLanes::default()
+        }
     );
 }
 

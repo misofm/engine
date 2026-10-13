@@ -298,6 +298,17 @@ impl Rig {
             .expect("track producer")
     }
 
+    /// Every send's cell write count in the current epoch, in route-ID order (#1557).
+    fn current_route_cells(&self) -> Vec<u64> {
+        let snapshot = crate::ffi::test_transaction_snapshot(self.session);
+        snapshot
+            .route_cells
+            .iter()
+            .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+            .map(|&(_, _, writes)| writes)
+            .collect()
+    }
+
     /// Every strip's cell write counts in the current epoch, per cell: `([fader left, fader
     /// right, mute left, mute right], matrix)`.
     fn current_cells(&self) -> Vec<([u64; 4], u64)> {
@@ -5452,6 +5463,240 @@ mod set_control {
                 assert_eq!(rig.summary().2, epoch, "{label}: the first epoch renders");
             }
         }
+    }
+
+    /// The own-row IDs of a route (`crates/controls/src/route.rs`).
+    const ROUTE_GAIN_DB: u32 = 1;
+    const ROUTE_MUTE: u32 = 2;
+    const ROUTE_MATRIX_LL: u32 = 3;
+    const ROUTE_MATRIX_LR: u32 = 4;
+    const ROUTE_MATRIX_RL: u32 = 5;
+
+    fn route(route: &str, control: u32) -> ControlAddress {
+        address(Owner::Route(id(route)), Section::Own, control, Lane::Both)
+    }
+
+    /// Gate 1 (#1557): a send's gain, mute and matrix cells commit one revision with the plan epoch
+    /// unchanged, and from the block their ramp leaves behind render the bits of a plan prepared
+    /// from the committed session. No render block after the commit allocates or frees, and a
+    /// gain edit on a muted send writes no cell, so the later unmute carries the new gain.
+    ///
+    /// Red if a send edit rebuilds, lowers other coefficients than preparation folds, re-ramps a
+    /// muted send, or the route lane adds render work that allocates.
+    #[test]
+    fn send_values_are_live_and_render_the_prepared_plan_bits() {
+        bench_support::alloc::assert_installed();
+        let document = stateless_bus_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let untouched = Reference::run(&document, 48);
+        type Case = (&'static str, Vec<SessionEdit>);
+        let cases: [Case; 6] = [
+            (
+                "gain",
+                vec![set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)],
+            ),
+            ("mute", vec![set(route("eq0-bus", ROUTE_MUTE), 1.0, None)]),
+            (
+                "matrix, one coefficient",
+                vec![set(route("eq0-bus", ROUTE_MATRIX_LR), 0.5, None)],
+            ),
+            (
+                "matrix, four coefficients",
+                vec![
+                    set(route("eq0-bus", ROUTE_MATRIX_LL), 0.5, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LR), 0.25, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_RL), -0.5, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LL + 3), 0.75, None),
+                ],
+            ),
+            (
+                "gain, mute and matrix together",
+                vec![
+                    set(route("eq0-bus", ROUTE_GAIN_DB), -3.0, None),
+                    set(route("eq0-bus", ROUTE_MUTE), 1.0, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LR), 0.5, None),
+                ],
+            ),
+            (
+                "gain with an explicit step",
+                vec![set(route("eq0-bus", ROUTE_GAIN_DB), -9.0, Some(0))],
+            ),
+        ];
+        for (case, edits) in cases {
+            let label = format!("send {case}");
+            let mut rig = Rig::new(&document);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            assert_eq!(rig.current_route_cells(), vec![0], "{label}: one send lane");
+            assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            assert_eq!(
+                rig.current_route_cells(),
+                vec![1],
+                "{label}: one write to the send's cell"
+            );
+            let committed = rig.snapshot();
+            let k = window(rig.latency(), ramp, rig.quantum);
+            let edit_block = rig.block;
+            let mut live = Vec::new();
+            for _ in 0..k + 4 {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                live.push(pcm);
+            }
+            let reference = Reference::run(&committed, rig.block);
+            let mut heard = false;
+            for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                let block = edit_block as usize + offset;
+                assert!(pcm.iter().any(|sample| *sample != 0.0), "{label}: signal");
+                assert_eq!(bits(pcm), bits(&reference[block]), "{label}: block {block}");
+                heard |= bits(pcm) != bits(&untouched[block]);
+            }
+            assert!(heard, "{label}: the edit changes the output");
+            assert_eq!(rig.summary().2, epoch, "{label}: the first epoch renders");
+        }
+
+        // A gain edit on a muted send writes no cell; the unmute carries the new gain.
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_MUTE), 1.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.current_route_cells(), vec![1]);
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(
+            rig.current_route_cells(),
+            vec![1],
+            "a gain edit on a muted send writes no cell"
+        );
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_MUTE), 0.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.current_route_cells(), vec![2]);
+        assert_eq!(rig.summary().3, 0, "no edit built a candidate");
+        let committed = rig.snapshot();
+        assert_eq!(
+            parse_session_json(&committed)
+                .expect("model")
+                .routes
+                .iter()
+                .find(|route| route.id == id("eq0-bus"))
+                .expect("send")
+                .gain_db,
+            -6.0
+        );
+        let k = window(rig.latency(), ramp, rig.quantum);
+        let blocks = settle(&mut rig, k, 4);
+        let reference = Reference::run(&committed, rig.block);
+        for (block, live) in blocks {
+            assert_eq!(
+                bits(&live),
+                bits(&reference[block as usize]),
+                "unmuted send, block {block}"
+            );
+        }
+    }
+
+    /// Gate 2 (#1557): a route into the output keeps its fold, so its gain, mute and matrix are
+    /// rebuilds on a post-fader and a pre-fader route, and a send into a submix beside it is live.
+    ///
+    /// Red if an output route loses its fold through a live edit (a candidate not prepared).
+    #[test]
+    fn output_route_values_are_rebuilds() {
+        let post_fader = with_model(&long_session(10, 48_000), |model| {
+            model.routes[0].source = RouteSource::Track {
+                track_id: model.tracks[0].id.clone(),
+                tap: session::SendTap::PostFader,
+            };
+        });
+        let pre_fader = with_model(&long_session(10, 48_000), |model| {
+            model.routes[0].source = RouteSource::Track {
+                track_id: model.tracks[0].id.clone(),
+                tap: session::SendTap::PreFader,
+            };
+        });
+        let first = parse_session_json(&post_fader).expect("model").routes[0]
+            .id
+            .as_str()
+            .to_owned();
+        assert_rebuilds(
+            &post_fader,
+            &[set(route(&first, ROUTE_GAIN_DB), -6.0, None)],
+            "post-fader output route, gain",
+        );
+        assert_rebuilds(
+            &pre_fader,
+            &[set(route(&first, ROUTE_MUTE), 1.0, None)],
+            "pre-fader output route, mute",
+        );
+        assert_rebuilds(
+            &pre_fader,
+            &[set(route(&first, ROUTE_MATRIX_LR), 0.5, None)],
+            "pre-fader output route, matrix",
+        );
+    }
+
+    /// Gate 4 (#1557): a transaction of a valid send gain and an out-of-domain matrix value is
+    /// refused whole: no send cell is written and the revision does not move.
+    ///
+    /// Red if the gain is written before the matrix value is refused.
+    #[test]
+    fn a_send_transaction_with_an_out_of_domain_value_writes_no_cell() {
+        let document = stateless_bus_document();
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, _, epoch, pending) = rig.summary();
+        let (status, diagnostics) = refusal(
+            &mut rig,
+            &[
+                set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None),
+                set(route("eq0-bus", ROUTE_MATRIX_LR), 100.0, None),
+            ],
+        );
+        assert_ne!(
+            status,
+            protocol::StatusCode::Ok,
+            "the out-of-domain value is refused"
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].1, 1, "the matrix edit, the second");
+        assert_eq!(
+            (rig.summary().0, rig.summary().2, rig.summary().3),
+            (revision, epoch, pending),
+            "no revision, no candidate"
+        );
+        assert_eq!(
+            rig.current_route_cells(),
+            vec![0],
+            "no send cell was written"
+        );
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)]),
+            crate::RESULT_OK,
+            "the valid half applies alone"
+        );
+        assert_eq!(rig.current_route_cells(), vec![1]);
     }
 
     /// Gate 1, effect family on a submix strip: a console slot's parameter, an insert's

@@ -43,8 +43,7 @@ mod vca;
 
 pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use descriptor::{
-    Choice, ControlDescriptor, ControlScope, DomainRule, EFFECTIVE_SLICE, Lanes, Motion,
-    ROUTE_SLICE, check,
+    Choice, ControlDescriptor, ControlScope, DomainRule, EFFECTIVE_SLICE, Lanes, Motion, check,
 };
 pub use diff::{ChangedControl, changed_controls};
 pub use effect_contract::control::{

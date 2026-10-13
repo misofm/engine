@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use common::{RATE, fixture, id, route_own, row_of, strip_builtin, strip_own};
 use controls::{
     ControlAddress, ControlClass, ControlRow, ControlScope, EFFECTIVE_SLICE, Lane, Owner,
-    ROUTE_SLICE, RebuildReason, Section, list,
+    RebuildReason, Section, list,
 };
 
 /// How a row is listed: once as `both`, or as `left` and `right`.
@@ -142,11 +142,12 @@ fn classes_match_decision_14() {
         reason(class(&model, &strip_builtin("vocal", 11, Lane::Left))),
         RebuildReason::NewMemory
     );
-    // A send into the submix: ruled live, not built; `follows_mute` waits for the effective slice.
+    // A send into the submix is live (#1557); `follows_mute` waits for the effective slice.
     for control in 1..=6 {
         assert_eq!(
-            reason(class(&model, &route_own("send", control))),
-            RebuildReason::RuledLiveNotBuilt { issue: ROUTE_SLICE }
+            class(&model, &route_own("send", control)),
+            ControlClass::Live,
+            "send {control}"
         );
     }
     assert_eq!(
@@ -240,6 +241,7 @@ fn automatable_is_exactly_the_live_model_value_rows() {
         "trim_db",
         "hpf_hz",
         "lpf_hz",
+        "gain_db",
         "fader_db",
         "mute",
         "pan",
