@@ -94,6 +94,18 @@ fn contract(identity: &EffectIdentity) -> Option<&'static EffectDescriptor> {
         .map(|factory| factory.descriptor())
 }
 
+/// Whether the instance `identity` has control rows at all: a native effect the launch registry
+/// carries. A `cid` effect and an identity the registry lacks have none, so no row sees a change
+/// to their values.
+pub(crate) fn has_rows(identity: &EffectIdentity) -> bool {
+    contract(identity).is_some()
+}
+
+/// Whether an insert of `identity` has a link-mode row: the effect supports a choice of modes.
+pub(crate) fn has_link_mode_row(identity: &EffectIdentity) -> bool {
+    contract(identity).is_some_and(|descriptor| link_choices(descriptor).is_some())
+}
+
 /// The numeric code of a link mode: the `effect_contract::LinkMode` code.
 fn link_code(mode: LinkMode) -> f32 {
     match mode {

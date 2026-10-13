@@ -1381,9 +1381,9 @@ where
                 Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
             };
 
-        // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7). The delta and the
-        // producer table are both in canonical track order, so the search resumes where the last
-        // one stopped; it still finds a strip anywhere, since it wraps.
+        // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7), among all strips,
+        // tracks then submixes (#1554 D6): a binary search per segment of the strip table, whose
+        // IDs are sorted within each segment.
         let ProviderEpoch {
             strips,
             effects,
@@ -1394,24 +1394,28 @@ where
             None => &mut self.providers,
         };
         let track_count = strips.track_count;
-        let tracks = &mut strips.controls[..track_count];
+        let strip_lanes = &mut strips.controls;
+        let strip_rank = |id: &str| {
+            host_core::strip_position(
+                strip_lanes.len(),
+                track_count,
+                |index| &*strip_lanes[index].track_id,
+                id,
+            )
+        };
         let mut resolved = Vec::new();
         if resolved.try_reserve_exact(delta.strips.len()).is_err() {
             return LiveCommit::Done(Err(CommandError::Internal));
         }
-        let mut cursor = 0;
         for strip in &delta.strips {
-            let found = (0..tracks.len())
-                .map(|step| (cursor + step) % tracks.len())
-                .find(|&index| &*tracks[index].track_id == strip.strip_id);
-            let Some(index) = found else {
+            let Some(index) = strip_rank(strip.strip_id) else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
             resolved.push(index);
-            cursor = index + 1;
         }
 
-        // The effect instances, by strip ID and live address (#1264 D3).
+        // The effect instances, by strip ID and live address (#1264 D3), through the producer
+        // table's sort (#1554 D6).
         let mut resolved_effects = Vec::new();
         let mut begun = Vec::new();
         if resolved_effects
@@ -1422,9 +1426,12 @@ where
             return LiveCommit::Done(Err(CommandError::Internal));
         }
         for instance in &delta.effects {
-            let Some(index) = effects.iter().position(|producer| {
-                &*producer.track_id == instance.strip_id && producer.address == instance.address
-            }) else {
+            let Some(index) = host_core::effect_producer_position(
+                effects,
+                strip_rank,
+                instance.strip_id,
+                instance.address,
+            ) else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
             // A delta that carries targets addresses an instance that owns them (#1265 D2).
@@ -1531,7 +1538,7 @@ where
         // Write the strips' cells, then each effect's cells and each EQ owner's target cells.
         // Nothing above changed anything but the owners' open candidates.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
-            let producer = &mut tracks[index];
+            let producer = &mut strip_lanes[index];
             for record in strip.fader_records() {
                 producer.fader.write(stamp, record);
             }

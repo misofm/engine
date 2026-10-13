@@ -507,10 +507,69 @@ impl HostLiveControlHandles {
         track_id: &str,
         address: LiveEffectAddress,
     ) -> Option<&mut EffectControlProducer> {
-        self.effect_controls
-            .iter_mut()
-            .find(|producer| &*producer.track_id == track_id && producer.address == address)
+        let index = effect_producer_position(
+            &self.effect_controls,
+            |id| {
+                strip_position(
+                    self.strips.len(),
+                    self.track_count,
+                    |index| &*self.strips[index],
+                    id,
+                )
+            },
+            track_id,
+            address,
+        )?;
+        self.effect_controls.get_mut(index)
     }
+}
+
+/// The position of strip `id` in the canonical strip order: the tracks, then the submixes, each
+/// segment in ascending ID order, as [`HostLiveControlHandles::strips`] lists them (#1554 D6).
+/// `id_at(i)` is the ID of the strip at position `i` of `count`, the first `track_count` of
+/// which are tracks. Two binary searches, one per segment; allocation-free.
+#[must_use]
+pub fn strip_position<'s>(
+    count: usize,
+    track_count: usize,
+    id_at: impl Fn(usize) -> &'s str,
+    id: &str,
+) -> Option<usize> {
+    let search = |mut low: usize, mut high: usize| {
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match id_at(middle).cmp(id) {
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+                core::cmp::Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    };
+    search(0, track_count.min(count)).or_else(|| search(track_count.min(count), count))
+}
+
+/// The position of the producer of the instance `address` of strip `strip_id` in `producers`,
+/// which are sorted by `(strip position, address)` (#1554 D6; preparation sorts them).
+/// `strip_rank` gives a strip's position in the strip order ([`strip_position`]).
+#[must_use]
+pub fn effect_producer_position(
+    producers: &[EffectControlProducer],
+    strip_rank: impl Fn(&str) -> Option<usize>,
+    strip_id: &str,
+    address: LiveEffectAddress,
+) -> Option<usize> {
+    let rank = strip_rank(strip_id)?;
+    let index = producers.partition_point(|producer| {
+        (
+            strip_rank(&producer.track_id).unwrap_or(usize::MAX),
+            producer.address,
+        ) < (rank, address)
+    });
+    producers
+        .get(index)
+        .filter(|producer| &*producer.track_id == strip_id && producer.address == address)
+        .map(|_| index)
 }
 
 /// Bytes a host that keeps the strip producers as one exactly sized boxed slice retains: the
@@ -1674,7 +1733,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // host asked for observation capacity, its observation queue (decision 15, D15-2). This is
     // the only thing that creates one; a host that asks for no live controls attaches nothing and
     // the plan renders the byte-identical live-control-free path.
-    let effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
+    let mut effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
         Some(_) if lanes.effects => attach_effect_live_controls(
             &mut effects,
             &live_superseded,
@@ -1721,6 +1780,43 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         )
         .collect();
     let live_control_track_count = model.tracks.len();
+    // #1554 D6: the producer table is sorted by (strip position, address), so a commit finds an
+    // instance's producer by binary search. Preparation attaches them in `(strip ID, rack, effect
+    // ID)` order, which is neither. The keys are unique, so the unstable sort is deterministic.
+    debug_assert!(
+        live_control_strips[..live_control_track_count].is_sorted()
+            && live_control_strips[live_control_track_count..].is_sorted(),
+        "each segment of the strip list is in ascending ID order"
+    );
+    let strip_rank = |id: &str| {
+        strip_position(
+            live_control_strips.len(),
+            live_control_track_count,
+            |index| &*live_control_strips[index],
+            id,
+        )
+    };
+    effect_controls.sort_unstable_by_key(|producer| {
+        (
+            strip_rank(&producer.track_id).unwrap_or(usize::MAX),
+            producer.address,
+        )
+    });
+    debug_assert!(
+        effect_controls
+            .iter()
+            .all(|producer| strip_rank(&producer.track_id).is_some())
+            && effect_controls.iter().all(|producer| {
+                effect_producer_position(
+                    &effect_controls,
+                    strip_rank,
+                    &producer.track_id,
+                    producer.address,
+                )
+                .is_some_and(|index| core::ptr::eq(&effect_controls[index], producer))
+            }),
+        "every effect producer is found by its sorted position"
+    );
     let live_control_tracks = &live_control_strips[..live_control_track_count];
     let control_requests: Vec<TrackControlRequest> = match live_controls.control_queue_depth {
         None => Vec::new(),
@@ -2501,8 +2597,8 @@ pub(crate) fn fader_records(
     Ok(fader)
 }
 
-/// Whether `track_id`'s mute changes from `before` to `after` while a `follows_mute` route in
-/// `model` sends from the track (#1053 G2).
+/// Whether the strip `track_id`'s (a track's or a submix's) mute changes from `before` to `after`
+/// while a `follows_mute` route in `model` sends from the strip (#1053 G2, #1554 D5).
 ///
 /// The classifier refuses such a delta (`LiveRebuild::FollowedMute`): the route's own mute must
 /// step with the source's, and a live mute record ramps only the source's stage (#1054). A
@@ -2517,8 +2613,14 @@ pub(crate) fn followed_mute_changes(
     [before.left_mute, before.right_mute] != [after.left_mute, after.right_mute]
         && model.routes.iter().any(|route| {
             route.follows_mute
-                && matches!(&route.source, session::RouteSource::Track { track_id: source, .. }
-                    if source.as_str() == track_id)
+                && match &route.source {
+                    session::RouteSource::Track {
+                        track_id: source, ..
+                    }
+                    | session::RouteSource::Submix {
+                        submix_id: source, ..
+                    } => source.as_str() == track_id,
+                }
         })
 }
 

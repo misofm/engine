@@ -26,11 +26,13 @@
 mod address;
 mod builtin_rows;
 mod descriptor;
+mod diff;
 mod effect_rows;
 mod effective;
 mod error;
 mod lane;
 mod live_ramps;
+mod mask;
 mod registry;
 mod route;
 mod session_rows;
@@ -43,6 +45,7 @@ pub use descriptor::{
     Choice, ControlDescriptor, ControlScope, DomainRule, EFFECTIVE_SLICE, Lanes, Motion,
     ROUTE_SLICE, check,
 };
+pub use diff::{ChangedControl, changed_controls};
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
 };
@@ -54,5 +57,6 @@ pub use effective::{
 };
 pub use error::ControlError;
 pub use live_ramps::LiveRamps;
+pub use mask::mask_values;
 pub use registry::{ControlRow, get, list, row_descriptor, set};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};

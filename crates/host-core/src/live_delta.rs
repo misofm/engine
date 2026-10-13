@@ -1,33 +1,35 @@
-//! Classify a committed session delta as a live track fader, mute, pan, effect-parameter and
-//! effect-bypass update, or a rebuild (issues #1255, #1264, #1265 and #1266; umbrella #1053 D1,
-//! D3, D9 and D14).
+//! Classify a committed session delta as live records or a rebuild, through the control registry
+//! (issues #1255, #1264, #1265, #1266 and #1554; umbrella #1053; decision 17, design point C6).
 //!
 //! A host that holds a running plan and commits a transaction has two models: the committed one
 //! the plan was prepared with (plus every record pushed into it since, #1053 D9), and the
 //! transaction's prospective one. [`classify_live_delta`] reads the two and decides, without ever
-//! looking at edit opcodes, whether the difference can ride the plan's live fader, matrix and
-//! effect lanes as records, or needs a plan rebuild. For a live delta it returns exactly the
-//! records that bring the render plane from the first model's values to the second's, and never a
-//! redundant one.
+//! looking at edit opcodes, whether the difference can ride the plan's live lanes as records, or
+//! needs a plan rebuild. For a live delta it returns exactly the records that bring the render
+//! plane from the first model's values to the second's, and never a redundant one.
 //!
-//! This is the one classifier. Later slices widen it in place -- input records (#1261, #1262),
-//! EQ and bypass records (#1265, #1266), submix strips and routes (#1225), followed mutes (#1226)
-//! and VCAs (#1247) -- they do not add a second one.
+//! This is the one classifier, and it keeps no list of fields: `controls` says which model fields
+//! are control values and whether each is live or rebuild-only, and this module lowers a live
+//! change to records, one lowering per [`controls::Family`]. A later slice widens it in place with
+//! a new arm of the lowering (input records #1556, route records #1557, derived values #1558); it
+//! does not add a second classifier.
 
 use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
 };
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+use controls::{ControlClass, Family, Owner, RebuildReason, Section};
 use effect_compiler::{
     LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
-    lowers_session_bypass, resolve_initial_values,
+    resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
 use session::{
-    EditRamps, Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json,
+    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, SessionModel, StableId, StripRef,
+    canonical_session_json,
 };
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
@@ -94,28 +96,24 @@ pub struct LiveDelta<'a> {
 /// Why a delta needs a plan rebuild.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveRebuild {
-    /// Either model declares a VCA (#1053 G3, until #1247).
+    /// Either model declares a VCA (#1053 G3, until #1558).
     Vca,
-    /// The track set differs, or a field other than a track's fader, pan/matrix, effect `params`
-    /// or effect `bypass` differs.
+    /// The models differ in something that is not a control value: the strip, route, slot or
+    /// insert set or order, an effect's identity, quality or sidechain, a profile's other fields,
+    /// or any other field no control row describes.
     Structure,
     /// A fader or pan/matrix value is outside the domain its render-side setter accepts, or an
     /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
     /// preparation diagnostic it always has.
     Domain,
-    /// An effect parameter value changes that the plan keeps prepared: one that is not
-    /// automatable or whose `automation_rate` is not `Block` (an EQ band's `enabled` and `kind`
-    /// among them, decision 14 F2), or any parameter of a target-capable effect that
-    /// [`EqTargetPreparer`] does not accept.
-    Prepared,
-    /// A track's mute changes while a route with `follows_mute` sends from it (#1053 G2, until
-    /// #1226).
+    /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
+    /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
+    /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
+    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
+    RebuildOnly(RebuildReason),
+    /// A strip's mute changes while a route with `follows_mute` sends from it (#1053 G2, until
+    /// #1558).
     FollowedMute,
-    /// The bypass of an effect whose session bypass is prepared changes, in either direction:
-    /// one for which [`lowers_session_bypass`] is false (the delay and the multiband compressor).
-    /// Its running plan holds the bypass in its prepared state, not on its lane, so a live record
-    /// would be acked and never heard (decision 14 F4, #1266 D1).
-    PreparedBypass,
     /// The stored automation changes and `next` automates an effect parameter that the plan keeps
     /// prepared ([`effect_automation_diagnostics`] is not empty, decision 15 E1, #1335 D4). The
     /// rebuild's preparation refuses it with `effect.automation.rate`; the classifier only
@@ -123,53 +121,39 @@ pub enum LiveRebuild {
     AutomationTarget,
 }
 
-/// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1).
+/// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1, #1554).
 ///
 /// Both inputs must be **normalized** models (`CompiledSession::normalized_model()`): the
-/// committed session's and the transaction's prospective one. The track pairing and the canonical
-/// JSON comparison rely on normalized order.
+/// committed session's and the transaction's prospective one. The structure comparison relies on
+/// normalized order.
 ///
-/// The steps, in order:
+/// The control rows (`controls`, decision 17) say what a value is and how it changes; this
+/// function keeps no list of fields. The steps, in order:
 /// 1. [`LiveRebuild::Vca`] if either model declares a VCA.
-/// 2. [`LiveRebuild::Structure`] if the track IDs differ, by count or pairwise in order.
-/// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
-///    output-profile IDs, `control_smoothing`, stored automation, and every track's fader,
-///    pan/matrix, console-entry `params` and `bypass`, and insert `params` and `bypass` copied
-///    from `current`, has canonical JSON bytes other than `current`'s. An effect's identity,
-///    quality, link mode and sidechain, the insert order, the console slot set and every submix
-///    field stay compared (a submix strip's bypass stays structural, #1053 G1). Bytes, never
-///    `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit from
-///    `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
-/// 4. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
-///    [`effect_automation_diagnostics`] refuses one of `next`'s automations: one whose `inserts`
-///    or `console` target parameter is not automatable or whose `automation_rate` is not `Block`
-///    (decision 15 E1, #1335 D4). An unchanged automation table is never re-checked: it was
-///    prepared. An accepted change stays live with no records, as #1260 D2 made it.
-/// 5. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
-///    [`builtins::checked_fader_gain`] or a pan/matrix does not lower through
-///    [`builtins_compiler::lower_matrix_or_pan`] (the single authorities the render-side setters
-///    use); [`LiveRebuild::FollowedMute`] if a lane's
-///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
-///    track's records. Then, for each of the track's effect instances in chain order whose
-///    `bypass` differs: [`LiveRebuild::PreparedBypass`] if [`lowers_session_bypass`] is false
-///    for its effect, otherwise one [`EffectControlRecord::Bypass`] carrying the post-commit
-///    bypass, ahead of its parameter records (#1266 D1). And for each whose
-///    `params` differ: [`LiveRebuild::Domain`] if either model's `params` do not resolve through
-///    [`resolve_initial_values`] (the one function preparation uses); [`LiveRebuild::Prepared`]
-///    if a resolved value whose bits change belongs to a parameter that is not automatable or
-///    whose `automation_rate` is not `Block`; otherwise one [`EffectControlRecord::Parameter`]
-///    per changed `(parameter_index, channel)`, carrying the resolved post-commit value. A
-///    removed `params` entry resolves to the default, so its change is a record too. For an
-///    effect with a prepared-target capability (the EQ, whose producer refuses a bare parameter
-///    record, #1265 D1) those records are its owner's edits, and the instance also carries the
-///    targets [`EqTargetPreparer`] designs at `next`'s sample rate, seeded with the pre-commit
-///    resolved values (the values preparation and every later live commit gave its owner); a
-///    capability [`EqTargetPreparer`] does not accept is [`LiveRebuild::Prepared`], and a design
-///    refusal is [`LiveRebuild::Domain`].
+/// 2. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
+///    output-profile IDs and stored automation, and with every control value of
+///    [`controls::mask_values`] copied from `current`, has canonical JSON bytes other than
+///    `current`'s. Bytes, never `PartialEq`: the canonical `f32` spelling keeps a zero's sign. A
+///    canonical JSON error is structural too.
+/// 3. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
+///    [`effect_automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
+///    #1335 D4). An unchanged automation table is never re-checked: it was prepared. An accepted
+///    change stays live with no records, as #1260 D2 made it.
+/// 4. With the structure equal, the two models list the same controls in the same order. For each
+///    control whose value bits differ ([`controls::changed_controls`]): a row that is
+///    rebuild-only is [`LiveRebuild::RebuildOnly`] with the row's reason; a row of family
+///    `Setting` gives no record; a live row marks its owner changed for its family.
+/// 5. [`LiveRebuild::Domain`] if a changed effect's `params` do not resolve through
+///    [`resolve_initial_values`] (the one function preparation uses), whether or not a row's value
+///    moved: an unknown parameter or a unit mismatch has no row.
+/// 6. Each changed owner is lowered once per family (`lower`): a strip's fader and mute, a
+///    strip's pan or matrix, an effect instance's bypass and parameters. An unchanged owner is
+///    never lowered. A lowering's domain refusal is [`LiveRebuild::Domain`]; a strip whose mute
+///    changes while a `follows_mute` route sends from it is [`LiveRebuild::FollowedMute`].
 ///
 /// The session ID, the two profile IDs, the stored automation and `control_smoothing` are
 /// model-only: no prepared plan reads them (#1260, #1365), so a delta that changes only them is
-/// live with no records, once step 4 has accepted the automation's targets. `control_smoothing`'s
+/// live with no records, once step 3 has accepted the automation's targets. `control_smoothing`'s
 /// only reader is [`LiveRamps::for_session`], which the caller evaluates on `next`: the records
 /// of the same transaction use the new lengths, and a ramp already in flight keeps its own. A
 /// preparation that bakes a ramp length into a plan (a transition decided at preparation) reads
@@ -201,13 +185,13 @@ pub enum LiveRebuild {
 ///
 /// # Allocation
 ///
-/// Control thread only. The masked clone, the two canonical JSON strings, when the automation
-/// changes the automation diagnostics, and, when an effect's `params` differ, the lowered racks,
-/// the resolved values and an EQ's target designer are allocated and freed on every call, on the
-/// control-plane precedent of #369 (the protocol already compiles a whole session per edit).
-/// Nothing it allocates is retained apart from the returned entries. The launch registry is the
-/// process's shared one (#1469): the first call of the process that needs it builds it, and
-/// every later call reads it.
+/// Control thread only. The masked clone, the two canonical JSON strings, the two control lists
+/// and their difference, when the automation changes the automation diagnostics, and, for a
+/// changed effect instance, the lowered racks, the resolved values and an EQ's target designer
+/// are allocated and freed on every call, on the control-plane precedent of #369 (the protocol
+/// already compiles a whole session per edit). Nothing it allocates is retained apart from the
+/// returned entries. The launch registry is the process's shared one (#1469): the first call of
+/// the process that needs it builds it, and every later call reads it.
 ///
 /// # Errors
 ///
@@ -221,46 +205,18 @@ pub fn classify_live_delta<'a>(
     if !current.vcas.is_empty() || !next.vcas.is_empty() {
         return Err(LiveRebuild::Vca);
     }
-    if current.tracks.len() != next.tracks.len()
-        || current
-            .tracks
-            .iter()
-            .zip(&next.tracks)
-            .any(|(before, after)| before.id != after.id)
-    {
-        return Err(LiveRebuild::Structure);
-    }
+    // Step 2. The control values are the rows' (decision 17, C6); the model-only fields are the
+    // classifier's own.
     let mut masked = next.clone();
+    controls::mask_values(&mut masked, current);
     masked.revision = current.revision;
     // #1260 D1: fields no prepared plan reads. Each profile's other fields stay compared.
     masked.session_id = current.session_id.clone();
     masked.render_profile.id = current.render_profile.id.clone();
     masked.output_profile.id = current.output_profile.id.clone();
-    // #1365 D4: read only by `LiveRamps::for_session`, never by a prepared plan.
-    masked.control_smoothing = current.control_smoothing;
     // #1260 D2: correct only while no host renders stored automation (#1058). The first issue
     // that renders it must drop this line.
     masked.automation = current.automation.clone();
-    for (track, before) in masked.tracks.iter_mut().zip(&current.tracks) {
-        track.fader = before.fader.clone();
-        track.matrix_or_pan = before.matrix_or_pan.clone();
-        // #1264 D2: only the values. Paired by position; a changed slot set or insert order
-        // still differs below, by its IDs.
-        // #1266 D1: and the bypass, which `effect_records` classifies.
-        for (entry, prior) in track.console.iter_mut().zip(&before.console) {
-            entry.params.clone_from(&prior.params);
-            entry.bypass = prior.bypass;
-        }
-        for (effect, prior) in track
-            .inserts
-            .effects
-            .iter_mut()
-            .zip(&before.inserts.effects)
-        {
-            effect.params.clone_from(&prior.params);
-            effect.bypass = prior.bypass;
-        }
-    }
     match (
         canonical_session_json(current),
         canonical_session_json(&masked),
@@ -270,6 +226,7 @@ pub fn classify_live_delta<'a>(
     }
     drop(masked);
 
+    // Step 3.
     if current.automation != next.automation {
         let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
         if !effect_automation_diagnostics(next, registry).is_empty() {
@@ -277,100 +234,310 @@ pub fn classify_live_delta<'a>(
         }
     }
 
+    // Step 4.
+    let changes = controls::changed_controls(current, next, next.sample_rate_hz)
+        .ok_or(LiveRebuild::Structure)?;
+    let mut work: Vec<Work> = Vec::new();
+    for change in &changes {
+        let descriptor = &change.descriptor;
+        match descriptor.class {
+            ControlClass::RebuildOnly { reason, .. } => {
+                return Err(LiveRebuild::RebuildOnly(reason));
+            }
+            // `changed_controls` skips a derived row; #1558 lowers it.
+            ControlClass::Derived => continue,
+            ControlClass::Live => {}
+        }
+        if descriptor.family == Family::Setting {
+            continue;
+        }
+        let Owner::Strip(strip) = &change.address.owner else {
+            // A route or a VCA row is rebuild-only or derived in this slice.
+            return Err(LiveRebuild::Structure);
+        };
+        if work.last().is_none_or(|last| last.strip != *strip) {
+            work.push(Work::new(strip.clone()));
+        }
+        let item = work.last_mut().expect("a work item was just pushed");
+        match descriptor.family {
+            Family::StripLevel => item.level = true,
+            Family::StripMatrix => item.matrix = true,
+            Family::Effect => {
+                if item.instances.last() != Some(&change.address.section) {
+                    item.instances.push(change.address.section.clone());
+                }
+            }
+            family @ (Family::StripInput | Family::Route) => item.unlowered = Some(family),
+            Family::Setting => {}
+        }
+    }
+
+    // Step 5.
+    refuse_unresolvable_params(current, next)?;
+
+    // Step 6.
     let mut delta = LiveDelta::default();
-    for (before, after) in current.tracks.iter().zip(&next.tracks) {
-        let edit = StripEditRamps::of(edit_ramps, &after.id);
-        let fader = fader_records(&before.fader, &after.fader, ramps, edit)
-            .map_err(|_| LiveRebuild::Domain)?;
-        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan, ramps, edit)
-            .map_err(|_| LiveRebuild::Domain)?;
-        if followed_mute_changes(&before.fader, &after.fader, next, after.id.as_str()) {
-            return Err(LiveRebuild::FollowedMute);
+    for item in &work {
+        let before = strip_of(current, &item.strip).ok_or(LiveRebuild::Structure)?;
+        let after = strip_of(next, &item.strip).ok_or(LiveRebuild::Structure)?;
+        let ctx = Context {
+            current,
+            next,
+            ramps,
+            edit: StripEditRamps::of(edit_ramps, &item.strip),
+        };
+        let mut records = LiveStripRecords {
+            strip_id: after.id.as_str(),
+            fader: [None; 4],
+            matrix: None,
+        };
+        let families = item
+            .unlowered
+            .into_iter()
+            .chain(item.level.then_some(Family::StripLevel))
+            .chain(item.matrix.then_some(Family::StripMatrix));
+        for family in families {
+            let target = Target {
+                before,
+                after,
+                instance: None,
+            };
+            match lower(family, &ctx, &target)? {
+                Lowered::Fader(fader) => records.fader = fader,
+                Lowered::Matrix(matrix) => records.matrix = matrix,
+                Lowered::Effect(_) | Lowered::Nothing => {}
+            }
         }
-        if fader[0].is_some() || matrix.is_some() {
-            delta.strips.push(LiveStripRecords {
-                strip_id: after.id.as_str(),
-                fader,
-                matrix,
-            });
+        if records.fader[0].is_some() || records.matrix.is_some() {
+            delta.strips.push(records);
         }
-        effect_records((current, before), (next, after), &mut delta.effects)?;
+        for section in &item.instances {
+            let target = Target {
+                before,
+                after,
+                instance: Some(section),
+            };
+            if let Lowered::Effect(Some(effect)) = lower(Family::Effect, &ctx, &target)? {
+                delta.effects.push(effect);
+            }
+        }
     }
     Ok(delta)
 }
 
-/// Appends the bypass and parameter records of one track's effect instances whose `bypass` or
-/// `params` differ (#1264 D2, #1266 D1). The step-3 mask has already proved that the two tracks'
-/// instances agree in everything but their `params` and `bypass`.
-fn effect_records<'a>(
-    (current, before): (&SessionModel, &Track),
-    (next, after): (&'a SessionModel, &'a Track),
-    output: &mut Vec<LiveEffectRecords<'a>>,
-) -> Result<(), LiveRebuild> {
-    let racks_before = current.lower_track(before);
-    let racks_after = next.lower_track(after);
-    let [pre_before, inserts_before, post_before] = racks_before.in_chain_order();
-    let [pre_after, inserts_after, post_after] = racks_after.in_chain_order();
-    let pre_insert = pre_after.len();
-    let instances = pre_before
-        .iter()
-        .zip(pre_after)
-        .enumerate()
-        .map(|(index, pair)| (LiveEffectAddress::console(index as u32), pair))
-        .chain(
-            inserts_before
-                .iter()
-                .zip(inserts_after)
-                .enumerate()
-                .map(|(index, pair)| (LiveEffectAddress::insert(index as u32), pair)),
-        )
-        .chain(
-            post_before
-                .iter()
-                .zip(post_after)
-                .enumerate()
-                .map(|(index, pair)| {
-                    (
-                        LiveEffectAddress::console((pre_insert + index) as u32),
-                        pair,
-                    )
-                }),
-        );
-    for (address, (effect_before, effect_after)) in instances {
-        let bypass = (effect_before.bypass != effect_after.bypass).then_some(effect_after.bypass);
-        let params_differ = !same_params(&effect_before.params, &effect_after.params);
-        if bypass.is_none() && !params_differ {
-            continue;
+/// The changed controls of one strip, from the control list's order.
+struct Work {
+    strip: StableId,
+    /// A fader or mute row changed.
+    level: bool,
+    /// A pan, matrix or matrix-mode row changed.
+    matrix: bool,
+    /// A live row of a family that this slice cannot lower changed (#1556, #1557).
+    unlowered: Option<Family>,
+    /// The effect sections with a changed row, in chain order.
+    instances: Vec<Section>,
+}
+
+impl Work {
+    fn new(strip: StableId) -> Self {
+        Self {
+            strip,
+            level: false,
+            matrix: false,
+            unlowered: None,
+            instances: Vec::new(),
         }
-        if bypass.is_some() {
-            // A third-party or unknown identity never prepared; the rebuild reports it.
-            let EffectIdentity::Native { effect_id } = &effect_after.identity else {
-                return Err(LiveRebuild::Structure);
-            };
-            // The delay and the multiband compressor hold a session bypass in their prepared
-            // state, which no lane record reaches (decision 14 F4).
-            if !lowers_session_bypass(effect_id.as_str()) {
-                return Err(LiveRebuild::PreparedBypass);
+    }
+}
+
+/// The strip `id` of `model` (a track or a submix).
+fn strip_of<'m>(model: &'m SessionModel, id: &StableId) -> Option<StripRef<'m>> {
+    model.strips().find(|strip| strip.id == id)
+}
+
+/// What a lowering reads besides its target.
+struct Context<'m> {
+    current: &'m SessionModel,
+    next: &'m SessionModel,
+    ramps: LiveRamps,
+    edit: StripEditRamps,
+}
+
+/// What a lowering is of: a strip in both models, or one effect instance of it.
+struct Target<'s, 'm, 'a> {
+    before: StripRef<'m>,
+    after: StripRef<'a>,
+    /// The effect section, for the [`Family::Effect`] lowering.
+    instance: Option<&'s Section>,
+}
+
+/// What one lowering produced.
+enum Lowered<'a> {
+    Fader([Option<TrackFaderRecord>; 4]),
+    Matrix(Option<TrackControlRecord>),
+    Effect(Option<LiveEffectRecords<'a>>),
+    Nothing,
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static LOWERED_OWNERS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// How many owners [`classify_live_delta`] has lowered on this thread since the last call, and
+/// resets the count (#1554 D7). One call of the lowering per owner and family counts one, so a
+/// test can show that one edit lowers one owner and an unchanged owner is never lowered.
+#[cfg(feature = "test-support")]
+pub fn take_lowered_owner_count() -> usize {
+    LOWERED_OWNERS.with(|count| count.replace(0))
+}
+
+/// Lowers one changed owner of one family to its render records: the one lowering of each family
+/// (decision 17, C6). A family whose rows are live decides here what a change of them costs the
+/// plan; the classifier above decides only that it is live.
+///
+/// `StripInput` and `Route` are unreachable in this slice (their rows are rebuild-only until
+/// #1556 and #1557 add their arms) and refuse defensively.
+fn lower<'a>(
+    family: Family,
+    ctx: &Context<'_>,
+    target: &Target<'_, '_, 'a>,
+) -> Result<Lowered<'a>, LiveRebuild> {
+    #[cfg(feature = "test-support")]
+    LOWERED_OWNERS.with(|count| count.set(count.get() + 1));
+    let (before, after) = (&target.before, &target.after);
+    match family {
+        Family::StripLevel => {
+            let fader = fader_records(before.fader, after.fader, ctx.ramps, ctx.edit)
+                .map_err(|_| LiveRebuild::Domain)?;
+            if followed_mute_changes(before.fader, after.fader, ctx.next, after.id.as_str()) {
+                return Err(LiveRebuild::FollowedMute);
+            }
+            Ok(Lowered::Fader(fader))
+        }
+        Family::StripMatrix => matrix_record(
+            before.matrix_or_pan,
+            after.matrix_or_pan,
+            ctx.ramps,
+            ctx.edit,
+        )
+        .map(Lowered::Matrix)
+        .map_err(|_| LiveRebuild::Domain),
+        Family::Effect => {
+            let section = target.instance.ok_or(LiveRebuild::Structure)?;
+            effect_records(ctx, target, section).map(Lowered::Effect)
+        }
+        Family::Setting => Ok(Lowered::Nothing),
+        Family::StripInput | Family::Route => Err(LiveRebuild::Structure),
+    }
+}
+
+/// Step 5: a changed effect's `params` must resolve, as preparation resolves them. An unknown
+/// parameter ID, a unit mismatch or a duplicate lane has no control row to move, yet a rebuild
+/// refuses it, so a live commit must not ack it.
+fn refuse_unresolvable_params(
+    current: &SessionModel,
+    next: &SessionModel,
+) -> Result<(), LiveRebuild> {
+    for (before, after) in current.strips().zip(next.strips()) {
+        for (prior, entry) in before.console.iter().zip(after.console) {
+            if !same_params(&prior.params, &entry.params) {
+                let slot = next
+                    .console
+                    .slots()
+                    .find(|slot| slot.slot == entry.slot)
+                    .ok_or(LiveRebuild::Structure)?;
+                resolves(&slot.identity, &entry.params)?;
             }
         }
-        let (mut records, targets) = if params_differ {
-            parameter_records(effect_before, effect_after, next.sample_rate_hz)?
-        } else {
-            (Vec::new(), None)
-        };
-        if let Some(bypass) = bypass {
-            records.insert(0, EffectControlRecord::Bypass(bypass));
-        }
-        if !records.is_empty() {
-            output.push(LiveEffectRecords {
-                strip_id: after.id.as_str(),
-                address,
-                records,
-                targets,
-            });
+        for (prior, effect) in before.inserts.effects.iter().zip(&after.inserts.effects) {
+            if !same_params(&prior.params, &effect.params) {
+                resolves(&effect.identity, &effect.params)?;
+            }
         }
     }
     Ok(())
+}
+
+/// Whether `params` resolve against the descriptor of `identity`.
+fn resolves(identity: &EffectIdentity, params: &[EffectParam]) -> Result<(), LiveRebuild> {
+    // A third-party or unknown identity never prepared; the rebuild reports it.
+    let EffectIdentity::Native { effect_id } = identity else {
+        return Err(LiveRebuild::Structure);
+    };
+    let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
+    let factory = registry
+        .get_shared_ascii(effect_id.as_str())
+        .ok_or(LiveRebuild::Structure)?;
+    resolve_initial_values(factory.descriptor(), params)
+        .map(|_| ())
+        .map_err(|_| LiveRebuild::Domain)
+}
+
+/// The index of the instance `section` in a strip's three lowered racks, as its live address and
+/// its `(rack, position)` in chain order.
+fn locate(
+    racks: &LoweredRacks<'_>,
+    section: &Section,
+) -> Option<(LiveEffectAddress, usize, usize)> {
+    let [pre, inserts, _] = racks.in_chain_order();
+    match section {
+        Section::Console(slot) => {
+            let position = |rack: &[Effect]| rack.iter().position(|effect| effect.id == *slot);
+            position(pre)
+                .map(|index| (LiveEffectAddress::console(index as u32), 0, index))
+                .or_else(|| {
+                    position(&racks.post_insert).map(|index| {
+                        (
+                            LiveEffectAddress::console((pre.len() + index) as u32),
+                            2,
+                            index,
+                        )
+                    })
+                })
+        }
+        Section::Inserts(effect) => inserts
+            .iter()
+            .position(|candidate| candidate.id == *effect)
+            .map(|index| (LiveEffectAddress::insert(index as u32), 1, index)),
+        Section::Own | Section::Builtins => None,
+    }
+}
+
+/// The bypass and parameter records of one effect instance whose `bypass` or `params` differ
+/// (#1264 D2, #1266 D1). The structure comparison has already proved that the two strips'
+/// instances agree in everything but their `params` and `bypass`, and the rows have proved that
+/// each changed value is live.
+fn effect_records<'a>(
+    ctx: &Context<'_>,
+    target: &Target<'_, '_, 'a>,
+    section: &Section,
+) -> Result<Option<LiveEffectRecords<'a>>, LiveRebuild> {
+    let racks_before = ctx.current.lower_strip(&target.before);
+    let racks_after = ctx.next.lower_strip(&target.after);
+    let (address, rack, index) = locate(&racks_after, section).ok_or(LiveRebuild::Structure)?;
+    let (address_before, rack_before, index_before) =
+        locate(&racks_before, section).ok_or(LiveRebuild::Structure)?;
+    if (address, rack, index) != (address_before, rack_before, index_before) {
+        return Err(LiveRebuild::Structure);
+    }
+    let effect_before = &racks_before.in_chain_order()[rack][index];
+    let effect_after = &racks_after.in_chain_order()[rack][index];
+    let bypass = (effect_before.bypass != effect_after.bypass).then_some(effect_after.bypass);
+    let (mut records, targets) = if same_params(&effect_before.params, &effect_after.params) {
+        (Vec::new(), None)
+    } else {
+        parameter_records(effect_before, effect_after, ctx.next.sample_rate_hz)?
+    };
+    if let Some(bypass) = bypass {
+        records.insert(0, EffectControlRecord::Bypass(bypass));
+    }
+    Ok((!records.is_empty()).then(|| LiveEffectRecords {
+        strip_id: target.after.id.as_str(),
+        address,
+        records,
+        targets,
+    }))
 }
 
 /// The records of one instance, and the targets of a target-capable one.
@@ -402,8 +569,10 @@ fn parameter_records(
             continue;
         }
         let parameter = &descriptor.parameters[value_after.parameter_index as usize];
-        if !parameter.automatable || parameter.automation_rate != AutomationRate::Block {
-            return Err(LiveRebuild::Prepared);
+        // A row is live only when the plan keeps a block-rate cell for it; the control rows say
+        // so, and this refuses a descriptor whose row would claim more.
+        if parameter.automation_rate != AutomationRate::Block {
+            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
         }
         records.push(EffectControlRecord::Parameter {
             parameter_index: value_after.parameter_index,
@@ -432,9 +601,10 @@ fn design_targets(
 ) -> Result<Vec<PreparedEffectTarget>, LiveRebuild> {
     let descriptor = factory.descriptor();
     // A capability other than the 60-row EQ's has no control-thread designer: rebuild.
-    let preparer = EqTargetPreparer::new(factory).map_err(|_| LiveRebuild::Prepared)?;
+    let preparer = EqTargetPreparer::new(factory)
+        .map_err(|_| LiveRebuild::RebuildOnly(RebuildReason::Correctness))?;
     if seeds.len() != EQ_VALUE_COUNT {
-        return Err(LiveRebuild::Prepared);
+        return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
     }
     let edits: Vec<EqTargetEdit> = records
         .iter()
@@ -448,7 +618,7 @@ fn design_targets(
                 channel,
                 value,
             }),
-            _ => Err(LiveRebuild::Prepared),
+            _ => Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness)),
         })
         .collect::<Result<_, _>>()?;
     let mut out = [PreparedEffectTarget {
@@ -459,7 +629,9 @@ fn design_targets(
     let (_, count) = preparer
         .prepare(sample_rate_hz, seeds, &edits, &mut out)
         .map_err(|error| match error {
-            EqTargetPreparerError::Unsupported => LiveRebuild::Prepared,
+            EqTargetPreparerError::Unsupported => {
+                LiveRebuild::RebuildOnly(RebuildReason::Correctness)
+            }
             _ => LiveRebuild::Domain,
         })?;
     Ok(out[..count].to_vec())

@@ -6,6 +6,7 @@
 //! live plan of the nine-track EQ fixture and compares the output with a rebuilt plan's.
 #![cfg(feature = "control-provider")]
 
+use controls::RebuildReason;
 use core::num::NonZeroUsize;
 
 use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
@@ -195,6 +196,24 @@ fn mute(lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) -> Trac
         lanes,
         muted,
         smoothing_samples,
+    }
+}
+
+/// The builtin IDs the control rows use (`BUILTIN_PARAMETER_DESCRIPTORS`).
+const TRIM_DB: u32 = 2;
+
+/// The reason the control row of builtin `control` gives for being rebuild-only.
+fn builtin_reason(control: u32) -> RebuildReason {
+    let descriptor = controls::row_descriptor(
+        controls::OwnerKind::Strip,
+        controls::SectionKind::Builtins,
+        control,
+        48_000,
+    )
+    .expect("a builtin row");
+    match descriptor.class {
+        controls::ControlClass::RebuildOnly { reason, .. } => reason,
+        other => panic!("builtin {control} is {other:?}, not rebuild-only"),
     }
 }
 
@@ -391,22 +410,103 @@ fn values_outside_the_setter_domain_need_a_rebuild() {
 /// Gate 1(g). Red if the mask comparison uses `PartialEq` and misses a sign-of-zero edit of a
 /// field that is not live.
 #[test]
-fn a_sign_of_zero_trim_edit_is_structural() {
+fn a_sign_of_zero_trim_edit_is_a_rebuild_by_its_row() {
     let current = two_tracks();
     assert_eq!(current.tracks[0].builtins.left.trim_db.to_bits(), 0);
     assert_eq!(
         classify(&current, |next| next.tracks[0].builtins.left.trim_db = -0.0),
-        Err(LiveRebuild::Structure)
+        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
     );
 }
 
-/// Gate 1(h), G1. Red if a submix fader change is classified live.
+/// #1554 gate 1, D5. Red if a submix strip is left structural: its fader, mute and pan are live
+/// records addressed to the submix's ID, as a track's are, and a track's records are not
+/// addressed to it.
 #[test]
-fn a_submix_fader_change_is_structural() {
+fn a_submix_strip_fader_mute_and_pan_are_live() {
     let current = with_bus(false);
     assert_eq!(
         classify(&current, |next| next.submixes[0].fader.left_db = -6.0),
-        Err(LiveRebuild::Structure)
+        Ok(vec![(
+            "bus".to_owned(),
+            vec![fader_db(BuiltinLaneSelector::Left, -6.0, 0)],
+            None
+        )])
+    );
+    assert_eq!(
+        classify(&current, |next| {
+            next.submixes[0].fader.left_mute = true;
+            next.submixes[0].fader.right_mute = true;
+        }),
+        Ok(vec![(
+            "bus".to_owned(),
+            vec![mute(BuiltinLaneSelector::Both, true, 0)],
+            None
+        )])
+    );
+    let panned = classify(&current, |next| {
+        next.submixes[0].matrix_or_pan = MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.5,
+            smoothing_samples: 0,
+        };
+    })
+    .expect("a submix pan is live");
+    assert_eq!(panned.len(), 1);
+    assert_eq!(panned[0].0, "bus");
+    assert!(panned[0].1.is_empty() && panned[0].2.is_some());
+}
+
+/// #1554 D5. Red if the followed-mute guard covers only a track source: a submix whose mute
+/// changes while a `follows_mute` route sends from it has the same ramp problem.
+#[test]
+fn a_followed_submix_mute_change_needs_a_rebuild() {
+    let mut model = with_bus(false);
+    let bus = id("bus");
+    let bus2 = id("bus2");
+    // bus -> bus2 (following bus's mute) -> output.
+    let to_output = model
+        .routes
+        .iter()
+        .find(|route| route.id == id("bus-main"))
+        .expect("the bus's output route")
+        .clone();
+    model.routes.retain(|route| route.id != id("bus-main"));
+    let mut to_bus2 = to_output.clone();
+    to_bus2.id = id("bus-bus2");
+    to_bus2.destination = RouteDestination::SubmixInput {
+        submix_id: bus2.clone(),
+    };
+    to_bus2.follows_mute = true;
+    let mut bus2_out = to_output;
+    bus2_out.id = id("bus2-main");
+    bus2_out.source = RouteSource::Submix {
+        submix_id: bus2.clone(),
+        tap: SendTap::PostPan,
+    };
+    model.routes.push(to_bus2);
+    model.routes.push(bus2_out);
+    let console = model.console.clone();
+    model.submixes.push(Submix::unity(bus2, &console));
+    let current = normalized(&model);
+    assert_eq!(
+        classify(&current, |next| {
+            let submix = next.submixes.iter_mut().find(|s| s.id == bus).expect("bus");
+            submix.fader.left_mute = true;
+        }),
+        Err(LiveRebuild::FollowedMute)
+    );
+    // The same change on the other submix, which nothing follows, is live.
+    assert!(
+        classify(&current, |next| {
+            let submix = next
+                .submixes
+                .iter_mut()
+                .find(|s| s.id == id("bus2"))
+                .expect("bus2");
+            submix.fader.left_mute = true;
+        })
+        .is_ok()
     );
 }
 
@@ -485,7 +585,7 @@ fn any_vca_needs_a_rebuild() {
 #[test]
 fn structural_edits_need_a_rebuild() {
     let current = two_tracks();
-    let edits: [(&str, Edit); 4] = [
+    let edits: [(&str, Edit); 3] = [
         ("track removed", |next| {
             next.tracks.pop();
         }),
@@ -497,7 +597,6 @@ fn structural_edits_need_a_rebuild() {
         ("track renamed", |next| {
             next.tracks[1].id = StableId::parse("zz-renamed").expect("id");
         }),
-        ("route gain", |next| next.routes[0].gain_db = -1.0),
     ];
     for (name, edit) in edits {
         assert_eq!(
@@ -1373,6 +1472,23 @@ fn a_removed_parameter_returns_to_its_default() {
     );
 }
 
+/// The reason the launch descriptor of `effect_id` gives for parameter `parameter_id` being
+/// prepared (its `prepared_reason`).
+fn prepared_reason(effect_id: &str, parameter_id: u32) -> RebuildReason {
+    let registry = effect_compiler::launch_native_effect_registry().expect("launch registry");
+    registry
+        .get_ascii(effect_id)
+        .expect("launch effect")
+        .descriptor()
+        .parameters
+        .iter()
+        .find(|parameter| parameter.id.0 == parameter_id)
+        .expect("declared parameter")
+        .prepared_reason
+        .expect("a prepared parameter states its reason")
+        .reason
+}
+
 /// #1264 gate 1(d), #1265 gate 1(c). Red if a parameter the plan keeps prepared -- a gate/expander
 /// attack, or an EQ band's `enabled` or `kind` (`automation_rate` `None`, decision 14 F2) -- is
 /// classified live: the edit would be acked and the effect would never apply it.
@@ -1389,7 +1505,10 @@ fn prepared_parameter_changes_need_a_rebuild() {
                 10.0,
             ));
         }),
-        Err(LiveRebuild::Prepared)
+        Err(LiveRebuild::RebuildOnly(prepared_reason(
+            "miso.gate-expander",
+            5
+        )))
     );
     // The gate's threshold (ID 1) is live.
     assert!(
@@ -1408,7 +1527,10 @@ fn prepared_parameter_changes_need_a_rebuild() {
                 inserts(next, 2).push(param(4, ParameterChannel::Left, ParameterUnit::Db, 3.0));
                 inserts(next, 2).push(prepared.clone());
             }),
-            Err(LiveRebuild::Prepared),
+            Err(LiveRebuild::RebuildOnly(prepared_reason(
+                "miso.parametric-eq",
+                prepared.parameter_id
+            ))),
             "{prepared:?}"
         );
     }
@@ -1755,13 +1877,16 @@ fn an_eq_bypass_beside_a_gain_change_rides_ahead_of_its_targets() {
 /// heard, because the running plan holds that bypass in its prepared state.
 #[test]
 fn a_prepared_bypass_change_needs_a_rebuild() {
-    for index in [3, 4] {
+    // The delay (#1339) and the multiband compressor (#1340): the reason is the row's.
+    for (index, issue) in [(3, 1339), (4, 1340)] {
         let enabled = with_bypassable();
         assert_eq!(
             classify_effects(&enabled, |next| {
                 next.tracks[0].inserts.effects[index].bypass = true;
             }),
-            Err(LiveRebuild::PreparedBypass),
+            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+                issue
+            })),
             "insert {index} bypassed"
         );
         let mut bypassed = enabled.clone();
@@ -1771,16 +1896,18 @@ fn a_prepared_bypass_change_needs_a_rebuild() {
             classify_effects(&bypassed, |next| {
                 next.tracks[0].inserts.effects[index].bypass = false;
             }),
-            Err(LiveRebuild::PreparedBypass),
+            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+                issue
+            })),
             "insert {index} lifted"
         );
     }
 }
 
-/// #1053 G1 on the bypass. Red if the bypass mask reaches a submix strip's effects: a submix
-/// effect's bypass stays structural until #1267.
+/// #1554 D5 on the bypass. Red if a submix strip's effects are left structural: a submix effect's
+/// bypass is a record addressed to the submix's ID, like a track's.
 #[test]
-fn a_submix_effect_bypass_is_structural() {
+fn a_submix_effect_bypass_is_live() {
     let fixture = parse_session_json(FIXTURE).expect("fixture parses");
     let mut model = with_bus(false);
     let mut compressor = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
@@ -1793,9 +1920,16 @@ fn a_submix_effect_bypass_is_structural() {
     model.submixes[0].inserts.effects.push(compressor);
     let current = normalized(&model);
     assert_eq!(
-        classify(&current, |next| next.submixes[0].inserts.effects[0]
+        classify_effects(&current, |next| next.submixes[0].inserts.effects[0]
             .bypass = true),
-        Err(LiveRebuild::Structure)
+        Ok((
+            Vec::new(),
+            vec![(
+                "bus".to_owned(),
+                LiveEffectAddress::insert(0),
+                vec![EffectControlRecord::Bypass(true)]
+            )]
+        ))
     );
 }
 
@@ -1839,11 +1973,11 @@ fn with_effect_bus() -> SessionModel {
     normalized(&model)
 }
 
-/// #1053 G1 on effect parameters (#1264 verdict MINOR 2). Red if the effect parameter mask or
-/// the record lowering walks submix strips, so that a submix console-entry or insert `params`
-/// change goes live before #1267.
+/// #1554 D5 on effect parameters. Red if a submix strip's console entry or insert parameter is
+/// left structural, or is addressed to a track: each is a record at its own strip's ID and
+/// instance address.
 #[test]
-fn submix_effect_params_are_structural() {
+fn submix_effect_params_are_live() {
     let current = with_effect_bus();
     assert_eq!(current.submixes.len(), 1);
     assert_eq!(
@@ -1860,7 +1994,14 @@ fn submix_effect_params_are_structural() {
                 6.0,
             ));
         }),
-        Err(LiveRebuild::Structure),
+        Ok((
+            Vec::new(),
+            vec![(
+                "bus".to_owned(),
+                LiveEffectAddress::console(0),
+                vec![record(0, Lane::Left, 6.0), record(0, Lane::Right, 6.0)]
+            )]
+        )),
         "submix console entry"
     );
     assert_eq!(
@@ -1872,15 +2013,15 @@ fn submix_effect_params_are_structural() {
                 -30.0,
             ));
         }),
-        Err(LiveRebuild::Structure),
+        Ok((
+            Vec::new(),
+            vec![(
+                "bus".to_owned(),
+                LiveEffectAddress::insert(0),
+                vec![record(0, Lane::Left, -30.0)]
+            )]
+        )),
         "submix insert"
-    );
-    // Control: the same model's track edit is live.
-    assert!(
-        classify_effects(&current, |next| {
-            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
-        })
-        .is_ok()
     );
 }
 
@@ -1934,5 +2075,248 @@ fn an_automation_on_a_prepared_effect_parameter_needs_a_rebuild() {
             next.automation.push(ride);
         }),
         Ok((Vec::new(), Vec::new()))
+    );
+}
+
+// Issue #1554: the classifier reads the control rows.
+
+/// `with_effects` with a true-peak limiter insert (`insert(3)`) on the first track.
+fn with_limiter() -> SessionModel {
+    let mut model = with_effects();
+    let mut limiter = model.tracks[0].inserts.effects[0].clone();
+    limiter.id = id("limiter");
+    limiter.identity = EffectIdentity::Native {
+        effect_id: id("miso.true-peak-limiter"),
+    };
+    limiter.params.clear();
+    model.tracks[0].inserts.effects.push(limiter);
+    normalized(&model)
+}
+
+/// Gate 2. Red if a rebuild-only value is acked as live, or reports another reason than its own
+/// row's; or if a live value edit beside a rebuild-only or structural one hides it.
+#[test]
+fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
+    let current = two_tracks();
+    assert_eq!(
+        classify(&current, |next| next.tracks[0]
+            .builtins
+            .right
+            .delay_samples = 64),
+        Err(LiveRebuild::RebuildOnly(builtin_reason(11)))
+    );
+    // The limiter's lookahead, beside a live threshold edit of the same instance.
+    let limiter = with_limiter();
+    assert_eq!(
+        classify_effects(&limiter, |next| {
+            let params = &mut next.tracks[0].inserts.effects[3].params;
+            params.push(param(1, ParameterChannel::Both, ParameterUnit::Db, -3.0));
+            params.push(param(
+                3,
+                ParameterChannel::Both,
+                ParameterUnit::Milliseconds,
+                2.0,
+            ));
+        }),
+        Err(LiveRebuild::RebuildOnly(prepared_reason(
+            "miso.true-peak-limiter",
+            3
+        )))
+    );
+    // A send's gain: into the output, and into a submix.
+    assert_eq!(
+        classify(&current, |next| next.routes[0].gain_db = -1.0),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation))
+    );
+    let bus = with_bus(false);
+    let send = bus
+        .routes
+        .iter()
+        .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .expect("the send into the bus");
+    assert_eq!(
+        classify(&bus, |next| next.routes[send].gain_db = -1.0),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue: 1557
+        }))
+    );
+    // A live fader edit does not hide a rebuild-only edit, or a structural one.
+    assert_eq!(
+        classify(&current, |next| {
+            next.tracks[0].fader.left_db = -6.0;
+            next.tracks[1].builtins.left.trim_db = 3.0;
+        }),
+        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
+    );
+    let effects = with_effects();
+    assert_eq!(
+        classify_effects(&effects, |next| {
+            next.tracks[0].fader.left_db = -6.0;
+            next.tracks[0].inserts.effects.swap(0, 1);
+        }),
+        Err(LiveRebuild::Structure)
+    );
+    assert_eq!(
+        classify(&current, |next| {
+            next.tracks[0].fader.left_db = -6.0;
+            next.tracks.pop();
+        }),
+        Err(LiveRebuild::Structure)
+    );
+}
+
+/// Gate 3. Red if a setting produces a record or a rebuild: the pan window alone and the session's
+/// ramp lengths alone change what later edits do, and nothing in the running plan.
+#[test]
+fn a_setting_change_alone_is_live_with_no_record() {
+    let current = two_tracks();
+    assert_eq!(
+        classify(&current, |next| {
+            let MatrixOrPan::Pan {
+                smoothing_samples, ..
+            } = &mut next.tracks[0].matrix_or_pan
+            else {
+                panic!("the settled tracks pan")
+            };
+            *smoothing_samples = 32;
+        }),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        classify(&current, |next| {
+            let mut lengths = session::CONTROL_SMOOTHING_DEFAULT;
+            lengths.fader_ms = 25.0;
+            next.control_smoothing = Some(lengths);
+        }),
+        Ok(Vec::new())
+    );
+    // The window is read by the records of the same edit: a move beside it uses the new window.
+    let moved = classify(&current, |next| {
+        next.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.5,
+            smoothing_samples: 32,
+        };
+    })
+    .expect("a pan move is live");
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].2.expect("a matrix record").smoothing_samples, 32);
+}
+
+/// Gate 4. Red if the mask compares resolved values instead of representations, or the reverse:
+/// a `both` entry rewritten as equal `left` and `right` entries is a different field with the same
+/// value, so it is live with no record; a different value is a record.
+#[test]
+fn rewriting_an_effect_entry_in_another_form_is_live_with_no_record() {
+    let mut model = with_effects();
+    model.tracks[0].inserts.effects[0].params.push(param(
+        1,
+        ParameterChannel::Both,
+        ParameterUnit::Db,
+        -30.0,
+    ));
+    let both = normalized(&model);
+    let split = |left: f32, right: f32| {
+        move |next: &mut SessionModel| {
+            next.tracks[0].inserts.effects[0].params = vec![
+                param(1, ParameterChannel::Left, ParameterUnit::Db, left),
+                param(1, ParameterChannel::Right, ParameterUnit::Db, right),
+            ];
+        }
+    };
+    assert_eq!(
+        classify_effects(&both, split(-30.0, -30.0)),
+        Ok((Vec::new(), Vec::new()))
+    );
+    // The reverse direction, from the split form.
+    let mut model = both.clone();
+    split(-30.0, -30.0)(&mut model);
+    let lanes = normalized(&model);
+    assert_eq!(
+        classify_effects(&lanes, |next| {
+            next.tracks[0].inserts.effects[0].params =
+                vec![param(1, ParameterChannel::Both, ParameterUnit::Db, -30.0)];
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
+    // One lane's value differs: one record.
+    let (_, effects) = classify_effects(&both, split(-30.0, -20.0)).expect("live");
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].2, vec![record(0, Lane::Right, -20.0)]);
+}
+
+/// 64 tracks and four submixes, each fed by one track.
+#[cfg(feature = "test-support")]
+fn many_strips() -> SessionModel {
+    let mut model = two_tracks();
+    let track = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    for index in 2..64 {
+        let mut next = track.clone();
+        next.id = id(&format!("t{index:02}"));
+        model.tracks.push(next);
+        let mut next = route.clone();
+        next.id = id(&format!("r{index:02}"));
+        next.source = RouteSource::Track {
+            track_id: id(&format!("t{index:02}")),
+            tap: SendTap::PostPan,
+        };
+        model.routes.push(next);
+    }
+    for index in 0..4 {
+        let bus = id(&format!("bus{index}"));
+        let mut send = route.clone();
+        send.id = id(&format!("send{index}"));
+        send.source = RouteSource::Track {
+            track_id: id(&format!("t{:02}", index + 2)),
+            tap: SendTap::PostPan,
+        };
+        send.destination = RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        };
+        let mut out = route.clone();
+        out.id = id(&format!("bus{index}-main"));
+        out.source = RouteSource::Submix {
+            submix_id: bus.clone(),
+            tap: SendTap::PostPan,
+        };
+        model.routes.push(send);
+        model.routes.push(out);
+        let console = model.console.clone();
+        model.submixes.push(Submix::unity(bus, &console));
+    }
+    normalized(&model)
+}
+
+/// Gate 5. Red if the classifier lowers every owner again: one `fader_db` edit on 64 tracks and
+/// four submixes lowers exactly one owner, on a track and on a submix, and an edit that moves
+/// nothing lowers none.
+#[cfg(feature = "test-support")]
+#[test]
+fn one_edit_lowers_one_owner() {
+    let current = many_strips();
+    assert_eq!((current.tracks.len(), current.submixes.len()), (64, 4));
+    let lowered = |edit: fn(&mut SessionModel)| {
+        host_core::take_lowered_owner_count();
+        let records = classify(&current, edit).expect("a live edit");
+        (host_core::take_lowered_owner_count(), records.len())
+    };
+    assert_eq!(lowered(|next| next.tracks[37].fader.left_db = -6.0), (1, 1));
+    assert_eq!(
+        lowered(|next| next.submixes[2].fader.right_db = -6.0),
+        (1, 1)
+    );
+    assert_eq!(lowered(|_| {}), (0, 0));
+    // Two families of one strip are two lowerings; two strips are two.
+    assert_eq!(
+        lowered(|next| {
+            next.tracks[5].fader.left_mute = true;
+            next.tracks[5].matrix_or_pan = MatrixOrPan::Pan {
+                left: 0.5,
+                right: 0.5,
+                smoothing_samples: 0,
+            };
+        }),
+        (2, 1)
     );
 }
