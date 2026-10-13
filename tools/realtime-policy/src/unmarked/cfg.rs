@@ -1,7 +1,8 @@
 //! Test code by attribute (#1443 D1, rule 2): `#[test]`, and `#[cfg(P)]` where `P` is false.
 //!
-//! `P` is evaluated with three-valued (Kleene) logic: the atom `test` is false, every
-//! `feature = ".."` is true, and every other atom is unknown. Several `#[cfg]` attributes on one
+//! `P` is evaluated with three-valued (Kleene) logic: the atom `test` is false, and every
+//! other atom, every `feature = ".."` included, is unknown (root fix of 2026-10-13: reading a
+//! feature as true made `#[cfg(not(feature = "x"))]` false and let its pops pass as test code). Several `#[cfg]` attributes on one
 //! node are joined with AND. `cfg_attr` is ignored, which fails closed: a node whose attributes
 //! the evaluator cannot read as false is not test code.
 
@@ -66,7 +67,6 @@ pub(super) fn is_test(attributes: &[syn::Attribute]) -> bool {
 fn eval(meta: &syn::Meta) -> Tri {
     match meta {
         syn::Meta::Path(path) if path.is_ident("test") => Tri::False,
-        syn::Meta::NameValue(pair) if pair.path.is_ident("feature") => Tri::True,
         syn::Meta::List(list) => {
             let Ok(arguments) =
                 list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)

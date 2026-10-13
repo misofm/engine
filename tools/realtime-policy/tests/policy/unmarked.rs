@@ -63,6 +63,10 @@ fn only_a_false_cfg_is_test_code() {
             format!("#[cfg(any(test, feature = \"test-support\"))]\n{POP}"),
         ),
         (
+            "not-feature",
+            format!("#[cfg(not(feature = \"x\"))]\n{POP}"),
+        ),
+        (
             "unknown-atom",
             format!("#[cfg(all(unix, not(unix)))]\n{POP}"),
         ),

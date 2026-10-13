@@ -400,6 +400,8 @@ Delivery mode: feature sprint (no mutation runs, short note). Re-measured on `ma
   `#[cfg(not(feature = "x"))]` evaluates false and its pops count as test code: a production build
   without the feature compiles them. Reading features as unknown instead gives every result the spec
   lists (the `test-support` forms stay non-test) and closes this. The real tree has no such cfg.
+- **Root fix (2026-10-13):** feature predicates read as unknown, unknown is non-test (fail closed); test
+  `only_a_false_cfg_is_test_code` (row `not-feature`). This closes the open item above.
 - **Gates.** `cargo run --release -p realtime-policy`: ok (126 regions in 27 files);
   `cargo test --locked -p realtime-policy`: 222 passed; fmt; clippy `-D warnings` for
   `realtime-policy`, `source`, `host-core`; `check-workspace-policy.sh`. No shipped code changed

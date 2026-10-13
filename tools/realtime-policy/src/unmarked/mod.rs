@@ -6,8 +6,8 @@
 //! skipped:
 //!
 //! - **Test code (D1)** is ignored: a file under `<package>/tests/`, a node that carries `#[test]`
-//!   or a `#[cfg(P)]` whose `P` is false when `test` is false, every `feature = ".."` is true and
-//!   every other atom is unknown, and a file that only test code declares ([`modules`], [`cfg`]).
+//!   or a `#[cfg(P)]` whose `P` is false when `test` is false and every other atom, every
+//!   `feature = ".."` included, is unknown, and a file that only test code declares ([`modules`], [`cfg`]).
 //!   No module is exempt by its name, and `#[cfg(any(test, feature = "test-support"))]` is not
 //!   test code: a test-support build ships it.
 //! - **Every other pop (D2)** must be in a marked region (where the drain rule judges it) or in
