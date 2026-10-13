@@ -7,8 +7,6 @@
 //! lanes staying off. The second is the same fixture with an empty console, no inserts and both
 //! input filters off, so its lanes-free tail is finite; only it can show the tail rule.
 
-use core::num::NonZeroUsize;
-
 use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::TestOnlyWriteGate;
 use builtins_compiler::{
@@ -138,10 +136,7 @@ fn lanes_free(model: &SessionModel) -> PreparedHost {
 }
 
 fn request() -> HostLiveControlRequest {
-    HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
-        ..HostLiveControlRequest::default()
-    }
+    HostLiveControlRequest::default()
 }
 
 fn with_lanes(

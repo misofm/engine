@@ -12,10 +12,9 @@ use engine::realtime::{
 };
 use graph_compiler::Backend;
 use host_core::{
-    CompiledSession, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PlanStateInventory,
-    PrepareDiagnostics, PreparedHost, SourceControlSet, SourceSubmission, SuccessorBase,
-    compile_host_model, test_only_prepare_host_runtime_with_live_controls_on,
-    test_only_prepare_host_runtime_with_live_controls_successor_on,
+    CompiledSession, HostPrepareCaps, HostShapePolicy, PlanStateInventory, PrepareDiagnostics,
+    PreparedHost, SourceControlSet, SourceSubmission, SuccessorBase, compile_host_model,
+    test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
 };
 use session::SessionModel;
 
@@ -77,14 +76,8 @@ impl Session {
 
     /// Prepared fresh, as a plan with no predecessor.
     pub(crate) fn prepare(&self, backend: Backend) -> PreparedHost {
-        test_only_prepare_host_runtime_with_live_controls_on(
-            &self.compiled,
-            &caps(),
-            &HostLiveControlRequest::default(),
-            backend,
-        )
-        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
-        .0
+        test_only_prepare_host_runtime_on(&self.compiled, &caps(), backend)
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
     }
 
     /// Prepared as the successor of the plan `inventory` describes, whose committed model is
@@ -96,10 +89,9 @@ impl Session {
         caps: &HostPrepareCaps,
         backend: Backend,
     ) -> Result<PreparedHost, PrepareDiagnostics> {
-        test_only_prepare_host_runtime_with_live_controls_successor_on(
+        test_only_prepare_host_runtime_successor_on(
             &self.compiled,
             caps,
-            &HostLiveControlRequest::default(),
             SuccessorBase {
                 inventory,
                 committed,
@@ -108,7 +100,6 @@ impl Session {
             },
             backend,
         )
-        .map(|(prepared, _)| prepared)
     }
 }
 

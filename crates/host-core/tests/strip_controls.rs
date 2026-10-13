@@ -7,8 +7,6 @@
 //! render the same bits. The bus strip holds no state that the fader could have perturbed earlier,
 //! so the comparison is exact.
 
-use core::num::NonZeroUsize;
-
 use builtins::BuiltinLaneSelector;
 use builtins_compiler::{TestOnlyWriteGate, TrackFaderRecord};
 use dsp_reference::randomized::Draw;
@@ -132,10 +130,7 @@ fn prepare(document: &str) -> (PreparedHost, HostLiveControlHandles) {
     let compiled = compile_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
-    let request = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
-        ..HostLiveControlRequest::default()
-    };
+    let request = HostLiveControlRequest::default();
     prepare_host_runtime_with_live_controls(&compiled, &caps(), &request).unwrap_or_else(
         |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
     )

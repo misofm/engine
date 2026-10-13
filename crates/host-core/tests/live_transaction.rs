@@ -170,10 +170,7 @@ fn one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for()
     let (mut host, mut handles) = prepare_host_runtime_with_live_lanes(
         &compile(&initial),
         &caps(),
-        &HostLiveControlRequest {
-            control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
-            ..HostLiveControlRequest::default()
-        },
+        &HostLiveControlRequest::default(),
         HostLiveLanes::FADER_AND_MATRIX,
         None,
         &LiveValuesSuperseded::default(),

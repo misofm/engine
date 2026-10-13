@@ -609,9 +609,6 @@ struct HostHalf {
     effects: Box<[host_core::EffectControlProducer]>,
 }
 
-/// capi's live-lane depth, `LIVE_QUEUE_DEPTH` (#1053 D4), which is crate-private.
-const LIVE_QUEUE_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::new(16).unwrap();
-
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
     host_half_counting(
         document,
@@ -644,10 +641,7 @@ fn host_half_counting(
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
-        &host_core::HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..host_core::HostLiveControlRequest::default()
-        },
+        &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
             strip_input: false,
             effects: true,
@@ -703,10 +697,7 @@ impl HostHalf {
         host_core::prepare_host_runtime_with_live_lanes(
             self.store.compiled(),
             &host_caps(compile_limits),
-            &host_core::HostLiveControlRequest {
-                control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-                ..host_core::HostLiveControlRequest::default()
-            },
+            &host_core::HostLiveControlRequest::default(),
             host_core::HostLiveLanes {
                 strip_input: false,
                 effects: true,
@@ -1987,10 +1978,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
-        &host_core::HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..host_core::HostLiveControlRequest::default()
-        },
+        &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
             strip_input: false,
             effects: true,

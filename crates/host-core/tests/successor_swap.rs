@@ -404,14 +404,8 @@ fn the_largest_allocation_counts_a_carried_ring() {
     let b = Session::compile(b_model);
     let backend = Backend::current();
     let prepare = |session: &Session| {
-        host_core::test_only_prepare_host_runtime_with_live_controls_on(
-            &session.compiled,
-            &long_rings,
-            &host_core::HostLiveControlRequest::default(),
-            backend,
-        )
-        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
-        .0
+        host_core::test_only_prepare_host_runtime_on(&session.compiled, &long_rings, backend)
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
     };
     let predecessor = prepare(&a);
     let fresh = prepare(&b).report;
@@ -462,13 +456,8 @@ fn the_carry_program_is_charged_to_the_graph_cap() {
         caps
     };
     let fresh = smallest_admitting(|cap| {
-        host_core::test_only_prepare_host_runtime_with_live_controls_on(
-            &b.compiled,
-            &with_graph_cap(cap),
-            &host_core::HostLiveControlRequest::default(),
-            backend,
-        )
-        .is_ok()
+        host_core::test_only_prepare_host_runtime_on(&b.compiled, &with_graph_cap(cap), backend)
+            .is_ok()
     });
     let successor = smallest_admitting(|cap| {
         b.prepare_successor(
@@ -972,10 +961,7 @@ struct LivePlan {
 
 impl LivePlan {
     fn request() -> host_core::HostLiveControlRequest {
-        host_core::HostLiveControlRequest {
-            control_queue_depth: Some(core::num::NonZeroUsize::new(8).expect("depth")),
-            ..host_core::HostLiveControlRequest::default()
-        }
+        host_core::HostLiveControlRequest::default()
     }
 
     fn new(

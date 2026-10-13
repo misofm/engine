@@ -7,7 +7,6 @@
 #![cfg(feature = "control-provider")]
 
 use controls::RebuildReason;
-use core::num::NonZeroUsize;
 
 use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
 use dsp_reference::randomized::Draw;
@@ -1187,10 +1186,7 @@ fn pushed_records_render_the_rebuilt_plan() {
         "every edited track but the sign-of-zero one"
     );
 
-    let request = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
-        ..HostLiveControlRequest::default()
-    };
+    let request = HostLiveControlRequest::default();
     let (mut live, mut handles) =
         prepare_host_runtime_with_live_controls(&current_compiled, &caps(), &request)
             .unwrap_or_else(|failure| {
@@ -1607,10 +1603,7 @@ fn with_shaped_eq() -> SessionModel {
 /// The values preparation gave the EQ insert's owner: its committed rows, read from a host-core
 /// plan of `model` prepared with every live lane.
 fn prepared_eq_seeds(model: &SessionModel) -> Vec<f32> {
-    let request = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
-        ..HostLiveControlRequest::default()
-    };
+    let request = HostLiveControlRequest::default();
     let (_, handles) = prepare_host_runtime_with_live_controls(&compile(model), &caps(), &request)
         .unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))

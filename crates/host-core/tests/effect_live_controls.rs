@@ -54,7 +54,6 @@ fn caps() -> HostPrepareCaps {
 
 fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,

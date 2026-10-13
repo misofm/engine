@@ -81,8 +81,6 @@ pub const PLAN_ID: u64 = 149;
 /// frame have to describe the same span of samples, which is the rule
 /// `attach_effect_observation` states and the rule a host follows.
 pub const WINDOW_BLOCKS: u32 = 4;
-/// Bounded depth of each effect's live-control channel in the observation arms.
-pub const CONTROL_QUEUE_DEPTH: usize = 8;
 /// Cap on declared observation taps per effect, passed to the observation attach.
 pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 /// Bounded depth of each meter stream. Drained outside the clock after every observation.

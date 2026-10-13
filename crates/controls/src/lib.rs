@@ -31,6 +31,7 @@ mod effect_rows;
 mod effective;
 mod error;
 mod lane;
+mod live_lanes;
 mod live_ramps;
 mod mask;
 mod registry;
@@ -56,6 +57,7 @@ pub use effective::{
     effective_into, effective_strip,
 };
 pub use error::ControlError;
+pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
 pub use registry::{ControlRow, get, list, row_descriptor, set};

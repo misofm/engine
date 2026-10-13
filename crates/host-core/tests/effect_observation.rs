@@ -17,8 +17,10 @@ use effect_contract::{
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
-    LiveEffectRack, PreparedHost, SourceSubmission, prepare_host_session_with_live_controls,
+    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
+    HostShapePolicy, LiveEffectRack, LiveValuesSuperseded, PreparedHost, SourceSubmission,
+    compile_host_session, prepare_host_runtime_with_live_lanes, prepare_host_session,
+    prepare_host_session_with_live_controls,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.json");
@@ -80,7 +82,6 @@ fn live_controls(leg: Leg) -> HostLiveControlRequest {
         Leg::LiveControlsNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
     );
     HostLiveControlRequest {
-        control_queue_depth: attached.then(|| NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: attached
             .then(|| NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -123,12 +124,33 @@ fn prepare(leg: Leg) -> Session {
 }
 
 fn prepare_from(document: &str, leg: Leg) -> Session {
-    let (_session, mut prepared, handles) =
-        prepare_host_session_with_live_controls(document, &caps(), &live_controls(leg))
-            .unwrap_or_else(|failure| {
+    // The baseline leg is the plain entry: no live controls at all.
+    let (mut prepared, handles) = if leg == Leg::NoLiveControls {
+        let (_session, prepared) =
+            prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.strips.len(), TRACKS);
+        let handles = HostLiveControlHandles {
+            strips: Vec::new(),
+            track_count: 0,
+            strip_controls: Vec::new(),
+            effect_controls: Vec::new(),
+            meters: Vec::new(),
+            effect_observations: Vec::new(),
+            route_controls: Vec::new(),
+            master_track: None,
+            live_values_superseded: LiveValuesSuperseded::default(),
+        };
+        (prepared, handles)
+    } else {
+        let (_session, prepared, handles) =
+            prepare_host_session_with_live_controls(document, &caps(), &live_controls(leg))
+                .unwrap_or_else(|failure| {
+                    panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+                });
+        assert_eq!(handles.strips.len(), TRACKS);
+        (prepared, handles)
+    };
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
         "the cohort planner bound at least one homogeneous bank on this host"
@@ -671,7 +693,6 @@ fn scalar_reference_windows(
 #[test]
 fn the_per_node_scalar_path_publishes_its_own_block() {
     let request = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
@@ -770,20 +791,27 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
     );
 }
 
-/// Observation capacity without live controls is a rejection, not a silent half-attach.
+/// Observation capacity without effect lanes is a rejection, not a silent half-attach.
 #[test]
-fn observation_without_a_control_channel_is_refused() {
+fn observation_without_effect_lanes_is_refused() {
     let request = HostLiveControlRequest {
-        control_queue_depth: None,
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
         observation_taps: 4,
         master_track: None,
     };
-    let failure = prepare_host_session_with_live_controls(SESSION, &caps(), &request)
-        .err()
-        .expect("a subscription has no delivery path without a command queue");
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiles");
+    let failure = prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps(),
+        &request,
+        HostLiveLanes::FADER_AND_MATRIX,
+        None,
+        &LiveValuesSuperseded::default(),
+    )
+    .err()
+    .expect("a subscription has no delivery path without effect lanes");
     assert!(
         String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.live_controls"),
         "the diagnostic names the rule"
@@ -791,7 +819,6 @@ fn observation_without_a_control_channel_is_refused() {
 
     // And a designated master must name a track this session has.
     let request = HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         master_track: Some(TRACKS as u32),
         ..request
     };

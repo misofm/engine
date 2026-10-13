@@ -2986,14 +2986,9 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     let (without_effects, _) = host_core::prepare_host_runtime_with_live_lanes(
         &compiled,
         &caps,
-        &HostLiveControlRequest {
-            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-            ..HostLiveControlRequest::default()
-        },
-        HostLiveLanes {
-            effects: false,
-            ..C_ABI_LIVE_LANES
-        },
+        &HostLiveControlRequest::default(),
+        // The C ABI's selection less its effect lanes: today no input or route row is live.
+        HostLiveLanes::FADER_AND_MATRIX,
         None,
         &host_core::LiveValuesSuperseded::default(),
     )

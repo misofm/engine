@@ -19,6 +19,9 @@ use session::{
 const SOURCE: &[u8] = b"fixture-source";
 /// Long enough for every run below.
 const SOURCE_FRAMES: u64 = 96 * 128;
+/// The depth of the queue the effect lanes replaced (#1345): a transaction larger than it proves
+/// the cells have no queue to overflow.
+const OLD_QUEUE_DEPTH: usize = 16;
 
 /// One lane of the source: never zero, and different on the left and the right.
 fn source_sample(lane: usize, frame: u64) -> f32 {
@@ -2500,10 +2503,7 @@ impl LaneReference {
         let (mut host, handles) = prepare_host_runtime_with_live_lanes(
             &compiled,
             &caps,
-            &HostLiveControlRequest {
-                control_queue_depth: Some(LIVE_QUEUE_DEPTH),
-                ..HostLiveControlRequest::default()
-            },
+            &HostLiveControlRequest::default(),
             HostLiveLanes::ALL,
             None,
             &host_core::LiveValuesSuperseded::default(),
@@ -2822,6 +2822,47 @@ fn eq_session(sample_rate_hz: u32) -> String {
         both(4, ParameterUnit::Db, 6.0),
     ];
     session::canonical_session_json(&model).expect("canonical EQ session")
+}
+
+/// #1555 gate 2: the lanes the core chooses for a session with a console slot on every track and
+/// one insert are the lanes the C ABI always carried: an effect producer per console slot and
+/// insert, a fader/matrix producer per strip, and no input cells (no input row is live).
+///
+/// Test value: red if choosing the lanes from the rows changes the C ABI's lane set before a row
+/// flips, which would hand a live edit no cell, or an input lane whose tail turns infinite.
+#[test]
+fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_lanes_and_no_input_cells() {
+    let document = eq_session(48_000);
+    let children = compile_children(&document, limits(), None).expect("EQ session");
+    let providers = children.session.test_providers();
+    let model = parse_session_json(&document).expect("EQ session parses");
+    let strips = model.tracks.len() + model.submixes.len();
+    assert_eq!(providers.test_strip_controls().len(), strips);
+    assert!(
+        providers
+            .test_strip_controls()
+            .iter()
+            .all(|strip| strip.input.is_none()),
+        "no strip carries an input lane"
+    );
+    let slots = model.console.pre_insert.len() + model.console.post_insert.len();
+    let inserts: usize = model
+        .tracks
+        .iter()
+        .map(|track| track.inserts.effects.len())
+        .chain(
+            model
+                .submixes
+                .iter()
+                .map(|submix| submix.inserts.effects.len()),
+        )
+        .sum();
+    assert!(slots > 0 && inserts > 0, "the session has both kinds");
+    assert_eq!(
+        providers.test_effects().len(),
+        strips * slots + inserts,
+        "one effect producer per console slot of every strip and per insert"
+    );
 }
 
 /// One EQ edit, by descriptor parameter ID.
@@ -3486,7 +3527,7 @@ fn one_transaction_with_more_cells_than_the_old_queue_held_stays_live() {
         })
         .sum();
     assert!(
-        cells > LIVE_QUEUE_DEPTH.get(),
+        cells > OLD_QUEUE_DEPTH,
         "the transaction writes more cells than the old queue held ({cells} cells)"
     );
     let edit = |&(parameter_id, unit, value): &(u32, session::ParameterUnit, f32)| {

@@ -16,6 +16,7 @@ default = []
 test-support = ["host-core/test-support"]
 
 [dependencies]
+controls.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
 host-core = { workspace = true, features = ["control-provider"] }

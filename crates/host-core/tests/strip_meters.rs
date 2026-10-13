@@ -649,7 +649,6 @@ fn two_bus_session() -> String {
 fn the_last_submix_can_be_designated_master_and_one_past_it_is_refused() {
     let document = two_bus_session();
     let request = |master: u32| HostLiveControlRequest {
-        control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
         meter_period_frames: NonZeroU32::new(QUANTUM as u32),
         meter_queue_depth: NonZeroUsize::new(4).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
