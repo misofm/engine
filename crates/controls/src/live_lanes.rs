@@ -20,14 +20,16 @@ pub struct LiveLanes {
 }
 
 impl LiveLanes {
-    /// The lanes the live rows in `rows` need. A row that its owner's shape does not use
-    /// (`active == false`) needs none.
+    /// The lanes the live rows in `rows` need, chosen by a row's class and family alone. A row's
+    /// `active` flag is a value-dependent state (a `matrix_mode` switch flips it), and a plan's
+    /// lanes must not depend on a value: an inactive live row asks for its lane as an active one
+    /// does, so a live edit never finds the lane missing and a plan and its successor agree.
     #[must_use]
     pub fn of_rows(rows: impl IntoIterator<Item = ControlRow>) -> Self {
         let mut lanes = Self::default();
         for row in rows {
             let descriptor = row.descriptor;
-            if !descriptor.active || descriptor.class != ControlClass::Live {
+            if descriptor.class != ControlClass::Live {
                 continue;
             }
             match descriptor.family {

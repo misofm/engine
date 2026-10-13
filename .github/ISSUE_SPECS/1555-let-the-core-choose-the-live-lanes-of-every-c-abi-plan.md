@@ -139,3 +139,12 @@ columns (the session's limiter), so the input lane's infinite live tail changes 
 C ABI's lane set equals `C_ABI_LIVE_LANES` for the session (`effects` only; the effect control
 bytes are identical to the pre-change preparation), and `audit capi` reports `pcm_digest`
 `76525e7ef9e78cf4` unchanged.
+
+## Decision record (batch 2 review fold, 2026-10-13)
+
+- **D-fold-1. Lanes by class and family only.** `LiveLanes::of_rows` no longer skips a row whose
+  `active` flag is false. `active` follows a value (a live `matrix_mode` switch flips it), and a
+  value must never change which lanes a plan has: otherwise a successor of one session could
+  carry other lanes than its predecessor, and a live edit could find its lane missing. The
+  `active` flag still decides what a row lists and what `set` accepts.
+

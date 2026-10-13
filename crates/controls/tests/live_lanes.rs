@@ -81,14 +81,25 @@ fn a_live_route_or_input_row_asks_for_its_lane() {
     assert!(!today.strip_input && !today.routes);
 }
 
-/// Red if an inactive row (one its owner's shape does not use) asks for a lane.
+/// Red if a row's `active` flag, which a value (`matrix_mode`) flips, changes which lanes a plan
+/// has: the lanes follow class and family alone, so the same session in two states has one plan
+/// shape and a live edit can never find its lane missing.
 #[test]
-fn an_inactive_live_row_asks_for_no_lane() {
-    let model = fixture();
-    let mut table = rows(&model);
-    for row in &mut table {
-        row.descriptor.class = ControlClass::Live;
-        row.descriptor.active = false;
-    }
-    assert_eq!(LiveLanes::of_rows(table), LiveLanes::default());
+fn a_rows_active_flag_never_changes_the_lanes() {
+    let model = effects_fixture();
+    let lanes_with = |active: bool| {
+        let mut table = rows(&model);
+        for row in &mut table {
+            row.descriptor.class = ControlClass::Live;
+            row.descriptor.active = active;
+        }
+        LiveLanes::of_rows(table)
+    };
+    let all = LiveLanes {
+        strip_input: true,
+        effects: true,
+        routes: true,
+    };
+    assert_eq!(lanes_with(true), all);
+    assert_eq!(lanes_with(false), all);
 }
