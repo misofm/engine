@@ -52,6 +52,8 @@ pub(crate) fn policy() -> Policy {
             "miso_engine_web_v1_dispose".to_owned(),
             "miso_engine_web_v1_render_allocation_count".to_owned(),
         ],
+        // The base tree has no control-side pop; a case that needs entries passes its own.
+        control_side_allowlist: Vec::new(),
         ..Policy::workspace()
     }
 }

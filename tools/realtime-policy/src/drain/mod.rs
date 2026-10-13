@@ -128,9 +128,12 @@ use crate::boundary::{Boundaries, RegionNodes};
 use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
-use facts::{Facts, PopKind, PopSite, Use};
+use facts::{Facts, Use};
+pub(crate) use facts::{PopKind, PopSite, macro_pops};
+pub(crate) use names::bare;
 use scope::{Binding, BindingKind, nearest};
-use tree::{Node, Pos, Step, Tree, Via};
+use tree::{Node, Step, Tree, Via};
+pub(crate) use tree::{Pos, pos};
 pub(crate) use trusted::NameScan;
 
 /// What a judgment reads: the file's tree, its facts, the pop's region, and every pop of the file.

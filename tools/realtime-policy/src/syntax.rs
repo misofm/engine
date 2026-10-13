@@ -9,20 +9,26 @@ use crate::source::Source;
 /// Parse `source`. A file that does not parse, or whose tree holds a node that `syn` keeps as raw
 /// tokens, is a finding: no rule can judge tokens the tree does not expose.
 pub(crate) fn parse(source: &Source, findings: &mut Vec<Finding>) -> Option<syn::File> {
-    let file = match syn::parse_file(&source.text) {
-        Ok(file) => file,
+    let file = parse_tree(source, findings)?;
+    let mut finder = VerbatimFinder { source, findings };
+    finder.visit_file(&file);
+    Some(file)
+}
+
+/// Parse `source`. A file that does not parse is a finding. Raw-token nodes are not reported: the
+/// census covers a `try_pop` in one token by token.
+pub(crate) fn parse_tree(source: &Source, findings: &mut Vec<Finding>) -> Option<syn::File> {
+    match syn::parse_file(&source.text) {
+        Ok(file) => Some(file),
         Err(error) => {
             findings.push(Finding::at_line_only(
                 Class::ParseError,
                 &source.path,
                 error.span().start().line,
             ));
-            return None;
+            None
         }
-    };
-    let mut finder = VerbatimFinder { source, findings };
-    finder.visit_file(&file);
-    Some(file)
+    }
 }
 
 /// Reports every node that the parser kept as a token stream.

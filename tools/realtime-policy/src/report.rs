@@ -60,6 +60,14 @@ pub enum Class {
     ForbiddenBody,
     /// A `try_pop` in a marked region that the drain rule cannot prove bounded.
     UnboundedTryPop,
+    /// A non-test `try_pop` outside every marked region, in a function that no control-side
+    /// allowlist entry admits (D2).
+    UnmarkedTryPop,
+    /// A `try_pop` identifier token that the syntax walk did not classify (D2, the census).
+    UnclassifiedTryPop,
+    /// A control-side allowlist entry whose file or function is gone, whose path matches more than
+    /// one function, or whose site count differs from the function's (D3).
+    StaleAllowlistEntry,
     /// `crates/capi/src/ffi.rs` does not exist.
     MissingCapiFfi,
     /// `crates/capi/src/ffi.rs` has no production render entry point.
@@ -145,6 +153,15 @@ impl fmt::Display for Class {
             Self::UnboundedTryPop => out.write_str(
                 "marked realtime unbounded try_pop drain (bound it with available_at_entry)",
             ),
+            Self::UnmarkedTryPop => out.write_str(
+                "unmarked try_pop outside the control-side allowlist (mark its function as a realtime region, or list it with its thread and reason)",
+            ),
+            Self::UnclassifiedTryPop => out.write_str(
+                "try_pop token the syntax walk did not classify (not a pop, a fn definition, test code or an allowlisted pop)",
+            ),
+            Self::StaleAllowlistEntry => out.write_str(
+                "stale control-side allowlist entry (its file or function is gone, its path matches more than one function, or its site count differs)",
+            ),
             Self::MissingCapiFfi => write!(out, "missing {}", whole_plan::CAPI_FFI),
             Self::NoRenderEntry => out.write_str("has no production render entry point to scan"),
             Self::WholePlanReference => out.write_str(
@@ -211,6 +228,9 @@ pub struct Finding {
     pub source: Option<String>,
     /// The export that the finding is about, with its prefix, when it is about one.
     pub export: Option<String>,
+    /// The canonical function path of the control-side allowlist entry that the finding is about,
+    /// when it is about one.
+    pub function: Option<String>,
 }
 
 impl Finding {
@@ -222,6 +242,7 @@ impl Finding {
             line: None,
             source: None,
             export: None,
+            function: None,
         }
     }
 
@@ -233,6 +254,7 @@ impl Finding {
             line: None,
             source: None,
             export: None,
+            function: None,
         }
     }
 
@@ -244,7 +266,14 @@ impl Finding {
             line: Some(line),
             source: Some(source.trim().to_owned()),
             export: None,
+            function: None,
         }
+    }
+
+    /// The same finding, about the allowlist entry for `function`.
+    pub(crate) fn about_entry(mut self, function: &str) -> Self {
+        self.function = Some(function.to_owned());
+        self
     }
 
     /// The same finding, about `export`.
@@ -261,6 +290,7 @@ impl Finding {
             line: Some(line),
             source: None,
             export: None,
+            function: None,
         }
     }
 }
@@ -270,6 +300,9 @@ impl fmt::Display for Finding {
         write!(out, "realtime policy failure: {}", self.class)?;
         if let Some(export) = &self.export {
             write!(out, ": export {export}")?;
+        }
+        if let Some(function) = &self.function {
+            write!(out, ": entry {function}")?;
         }
         if let Some(path) = &self.path {
             write!(out, ": {path}")?;

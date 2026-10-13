@@ -15,10 +15,10 @@ use super::names::bare;
 use crate::boundary::Boundaries;
 
 /// A source position as a sortable pair of line and column.
-pub(super) type Pos = (usize, usize);
+pub(crate) type Pos = (usize, usize);
 
 /// A position as a sortable pair.
-pub(super) fn pos(position: LineColumn) -> Pos {
+pub(crate) fn pos(position: LineColumn) -> Pos {
     (position.line, position.column)
 }
 

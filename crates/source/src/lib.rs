@@ -796,7 +796,7 @@ impl PcmSourceProducer {
             native_decoder_sanitized_samples: self.native_decoder_sanitized_samples,
         }
     }
-
+    // REALTIME_POLICY_BEGIN
     fn take_recycled_block(&mut self) -> Result<Box<TransferBlock>, HostChunkError> {
         if let Some(block) = self.deferred_block.take() {
             match self.data_producer.try_push(block) {
@@ -815,7 +815,7 @@ impl PcmSourceProducer {
                 full_count: self.data_producer.full_count(),
             })
     }
-
+    // REALTIME_POLICY_END
     fn submit(&mut self, chunk: HostPlanarChunk<'_>) -> Result<SubmitReport, HostChunkError> {
         validate_host_chunk(self, chunk)?;
         let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
@@ -1318,7 +1318,7 @@ impl PcmSourceConsumer {
         }
         Ok(())
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Pop the admitted command, if any, then apply a held anchored seek whose block has come.
     fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
         match self.command_consumer.try_pop() {
@@ -1363,7 +1363,7 @@ impl PcmSourceConsumer {
             SourceFrame(held.frame.0.saturating_add(late_by)),
         );
     }
-
+    // REALTIME_POLICY_END
     /// Make `generation` audible from `frame`. A pending `current` block of that generation that
     /// does not start behind `frame` is kept -- an anchored seek's primed block -- and any other is
     /// discarded, noting the region end it carries.
@@ -1384,7 +1384,7 @@ impl PcmSourceConsumer {
             }
         }
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Pop toward the block to play. `clock` is the block's, for a seek observed here.
     ///
     /// The call pops at most the blocks queued when it begins (`available`), never the blocks the
@@ -1472,7 +1472,7 @@ impl PcmSourceConsumer {
         self.note_end_and_discard(block);
         false
     }
-
+    // REALTIME_POLICY_END
     /// Carry the decoder's sanitized-sample count of `block` into the consumer's running maximum.
     fn note_sanitized_samples(&mut self, block: &TransferBlock) {
         self.native_decoder_sanitized_samples = self

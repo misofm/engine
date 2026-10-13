@@ -533,7 +533,7 @@ impl SpectrumCapture {
             .map(|_| ())
             .map_err(|_| SpectrumCaptureError::Busy)
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Cancel the current capture, discarding any completed window.
     pub fn cancel(&mut self) {
         let available = self
@@ -596,7 +596,7 @@ impl SpectrumCapture {
             _ => Err(SpectrumCaptureReadError::Invalid),
         }
     }
-
+    // REALTIME_POLICY_END
     /// Start scheduled windows for the prepared target.
     pub fn start_continuous(
         &mut self,
@@ -677,7 +677,7 @@ impl SpectrumCapture {
         self.commit_continuous(cadence, epoch);
         Ok(())
     }
-
+    // REALTIME_POLICY_BEGIN
     fn commit_continuous(&mut self, cadence: SpectrumCadence, epoch: u64) {
         let available = self
             .consumer
@@ -736,7 +736,7 @@ impl SpectrumCapture {
             self.recovery_pending = false;
         }
     }
-
+    // REALTIME_POLICY_END
     /// Return the active continuous profile, when this handle is running continuously.
     #[must_use]
     pub fn cadence(&self) -> Option<SpectrumCadence> {
@@ -768,7 +768,7 @@ impl SpectrumCapture {
         self.try_read_continuous_record()
             .map(|record| record.continuous_window())
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Try to take one continuous record from its control-side queue.
     ///
     /// Queue consumption is bounded by the population observed at this read entry. A stale item
@@ -836,7 +836,7 @@ impl SpectrumCapture {
             },
         )
     }
-
+    // REALTIME_POLICY_END
     /// The selected graph boundary for this capture.
     #[must_use]
     pub fn target(&self) -> &SpectrumTarget {
@@ -939,7 +939,7 @@ impl SpectrumCaptureCollection {
     pub fn cancel(&mut self) {
         self.cancel_except(None);
     }
-
+    // REALTIME_POLICY_BEGIN
     /// Drain and then reset every capture except `keep`.
     ///
     /// Every capture is drained before any is reset. The drain loop pops each capture's queue at
@@ -966,7 +966,7 @@ impl SpectrumCaptureCollection {
             capture.reset_after_cancel();
         }
     }
-
+    // REALTIME_POLICY_END
     /// Atomically replace the selected one-shot capture with an exact prepared entry.
     ///
     /// The target and mask are validated before touching the current capture. A successful

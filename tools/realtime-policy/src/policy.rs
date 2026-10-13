@@ -10,6 +10,122 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// table: `docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked allocator".
 const UNWRAPPED_EXPORTS: [&str; 2] = ["dispose", "render_allocation_count"];
 
+/// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a
+/// control, teardown or harness thread, never inside a product render callback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlSideEntry {
+    /// The file, relative to the workspace root with `/` separators.
+    pub path: String,
+    /// The canonical function path inside the file, with generics removed: `<fn>` for a free
+    /// function, `<Type>::<fn>` for an inherent method, `<Trait> for <Type>::<fn>` for a trait
+    /// method, each with `<mod>::` prefixes for the enclosing inline modules.
+    pub function: String,
+    /// The exact number of non-test `try_pop` sites in that function's own body, macro tokens
+    /// included.
+    pub sites: usize,
+    /// The thread that runs the function on every host that runs it.
+    pub thread: String,
+    /// Why the pop never runs inside a product render callback.
+    pub reason: String,
+}
+
+/// The day-one control-side allowlist (#1443 D7): path, function, sites, thread, reason. A reason
+/// says why the pop never runs inside a product render callback (the C ABI render call, the
+/// worklet's `process()` or a worklet message handler).
+const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
+    (
+        "crates/protocol/src/queue.rs",
+        "ProtocolQueues::try_dequeue_automation",
+        1,
+        "C ABI control thread",
+        "ProtocolController's control-side cancel of queued automation is the only consumer; no render-side drain exists (docs/CONTROL_PROTOCOL_SEMANTICS.md, \"Delivery status\"), and the protocol crate is not linked into the browser artifact",
+    ),
+    (
+        "crates/protocol/src/queue.rs",
+        "ProtocolQueues::try_dequeue_event",
+        1,
+        "C ABI control thread",
+        "ProtocolController dequeues reliable events on the control side; the protocol crate is not linked into the browser artifact",
+    ),
+    (
+        "crates/protocol/src/queue.rs",
+        "ProtocolQueues::try_dequeue_telemetry",
+        1,
+        "C ABI control thread",
+        "ProtocolController batches telemetry on the control side; the protocol crate is not linked into the browser artifact",
+    ),
+    (
+        "crates/protocol/src/queue.rs",
+        "ProtocolQueues::try_dequeue_counter_telemetry",
+        1,
+        "C ABI control thread",
+        "ProtocolController batches counter telemetry on the control side; the protocol crate is not linked into the browser artifact",
+    ),
+    (
+        "crates/engine/src/realtime/plan_exchange.rs",
+        "PlanRetirer::try_reclaim",
+        1,
+        "the control/retirement owner",
+        "the retirement queue's consumer is the control side, which reclaims a displaced plan off the render thread (its doc comment)",
+    ),
+    (
+        "crates/engine/src/realtime/plan_exchange.rs",
+        "Drop for PlanRetirer::drop",
+        1,
+        "the retirement owner, at teardown",
+        "destroys retired plans on the retirement owner's thread, not on the render thread (its doc comment)",
+    ),
+    (
+        "tools/console-workload/src/lib.rs",
+        "SessionRuntime::drain_meter_snapshots",
+        1,
+        "the benchmark driver's thread",
+        "the driver drains between blocks on the thread that renders, outside every render call",
+    ),
+    (
+        "tools/audit/src/builtins_graph.rs",
+        "run_retirement_worker",
+        1,
+        "the audit's retirement worker",
+        "the worker thread pops its own command queue; it never renders",
+    ),
+    (
+        "tools/audit/src/builtins_graph.rs",
+        "drain_values",
+        2,
+        "the audit harness thread",
+        "the harness drains each meter between render calls, on the thread that renders",
+    ),
+    (
+        "tools/audit/src/builtins_graph.rs",
+        "drain_fixture",
+        2,
+        "the audit harness thread",
+        "the harness drains each meter between render calls, on the thread that renders",
+    ),
+    (
+        "tools/audit/src/fixture_builtins.rs",
+        "graph_tap_fixtures",
+        1,
+        "the audit harness thread",
+        "the harness reads each tap's window after the render call returns",
+    ),
+    (
+        "tools/audit/src/fixture_builtins.rs",
+        "meters",
+        10,
+        "the audit harness thread",
+        "the harness drains each meter between render calls, on the thread that renders",
+    ),
+    (
+        "crates/builtins-compiler/src/lib.rs",
+        "tests::render_post_input_bits_with_variant",
+        1,
+        "the test harness (test-support builds)",
+        "the harness renders and drains in turn on one thread; it is a test-support helper, not a product render callback",
+    ),
+];
+
 /// The constants a check reads. `Policy::workspace` holds the real values; a library case builds
 /// its own by replacing fields, so no case depends on the real tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +140,9 @@ pub struct Policy {
     pub render_thread_exports: Vec<RenderThreadExport>,
     /// The full names of the table's entries that may be unwrapped.
     pub unwrapped_exports: Vec<String>,
+    /// The functions whose `try_pop` calls run off every render thread (#1443 D3). A non-test pop
+    /// outside every marked region must be in the body of one of these.
+    pub control_side_allowlist: Vec<ControlSideEntry>,
 }
 
 impl Policy {
@@ -66,15 +185,28 @@ impl Policy {
                 .collect(),
             // The floors equal the tree's counts, so a deleted marker or file fails here. They
             // carry stream B's raises (#1432's `latest_cell.rs`, #1277, #1279, #1346, #1347 and
-            // #1345 D9: the awk gate's 118 regions in 27 files) and #1448's `poll_meters` region.
-            // A change that adds a marker raises them in the same change.
+            // #1345 D9: the awk gate's 118 regions in 27 files), #1448's `poll_meters` region and
+            // #1443's seven (three in `crates/source`, four in `spectrum.rs`). A change that adds
+            // a marker raises them in the same change.
             marked_files_floor: 27,
-            marked_regions_floor: 119,
+            marked_regions_floor: 126,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS
                 .iter()
                 .map(|name| format!("{}{name}", table::PREFIX))
+                .collect(),
+            control_side_allowlist: CONTROL_SIDE
+                .iter()
+                .map(
+                    |&(path, function, sites, thread, reason)| ControlSideEntry {
+                        path: path.to_owned(),
+                        function: function.to_owned(),
+                        sites,
+                        thread: thread.to_owned(),
+                        reason: reason.to_owned(),
+                    },
+                )
                 .collect(),
         }
     }

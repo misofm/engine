@@ -105,7 +105,12 @@ fn the_ported_drain_cases_are_refused() {
         |_, case| {
             let tree = case.tree();
             let expected: &[Class] = match case.name {
-                "open-tail-last-file" => &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR],
+                "open-tail-last-file" => &[
+                    Class::MisorderedMarkers,
+                    Class::UnmarkedTryPop,
+                    FILE_FLOOR,
+                    REGION_FLOOR,
+                ],
                 "region-ends-in-comment" => &[Class::MalformedMarker],
                 _ => &[DRAIN],
             };

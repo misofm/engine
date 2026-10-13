@@ -2,7 +2,7 @@
 
 /// The name an identifier stands for: a raw identifier (`r#try_pop`) is the identifier without
 /// its prefix.
-pub(super) fn bare(ident: &proc_macro2::Ident) -> String {
+pub(crate) fn bare(ident: &proc_macro2::Ident) -> String {
     let text = ident.to_string();
     match text.strip_prefix("r#") {
         Some(rest) => rest.to_owned(),

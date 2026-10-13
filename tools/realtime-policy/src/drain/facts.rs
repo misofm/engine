@@ -15,7 +15,7 @@ pub(super) const POP: &str = "try_pop";
 
 /// How a pop is spelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PopKind {
+pub(crate) enum PopKind {
     /// A method call named `try_pop`.
     Method,
     /// A path expression whose last segment is `try_pop`.
@@ -26,15 +26,22 @@ pub(super) enum PopKind {
 
 /// A pop and the position of its `try_pop` identifier.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PopSite {
-    pub(super) pos: Pos,
-    pub(super) kind: PopKind,
+pub(crate) struct PopSite {
+    pub(crate) pos: Pos,
+    pub(crate) kind: PopKind,
 }
 
 /// Every pop of `file`, in no particular order.
 pub(super) fn pops(file: &syn::File) -> Vec<PopSite> {
     let mut finder = PopFinder { found: Vec::new() };
     finder.visit_file(file);
+    finder.found
+}
+
+/// The pops that spell `try_pop` in a macro's token tree, at any depth (D2).
+pub(crate) fn macro_pops(tokens: &proc_macro2::TokenStream) -> Vec<PopSite> {
+    let mut finder = PopFinder { found: Vec::new() };
+    finder.tokens(tokens);
     finder.found
 }
 

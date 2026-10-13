@@ -152,8 +152,15 @@ fn an_open_tail_is_misordered() {
         path: pad,
         text: &format!("// {END}\n// {BEGIN}\nfn render_tail() {{}}\n"),
     }]);
-    let report =
-        super::common::assert_classes(&tree, &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR]);
+    let report = super::common::assert_classes(
+        &tree,
+        &[
+            Class::MisorderedMarkers,
+            Class::UnmarkedTryPop,
+            FILE_FLOOR,
+            REGION_FLOOR,
+        ],
+    );
     assert_eq!(
         (report.regions, report.files),
         (BASE_REGIONS - 15, BASE_FILES - 1)
@@ -188,7 +195,8 @@ fn the_file_floor_fires_when_a_marked_file_loses_its_markers() {
     // including the file's unmarked `try_pop` drains.
     let tree = Tree::base("marked-file-count-floor");
     strip_marker_lines(&tree, "crates/builtins/src/lib.rs");
-    super::common::assert_classes(&tree, &[FILE_FLOOR, REGION_FLOOR]);
+    // The file's drains are pops outside every region now (#1443 D2).
+    super::common::assert_classes(&tree, &[Class::UnmarkedTryPop, FILE_FLOOR, REGION_FLOOR]);
 }
 
 #[test]
@@ -197,7 +205,8 @@ fn the_floors_fire_when_no_file_is_marked() {
     for path in marked_paths(&tree) {
         strip_marker_lines(&tree, &path);
     }
-    let report = super::common::assert_classes(&tree, &[FILE_FLOOR, REGION_FLOOR]);
+    let report =
+        super::common::assert_classes(&tree, &[Class::UnmarkedTryPop, FILE_FLOOR, REGION_FLOOR]);
     assert_eq!((report.regions, report.files), (0, 0));
 }
 
