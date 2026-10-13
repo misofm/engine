@@ -94,7 +94,11 @@ The stored automation target `{entity_id, rack, effect_id, parameter_id, channel
 **C3. The descriptor.** One type, `ControlDescriptor`, for every control:
 
 - identity: address; stable machine `name` (`fader_db`, `threshold_db`); `display_name`,
-  `display_unit`;
+  `display_unit`. A machine name is `[a-z][a-z0-9_]*`, unique within its section, and ends with the
+  unit suffix of its unit when the unit is dB (`_db`), Hz (`_hz`), ms (`_ms`), seconds (`_s`),
+  samples (`_samples`) or percent (`_percent`); a unitless, ratio, toggle or enumeration
+  parameter has no suffix (a ratio parameter ends `_ratio` only if the word is not already in the
+  name). `validate_descriptor` enforces it for effect parameters (#1549 D8);
 - value: `unit`; `kind` (continuous, toggle, enumeration); `minimum`, `maximum` (rate-resolved at
   the session rate), optional `disabled_value` (HPF and LPF `0` = off); `default`; `taper`
   (linear, logarithmic, exponential, decibel, stepped); `step` (lattice step and precision, and the

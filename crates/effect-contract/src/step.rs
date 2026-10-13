@@ -917,7 +917,7 @@ mod tests {
         ParameterDescriptor {
             id: ParameterId(1),
             display_name: "frequency",
-            name: "frequency",
+            name: "frequency_hz",
             display_unit: "Hz",
             unit: ParameterUnit::Hz,
             domain: ParameterDomain::Continuous,

@@ -132,7 +132,7 @@ const TIMING_REASON: Option<PreparedReason> = Some(PreparedReason {
 pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
-        "threshold",
+        "threshold_db",
         "threshold",
         "dB",
         ParameterUnit::Db,
@@ -160,7 +160,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     ),
     parameter(
         3,
-        "range",
+        "range_db",
         "range",
         "dB",
         ParameterUnit::Db,
@@ -174,7 +174,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     ),
     parameter(
         4,
-        "hysteresis",
+        "hysteresis_db",
         "hysteresis",
         "dB",
         ParameterUnit::Db,
@@ -190,7 +190,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         prepared_reason: TIMING_REASON,
         ..parameter(
             5,
-            "attack",
+            "attack_ms",
             "attack",
             "ms",
             ParameterUnit::Milliseconds,
@@ -207,7 +207,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         prepared_reason: TIMING_REASON,
         ..parameter(
             6,
-            "hold",
+            "hold_ms",
             "hold",
             "ms",
             ParameterUnit::Milliseconds,
@@ -224,7 +224,7 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         prepared_reason: TIMING_REASON,
         ..parameter(
             7,
-            "release",
+            "release_ms",
             "release",
             "ms",
             ParameterUnit::Milliseconds,

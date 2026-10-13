@@ -180,7 +180,7 @@ const fn parameter(
 pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     parameter(
         1,
-        "threshold",
+        "threshold_db",
         "threshold",
         "dB",
         ParameterUnit::Db,
@@ -208,7 +208,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         3,
-        "knee",
+        "knee_db",
         "knee",
         "dB",
         ParameterUnit::Db,
@@ -222,7 +222,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         4,
-        "attack",
+        "attack_ms",
         "attack",
         "ms",
         ParameterUnit::Milliseconds,
@@ -236,7 +236,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         5,
-        "release",
+        "release_ms",
         "release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -250,7 +250,7 @@ pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 7] = [
     ),
     parameter(
         6,
-        "makeup",
+        "makeup_db",
         "makeup",
         "dB",
         ParameterUnit::Db,

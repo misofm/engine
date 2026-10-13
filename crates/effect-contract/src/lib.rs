@@ -717,7 +717,8 @@ pub struct EnumChoice {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParameterDescriptor {
     pub id: ParameterId,
-    /// The stable machine name (decision 17, C3): `[a-z][a-z0-9_]*`, unique within the effect.
+    /// The stable machine name (decision 17, C3, D8): `[a-z][a-z0-9_]*`, unique within the effect,
+    /// ending with the suffix of its `unit` (see [`machine_name_unit_suffix`]).
     /// `display_name` is the label a person reads.
     pub name: &'static str,
     pub display_name: &'static str,
@@ -1005,6 +1006,35 @@ fn valid_machine_name(name: &str) -> bool {
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
+/// The suffix a machine name must end with for a parameter of `unit` (decision 17, C3/D8), or
+/// `None` when the unit takes no suffix. This is the one place that maps a unit to its suffix.
+///
+/// `dB` ends `_db`, Hz `_hz`, milliseconds `_ms`, samples `_samples`. A linear (unitless, toggle
+/// or enumeration) or ratio parameter has no suffix: a ratio parameter is already named for what
+/// it is (`ratio`, `low_ratio`, `band_1_q`). Seconds (`_s`) and percent (`_percent`) have no
+/// [`ParameterUnit`] today; adding one forces an arm here, because the match is exhaustive.
+#[must_use]
+pub const fn machine_name_unit_suffix(unit: ParameterUnit) -> Option<&'static str> {
+    match unit {
+        ParameterUnit::Db => Some("_db"),
+        ParameterUnit::Hz => Some("_hz"),
+        ParameterUnit::Milliseconds => Some("_ms"),
+        ParameterUnit::Samples => Some("_samples"),
+        ParameterUnit::Linear | ParameterUnit::Ratio => None,
+    }
+}
+/// Every suffix [`machine_name_unit_suffix`] can return, plus the two reserved for units that do
+/// not exist yet; a parameter whose unit takes no suffix must not end with any of them.
+const RESERVED_UNIT_SUFFIXES: [&str; 6] = ["_db", "_hz", "_ms", "_s", "_samples", "_percent"];
+/// Whether `name` carries the suffix its `unit` demands, and no suffix of another unit.
+fn machine_name_matches_unit(name: &str, unit: ParameterUnit) -> bool {
+    match machine_name_unit_suffix(unit) {
+        Some(suffix) => name.ends_with(suffix),
+        None => !RESERVED_UNIT_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix)),
+    }
+}
 pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
@@ -1033,7 +1063,10 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
     }
     let (mut prior, mut ids, mut names) = (0, BTreeSet::new(), BTreeSet::new());
     for p in d.parameters {
-        if !valid_machine_name(p.name) || !names.insert(p.name) {
+        if !valid_machine_name(p.name)
+            || !machine_name_matches_unit(p.name, p.unit)
+            || !names.insert(p.name)
+        {
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::ParameterName,
@@ -3335,7 +3368,7 @@ mod continuous_mapping_validity_tests {
     const BASE: ParameterDescriptor = ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
-        name: "gain",
+        name: "gain_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,

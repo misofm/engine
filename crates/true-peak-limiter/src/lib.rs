@@ -183,7 +183,7 @@ const LOOKAHEAD_REASON: Option<PreparedReason> = Some(PreparedReason {
 pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
-        "ceiling",
+        "ceiling_db",
         "ceiling",
         "dBTP-est",
         ParameterUnit::Db,
@@ -197,7 +197,7 @@ pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] =
     ),
     parameter(
         2,
-        "release",
+        "release_ms",
         "release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -213,7 +213,7 @@ pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] =
         prepared_reason: LOOKAHEAD_REASON,
         ..parameter(
             3,
-            "lookahead",
+            "lookahead_ms",
             "lookahead",
             "ms",
             ParameterUnit::Milliseconds,

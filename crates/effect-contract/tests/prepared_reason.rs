@@ -23,7 +23,7 @@ const fn parameter(
     ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
-        name: "gain",
+        name: "gain_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,

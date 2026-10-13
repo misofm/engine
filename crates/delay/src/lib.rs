@@ -185,7 +185,7 @@ const fn with_lattice(
 pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
-        "delay_time",
+        "delay_time_ms",
         "delay time",
         "ms",
         ParameterUnit::Milliseconds,

@@ -2097,7 +2097,7 @@ mod tail_bound_count_tests {
     const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
-        name: "gain",
+        name: "gain_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,

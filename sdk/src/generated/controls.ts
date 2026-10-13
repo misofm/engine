@@ -1225,7 +1225,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "threshold",
+          "name": "threshold_db",
           "displayName": "threshold",
           "displayUnit": "dB",
           "unit": "db",
@@ -1295,7 +1295,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 3,
-          "name": "knee",
+          "name": "knee_db",
           "displayName": "knee",
           "displayUnit": "dB",
           "unit": "db",
@@ -1330,7 +1330,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 4,
-          "name": "attack",
+          "name": "attack_ms",
           "displayName": "attack",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -1365,7 +1365,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 5,
-          "name": "release",
+          "name": "release_ms",
           "displayName": "release",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -1400,7 +1400,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 6,
-          "name": "makeup",
+          "name": "makeup_db",
           "displayName": "makeup",
           "displayUnit": "dB",
           "unit": "db",
@@ -1557,7 +1557,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "delay_time",
+          "name": "delay_time_ms",
           "displayName": "delay time",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -1772,7 +1772,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "threshold",
+          "name": "threshold_db",
           "displayName": "threshold",
           "displayUnit": "dB",
           "unit": "db",
@@ -1842,7 +1842,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 3,
-          "name": "range",
+          "name": "range_db",
           "displayName": "range",
           "displayUnit": "dB",
           "unit": "db",
@@ -1877,7 +1877,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 4,
-          "name": "hysteresis",
+          "name": "hysteresis_db",
           "displayName": "hysteresis",
           "displayUnit": "dB",
           "unit": "db",
@@ -1912,7 +1912,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 5,
-          "name": "attack",
+          "name": "attack_ms",
           "displayName": "attack",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -1947,7 +1947,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 6,
-          "name": "hold",
+          "name": "hold_ms",
           "displayName": "hold",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -1982,7 +1982,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 7,
-          "name": "release",
+          "name": "release_ms",
           "displayName": "release",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -2104,7 +2104,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "crossover",
+          "name": "crossover_hz",
           "displayName": "crossover",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -2139,7 +2139,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 3,
-          "name": "low_threshold",
+          "name": "low_threshold_db",
           "displayName": "low_threshold",
           "displayUnit": "dB",
           "unit": "db",
@@ -2209,7 +2209,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 5,
-          "name": "low_attack",
+          "name": "low_attack_ms",
           "displayName": "low_attack",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -2244,7 +2244,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 6,
-          "name": "low_release",
+          "name": "low_release_ms",
           "displayName": "low_release",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -2279,7 +2279,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 7,
-          "name": "low_makeup",
+          "name": "low_makeup_db",
           "displayName": "low_makeup",
           "displayUnit": "dB",
           "unit": "db",
@@ -2314,7 +2314,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 8,
-          "name": "high_threshold",
+          "name": "high_threshold_db",
           "displayName": "high_threshold",
           "displayUnit": "dB",
           "unit": "db",
@@ -2384,7 +2384,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 10,
-          "name": "high_attack",
+          "name": "high_attack_ms",
           "displayName": "high_attack",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -2419,7 +2419,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 11,
-          "name": "high_release",
+          "name": "high_release_ms",
           "displayName": "high_release",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -2454,7 +2454,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 12,
-          "name": "high_makeup",
+          "name": "high_makeup_db",
           "displayName": "high_makeup",
           "displayUnit": "dB",
           "unit": "db",
@@ -2671,7 +2671,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 3,
-          "name": "band_1_frequency",
+          "name": "band_1_frequency_hz",
           "displayName": "band-1-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -2706,7 +2706,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 4,
-          "name": "band_1_gain",
+          "name": "band_1_gain_db",
           "displayName": "band-1-gain",
           "displayUnit": "dB",
           "unit": "db",
@@ -2906,7 +2906,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 19,
-          "name": "band_2_frequency",
+          "name": "band_2_frequency_hz",
           "displayName": "band-2-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -2941,7 +2941,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 20,
-          "name": "band_2_gain",
+          "name": "band_2_gain_db",
           "displayName": "band-2-gain",
           "displayUnit": "dB",
           "unit": "db",
@@ -3141,7 +3141,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 35,
-          "name": "band_3_frequency",
+          "name": "band_3_frequency_hz",
           "displayName": "band-3-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -3176,7 +3176,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 36,
-          "name": "band_3_gain",
+          "name": "band_3_gain_db",
           "displayName": "band-3-gain",
           "displayUnit": "dB",
           "unit": "db",
@@ -3376,7 +3376,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 51,
-          "name": "band_4_frequency",
+          "name": "band_4_frequency_hz",
           "displayName": "band-4-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -3411,7 +3411,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 52,
-          "name": "band_4_gain",
+          "name": "band_4_gain_db",
           "displayName": "band-4-gain",
           "displayUnit": "dB",
           "unit": "db",
@@ -3551,7 +3551,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 66,
-          "name": "hpf_frequency",
+          "name": "hpf_frequency_hz",
           "displayName": "hpf-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -3656,7 +3656,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 82,
-          "name": "lpf_frequency",
+          "name": "lpf_frequency_hz",
           "displayName": "lpf-frequency",
           "displayUnit": "Hz",
           "unit": "hz",
@@ -3766,7 +3766,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "drive",
+          "name": "drive_db",
           "displayName": "drive",
           "displayUnit": "dB",
           "unit": "db",
@@ -3801,7 +3801,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 2,
-          "name": "output",
+          "name": "output_db",
           "displayName": "output",
           "displayUnit": "dB",
           "unit": "db",
@@ -4103,7 +4103,7 @@ export const CONTROLS = deepFreeze(
       "parameters": [
         {
           "control": 1,
-          "name": "ceiling",
+          "name": "ceiling_db",
           "displayName": "ceiling",
           "displayUnit": "dBTP-est",
           "unit": "db",
@@ -4138,7 +4138,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 2,
-          "name": "release",
+          "name": "release_ms",
           "displayName": "release",
           "displayUnit": "ms",
           "unit": "milliseconds",
@@ -4173,7 +4173,7 @@ export const CONTROLS = deepFreeze(
         },
         {
           "control": 3,
-          "name": "lookahead",
+          "name": "lookahead_ms",
           "displayName": "lookahead",
           "displayUnit": "ms",
           "unit": "milliseconds",

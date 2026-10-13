@@ -191,7 +191,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
         prepared_reason: CROSSOVER_REASON,
         ..parameter(
             1,
-            "crossover",
+            "crossover_hz",
             "crossover",
             "Hz",
             ParameterUnit::Hz,
@@ -206,7 +206,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     },
     parameter(
         3,
-        "low_threshold",
+        "low_threshold_db",
         "low_threshold",
         "dB",
         ParameterUnit::Db,
@@ -234,7 +234,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         5,
-        "low_attack",
+        "low_attack_ms",
         "low_attack",
         "ms",
         ParameterUnit::Milliseconds,
@@ -248,7 +248,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         6,
-        "low_release",
+        "low_release_ms",
         "low_release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -262,7 +262,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         7,
-        "low_makeup",
+        "low_makeup_db",
         "low_makeup",
         "dB",
         ParameterUnit::Db,
@@ -276,7 +276,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         8,
-        "high_threshold",
+        "high_threshold_db",
         "high_threshold",
         "dB",
         ParameterUnit::Db,
@@ -304,7 +304,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         10,
-        "high_attack",
+        "high_attack_ms",
         "high_attack",
         "ms",
         ParameterUnit::Milliseconds,
@@ -318,7 +318,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         11,
-        "high_release",
+        "high_release_ms",
         "high_release",
         "ms",
         ParameterUnit::Milliseconds,
@@ -332,7 +332,7 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT
     ),
     parameter(
         12,
-        "high_makeup",
+        "high_makeup_db",
         "high_makeup",
         "dB",
         ParameterUnit::Db,

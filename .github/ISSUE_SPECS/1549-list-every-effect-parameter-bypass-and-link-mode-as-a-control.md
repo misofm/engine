@@ -110,6 +110,19 @@ included, gets a display name and a display unit, so a frontend can draw it.
 - **D7. No behaviour change.** No host calls the new rows yet. The metadata generator output is
   unchanged in this slice (#1550 emits the rows).
 
+- **D8. Machine names.** A machine name is `[a-z][a-z0-9_]*`, unique within its section, and ends
+  with the unit suffix of its unit when the unit is dB (`_db`), Hz (`_hz`), ms (`_ms`), seconds
+  (`_s`), samples (`_samples`) or percent (`_percent`). A unitless, ratio, toggle or enumeration
+  parameter has no suffix (a ratio parameter ends `_ratio` only if the word is not already in the
+  name, so `ratio` and `low_ratio` stay as they are). Builtin and own rows already follow it
+  (`fader_db`, `trim_db`, `hpf_hz`, `pan_window_samples`). `effect_contract::machine_name_unit_suffix`
+  is the one function that maps a unit to its suffix; `validate_descriptor` enforces it with
+  `DescriptorDiagnosticCode::ParameterName` (also for a unitless or ratio parameter that ends in a
+  unit suffix). `ParameterUnit` has no seconds or percent member today, so those two suffixes are
+  reserved: adding the unit forces an arm in the match. All eight effects were renamed (batch 1
+  review fold): for example compressor `threshold_db`, `attack_ms`; delay `delay_time_ms`;
+  multiband `crossover_hz`; EQ `band_1_frequency_hz`, `band_1_gain_db`, `hpf_frequency_hz`.
+
 ## Deliverables
 
 1. D1: the field, the validation code, the four effects' reasons, and the field on every

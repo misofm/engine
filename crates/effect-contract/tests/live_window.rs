@@ -40,7 +40,7 @@ const fn parameter_descriptor(
     ParameterDescriptor {
         id: ParameterId(id),
         display_name: "Synthetic",
-        name: "synthetic",
+        name: "synthetic_db",
         display_unit: "dB",
         unit: ParameterUnit::Db,
         domain: ParameterDomain::Continuous,

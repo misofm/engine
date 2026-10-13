@@ -67,6 +67,17 @@ fn expected_instance(
     out
 }
 
+/// Red if the launch registry gains or loses an effect and this file's fixture list does not, so
+/// every per-effect test below covers exactly the effects that ship.
+#[test]
+fn the_fixture_effect_list_is_the_launch_registry() {
+    let registry = launch_native_effect_registry().expect("the launch registry builds");
+    let shipped: BTreeSet<&str> = registry.descriptors().map(|d| d.id.as_str()).collect();
+    let tested: BTreeSet<&str> = LAUNCH_EFFECTS.into_iter().collect();
+    assert_eq!(tested, shipped);
+    assert_eq!(registry.len(), LAUNCH_EFFECTS.len());
+}
+
 /// Gate 1, shape. Red if an effect parameter, bypass or link mode is not a control, is listed
 /// twice, is out of the ruled order, or a console slot grows a link-mode row.
 #[test]
@@ -636,9 +647,9 @@ fn effect_row_names_are_the_contracts_declared_names() {
             .descriptor
             .name
     };
-    assert_eq!(name_of("miso.delay", 1), "delay_time");
+    assert_eq!(name_of("miso.delay", 1), "delay_time_ms");
     assert_eq!(name_of("miso.parametric-eq", 1), "band_1_enabled");
-    assert_eq!(name_of("miso.compressor", 1), "threshold");
+    assert_eq!(name_of("miso.compressor", 1), "threshold_db");
     assert_eq!(
         all.iter()
             .find(|row| row.address.control == BYPASS_CONTROL)

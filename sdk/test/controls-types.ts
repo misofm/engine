@@ -18,7 +18,7 @@ export const sendGain: ControlAddress = {
 export const threshold: ControlAddress = {
   owner: { kind: "strip", id: "drums" },
   section: { kind: "inserts", effect: "comp" },
-  control: "threshold",
+  control: "threshold_db",
   lane: "right",
 };
 // The same name, narrowed to one effect.

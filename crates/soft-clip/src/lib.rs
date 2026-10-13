@@ -156,7 +156,7 @@ const fn parameter(
 pub const SOFT_CLIP_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
-        "drive",
+        "drive_db",
         "drive",
         "dB",
         ParameterUnit::Db,
@@ -166,7 +166,7 @@ pub const SOFT_CLIP_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     ),
     parameter(
         2,
-        "output",
+        "output_db",
         "output",
         "dB",
         ParameterUnit::Db,
