@@ -147,3 +147,37 @@ Dependents: *Prepare through an adapter-supplied preparer in the control-plane c
 *Replace the running browser session in the Rust host* (#1290).
 
 **Decision 17 amendment (2026-10-13).** D4's refusal (`host.spectrum.target`) and gate 4 stay as host-core's invariant check. From #1593 on, the control plane never passes a missing target: a structural edit that removes a spectrum target's strip or output drops that entry from the session's spectrum configuration in the same commit, before the successor is prepared, so the edit is never refused for a spectrum target (#1593 D4).
+
+## Decision record
+
+Implemented on the batch 4 branch (decision 17 controls program). The spec predates decision 17 and
+several landed slices; each adaptation of its intent to today's code:
+
+- **A1. Signatures carry `superseded`.** D1 and D2 list `(compiled, caps, live_controls, spectrum,
+  lanes, base)`. Since #1312 D2 every boot entry here takes the session's `live_values_superseded`
+  count after `lanes`, so each new entry takes `(.., lanes, superseded, base)` (D2's selected-meter
+  pair has `meters` before `lanes`). Each is its boot entry plus `base`, which is what D1 asks for.
+- **A2. No `bound_cache`.** `prepare_host_runtime_with_live_lanes{,_successor}` take an
+  `InputBoundCache`; the spectrum and selected-meter boot entries pass `None`, and
+  `prepare_selected_session_builtins_with_live_controls` takes none. The new entries match their
+  boot entries and take none. #1400 adds a cache argument to all of them together if it wants one.
+- **A3. `lanes` exists already.** The dependency on #1326 is met (`HostLiveLanes` is an argument of
+  every boot entry here). The cases pass `HostLiveLanes::ALL`; a caller passes what it chooses (the C
+  ABI's choice is `controls::live_lanes`, decision 17 C6).
+- **A4. Effective values.** The shared body now computes `controls::effective` once per preparation
+  (decision 17 C7), before it picks a builtins form. The four new entries reach that code through the
+  same body (D3), so they need no `effective` argument and no decision 17 change.
+- **A5. D2's routing.** In the body, `selected_meters.is_some()` now picks
+  `prepare_selected_session_builtins_between_render_calls` only when `between_render_calls` is true,
+  else `prepare_selected_session_builtins_with_live_controls`. The one existing caller of the
+  serialized selected entry passes `true`, so its behaviour and bits are unchanged.
+- **A6. Test harness.** `support/successor.rs` gained the general form `swapped_run_with` (an
+  already prepared predecessor and a closure that prepares the successor from its inventory),
+  `reference_run_of`, and a `SwappedRun` that keeps the render owner and exchange halves so gate 2
+  renders on past `BLOCKS`. `swapped_run` and `reference_run` delegate to them with unchanged
+  behaviour (`successor_swap.rs` passes unchanged). That is wider than "a spectrum-aware helper
+  only", but it is the one helper change that gates 1, 2 and 5 need.
+- **A7. Gate 1 negative.** The test also runs each branch with a base-less successor and expects the
+  first difference at the swap block, so the oracle can fail.
+- **A8. Decision 17 amendment.** D4's refusal and gate 4 stay as host-core's invariant check, as the
+  amendment says; the control plane never reaches it from #1593 on.

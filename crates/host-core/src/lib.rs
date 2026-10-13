@@ -147,12 +147,14 @@ pub use prepare::{
     prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
+    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
+    prepare_host_runtime_with_live_controls_and_spectrum_successor,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
-    prepare_host_runtime_with_live_lanes_successor,
+    prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_between_render_calls,
-    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    prepare_host_session, prepare_host_session_with_live_controls, strip_control_table_bytes,
-    strip_position,
+    prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
+    prepare_host_runtime_with_spectrum_collection, prepare_host_session,
+    prepare_host_session_with_live_controls, strip_control_table_bytes, strip_position,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{

@@ -3,6 +3,9 @@
 //! exchange, render on; and render the post-edit session fresh from sample zero as the reference.
 //! The two block streams are compared bit for bit. Slices 7-15 add their cases on top of it.
 
+// Every test binary that includes this file uses a different part of it.
+#![allow(dead_code)]
+
 use core::num::NonZeroUsize;
 
 use bench_support::alloc as bench_alloc;
@@ -170,7 +173,7 @@ pub(crate) struct Block {
     pub(crate) audit: (u64, u64),
 }
 
-fn render(owner: &mut RealtimePlanOwner) -> Block {
+pub(crate) fn render(owner: &mut RealtimePlanOwner) -> Block {
     let mut output = [f32::NAN; QUANTUM * 2];
     let sample = owner.next_absolute_sample();
     audit::reset();
@@ -194,7 +197,7 @@ fn render(owner: &mut RealtimePlanOwner) -> Block {
     }
 }
 
-fn exchange(plan: engine::realtime::PreparedRenderPlan) -> ExchangeParts {
+pub(crate) fn exchange(plan: engine::realtime::PreparedRenderPlan) -> ExchangeParts {
     plan_exchange(
         plan,
         PlanExchangeConfig {
@@ -204,7 +207,7 @@ fn exchange(plan: engine::realtime::PreparedRenderPlan) -> ExchangeParts {
     .unwrap_or_else(|_| panic!("plan exchange"))
 }
 
-type ExchangeParts = (
+pub(crate) type ExchangeParts = (
     engine::realtime::PlanPublisher,
     RealtimePlanOwner,
     engine::realtime::PlanRetirer,
@@ -222,6 +225,16 @@ pub(crate) struct SwappedRun {
     pub(crate) adopted: usize,
     /// The successor's `restarted_strips()` (#1277 D6).
     pub(crate) restarted: Vec<Box<str>>,
+    /// The render owner, now rendering the successor, for a test that renders on past
+    /// [`BLOCKS`] (#1401 gate 2).
+    #[allow(dead_code)]
+    // Read by the cases that render on; every test binary shares this file.
+    pub(crate) owner: RealtimePlanOwner,
+    /// The exchange's other halves, kept alive so the displaced plan is retired off the owner.
+    pub(crate) exchange: (
+        engine::realtime::PlanPublisher,
+        engine::realtime::PlanRetirer,
+    ),
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks, prepare `b` as its successor (committed model: `a`'s),
@@ -235,7 +248,31 @@ pub(crate) fn swapped_run(
     backend: Backend,
     successor: Successor,
 ) -> SwappedRun {
-    let predecessor = a.prepare(backend);
+    swapped_run_with(
+        a.prepare(backend),
+        |inventory| match successor {
+            Successor::Carry => b
+                .prepare_successor(inventory, &a.model, &caps(), backend)
+                .unwrap_or_else(|failure| panic!("successor: {failure:?}")),
+            Successor::Fresh => b.prepare(backend),
+        },
+        before,
+        after,
+        successor,
+    )
+}
+
+/// [`swapped_run`] over an already prepared predecessor, with the successor prepared by
+/// `prepare_successor` from the predecessor's inventory: the form a case uses when its plan comes
+/// from another preparation entry (#1401). For [`Successor::Carry`] the closure must prepare a
+/// real successor; for [`Successor::Fresh`] it ignores the inventory.
+pub(crate) fn swapped_run_with(
+    predecessor: PreparedHost,
+    prepare_successor: impl FnOnce(&PlanStateInventory) -> PreparedHost,
+    before: &[&Feed],
+    after: &[&Feed],
+    successor: Successor,
+) -> SwappedRun {
     let rate = predecessor.report.sample_rate_hz;
     let PreparedHost {
         plan,
@@ -243,7 +280,7 @@ pub(crate) fn swapped_run(
         inventory,
         ..
     } = predecessor;
-    let (mut publisher, mut owner, _retirer) = exchange(plan);
+    let (mut publisher, mut owner, retirer) = exchange(plan);
     let mut blocks = Vec::with_capacity(BLOCKS);
     for feed in before {
         feed.submit(&mut a_sources, rate, 0);
@@ -254,15 +291,10 @@ pub(crate) fn swapped_run(
         }
         blocks.push(render(&mut owner));
     }
-    let (b_prepared, adopted) = match successor {
-        Successor::Carry => {
-            let mut prepared = b
-                .prepare_successor(&inventory, &a.model, &caps(), backend)
-                .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-            let adopted = prepared.sources.adopt_persisting(&mut a_sources);
-            (prepared, adopted)
-        }
-        Successor::Fresh => (b.prepare(backend), 0),
+    let mut b_prepared = prepare_successor(&inventory);
+    let adopted = match successor {
+        Successor::Carry => b_prepared.sources.adopt_persisting(&mut a_sources),
+        Successor::Fresh => 0,
     };
     let restarted = b_prepared.restarted_strips().to_vec();
     let PreparedHost {
@@ -298,12 +330,18 @@ pub(crate) fn swapped_run(
         successor_sources: b_sources,
         adopted,
         restarted,
+        owner,
+        exchange: (publisher, retirer),
     }
 }
 
 /// `session` prepared fresh and fed `feeds` from frame 0: the reference stream.
 pub(crate) fn reference_run(session: &Session, feeds: &[&Feed], backend: Backend) -> Vec<Block> {
-    let prepared = session.prepare(backend);
+    reference_run_of(session.prepare(backend), feeds)
+}
+
+/// [`reference_run`] over a plan another preparation entry made (#1401).
+pub(crate) fn reference_run_of(prepared: PreparedHost, feeds: &[&Feed]) -> Vec<Block> {
     let rate = prepared.report.sample_rate_hz;
     let PreparedHost {
         plan, mut sources, ..

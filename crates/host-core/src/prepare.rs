@@ -15,6 +15,7 @@ use builtins_compiler::{
     BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
     TrackControlProducer, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
     lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
+    prepare_selected_session_builtins_with_live_controls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
 };
@@ -1156,6 +1157,82 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
     Ok((prepared, handles, capture))
 }
 
+/// [`prepare_host_runtime_with_live_controls_and_spectrum`] for a successor of a running plan
+/// (issue #1401 D1): every source `base` left unchanged is prepared vacant for the carry program
+/// exactly as in [`prepare_host_runtime_successor`], and control delivery is concurrent.
+///
+/// The successor gets a fresh capture, sized and validated as at boot and allocated here, on the
+/// control thread; carrying capture state across the swap is #1395. A spectrum target the
+/// successor does not have is refused with `host.spectrum.target`, before anything of `base` moves.
+pub fn prepare_host_runtime_with_live_controls_and_spectrum_successor(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    spectrum: &SpectrumCaptureRequest,
+    lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
+    base: SuccessorBase<'_>,
+) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        None,
+        false,
+        Backend::current(),
+        Some(SpectrumPreparationRequest::Single(spectrum)),
+        Some(base),
+        lanes,
+        None,
+        Some(superseded),
+    )?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Single(capture) => capture,
+        PreparedSpectrumCapture::Collection(_) => {
+            return Err(resource("host.spectrum.capture"));
+        }
+    };
+    Ok((prepared, handles, capture))
+}
+
+/// [`prepare_host_runtime_with_live_controls_and_spectrum_collection`] for a successor of a
+/// running plan: see [`prepare_host_runtime_with_live_controls_and_spectrum_successor`].
+pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    spectrum: &SpectrumCaptureCollectionRequest,
+    lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
+    base: SuccessorBase<'_>,
+) -> Result<
+    (
+        PreparedHost,
+        HostLiveControlHandles,
+        SpectrumCaptureCollection,
+    ),
+    PrepareDiagnostics,
+> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        None,
+        false,
+        Backend::current(),
+        Some(SpectrumPreparationRequest::Collection(spectrum)),
+        Some(base),
+        lanes,
+        None,
+        Some(superseded),
+    )?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Collection(capture) => capture,
+        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+    };
+    Ok((prepared, handles, capture))
+}
+
 /// Prepare a successor of a running plan (issue #1272 D2).
 ///
 /// Exactly [`prepare_host_runtime`], except that every source the transaction left unchanged
@@ -1392,6 +1469,66 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         Backend::current(),
         None,
         None,
+        lanes,
+        None,
+        Some(superseded),
+    )?;
+    Ok((prepared, handles))
+}
+
+/// Prepare a host with exactly the caller-selected meter observers and `Concurrent` control
+/// delivery (issue #1401 D2): the form a control plane uses while another thread renders.
+///
+/// Same session and feed as [`prepare_host_runtime_with_selected_meters_between_render_calls`],
+/// the same rendered bits, but no fused fader and matrix bank is formed, because a producer may
+/// push a record while render runs.
+///
+/// `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
+pub fn prepare_host_runtime_with_selected_meters(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    meters: &[HostMeterRequest],
+    lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        Some(meters),
+        false,
+        Backend::current(),
+        None,
+        None,
+        lanes,
+        None,
+        Some(superseded),
+    )?;
+    Ok((prepared, handles))
+}
+
+/// [`prepare_host_runtime_with_selected_meters`] for a successor of a running plan: see
+/// [`prepare_host_runtime_successor`].
+pub fn prepare_host_runtime_with_selected_meters_successor(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    meters: &[HostMeterRequest],
+    lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
+    base: SuccessorBase<'_>,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        Some(meters),
+        false,
+        Backend::current(),
+        None,
+        Some(base),
         lanes,
         None,
         Some(superseded),
@@ -1926,13 +2063,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         &controls::MonitorOverlay::default(),
     );
     let builtins = if selected_meters.is_some() {
-        prepare_selected_session_builtins_between_render_calls(
-            compiled,
-            &effective,
-            &meter_requests,
-            &control_requests,
-            builtin_caps,
-        )
+        // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
+        // other request. The serialized form keeps its fused fader and matrix banks.
+        if between_render_calls {
+            prepare_selected_session_builtins_between_render_calls(
+                compiled,
+                &effective,
+                &meter_requests,
+                &control_requests,
+                builtin_caps,
+            )
+        } else {
+            prepare_selected_session_builtins_with_live_controls(
+                compiled,
+                &effective,
+                &meter_requests,
+                &control_requests,
+                builtin_caps,
+            )
+        }
     } else if between_render_calls {
         prepare_session_builtins_between_render_calls(
             compiled,
