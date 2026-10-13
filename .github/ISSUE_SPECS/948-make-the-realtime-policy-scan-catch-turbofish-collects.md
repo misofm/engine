@@ -29,6 +29,6 @@ Closed by tool slice A2 (#1439), attempt 1, on `codex/d15-stream-j3`.
 - Workspace: `cargo run --locked --release -q -p realtime-policy` prints
   `realtime policy: ok (93 marked regions in 26 files)`, the same counts as
   `bash scripts/check-realtime-policy.sh`, so the real regions hold no turbofish collect.
-- Verdict: `/home/bl/misofm/submix-verdicts/1439-attempt1.md` (written by the verifier; this issue closes
+- Verdict: `docs/handoffs/decision-15-2026-10-05/verdicts/stream-j3/1439-attempt1.md` (written by the verifier; this issue closes
   only on its PASS).
 - The closing steps that need GitHub (D6 steps 3 and 4) run after the batch push, not in this attempt.

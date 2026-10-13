@@ -349,6 +349,11 @@ from `:440` on move down by one.
   verdict, and the branch is pushed once, at the batch boundary. The batch also carries the #1448
   guard commit, after C2 and before B2b-1. B2b-1 waits for the three production issues and B2b-2
   for #1345 (Amendment 1), so the batch boundary waits for them on `main`.
+  - **Root amendment (2026-10-13).** #1443 and #1444 are not in the J3 batch; they land in a
+    follow-up J batch after J3 merges, because the batch should not wait for slices that were
+    blocked until B3 merged. The sentence above ("the whole set lands in one J batch", and the
+    batch boundary waiting for B2b-1 and B2b-2 on `main`) stands as the original decision and is
+    superseded for those two slices only. The #1448 guard commit stays in J3.
   - Inside the batch, both gates run until C2's commit, and the Hazards' two-gates rule applies to
     each commit before it. No CI run sees a commit between A1 and C2, because the batch pushes
     once. The gap is still safe: each slice's local gates run the awk gate, every slice before C2

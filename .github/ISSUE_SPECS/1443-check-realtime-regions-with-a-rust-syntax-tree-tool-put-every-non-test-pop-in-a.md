@@ -18,7 +18,7 @@ each holds).
   the call rule needs (D6), so that every line that moves in `crates/builtins-compiler/src/lib.rs`
   moves in this one marker commit.
 - It waits for three production issues, which bound the render-thread drains first (root rulings
-  R1 and R2), and it comes after C2 and the #1448 guard commit in the J batch (Dependencies).
+  R1 and R2), and it comes after C2 and the #1448 guard commit, in the follow-up J batch after J3 (root, 2026-10-13; Dependencies).
 
 Production changes: region markers in three files, and one restructure of test-support code (D6).
 
@@ -272,6 +272,12 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
     - the `LiveControl*` drains: B1b-D6's route-drain twin.
 
 ## #1448 guard (this slice's first commit)
+
+**Root amendment (2026-10-13).** #1443 is not in the J3 batch; it lands in a follow-up J batch
+after J3 merges, because the batch should not wait for slices that were blocked until B3 merged.
+The "#1448 guard" commit lands in J3, ahead of the rest of this slice, and #1443 stays open after
+J3 merges. The guard commit has its own verdict, `docs/handoffs/decision-15-2026-10-05/verdicts/stream-j3/1448-guard-attempt1.md`;
+the original text below is unchanged.
 
 This section is the spec of the commit "H #1448's guard, landed by J after C2" (root ruling 2 on
 the fourth review, option (C)). It was #1448's D5. It lives here because #1448 (stream H, *Bound the
