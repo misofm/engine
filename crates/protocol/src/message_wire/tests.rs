@@ -992,6 +992,24 @@ fn control_pages_hold_exactly_two_hundred_fifty_six_rows() {
         codec.encoded_control_list_page_len(&page(257)),
         Err(EncodeError::LimitExceeded)
     );
+    // The decoder holds the same bound: a 257th well-formed row appended to a full page's bytes is
+    // refused, whatever the frame limits would have admitted.
+    let bytes = encode_control_page(&codec, &page(256));
+    let (patched, count) = edited(&bytes, |fields| {
+        let mut last = nth(fields, 5, 255).clone();
+        set(&mut last, 1, &257_u32.to_le_bytes());
+        fields.push(Tlv {
+            id: 5,
+            wire: 11,
+            mandatory: 1,
+            node: Node::Message(last),
+        });
+        set(fields, 3, &257_u32.to_le_bytes());
+    });
+    assert_eq!(
+        decode_control_page(&codec, &patched, count),
+        Err(DecodeError::InvalidField)
+    );
 }
 
 /// Gate 1: each request rule is refused on encode and on decode alike, and a decoded refusal is
@@ -1165,6 +1183,22 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
             "builtins section with a slot",
             Some(|p| p.entries[2].address.slot_id = Some("comp".to_owned())),
             |f| insert(address(f, 2), leaf(4, 9, b"comp")),
+        ),
+        (
+            "console section without a slot",
+            Some(|p| {
+                p.entries[3].address.section = ControlSection::Console;
+                p.entries[3].address.slot_id = None;
+            }),
+            |f| {
+                set(address(f, 3), 3, &[ControlSection::Console.code()]);
+                remove(address(f, 3), 4);
+            },
+        ),
+        (
+            "own section with a slot",
+            Some(|p| p.entries[0].address.slot_id = Some("comp".to_owned())),
+            |f| insert(address(f, 0), leaf(4, 9, b"comp")),
         ),
         (
             "control row without a control ID",
@@ -1653,9 +1687,30 @@ fn control_code_tables_are_exact() {
     );
     assert_eq!(ControlSection::Console.code(), ParameterRack::Console as u8);
     assert_eq!(ControlSection::Own.code(), 6);
-    assert_eq!(ControlRampRow::Fader.code(), 1);
-    assert_eq!(ControlRampRow::SendMatrix.code(), 15);
-    assert_eq!(ControlRampRow::CODES.len(), 15);
+    // Every ramp-row code, pinned: the codes are wire contract and a client matches on them, so a
+    // swap of two rows must turn this red even though each code still round-trips.
+    let ramp_rows = [
+        (ControlRampRow::Fader, 1),
+        (ControlRampRow::InputTrim, 2),
+        (ControlRampRow::SendGain, 3),
+        (ControlRampRow::VcaOffset, 4),
+        (ControlRampRow::LinkGlide, 5),
+        (ControlRampRow::Mute, 6),
+        (ControlRampRow::Solo, 7),
+        (ControlRampRow::PolarityInvert, 8),
+        (ControlRampRow::SendMute, 9),
+        (ControlRampRow::SendFollowsMute, 10),
+        (ControlRampRow::VcaMute, 11),
+        (ControlRampRow::BypassCrossfade, 12),
+        (ControlRampRow::Pan, 13),
+        (ControlRampRow::Matrix, 14),
+        (ControlRampRow::SendMatrix, 15),
+    ];
+    assert_eq!(ramp_rows.len(), ControlRampRow::CODES.len());
+    for (row, code) in ramp_rows {
+        assert_eq!(row.code(), code, "{row:?}");
+        assert_eq!(ControlRampRow::from_code(code), Ok(row));
+    }
     assert_eq!(ControlReason::RuledLiveNotBuilt.code(), 8);
 }
 

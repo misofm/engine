@@ -4714,6 +4714,69 @@ mod set_control {
         );
     }
 
+    /// Gate 3, measured: an address edit's explicit 480-sample ramp takes 480 samples. Every block
+    /// that begins before sample 480 has left the old fader and not reached the new one; every
+    /// block from `480 / quantum` on is the new fader, bit for bit, as a rebuilt plan renders it.
+    ///
+    /// Red if the length is rounded to a block (the ramp then ends at the first block boundary at
+    /// or after 480), is shortened or stretched, or never lands on the target.
+    #[test]
+    fn a_set_control_ramp_of_480_samples_reaches_its_target_at_block_480_over_the_quantum() {
+        // The stateless session has no latency, so the ramp is heard from the commit.
+        let mut stateless = super::super::tests::stateless_session(48_000);
+        stateless.sources[0].frames = SOURCE_FRAMES;
+        let document = session::canonical_session_json(&stateless).expect("canonical");
+        let model = parse_session_json(&document).expect("model");
+        let name = model.tracks[0].id.as_str().to_owned();
+        let target = set(builtin(&name, FADER_DB, Lane::Both), -12.0, Some(480));
+        let target_document = session::canonical_session_json(&applied(
+            &document,
+            &[set(builtin(&name, FADER_DB, Lane::Both), -12.0, None)],
+        ))
+        .expect("canonical");
+        let mut rig = Rig::new(&document);
+        let quantum = rig.quantum as u64;
+        assert_eq!(
+            rig.latency(),
+            0,
+            "no latency: the fader lands at the output"
+        );
+        assert!(
+            480 > 2 * quantum && 480 % quantum != 0,
+            "the ramp spans several blocks"
+        );
+        let mut before = Reference::new(&document);
+        let mut after = Reference::new(&target_document);
+        for _ in 0..4 {
+            let live = rig.step();
+            assert_eq!(bits(&live), bits(&before.step()), "warm-up");
+            after.step();
+        }
+        assert_eq!(rig.apply(&[target]), crate::RESULT_OK);
+        for offset in 0..480_u64.div_ceil(quantum) + 2 {
+            let live = rig.step();
+            let (old, new) = (before.step(), after.step());
+            if offset * quantum < 480 {
+                assert_ne!(
+                    bits(&live),
+                    bits(&old),
+                    "block {offset} has left the old fader"
+                );
+                assert_ne!(
+                    bits(&live),
+                    bits(&new),
+                    "block {offset} has not reached the new one"
+                );
+            } else {
+                assert_eq!(
+                    bits(&live),
+                    bits(&new),
+                    "block {offset} begins 480 samples or more after the commit"
+                );
+            }
+        }
+    }
+
     /// The status and the `(code, operation index)` of each diagnostic of a refused transaction.
     fn refusal(rig: &mut Rig, edits: &[SessionEdit]) -> (protocol::StatusCode, Vec<(String, u32)>) {
         let bytes = rig.transaction(edits);

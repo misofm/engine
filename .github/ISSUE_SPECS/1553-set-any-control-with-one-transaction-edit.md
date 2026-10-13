@@ -182,4 +182,9 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   `ControlAddress::try_from_controls` (a fallible copy of each ID, for the host-core list builder)
   and `TryFrom<&protocol::ControlAddress> for controls::ControlAddress`; a test ties the owner,
   section and lane codes of both sides.
+- **Gate 3, measured (batch 2 review fold).** `a_set_control_ramp_of_480_samples_reaches_its_target_at_block_480_over_the_quantum`
+  (capi `live_tests.rs`) renders a stateless session (no latency) after a `SET_CONTROL` fader edit
+  with `ramp_samples` 480: every block that begins before sample 480 differs from both the old and
+  the target fader, and every block from `480 / quantum` on equals a rebuilt plan of the target
+  session bit for bit. The earlier test pinned only the equality with the per-kind edit.
 

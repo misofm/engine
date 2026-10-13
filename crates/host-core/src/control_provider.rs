@@ -960,6 +960,55 @@ mod tests {
 
     const RATE: u32 = 48_000;
 
+    /// Every live-ramp row maps to the wire ramp row of the same name and code. The match has no
+    /// wildcard, so a new row must be classified here.
+    ///
+    /// Red if `ramp_row` swaps two rows: the list would then tell a client that a fader's default
+    /// ramp comes from another `control_smoothing` key than the one the core reads.
+    #[test]
+    fn every_live_ramp_row_maps_to_its_wire_code() {
+        const fn expected(row: LiveRampRow) -> u8 {
+            match row {
+                LiveRampRow::Fader => 1,
+                LiveRampRow::InputTrim => 2,
+                LiveRampRow::SendGain => 3,
+                LiveRampRow::VcaOffset => 4,
+                LiveRampRow::LinkGlide => 5,
+                LiveRampRow::Mute => 6,
+                LiveRampRow::Solo => 7,
+                LiveRampRow::PolarityInvert => 8,
+                LiveRampRow::SendMute => 9,
+                LiveRampRow::SendFollowsMute => 10,
+                LiveRampRow::VcaMute => 11,
+                LiveRampRow::BypassCrossfade => 12,
+                LiveRampRow::Pan => 13,
+                LiveRampRow::Matrix => 14,
+                LiveRampRow::SendMatrix => 15,
+            }
+        }
+        let rows = [
+            LiveRampRow::Fader,
+            LiveRampRow::InputTrim,
+            LiveRampRow::SendGain,
+            LiveRampRow::VcaOffset,
+            LiveRampRow::LinkGlide,
+            LiveRampRow::Mute,
+            LiveRampRow::Solo,
+            LiveRampRow::PolarityInvert,
+            LiveRampRow::SendMute,
+            LiveRampRow::SendFollowsMute,
+            LiveRampRow::VcaMute,
+            LiveRampRow::BypassCrossfade,
+            LiveRampRow::Pan,
+            LiveRampRow::Matrix,
+            LiveRampRow::SendMatrix,
+        ];
+        assert_eq!(rows.len(), protocol::ControlRampRow::CODES.len());
+        for row in rows {
+            assert_eq!(ramp_row(row).code(), expected(row), "{row:?}");
+        }
+    }
+
     fn compile(model: &session::SessionModel) -> session::CompiledSession {
         session::compile_session(
             model,
