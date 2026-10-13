@@ -2,7 +2,7 @@
 
 Decision 17, root ruling of 2026-10-13 (option B for #1559's revision gap). Architecture change in
 `engine::realtime`. Code anchors verified on `93337ffbe` (main) and `79f172730` (#1559).
-Issue number: assigned at filing (written here as #TBD4). Feature sprint mode (owner,
+Issue number: assigned at filing (written here as #1603). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review. The realtime gates below are
 mandatory all the same.
 
@@ -173,7 +173,7 @@ live value (D15-2). No wire, C ABI or browser status field changes.
   > the committed revision, unchanged. Its records are published on the newest plan's revision
   > gate under that revision with a monitor tick: the gate orders publications by `(revision,
   > tick)`, and the applied watermark reports the revision only, so it is never above the
-  > committed revision (amended 2026-10-13, root, option B for #1559's revision gap; #TBD4). A
+  > committed revision (amended 2026-10-13, root, option B for #1559's revision gap; #1603). A
   > monitor-only transaction is always live and applies by D15-2's convergence block: the first
   > block that begins after the reply returns, or, while a replacement plan is pending, the block
   > that adopts it, which the watermark reports when it reaches the reply's revision. A
@@ -204,7 +204,7 @@ live value (D15-2). No wire, C ABI or browser status field changes.
   drops `monitors_since_commit` and requires `header.revision == r + 1` for every model commit.
 - Replace the first implementation-record bullet ("A solo's records need a gate revision") with:
 
-  > - **A solo's records ride a monitor tick** (#TBD4, root ruling of 2026-10-13, option B). A
+  > - **A solo's records ride a monitor tick** (#1603, root ruling of 2026-10-13, option B). A
   >   monitor-only transaction that produces records stamps `stamp_monitor(committed revision)` on
   >   the newest plan's gate, key `(r, t)` with `t >= 1`, and publishes that key. No revision number
   >   is spent: the store has no `next_gate_revision`, and the next model commit is `r + 1`. The
