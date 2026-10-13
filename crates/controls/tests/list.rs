@@ -127,7 +127,7 @@ fn reason(class: ControlClass) -> RebuildReason {
 fn classes_match_decision_14() {
     let model = fixture();
     // Live builtins.
-    for control in [5, 6, 7, 8, 9, 10, 12] {
+    for control in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12] {
         assert_eq!(
             class(
                 &model,
@@ -142,15 +142,6 @@ fn classes_match_decision_14() {
         reason(class(&model, &strip_builtin("vocal", 11, Lane::Left))),
         RebuildReason::NewMemory
     );
-    // The input section is ruled live and not built.
-    for control in [1, 2, 3, 4] {
-        assert_eq!(
-            reason(class(&model, &strip_builtin("vocal", control, Lane::Left))),
-            RebuildReason::RuledLiveNotBuilt {
-                issue: builtins::STRIP_INPUT_SLICE
-            }
-        );
-    }
     // A send into the submix: ruled live, not built; `follows_mute` waits for the effective slice.
     for control in 1..=6 {
         assert_eq!(
@@ -245,6 +236,10 @@ fn automatable_is_exactly_the_live_model_value_rows() {
         .map(|row| row.descriptor.name)
         .collect();
     let expected: BTreeSet<&str> = [
+        "polarity_invert",
+        "trim_db",
+        "hpf_hz",
+        "lpf_hz",
         "fader_db",
         "mute",
         "pan",

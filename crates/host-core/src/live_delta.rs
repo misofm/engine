@@ -11,13 +11,18 @@
 //! This is the one classifier, and it keeps no list of fields: `controls` says which model fields
 //! are control values and whether each is live or rebuild-only, and this module lowers a live
 //! change to records, one lowering per [`controls::Family`]. A later slice widens it in place with
-//! a new arm of the lowering (input records #1556, route records #1557, derived values #1558); it
+//! a new arm of the lowering (the input records are #1556's; route records #1557, derived values #1558); it
 //! does not add a second classifier.
 
 use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
+    INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
-use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+use builtins::{
+    BuiltinLaneSelector, PreparedInputFilterTarget, checked_trim_gain, validate_input_filter_pair,
+    validate_prepared_input_filter_target,
+};
+use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use controls::{ControlClass, Family, Owner, RebuildReason, Section};
 use effect_compiler::{
     LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
@@ -34,8 +39,10 @@ use session::{
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
-use crate::prepare::LiveRamps;
-use crate::prepare::{StripEditRamps, fader_records, followed_mute_changes, matrix_record};
+use crate::prepare::{LiveRampRow, LiveRamps};
+use crate::prepare::{
+    StripEditRamps, fader_records, followed_mute_changes, lane_records, matrix_record,
+};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,9 +54,29 @@ pub struct LiveStripRecords<'a> {
     pub fader: [Option<TrackFaderRecord>; 4],
     /// For the strip's matrix/pan queue: the new lowered target, when it changes.
     pub matrix: Option<TrackControlRecord>,
+    /// For the strip's input cells (#1556 D2), in write order: the `TrimDb` records, then the
+    /// `PolarityInvert` records, then the `PreparedFilter` targets in the order the preparer
+    /// returns them, each left before right; empty when no input value changes.
+    pub input: Vec<TrackInputRecord>,
 }
 
 impl LiveStripRecords<'_> {
+    /// Whether every input record satisfies the contract the strip's input cells assume (#1556
+    /// D5): a trim inside the domain and a filter target [`validate_prepared_input_filter_target`]
+    /// accepts, so that a cell write, which cannot fail, never meets a value it was not built for.
+    /// The classifier produces only such records, so a host that finds `false` has an internal
+    /// fault and must refuse before its first write.
+    #[must_use]
+    pub fn input_records_valid(&self) -> bool {
+        self.input.iter().all(|record| match record {
+            TrackInputRecord::TrimDb { db, .. } => checked_trim_gain(*db).is_ok(),
+            TrackInputRecord::PolarityInvert { .. } => true,
+            TrackInputRecord::PreparedFilter { target } => {
+                validate_prepared_input_filter_target(target).is_ok()
+            }
+        })
+    }
+
     /// The fader/mute records, in push order.
     pub fn fader_records(&self) -> impl Iterator<Item = TrackFaderRecord> + '_ {
         self.fader.iter().map_while(|record| *record)
@@ -146,8 +173,9 @@ pub enum LiveRebuild {
 /// 5. [`LiveRebuild::Domain`] if a changed effect's `params` do not resolve through
 ///    [`resolve_initial_values`] (the one function preparation uses), whether or not a row's value
 ///    moved: an unknown parameter or a unit mismatch has no row.
-/// 6. Each changed owner is lowered once per family (`lower`): a strip's fader and mute, a
-///    strip's pan or matrix, an effect instance's bypass and parameters. An unchanged owner is
+/// 6. Each changed owner is lowered once per family (`lower`): a strip's input trim, polarity and
+///    filters (#1556), a strip's fader and mute, a strip's pan or matrix, an effect instance's
+///    bypass and parameters. An unchanged owner is
 ///    never lowered. A lowering's domain refusal is [`LiveRebuild::Domain`]; a strip whose mute
 ///    changes while a `follows_mute` route sends from it is [`LiveRebuild::FollowedMute`].
 ///
@@ -168,7 +196,9 @@ pub enum LiveRebuild {
 /// A record is emitted only when the value the render plane holds changes (`solo.rs`: never a
 /// redundant record): a `FaderDb` per lane whose gain bits change (one `Both` when both change to
 /// the same dB bits), a `Mute` per lane whose mute changes (one `Both` when both change to the
-/// same value), and a matrix record when a lowered coefficient's bits change. A fader move on a
+/// same value), a matrix record when a lowered coefficient's bits change, and the strip's input
+/// records (a `TrimDb` and a `PolarityInvert` by the same rules, then the filter targets
+/// [`InputFilterPreparer`] designs for the changed cutoffs, #1556). A fader move on a
 /// lane that stays muted still gets its record, so the stage remembers the gain for a later
 /// unmute. An effect record is emitted only for a resolved value whose bits change: a `Both`
 /// value rewritten as equal per-lane values gives none.
@@ -267,7 +297,8 @@ pub fn classify_live_delta<'a>(
                     item.instances.push(change.address.section.clone());
                 }
             }
-            family @ (Family::StripInput | Family::Route) => item.unlowered = Some(family),
+            Family::StripInput => item.input = true,
+            Family::Route => item.unlowered = Some(Family::Route),
             Family::Setting => {}
         }
     }
@@ -290,10 +321,12 @@ pub fn classify_live_delta<'a>(
             strip_id: after.id.as_str(),
             fader: [None; 4],
             matrix: None,
+            input: Vec::new(),
         };
         let families = item
             .unlowered
             .into_iter()
+            .chain(item.input.then_some(Family::StripInput))
             .chain(item.level.then_some(Family::StripLevel))
             .chain(item.matrix.then_some(Family::StripMatrix));
         for family in families {
@@ -305,10 +338,11 @@ pub fn classify_live_delta<'a>(
             match lower(family, &ctx, &target)? {
                 Lowered::Fader(fader) => records.fader = fader,
                 Lowered::Matrix(matrix) => records.matrix = matrix,
+                Lowered::Input(input) => records.input = input,
                 Lowered::Effect(_) | Lowered::Nothing => {}
             }
         }
-        if records.fader[0].is_some() || records.matrix.is_some() {
+        if records.fader[0].is_some() || records.matrix.is_some() || !records.input.is_empty() {
             delta.strips.push(records);
         }
         for section in &item.instances {
@@ -332,7 +366,9 @@ struct Work {
     level: bool,
     /// A pan, matrix or matrix-mode row changed.
     matrix: bool,
-    /// A live row of a family that this slice cannot lower changed (#1556, #1557).
+    /// A trim, polarity, HPF or LPF row changed (#1556).
+    input: bool,
+    /// A live row of a family that this slice cannot lower changed (#1557).
     unlowered: Option<Family>,
     /// The effect sections with a changed row, in chain order.
     instances: Vec<Section>,
@@ -344,6 +380,7 @@ impl Work {
             strip,
             level: false,
             matrix: false,
+            input: false,
             unlowered: None,
             instances: Vec::new(),
         }
@@ -375,6 +412,7 @@ struct Target<'s, 'm, 'a> {
 enum Lowered<'a> {
     Fader([Option<TrackFaderRecord>; 4]),
     Matrix(Option<TrackControlRecord>),
+    Input(Vec<TrackInputRecord>),
     Effect(Option<LiveEffectRecords<'a>>),
     Nothing,
 }
@@ -396,8 +434,8 @@ pub fn take_lowered_owner_count() -> usize {
 /// (decision 17, C6). A family whose rows are live decides here what a change of them costs the
 /// plan; the classifier above decides only that it is live.
 ///
-/// `StripInput` and `Route` are unreachable in this slice (their rows are rebuild-only until
-/// #1556 and #1557 add their arms) and refuse defensively.
+/// `Route` is unreachable in this slice (its rows are rebuild-only until #1557 adds its arm) and
+/// refuses defensively.
 fn lower<'a>(
     family: Family,
     ctx: &Context<'_>,
@@ -427,8 +465,159 @@ fn lower<'a>(
             let section = target.instance.ok_or(LiveRebuild::Structure)?;
             effect_records(ctx, target, section).map(Lowered::Effect)
         }
+        Family::StripInput => input_records(
+            before.builtins,
+            after.builtins,
+            ctx.next.sample_rate_hz,
+            ctx.ramps,
+            ctx.edit,
+        )
+        .map(Lowered::Input),
         Family::Setting => Ok(Lowered::Nothing),
-        Family::StripInput | Family::Route => Err(LiveRebuild::Structure),
+        Family::Route => Err(LiveRebuild::Structure),
+    }
+}
+
+/// The input records that bring a strip's input section from `before`'s values to `after`'s
+/// (#1556 D2-D4), in write order: trims, then polarities, then filter targets, each left before
+/// right. A record is emitted only when the value the render plane holds changes.
+///
+/// - `TrimDb`: one per lane whose [`checked_trim_gain`] bits change, or one `Both` when both lanes
+///   change to the same `trim_db` bits. The comparison is of the gain's bits, so `0.0` to `-0.0`
+///   (the same gain) gives no record.
+/// - `PolarityInvert`: one per lane whose value changes, or one `Both` when both change to the
+///   same value.
+/// - `PreparedFilter`: the targets [`InputFilterPreparer`] designs, off the render thread, from the
+///   pre-commit normalized pairs and the changed values (see [`filter_edits`]).
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] when a trim is outside the domain, or a pair or a designed target is
+/// refused.
+fn input_records(
+    before: &session::DualMonoBuiltins,
+    after: &session::DualMonoBuiltins,
+    sample_rate_hz: u32,
+    ramps: LiveRamps,
+    edit: StripEditRamps,
+) -> Result<Vec<TrackInputRecord>, LiveRebuild> {
+    let lanes_before = [&before.left, &before.right];
+    let lanes_after = [&after.left, &after.right];
+    let mut records = Vec::with_capacity(4 + INPUT_FILTER_TARGET_CAPACITY);
+
+    let gain_bits = |db: f32| {
+        checked_trim_gain(db)
+            .map(f32::to_bits)
+            .map_err(|_| LiveRebuild::Domain)
+    };
+    let mut trim_changed = [false; 2];
+    for lane in 0..2 {
+        trim_changed[lane] =
+            gain_bits(lanes_before[lane].trim_db)? != gain_bits(lanes_after[lane].trim_db)?;
+    }
+    for (lanes, lane) in lane_records(
+        trim_changed,
+        lanes_after[0].trim_db.to_bits() == lanes_after[1].trim_db.to_bits(),
+    ) {
+        records.push(TrackInputRecord::TrimDb {
+            lanes,
+            db: lanes_after[lane].trim_db,
+            smoothing_samples: ramps.resolve(LiveRampRow::InputTrim, edit.input),
+        });
+    }
+
+    let polarity_changed =
+        [0, 1].map(|lane| lanes_before[lane].polarity_invert != lanes_after[lane].polarity_invert);
+    for (lanes, lane) in lane_records(
+        polarity_changed,
+        lanes_after[0].polarity_invert == lanes_after[1].polarity_invert,
+    ) {
+        records.push(TrackInputRecord::PolarityInvert {
+            lanes,
+            inverted: lanes_after[lane].polarity_invert,
+            smoothing_samples: ramps.resolve(LiveRampRow::PolarityInvert, edit.input),
+        });
+    }
+
+    // The filters: compare the values each lane's pair normalizes to, so `-0.0` to `0.0` is no
+    // change (#1556 D4).
+    let pair = |lane: &session::ChannelBuiltins| {
+        validate_input_filter_pair(sample_rate_hz, lane.hpf_hz, lane.lpf_hz)
+            .map_err(|_| LiveRebuild::Domain)
+    };
+    let pairs_before = [pair(lanes_before[0])?, pair(lanes_before[1])?];
+    let pairs_after = [pair(lanes_after[0])?, pair(lanes_after[1])?];
+    let mut changed = [(false, false); 2];
+    for lane in 0..2 {
+        changed[lane] = (
+            pairs_before[lane].hpf_hz.to_bits() != pairs_after[lane].hpf_hz.to_bits(),
+            pairs_before[lane].lpf_hz.to_bits() != pairs_after[lane].lpf_hz.to_bits(),
+        );
+    }
+    let edits = filter_edits(changed, pairs_after);
+    if !edits.is_empty() {
+        let seeds = [
+            pairs_before[0].hpf_hz,
+            pairs_before[0].lpf_hz,
+            pairs_before[1].hpf_hz,
+            pairs_before[1].lpf_hz,
+        ];
+        let mut out = [PreparedInputFilterTarget {
+            lanes: BuiltinLaneSelector::Both,
+            section: 0,
+            pair: [0.0; 2],
+            coefficients: [0.0; 6],
+        }; INPUT_FILTER_TARGET_CAPACITY];
+        let (_, count) = InputFilterPreparer
+            .prepare(sample_rate_hz, &seeds, &edits, &mut out)
+            .map_err(|_| LiveRebuild::Domain)?;
+        records.extend(
+            out[..count]
+                .iter()
+                .map(|&target| TrackInputRecord::PreparedFilter { target }),
+        );
+    }
+    Ok(records)
+}
+
+/// The semantic edits that carry a strip's changed filter values (#1556 D4): per lane, `3` or `4`
+/// for a one-sided change and the atomic pair `0` when both of the lane's values change (so a
+/// pair that two one-sided edits would refuse, an HPF raised past the old LPF while the LPF
+/// rises, is one valid edit). The same edit on both lanes is one `Both` edit, which is how the
+/// preparer later merges equal targets.
+fn filter_edits(
+    changed: [(bool, bool); 2],
+    after: [builtins::InputFilterPair; 2],
+) -> Vec<InputFilterEdit> {
+    let lane_edit = |lane: usize| {
+        let pair = after[lane];
+        match changed[lane] {
+            (false, false) => None,
+            (true, false) => Some((3, pair.hpf_hz, 0.0)),
+            (false, true) => Some((4, pair.lpf_hz, 0.0)),
+            (true, true) => Some((0, pair.hpf_hz, pair.lpf_hz)),
+        }
+    };
+    let (left, right) = (lane_edit(0), lane_edit(1));
+    let edit = |(parameter_id, value0, value1): (u32, f32, f32), channel| InputFilterEdit {
+        parameter_id,
+        channel,
+        value0,
+        value1,
+    };
+    match (left, right) {
+        (Some(left), Some(right))
+            if left.0 == right.0
+                && left.1.to_bits() == right.1.to_bits()
+                && left.2.to_bits() == right.2.to_bits() =>
+        {
+            vec![edit(left, ParameterChannel::Both)]
+        }
+        _ => left
+            .map(|left| edit(left, ParameterChannel::Left))
+            .into_iter()
+            .chain(right.map(|right| edit(right, ParameterChannel::Right)))
+            .collect(),
     }
 }
 

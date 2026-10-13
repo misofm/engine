@@ -8,7 +8,11 @@
 
 use controls::RebuildReason;
 
-use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
+use builtins::{
+    BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, PreparedInputFilterTarget,
+    pan_matrix,
+};
+use builtins_compiler::TrackInputRecord;
 use dsp_reference::randomized::Draw;
 use effect_contract::{
     BankWidth, EffectControlRecord, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel as Lane,
@@ -17,10 +21,10 @@ use effect_contract::{
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     BuiltinLaneSelector, EQ_TARGET_CAPACITY, EqTargetEdit, EqTargetPreparer,
-    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta, LiveEffectAddress,
-    LiveRampRow, LiveRamps, LiveRebuild, PreparedHost, SourceSubmission, TrackControlRecord,
-    TrackFaderRecord, classify_live_delta, compile_host_session, prepare_host_runtime,
-    prepare_host_runtime_with_live_controls,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterPreparer,
+    LiveDelta, LiveEffectAddress, LiveRampRow, LiveRamps, LiveRebuild, PreparedHost,
+    SourceSubmission, TrackControlRecord, TrackFaderRecord, classify_live_delta,
+    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_live_controls,
 };
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
@@ -198,8 +202,8 @@ fn mute(lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) -> Trac
     }
 }
 
-/// The builtin IDs the control rows use (`BUILTIN_PARAMETER_DESCRIPTORS`).
-const TRIM_DB: u32 = 2;
+/// The builtin ID the control rows use for the input delay (`BUILTIN_PARAMETER_DESCRIPTORS`).
+const DELAY_SAMPLES: u32 = 11;
 
 /// The reason the control row of builtin `control` gives for being rebuild-only.
 fn builtin_reason(control: u32) -> RebuildReason {
@@ -407,14 +411,17 @@ fn values_outside_the_setter_domain_need_a_rebuild() {
 }
 
 /// Gate 1(g). Red if the mask comparison uses `PartialEq` and misses a sign-of-zero edit of a
-/// field that is not live.
+/// field that is not live: the delay is the one builtin still rebuild-only.
 #[test]
-fn a_sign_of_zero_trim_edit_is_a_rebuild_by_its_row() {
+fn a_sign_of_zero_delay_edit_is_a_rebuild_by_its_row() {
     let current = two_tracks();
-    assert_eq!(current.tracks[0].builtins.left.trim_db.to_bits(), 0);
+    assert_eq!(current.tracks[0].builtins.left.delay_samples, 0);
     assert_eq!(
-        classify(&current, |next| next.tracks[0].builtins.left.trim_db = -0.0),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
+        classify(&current, |next| next.tracks[0]
+            .builtins
+            .left
+            .delay_samples = 1),
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
 }
 
@@ -1260,8 +1267,498 @@ fn push_delta(
             if let Some(record) = strip.matrix {
                 control.producer.write(stamp, record);
             }
+            let input = control.input.as_mut().expect("the input lane");
+            for &record in &strip.input {
+                input.write(stamp, record);
+            }
         }
     });
+}
+
+// Issue #1556: the strip input family (trim, polarity, input filters).
+
+type InputStrip = (String, Vec<TrackInputRecord>);
+
+fn classify_input(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<Vec<InputStrip>, LiveRebuild> {
+    classify_input_with(current, edit, STEP, &EditRamps::new())
+}
+
+fn classify_input_with(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+) -> Result<Vec<InputStrip>, LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, ramps, edit_ramps).map(|delta| {
+        delta
+            .strips
+            .iter()
+            .filter(|strip| !strip.input.is_empty())
+            .map(|strip| (strip.strip_id.to_owned(), strip.input.clone()))
+            .collect()
+    })
+}
+
+fn trim(lanes: BuiltinLaneSelector, db: f32, smoothing_samples: u32) -> TrackInputRecord {
+    TrackInputRecord::TrimDb {
+        lanes,
+        db,
+        smoothing_samples,
+    }
+}
+
+fn polarity(
+    lanes: BuiltinLaneSelector,
+    inverted: bool,
+    smoothing_samples: u32,
+) -> TrackInputRecord {
+    TrackInputRecord::PolarityInvert {
+        lanes,
+        inverted,
+        smoothing_samples,
+    }
+}
+
+/// The filter records [`InputFilterPreparer`] designs for `edits` from `seeds` (left HPF, left LPF,
+/// right HPF, right LPF), called directly: the records a classifier must emit are exactly these.
+fn designed_filters(
+    rate: u32,
+    seeds: [f32; 4],
+    edits: &[InputFilterEdit],
+) -> Vec<TrackInputRecord> {
+    let mut out = [PreparedInputFilterTarget {
+        lanes: BuiltinLaneSelector::Both,
+        section: 0,
+        pair: [0.0; 2],
+        coefficients: [0.0; 6],
+    }; host_core::INPUT_FILTER_TARGET_CAPACITY];
+    let (_, count) = InputFilterPreparer
+        .prepare(rate, &seeds, edits, &mut out)
+        .expect("the edits design");
+    out[..count]
+        .iter()
+        .map(|&target| TrackInputRecord::PreparedFilter { target })
+        .collect()
+}
+
+fn filter_edit(parameter_id: u32, channel: Lane, value0: f32, value1: f32) -> InputFilterEdit {
+    InputFilterEdit {
+        parameter_id,
+        channel,
+        value0,
+        value1,
+    }
+}
+
+/// `two_tracks` with the first track's lanes set to `left` and `right` `(hpf_hz, lpf_hz)`.
+fn with_filters(left: (f32, f32), right: (f32, f32)) -> SessionModel {
+    let mut model = two_tracks();
+    set_filters(&mut model, left, right);
+    normalized(&model)
+}
+
+fn set_filters(model: &mut SessionModel, left: (f32, f32), right: (f32, f32)) {
+    let builtins = &mut model.tracks[0].builtins;
+    (builtins.left.hpf_hz, builtins.left.lpf_hz) = left;
+    (builtins.right.hpf_hz, builtins.right.lpf_hz) = right;
+}
+
+/// #1556 D3. Red if a trim record lands on the wrong lane, is not merged into one `Both` when both
+/// lanes move to the same dB, is emitted for a move that keeps the gain (`0.0` to `-0.0`), or if
+/// the gain domain is not the setter's.
+#[test]
+fn trim_records_address_exactly_the_changed_lanes() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let one = |records: Vec<TrackInputRecord>| Ok(vec![(first.clone(), records)]);
+    assert_eq!(
+        classify_input(&current, |next| next.tracks[0].builtins.left.trim_db = -6.0),
+        one(vec![trim(Left, -6.0, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -3.0;
+            next.tracks[0].builtins.right.trim_db = -3.0;
+        }),
+        one(vec![trim(Both, -3.0, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -2.0;
+            next.tracks[0].builtins.right.trim_db = -4.0;
+        }),
+        one(vec![trim(Left, -2.0, 0), trim(Right, -4.0, 0)])
+    );
+    // Only the lane that moved gets a record, whatever the other holds.
+    let split = edited(&current, |model| {
+        model.tracks[0].builtins.left.trim_db = -2.0
+    });
+    assert_eq!(
+        classify_input(&split, |next| next.tracks[0].builtins.right.trim_db = -2.0),
+        one(vec![trim(Right, -2.0, 0)])
+    );
+    // `0.0` to `-0.0` keeps the gain: the model's bits change and the plan does not.
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -0.0;
+            next.tracks[0].builtins.right.trim_db = -0.0;
+        }),
+        Ok(Vec::new())
+    );
+    for db in [24.0_f32, -144.0] {
+        assert!(classify_input(&current, |next| next.tracks[0].builtins.left.trim_db = db).is_ok());
+    }
+    for db in [24.0_f32.next_up(), (-144.0_f32).next_down(), f32::NAN] {
+        assert_eq!(
+            classify_input(&current, |next| next.tracks[0].builtins.right.trim_db = db),
+            Err(LiveRebuild::Domain),
+            "{db}"
+        );
+    }
+}
+
+/// #1556 D3. Red if a polarity record goes to the wrong lane, or splits two lanes that flip to
+/// one value.
+#[test]
+fn polarity_records_address_exactly_the_changed_lanes() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let one = |records: Vec<TrackInputRecord>| Ok(vec![(first.clone(), records)]);
+    assert_eq!(
+        classify_input(&current, |next| next.tracks[0]
+            .builtins
+            .left
+            .polarity_invert = true),
+        one(vec![polarity(Left, true, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.polarity_invert = true;
+            next.tracks[0].builtins.right.polarity_invert = true;
+        }),
+        one(vec![polarity(Both, true, 0)])
+    );
+    // Two lanes that change to different values stay two records.
+    let split = edited(&current, |model| {
+        model.tracks[0].builtins.left.polarity_invert = true;
+    });
+    assert_eq!(
+        classify_input(&split, |next| {
+            next.tracks[0].builtins.left.polarity_invert = false;
+            next.tracks[0].builtins.right.polarity_invert = true;
+        }),
+        one(vec![polarity(Left, false, 0), polarity(Right, true, 0)])
+    );
+    // A lane that keeps its value gets no record.
+    assert_eq!(
+        classify_input(&split, |next| next.tracks[0]
+            .builtins
+            .right
+            .polarity_invert = true),
+        one(vec![polarity(Right, true, 0)])
+    );
+}
+
+/// #1556 D3. Red if a trim or polarity record reads another row's ramp: a trim takes the fader's
+/// length, a polarity flip twice the mute's, and an edit's own length (an explicit 0 included) is
+/// kept as given, not doubled.
+#[test]
+fn input_records_carry_their_rows_ramps() {
+    use BuiltinLaneSelector::Both;
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let flip_and_ride = |next: &mut SessionModel| {
+        let builtins = &mut next.tracks[0].builtins;
+        for lane in [&mut builtins.left, &mut builtins.right] {
+            lane.trim_db = -6.0;
+            lane.polarity_invert = true;
+        }
+    };
+    let table = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    let current = with_smoothing(&current, table);
+    let next = edited(&current, flip_and_ride);
+    let ramps = LiveRamps::for_session(&next);
+    // At 48 kHz: fader 15 ms is 720 samples, mute 5 ms is 240, a flip twice that.
+    assert_eq!(
+        classify_input_with(&current, flip_and_ride, ramps, &EditRamps::new()),
+        Ok(vec![(
+            first.clone(),
+            vec![trim(Both, -6.0, 720), polarity(Both, true, 480)]
+        )])
+    );
+    for explicit in [0, 37] {
+        let mut edit_ramps = EditRamps::new();
+        edit_ramps.set(
+            &EditRampTarget::Strip(current.tracks[0].id.clone()),
+            EditRampRow::Input,
+            Some(explicit),
+        );
+        assert_eq!(
+            classify_input_with(&current, flip_and_ride, ramps, &edit_ramps),
+            Ok(vec![(
+                first.clone(),
+                vec![trim(Both, -6.0, explicit), polarity(Both, true, explicit)]
+            )])
+        );
+    }
+    // The other strip's entry changes nothing.
+    let mut other = EditRamps::new();
+    other.set(
+        &EditRampTarget::Strip(current.tracks[1].id.clone()),
+        EditRampRow::Input,
+        Some(37),
+    );
+    assert_eq!(
+        classify_input_with(&current, flip_and_ride, ramps, &other),
+        Ok(vec![(
+            first,
+            vec![trim(Both, -6.0, 720), polarity(Both, true, 480)]
+        )])
+    );
+}
+
+/// #1556 D4. Red if a filter target is designed from the wrong seeds, a one-sided change is sent
+/// as a pair or the reverse, two equal lanes are not merged into one `Both` target, or a
+/// `-0.0` cutoff is a change.
+#[test]
+fn filter_records_are_the_preparers_targets_for_the_changed_values() {
+    let rate = two_tracks().sample_rate_hz;
+    let case = |before: ((f32, f32), (f32, f32)), after: ((f32, f32), (f32, f32))| {
+        let current = with_filters(before.0, before.1);
+        classify_input(&current, |next| set_filters(next, after.0, after.1)).map(|strips| {
+            strips
+                .into_iter()
+                .map(|(_, records)| records)
+                .collect::<Vec<_>>()
+        })
+    };
+    let seeds = |before: ((f32, f32), (f32, f32))| [before.0.0, before.0.1, before.1.0, before.1.1];
+    let steady = ((200.0, 2_000.0), (0.0, 0.0));
+
+    // One lane, one side: the left HPF moves; the right lane and the left LPF are untouched.
+    let moved = ((300.0, 2_000.0), (0.0, 0.0));
+    assert_eq!(
+        case(steady, moved),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(3, Lane::Left, 300.0, 0.0)]
+        )])
+    );
+    // The left LPF disables.
+    let disabled = ((200.0, 0.0), (0.0, 0.0));
+    assert_eq!(
+        case(steady, disabled),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(4, Lane::Left, 0.0, 0.0)]
+        )])
+    );
+    // The same one-sided change on both lanes is one `Both` edit; two lanes with the same final
+    // pair design equal targets, which merge into one `Both` target.
+    let matching = ((200.0, 2_000.0), (0.0, 2_000.0));
+    let records = case(matching, ((50.0, 2_000.0), (50.0, 2_000.0))).expect("live");
+    assert_eq!(
+        records,
+        vec![designed_filters(
+            rate,
+            seeds(matching),
+            &[filter_edit(3, Lane::Both, 50.0, 0.0)]
+        )]
+    );
+    assert!(
+        matches!(
+            records[0][..],
+            [TrackInputRecord::PreparedFilter { target }] if target.lanes == BuiltinLaneSelector::Both
+        ),
+        "{records:?}"
+    );
+    // Lanes whose final pairs differ keep one target each, though the edit is one `Both` edit.
+    let records = case(steady, ((50.0, 2_000.0), (50.0, 0.0))).expect("live");
+    assert_eq!(
+        records,
+        vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(3, Lane::Both, 50.0, 0.0)]
+        )]
+    );
+    assert_eq!(records[0].len(), 2);
+    // Different sides on the two lanes: one edit each; the preparer returns the HPF section first.
+    let sides = ((300.0, 2_000.0), (0.0, 4_000.0));
+    assert_eq!(
+        case(steady, sides),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[
+                filter_edit(3, Lane::Left, 300.0, 0.0),
+                filter_edit(4, Lane::Right, 4_000.0, 0.0)
+            ]
+        )])
+    );
+    // Both of a lane's values moving is one atomic pair edit, which a pair of one-sided edits
+    // would refuse: the HPF passes the old LPF.
+    let crossing = ((3_000.0, 6_000.0), (0.0, 0.0));
+    assert!(
+        InputFilterPreparer
+            .prepare(
+                rate,
+                &seeds(steady),
+                &[filter_edit(3, Lane::Left, 3_000.0, 0.0)],
+                &mut [PreparedInputFilterTarget {
+                    lanes: BuiltinLaneSelector::Both,
+                    section: 0,
+                    pair: [0.0; 2],
+                    coefficients: [0.0; 6],
+                }; 4],
+            )
+            .is_err(),
+        "the HPF alone crosses the LPF"
+    );
+    assert_eq!(
+        case(steady, crossing),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(0, Lane::Left, 3_000.0, 6_000.0)]
+        )])
+    );
+    // The same pair on both lanes is one `Both` pair edit.
+    let both_pairs = ((3_000.0, 6_000.0), (3_000.0, 6_000.0));
+    assert_eq!(
+        case(steady, both_pairs),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(0, Lane::Both, 3_000.0, 6_000.0)]
+        )])
+    );
+    // A filter-off value is `+0.0` only: `validate_input_filter_pair` refuses `-0.0` as it refuses
+    // a rebuild's preparation, so the rebuild reports it and no live commit acks it.
+    assert_eq!(
+        case(steady, ((200.0, 2_000.0), (-0.0, -0.0))),
+        Err(LiveRebuild::Domain)
+    );
+    // Rewriting the same values is no record.
+    assert_eq!(case(steady, steady), Ok(Vec::new()));
+}
+
+/// #1556 D4. Red if a cutoff the filter domain refuses is acked live: above Nyquist, non-finite,
+/// below the rate-keyed minimum, or an HPF at or above the LPF.
+#[test]
+fn filter_values_the_domain_refuses_need_a_rebuild() {
+    let current = with_filters((0.0, 0.0), (0.0, 0.0));
+    let nyquist = current.sample_rate_hz as f32 / 2.0;
+    for (hpf, lpf) in [
+        (nyquist, 0.0),
+        (f32::NAN, 0.0),
+        (0.0, f32::INFINITY),
+        (5.0, 0.0),
+        (-1.0, 0.0),
+        (1_000.0, 1_000.0),
+        (2_000.0, 1_000.0),
+    ] {
+        assert_eq!(
+            classify_input(&current, |next| set_filters(next, (hpf, lpf), (0.0, 0.0))),
+            Err(LiveRebuild::Domain),
+            "{hpf} {lpf}"
+        );
+    }
+    assert!(
+        classify_input(&current, |next| set_filters(
+            next,
+            (80.0, 8_000.0),
+            (10.0, 0.0)
+        ))
+        .is_ok()
+    );
+}
+
+/// #1556 D2. Red if the records of one strip are not trims, then polarities, then filter targets,
+/// each left before right, or if a track's input values reach another strip.
+#[test]
+fn a_strips_input_records_are_trims_then_polarities_then_targets() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let rate = two_tracks().sample_rate_hz;
+    let current = with_filters((0.0, 0.0), (0.0, 0.0));
+    let strips = classify_input(&current, |next| {
+        let builtins = &mut next.tracks[0].builtins;
+        builtins.right.hpf_hz = 100.0;
+        builtins.left.lpf_hz = 8_000.0;
+        builtins.right.polarity_invert = true;
+        builtins.left.polarity_invert = true;
+        builtins.left.trim_db = -3.0;
+        builtins.right.trim_db = -4.0;
+        // The second track's values do not move.
+        next.tracks[1].fader.left_db = -6.0;
+    })
+    .expect("live");
+    assert_eq!(strips.len(), 1, "one strip has input records");
+    let (id, records) = &strips[0];
+    assert_eq!(*id, track_id(&current, 0));
+    let filters = designed_filters(
+        rate,
+        [0.0; 4],
+        &[
+            filter_edit(4, Lane::Left, 8_000.0, 0.0),
+            filter_edit(3, Lane::Right, 100.0, 0.0),
+        ],
+    );
+    assert_eq!(filters.len(), 2);
+    let mut expected = vec![
+        trim(Left, -3.0, 0),
+        trim(Right, -4.0, 0),
+        polarity(Both, true, 0),
+    ];
+    expected.extend(filters);
+    assert_eq!(*records, expected);
+}
+
+/// #1556 D5. Red if a submix strip's input section stays structural or its records are addressed
+/// to a track.
+#[test]
+fn a_submix_strip_input_section_is_live() {
+    use BuiltinLaneSelector::{Both, Left};
+    let rate = with_bus(false).sample_rate_hz;
+    let current = with_bus(false);
+    let strips = classify_input(&current, |next| {
+        let builtins = &mut next.submixes[0].builtins;
+        builtins.left.trim_db = -6.0;
+        builtins.left.polarity_invert = true;
+        builtins.right.polarity_invert = true;
+        builtins.left.hpf_hz = 80.0;
+    })
+    .expect("a submix input section is live");
+    assert_eq!(strips.len(), 1);
+    assert_eq!(strips[0].0, "bus");
+    let seeds = {
+        let builtins = &current.submixes[0].builtins;
+        [
+            builtins.left.hpf_hz,
+            builtins.left.lpf_hz,
+            builtins.right.hpf_hz,
+            builtins.right.lpf_hz,
+        ]
+    };
+    let mut expected = vec![trim(Left, -6.0, 0), polarity(Both, true, 0)];
+    expected.extend(designed_filters(
+        rate,
+        seeds,
+        &[filter_edit(3, Lane::Left, 80.0, 0.0)],
+    ));
+    assert_eq!(strips[0].1, expected);
 }
 
 // Issue #1264: effect parameter records.
@@ -2096,7 +2593,7 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
             .builtins
             .right
             .delay_samples = 64),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(11)))
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
     // The limiter's lookahead, beside a live threshold edit of the same instance.
     let limiter = with_limiter();
@@ -2137,9 +2634,9 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
     assert_eq!(
         classify(&current, |next| {
             next.tracks[0].fader.left_db = -6.0;
-            next.tracks[1].builtins.left.trim_db = 3.0;
+            next.tracks[1].builtins.left.delay_samples = 64;
         }),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
     let effects = with_effects();
     assert_eq!(

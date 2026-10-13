@@ -1341,7 +1341,7 @@ where
     /// changes, and a refusal after an owner was begun discards every begun owner (`OpenOwners`).
     ///
     /// Every live value is a latest-target cell (#1312, #1345): a strip's fader, mute and
-    /// matrix/pan values, an effect's parameter values, its bypass and an EQ's targets. A write
+    /// matrix/pan values, its input trim, polarity and filter targets (#1556), an effect's parameter values, its bypass and an EQ's targets. A write
     /// needs no room, so nothing refuses a delta for room and nothing turns it into a rebuild
     /// because it outgrew a queue. After the predicate and the test fault hook, the commit takes
     /// its stamp from the newest epoch's gate as its last fallible step (D7). Only then does it
@@ -1441,6 +1441,21 @@ where
                 return LiveCommit::Done(Err(CommandError::Internal));
             }
             resolved_effects.push(index);
+        }
+
+        // 2b. A strip with input records has an input writer, and every filter target passes the
+        // contract the writer assumes (#1556 D5). Both are checked before the first write: the
+        // cells' write cannot fail and panics on a target it was never validated for.
+        for (strip, &index) in delta.strips.iter().zip(&resolved) {
+            if strip.input.is_empty() {
+                continue;
+            }
+            if strip_lanes[index].input.is_none() {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
+            if !strip.input_records_valid() {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
         }
 
         // 3. Each EQ owner's transaction (#1265 D2): begin at its committed revision, apply the
@@ -1546,6 +1561,11 @@ where
             }
             if let Some(record) = strip.matrix {
                 producer.producer.write(stamp, record);
+            }
+            if let Some(input) = producer.input.as_mut() {
+                for &record in &strip.input {
+                    input.write(stamp, record);
+                }
             }
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {

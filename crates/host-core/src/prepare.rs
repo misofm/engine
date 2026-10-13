@@ -2550,14 +2550,16 @@ fn strip_stage_row<'a>(
         .map(|index| &rows[index])
 }
 
-/// The per-edit ramp lengths of one strip's three record rows, looked up once from the
-/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)` and
-/// `(Strip, Matrix)` entries. `None` is "the edit gave no length": the session's applies.
+/// The per-edit ramp lengths of one strip's four record rows, looked up once from the
+/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)`,
+/// `(Strip, Matrix)` and `(Strip, Input)` entries. `None` is "the edit gave no length": the session's applies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StripEditRamps {
     fader: Option<u32>,
     mute: Option<u32>,
     matrix: Option<u32>,
+    /// The input trim and polarity (#1556 D3).
+    pub(crate) input: Option<u32>,
 }
 
 impl StripEditRamps {
@@ -2572,6 +2574,7 @@ impl StripEditRamps {
             fader: edit_ramps.get(&target, EditRampRow::Fader),
             mute: edit_ramps.get(&target, EditRampRow::Mute),
             matrix: edit_ramps.get(&target, EditRampRow::Matrix),
+            input: edit_ramps.get(&target, EditRampRow::Input),
         }
     }
 }
@@ -2705,7 +2708,7 @@ pub(crate) fn matrix_record(
 /// The lane records for one per-lane change mask: one `Both` when both lanes change and
 /// `same_value`, else one record per changed lane, left first. Each entry names the lane whose
 /// post-commit value the record carries.
-fn lane_records(
+pub(crate) fn lane_records(
     changed: [bool; 2],
     same_value: bool,
 ) -> impl Iterator<Item = (BuiltinLaneSelector, usize)> {

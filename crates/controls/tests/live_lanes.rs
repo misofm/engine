@@ -14,9 +14,13 @@ fn rows(model: &session::SessionModel) -> Vec<ControlRow> {
 /// attached for a row that is not live (a session with no effect would pay for effect cells).
 #[test]
 fn the_effect_lane_follows_the_effect_rows() {
-    // No effect, no effect row, no lane. With today's classes nothing else is live.
+    // No effect, no effect row, no lane. With today's classes only the input rows are live (#1556).
     let mut model = fixture();
-    assert_eq!(live_lanes(&model), LiveLanes::default());
+    let input_only = LiveLanes {
+        strip_input: true,
+        ..LiveLanes::default()
+    };
+    assert_eq!(live_lanes(&model), input_only);
 
     // One insert on one track gives the effect lane and no other.
     let effect = LAUNCH_EFFECTS[1];
@@ -35,7 +39,7 @@ fn the_effect_lane_follows_the_effect_rows() {
         live_lanes(&model),
         LiveLanes {
             effects: true,
-            ..LiveLanes::default()
+            ..input_only
         }
     );
 
@@ -45,40 +49,37 @@ fn the_effect_lane_follows_the_effect_rows() {
 }
 
 /// Red if the input or route lane ignores its family, or if a row that is not live asks for a
-/// lane: the test table flips every route row, then every input row, to live.
+/// lane: the test table flips every route row to live, then every input row to rebuild-only.
 #[test]
 fn a_live_route_or_input_row_asks_for_its_lane() {
     let model = fixture();
-    let flip = |family: Family| {
-        let mut flipped = rows(&model);
-        let mut flips = 0;
-        for row in &mut flipped {
+    let set = |family: Family, class: ControlClass| {
+        let mut table = rows(&model);
+        let mut changed = 0;
+        for row in &mut table {
             if row.descriptor.family == family {
-                row.descriptor.class = ControlClass::Live;
-                flips += 1;
+                row.descriptor.class = class;
+                changed += 1;
             }
         }
-        assert!(flips > 0, "the fixture lists a {family:?} row");
-        LiveLanes::of_rows(flipped)
+        assert!(changed > 0, "the fixture lists a {family:?} row");
+        LiveLanes::of_rows(table)
     };
+    // The input rows are live today (#1556); the route rows are not.
+    let today = LiveLanes::of_rows(rows(&model));
+    assert!(today.strip_input && !today.routes);
     assert_eq!(
-        flip(Family::Route),
+        set(Family::Route, ControlClass::Live),
         LiveLanes {
+            strip_input: true,
             routes: true,
             ..LiveLanes::default()
         }
     );
     assert_eq!(
-        flip(Family::StripInput),
-        LiveLanes {
-            strip_input: true,
-            ..LiveLanes::default()
-        }
+        set(Family::StripInput, ControlClass::Derived),
+        LiveLanes::default()
     );
-
-    // Today's table: no input and no route row is live.
-    let today = LiveLanes::of_rows(rows(&model));
-    assert!(!today.strip_input && !today.routes);
 }
 
 /// Red if a row's `active` flag, which a value (`matrix_mode`) flips, changes which lanes a plan

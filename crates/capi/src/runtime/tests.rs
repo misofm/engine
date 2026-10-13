@@ -2946,6 +2946,14 @@ fn mixed_effect_parity_session(sample_rate_hz: u32) -> String {
     session::canonical_session_json(&model).expect("canonical mixed-effect session")
 }
 
+/// The C ABI's lane selection less its effect lanes: the input rows are live (#1556), no route row
+/// is.
+const INPUT_LANE_ONLY: HostLiveLanes = HostLiveLanes {
+    strip_input: true,
+    effects: false,
+    routes: false,
+};
+
 /// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session
 /// (#1256 gate 1), and against the C ABI's lane selection without its effect lanes (#1263 gate 1).
 fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
@@ -2979,11 +2987,25 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         );
     }
     assert_eq!(resources.latency_samples, host.latency_samples, "{label}");
-    assert_eq!(resources.tail_kind, tail_kind, "{label}: tail kind");
-    assert_eq!(
-        resources.tail_samples, tail_samples,
-        "{label}: tail samples"
-    );
+    // Every strip carries the input lane (#1556), so the input section's tail is the live bound:
+    // finite for every history of live values, and never below the prepared design's. A plan with
+    // no infinite-tail effect stays finite; one with such an effect stays infinite.
+    if tail_kind == TAIL_FINITE {
+        assert_eq!(
+            resources.tail_kind, TAIL_FINITE,
+            "{label}: the live input bound is finite"
+        );
+        assert!(
+            resources.tail_samples >= tail_samples,
+            "{label}: the live bound {} covers the design's {tail_samples}",
+            resources.tail_samples
+        );
+    } else {
+        assert_eq!(
+            resources.tail_kind, TAIL_INFINITE,
+            "{label}: an infinite-tail effect keeps the plan's tail infinite"
+        );
+    }
 
     // #1263 gate 1: attaching the effect lanes moves neither latency nor tail. The reference is
     // the C ABI's selection less its effect lanes, prepared at the same depth.
@@ -2991,8 +3013,8 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         &compiled,
         &caps,
         &HostLiveControlRequest::default(),
-        // The C ABI's selection less its effect lanes: today no input or route row is live.
-        HostLiveLanes::FADER_AND_MATRIX,
+        // The C ABI's selection less its effect lanes: the input rows are live (#1556), no route row is.
+        INPUT_LANE_ONLY,
         None,
         &host_core::LiveValuesSuperseded::default(),
     )
@@ -3057,7 +3079,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         "{label}: one producer per effect instance, owners on the EQs"
     );
 
-    // One producer per strip, in canonical strip order, with no input lane.
+    // One producer per strip, in canonical strip order, each with an input lane (#1556).
     let model = compiled.normalized_model();
     let strips = c.session.test_providers();
     assert_eq!(strips.test_track_count(), model.tracks.len(), "{label}");
@@ -3077,8 +3099,8 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         strips
             .test_strip_controls()
             .iter()
-            .all(|producer| producer.input.is_none()),
-        "{label}: no strip carries an input lane"
+            .all(|producer| producer.input.is_some()),
+        "{label}: every strip carries an input lane"
     );
 
     // Eight blocks fed the same source chunks are bit-identical.

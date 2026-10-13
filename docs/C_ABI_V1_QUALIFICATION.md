@@ -339,9 +339,41 @@ reference session the
 two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
 must raise both. #1256 attached no input, effect or route lane, so rendering, `latency_samples`,
-`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the C ABI still
-attaches no input lane (#1261) and no route lane (#1225). #1257 delivers fader, mute and pan edits
-through them (next section).
+`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the input lane
+(#1556, section "Live strip input" below) and the route lane (#1225) are attached later. #1257
+delivers fader, mute and pan edits through them (next section).
+
+## Live strip input: trim, polarity and the input filters (#1556)
+
+The strip input section's `trim_db`, `polarity_invert`, `hpf_hz` and `lpf_hz` are live rows of the
+control list (decision 17, S5). `miso_engine_v1_submit_command` commits a change of them as a live
+revision, on tracks and submixes, per lane and on both, through `SET_CONTROL` or the per-kind
+edits; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
+needs new memory). The core chooses the lanes from the rows (`controls::live_lanes`), so **every C
+ABI plan carries an input lane per strip**: the trim, polarity and filter cells of
+`TrackControlProducer::input`, charged in `builtin_retained_payload_bytes` (31,424 -> 36,153 on the
+nine-track EQ reference session) and, for the producers' table, in `capi_retained_bytes`.
+
+- **Records.** Per strip, in write order: `TrimDb` (one per lane whose gain changes, or one `Both`
+  when both lanes change to the same `trim_db`; `0.0` to `-0.0` is no record), `PolarityInvert`
+  (the same rule), then the filter targets that host-core's `InputFilterPreparer` designs on the
+  control thread from the strip's pre-commit values: a one-sided edit per lane, one atomic pair
+  edit when both of a lane's cutoffs change (so a pair that two one-sided edits would refuse, an
+  HPF passing the old LPF, is live), one `Both` edit when both lanes change the same way. A cutoff
+  the filter domain refuses (above the rate-keyed maximum, non-finite, an HPF at or above the LPF,
+  `-0.0`) is the same refusal a rebuild gives. The designed targets are validated before the first
+  cell write, and a write cannot fail, so no acked edit is dropped.
+- **Ramps.** A trim ramps over `fader_ms`, a polarity flip over twice `mute_ms` (the coefficient
+  passes through zero on the trim ramp, so a flip is a linear ramp from `+g` to `-g`), both
+  replaceable by the edit's own `ramp_samples`; a filter target is applied over a fixed 64
+  coefficient updates, and its edit takes no length.
+- **Rendering, latency and tail.** An input lane adds no latency. A strip with the lane reports the
+  rate's live input bound (finite for every history of live trim and filter targets) in place of
+  its prepared design's bound, so a plan with no infinite-tail effect reports `TAIL_FINITE`
+  (checked on the one-, ten- and nine-track parity sessions at the four launch rates). After the
+  ramp, a live edit renders the bits of a plan prepared from the committed session (the filters
+  from a common silence, `-0.0` samples included); gated at 44.1 and 96 kHz, with zero render
+  allocations and frees.
 
 ## Value-only track edits on the running plan (#1257)
 
@@ -444,8 +476,8 @@ per shared `Block`-rate automatable parameter, and for a parametric EQ one per t
 channel in place of the parameters; the render-side staging window is raised to hold every
 parameter cell. capi keeps the producers with the plan's provider epoch;
 each EQ's producer owns its prepared-target owner. #1264 writes live effect parameter edits to
-their cells, and #1265 publishes live EQ targets through the owners (below). No input or route
-lane is attached.
+their cells, and #1265 publishes live EQ targets through the owners (below). The input lane is
+#1556's (below); no route lane is attached.
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
@@ -604,6 +636,13 @@ the rack's latency-preserving bypass shunt (decision 14).
 
 ## Design-bound caches (#1471)
 
+**Since #1556 no C ABI compile or rebuild fills these caches.** Every strip carries the live input
+lane, which reports the rate's live bound and designs none, so a compile and a rebuild bound no
+input design and walk no frame (`design_bound_cache`'s `a_c_abi_plan_bounds_no_input_design`), and
+the engine's cache and every epoch's seed stay empty. The rest of this section describes the
+machinery as it stands; it is dead on the C ABI until a successor removes it or a lane-free plan
+returns.
+
 The engine owns one control-thread cache of input-section design bounds (`builtins::
 InputBoundCache`, #1457), read and filled by every `miso_engine_v1_compile_session` on it. A
 session keeps none of it: each provider epoch owns the designs the preparation that made its plan
@@ -641,13 +680,6 @@ here from the cap, the entry layout and the ordered map's worst-case node occupa
   journal on every path and frees it before it returns; the record it becomes is the plan
   epoch's seed, charged to `maximum_capi_retained_bytes`, not the engine's cache.
 
-`resource_lifecycle`'s `the_engine_cache_stays_within_its_stated_ceiling` measures the leaf node (a
-one-design compile on a fresh engine frees exactly one), derives the worst case with the formula
-above and asserts it is at most the stated figure, so a larger key or value turns it red. It then
-compiles twice the cap's distinct designs on one engine (the cache fills, clears at the 8,193rd
-and fills again) and asserts that engine destroy frees at most that ceiling over an empty
-engine's. One fill order measured 3,602,112 bytes; that figure is not the ceiling.
-`a_compile_leaves_nothing_open_on_the_engine_cache` compiles a 200-design document on two
-engines, a no-filter document on the second as well, and asserts engine destroy frees the same
-bytes for both (84,208 each), so a journal left open turns it red. The C header states the
+The two tests that measured the ceiling against a filled cache were removed with #1556: no C ABI
+compile reaches the cache any more. The C header states the
 ceiling in its "Engine memory" paragraph.

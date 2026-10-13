@@ -477,14 +477,6 @@ pub fn builtin_parameter_lattice_points(
     Ok(BuiltinLatticePoints { points, disabled })
 }
 
-/// The issue that makes the strip input section's values (trim, polarity, HPF, LPF) live on every
-/// host: decision 14 rules them live and decision 17 slice S5 (#1556) builds the path; its last
-/// step flips these rows to `Live`.
-pub const STRIP_INPUT_SLICE: u32 = 1556;
-
-const STRIP_INPUT_REOPEN: &str =
-    "The strip input slice (decision 17, S5) builds the live path and flips this row to live.";
-
 const DELAY_SAMPLES_REOPEN: &str = "A re-timing that does not glitch, for example a crossfaded dual \
      read over a line sized to the 48,000-sample maximum, with that memory accepted (decision 14, D2).";
 
@@ -508,12 +500,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
         ramp: Some(LiveRampRow::PolarityInvert),
-        class: ControlClass::RebuildOnly {
-            reason: RebuildReason::RuledLiveNotBuilt {
-                issue: STRIP_INPUT_SLICE,
-            },
-            reopen: STRIP_INPUT_REOPEN,
-        },
+        class: ControlClass::Live,
         family: Family::StripInput,
         taper: Taper::Stepped,
         kind: ControlKind::Toggle,
@@ -540,12 +527,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
         ramp: Some(LiveRampRow::InputTrim),
-        class: ControlClass::RebuildOnly {
-            reason: RebuildReason::RuledLiveNotBuilt {
-                issue: STRIP_INPUT_SLICE,
-            },
-            reopen: STRIP_INPUT_REOPEN,
-        },
+        class: ControlClass::Live,
         family: Family::StripInput,
         taper: Taper::Decibel,
         kind: ControlKind::Continuous,
@@ -570,12 +552,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         ramp: None,
-        class: ControlClass::RebuildOnly {
-            reason: RebuildReason::RuledLiveNotBuilt {
-                issue: STRIP_INPUT_SLICE,
-            },
-            reopen: STRIP_INPUT_REOPEN,
-        },
+        class: ControlClass::Live,
         family: Family::StripInput,
         taper: Taper::Logarithmic,
         kind: ControlKind::Continuous,
@@ -598,12 +575,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
         ramp: None,
-        class: ControlClass::RebuildOnly {
-            reason: RebuildReason::RuledLiveNotBuilt {
-                issue: STRIP_INPUT_SLICE,
-            },
-            reopen: STRIP_INPUT_REOPEN,
-        },
+        class: ControlClass::Live,
         family: Family::StripInput,
         taper: Taper::Logarithmic,
         kind: ControlKind::Continuous,
@@ -4929,7 +4901,15 @@ pub fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 /// The result is a **magnitude**: the polarity sign is applied by the caller, because
 /// `polarity_invert` is its own parameter with its own command kind and a trim move must not
 /// silently clear it.
-fn checked_trim_gain(db: f32) -> Result<f32, BuiltinParameterError> {
+///
+/// Issue #1556 D3: preparation, the render-side setter and host-core's live-delta classifier share
+/// this one function, as they share [`checked_fader_gain`], so a live trim record is refused on
+/// exactly the terms a declared value is.
+///
+/// # Errors
+///
+/// [`BuiltinParameterError::GainDomain`] when `db` is not finite or is outside `[-144, 24]`.
+pub fn checked_trim_gain(db: f32) -> Result<f32, BuiltinParameterError> {
     if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
         return Err(BuiltinParameterError::GainDomain);
     }
