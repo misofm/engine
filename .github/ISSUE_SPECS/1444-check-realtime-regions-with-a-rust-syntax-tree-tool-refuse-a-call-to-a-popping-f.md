@@ -243,3 +243,41 @@ outside the repository.
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt record: attempt 1 (stream J follow-up batch, 2026-10-13, on `9ef045fbd`)
+
+Delivery mode: feature sprint (no mutation runs, short note). Re-measured on the branch (main
+`70804d3c2` plus #1443).
+
+- **What changed.** `tools/realtime-policy/src/calls.rs` (new; the call rule, D2 rules 1 to 3, D4
+  limits in its module documentation); `unmarked/walk.rs` and `unmarked/mod.rs` return the name set
+  (D1) and the non-test trait `impl`s from the walk #1443 already makes (`Popping`); `lib.rs` reads
+  `use .. as` renames of the iterator traits token by token from every file; classes
+  `PoppingCall`, `PoppingPathValue` and `PoppingIterator`; the drain module documentation (D6).
+  The rule is its own full `syn` visit with its own scopes (not the drain rule's allow-list tree),
+  so no node is skipped: locals are `let`, pattern and parameter bindings, a nested `fn` or other
+  item sees none of the function around it, and a `let` is hot when its initializer meets a name of
+  the set or a hot local at any depth.
+- **Tests.** `tests/policy/calls.rs` has every D5 case except the two it leaves to existing tests:
+  the helper-outside case gains the call-rule class in `unmarked.rs`, and the `cancel_except` twin
+  (`drain/twins.rs`) now runs the call rule unchanged and still passes. Extra cases: a call in a
+  macro token tree, a free-function and path call, the `for` iterator expression outside its loop,
+  locals named like popping functions (exempt) and the shadow ending with its block, a nested `fn`
+  that sees no local, every iterator trait with a rename in another file and `r#`, a quiet iterator
+  and a non-iterator trait that pop (accepted). One earlier case changed:
+  `a_pop_in_a_nested_function_is_judged_by_the_loops_outside_it` also gets `PoppingCall`, because
+  its loop calls the nested popping `helper`.
+- **Real tree, re-measured: 3 hits, a name collision.** The name set is 25 names (spec: 28 or 29;
+  `process` and `stage` left it with #1346/#1312/#1345). `drain` is in the set because of
+  `LiveControlEffectBankStage::drain` (`crates/rack/src/lib.rs:1513`, #1345's marked bank drain,
+  correct under the drain rule). The tool then refuses three calls whose receivers are cell readers
+  and never pop: `crates/builtins-compiler/src/lib.rs:1180` (`InputReader::drain`), `:2038`
+  (`FaderReader::drain`) and `:2074` (`MatrixReader::drain`), each in the `for .. in controls`
+  loop. This is D3's case (receiver cannot reach the popping function): the rule and the code stay
+  as they are, and root names the restructure. No other hit: the source acquire, the spectrum
+  collection, `poll_meters`, the plan exchange and the three spec-listed `.process(` calls are gone
+  or pass. No `impl Iterator` that pops exists.
+- **Gates run.** `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy
+  --all-targets -- -D warnings`, `cargo test --locked -p realtime-policy` (241 passed). Gate 1
+  (`cargo run --locked --release -q -p realtime-policy` on the real tree) FAILS with the three
+  hits above and nothing else.

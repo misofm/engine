@@ -82,10 +82,15 @@
 //! under `<package>/tests/`, a `#[test]` or false-`cfg` node, a file that only test code declares;
 //! `#[cfg(any(test, feature = "test-support"))]` is not test code) and the allowlist.
 //!
+//! A call from a marked loop or closure to a function that pops is the call rule's
+//! ([`crate::calls`], #1444): it refuses the call, a path value that names such a function, and an
+//! iterator implementation that pops.
+//!
 //! What stays outside the rule (D4): recursion; a loop in a caller, outside the region (a loop
-//! that encloses the region inside the same function is refused above, not a limit); a call from a
-//! marked loop to a function that pops (the call rule, #1444); and a macro, defined elsewhere,
-//! that expands to a loop.
+//! that encloses the region inside the same function is refused above, not a limit); a helper two
+//! calls deep; a function value that enters a function as a parameter, a field or a return value;
+//! an implicit call other than iteration (`Drop`, `Deref`, an operator trait); and a macro,
+//! defined elsewhere, that expands to a loop.
 //!
 //! The limits of the tool's threat model (#1438 Hazards): code outside the workspace source, which
 //! the tool cannot read, type-level behaviour, because the rule reads syntax and not types, and

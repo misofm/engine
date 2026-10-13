@@ -53,6 +53,25 @@ pub(crate) fn declares_module(source: &Source) -> bool {
     walk::declares_module(&source.tokens)
 }
 
+/// What the pass learns about the functions that pop, for the call rule (#1444 D1, D2 rule 3).
+#[derive(Default)]
+pub(crate) struct Popping {
+    /// The names of the non-test functions whose own body holds a pop. `try_pop` is not in it.
+    pub(crate) names: BTreeSet<String>,
+    /// The non-test `impl`s of a trait, with whether a method of the `impl` pops.
+    pub(crate) trait_impls: Vec<TraitImpl>,
+}
+
+/// A non-test `impl` of a trait.
+pub(crate) struct TraitImpl {
+    /// The index of the file's unit in the slice given to [`check`].
+    pub(crate) unit: usize,
+    /// The last segment of the trait path, without `r#`.
+    pub(crate) trait_name: String,
+    pub(crate) line: usize,
+    pub(crate) popping: bool,
+}
+
 /// Judge every non-test pop of `units` that stands outside every region. `files` holds every
 /// `.rs` path of the walk.
 pub(crate) fn check(
@@ -61,7 +80,8 @@ pub(crate) fn check(
     units: &[Unit<'_>],
     policy: &Policy,
     findings: &mut Vec<Finding>,
-) {
+) -> Popping {
+    let mut popping = Popping::default();
     let modules = Modules::new(
         root,
         files,
@@ -70,7 +90,7 @@ pub(crate) fn check(
             .map(|unit| (unit.source.path.as_str(), unit.file)),
     );
     let mut judged: HashSet<usize> = HashSet::new();
-    for unit in units {
+    for (index, unit) in units.iter().enumerate() {
         let mut tokens = Vec::new();
         identifiers(&unit.source.tokens, &mut tokens);
         if modules.is_test(&unit.source.path) {
@@ -85,13 +105,31 @@ pub(crate) fn check(
         if tokens.is_empty() && entries_of(policy, &unit.source.path).next().is_none() {
             continue;
         }
-        judge(unit, &tokens, policy, &mut judged, findings);
+        let walk = walk::walk(unit.file);
+        for pop in &walk.pops {
+            if let Some(function) = pop.function {
+                let name = &walk.functions[function].name;
+                if name != "try_pop" {
+                    popping.names.insert(name.clone());
+                }
+            }
+        }
+        popping
+            .trait_impls
+            .extend(walk.trait_impls.iter().map(|found| TraitImpl {
+                unit: index,
+                trait_name: found.trait_name.clone(),
+                line: found.line,
+                popping: found.popping,
+            }));
+        judge(unit, &walk, &tokens, policy, &mut judged, findings);
     }
     for (index, entry) in policy.control_side_allowlist.iter().enumerate() {
         if !judged.contains(&index) {
             findings.push(stale(entry, None));
         }
     }
+    popping
 }
 
 fn entries_of<'p>(
@@ -121,13 +159,13 @@ fn stale(entry: &ControlSideEntry, line: Option<(&Source, usize)>) -> Finding {
 /// Judge one file that is not test code and holds a `try_pop` token.
 fn judge(
     unit: &Unit<'_>,
+    walk: &walk::Walk,
     tokens: &[Pos],
     policy: &Policy,
     judged: &mut HashSet<usize>,
     findings: &mut Vec<Finding>,
 ) {
     let source = unit.source;
-    let walk = walk::walk(unit.file);
     let in_region = |line: usize| {
         unit.regions
             .iter()

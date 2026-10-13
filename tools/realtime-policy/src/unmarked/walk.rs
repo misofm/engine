@@ -13,6 +13,10 @@ use crate::drain::{PopKind, PopSite, Pos, bare, macro_pops, pos};
 pub(super) struct Function {
     /// The canonical path (#1443 D3).
     pub(super) path: String,
+    /// The name, without `r#` (#1444 D1).
+    pub(super) name: String,
+    /// Whether it is a method of an `impl` or a `trait` (#1444 D2 rule 3).
+    pub(super) method: bool,
     /// The line of its name.
     pub(super) line: usize,
 }
@@ -26,11 +30,22 @@ pub(super) struct Pop {
     pub(super) deferred: bool,
 }
 
+/// An `impl` of a trait that is not test code (#1444 D2 rule 3).
+pub(super) struct TraitImpl {
+    /// The last segment of the trait path, without `r#`.
+    pub(super) trait_name: String,
+    /// The line of the trait path.
+    pub(super) line: usize,
+    /// Whether any method of the `impl` has a pop in its own body, a closure of it included.
+    pub(super) popping: bool,
+}
+
 /// What one walk found.
 #[derive(Default)]
 pub(super) struct Walk {
     pub(super) functions: Vec<Function>,
     pub(super) pops: Vec<Pop>,
+    pub(super) trait_impls: Vec<TraitImpl>,
     /// The extents (start, one past the end) of the nodes that are test code.
     pub(super) test_ranges: Vec<(Pos, Pos)>,
     /// The names of `fn try_pop` definitions that are not test code.
@@ -111,6 +126,8 @@ impl Walker {
         let path = self.function_path(&name);
         self.found.functions.push(Function {
             path,
+            name,
+            method: self.owner.is_some(),
             line: signature.ident.span().start().line,
         });
         self.frames.push(Frame { index, deferred: 0 });
@@ -257,8 +274,23 @@ impl<'ast> Visit<'ast> for Walker {
             None => target,
         };
         let outer = self.owner.replace(owner);
+        let first = self.found.functions.len();
         visit::visit_item_impl(self, node);
         self.owner = outer;
+        if let Some((_, path, _)) = &node.trait_
+            && let Some(last) = path.segments.last()
+        {
+            let popping = self.found.pops.iter().any(|pop| {
+                pop.function.is_some_and(|function| {
+                    function >= first && self.found.functions[function].method
+                })
+            });
+            self.found.trait_impls.push(TraitImpl {
+                trait_name: bare(&last.ident),
+                line: last.ident.span().start().line,
+                popping,
+            });
+        }
     }
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {

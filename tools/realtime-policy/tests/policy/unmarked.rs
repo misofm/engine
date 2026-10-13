@@ -333,5 +333,10 @@ fn a_helper_outside_every_region_is_refused() {
     let text = format!(
         "// {BEGIN}\nimpl Lane {{\n    fn drain(&mut self) {{\n        while let Some(record) = self.next_record() {{\n            apply(record);\n        }}\n    }}\n}}\n// {END}\nimpl Lane {{\n    fn next_record(&mut self) -> Option<Record> {{\n        self.control.try_pop().ok()\n    }}\n}}\n"
     );
-    classes("helper-outside", &[create(LIB, &text)], &[UNMARKED]);
+    // B2b-2 adds the call-rule class: the caller loops over the helper.
+    classes(
+        "helper-outside",
+        &[create(LIB, &text)],
+        &[UNMARKED, Class::PoppingCall],
+    );
 }

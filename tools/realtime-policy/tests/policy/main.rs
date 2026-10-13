@@ -5,6 +5,7 @@
 
 mod binary;
 mod boundary;
+mod calls;
 mod common;
 mod drain;
 mod forbidden;

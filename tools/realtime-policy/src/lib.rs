@@ -10,6 +10,7 @@
 //! skip.
 
 mod boundary;
+mod calls;
 mod cli;
 mod drain;
 mod forbidden;
@@ -57,6 +58,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     let mut names = drain::NameScan::default();
     let mut parsed = Vec::new();
     let mut all_files = BTreeSet::new();
+    let mut aliases = BTreeSet::new();
     for file in walk::rust_files(workspace_root, &mut findings) {
         all_files.insert(file.path.clone());
         let source = match Source::load(&file.absolute, &file.path) {
@@ -69,6 +71,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         unsafe_scan::scan(&source, policy, &mut findings);
         source_reads::scan(&source, &file.absolute, &mut findings);
         names.read(&source);
+        calls::read_aliases(&source, &mut aliases);
         let markers = markers::scan(&source, &mut findings);
         if !markers.regions.is_empty() {
             regions += markers.regions.len();
@@ -103,7 +106,8 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             regions,
         })
         .collect();
-    unmarked::check(workspace_root, &all_files, &units, policy, &mut findings);
+    let popping = unmarked::check(workspace_root, &all_files, &units, policy, &mut findings);
+    calls::check(&units, &popping, &aliases, &mut findings);
     let (debug_assert_trusted, name_findings) = names.finish();
     findings.extend(name_findings);
     let mut capi_ffi = None;

@@ -60,6 +60,13 @@ pub enum Class {
     ForbiddenBody,
     /// A `try_pop` in a marked region that the drain rule cannot prove bounded.
     UnboundedTryPop,
+    /// A call to a function that pops, inside a loop or a closure of a marked region (#1444 D2
+    /// rule 1).
+    PoppingCall,
+    /// A function that pops, named as a value anywhere in a marked region (#1444 D2 rule 2).
+    PoppingPathValue,
+    /// An `impl` of an iterator trait with a method that pops (#1444 D2 rule 3).
+    PoppingIterator,
     /// A non-test `try_pop` outside every marked region, in a function that no control-side
     /// allowlist entry admits (D2).
     UnmarkedTryPop,
@@ -152,6 +159,15 @@ impl fmt::Display for Class {
             Self::ForbiddenBody => out.write_str("marked realtime forbidden-body predicate"),
             Self::UnboundedTryPop => out.write_str(
                 "marked realtime unbounded try_pop drain (bound it with available_at_entry)",
+            ),
+            Self::PoppingCall => out.write_str(
+                "marked realtime call to a popping function inside a loop or closure (move the pop out of the loop, or into the loop's own counted drain)",
+            ),
+            Self::PoppingPathValue => out.write_str(
+                "marked realtime path value that names a popping function (a function value can be called from a loop the walk does not see)",
+            ),
+            Self::PoppingIterator => out.write_str(
+                "iterator implementation whose method pops (iteration calls it with no call site to judge)",
             ),
             Self::UnmarkedTryPop => out.write_str(
                 "unmarked try_pop outside the control-side allowlist (mark its function as a realtime region, or list it with its thread and reason)",
