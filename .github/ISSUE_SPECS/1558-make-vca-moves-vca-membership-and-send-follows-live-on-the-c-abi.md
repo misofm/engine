@@ -257,9 +257,29 @@ Commands: `cargo test --locked -p controls -p host-core --all-features`,
   followed mute changes, as D4 says. The sends of the successor are prepared from its model, so they
   are gated at the swap block without the source's ramp. The live path ramps a send's gate with its
   source's mute (D7); the successor path cannot until a send's ramp is carried across a swap.
-- **Catalog growth.** A live VCA add replaces the catalog by a larger one (four rows and a header
-  per VCA). `validate_live_peak` charges the newest plan's catalog as before; the growth is bounded
-  by `maximum_vcas` and is not charged separately.
+- **Catalog growth (batch 3 review fold, replaces the first reading).** A live VCA add (or a
+  remove and add with a longer ID) replaces the catalog by a larger one (four rows and a header per
+  VCA, and the ID in each). The first reading charged only the catalog the plans were prepared
+  with, and said the growth was bounded by `maximum_vcas`; that bounds the row count, not the
+  bytes, and no ceiling saw them. Now `live_admission` builds the committed model's catalog before
+  admission and `validate_live_peak` takes a `LiveCatalogAdmission`: the new catalog's retained bytes
+  less the current catalog's (saturating at zero) join the capi term, and the new catalog's largest
+  single allocation joins the largest-allocation term. A refusal is the compile diagnostic a
+  rebuild gives (`ResourceFault::Limit`), before any write. After the commit the newest epoch's
+  retained rows (`CapiResources` and the report row `plan_resources` reads) follow the committed
+  catalog, so the next admission and the report see its bytes; an older pending-swap epoch keeps the
+  catalog it was prepared with until its plan is gone, and the largest-allocation figure only
+  grows. The peak therefore holds the committed catalog twice (the retained row and the
+  prepared-protocol stand-in), as the first reading's did for the old one.
+- **A route record with a gain or matrix change and a source-caused gate change takes the
+  source's `Mute` length (batch 3 review fold).** D7's last clause names #1557 D3's rule for such a
+  record, which would give the `SendGain` or `SendMatrix` row's length. The code does the other
+  thing: once the gate changes the gate's length governs the whole record (`route_records`), and a
+  gate change that no route edit caused takes the source's `Mute` length. Decision: keep the code.
+  A send that follows its source's mute must ramp with it; a second, independent length on the same
+  record would make the cell ramp one way for its gate and another for its gain, and a record
+  has one length. The gain moves with the gate's ramp in that block. One test pins it
+  (`a_gain_change_with_a_source_caused_gate_change_takes_the_sources_mute_length`).
 - **Tests.** Inverted: `a_followed_mute_change_needs_a_rebuild`, `any_vca_needs_a_rebuild`,
   `a_followed_submix_mute_change_needs_a_rebuild` (host-core classifier);
   `deltas_outside_the_live_set_rebuild_...` (capi); the four followed-mute / VCA restart tests of

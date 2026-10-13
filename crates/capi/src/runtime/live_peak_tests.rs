@@ -46,8 +46,14 @@ fn verdict(
     models: CompiledModelAdmission,
     limits: CompileLimits,
 ) -> Result<(), String> {
-    validate_live_peak(current, pending, models, limits.into())
-        .map_err(|failure| String::from_utf8(failure_bytes(failure)).expect("UTF-8"))
+    validate_live_peak(
+        current,
+        pending,
+        models,
+        LiveCatalogAdmission::default(),
+        limits.into(),
+    )
+    .map_err(|failure| String::from_utf8(failure_bytes(failure)).expect("UTF-8"))
 }
 
 /// Accepts with `cap` at `peak` and refuses with it one byte below, with `code`.

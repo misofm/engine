@@ -57,33 +57,23 @@ pub struct SessionControlProviderResources {
 pub struct ControlCatalog {
     entries: Vec<ControlEntry>,
     values: Vec<f32>,
+    resources: CatalogResources,
 }
 
-/// Production control provider whose catalog and state are derived from a compiled session.
-pub struct SessionControlProvider {
-    sample_source: Arc<dyn PlanSampleSource>,
-    catalog: ControlCatalog,
-    /// The structure the catalog's handles belong to: `1` for the first catalog, one more for
-    /// each catalog whose address sequence differs from the one before.
-    structure_epoch: u64,
-    /// The committed session revision the catalog's values were read at.
-    revision: u64,
-    counter_snapshot: Vec<CounterValue>,
-    diagnostics: Vec<Diagnostic>,
-    diagnostic_live: Vec<bool>,
-    transport_state: TransportState,
-    transport_position: SampleTime,
-    telemetry_configuration: TelemetryConfiguration,
+/// The retained bytes of one catalog and its largest single allocation, the catalog-only part of
+/// [`SessionControlProvider::resource_report`] (decision 17, C4). It is computed once, when the
+/// catalog is built, so a live commit reads the current catalog's figure without a walk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CatalogResources {
+    /// Bytes the catalog retains: entries, values, choices, ladders and strings.
+    pub retained_bytes: u64,
+    /// The largest single allocation among them.
+    pub largest_allocation_bytes: u64,
 }
 
-impl SessionControlProvider {
-    /// Project the allocations made by [`Self::try_new`] from its already prepared catalog.
-    pub fn resource_report(
-        catalog: &ControlCatalog,
-        retained: ControllerRetainedCapacity,
-        diagnostic_capacity: usize,
-    ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
-        let row_count = catalog.entries.len();
+impl CatalogResources {
+    fn of(entries: &[ControlEntry], values: &[f32]) -> Result<Self, SessionControlProviderError> {
+        let row_count = entries.len();
         let mut enum_count = 0_usize;
         let mut ladder_count = 0_usize;
         let mut string_bytes = 0_usize;
@@ -98,7 +88,7 @@ impl SessionControlProvider {
                 .max(u64::try_from(value.len()).map_err(|_| SessionControlProviderError)?);
             Ok(())
         };
-        for entry in &catalog.entries {
+        for entry in entries {
             charge(entry.address.owner_id.as_deref().unwrap_or_default())?;
             charge(entry.address.slot_id.as_deref().unwrap_or_default())?;
             match &entry.body {
@@ -133,7 +123,7 @@ impl SessionControlProvider {
             }
         }
         let metadata_bytes = bytes::<ControlEntry>(row_count)?;
-        let values_bytes = bytes::<f32>(catalog.values.len())?;
+        let values_bytes = bytes::<f32>(values.len())?;
         let catalog_retained_bytes = [
             metadata_bytes,
             values_bytes,
@@ -144,6 +134,43 @@ impl SessionControlProvider {
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
         .ok_or(SessionControlProviderError)?;
+        Ok(Self {
+            retained_bytes: catalog_retained_bytes,
+            largest_allocation_bytes: metadata_bytes
+                .max(values_bytes)
+                .max(largest_enum)
+                .max(largest_ladder)
+                .max(largest_string),
+        })
+    }
+}
+
+/// Production control provider whose catalog and state are derived from a compiled session.
+pub struct SessionControlProvider {
+    sample_source: Arc<dyn PlanSampleSource>,
+    catalog: ControlCatalog,
+    /// The structure the catalog's handles belong to: `1` for the first catalog, one more for
+    /// each catalog whose address sequence differs from the one before.
+    structure_epoch: u64,
+    /// The committed session revision the catalog's values were read at.
+    revision: u64,
+    counter_snapshot: Vec<CounterValue>,
+    diagnostics: Vec<Diagnostic>,
+    diagnostic_live: Vec<bool>,
+    transport_state: TransportState,
+    transport_position: SampleTime,
+    telemetry_configuration: TelemetryConfiguration,
+}
+
+impl SessionControlProvider {
+    /// Project the allocations made by [`Self::try_new`] from its already prepared catalog.
+    pub fn resource_report(
+        catalog: &ControlCatalog,
+        retained: ControllerRetainedCapacity,
+        diagnostic_capacity: usize,
+    ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
+        let catalog_resources = catalog.resources();
+        let catalog_retained_bytes = catalog_resources.retained_bytes;
         let diagnostics_bytes = bytes::<Diagnostic>(diagnostic_capacity)?;
         let diagnostic_live_bytes = bytes::<bool>(diagnostic_capacity)?;
         let counter_snapshot_bytes =
@@ -162,11 +189,8 @@ impl SessionControlProvider {
         Ok(SessionControlProviderResources {
             catalog_retained_bytes,
             fixed_retained_bytes,
-            largest_allocation_bytes: metadata_bytes
-                .max(values_bytes)
-                .max(largest_enum)
-                .max(largest_ladder)
-                .max(largest_string)
+            largest_allocation_bytes: catalog_resources
+                .largest_allocation_bytes
                 .max(diagnostics_bytes)
                 .max(diagnostic_live_bytes)
                 .max(counter_snapshot_bytes)
@@ -240,6 +264,12 @@ impl SessionControlProvider {
         }
         self.catalog = catalog;
         self.revision = revision;
+    }
+
+    /// The retained bytes and largest allocation of the catalog the provider holds now.
+    #[must_use]
+    pub const fn catalog_resources(&self) -> CatalogResources {
+        self.catalog.resources
     }
 
     /// The structure epoch the catalog's handles belong to.
@@ -689,7 +719,19 @@ impl ControlCatalog {
             });
             values.push(row.value);
         }
-        Ok(Self { entries, values })
+        let resources = CatalogResources::of(&entries, &values)?;
+        Ok(Self {
+            entries,
+            values,
+            resources,
+        })
+    }
+
+    /// The catalog's retained bytes and largest single allocation, as
+    /// [`SessionControlProvider::resource_report`] charges them.
+    #[must_use]
+    pub const fn resources(&self) -> CatalogResources {
+        self.resources
     }
 }
 

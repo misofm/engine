@@ -1030,6 +1030,49 @@ fn a_followed_gate_ramps_with_its_source_strips_mute() {
     assert_eq!(routes, vec![7]);
 }
 
+/// #1558 D7 (decision record, batch 3 fold). A route whose gain also changes in the transaction
+/// that its source's mute gated it takes the source's `Mute` length, not the `SendGain` row's and
+/// not the route's own `RouteGain` edit: the gate governs the record, so the send follows its source's
+/// ramp. Red if a record that carries a gain change and a source-caused gate change takes the gain's
+/// length, so the send would ramp apart from the strip that gates it.
+#[test]
+fn a_gain_change_with_a_source_caused_gate_change_takes_the_sources_mute_length() {
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = with_bus(true);
+    let send = send_index(&current);
+    let mut ramp = EditRamps::new();
+    ramp.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Mute,
+        Some(96),
+    );
+    ramp.set(
+        &EditRampTarget::Route(current.routes[send].id.clone()),
+        EditRampRow::RouteGain,
+        Some(7),
+    );
+    let (_, routes) = classify_both(
+        &current,
+        |next| {
+            next.tracks[0].fader.left_mute = true;
+            let send = send_index(next);
+            next.routes[send].gain_db = -3.0;
+        },
+        session_ramps,
+        &ramp,
+    )
+    .expect("live");
+    assert_eq!(
+        routes.iter().map(|route| route.3).collect::<Vec<_>>(),
+        vec![96]
+    );
+}
+
 /// Gate 1(k). Red if a structural edit is classified live.
 #[test]
 fn structural_edits_need_a_rebuild() {

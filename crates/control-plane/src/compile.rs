@@ -105,6 +105,57 @@ pub(crate) fn compiled_model_admission(
     })
 }
 
+/// What the committed model's control catalog adds to a live commit's peak (#1558 D6).
+///
+/// A live commit replaces the provider's catalog by the committed model's, and a VCA added live
+/// adds rows to it (and a VCA replaced by one with a longer ID, longer strings), so the new
+/// catalog can be larger than the one the plans were prepared with. The epochs' retained rows hold
+/// the current catalog once, and the prepared-protocol row once more as the stand-in for a
+/// successor's; this charges the growth beyond the current catalog, and the new catalog's largest
+/// single allocation, which no row holds yet.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct LiveCatalogAdmission {
+    /// The new catalog's retained bytes less the current catalog's, at least zero.
+    pub growth_bytes: u64,
+    /// The new catalog's largest single allocation.
+    pub largest_allocation_bytes: u64,
+}
+
+impl CapiResources {
+    /// This epoch's rows after a live commit replaced the provider's catalog of `previous`'s
+    /// figures by `committed`'s: both rows that hold a catalog follow it, and the largest
+    /// allocation only grows. Infallible, as the commit's last steps are.
+    pub(crate) fn follow_catalog(
+        &mut self,
+        previous: host_core::CatalogResources,
+        committed: host_core::CatalogResources,
+    ) {
+        let follow = |row: u64| {
+            row.saturating_sub(previous.retained_bytes)
+                .saturating_add(committed.retained_bytes)
+        };
+        self.active_retained = follow(self.active_retained);
+        self.prepared_protocol_retained = follow(self.prepared_protocol_retained);
+        self.largest = self.largest.max(committed.largest_allocation_bytes);
+    }
+}
+
+impl LiveCatalogAdmission {
+    /// The charge of replacing the catalog whose figures are `current` by the one of `new`.
+    pub(crate) fn between(
+        current: host_core::CatalogResources,
+        new: host_core::CatalogResources,
+    ) -> Self {
+        Self {
+            growth_bytes: new.retained_bytes.saturating_sub(current.retained_bytes),
+            largest_allocation_bytes: new.largest_allocation_bytes,
+        }
+    }
+}
+
 #[repr(C)]
 pub(crate) struct SharedArcAllocation<T> {
     pub(crate) strong: core::sync::atomic::AtomicUsize,
@@ -481,10 +532,12 @@ pub struct LiveEpochResources {
 /// - **capi:** the newest plan's `control_retained_bytes`, plus the current epoch's `epoch_retained`
 ///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
 ///   term includes a provider catalog (`catalog_retained_bytes`), which a live commit replaces by
-///   the committed model's (#1552 D3), so the term is the same one a rebuild charges; a VCA added
-///   live adds its rows to that catalog, bounded by `maximum_vcas` (#1558 D6);
+///   the committed model's (#1552 D3), so the term is the same one a rebuild charges;
+/// - **catalog growth:** the new catalog's retained bytes beyond the current catalog's are added to
+///   the capi term, and its largest single allocation joins the largest-allocation term, so a VCA
+///   added live that grows the catalog meets the ceiling a rebuild would (#1558 D6);
 /// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
-///   newest epoch's capi `largest` and the compiled models' largest allocation.
+///   newest epoch's capi `largest`, the compiled models' largest allocation and the new catalog's.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -492,6 +545,7 @@ pub fn validate_live_peak(
     current: LiveEpochResources,
     pending: Option<LiveEpochResources>,
     compiled_models: CompiledModelAdmission,
+    catalog: LiveCatalogAdmission,
     limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
@@ -510,6 +564,7 @@ pub fn validate_live_peak(
         .control_retained_bytes
         .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
         .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
+        .and_then(|value| value.checked_add(catalog.growth_bytes))
         .ok_or_else(arithmetic)?;
     if capi > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -520,6 +575,7 @@ pub fn validate_live_peak(
         .max(pending.map_or(0, |pending| pending.report.largest_named_allocation_bytes))
         .max(newest.capi.largest)
         .max(compiled_models.largest_allocation_bytes)
+        .max(catalog.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
         return Err(failure(ResourceFault::Limit));

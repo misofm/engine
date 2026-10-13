@@ -1394,26 +1394,23 @@ where
             return LiveCommit::Rebuild(prepared);
         };
 
-        // 1. Admission (#1053 D8). Its refusal is the compile diagnostic a rebuild would give.
-        if let Err(error) = self.live_admission(&prepared) {
-            return LiveCommit::Done(Err(error));
-        }
-
-        // 1b. The catalog of the committed model, built before anything is written, so that the
-        // commit's last steps cannot fail for room (#1552 D3).
-        let catalog =
-            match host_core::ControlCatalog::build(next, transaction.compiled().sample_rate().0) {
-                Ok(catalog) => catalog,
-                Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
-            };
+        // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
+        // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
+        // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
+        let catalog = match self.live_admission(&prepared) {
+            Ok(catalog) => catalog,
+            Err(error) => return LiveCommit::Done(Err(error)),
+        };
 
         // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7), among all strips,
         // tracks then submixes (#1554 D6): a binary search per segment of the strip table, whose
         // IDs are sorted within each segment.
         let ProviderEpoch {
+            epoch: newest_epoch,
             strips,
             effects,
             revision_gate,
+            capi: newest_capi,
             ..
         } = match self.pending_providers.last_mut() {
             Some(provider) => provider,
@@ -1672,9 +1669,34 @@ where
         // values are read back through the same pass a rebuild uses, so a derived row follows its
         // inputs, and the structure epoch advances if any descriptor changed (a `matrix_mode`
         // switch flips `active`). Nothing here allocates or fails.
+        let previous_catalog = self.controller.provider().catalog_resources();
+        let committed_catalog = catalog.resources();
         self.controller
             .provider_mut()
             .replace_session_catalog(catalog, revision);
+        // The newest epoch's rows follow the committed catalog (#1558 D6): it holds the catalog
+        // once in its retained bytes and once in the prepared-protocol stand-in, which later
+        // admissions charge, and `plan_resources` reports the retained bytes. An older epoch's row
+        // keeps the catalog it was prepared with until its plan is gone. Nothing here fails.
+        newest_capi.follow_catalog(previous_catalog, committed_catalog);
+        {
+            let mut reports = self
+                .shared
+                .reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((_, row)) = reports.iter_mut().find(|(epoch, _)| epoch == newest_epoch) {
+                let mut resources = PlanResources::from(*row);
+                resources.control_retained_bytes = resources
+                    .control_retained_bytes
+                    .saturating_sub(previous_catalog.retained_bytes)
+                    .saturating_add(committed_catalog.retained_bytes);
+                resources.largest_named_allocation_bytes = resources
+                    .largest_named_allocation_bytes
+                    .max(committed_catalog.largest_allocation_bytes);
+                *row = A::Row::from(resources);
+            }
+        }
         // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
         // that carries its content, the newest epoch's (#1502 D6), which is the routing the
         // producers were chosen by, so the cells a commit writes and the gate that reveals them
@@ -1688,8 +1710,12 @@ where
         )))
     }
 
-    /// The live admission's inputs, read from the report table and the epochs (#1053 D8).
-    fn live_admission(&self, prepared: &ObservedPreparedToken) -> Result<(), CommandError> {
+    /// The live admission's inputs, read from the report table and the epochs (#1053 D8). It
+    /// returns the catalog of the committed model, which it built to charge (#1558 D6).
+    fn live_admission(
+        &self,
+        prepared: &ObservedPreparedToken,
+    ) -> Result<host_core::ControlCatalog, CommandError> {
         // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
         // function, the same diagnostic, and nothing is committed on a refusal.
         host_core::check_counts(
@@ -1706,6 +1732,18 @@ where
             prepared.get().prospective_session().compiled(),
         )
         .map_err(CommandError::CompileRejected)?;
+        // The new catalog, before anything is written. A VCA added live adds rows to it, so it
+        // can outgrow the catalog the epochs were prepared with.
+        let prospective = prepared.get().prospective_session().compiled();
+        let catalog = host_core::ControlCatalog::build(
+            prospective.normalized_model(),
+            prospective.sample_rate().0,
+        )
+        .map_err(|_| CommandError::Internal)?;
+        let catalog_admission = LiveCatalogAdmission::between(
+            self.controller.provider().catalog_resources(),
+            catalog.resources(),
+        );
         let (current, pending) = {
             let reports = self
                 .shared
@@ -1726,8 +1764,9 @@ where
             let pending = self.pending_providers.last().map(row).transpose()?;
             (current, pending)
         };
-        validate_live_peak(current, pending, models, self.limits)
-            .map_err(CommandError::CompileRejected)
+        validate_live_peak(current, pending, models, catalog_admission, self.limits)
+            .map_err(CommandError::CompileRejected)?;
+        Ok(catalog)
     }
 
     /// The response bytes of the last successful command.

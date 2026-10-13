@@ -6200,7 +6200,20 @@ mod set_control {
                 }
             }
             let (revision, _, epoch, pending) = rig.summary();
-            assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+            let bytes = rig.transaction(&edits);
+            let (result, response) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            // #1313 D2: a delta with a record is `live`; one that moves no effective value has
+            // none, and is `model_only`.
+            assert_eq!(
+                edit_path_of(&response),
+                if audible {
+                    protocol::EditPath::Live
+                } else {
+                    protocol::EditPath::ModelOnly
+                },
+                "{label}: the response names the path the classifier took"
+            );
             assert_eq!(
                 (rig.summary().0, rig.summary().2, rig.summary().3),
                 (revision + 1, epoch, pending),
@@ -6441,5 +6454,115 @@ mod set_control {
         let (gone, last, _) = control_list_all_c(rig.session, &mut rig.request, 256);
         assert_eq!(last, fresh + 1);
         assert!(vca_rows(&gone, "extra").is_empty());
+    }
+
+    /// Gate 7 (#1558 D6, batch 3 fold): VCAs added live replace the control catalog by a larger one,
+    /// and the live admission charges the growth. With the capi ceiling set to the smallest one
+    /// that admits a live edit that adds no catalog bytes, plus the growth less one byte, the add
+    /// is refused as a rebuild would, and the model, the revision and every cell are as they were;
+    /// at the growth it commits, and the plan reports the committed catalog's bytes, which is what
+    /// a rebuild of the same session reports.
+    ///
+    /// Red if the live admission charges the catalog the plans were prepared with and not the one
+    /// the commit publishes.
+    #[test]
+    fn a_vca_added_live_is_charged_for_the_catalog_it_adds() {
+        let document = vca_document();
+        let long = |tag: &str| format!("{tag}-{}", "v".repeat(48));
+        let names = [long("one"), long("two"), long("three")];
+        let grown = with_model(&document, |model| {
+            for name in &names {
+                model.vcas.push(vca_of(name, &["eq1"]));
+            }
+        });
+        let adds: Vec<SessionEdit> = names
+            .iter()
+            .map(|name| SessionEdit::UpsertVca {
+                vca: vca_of(name, &["eq1"]),
+            })
+            .collect();
+        let same_size = [set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -3.0, None)];
+        let catalog_bytes = |document: &str| {
+            let model = parse_session_json(document).expect("model");
+            host_core::ControlCatalog::build(&model, model.sample_rate_hz)
+                .expect("catalog")
+                .resources()
+                .retained_bytes
+        };
+        let growth = catalog_bytes(&grown) - catalog_bytes(&document);
+        assert!(growth > 0, "the added VCAs add catalog bytes");
+
+        // Whether the edits commit under `ceiling`; a refusal changes nothing.
+        let commits = |ceiling: u64, edits: &[SessionEdit]| {
+            let tight = CompileLimits {
+                maximum_capi_retained_bytes: ceiling,
+                ..limits()
+            };
+            let mut rig = Rig::with_limits(&document, tight);
+            rig.step();
+            let before = refusal_state(&rig);
+            let cells = rig.current_cells();
+            let result = rig.apply(edits);
+            if result == crate::RESULT_OK {
+                return true;
+            }
+            assert_eq!(result, crate::RESULT_COMPILE_REJECTED);
+            assert_eq!(refusal_state(&rig), before, "a refusal writes nothing");
+            assert_eq!(rig.current_cells(), cells);
+            assert_eq!(rig.summary().3, 0, "no candidate");
+            false
+        };
+        // The smallest ceiling that admits an edit that leaves the catalog's size as it is.
+        let active = crate::ffi::test_plan_snapshot(Rig::new(&document).plan)
+            .1
+            .capi_retained_bytes;
+        let (mut low, mut high) = (active, limits().maximum_capi_retained_bytes);
+        assert!(commits(high, &same_size));
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if commits(middle, &same_size) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let floor = low;
+        assert!(floor > active, "the live peak holds the catalog twice");
+
+        assert!(!commits(floor + growth - 1, &adds), "one byte short");
+        assert!(commits(floor + growth, &adds), "at the growth");
+
+        let tight = CompileLimits {
+            maximum_capi_retained_bytes: floor + growth,
+            ..limits()
+        };
+        let mut rig = Rig::with_limits(&document, tight);
+        rig.step();
+        let retained = |rig: &Rig| {
+            crate::ffi::test_plan_snapshot(rig.plan)
+                .1
+                .capi_retained_bytes
+        };
+        let before = retained(&rig);
+        assert_eq!(rig.apply(&adds), crate::RESULT_OK);
+        assert_eq!(rig.summary().3, 0, "the adds are live");
+        assert_eq!(retained(&rig), before + growth);
+        let rebuilt = compile_children(&grown, tight, None)
+            .unwrap_or_else(|_| panic!("the grown session compiles"))
+            .plan
+            .resources()
+            .capi_retained_bytes;
+        assert_eq!(retained(&rig), rebuilt, "what a rebuild reports");
+        // The next live edit meets the committed catalog's bytes: the peak holds it twice, so at
+        // this ceiling it is refused, and with the second copy's room it commits.
+        assert_eq!(rig.apply(&same_size), crate::RESULT_COMPILE_REJECTED);
+        let roomy = CompileLimits {
+            maximum_capi_retained_bytes: floor + 2 * growth,
+            ..limits()
+        };
+        let mut rig = Rig::with_limits(&document, roomy);
+        rig.step();
+        assert_eq!(rig.apply(&adds), crate::RESULT_OK);
+        assert_eq!(rig.apply(&same_size), crate::RESULT_OK);
     }
 }

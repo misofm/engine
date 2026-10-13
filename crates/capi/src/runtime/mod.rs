@@ -38,9 +38,9 @@ pub(crate) use error::*;
 // imported here before #1309, and the control plane's `test-support` observers (D8).
 #[cfg(test)]
 pub(crate) use control_plane::{
-    CapiResources, CompiledModelAdmission, LiveEpochResources, TestOwnerCounters, TestOwnerState,
-    TestStructuralFaultPhase, test_lifecycle_counters, test_reset_lifecycle_observer,
-    validate_live_peak,
+    CapiResources, CompiledModelAdmission, LiveCatalogAdmission, LiveEpochResources,
+    TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase, test_lifecycle_counters,
+    test_reset_lifecycle_observer, validate_live_peak,
 };
 #[cfg(test)]
 pub(crate) use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo};
