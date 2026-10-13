@@ -89,19 +89,38 @@ webkit:   all qualification gates passed (26.5)
 
 The row subscribes to the compressor's declared tap, renders sixteen blocks, and requires:
 `trackGrDb` positive and finite, `masterGrDb` equal to the designated track's own reading,
-`firstSample` strictly monotonic with the windows tiling, an unsubscribe that actually stops the
-traffic, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
-audio**. Self-test mutations run against every browser's real result (the unsubscribe gate's are
-listed under Amendment 6 below):
+`firstSample` strictly monotonic with the windows tiling, a never-armed tap publishing no
+reduction, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
+audio**. (The row once also required an unsubscribe to stop the traffic; that real-browser gate was
+removed by #1345 Amendment 7, see the notes below, and the Rust test
+`a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading` holds the claim.) Self-test
+mutations run against every browser's real result:
 
 | mutation | gate |
 |---|---|
 | `observation-armed` (the eval's named case, `observationArmed = 0`) | `an armed tap published no reduction at all` |
-| `observation-unsubscribe` | `an unsubscribed tap kept publishing, the signal under it stopped, or the run never exercised the armed tap` |
+| `observation-disarmed` (was `observation-unsubscribe`; the offline run that never subscribes must report no reduction) | `a tap that was never armed published a reduction` |
 | `observation-identity` | `arming a declared tap moved a rendered sample` |
 | `observation-window` | `observation windows did not advance monotonically and tile` |
 
-*Note, 2026-10-12 (stream B batch-3 verdict B1, #1345 Amendment 5).* The engine admits one
+*Note, 2026-10-13 (#1345 Amendment 7, split, root 2026-10-13).* The real-browser
+`observation-unsubscribe` gate is removed: `runObservationUnsubscribeRun`, `unsubscribe-session.json`
+and its `qualificationSessionSources` row, the gate in `run.mjs` and its four result-field mutations
+(`observation-unsubscribe`, `-silent`, `-short`, `-norender`), the two page mutations
+(`skip-unsubscribe`, `feed-ends-at-boundary`) and the eleventh render-allocation row
+(`observation-unsubscribe`; the gate counts ten again). The notes and tables below that describe them
+are kept as history and marked removed; the gate moves to successor S1 ("Qualify observation
+unsubscribe on a real AudioContext in three browsers"), which starts from the saved patch
+(`/home/bl/misofm/submix-verdicts/b3-acceptance/split/observation-unsubscribe-gate.patch`). The
+removal also took the code only that gate called: the bounded waits, the suspended-context poll, the
+trusted-click resume (`resumeThroughClick`, `resumeUntil`, `renderUntil`), `sampleContext` and the stall
+classifier (`classifyStallSignature`, its printing in `run.mjs` and `stallSignatureProofs()`), because
+no real-context gate remains in `qualification.js` to call them; the patch carries them. What stays:
+the offline "disarmed" identity run (its zero-reduction check is now the `observation-disarmed` gate),
+the `resume-clicks` gate (now two SDK clicks, none without the SDK) and its three mutations, and the
+`spectrum-query-closed` handler fix.
+
+*Note, 2026-10-12 (stream B batch-3 verdict B1, #1345 Amendment 5; the gate described is removed by Amendment 7).* The engine admits one
 observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), so the raw `host.observe`
 unsubscribe of this row, sent before any render, was refused with typed backpressure on all three
 browsers. Firefox has no `OfflineAudioContext.suspend`, so the unsubscribe now runs on a real
@@ -155,8 +174,8 @@ blocks of such frames, and a track peak above 0.05 on every such frame. The host
 underrun count, so the per-block peak is the evidence that no block of zeros was rendered. Under
 Amendment 6 `resume-clicks` declares two SDK clicks and one gate click.
 
-Result-field mutations (`mutate()` in `run.mjs`, each required to fail `<browser>: ...` on every
-browser's real result):
+Result-field mutations **(removed 2026-10-13, #1345 Amendment 7; history)** (`mutate()` in `run.mjs`,
+each required to fail `<browser>: ...` on every browser's real result):
 
 | mutation | change | gate |
 |---|---|---|
@@ -165,7 +184,7 @@ browser's real result):
 | `observation-unsubscribe-short` (c) | `blocksAfterAcknowledgement = 15` | the same gate: fewer than sixteen blocks |
 | `observation-unsubscribe-norender` | `renderedBeforeUnsubscribe = renderedAfterSubscribe` | the same gate: no render between the two |
 
-Page mutations (`unsubscribePageMutationProofs` in `run.mjs`, under `--self-test-mutations`, a fresh
+Page mutations **(removed 2026-10-13, #1345 Amendment 7; history)** (`unsubscribePageMutationProofs` in `run.mjs`, under `--self-test-mutations`, a fresh
 page of every browser; each prints its numbers, requires the verdict to refuse them, and requires the
 verdict to accept them again when only the one field that should refuse them is repaired, so it proves
 which check turned red):
@@ -186,7 +205,8 @@ tap from an armed one; no result-field mutation can show that, because it never 
 `AudioContext` of the page now runs inside a trusted click. WebKit starts or restarts an
 `AudioContext` only inside a user activation and otherwise leaves `resume()` pending. The page
 declares its click plan (`resumeClickPlan`: the two SDK controls, when the SDK workloads run, and the
-two `data-qualification-resume` buttons (one since Amendment 6) of `resumeThroughClick`), `run.mjs` clicks exactly those
+two `data-qualification-resume` buttons (one since Amendment 6) of `resumeThroughClick`; since Amendment 7 the plan is the two SDK
+controls only and empty without the SDK, the buttons having gone with the gate), `run.mjs` clicks exactly those
 controls, counts its clicks and runs the page under one 300 s deadline, and the page counts every
 `AudioContext.resume()` by whether `window.event` was a trusted click. The result carries
 `resumes: { declared, inClick, direct, planned, clicksPerformed }`; the `resume-clicks` gate requires
@@ -202,7 +222,7 @@ self-test mutations of the real result, each required to fail with `<browser>: r
 | `resume-clicks-missing` | `resumes.clicksPerformed` one fewer than declared | `resume-clicks`: the harness did not click exactly the declared controls |
 | `resume-clicks-extra` | `resumes.clicksPerformed` one more than declared | the same gate |
 
-**The stall signature (root ruling, 2026-10-12, stream B batch 3).** A `stall timeout` failure carries a
+**The stall signature (root ruling, 2026-10-12, stream B batch 3; removed 2026-10-13, #1345 Amendment 7: the classifier, its printing and `stallSignatureProofs()` had no caller once the unsubscribe gate went, and are in the saved patch for S1; history).** A `stall timeout` failure carries a
 structured `stallSignature` (`classifyStallSignature` in `qualification.js`), and `run.mjs` prints it as
 `<browser>: stall-signature: {...}` and keeps it in the failure's `qualificationError.value`. It is
 `full: true` only if the context state is "running" at the resume and at the timeout, `currentTime` and

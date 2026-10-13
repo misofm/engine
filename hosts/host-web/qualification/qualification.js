@@ -23,20 +23,6 @@ const OBSERVATION_TAPS = 4n;
 const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
-// #1345 Amendment 6: the real-context unsubscribe run, over its own session document
-// (`unsubscribe-session.json`, a 512-block source: the observation document's sixteen blocks cannot
-// hold the armed blocks, a render, and sixteen blocks after the acknowledgement). A one-block meter window, so each frame
-// carries one block's peak; a source fed twelve blocks ahead of the render (~32 ms, well inside the
-// 5,120-frame default ring) and no further; sixteen blocks of frames after the acknowledgement.
-const UNSUBSCRIBE_SOURCE_BLOCKS = 512;
-const UNSUBSCRIBE_METER_BLOCKS = 1n;
-const UNSUBSCRIBE_LEAD_BLOCKS = 12;
-const UNSUBSCRIBE_ARMED_FRAMES = 4;
-const UNSUBSCRIBE_MINIMUM_BLOCKS = 16;
-// The fed signal is a +-0.5 square wave; the compressor's reduction at that level (about 5 dB, in
-// the armed frames) leaves a track peak near 0.27, far above this floor, and a block of zeros (an
-// underrun) peaks at 0.
-const UNSUBSCRIBE_PEAK_FLOOR = 0.05;
 const MINIMUM_STALL_MS = 100;
 // Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
 // blocks, the observation session's whole declared source region.
@@ -132,27 +118,6 @@ function observationPlanes(_blockIndex) {
   );
   left.fill(OBSERVATION_LEVEL);
   right.fill(OBSERVATION_LEVEL);
-  return [left, right];
-}
-
-// The unsubscribe run's fed block: a square wave of +-0.5, sixteen samples per half period, on both
-// channels. It is not the constant of `observationPlanes`: the strip's input high-pass removes a
-// constant, so a fed DC level decays to nothing within a few blocks and a later block could not tell
-// signal from silence. Every block is identical (128 is four whole periods), the values are exact in
-// binary32, and `blockIndex` is unused, as in every fed-PCM generator here.
-function unsubscribePlanes(_blockIndex) {
-  const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
-  const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
-  const right = new Float32Array(
-    storage,
-    QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
-    QUANTUM_FRAMES,
-  );
-  for (let frame = 0; frame < QUANTUM_FRAMES; frame += 1) {
-    const level = (frame >> 4) % 2 === 0 ? OBSERVATION_LEVEL : -OBSERVATION_LEVEL;
-    left[frame] = level;
-    right[frame] = level;
-  }
   return [left, right];
 }
 
@@ -431,17 +396,19 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, in a real browser.
+/// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
 /// the tap is armed when rendering starts. That is E1's leg (c) against leg (d) in a browser: the
 /// two renders must produce **identical PCM**, because arming a declared tap may not move a sample.
 ///
-/// `armed` is `true` for the first run and `false` for the second, which never subscribes. That the
-/// tap stops publishing after an unsubscribe is [`runObservationUnsubscribeRun`]'s, on a real
-/// context: the engine admits one observation record per tap per render (#1345 D8, D2 Amendments
-/// 1 and 2), so the unsubscribe needs a render after the subscribe, and an offline context renders
-/// only inside one `startRendering` call (Firefox has no `OfflineAudioContext.suspend`).
+/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The
+/// engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), and an
+/// offline context renders only inside one `startRendering` call (Firefox has no
+/// `OfflineAudioContext.suspend`), so a subscribe followed at once by an unsubscribe is refused with
+/// typed backpressure here. That an unsubscribe stops a tap's reading is proved by the Rust test
+/// `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading` (`hosts/host-web`), not by
+/// this page (#1345 Amendment 7).
 async function runObservationRun(createHost, sessionDocument, armed) {
   const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -533,77 +500,21 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   };
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-/// The bound on every wait that depends on an audio context or on a host reply in the real-context
-/// run, the same 10 s as `sdk-response-entry.ts` uses for its `suspend()` and `resume()` bounds.
-const AUDIO_STEP_TIMEOUT_MS = 10_000;
-
-/// Await `start()`, failing with `<kind> timeout at <step>` and the context's state if it has not
-/// settled within `AUDIO_STEP_TIMEOUT_MS`. A timeout is a failure of the gate: never a pass, a skip
-/// or a retry. WebKit leaves a `resume()` that has no user activation pending (batch-verdict 2, B2);
-/// an unbounded wait there hangs the page until CI kills the job.
-async function bounded(kind, step, context, start) {
-  let timer;
-  const stalled = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(
-      `${kind} timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
-    )), AUDIO_STEP_TIMEOUT_MS);
-  });
-  try {
-    return await Promise.race([start(), stalled]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
-/// The first `suspend()` of a new context is not awaited (Firefox can create a later context already
-/// running, and the `suspend()` is only a request), so this poll is what keeps the
-/// gate from going on with a context that is still running: the boot needs a suspended context.
-/// Returns the state it saw, which the run records.
-async function requireSuspended(context, step) {
-  const started = performance.now();
-  while (context.state !== "suspended") {
-    if (performance.now() - started > AUDIO_STEP_TIMEOUT_MS) {
-      throw new Error(
-        `suspend timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
-      );
-    }
-    await delay(4);
-  }
-  return context.state;
-}
-
-/// The label of the one trusted-click resume `runObservationUnsubscribeRun` makes (#1345 Amendment 6).
-/// The click plan below names the button by this label, so the gate and its plan cannot drift apart.
-const UNSUBSCRIBE_RESUME = "the armed tap to render";
-const UNSUBSCRIBE_AFTER_WAIT = "the blocks after the unsubscribe";
-
 /// Every control the page asks the harness to click, in the order the page offers them, as selectors
 /// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
-/// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
-/// first; the last is `resumeThroughClick`'s button.
+/// The two controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
+/// only when the SDK qualification does; without it the plan is empty.
 export function resumeClickPlan(sdkEnabled) {
-  if (!WebAssembly.validate(SIMD128_PROBE)) return [];
-  return [
-    ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
-    resumeControlSelector(UNSUBSCRIBE_RESUME),
-  ];
-}
-
-function resumeControlSelector(what) {
-  return `button[data-qualification-resume="${what}"]`;
+  if (!sdkEnabled || !WebAssembly.validate(SIMD128_PROBE)) return [];
+  return ["#spectrum-collection-resume", "#spectrum-hop-resume"];
 }
 
 /// Count every `AudioContext.resume()` of the page, split by whether it ran synchronously inside a
 /// trusted click handler (`window.event` is that click) or anywhere else (`direct`). Offline contexts
 /// are not counted: they need no activation. The count is part of the result, so a `resume()` that
-/// bypasses [`resumeThroughClick`] (the gate's own, or one added to the SDK workloads) turns the
+/// is not inside a click handler (an SDK workload's, or one added later) turns the
 /// `resume-clicks` gate red whatever the browser happens to allow.
 function countResumes() {
   const record = { inClick: 0, direct: 0 };
@@ -618,362 +529,11 @@ function countResumes() {
   return record;
 }
 
-/// Resume `context` with a trusted click on a button this function adds, the way an app must in
-/// Safari. WebKit starts a new `AudioContext`, or restarts a suspended one, only inside a user
-/// activation, and otherwise leaves `resume()` pending (state "suspended", or "interrupted"); it
-/// neither rejects nor settles. The harness's `page.evaluate` activation lasts only a short while,
-/// so a page that has run longer than that before it resumes (the SDK phase makes it so, much
-/// longer on a busy machine) has none left (batch-verdict 2, B2). `run.mjs` clicks the button named
-/// by [`resumeClickPlan`], which is a trusted event in all three browsers. The wait for the click is
-/// bounded like every other wait here.
-async function resumeThroughClick(context, what) {
-  const button = document.createElement("button");
-  button.setAttribute("data-qualification-resume", what);
-  button.textContent = `Resume qualification audio: ${what}`;
-  document.body.append(button);
-  try {
-    await bounded("resume", `${what} (click)`, context, () => new Promise((resolve, reject) => {
-      button.addEventListener("click", () => context.resume().then(resolve, reject), { once: true });
-    }));
-  } finally {
-    button.remove();
-  }
-}
-
-/// How often `resumeUntil` asks the host for its status while it waits, and how long one such
-/// request may stay unanswered before the poll counts as unanswered.
-const STALL_POLL_INTERVAL_MS = 250;
-const STALL_POLL_TIMEOUT_MS = 1_000;
-
-/// The signature of a stall that `resumeUntil` records (root ruling, 2026-10-12, decision 15 stream B
-/// batch 3). It is `full` only if a stalled render is the whole of the evidence: the context says it
-/// is "running", its clock (`currentTime`) and the engine's `renderedQuanta` are the same at the
-/// resume and at the timeout, the processor answered at least two status requests inside the window
-/// and its last render result is 0. The status replies come from the processor's own port handler,
-/// which runs in the same JS agent as `process()`: an answered reply proves `process()` was not on
-/// the stack, so a context that "ran" and rendered nothing is a context that was not pulling its
-/// graph. Only a failure with a full signature may be listed as a browser exemption; CI still fails
-/// by name and never retries. `atResume` and `atTimeout` are `sampleContext` records (or `null`
-/// when the sample was not answered); `replyIds` are the request ids of the answered status
-/// requests in the window, in order.
-export function classifyStallSignature({ atResume, atTimeout, repliesSent, replyIds }) {
-  const running = (sample) => sample?.contextState === "running";
-  const lastResult = (sample) => sample?.status?.lastResult;
-  // The host status carries `renderedQuanta` as a `bigint`; the signature carries it as a decimal
-  // string so it serializes.
-  const quanta = (sample) => sample?.status?.renderedQuanta === undefined
-    ? null
-    : String(sample.status.renderedQuanta);
-  const answered = replyIds.length;
-  const full = running(atResume) && running(atTimeout)
-    && typeof atResume.currentTime === "number" && atResume.currentTime === atTimeout.currentTime
-    && quanta(atResume) !== null && quanta(atResume) === quanta(atTimeout)
-    && answered >= 2
-    && lastResult(atResume) === RESULT_OK && lastResult(atTimeout) === RESULT_OK;
-  return {
-    state: atTimeout?.contextState ?? null,
-    stateAtResume: atResume?.contextState ?? null,
-    currentTimeAtResume: atResume?.currentTime ?? null,
-    currentTimeAtTimeout: atTimeout?.currentTime ?? null,
-    renderedQuantaAtResume: quanta(atResume),
-    renderedQuantaAtTimeout: quanta(atTimeout),
-    repliesSent,
-    repliesAnswered: answered,
-    replyIds: answered === 0 ? [] : [replyIds[0], replyIds[answered - 1]],
-    lastResult: lastResult(atTimeout) ?? null,
-    lastResultAtResume: lastResult(atResume) ?? null,
-    full,
-  };
-}
-
-/// One bounded `describe()`: the sample, or `null` if it threw or stayed unanswered for
-/// `STALL_POLL_TIMEOUT_MS`. A reply that arrives after the bound is dropped without an unhandled
-/// rejection.
-async function boundedSample(describe) {
-  const pending = describe();
-  pending.catch(() => {});
-  let timer;
-  const unanswered = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(null), STALL_POLL_TIMEOUT_MS);
-  });
-  try {
-    return await Promise.race([pending, unanswered]);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/// Resume `context` through a trusted click and wait until `condition` holds, for at most
-/// `AUDIO_STEP_TIMEOUT_MS`. See [`renderUntil`] for the wait; the click is the only resume.
-async function resumeUntil(context, condition, what, describe) {
-  await resumeThroughClick(context, what);
-  await renderUntil(context, condition, what, describe);
-}
-
-/// Wait, on a context that is already running, until `condition` holds, for at most
-/// `AUDIO_STEP_TIMEOUT_MS`. There is no recovery: a context that does not pull its graph is a named
-/// failure of the gate, never a retry (root, 2026-10-12; a script `suspend()` then `resume()` hung
-/// the whole page in 3 of 8 runs of the minimal repro, `/tmp/claude-1002/b2diag/drv5.out`). The
-/// failure carries `describe()` sampled twice across the window, at the start and at the
-/// timeout, so a stalled clock (`currentTime`) and a stalled render count (`renderedQuanta`) show as
-/// equal samples. While it waits it also asks for the host status every `STALL_POLL_INTERVAL_MS`
-/// (each request bounded), and the failure carries the `stallSignature` of
-/// [`classifyStallSignature`]. The polls change no pass condition and no bound.
-async function renderUntil(context, condition, what, describe) {
-  const started = performance.now();
-  const atResume = await describe();
-  let lastPoll = started;
-  let repliesSent = 0;
-  const replyIds = [];
-  const poll = async () => {
-    repliesSent += 1;
-    const sample = await boundedSample(describe);
-    if (sample?.status !== undefined) replyIds.push(sample.status.requestId);
-    return sample;
-  };
-  while (!(await condition())) {
-    const now = performance.now();
-    if (now - started > AUDIO_STEP_TIMEOUT_MS) {
-      const atTimeout = await poll();
-      const error = new Error(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
-        atResume,
-        atTimeout,
-      })}`);
-      error.stallSignature = classifyStallSignature({ atResume, atTimeout, repliesSent, replyIds });
-      throw error;
-    }
-    if (now - lastPoll >= STALL_POLL_INTERVAL_MS) {
-      await poll();
-      lastPoll = performance.now();
-    }
-    await delay(4);
-  }
-}
-
-/// One sample of a real context for a stall record: its state, its clock and the host's status (the
-/// engine's own `renderedQuanta` counts the blocks whose render returned).
-async function sampleContext(context, step, host) {
-  return {
-    contextState: context.state,
-    currentTime: context.currentTime,
-    status: await step("status", () => host.status()),
-  };
-}
-
-/// Issue #143 E12 and #1345 Amendment 6: subscribe -> frames -> unsubscribe -> no reduction on any
-/// later frame, in a real browser, on one real `AudioContext` that is resumed once and never
-/// suspended again before the final close.
-///
-/// A named #1345 exception (root, 2026-10-12, batch-verdict B1; Amendment 6 replaced its suspend).
-/// This page calls the raw `host.observe`, and the engine admits one observation record per tap per
-/// render (#1345 D8, D2 Amendments 1 and 2): a second record for the tap is refused with typed
-/// backpressure until a block has drained the first. The honest contract is the one the SDK keeps
-/// (`renderWait`): a render separates two operations on one tap. Admission itself still never
-/// coalesces. The run therefore proves a render between the two, and does not suspend to get one:
-///
-/// 1. suspended, it feeds the source, subscribes, and reads the host status (`R1`, the rendered
-///    quanta after the subscribe resolved);
-/// 2. one trusted click resumes the context (see [`resumeThroughClick`]); the run keeps the source
-///    fed and waits until the rendered quanta exceed `R1` and armed frames have arrived;
-/// 3. it unsubscribes. The acknowledgement and the meter frames travel one FIFO port, so a frame
-///    the page receives after the acknowledgement resolved was polled after the tap was disarmed;
-/// 4. it keeps feeding and waits until the frames received after the acknowledgement cover at least
-///    [`UNSUBSCRIBE_MINIMUM_BLOCKS`] blocks.
-///
-/// The gate then requires `trackGrDb == 0` on **every** frame received after the acknowledgement
-/// (the contract text: the gain-reduction section is recomputed from the taps armed when each frame
-/// is polled), no exclusion of the first frame or of any block after the boundary. A zero must not
-/// come from silence: the meter window is one block, so each frame carries one block's peak, and
-/// every frame after the acknowledgement must peak above [`UNSUBSCRIBE_PEAK_FLOOR`]. The page
-/// reads no source-underrun counter (the host publishes none), so the per-block peak of the fed
-/// signal is the evidence that no block of zeros was rendered.
-///
-/// The source streams just-in-time for the whole run: after every status read the page tops the ring
-/// up to [`UNSUBSCRIBE_LEAD_BLOCKS`] blocks ahead of the rendered quanta, never further. The
-/// lead is short enough that a feed which stops at the boundary underruns well inside the
-/// [`UNSUBSCRIBE_MINIMUM_BLOCKS`] the gate requires.
-///
-/// `mutation` is `null` for the gate itself; `"skip-unsubscribe"` and `"feed-ends-at-boundary"` are
-/// the page mutations `run.mjs` proves red in every browser (see MUTATIONS.md).
-async function runObservationUnsubscribeRun(createHost, sessionDocument, mutation = null) {
-  const context = new AudioContext({ sampleRate: SAMPLE_RATE });
-  // The first `suspend()` of a new context is not awaited, the way `sdk-response-entry.ts` keeps its
-  // contexts suspended across addModule. The state poll below is the check that replaces the await:
-  // the run goes on only with a context that reports "suspended", and fails with a named location
-  // otherwise.
-  void context.suspend().catch(() => {});
-  const stateBeforeBoot = await requireSuspended(context, "the new context before boot");
-  const step = (name, work) => bounded("await", name, context, work);
-  const host = await step("createHost", () => createHost({
-    context,
-    document: sessionDocument,
-    options: bootOptions(
-      DEFAULT_RING_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
-      UNSUBSCRIBE_METER_BLOCKS,
-      OBSERVATION_TAPS,
-      OBSERVATION_MASTER_TRACK_PLUS_ONE,
-    ),
-    simd128ModuleUrl: ARTIFACT_URL,
-    workletModuleUrl: WORKLET_URL,
-  }));
-  host.node.connect(context.destination);
-
-  // The source. `fed` counts the blocks submitted; the content is the level the armed tap needs,
-  // block after block, to the end of the document's source, for as long as `feeding` holds.
-  //
-  // The feed is driven by the meter frames themselves, not by status requests: a frame says which
-  // block the render has just closed, so every frame tops the ring up to `UNSUBSCRIBE_LEAD_BLOCKS`
-  // ahead of it, with the blocks sent back to back and their acknowledgements collected later. It
-  // asks the processor for nothing, so the processor answers only the submits and the run's own
-  // requests (the real browsers answer one request per quantum or fewer, and a feed that waits for a
-  // status read and then for an acknowledgement per block falls behind a render that consumes a
-  // block every 2.7 ms).
-  let fed = 0;
-  let feeding = true;
-  let feedFailure = null;
-  const inflight = [];
-  const submitBlocks = (target) => {
-    if (target > UNSUBSCRIBE_SOURCE_BLOCKS) {
-      feedFailure ??= new Error("observation unsubscribe source exhausted");
-      return;
-    }
-    for (; fed < target; fed += 1) {
-      const block = fed;
-      inflight.push(host.submitSource({
-        sourceId: "live-control-source",
-        generation: 1n,
-        startFrame: BigInt(block * QUANTUM_FRAMES),
-        sampleRateHz: SAMPLE_RATE,
-        planes: unsubscribePlanes(block),
-        frames: QUANTUM_FRAMES,
-        endOfRegion: block === UNSUBSCRIBE_SOURCE_BLOCKS - 1,
-      }).then((acknowledgement) => {
-        if (acknowledgement.result !== 0) {
-          feedFailure ??= new Error(`observation unsubscribe feed rejected: ${acknowledgement.result} at block ${block}`);
-        }
-      }, (error) => {
-        feedFailure ??= error;
-      }));
-    }
-  };
-  const requireFeed = () => {
-    if (feedFailure !== null) throw feedFailure;
-  };
-  const frames = [];
-  const meterLease = await step("meters", () => host.meters({
-    enabled: true,
-    onFrame: (frame) => {
-      const closed = {
-        trackGrDb: frame.trackGrDb[0],
-        peak: Math.max(frame.peaks[0], frame.peaks[1]),
-        firstSample: frame.firstSample,
-        endSample: frame.endSample,
-      };
-      frames.push(closed);
-      if (feeding) submitBlocks(Number(closed.endSample / BigInt(QUANTUM_FRAMES)) + UNSUBSCRIBE_LEAD_BLOCKS);
-    },
-  }));
-  const renderedQuanta = async () => (await step("status", () => host.status())).renderedQuanta;
-  const describe = () => sampleContext(context, step, host);
-
-  submitBlocks(UNSUBSCRIBE_LEAD_BLOCKS);
-  await step("submitSource", () => Promise.all(inflight));
-  requireFeed();
-  const subscription = {
-    trackIndex: 0,
-    rack: 1,
-    effectIndex: 0,
-    tapId: OBSERVATION_TAP_ID,
-    windowBlocks: Number(UNSUBSCRIBE_METER_BLOCKS),
-    armed: true,
-  };
-  const subscribed = await step("observe (subscribe)", () => host.observe({ subscriptions: [subscription] }));
-  // R1: read after the subscribe resolved. The unsubscribe goes out only after a render beyond it.
-  const renderedAfterSubscribe = await renderedQuanta();
-
-  let renderedBeforeUnsubscribe = renderedAfterSubscribe;
-  await resumeUntil(
-    context,
-    async () => {
-      requireFeed();
-      if (frames.length < UNSUBSCRIBE_ARMED_FRAMES) return false;
-      renderedBeforeUnsubscribe = await renderedQuanta();
-      return renderedBeforeUnsubscribe > renderedAfterSubscribe;
-    },
-    UNSUBSCRIBE_RESUME,
-    describe,
-  );
-  const maximumGrDb = (list) => list.reduce((highest, frame) => Math.max(highest, frame.trackGrDb), 0);
-  const minimumPeak = (list) => list.reduce((lowest, frame) => Math.min(lowest, frame.peak), Infinity);
-  const armedFrames = frames.length;
-  const armedList = frames.slice();
-
-  const unsubscribed = mutation === "skip-unsubscribe"
-    ? { result: 0, bindings: [] }
-    : await step("observe (unsubscribe)", () => host.observe({
-      subscriptions: [{ ...subscription, armed: false }],
-    }));
-  // Everything received from here on was polled after the acknowledgement was sent: the same port,
-  // in order.
-  const acknowledgedAtFrame = frames.length;
-  if (mutation === "feed-ends-at-boundary") feeding = false;
-  const boundary = await renderedQuanta();
-
-  const blocksAfter = () => frames.slice(acknowledgedAtFrame).reduce(
-    (blocks, frame) => blocks + Number((frame.endSample - frame.firstSample) / BigInt(QUANTUM_FRAMES)),
-    0,
-  );
-  await renderUntil(
-    context,
-    async () => {
-      requireFeed();
-      return blocksAfter() >= UNSUBSCRIBE_MINIMUM_BLOCKS;
-    },
-    UNSUBSCRIBE_AFTER_WAIT,
-    async () => ({ boundary: String(boundary), ...(await describe()) }),
-  );
-  const afterList = frames.slice(acknowledgedAtFrame);
-  feeding = false;
-  await step("submitSource", () => Promise.all(inflight));
-  requireFeed();
-
-  const renderAllocations = await step("renderAllocationCount", () => renderAllocationCount(host));
-  await step("dispose", () => host.dispose());
-  await step("close", () => context.close());
-  return {
-    contextStateBeforeBoot: stateBeforeBoot,
-    meterLeaseResult: meterLease.result,
-    subscribeResult: subscribed.result,
-    unsubscribeResult: unsubscribed.result,
-    unsubscribeBindings: unsubscribed.bindings.length,
-    renderedAfterSubscribe: String(renderedAfterSubscribe),
-    renderedBeforeUnsubscribe: String(renderedBeforeUnsubscribe),
-    boundary: String(boundary),
-    fedBlocks: fed,
-    armedFrames,
-    armedMaximumTrackGrDb: maximumGrDb(armedList),
-    framesAfterAcknowledgement: afterList.length,
-    blocksAfterAcknowledgement: blocksAfter(),
-    maximumTrackGrDbAfterAcknowledgement: maximumGrDb(afterList),
-    minimumPeakAfterAcknowledgement: afterList.length === 0 ? 0 : minimumPeak(afterList),
-    renderAllocations,
-  };
-}
-
-/// Issue #143 E12: the observation row, its two offline runs and the real-context unsubscribe.
-async function runObservationQualification(createHost, sessionDocument, unsubscribeDocument) {
+/// Issue #143 E12: the observation row and its two offline runs.
+async function runObservationQualification(createHost, sessionDocument) {
   const armed = await runObservationRun(createHost, sessionDocument, true);
   const disarmed = await runObservationRun(createHost, sessionDocument, false);
-  const unsubscribe = await runObservationUnsubscribeRun(createHost, unsubscribeDocument);
-  return {
-    armed,
-    disarmed,
-    unsubscribe,
-    identicalAudio: armed.renderedDigest === disarmed.renderedDigest,
-  };
+  return { armed, disarmed, identicalAudio: armed.renderedDigest === disarmed.renderedDigest };
 }
 
 async function runStallQualification(createHost, sessionDocument) {
@@ -1185,7 +745,7 @@ export async function runQualification() {
   const resumeRecord = countResumes();
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
-    liveControlResponse, observationResponse, unsubscribeResponse,
+    liveControlResponse, observationResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -1195,10 +755,9 @@ export async function runQualification() {
       fetch("/qualification/stall-session.json"),
       fetch("/qualification/live-control-session.json"),
       fetch("/qualification/observation-session.json"),
-      fetch("/qualification/unsubscribe-session.json"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
-      || !liveControlResponse.ok || !observationResponse.ok || !unsubscribeResponse.ok) {
+      || !liveControlResponse.ok || !observationResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -1211,8 +770,6 @@ export async function runQualification() {
   // Issue #143 E12: the live-control session plus one compressor, so an armed tap has a real
   // reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
-  // #1345 Amendment 6: the real-context unsubscribe run's own session, with a source long enough.
-  const unsubscribeDocument = new TextEncoder().encode(await unsubscribeResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
     ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
@@ -1280,16 +837,12 @@ export async function runQualification() {
     observation = await runObservationQualification(
       createMisoAudioWorkletHost,
       observationDocument,
-      unsubscribeDocument,
     );
   } catch (error) {
     const diagnostic = await diagnoseReady(observationDocument);
-    const failure = new Error(`observation qualification failed: ${diagnosticJson({
+    throw new Error(`observation qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
-    // The structured stall signature rides on the failure so `run.mjs` prints and classifies it.
-    if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
-    throw failure;
   }
   let stall;
   try {
@@ -1336,7 +889,6 @@ export async function runQualification() {
       { workload: "live-control", count: live.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
-      { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
       { workload: "staging-reads-one-shot", count: stagingReads.oneShot.renderAllocations },
       { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
@@ -1356,48 +908,6 @@ export const qualificationConstants = Object.freeze({
   sourceChannels: 2,
   sourceBitDepth: "32f",
 });
-
-/// The `observation-unsubscribe` gate on the run's result (#1345 Amendment 6), shared by the gate
-/// in `run.mjs` and by the page-mutation proofs, so both judge by one predicate. `true` only if the
-/// armed tap published, the unsubscribe followed a render beyond the subscribe, and every frame
-/// received after the unsubscribe acknowledgement (at least sixteen blocks of them, none excluded)
-/// carried no reduction while still carrying the fed signal.
-export function unsubscribeVerdict(run) {
-  if (run === null || typeof run !== "object") return false;
-  const wholeNumber = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
-  return run.contextStateBeforeBoot === "suspended"
-    && run.meterLeaseResult === RESULT_OK
-    && run.subscribeResult === RESULT_OK
-    && run.unsubscribeResult === RESULT_OK
-    && run.unsubscribeBindings === 0
-    && wholeNumber(run.renderedAfterSubscribe) && wholeNumber(run.renderedBeforeUnsubscribe)
-    && BigInt(run.renderedBeforeUnsubscribe) > BigInt(run.renderedAfterSubscribe)
-    && run.armedFrames >= UNSUBSCRIBE_ARMED_FRAMES
-    && run.armedMaximumTrackGrDb > 0
-    && run.blocksAfterAcknowledgement >= UNSUBSCRIBE_MINIMUM_BLOCKS
-    && run.framesAfterAcknowledgement >= 1
-    && run.maximumTrackGrDbAfterAcknowledgement === 0
-    && run.minimumPeakAfterAcknowledgement > UNSUBSCRIBE_PEAK_FLOOR;
-}
-
-/// The page-mutation seam (#1345 Amendment 6): the unsubscribe run alone, with one named defect
-/// applied in the page. `run.mjs` runs it in a fresh page of every browser under
-/// `--self-test-mutations` and requires [`unsubscribeVerdict`] to be false. `null` runs the gate
-/// unmutated. The click plan is the run's own single control.
-export const unsubscribePageMutations = Object.freeze(["skip-unsubscribe", "feed-ends-at-boundary"]);
-export const unsubscribePageClickPlan = Object.freeze([resumeControlSelector(UNSUBSCRIBE_RESUME)]);
-export async function runUnsubscribePageMutation(mutation) {
-  if (mutation !== null && !unsubscribePageMutations.includes(mutation)) throw new Error(`unknown page mutation: ${mutation}`);
-  const [{ createMisoAudioWorkletHost }, observationResponse] = await Promise.all([
-    import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
-    fetch("/qualification/unsubscribe-session.json"),
-  ]);
-  if (!observationResponse.ok) throw new Error("qualification fixture fetch failed");
-  const document = new TextEncoder().encode(await observationResponse.text());
-  const resumeRecord = countResumes();
-  const unsubscribe = await runObservationUnsubscribeRun(createMisoAudioWorkletHost, document, mutation);
-  return { unsubscribe, resumes: resumeRecord };
-}
 
 // Issue #288: these are the existing qualification call sites, exposed only to the hermetic
 // contract test. The browser runner continues to enter through runQualification below; keeping
@@ -1431,12 +941,6 @@ export const qualificationSessionSources = Object.freeze([
     sourceId: "live-control-source",
     blocks: OBSERVATION_BLOCKS,
     planes: observationPlanes,
-  }),
-  Object.freeze({
-    document: "unsubscribe-session.json",
-    sourceId: "live-control-source",
-    blocks: UNSUBSCRIBE_SOURCE_BLOCKS,
-    planes: unsubscribePlanes,
   }),
   Object.freeze({
     document: "stall-session.json",

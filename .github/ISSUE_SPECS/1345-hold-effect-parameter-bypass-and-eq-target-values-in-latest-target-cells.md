@@ -390,6 +390,10 @@ attempts touched, now part of its decision record:
 
 ## Amendment 5 (root, 2026-10-12): the qualification page's unsubscribe (batch-verdict B1)
 
+> **Superseded by Amendment 7 (split, root 2026-10-13) as far as it concerns the real-browser
+> unsubscribe gate.** The gate is removed from #1345 and moves to successor S1. The text below stays
+> as history.
+
 Root's ruling on the stream B batch-3 verdict's B1 (`submix-verdicts/stream-b3-batch-verdict.md`):
 all three browser qualification legs failed the `observation-unsubscribe` gate, because the page's
 raw `host.observe` unsubscribe came before any render and Amendment 3 refuses a second record for one
@@ -433,6 +437,12 @@ to 36) all fail loudly at the first `resume()`. The leg is not green under full 
 and the open question are in the "Batch re-verify fixes" record below.
 
 ## Amendment 6 (root, 2026-10-12): the unsubscribe gate resumes once and never suspends again
+
+> **Superseded by Amendment 7 (split, root 2026-10-13) as far as it concerns the real-browser gate:
+> its "The gate" paragraph, the `resume-clicks` count of "two SDK clicks and one gate click", the
+> named exceptions (1) to (3) and the stated limit about the gate's peak floor.** The contract text, the
+> Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`, the reviewer's
+> check of the shipped host, and the reopening condition stay in force. The text below stays as history.
 
 Root's ruling on the stream B batch-3 gate stall. The two-resume design of Amendments 5 and the B2
 rounds stalls on Linux WebKit in a pre-existing WebKit and engine interaction (main 19 of 60 runs
@@ -514,6 +524,63 @@ boots a one-block meter window (`liveControlMeterBlocks = 1`), keeps the source 
 the render on the default 5,120-frame ring, and requires every frame after the acknowledgement to peak
 above 0.05. Mutation (e) (the feed stops at the boundary) must be red in every browser, and the record
 must show that the floor check is what turns it red.
+
+## Amendment 7 (root, 2026-10-13): split; the real-browser unsubscribe proof moves to a successor
+
+**Ruling.** #1345 has had attempts 1 to 3 and the B1, B2 and Amendment 6 fix rounds. Another fix round
+for the real-browser `observation-unsubscribe` gate would be a disguised retry (AGENTS.md: the
+five-attempt rule is a hard delivery stop). The issue splits:
+
+* **#1345 closes** on its Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`,
+  the offline "disarmed" identity witness run in the browser qualification (the run that never
+  subscribes, held to zero reduction by the `observation-disarmed` gate and to bit-identical audio by
+  `observation-identity`), and the contract text (both `.d.ts` twins and the `lib.rs` docs).
+* **The real-browser unsubscribe proof moves to successor S1,** "Qualify observation unsubscribe on a
+  real AudioContext in three browsers" (the number is assigned when root files it). S1 starts from the
+  saved patch, which re-adds the gate:
+  `/home/bl/misofm/submix-verdicts/b3-acceptance/split/observation-unsubscribe-gate.patch` (the full
+  pre-split files are beside it in `split/before/`).
+* **Amendments 5 and 6, real-browser gate paragraphs: superseded** by this split (marked above; kept as
+  history).
+
+**Why.** The acceptance measurements of the gate on `806de000a`
+(`/home/bl/misofm/submix-verdicts/b3-acceptance/summary.md`; 60 unloaded WebKit runs and a paired A/B
+against `main` `6cc1f8bc8`) show: no stall signature on either side, unloaded runs 0 failures in every
+browser, but the branch fails the gate itself on WebKit under load (leg i 1, leg ii 2 of 40 runs: the fed
+signal dipped below the 0.05 peak floor, and once the `skip-unsubscribe` page mutation escaped with a
+peak of 0.049) and one feed-ends-at-boundary page mutation run died with a page error; WebKit leg ii
+all failures were 8 of 40 against `main`'s 2 of 40 (Fisher one-sided p = 0.0436), three of them
+`observation qualification failed ... result 6` that `main` never shows. `main` has no such gate, so
+the comparison is not a like for like measure of the engine; it is a measure of this gate's
+flakiness on this box.
+
+**What was removed** (`hosts/host-web/qualification/`, `hosts/host-web/MUTATIONS.md`, STREAMS.md):
+`runObservationUnsubscribeRun`, `unsubscribePlanes` and the `UNSUBSCRIBE_*` constants;
+`unsubscribe-session.json` and its `qualificationSessionSources` row; `unsubscribeVerdict`,
+`unsubscribePageMutations`, `unsubscribePageClickPlan` and `runUnsubscribePageMutation`; in `run.mjs`
+the `observation-unsubscribe` gate, the result-field mutations `observation-unsubscribe`, `-silent`,
+`-short` and `-norender`, the page mutations (d) `skip-unsubscribe` and (e) `feed-ends-at-boundary`
+(`unsubscribePageMutationProofs`), and the eleventh render-allocation row (the gate counts ten again);
+the `unsubscribe-session.json` hot-file row in STREAMS.md (its `run.mjs` and `qualification.js` rows
+follow the new scope). MUTATIONS.md keeps its history and marks the removed rows. The gate's helpers
+that nothing else calls went with it, because no real-context gate remains in `qualification.js`: the
+bounded waits (`bounded`, `requireSuspended`, `delay`), `resumeThroughClick`, `resumeUntil`,
+`renderUntil`, `boundedSample`, `sampleContext` and the stall classifier `classifyStallSignature`
+with its printing in `run.mjs` and its self-test `stallSignatureProofs()`; the patch carries all of
+them, so S1 can use the stall signature recording again without a rewrite.
+
+**What was kept.** The Rust test; the contract text; the offline disarmed identity run (its zero check
+was part of the old `observation-unsubscribe` gate and is now the `observation-disarmed` gate with the
+mutation of the same name, `disarmed.maximumTrackGrDb = 1`, red in all three browsers' self-test);
+the `spectrum-query-closed` handler fix in `sdk-response-entry.ts`; the `resume-clicks` gate and its
+three mutations, which now declare the two SDK clicks only (none without the SDK) and no gate click.
+The `BROWSER_DEPLOYMENT_MATRIX.md` and `generate-matrix.mjs` sentence "requires an unsubscribe to actually stop the
+traffic" now reads "requires a never-armed tap to publish no reduction".
+
+**Test value.** `observation-disarmed` defends the claim that a tap nobody armed publishes no
+reduction (a host that folded an unarmed tap into the frame turns it red, and the armed-versus-unarmed
+identity check does not look at the reduction word). The `resume-clicks` mutations are unchanged and
+still defend the count of trusted-click resumes.
 
 ## Attempt record
 

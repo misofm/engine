@@ -8,9 +8,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
-import {
-  unsubscribePageClickPlan, unsubscribePageMutations, unsubscribeVerdict,
-} from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -30,11 +27,7 @@ const MUTATIONS = [
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
-  "observation-armed", "observation-identity", "observation-window",
-  // #1345 Amendment 6: the unsubscribe gate's result-field mutations (a)-(c) and the render proof;
-  // (d) and (e) are page mutations (`unsubscribePageMutations`), proved in each browser.
-  "observation-unsubscribe", "observation-unsubscribe-silent", "observation-unsubscribe-short",
-  "observation-unsubscribe-norender",
+  "observation-armed", "observation-disarmed", "observation-identity", "observation-window",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
@@ -212,7 +205,7 @@ function validate(browserName, result) {
   gate(browserName, "control-path", live?.telemetryFrames >= 1,
     "no render-telemetry frame arrived over a full window");
 
-  // Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, with `firstSample`
+  // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
   const observation = result.observation;
@@ -234,18 +227,11 @@ function validate(browserName, result) {
   gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
     && observation?.armed?.windowsTile === true,
   "observation windows did not advance monotonically and tile");
-  const unsubscribe = observation?.unsubscribe;
-  // #1345 Amendment 6: one resume and no suspend after it. The new context was suspended before boot
-  // (its first suspend is not awaited, so a poll replaces the await), a render beyond the subscribe's
-  // status separated the subscribe from the unsubscribe, and every frame the page received after the
-  // unsubscribe acknowledgement (at least sixteen blocks, none excluded) carried no reduction while
-  // still carrying the fed signal. A never-armed tap publishes none either.
-  gate(browserName, "observation-unsubscribe", unsubscribeVerdict(unsubscribe)
-    && observation?.disarmed?.maximumTrackGrDb === 0,
-  `an unsubscribed tap kept publishing, the signal under it stopped, or the run never exercised the armed tap: ${JSON.stringify({
-    unsubscribe,
-    disarmedMaximumTrackGrDb: observation?.disarmed?.maximumTrackGrDb,
-  })}`);
+  // A tap that was never armed publishes none. (That an unsubscribe stops a tap's reading is the
+  // Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`'s, #1345
+  // Amendment 7.)
+  gate(browserName, "observation-disarmed", observation?.disarmed?.maximumTrackGrDb === 0,
+    "a tap that was never armed published a reduction");
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
   // Every real `AudioContext.resume()` ran inside a trusted click (the page counts them, split by
@@ -254,11 +240,11 @@ function validate(browserName, result) {
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
     && Number.isInteger(resumes?.declared)
-    && resumes.declared === (result.sdkResponse === null ? 1 : 3)
+    && resumes.declared === (result.sdkResponse === null ? 0 : 2)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare its one gate click (plus the two SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare the two SDK clicks (none without the SDK), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -299,7 +285,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 11
+    && allocations.length === 10
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -750,15 +736,7 @@ function mutate(result, mutation) {
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
-  if (mutation === "observation-unsubscribe") copy.observation.unsubscribe.maximumTrackGrDbAfterAcknowledgement = 1;
-  // (b) A zero from silence: a frame after the acknowledgement peaked below the floor.
-  if (mutation === "observation-unsubscribe-silent") copy.observation.unsubscribe.minimumPeakAfterAcknowledgement = 0;
-  // (c) Fewer than sixteen blocks of frames after the acknowledgement.
-  if (mutation === "observation-unsubscribe-short") copy.observation.unsubscribe.blocksAfterAcknowledgement = 15;
-  // The unsubscribe went out with no render beyond the subscribe's status.
-  if (mutation === "observation-unsubscribe-norender") {
-    copy.observation.unsubscribe.renderedBeforeUnsubscribe = copy.observation.unsubscribe.renderedAfterSubscribe;
-  }
+  if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
   if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
@@ -806,41 +784,6 @@ function mutate(result, mutation) {
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   return copy;
-}
-
-/// The stall signature (`classifyStallSignature`, root ruling 2026-10-12) is `full` only when all of
-/// its conditions hold. A full record is held full, and each condition removed alone, from an
-/// otherwise full record, must give `full: false`, so a record missing any one condition can never
-/// be listed as an exemption.
-async function stallSignatureProofs() {
-  const { classifyStallSignature } = await import("./qualification.js");
-  const sample = (requestId) => ({
-    contextState: "running",
-    currentTime: 0.021333333333333333,
-    status: { requestId, lastResult: 0, renderedQuanta: 8n },
-  });
-  const full = { atResume: sample(39), atTimeout: sample(2282), repliesSent: 3, replyIds: [40, 100, 2282] };
-  const signature = classifyStallSignature(full);
-  assert.equal(signature.full, true, "stall-signature: the full record was not classified full");
-  assert.deepEqual(signature.replyIds, [40, 2282]);
-  assert.equal(signature.repliesAnswered, 3);
-  const without = {
-    "context state not running at the timeout": { atTimeout: { ...sample(2282), contextState: "suspended" } },
-    "context state not running at the resume": { atResume: { ...sample(39), contextState: "interrupted" } },
-    "currentTime moved": { atTimeout: { ...sample(2282), currentTime: 0.0426 } },
-    "renderedQuanta moved": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, renderedQuanta: 9n } } },
-    "one status reply": { replyIds: [2282] },
-    "no status reply": { replyIds: [] },
-    "last result not 0": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, lastResult: 6 } } },
-    "timeout sample unanswered": { atTimeout: null },
-  };
-  for (const [missing, change] of Object.entries(without)) {
-    assert.equal(
-      classifyStallSignature({ ...full, ...change }).full,
-      false,
-      `stall-signature: a record without ${missing} was classified full`,
-    );
-  }
 }
 
 function mutationProofs(browserName, result) {
@@ -954,67 +897,6 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
-/// #1345 Amendment 6, mutations (d) and (e): the unsubscribe run in a fresh page of this browser with
-/// one defect applied in the page, which the gate's verdict must refuse. Each also proves *which*
-/// check refuses it: the verdict turns true again when only that one field is repaired. (d) skips the
-/// unsubscribe, so the tap keeps publishing reduction on every later frame; (e) ends the source feed
-/// at the boundary, so reduction stays zero and only the peak floor sees the silence.
-async function unsubscribePageMutationProofs(browserName, browser, origin) {
-  for (const mutation of unsubscribePageMutations) {
-    const page = await browser.newPage();
-    const diagnostics = [];
-    page.on("console", (message) => diagnostics.push(`console ${message.type()}: ${message.text()}`));
-    page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
-    try {
-      page.setDefaultTimeout(120000);
-      await page.goto(`${origin}/qualification/index.html`);
-      const execution = page.evaluate(async (name) => {
-        try {
-          const module = await import("/qualification/qualification.js");
-          return await module.runUnsubscribePageMutation(name);
-        } catch (error) {
-          return { qualificationError: { message: error?.message ?? String(error), stack: error?.stack } };
-        }
-      }, mutation);
-      const completion = execution.then((value) => ({ kind: "complete", value }));
-      let timer;
-      const expired = new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ kind: "deadline" }), PAGE_DEADLINE_MS);
-      });
-      try {
-        for (const selector of unsubscribePageClickPlan) {
-          const click = page.locator(selector).first().click({ timeout: PAGE_DEADLINE_MS }).then(
-            () => ({ kind: "clicked" }),
-            (error) => ({ kind: "click-error", error }),
-          );
-          const outcome = await Promise.race([completion, click, expired]);
-          if (outcome.kind === "complete") break;
-          gate(browserName, "observation-unsubscribe-page-mutation", outcome.kind === "clicked",
-            `${mutation}: the page offered no control to click: ${outcome.error?.message ?? "deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
-        }
-        const outcome = await Promise.race([completion, expired]);
-        gate(browserName, "observation-unsubscribe-page-mutation", outcome.kind === "complete",
-          `${mutation}: the page did not finish within ${PAGE_DEADLINE_MS} ms; page diagnostics: ${diagnostics.join("; ")}`);
-      } finally {
-        clearTimeout(timer);
-      }
-      const { unsubscribe, qualificationError } = await execution;
-      gate(browserName, "observation-unsubscribe-page-mutation", qualificationError === undefined && unsubscribe !== undefined,
-        `${mutation}: the mutated run failed instead of reporting a result: ${JSON.stringify(qualificationError)}; page diagnostics: ${diagnostics.join("; ")}`);
-      const refused = !unsubscribeVerdict(unsubscribe);
-      const cause = mutation === "skip-unsubscribe"
-        ? { maximumTrackGrDbAfterAcknowledgement: 0 }
-        : { minimumPeakAfterAcknowledgement: 1 };
-      const onlyThatCheck = unsubscribeVerdict({ ...unsubscribe, ...cause });
-      process.stdout.write(`${browserName}: page-mutation ${mutation}: ${JSON.stringify(unsubscribe)}; refused=${refused}; accepted when only ${Object.keys(cause)[0]} is repaired=${onlyThatCheck}\n`);
-      gate(browserName, "observation-unsubscribe", refused && onlyThatCheck,
-        `red page mutation ${mutation} escaped the gate, or the gate refused it for another reason: ${JSON.stringify(unsubscribe)}`);
-    } finally {
-      await page.close();
-    }
-  }
-}
-
 async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
@@ -1094,19 +976,10 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       result.resumes.planned = plan.length;
       result.resumes.clicksPerformed = clicksPerformed;
     }
-    const stallSignature = result.qualificationError?.value?.stallSignature;
-    if (stallSignature !== undefined) {
-      // A bounded render wait timed out. The signature is what classifies the failure (full means a
-      // context that said "running" and rendered nothing while the processor still answered).
-      process.stdout.write(`${browserName}: stall-signature: ${JSON.stringify(stallSignature)}\n`);
-    }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
-    if (proveMutations) {
-      mutationProofs(browserName, result);
-      await unsubscribePageMutationProofs(browserName, browser, origin);
-    }
+    if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
@@ -1179,8 +1052,6 @@ async function main() {
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
     process.stdout.write(`artifact set: the exact ${served}-file shipped set is pinned\n`);
-    await stallSignatureProofs();
-    process.stdout.write("stall signature: each missing condition gives full=false\n");
   }
 
   // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version
