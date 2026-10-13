@@ -1006,6 +1006,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
         } else {
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
         };
+        // #1364 D2: the per-strip pan windows the browser keeps beside the session's ramp table.
+        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()) as u64;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
@@ -1015,6 +1017,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
+            .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
@@ -1025,6 +1028,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
+            .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
             .expect("bridge retained arithmetic");
         assert_eq!(
             host.resources().bridge_metadata_bytes,
@@ -1045,7 +1049,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
             .max(compiled.resource_estimate().single_allocation_bytes)
             .max(decoded_bytes)
-            .max(input_shadow_bytes);
+            .max(input_shadow_bytes)
+            .max(ramp_table_bytes);
         assert_eq!(
             host.resources().largest_bridge_allocation_bytes,
             bridge_largest
@@ -3625,6 +3630,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .effect_count
             .checked_mul(size_of::<Box<[u64]>>() as u64)
             .expect("observation arm table arithmetic");
+        // #1364 D2: the per-strip pan windows the browser keeps beside the session's ramp table.
+        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()) as u64;
         let effect_payload = string_payload + owner_payload;
         let effect_largest = string_largest.max(owner_largest);
         let effect_retained = dense_table + effect_payload;
@@ -3642,6 +3649,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .and_then(|bytes| bytes.checked_add(observation_arm_table))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
+            .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
@@ -3651,6 +3659,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .and_then(|bytes| bytes.checked_add(observation_arm_table))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
+            .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
             .expect("bridge retained arithmetic");
         let expected_bridge_largest = projection
             .report
@@ -3663,7 +3672,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .max(effect_largest)
             .max(observation_arm_table)
             .max(decoded_bytes)
-            .max(input_shadow_bytes);
+            .max(input_shadow_bytes)
+            .max(ramp_table_bytes);
         let expected_named_largest =
             expected_bridge_largest.max(engine.report.largest_engine_allocation_bytes);
         let host =
@@ -16258,4 +16268,540 @@ fn live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them() {
     assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 0);
     assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, 0), 0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+}
+
+// ---- Issue #1364: an absent ramp length resolves to the session's own ----
+//
+// Every session is #1245's: tracks `bass` 0, `drums` 1 and `vocal` 2, submixes `room` 3 and
+// `verb` 4, the `follows_mute` sends `bass-room` 0 and `drums-verb` 1, and one VCA, `lead`
+// (index 0), over `bass` and `drums`. The rate is 48 kHz, so a length in milliseconds times 48
+// is the expected sample count, written out by hand in each row.
+
+/// Which of the table's lengths a kind's record takes (#1054 D3).
+#[derive(Clone, Copy, Debug)]
+enum RampKey {
+    Fader,
+    Mute,
+    /// Polarity invert: twice the mute length.
+    Polarity,
+    Pan,
+}
+
+/// One ramped kind and a record that moves its target.
+struct RampKind {
+    name: &'static str,
+    kind: u32,
+    channel: u8,
+    index: u32,
+    values: [f32; 4],
+    key: RampKey,
+}
+
+const RAMP_KINDS: [RampKind; 12] = [
+    RampKind {
+        name: "faderDb",
+        kind: COMMAND_FADER_DB,
+        channel: 2,
+        index: 2,
+        values: [-3.0, 0.0, 0.0, 0.0],
+        key: RampKey::Fader,
+    },
+    RampKind {
+        name: "trimDb",
+        kind: COMMAND_TRIM_DB,
+        channel: 2,
+        index: 2,
+        values: [-3.0, 0.0, 0.0, 0.0],
+        key: RampKey::Fader,
+    },
+    RampKind {
+        name: "mute",
+        kind: COMMAND_MUTE,
+        channel: 2,
+        index: 2,
+        values: [1.0, 0.0, 0.0, 0.0],
+        key: RampKey::Mute,
+    },
+    RampKind {
+        name: "polarityInvert",
+        kind: COMMAND_POLARITY_INVERT,
+        channel: 2,
+        index: 2,
+        values: [1.0, 0.0, 0.0, 0.0],
+        key: RampKey::Polarity,
+    },
+    RampKind {
+        name: "pan",
+        kind: COMMAND_PAN,
+        channel: 255,
+        index: 2,
+        values: [-0.5, 0.5, 0.0, 0.0],
+        key: RampKey::Pan,
+    },
+    RampKind {
+        name: "matrix",
+        kind: COMMAND_MATRIX,
+        channel: 255,
+        index: 2,
+        values: [0.5, 0.0, 0.0, 1.0],
+        key: RampKey::Pan,
+    },
+    // Solo moves no record of its own: the other tracks' mutes carry its ramp.
+    RampKind {
+        name: "solo",
+        kind: COMMAND_SOLO,
+        channel: 255,
+        index: 2,
+        values: [1.0, 0.0, 0.0, 0.0],
+        key: RampKey::Mute,
+    },
+    RampKind {
+        name: "routeGainDb",
+        kind: COMMAND_ROUTE_GAIN_DB,
+        channel: 255,
+        index: 1,
+        values: [-3.0, 0.0, 0.0, 0.0],
+        key: RampKey::Fader,
+    },
+    RampKind {
+        name: "routeMute",
+        kind: COMMAND_ROUTE_MUTE,
+        channel: 255,
+        index: 1,
+        values: [1.0, 0.0, 0.0, 0.0],
+        key: RampKey::Mute,
+    },
+    RampKind {
+        name: "routeMatrix",
+        kind: COMMAND_ROUTE_MATRIX,
+        channel: 255,
+        index: 1,
+        values: [0.5, 0.0, 0.0, 1.0],
+        key: RampKey::Pan,
+    },
+    RampKind {
+        name: "vcaFaderDb",
+        kind: COMMAND_VCA_FADER_DB,
+        channel: 2,
+        index: 0,
+        values: [-6.0, 0.0, 0.0, 0.0],
+        key: RampKey::Fader,
+    },
+    RampKind {
+        name: "vcaMute",
+        kind: COMMAND_VCA_MUTE,
+        channel: 2,
+        index: 0,
+        values: [1.0, 0.0, 0.0, 0.0],
+        key: RampKey::Mute,
+    },
+];
+
+/// The lengths one session's table gives each key, in samples.
+#[derive(Clone, Copy)]
+struct RampLengths {
+    fader: u32,
+    mute: u32,
+    polarity: u32,
+    pan: u32,
+}
+
+impl RampLengths {
+    fn of(self, key: RampKey) -> u32 {
+        match key {
+            RampKey::Fader => self.fader,
+            RampKey::Mute => self.mute,
+            RampKey::Polarity => self.polarity,
+            RampKey::Pan => self.pan,
+        }
+    }
+}
+
+/// The #1245 follow session at 48 kHz with `table` as its `control_smoothing`, every strip's pan
+/// window zero except those `windows` names (a `Matrix` strip when the flag is set).
+fn ramp_host(
+    table: Option<session::ControlSmoothing>,
+    windows: &[(&str, u32, bool)],
+) -> AudioWorkletEngineHost {
+    let mut model = vca_ride_model(
+        &[],
+        &[("lead", [0.0; 2], [false; 2], &["bass", "drums"] as &[&str])],
+    );
+    model.control_smoothing = table;
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.matrix_or_pan = session::MatrixOrPan::Pan {
+            left: -0.25 * (index as f32 + 1.0),
+            right: 0.25 * (index as f32 + 1.0),
+            smoothing_samples: 0,
+        };
+    }
+    for (id, window, as_matrix) in windows {
+        let track = model
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == *id)
+            .expect("windowed track");
+        track.matrix_or_pan = if *as_matrix {
+            session::MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: *window,
+            }
+        } else {
+            session::MatrixOrPan::Pan {
+                left: -0.25,
+                right: 0.25,
+                smoothing_samples: *window,
+            }
+        };
+    }
+    vca_ride_host(&model, 64)
+}
+
+/// The ramp length of every ramped record the last submission staged, in staging order. The
+/// staging array keeps its entries between submissions and the host here is fresh, so every
+/// non-effect entry is that submission's.
+fn staged_ramp_lengths(host: &AudioWorkletEngineHost) -> Vec<u32> {
+    let ready = host.ready.as_ref().expect("ready");
+    ready
+        .command_decoded
+        .iter()
+        .filter_map(|staged| match staged.kind {
+            StagedCommandKind::Command(AdmittedCommand::Matrix(record)) => {
+                Some(record.smoothing_samples)
+            }
+            StagedCommandKind::Command(AdmittedCommand::Fader(
+                TrackFaderRecord::FaderDb {
+                    smoothing_samples, ..
+                }
+                | TrackFaderRecord::Mute {
+                    smoothing_samples, ..
+                },
+            ))
+            | StagedCommandKind::Command(AdmittedCommand::Input(
+                TrackInputRecord::TrimDb {
+                    smoothing_samples, ..
+                }
+                | TrackInputRecord::PolarityInvert {
+                    smoothing_samples, ..
+                },
+            )) => Some(smoothing_samples),
+            StagedCommandKind::Command(AdmittedCommand::Route(record)) => Some(record.length()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Admit `kind` with the ramp word `word` on a fresh host and return the staged lengths.
+fn admitted_ramp_lengths(
+    table: Option<session::ControlSmoothing>,
+    windows: &[(&str, u32, bool)],
+    kind: &RampKind,
+    index: u32,
+    word: u32,
+) -> Vec<u32> {
+    let mut host = ramp_host(table, windows);
+    stage_command(
+        &mut host,
+        0,
+        kind.kind,
+        255,
+        kind.channel,
+        index,
+        0,
+        0,
+        word,
+        kind.values,
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK, "{}", kind.name);
+    staged_ramp_lengths(&host)
+}
+
+/// #1364 D2, gate 1: each of the twelve ramped kinds, sent without a length, is admitted with its
+/// #1054 D3 row's length of the session it was prepared with, and with its own length when it
+/// sent one, `0` (a step) included.
+///
+/// The tables are told apart on purpose. The default table gives polarity and fader the same 960,
+/// so only the second table (`mute_ms` 5, `fader_ms` 15, `pan_ms` 25: 240, 720, 1200, and polarity
+/// 480) separates a polarity record on the fader key or at the plain mute length from the right
+/// one; the third, all zero, separates "the session says step" from "the session says nothing".
+///
+/// Red mutations: `with_session_ramp` skipping one kind's arm (that kind keeps `0xFFFFFFFF`, which
+/// no row has as a length); polarity on `Fader` or `Mute`; solo or a send on the wrong key;
+/// `resolve` replacing a finite word; a zero session read as the default.
+#[test]
+fn an_absent_ramp_resolves_to_the_sessions_row_and_a_given_one_is_kept() {
+    let default = Some(session::CONTROL_SMOOTHING_DEFAULT);
+    let custom = Some(session::ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    let zero = Some(session::ControlSmoothing {
+        mute_ms: 0.0,
+        fader_ms: 0.0,
+        pan_ms: 0.0,
+    });
+    let tables = [
+        // The researched default: 10, 20 and 20 ms at 48 kHz.
+        (
+            "default table",
+            None,
+            RampLengths {
+                fader: 960,
+                mute: 480,
+                polarity: 960,
+                pan: 960,
+            },
+        ),
+        (
+            "an explicit copy of the default table",
+            default,
+            RampLengths {
+                fader: 960,
+                mute: 480,
+                polarity: 960,
+                pan: 960,
+            },
+        ),
+        (
+            "mute 5 ms, fader 15 ms, pan 25 ms",
+            custom,
+            RampLengths {
+                fader: 720,
+                mute: 240,
+                polarity: 480,
+                pan: 1200,
+            },
+        ),
+        (
+            "all keys 0",
+            zero,
+            RampLengths {
+                fader: 0,
+                mute: 0,
+                polarity: 0,
+                pan: 0,
+            },
+        ),
+    ];
+    for (label, table, lengths) in tables {
+        for kind in &RAMP_KINDS {
+            let expected = lengths.of(kind.key);
+            let sentinel =
+                admitted_ramp_lengths(table, &[], kind, kind.index, SESSION_DEFAULT_RAMP);
+            assert!(
+                !sentinel.is_empty(),
+                "{label}: {} stages a record",
+                kind.name
+            );
+            assert!(
+                sentinel.iter().all(|length| *length == expected),
+                "{label}: {} resolves to {expected}, staged {sentinel:?}",
+                kind.name
+            );
+            for given in [37, 0] {
+                let kept = admitted_ramp_lengths(table, &[], kind, kind.index, given);
+                assert!(!kept.is_empty(), "{label}: {} stages a record", kind.name);
+                assert!(
+                    kept.iter().all(|length| *length == given),
+                    "{label}: {} keeps {given}, staged {kept:?}",
+                    kind.name
+                );
+            }
+        }
+    }
+}
+
+/// #1364 D2: a `follows_mute` send record takes the ramp of the strip mute that moved it, and so
+/// the mute key, resolved from the sentinel; and a send whose own record names a length keeps
+/// it. `bass` (strip 0) feeds `bass-room` with `follows_mute`.
+///
+/// Red mutation: resolving the strip mute after the follow pass has copied its word (the follow
+/// record would be built with a length of 4294967295 and refuse as `DOMAIN` past the route ramp
+/// bound).
+#[test]
+fn a_followed_mute_send_ramps_over_the_resolved_mute_length() {
+    let custom = Some(session::ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    let mut host = ramp_host(custom, &[]);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        SESSION_DEFAULT_RAMP,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let ready = host.ready.as_ref().expect("ready");
+    let routes: Vec<u32> = ready
+        .command_decoded
+        .iter()
+        .filter_map(|staged| match staged.kind {
+            StagedCommandKind::Command(AdmittedCommand::Route(record)) => Some(record.length()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(routes, [240], "the bass-room follow record");
+    assert_eq!(staged_ramp_lengths(&host), [240, 240], "mute, then follow");
+}
+
+/// #1364 D2 and #1054 D5: a pan or matrix record without a length takes its strip's own window
+/// when the prepared session gave the strip a non-zero one, whichever of `Pan` and `Matrix` the
+/// strip prepared as, and the `pan_ms` length otherwise. A send matrix has no strip window.
+///
+/// Red mutations: pan and matrix resolving to `pan_ms` always (the strip windows 96 and 48
+/// become 960); `strip_pan` filled with the table's length instead of the window; the window read
+/// from the wrong strip; a send matrix reading its source strip's window (route 1's source,
+/// `drums`, has window 48).
+#[test]
+fn a_pan_or_matrix_without_a_length_takes_its_strips_window() {
+    let windows = [("bass", 96, false), ("drums", 48, true)];
+    let find = |name: &str| {
+        RAMP_KINDS
+            .iter()
+            .find(|kind| kind.name == name)
+            .expect("kind row")
+    };
+    // (kind, strip, expected): `bass` is strip 0 (a pan window of 96), `drums` strip 1 (a matrix
+    // window of 48) and `vocal` strip 2 (none, so `pan_ms`: 960).
+    let cases = [
+        ("pan", 0, 96),
+        ("matrix", 0, 96),
+        ("pan", 1, 48),
+        ("matrix", 1, 48),
+        ("pan", 2, 960),
+        ("matrix", 2, 960),
+        // Route 0's source is `bass` (window 96) and route 1's is `drums` (window 48).
+        ("routeMatrix", 0, 960),
+        ("routeMatrix", 1, 960),
+    ];
+    for (name, index, expected) in cases {
+        let got = admitted_ramp_lengths(None, &windows, find(name), index, SESSION_DEFAULT_RAMP);
+        assert_eq!(got, [expected], "{name} at index {index}");
+        // A given length still wins over the window.
+        let given = admitted_ramp_lengths(None, &windows, find(name), index, 37);
+        assert_eq!(given, [37], "{name} at index {index} with a length of 37");
+    }
+}
+
+/// #1364 D2: the kinds that carry no ramp keep their rules. The word is the sentinel, which is
+/// non-zero, so a bypass record and a prepared input-filter record refuse it as `MALFORMED`
+/// exactly as they refuse any non-zero word, and an effect-parameter or observation record is
+/// handed on with the sentinel untouched (the parameter path never reads the word).
+///
+/// Red mutation: `with_session_ramp` resolving every kind (bypass would be admitted with a
+/// 480-sample "ramp" it has no use for, and the input filter with 480).
+#[test]
+fn the_kinds_without_a_ramp_keep_the_sentinel_and_refuse_it() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_live_control_host(QUANTUM, 8);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        SESSION_DEFAULT_RAMP,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(host.command_report().rejected_index, 0);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK, "the same record with 0");
+
+    let model = parse_session_json(&identity_session(QUANTUM, u64::from(QUANTUM) * 4))
+        .expect("identity model");
+    let ramps = SessionRamps::try_new(&model).expect("ramps");
+    let record = |kind: u32, rack: u8, channel: u8, parameter_id: u32, word: u32| {
+        let mut bytes = [0_u8; COMMAND_RECORD_BYTES as usize];
+        bytes[0] = u8::try_from(kind).expect("frozen kind");
+        bytes[1] = rack;
+        bytes[2] = channel;
+        bytes[12..16].copy_from_slice(&parameter_id.to_le_bytes());
+        bytes[16..20].copy_from_slice(&word.to_le_bytes());
+        bytes[24..28].copy_from_slice(&20.0_f32.to_le_bytes());
+        CommandRecord::decode(&bytes)
+            .expect("decodes")
+            .with_session_ramp(&ramps)
+    };
+    for kind in [
+        COMMAND_INPUT_FILTERS,
+        COMMAND_EFFECT_BYPASS,
+        COMMAND_EFFECT_PARAM,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        COMMAND_OBSERVE_UNSUBSCRIBE,
+    ] {
+        assert_eq!(
+            record(kind, 255, 255, 0, SESSION_DEFAULT_RAMP).smoothing_samples,
+            SESSION_DEFAULT_RAMP,
+            "kind {kind} keeps the sentinel",
+        );
+    }
+    assert_eq!(
+        record(COMMAND_INPUT_FILTERS, 255, 2, 0, SESSION_DEFAULT_RAMP)
+            .into_input_filter_edit()
+            .err(),
+        Some(COMMAND_REASON_MALFORMED),
+    );
+    assert!(
+        record(COMMAND_INPUT_FILTERS, 255, 2, 0, 0)
+            .into_input_filter_edit()
+            .is_ok(),
+        "the same input-filter record with 0 is well formed",
+    );
+}
+
+/// #1364 D2, gate 4: resolution is control-thread work done once. The table is built at
+/// preparation, so admitting a sentinel record allocates and frees nothing, for every ramped kind.
+///
+/// Red mutation: `with_session_ramp` rebuilding `SessionRamps` per record (one boxed slice per
+/// record).
+#[test]
+fn resolving_a_sentinel_allocates_nothing() {
+    let mut host = ramp_host(None, &[]);
+    for kind in &RAMP_KINDS {
+        stage_command(
+            &mut host,
+            0,
+            kind.kind,
+            255,
+            kind.channel,
+            kind.index,
+            0,
+            0,
+            SESSION_DEFAULT_RAMP,
+            kind.values,
+        );
+        let (result, allocations, deallocations) =
+            crate::ffi::live_response_ffi_tests::measured(|| host.submit_commands(1));
+        assert_eq!(result, RESULT_OK, "{}", kind.name);
+        assert_eq!(allocations, 0, "{} admission allocated", kind.name);
+        assert_eq!(deallocations, 0, "{} admission freed", kind.name);
+    }
 }
