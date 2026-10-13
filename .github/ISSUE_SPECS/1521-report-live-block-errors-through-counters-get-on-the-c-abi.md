@@ -8,9 +8,6 @@ follow-ups", NIT 3; #1312 "Batch follow-ups", NIT 3). Code anchors verified on `
 
 Root decisions 2026-10-11 after an adversarial review (choices 1-7 decided as recorded in the decisions below).
 
-DRAFT, not filed. Proposed file name:
-`NNNN-report-live-block-errors-through-counters-get-on-the-c-abi.md`.
-
 ## Product outcome
 
 A C ABI host reads `LIVE_BLOCK_ERRORS` with `COUNTERS_GET` or a configured `COUNTER_SNAPSHOT`,

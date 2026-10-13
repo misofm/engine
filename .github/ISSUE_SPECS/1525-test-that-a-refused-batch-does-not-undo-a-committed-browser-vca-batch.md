@@ -1,6 +1,6 @@
 # Test that a refused batch does not undo a committed browser VCA batch
 
-DRAFT, not filed. Stream B of decision 15
+Stream B of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-2: a refused
 submission changes nothing, and an ack never comes before a drop). This is a test-only follow-up to
 *Hold route-lane values in latest-target cells* (#1347). It comes from verdict mutation M13 of
@@ -10,8 +10,6 @@ attempt 1 and note n4 of attempt 2 (`/home/bl/misofm/submix-verdicts/1347-attemp
 
 Root decisions 2026-10-12 after an adversarial review: the solo and route sibling tests are in
 scope (gate 2).
-
-Proposed file name: `NNNN-test-that-a-refused-batch-does-not-undo-a-committed-browser-vca-batch.md`.
 
 ## Product outcome
 

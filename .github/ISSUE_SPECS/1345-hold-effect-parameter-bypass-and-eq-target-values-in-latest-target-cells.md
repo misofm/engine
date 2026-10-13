@@ -1213,11 +1213,18 @@ in `logs/summary` rows (`bar.txt`).
 
 **MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
 (`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four
-lanes, `eq8` lane 0 of it at eight). *Test value:* red if the input drain's lane mask is built from
-the first bank's moves instead of the drained bank's, which loses a later bank's pending trim write
-at the swap and which the first-bank tests (`eq2`) cannot see. *Mutation (apply: red; revert:
-green):* `moves.get(first)` -> `moves.get(0)` in `carried_input_lane_mask`: the two new tests red
-(70 other tests green); reverted: 72 passed.
+lanes, `eq8` lane 0 of it at eight; the strip at the same lane of the first bank, `eq1` or `eq0`,
+is muted in every session and restarts at the swap: the committed model moves its trim and B keeps
+the old one). *Test value:* red if the input drain's lane mask is built from the first bank's moves
+instead of the drained bank's, which loses a later bank's pending trim write at the swap when the
+first bank's mask lacks that lane and which the first-bank tests (`eq2`) cannot see. Without the
+restarting strip every lane carries, bank 0's mask is full and the defect hides (batch verdict 3,
+MINOR 1: the earlier form of these tests stayed green under it). *Mutations (apply: red; revert:
+green; `runtime.rs` restored byte-for-byte, `cmp` clean):* (a) `moves.get(first)` -> `moves.get(0)`
+in `carried_input_lane_mask`: the two tests red (70 other tests green); (b) `moves.get(first)` ->
+`moves.get(0)` and `.skip(first)` -> `.skip(0)`, so every bank uses bank 0's mask: the two tests
+red (70 green), and green (72 passed) with the tests as they were before this fix; reverted: 72
+passed.
 
 **NITs.** `lane_bit` (`crates/graph/src/runtime.rs`) carries a `debug_assert!` for a lane beyond the
 mask width and keeps `checked_shl(..).unwrap_or(0)` in release, so the Wasm call graph gains no

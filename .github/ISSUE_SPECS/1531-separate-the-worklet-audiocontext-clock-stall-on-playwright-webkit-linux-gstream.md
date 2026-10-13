@@ -14,6 +14,8 @@ the PulseAudio null sink. The browser qualification then has a committed minimal
 the same stall signature without engine code. Root and the owner can then rule on the B3 gate's
 exemption, on a CI change and on an upstream report from facts.
 
+Root note (2026-10-13): the real-browser observation-unsubscribe gate was removed by #1345 Amendment 7 and moves to #1535. "The B3 gate" below means #1535's `observation-unsubscribe` gate.
+
 ## Context
 
 - **The stack.** The CI browser leg (`.github/workflows/qualification.yml:376-445`) has these parts:
@@ -181,6 +183,8 @@ conditions hold:
 1. the failure has the full signature (i) to (iv);
 2. the minimal repro shows the same signature in the same session;
 3. every exempt failure is listed.
+
+Root note (2026-10-13): the real-browser observation-unsubscribe gate was removed by #1345 Amendment 7 and moves to #1535. "The B3 gate" means #1535's `observation-unsubscribe` gate; #1535 R3 routes a full-signature stall there to this issue.
 
 This slice affects the rule as follows:
 
@@ -354,6 +358,8 @@ Under #1531's rule ("How (a') depends on this"), S has appeared only with the en
 On the current data no B3 `observation-unsubscribe` stall is exempt. Each such gate failure is ours
 until a no-engine variant reproduces S. The visible fault is in WebKit, but the data cannot say
 "outside our code".
+
+Root note (2026-10-13): the real-browser observation-unsubscribe gate was removed by #1345 Amendment 7 and moves to #1535. The finding applies to #1535's gate.
 
 Note: `renderedQuanta` that matches the clock proves only that `process()` was not called. It does
 not clear our code: our render-thread posts may trigger a WebKit race.

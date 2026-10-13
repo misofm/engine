@@ -1,14 +1,11 @@
 # Fold only windows published since a tap's arm into the meter frame's gain reduction
 
-DRAFT, not filed. Stream B of decision 15
+Stream B of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`). Successor to
 *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), from root's
 finding of 2026-10-12 on #1345 Amendment 6. Code anchors verified on `codex/d15-stream-b3` at
 `374d347c2`. Amendment 6 is not in that commit, so the contract-sentence anchors are not verified:
 find them with the grep in "Deliverables". Re-verify every anchor before you start.
-
-Proposed file name:
-`NNNN-fold-only-windows-published-since-a-taps-arm-into-the-meter-frames-gain-reduction.md`.
 
 ## Product outcome
 

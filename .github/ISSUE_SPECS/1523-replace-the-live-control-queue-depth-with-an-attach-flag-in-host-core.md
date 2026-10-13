@@ -1,6 +1,6 @@
 # Replace the live-control queue depth with an attach flag in host-core
 
-DRAFT, not filed. Stream B of decision 15
+Stream B of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-2).
 Successor of *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345),
 from its attempt 1 open item 4 and verdict m1 (`/home/bl/misofm/submix-verdicts/1345-attempt1.md`,
@@ -13,8 +13,6 @@ Root decisions 2026-10-12 after an adversarial review: the sibling issue *Make t
 live-command boot word an on/off flag* uses layout option (A), a 0/1 flag at the same offset, with
 every other value refused, and lands after #1345, before H #1332 and C #1406. This issue does not
 depend on that choice.
-
-Proposed file name: `NNNN-replace-the-live-control-queue-depth-with-an-attach-flag.md`.
 
 **Why this is its own issue.** The whole removal of the live-control queue depth touches about 75
 files: 30 Rust files for the host-core field and about 45 browser, SDK, harness and benchmark files

@@ -1,13 +1,11 @@
 # Share one in-flight status read in the browser host
 
-DRAFT, not filed. Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
+Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
 Successor S2 of *Hold effect parameter, bypass and EQ-target values in latest-target cells*
 (#1345), from the stream B batch-3 acceptance review (root ruling 6, 2026-10-13). A product defect
 in the shipped browser host, found while diagnosing the qualification page's `result 6`.
 Code anchors verified at `806de000a` (`codex/d15-stream-b3`; the files below are unchanged by the
 split commit `4858c4c14`). Verify them again on `main` before the first edit.
-
-Proposed file name: `NNNN-share-one-in-flight-status-read-in-the-browser-host.md`.
 
 ## Product outcome
 

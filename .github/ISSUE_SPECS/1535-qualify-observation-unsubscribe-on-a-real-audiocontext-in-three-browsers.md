@@ -1,6 +1,6 @@
 # Qualify observation unsubscribe on a real AudioContext in three browsers
 
-DRAFT, not filed. Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
+Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
 Successor S1 of *Hold effect parameter, bypass and EQ-target values in latest-target cells*
 (#1345), from root's split ruling (#1345 Amendment 7, root ruling 6, 2026-10-13). Qualification
 work only: no host, SDK or engine change. **Fresh five-attempt budget** (AGENTS.md): #1345's
@@ -11,8 +11,6 @@ byte-for-byte in `/home/bl/misofm/submix-verdicts/b3-acceptance/split/before/`).
 is `4858c4c14` on `codex/d15-stream-b3`. Verify every anchor again on `main` after #1345 merges,
 before the first edit.
 
-Proposed file name: `NNNN-qualify-observation-unsubscribe-on-a-real-audiocontext-in-three-browsers.md`.
-
 ## Product outcome
 
 An app that unsubscribes a gain-reduction tap stops seeing that tap's reduction in the browser
@@ -22,7 +20,8 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
 1. After the unsubscribe acknowledgement (`result === 0`, no bindings), every meter frame the page
    receives has `trackGrDb[0] === 0`. No frame is excluded.
 2. The zero is not a zero of silence: at least 48 frames after the acknowledgement carry the fed
-   signal above the peak floor, and every frame after the acknowledgement peaks above it.
+   signal above the peak floor. A frame after the acknowledgement at or below the floor is
+   counted and reported (root ruling R1), never a failure.
 3. A gate failure names its cause: a refused request names its step, its kind and the page's
    in-flight counts; too few signal frames is a *shortfall*; a render that does not move is a
    *stall*. No failure prints `[object Object]` or a bare `result 6`.
@@ -54,8 +53,9 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
   render-allocation row, the bounded waits, the trusted-click resume and the stall classifier.
   **It also reverts two things the split kept, which this issue must not revert:** the
   `observation-disarmed` gate and its mutation (`run.mjs` at `4858c4c14`: `:30`, `:233`, `:739`),
-  and the `resume-clicks` count (`:241-243`, now `0`/`2`). The patch's `STREAMS.md` hunk is root's
-  file: do not apply it.
+  the dated Amendment 7 note and the `observation-disarmed` row of `MUTATIONS.md`, and the
+  `resume-clicks` count (`:241-243`, now `0`/`2`). The patch's `STREAMS.md` hunk is root's file:
+  do not apply it (it is under `docs/handoffs/`, which D1's exclusion removes).
 - **The gate as it was** (`hosts/host-web/qualification/qualification.js` at `806de000a`):
   - constants `:26-40` (`UNSUBSCRIBE_SOURCE_BLOCKS = 512`, `UNSUBSCRIBE_METER_BLOCKS = 1n`,
     `UNSUBSCRIBE_LEAD_BLOCKS = 12`, `UNSUBSCRIBE_ARMED_FRAMES = 4`, `UNSUBSCRIBE_MINIMUM_BLOCKS = 16`,
@@ -115,8 +115,12 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
 ## Decisions frozen for this slice
 
 - **D1. Start from the patch, keep what the split kept.** Apply the saved patch on the slice's base
-  (`main` with #1345 merged). Then restore the `observation-disarmed` gate and its mutation as they
-  are on `main`, and set `resume-clicks` to `declared === (result.sdkResponse === null ? 1 : 3)`
+  (`main` with #1345 merged) with
+  `git apply --exclude='docs/handoffs/*' /home/bl/misofm/submix-verdicts/b3-acceptance/split/observation-unsubscribe-gate.patch`
+  (as one whole, `git apply --check` fails on the `STREAMS.md` hunk; the exclusion drops that hunk
+  and the rest applies cleanly). The keep-list still applies after
+  the patch: restore the `observation-disarmed` gate and its mutation as they
+  are on `main` (D9 then adds its frame count), and set `resume-clicks` to `declared === (result.sdkResponse === null ? 1 : 3)`
   (the two SDK clicks and the gate's one click). The `observation-unsubscribe` gate does not check
   the disarmed run again (`observation-disarmed` owns that). Do not apply the patch's `STREAMS.md`
   hunk.
@@ -124,8 +128,9 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
   first `suspend()` not awaited; `requireSuspended` polls), resumed once by one trusted click, and
   never suspended again before the final close. `R1` is the host's `renderedQuanta` read after the
   subscribe resolves; the unsubscribe goes out only after a status read exceeds `R1`.
-  `trackGrDb[0] === 0` on every frame received after the acknowledgement, none excluded. Every frame
-  after the acknowledgement peaks above `UNSUBSCRIBE_PEAK_FLOOR = 0.05`. The source streams
+  `trackGrDb[0] === 0` on every frame received after the acknowledgement, none excluded. A frame
+  after the acknowledgement that peaks at or below `UNSUBSCRIBE_PEAK_FLOOR = 0.05` is reported, not
+  failed, and does not count toward D4's 48 frames (root ruling R1). The source streams
   just-in-time from `unsubscribe-session.json` (512 blocks); no seek. The one-block meter window
   (`UNSUBSCRIBE_METER_BLOCKS = 1n`) stays. No retry, no looser bound, no second resume.
 - **D3. Request discipline (reviewer finding A).**
@@ -171,21 +176,23 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
   `feedBehind` (D3.5) ends the wait at once, and the run returns its result for the verdict.
 - **D5. The verdict names its failures.** `unsubscribeFailures(run)` (exported from
   `qualification.js`) returns the list of failed checks, empty on a pass; `unsubscribeVerdict(run)`
-  is `unsubscribeFailures(run).length === 0`. Names and checks:
+  is `unsubscribeFailures(run).length === 0`. A dropout is not a failure (root ruling R1). Names and checks:
   - `context`: `contextStateBeforeBoot !== "suspended"`;
   - `armed`: meter lease or subscribe result not 0, `armedFrames < 4` or
     `armedMaximumTrackGrDb <= 0`;
   - `render-between`: `renderedBeforeUnsubscribe <= renderedAfterSubscribe` (decimal strings);
   - `unsubscribe-ack`: `unsubscribeResult !== 0` or `unsubscribeBindings !== 0`;
   - `reduction`: `maximumTrackGrDbAfterAcknowledgement !== 0` (over every frame after the
-    acknowledgement);
-  - `dropout`: `minimumPeakAfterAcknowledgement <= 0.05` (over every frame after the
-    acknowledgement);
+    acknowledgement), or `framesAfterAcknowledgement < 1` (a run that received no frame proves
+    nothing);
   - `shortfall`: `signalShortfall === true` or `signalFramesAfterAcknowledgement < 48`;
   - `feed`: `feedBehind !== null` or `maximumSourcesInFlight > 40`.
   The `run.mjs` gate message lists the names first, then the result JSON.
-  The result also records `reducingSignalFramesAfterAcknowledgement`: frames after the
-  acknowledgement with `trackGrDb > 0` and a peak above the floor.
+  The result also records `reducingSignalFramesAfterAcknowledgement` (frames after the
+  acknowledgement with `trackGrDb > 0` and a peak above the floor), `framesAfterAcknowledgement`,
+  `lowPeakFramesAfterAcknowledgement` (frames at or below the floor) and
+  `minimumPeakAfterAcknowledgement`; the last two are reported in the gate message and fail
+  nothing (root ruling R1).
 - **D6. Page mutations prove the cause, not "only one check".**
   - (d) `skip-unsubscribe`: the failures include `reduction`, and
     `reducingSignalFramesAfterAcknowledgement >= 1` (the GR check fails on frames **above** the
@@ -194,14 +201,24 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
   - (e) `feed-ends-at-boundary`: the run returns a result (it does not throw) and the failures
     include `shortfall`.
 - **D7. Stated limit (carried from #1345 Amendment 6).** A single-block dropout inside a multi-block
-  frame can be masked by the other block's peak. The `dropout` check catches a feed that stops or
-  falls behind (consecutive low frames); mutation (e) and `shortfall` prove the signal continued
-  past the ring. The host publishes no source-underrun count today; when S3 (*Report source
+  frame can be masked by the other block's peak. The reported low-peak count shows a feed that
+  stops or falls behind, but it fails nothing (root ruling R1); mutation (e) and `shortfall` prove the signal
+  continued past the ring. The host publishes no source-underrun count today; when S3 (*Report source
   underruns in the browser status*) is on `main`, a follow-up adds "no underrun block after the
   acknowledgement" to this gate. Not in this slice.
 - **D8. No product change.** A gate that is red on the unmutated tree because of the host, the SDK
   or the engine is a finding: stop, record it, report to root. Do not edit `hosts/host-web/web/`,
   `hosts/host-web/src/`, `sdk/` or `crates/`.
+- **D9. The zero-frame hole (batch verdict 3, MINOR 2; main has it too).** The gate must not pass
+  on a run that received no frame.
+  1. `observation-disarmed` (`run.mjs:233`) requires `observation.disarmed.frames >= 1` as well as
+     `maximumTrackGrDb === 0`; `runObservationRun` (`qualification.js`) returns `frames`
+     (`frames.length`) in its result for it.
+  2. The `observation-unsubscribe` checks after the acknowledgement require
+     `framesAfterAcknowledgement >= 1` (D5 `reduction`); D4's 48 signal frames already bound the
+     real run from below.
+  3. New result mutation `observation-disarmed-empty`: `observation.disarmed.frames = 0` -> the
+     `observation-disarmed` gate fails (red); the unmutated run stays green.
 
 ## Deliverables
 
@@ -212,7 +229,8 @@ Chromium, Firefox and WebKit, on a real `AudioContext` that renders on its own c
    mutations of gate 2 (with `mutationProofs` requiring each entry's named
    failure in the message), the page-mutation proofs of D6, `stallSignatureProofs()` back in
    `--self-test-mutations`, the new `requestFailureProofs()` of gate 4, the eleventh render-allocation
-   row, and `resume-clicks` per D1.
+   row, `resume-clicks` per D1, and the `observation-disarmed` frame count with its
+   `observation-disarmed-empty` mutation (D9).
 3. `unsubscribe-session.json` re-added; its `qualificationSessionSources` row re-added.
 4. `generate-matrix.mjs` and `BROWSER_DEPLOYMENT_MATRIX.md`: the observation sentence says the gate
    requires both a never-armed tap with no reduction and an unsubscribe that stops the reduction
@@ -262,14 +280,22 @@ defect turns this red that no existing test catches?
    must make `validate` throw a message that starts `<browser>: observation-unsubscribe:` and
    contains the named failure):
    - `observation-unsubscribe`: `maximumTrackGrDbAfterAcknowledgement = 1` -> `reduction`;
-   - `observation-unsubscribe-silent`: `minimumPeakAfterAcknowledgement = 0` -> `dropout`;
+   - `observation-unsubscribe-empty`: `framesAfterAcknowledgement = 0` (with the maximum
+     reduction left at 0) -> `reduction`;
+   - `observation-disarmed-empty`: `observation.disarmed.frames = 0` -> the `observation-disarmed`
+     gate (D9; message prefix `<browser>: observation-disarmed:`);
    - `observation-unsubscribe-short`: `signalFramesAfterAcknowledgement = 47` -> `shortfall`;
    - `observation-unsubscribe-norender`: `renderedBeforeUnsubscribe = renderedAfterSubscribe` ->
      `render-between`;
    - `observation-unsubscribe-inflight`: `maximumSourcesInFlight = 41` -> `feed`;
    - `observation-unsubscribe-behind`: `feedBehind = { block: 20, renderBlock: 21 }` -> `feed`.
-   *Test value:* turns red if a check of D5 is dropped, weakened (for example 48 back to 16, or
-   `>=` for `>` at the floor) or attributed to the wrong name; the real green result cannot show it.
+   There is no `-silent` mutation: a dropout is reported, not failed (root ruling R1). A node proof in
+   `--self-test-mutations` (`unsubscribeFailures` on an otherwise green run with
+   `lowPeakFramesAfterAcknowledgement = 3` and `minimumPeakAfterAcknowledgement = 0`) must return an
+   empty list.
+   *Test value:* turns red if a check of D5 is dropped, weakened (for example 48 back to 16) or
+   attributed to the wrong name, if a dropout starts to fail the gate (root ruling R1), or if a run with no frame
+   passes (D9); the real green result cannot show it.
    *Mutation:* delete the `shortfall` check from `unsubscribeFailures`: the `-short` entry escapes.
 3. **Page mutations (d) and (e)**, in each browser, under `--self-test-mutations` (D6).
    *Test value:* (d) turns red if the GR check can be satisfied while a still-armed tap reduces

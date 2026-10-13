@@ -152,6 +152,7 @@ some other gate fails.
   prerequisite.
 - **#1345 on `main`.** Its `observation-unsubscribe` gate and its `run.mjs` edits are on
   `codex/d15-stream-b3` only.
+  Root note (2026-10-13): the real-browser observation-unsubscribe gate was removed by #1345 Amendment 7 and moves to #1535.
 - **Same file as #1522 and #1530** (`run.mjs`): in any order, the later slice rebases.
 
 ## Placement

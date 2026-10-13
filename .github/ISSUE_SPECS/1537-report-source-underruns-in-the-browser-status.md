@@ -1,12 +1,10 @@
 # Report source underruns in the browser status
 
-DRAFT, not filed. Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
+Decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`).
 Successor S3 of *Hold effect parameter, bypass and EQ-target values in latest-target cells*
 (#1345), from root ruling 6 (2026-10-13): #1345 Amendment 6 had to use a peak floor as an
 "underrun substitute" because the host publishes no source-underrun count. Code anchors verified at
 `806de000a` (`codex/d15-stream-b3`). Verify them again on `main` before the first edit.
-
-Proposed file name: `NNNN-report-source-underruns-in-the-browser-status.md`.
 
 ## Product outcome
 

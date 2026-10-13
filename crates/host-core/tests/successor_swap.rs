@@ -1190,7 +1190,15 @@ fn first_direct_difference(left: &DirectRun, right: &DirectRun) -> Option<usize>
 /// B is prepared from, is pending in A's queue at the swap. The carry drains it into the lane
 /// before copying, so B's first block starts the trim ramp exactly where A would have. `strip` is
 /// the written strip: the first bank's `eq2`, or a strip in a later predecessor bank.
-fn a_pending_trim_record_survives_the_swap(backend: Backend, strip: &'static str) {
+/// `restarting` names a strip whose trim the committed model changes without B following it, so
+/// its input section restarts at the swap (#1276 D1); it sits in the first bank at the lane of the
+/// written strip in its own bank, and it is muted in every session so that its restart leaves the
+/// output bits where the unrestarted reference puts them.
+fn a_pending_trim_record_survives_the_swap(
+    backend: Backend,
+    strip: &'static str,
+    restarting: Option<&'static str>,
+) {
     const NEW_TRIM_DB: f32 = 4.5;
     let record = builtins_compiler::TrackInputRecord::TrimDb {
         lanes: builtins::BuiltinLaneSelector::Both,
@@ -1202,8 +1210,21 @@ fn a_pending_trim_record_survives_the_swap(backend: Backend, strip: &'static str
         strip,
         record,
     };
-    let a = Session::compile(filtered_session(false));
-    let mut committed = filtered_session(false);
+    let session = || {
+        let mut model = filtered_session(false);
+        if let Some(restarting) = restarting {
+            let track = model
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == restarting)
+                .expect("the restarting strip");
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+        }
+        model
+    };
+    let a = Session::compile(session());
+    let mut committed = session();
     let track = committed
         .tracks
         .iter_mut()
@@ -1212,7 +1233,18 @@ fn a_pending_trim_record_survives_the_swap(backend: Backend, strip: &'static str
     track.builtins.left.trim_db = NEW_TRIM_DB;
     track.builtins.right.trim_db = NEW_TRIM_DB;
     let b = Session::compile(with_muted_track(committed.clone()));
-    let reference_session = Session::compile(with_muted_track(filtered_session(false)));
+    if let Some(restarting) = restarting {
+        // Committed moves the restarting strip's trim; B keeps the old one, so that input section
+        // restarts instead of carrying.
+        let track = committed
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == restarting)
+            .expect("the restarting strip");
+        track.builtins.left.trim_db += 3.0;
+        track.builtins.right.trim_db += 3.0;
+    }
+    let reference_session = Session::compile(with_muted_track(session()));
     let feed = Feed::new(SOURCE, 5);
     let writes = [write(SWAP_BLOCK)];
     let reference = direct_run(
@@ -1337,29 +1369,32 @@ fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_four_lanes() {
 #[cfg(target_feature = "avx2")]
 #[test]
 fn a_pending_trim_record_survives_the_swap_at_eight_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq2");
+    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq2", None);
 }
 
 /// Gate 2 at four lanes.
 #[test]
 fn a_pending_trim_record_survives_the_swap_at_four_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq2");
+    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq2", None);
 }
 
 /// Gate 2 on a carried strip in the second predecessor bank (`eq8` is lane 0 of it at eight lanes).
-/// Red if the input drain's lane mask is built from the first bank's moves instead of the moves of
-/// the bank being drained: the pending trim write of a strip in a later bank is lost at the swap,
-/// and the first-bank tests above cannot see it.
+/// `eq0`, lane 0 of the first bank, restarts at the swap. Red if the input drain's lane mask is
+/// built from the first bank's moves instead of the moves of the bank being drained: the first
+/// bank's mask lacks lane 0, so the pending trim write of the later bank's lane 0 is lost at the
+/// swap. The first-bank tests above cannot see it, and a first bank whose lanes all carry (a full
+/// mask) would not either.
 #[cfg(target_feature = "avx2")]
 #[test]
 fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_eight_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq8");
+    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq8", Some("eq0"));
 }
 
 /// Gate 2 on a carried strip in the second predecessor bank (`eq5` is lane 1 of it at four lanes).
+/// `eq1`, lane 1 of the first bank, restarts at the swap; see the eight-lane case.
 #[test]
 fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_four_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq5");
+    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq5", Some("eq1"));
 }
 
 /// Gate 2 of #1276, second case: at a 32-frame quantum, a high-pass target admitted before block

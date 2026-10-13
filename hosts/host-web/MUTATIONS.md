@@ -132,7 +132,7 @@ reads `an unsubscribed tap kept publishing, or the run never exercised the armed
 the run's numbers. The offline "disarmed" run never subscribes; it still feeds the identity gate
 and must report no reduction. A render-allocation row, `observation-unsubscribe`, makes eleven.
 
-*Note, 2026-10-12 (batch verdict 2, B2).* Every wait of `runObservationUnsubscribeRun` is bounded
+*Note, 2026-10-12 (batch verdict 2, B2; removed by #1345 Amendment 7 with the gate and its bounded waits).* Every wait of `runObservationUnsubscribeRun` is bounded
 at 10 s, the bound `sdk-response-entry.ts` uses, and a stall fails the gate as `<kind> timeout at
 <step>` (kind `suspend`, `resume` or `await`) with the context state; a timeout is never a pass, a
 skip or a retry. The first `suspend()` of the new context is not awaited (it is only a request; a bounded
@@ -151,7 +151,7 @@ removed too, `createHost` refuses the running context (`miso.error.v1`, result 1
 stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
 failed; with the unsubscribe sent, 0.
 
-*Note, 2026-10-12 (#1345 Amendment 6, root: one resume, no suspend after it).* This note supersedes the two
+*Note, 2026-10-12 (#1345 Amendment 6, root: one resume, no suspend after it; the unsubscribe run is removed by Amendment 7).* This note supersedes the two
 notes above for the unsubscribe run: `runObservationUnsubscribeRun` resumes its real `AudioContext`
 once, through one trusted click, and never suspends it before the final close. The render between the
 subscribe and the unsubscribe is proved, not arranged: the host status read after the subscribe
@@ -210,10 +210,11 @@ controls only and empty without the SDK, the buttons having gone with the gate),
 controls, counts its clicks and runs the page under one 300 s deadline, and the page counts every
 `AudioContext.resume()` by whether `window.event` was a trusted click. The result carries
 `resumes: { declared, inClick, direct, planned, clicksPerformed }`; the `resume-clicks` gate requires
-`direct` 0 and the other four equal. There is no recovery in the gate: the former `resumeUntil` kick
-(`suspend()` then another click) is removed because it is a retry, and a context that does not pull its
-graph fails as `stall timeout at <step> after 10000 ms` with the context state, `currentTime` and the
-host's status (`renderedQuanta`) sampled right after the resume and at the timeout. Three committed
+`direct` 0 and the other four equal. The unsubscribe run had no recovery: the former `resumeUntil` kick
+(`suspend()` then another click) was removed because it is a retry, and a context that did not pull its
+graph failed as `stall timeout at <step> after 10000 ms` with the context state, `currentTime` and the
+host's status (`renderedQuanta`) sampled right after the resume and at the timeout. That stall
+sampling (`sampleContext`, `renderUntil`) is itself removed by Amendment 7. Three committed
 self-test mutations of the real result, each required to fail with `<browser>: resume-clicks:`:
 
 | mutation | change | gate |
