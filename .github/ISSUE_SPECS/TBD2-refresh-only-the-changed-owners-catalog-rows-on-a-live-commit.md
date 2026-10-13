@@ -1,6 +1,6 @@
 # Refresh only the changed owners' catalog rows on a live commit
 
-Successor of #1552, decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `31e6093c2` (branch codex/controls-s3). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of #1552, decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on the head of branch codex/controls-b2-fold (#1551-#1555 plus the batch 2 review fold). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 
@@ -11,32 +11,40 @@ client reads, and its `structure_epoch`, stay exactly what a full rebuild would 
 ## Context
 
 - **Today, every live commit builds a full catalog.** `commit_live`
-  (`crates/control-plane/src/control.rs:1359`) calls `host_core::ControlCatalog::build` on the
-  committed model before its first write (step 1b, `:1376-1382`) and publishes it after the commit
-  with `replace_session_catalog` (`:1590-1595`). `build`
-  (`crates/host-core/src/control_provider.rs:533-693`) runs one `controls::list` pass over every
+  (`crates/control-plane/src/control.rs:1361`) calls `host_core::ControlCatalog::build` on the
+  committed model before its first write (step 1b, `:1379-1385`) and publishes it after the commit
+  with `replace_session_catalog` (`:1602-1604`). `build`
+  (`crates/host-core/src/control_provider.rs:533`) runs one `controls::list` pass over every
   owner, allocates every wire row, and is held beside the current catalog until the publish. The
   cost is O(all controls) per fader move plus a transient full copy. That copy is not part of the
   double-live admission (#1552 decision record, "Cost").
-- **The epoch rule.** `replace_session_catalog` (`control_provider.rs:237-243`) advances
+- **The epoch rule.** `replace_session_catalog` (`control_provider.rs:237-243`, unchanged by the
+  fold) advances
   `structure_epoch` when any address, header or descriptor differs; a values-only commit keeps it
   (#1552 decision record, binding). A live `matrix_mode` switch flips `active` and advances it.
-- **Per-owner rows exist but are private.** `controls::owner_rows`
-  (`crates/controls/src/registry.rs:127-172`) yields one owner's rows, but it recomputes
-  `effective(model, overlay)` for the whole session on each call (`:143`, `:159`). `list`
-  (`:61-90`) computes it once.
+- **No per-owner row pass exists.** `controls::owner_rows` is gone: #1553 replaced it with
+  `resolve` (`crates/controls/src/registry.rs:179`, one row by address, used by `get` `:203` and
+  `set` `:265`), and `list` (`:61-90`) computes `effective(model, overlay)` once for every owner.
+  The pieces a per-owner pass needs are `strip::push_rows`, `route::push_rows`, `vca::push_rows`
+  and `session_rows::push_rows`, which `list` calls with one `Effective`
+  (`crates/controls/src/effective.rs:226`).
 - **Derived rows cross owners.** A strip's effective fader and mute rows
   (`crates/controls/src/strip.rs:146-170`) and a route's gate rows
   (`crates/controls/src/route.rs:211-216`) are `Derived`: a VCA move, a strip mute or a follow
   change alters other owners' values.
 - **Session settings change descriptors elsewhere.** A `control_smoothing` change is family
   `Setting` (live, no record) but changes `default_ramp_samples` on rows of every owner
-  (`LiveRamps::for_session`, `control_provider.rs:561`, `:786-787`).
-- **The classifier.** #1554 (`.github/ISSUE_SPECS/1554-classify-every-value-edit-through-the-control-registry.md`)
-  rewrites `classify_live_delta` (`crates/host-core/src/live_delta.rs:215`): with equal
-  structure, it compares the two models' `controls::list` rows and marks an owner changed per
-  family (D2); each changed owner is lowered once (D3); a test-build counter counts lowered owners
-  (D7). It is not merged at `31e6093c2` (`live_delta.rs:222` still returns `LiveRebuild::Vca`).
+  (`LiveRamps::for_session`, `control_provider.rs:561`; `control_row` reads it at `:764-770`).
+- **The classifier.** #1554 is merged. `classify_live_delta`
+  (`crates/host-core/src/live_delta.rs:199`) compares the two models' rows with
+  `controls::changed_controls` (`crates/controls/src/diff.rs:31`; each `ChangedControl` is an
+  address and its later descriptor, derived rows skipped), groups the changes into one work item
+  per strip (`Work`, `:329`), and lowers each changed owner and family once (`lower`, `:401`).
+  A test-build counter counts the lowered owners (`take_lowered_owner_count`, `:391`). The VCA
+  refusal (`LiveRebuild::Vca`, `:206`) stays until #1558.
+- **Raised ceilings.** The full-list catalog raised the C ABI reference ceilings to 554,240
+  (`capi_retained_bytes`) and 278,912 (`largest_named_allocation_bytes`)
+  (`crates/capi/tests/resource_lifecycle.rs:1279-1286`; #1552 decision record).
 - **Compact rows.** #TBD1 (the compact catalog) gives the catalog an
   `owners` table, a `sections` table, shared `descriptors` and fixed-size `rows`, so one owner's
   rows are one contiguous run.
@@ -46,11 +54,12 @@ client reads, and its `structure_epoch`, stay exactly what a full rebuild would 
 - **D1. The delta names the changed owners.** `LiveDelta` gains `changed_owners`: the list-order
   indices of every owner with at least one row whose value bits differ between the two models, of
   any class and family, `Derived` rows excluded. It also gains `settings_changed: bool`, true when
-  a `Setting`-family row differs. Both come from #1554's row diff; no second diff runs.
+  a `Setting`-family row differs. Both come from the `controls::changed_controls` result that
+  `classify_live_delta` already computes (`live_delta.rs:238`); no second diff runs.
 - **D2. One owner's rows from one effective pass.** `crates/controls` exports
   `owner_rows_with(model, &Effective, owner_index, sample_rate, out: &mut Vec<ControlRow>)` (name
   is the implementer's choice), which appends one owner's rows and takes the effective values
-  computed once by the caller. `owner_rows` (and so `get`) call it, so there is one path.
+  computed once by the caller. `list` calls it for every owner, so there is one path.
 - **D3. Stage before the first write.** In step 1b, `commit_live` calls
   `ControlCatalog::stage_live(&current, next, sample_rate, &delta)` (host-core). It returns one of:
   - `Values(staged)`: when `settings_changed` is false and every changed owner's new rows have
@@ -83,7 +92,7 @@ client reads, and its `structure_epoch`, stay exactly what a full rebuild would 
 2. D1 in `crates/host-core/src/live_delta.rs`.
 3. D3-D5 and D7 in `crates/host-core/src/control_provider.rs`.
 4. D3-D4 in `commit_live` (`crates/control-plane/src/control.rs`).
-5. The tests below; `docs/C_ABI_V1_QUALIFICATION.md:240-250` and `:544-546` describe the staged
+5. The tests below; `docs/C_ABI_V1_QUALIFICATION.md:236-252` and `:543-546` describe the staged
    refresh in two sentences.
 
 ## Authorized paths
@@ -110,7 +119,7 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
 `cargo build --locked --release -p audit -p capi` then `./target/release/audit capi`.
 
 1. **Same list as a full rebuild.** On `control_list_session()`
-   (`crates/capi/src/runtime/live_tests.rs:3892`), for each of these live commits: one track
+   (`crates/capi/src/runtime/live_tests.rs:3937`), for each of these live commits: one track
    `fader_db` lane, one submix `mute`, one console EQ parameter, one insert bypass, a VCA fader (if
    #1558 has merged; else skip with a note), two edits on two strips in one transaction, and a
    `control_smoothing` `fader_ms` change: every page at `limit` 256 equals, entry by entry, the page
@@ -120,7 +129,7 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
    its mute: the route's gate row value is the new effective one, though the route owner is not in
    `changed_owners`.
 3. **Epoch.** `a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not`
-   (`live_tests.rs:4235`) stays green; the `matrix_mode` switch takes `Full` (D7's counter).
+   (`live_tests.rs:4280`) stays green; the `matrix_mode` switch takes `Full` (D7's counter).
 4. **One owner.** One `fader_db` edit on a 64-track session with 4 submixes reads exactly one
    owner and takes no `Full` (D7's counter).
 5. **No ack before a drop.** `audit capi` reports 0 allocations, frees, locks and syscalls in
@@ -138,10 +147,10 @@ Commands: `cargo test --locked -p controls`, `cargo test --locked -p host-core -
 
 ## Dependencies
 
-- #1554 (the registry classifier and its row diff; D1 extends it).
+- #1554 (merged: the registry classifier and its row diff; D1 extends it).
 - #TBD1 (the compact catalog), which edits `control_provider.rs`
   first and gives each owner one contiguous run of rows.
-- #1552 (merged on `codex/controls-s3` at `31e6093c2`).
+- #1552 (merged in batch 2).
 
 ## Size
 
