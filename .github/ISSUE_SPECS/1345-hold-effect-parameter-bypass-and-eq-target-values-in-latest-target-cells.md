@@ -603,6 +603,10 @@ reduction (a host that folded an unarmed tap into the frame turns it red, and th
 identity check does not look at the reduction word). The `resume-clicks` mutations are unchanged and
 still defend the count of trusted-click resumes.
 
+## Amendment 8 (root, 2026-10-13): the reference graph cap's requirement includes the admitted effect-control bytes
+
+Amendment 8 (root, 2026-10-13): the reference graph cap's requirement includes the admitted effect-control bytes; REFERENCE_EFFECT_CONTROL_BUDGET = 21,376 (19,377 measured x 1.1 = 21,314.7, rounded up to a 64-byte multiple, the file's convention for `REFERENCE_MODEL_BUDGET` and every row budget).
+
 ## Attempt record
 
 ### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
@@ -1235,3 +1239,60 @@ in depth: host-core always carries both owners of a fused bank or neither
 (`host-core/src/prepare.rs`), so no test reaches it and removing it leaves every test green. (2) No
 SDK eval sends fader edits through `LiveControlWriter` to a real engine; `faderEdit` is used only in
 an engine-free coalescing test (`sdk/test/writer-evals.mjs`) since the deleted "playing" eval.
+
+### PR #1540 AArch64 fix: the reference graph cap's requirement (root-approved 2026-10-13; Sonnet 5.5, on `codex/d15-stream-b3`)
+
+**Failure.** `reference_session_retained_rows_stay_within_their_budgets` (`crates/capi/tests/resource_lifecycle.rs`),
+the at-budget "graph" row, failed on AArch64 CI: the cap was `budget("graph_session_plus_plan_bytes") +
+REFERENCE_MODEL_BUDGET` and the product admits `graph session+plan + compiled model + spectrum capture +
+native effect-control resources + route-control resources + carry program` against
+`maximum_graph_session_plus_plan_bytes` (`crates/host-core/src/prepare.rs`, `admitted_graph_and_model`). The
+test left the effect-control term out. Four lanes: admitted 402,293 against a cap of 400,704 (graph 363,482 +
+model 19,434 + effect controls 19,377); eight lanes: 444,497 against 446,592. The eight-lane cap had room by
+accident, so the x86 run stayed green.
+
+**Cause: commit `71b4ecdb8` (#1345 checkpoint 1).** Per-tap cells replaced the control queue and the target
+FIFO. The graph estimate grew by about 12.2 KB and the effect-control resources went from 15,345 to 19,377
+bytes at the reference shape (nine console-slot EQs), so the unaccounted term crossed the four-lane slack.
+
+**Fix.** The graph row's requirement is now `report.graph_session_plus_plan_bytes + model.compiled_model_bytes
++ host.prepared.report.effect_control_resources.total_bytes()`, the product's admitted total. The other
+admitted terms are zero for the reference session (a first preparation: no successor, so no carry program; no
+route lane, since `HostLiveLanes.routes` is false, so route-control resources 0; no spectrum capture), and
+the test asserts that so a session change cannot silently reopen the gap. The cap ceiling adds
+`REFERENCE_EFFECT_CONTROL_BUDGET = 21,376`, derived like `REFERENCE_MODEL_BUDGET` and the row budgets (measured
+value plus 10 %, rounded up to a 64-byte multiple): 19,377 x 1.1 = 21,314.7 -> 21,376. The 19,377 is identical
+at four and eight lanes (measured at both). The test now also admits at a cap equal to the requirement for
+every row, so an over-stated requirement (a cap that is never tight) turns red.
+
+**Exact requirement, one below.** Graph row: four lanes (qemu-user) requirement 402,293 admits, 402,292
+refuses; eight lanes (x86) requirement 444,497 admits, 444,496 refuses. The other rows are exact at both
+widths too (source-total 12,198, source-overhead 4,006, effect-state 8,496, builtin 28,161, capi 282,287,
+largest 90,720).
+
+**The growth scales with effects, not with blocks.** The reference session at four lanes (qemu) / eight
+lanes (x86), varying tracks (one console-slot EQ each) and render quantum:
+
+| session | effect controls | graph session+plan, 4 lanes | graph session+plan, 8 lanes |
+|---|---|---|---|
+| 8 tracks, 128 frames | 17,224 | 286,163 | 279,427 |
+| 9 tracks, 128 frames | 19,377 | 363,482 | 405,686 |
+| 10 tracks, 128 frames | 21,530 | 385,125 | 427,329 |
+| 17 tracks, 128 frames | 36,608 | 648,223 | 683,691 |
+| 9 tracks, 256 frames | 19,377 | 539,610 | 606,390 |
+| 9 tracks, 512 frames | 19,377 | 891,866 | 1,007,798 |
+
+Effect controls move by 2,153 bytes per effect (8 -> 9 -> 10 tracks) at both widths and not at all with the
+quantum; the graph row moves with the quantum because it holds the audio buffers, which is the existing
+graph-row behavior and not part of this growth. Cells are per effect and per parameter, never per block.
+
+**Test value.** The row defends the claim that the graph cap's requirement is the product's exact admitted
+total, so a graph-cap budget that omits an admitted term (the defect that failed AArch64 CI: a cap below the
+requirement at four lanes) turns red, as does a requirement the product does not charge. The new admit-at-
+requirement check is red if the requirement is understated (the product refuses a cap below its real total);
+the one-below check already was red if it is overstated. *Mutation (apply: red; revert: green):* dropping
+`+ effect_controls` from the graph requirement turns the test red at eight lanes (the exact-requirement
+compile is refused), and green restored.
+
+**Evidence.** AArch64 does not run on branch pushes, so a batch verifier must run the 4-lane tests under qemu
+before it says ready to push.
