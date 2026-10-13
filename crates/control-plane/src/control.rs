@@ -1300,7 +1300,7 @@ where
                     .adopt_persisting(&mut newest.sources);
                 self.controller
                     .provider_mut()
-                    .replace_session_catalog(candidate_catalog);
+                    .replace_session_catalog(candidate_catalog, revision);
                 // #1502 D6: the candidate carries the revision just committed. It goes on the
                 // candidate's own gate before the candidate is published, so render reports it
                 // when it adopts the candidate and never earlier, and nothing is stamped on the
@@ -1334,7 +1334,7 @@ where
     /// producer resolution by strip ID, and by strip ID and live address for an effect, in the
     /// newest epoch (#1053 D7), each EQ owner's transaction -- `begin_owner`, `edit_owner` per
     /// edit and `preflight_candidate_targets` for the classifier's designed targets (#1265 D2) --
-    /// every effect record's preflight and every changed value's readback handle (#1264 D3, D4),
+    /// every effect record's preflight (#1264 D3),
     /// and the protocol's own commit predicate. Each of them refuses before any cell or the model
     /// changes, and a refusal after an owner was begun discards every begun owner (`OpenOwners`).
     ///
@@ -1353,8 +1353,8 @@ where
     /// the parameter and target cells after it (#1345 D3).
     ///
     /// It never reserves a plan, adds a report row or replaces the provider catalog. After the
-    /// commit it sets each live effect value in the catalog in place, so the parameter readback
-    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3).
+    /// commit it refreshes the catalog's values from the committed model, so the control list
+    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3).
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
         let next = transaction.compiled().normalized_model();
@@ -1469,65 +1469,27 @@ where
             }
         }
 
-        // 4. Every written effect record passes its producer's preflight, and each changed
-        // value's readback row exists, before the first write (#1264 D3, D4). The classifier
-        // refuses every record a producer would, so a refusal here is an internal fault. An EQ's
-        // parameter records are its owner's edits, never written: its targets were preflighted
-        // above.
-        let record_count = delta
-            .effects
-            .iter()
-            .map(|instance| instance.records.len())
-            .sum();
-        let mut readback = Vec::new();
-        if readback.try_reserve_exact(record_count).is_err() {
-            return LiveCommit::Done(Err(CommandError::Internal));
-        }
-        let provider = self.controller.provider_mut();
+        // 4. Every written effect record passes its producer's preflight before the first write
+        // (#1264 D3). The classifier refuses every record a producer would, so a refusal here is
+        // an internal fault. An EQ's parameter records are its owner's edits, never written: its
+        // targets were preflighted above.
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
             let producer = &owners.effects[index];
-            let rack = match instance.address.rack {
-                host_core::LiveEffectRack::Console => protocol::ParameterRack::Console,
-                host_core::LiveEffectRack::Inserts => protocol::ParameterRack::Inserts,
-            };
             for &record in &instance.records {
-                let (parameter_index, channel, value) = match record {
-                    effect_contract::EffectControlRecord::Parameter {
-                        parameter_index,
-                        channel,
-                        value,
-                    } => (parameter_index, channel, value),
-                    // Written on every instance, the EQ's too; no parameter row reads it.
+                match record {
+                    // Written on every instance, the EQ's too.
                     effect_contract::EffectControlRecord::Bypass(_) => {
                         if producer.preflight(record).is_err() {
                             return LiveCommit::Done(Err(CommandError::Internal));
                         }
-                        continue;
+                    }
+                    effect_contract::EffectControlRecord::Parameter { .. } => {
+                        if instance.targets.is_none() && producer.preflight(record).is_err() {
+                            return LiveCommit::Done(Err(CommandError::Internal));
+                        }
                     }
                     _ => return LiveCommit::Done(Err(CommandError::Internal)),
-                };
-                if instance.targets.is_none() && producer.preflight(record).is_err() {
-                    return LiveCommit::Done(Err(CommandError::Internal));
                 }
-                let Some(parameter) = producer.descriptor.parameters.get(parameter_index as usize)
-                else {
-                    return LiveCommit::Done(Err(CommandError::Internal));
-                };
-                let channel = match channel {
-                    effect_contract::ParameterChannel::Left => protocol::ParameterChannel::Left,
-                    effect_contract::ParameterChannel::Right => protocol::ParameterChannel::Right,
-                    effect_contract::ParameterChannel::Both => protocol::ParameterChannel::Both,
-                };
-                let Some(handle) = provider.parameter_handle(
-                    instance.strip_id,
-                    rack,
-                    &producer.effect_id,
-                    parameter.id.0,
-                    channel,
-                ) else {
-                    return LiveCommit::Done(Err(CommandError::Internal));
-                };
-                readback.push((handle, value));
             }
         }
 
@@ -1599,8 +1561,8 @@ where
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
-        // 7. Commit, then each EQ owner; the readback follows every live effect value (#1264 D4,
-        // #1265 D3); 8. respond.
+        // 7. Commit, then each EQ owner; the catalog's values follow (#1264 D4, #1265 D3);
+        // 8. respond.
         let committed = prepared
             .commit(&mut self.controller)
             .expect("the commit predicate was checked under this borrow");
@@ -1615,10 +1577,17 @@ where
                 .expect("the owner's targets were published");
         }
         drop(owners);
-        let provider = self.controller.provider_mut();
-        for (handle, value) in readback {
-            provider.set_parameter_value(handle, value);
-        }
+        // The catalog keeps its handles, since a live commit never changes the address sequence;
+        // every committed value is read back from the model through one `controls::list` pass
+        // (decision 17, #1552 D3), so a derived row's value follows too.
+        let session = self.controller.session();
+        let values = host_core::committed_control_values(
+            session.compiled().normalized_model(),
+            session.compiled().sample_rate().0,
+        );
+        self.controller
+            .provider_mut()
+            .refresh_committed(values, revision);
         // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
         // that carries its content, the newest epoch's (#1502 D6), which is the routing the
         // producers were chosen by, so the cells a commit writes and the gate that reveals them

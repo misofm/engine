@@ -564,9 +564,10 @@ pub struct PreparedHost {
     /// What this plan holds, for preparing its successor ([`SuccessorBase`]). Control-side plain
     /// data; never read on the render thread.
     pub inventory: PlanStateInventory,
-    /// Exact protocol catalog projected from the accepted prepared-effect authority.
+    /// The control list of the compiled session (decision 17, C4), built before graph lowering
+    /// consumes the prepared entries.
     #[cfg(feature = "control-provider")]
-    pub control_catalog: crate::PreparedSessionControlCatalog,
+    pub control_catalog: crate::ControlCatalog,
 }
 
 impl PreparedHost {
@@ -1664,8 +1665,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         return Err(resource("host.effect.resource.limit"));
     }
     #[cfg(feature = "control-provider")]
-    let control_catalog = crate::SessionControlProvider::prepare_session(&effects.entries)
-        .map_err(|_| resource("host.control_provider.allocation"))?;
+    let control_catalog =
+        crate::ControlCatalog::build(compiled.normalized_model(), compiled.sample_rate().0)
+            .map_err(|_| resource("host.control_provider.allocation"))?;
 
     // Issue #140 A: one live-control lane per prepared strip effect instance (a submix strip's
     // included, #1207 D5): its latest-target cells and, for an effect that declares taps when the

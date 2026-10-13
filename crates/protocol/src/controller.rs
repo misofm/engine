@@ -579,7 +579,8 @@ pub trait ControlProvider {
         request: &ControlListRequest,
     ) -> Result<ControlStatePage, ParameterProviderError>;
     /// Borrow one control row for transient automation domain admission: an automatable
-    /// continuous, toggle or enumeration row.
+    /// continuous, toggle or enumeration row. A row that no automation can reach is
+    /// [`ParameterProviderError::UnsupportedTarget`].
     fn control_row(
         &mut self,
         handle: ParameterHandle,
@@ -614,6 +615,9 @@ pub enum ParameterProviderError {
     NotFound,
     /// The request names a structure that is no longer current (`control.list.stale`).
     Stale,
+    /// The control row exists but is not a target of `AUTOMATION_ENQUEUE`
+    /// (`automation.target.unsupported`).
+    UnsupportedTarget,
     /// The typed provider is temporarily unavailable.
     Unavailable,
     /// A bounded diagnostic cursor predates retained provider history.
@@ -2959,13 +2963,19 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
-                    Ok(page) => self.ok(Body::ControlList(page)),
+                    Ok(page) => match self.fit_control_list(page) {
+                        Ok(page) => self.ok(Body::ControlList(page)),
+                        Err(status) => self.non_ok(status, None),
+                    },
                     Err(error) => self.provider_error_outcome(error),
                 }
             }
             ControlCommand::ControlStateGet { request } => {
                 match self.provider.control_state(request) {
-                    Ok(page) => self.ok(Body::ControlState(page)),
+                    Ok(page) => match self.fit_control_state(page) {
+                        Ok(page) => self.ok(Body::ControlState(page)),
+                        Err(status) => self.non_ok(status, None),
+                    },
                     Err(error) => self.provider_error_outcome(error),
                 }
             }
@@ -2973,8 +2983,14 @@ impl<P: ControlProvider> ProtocolController<P> {
                 if batch.revision != self.session.revision() {
                     return self.non_ok(StatusCode::RevisionConflict, None);
                 }
-                if let Err(error) = self.validate_automation_domains(batch) {
-                    return self.non_ok(error, None);
+                match self.validate_automation_domains(batch) {
+                    Ok(()) => {}
+                    Err(AutomationRefusal::Provider(error)) => {
+                        return self.provider_error_outcome(error);
+                    }
+                    Err(AutomationRefusal::InvalidField) => {
+                        return self.non_ok(StatusCode::InvalidField, None);
+                    }
                 }
                 let current_sample = self.provider.current_sample();
                 match self.queues.try_enqueue_automation(current_sample, *batch) {
@@ -3174,17 +3190,88 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
-    /// The outcome of a provider refusal. A stale structure is a revision conflict that names
-    /// itself, so a caller refetches the list from the top (`control.list.stale`).
-    fn provider_error_outcome(&self, error: ParameterProviderError) -> Outcome {
-        if error != ParameterProviderError::Stale {
-            return self.non_ok(status_for_parameter(error), None);
+    /// The most payload bytes a success response may carry.
+    fn response_payload_budget(&self) -> usize {
+        self.replay
+            .config
+            .max_response_bytes
+            .saturating_sub(crate::OUTER_HEADER_BYTES)
+    }
+
+    /// Trim a control list page to the leading rows whose response fits the endpoint's response
+    /// bound: `limit` is the most rows a page holds, not the number it must, so a caller with a
+    /// small frame still pages through the list. A page that is trimmed is not the end of the
+    /// list. A single row that does not fit is `LIMIT_EXCEEDED`.
+    fn fit_control_list(&self, mut page: ControlListPage) -> Result<ControlListPage, StatusCode> {
+        let budget = self.response_payload_budget();
+        let cursor = page.last_handle;
+        loop {
+            let frame = TypedSuccessResponseFrame {
+                request_id: RequestId::new(1).ok_or(StatusCode::Internal)?,
+                revision: self.session.revision(),
+                payload: SuccessResponsePayload::ControlListPage(page),
+            };
+            let measured = self.codec.measure_success_response_frame(&frame);
+            let SuccessResponsePayload::ControlListPage(back) = frame.payload else {
+                return Err(StatusCode::Internal);
+            };
+            page = back;
+            let count = page.entries.len();
+            let Some(keep) = rows_that_fit(measured.map(|measure| measure.length), budget, count)?
+            else {
+                return Ok(page);
+            };
+            page.entries.truncate(keep);
+            page.last_handle = page.entries.last().map_or(cursor, |entry| entry.handle);
+            page.eof = false;
         }
+    }
+
+    /// [`Self::fit_control_list`] for a control state page.
+    fn fit_control_state(
+        &self,
+        mut page: ControlStatePage,
+    ) -> Result<ControlStatePage, StatusCode> {
+        let budget = self.response_payload_budget();
+        loop {
+            let frame = TypedSuccessResponseFrame {
+                request_id: RequestId::new(1).ok_or(StatusCode::Internal)?,
+                revision: self.session.revision(),
+                payload: SuccessResponsePayload::ControlStatePage(page),
+            };
+            let measured = self.codec.measure_success_response_frame(&frame);
+            let SuccessResponsePayload::ControlStatePage(back) = frame.payload else {
+                return Err(StatusCode::Internal);
+            };
+            page = back;
+            let count = page.records.len();
+            let Some(keep) = rows_that_fit(measured.map(|measure| measure.length), budget, count)?
+            else {
+                return Ok(page);
+            };
+            page.records.truncate(keep);
+            page.last_handle = page
+                .records
+                .last()
+                .map_or(page.last_handle, |record| record.handle);
+            page.eof = false;
+        }
+    }
+
+    /// The outcome of a provider refusal. A stale structure is a revision conflict that names
+    /// itself, so a caller refetches the list from the top (`control.list.stale`); a row that no
+    /// automation reaches is an invalid field that says so (`automation.target.unsupported`).
+    fn provider_error_outcome(&self, error: ParameterProviderError) -> Outcome {
+        let code = match error {
+            ParameterProviderError::Stale => "control.list.stale",
+            ParameterProviderError::UnsupportedTarget => "automation.target.unsupported",
+            _ => return self.non_ok(status_for_parameter(error), None),
+        };
         self.non_ok_value(
             status_for_parameter(error),
             NonOkResponse {
                 diagnostics: vec![Diagnostic {
-                    code: "control.list.stale".to_owned(),
+                    code: code.to_owned(),
                     severity: crate::DiagnosticSeverity::Error,
                     path: Vec::new(),
                     detail: None,
@@ -3395,17 +3482,17 @@ impl<P: ControlProvider> ProtocolController<P> {
     fn validate_automation_domains(
         &mut self,
         batch: &AutomationBatchSlot,
-    ) -> Result<(), StatusCode> {
+    ) -> Result<(), AutomationRefusal> {
         for record in batch.as_slice() {
             let entry = self
                 .provider
                 .control_row(record.handle)
-                .map_err(status_for_parameter)?;
+                .map_err(AutomationRefusal::Provider)?;
             let ControlBody::Control(row) = &entry.body else {
-                return Err(StatusCode::InvalidField);
+                return Err(AutomationRefusal::InvalidField);
             };
             if !row.automatable {
-                return Err(StatusCode::InvalidField);
+                return Err(AutomationRefusal::InvalidField);
             }
             for value in [record.start_value, record.end_value] {
                 let valid = match row.kind {
@@ -3416,7 +3503,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     }
                 };
                 if !valid {
-                    return Err(StatusCode::InvalidField);
+                    return Err(AutomationRefusal::InvalidField);
                 }
             }
         }
@@ -3641,10 +3728,40 @@ fn status_for_automation(error: AutomationBatchError) -> StatusCode {
     }
 }
 
+/// How many of `count` page rows to keep when the page measured `measured` payload bytes against
+/// `budget`: `None` when it fits, else fewer rows than `count`, at least one. A page whose one row
+/// does not fit is `LIMIT_EXCEEDED`; a codec limit (frame bytes, field count) is the same excess
+/// as the response bound, so it halves the page.
+fn rows_that_fit(
+    measured: Result<usize, EncodeError>,
+    budget: usize,
+    count: usize,
+) -> Result<Option<usize>, StatusCode> {
+    let keep = match measured {
+        Ok(length) if length <= budget => return Ok(None),
+        Ok(length) => count * budget / length.max(1),
+        Err(EncodeError::LimitExceeded) => count / 2,
+        Err(_) => return Err(StatusCode::Internal),
+    };
+    if count <= 1 {
+        return Err(StatusCode::LimitExceeded);
+    }
+    Ok(Some(keep.clamp(1, count - 1)))
+}
+
+/// Why an `AUTOMATION_ENQUEUE` batch is refused before it is queued.
+enum AutomationRefusal {
+    /// The provider refused the record's handle.
+    Provider(ParameterProviderError),
+    /// The row is not an automatable one, or the value is outside its domain.
+    InvalidField,
+}
+
 fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
     match error {
         ParameterProviderError::NotFound => StatusCode::NotFound,
         ParameterProviderError::Stale => StatusCode::RevisionConflict,
+        ParameterProviderError::UnsupportedTarget => StatusCode::InvalidField,
         ParameterProviderError::Unavailable => StatusCode::Unavailable,
         ParameterProviderError::ReplayExpired => StatusCode::ReplayExpired,
         ParameterProviderError::LimitExceeded => StatusCode::LimitExceeded,

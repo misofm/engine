@@ -43,7 +43,7 @@ pub(crate) struct PreparedRuntime {
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
     pub(crate) inventory: PlanStateInventory,
-    pub(crate) control_catalog: PreparedSessionControlCatalog,
+    pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
     /// The designs this preparation used, for the next preparation to read (#1471 Amendment 2).
     pub(crate) bound_seed: InputBoundRecord,
@@ -325,7 +325,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
 
 pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
-    catalog: &PreparedSessionControlCatalog,
+    catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
     bound_seed_bytes: u64,
@@ -853,6 +853,7 @@ where
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
         control_catalog,
+        store.revision().0,
         sample_source,
         retained_capacity,
         RENDER_DIAGNOSTIC_SLOTS,
@@ -867,12 +868,7 @@ where
         ProtocolControllerConfig {
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
-            // The control list is served by #1552: until then capability bit 7 stays clear and
-            // `CONTROL_LIST_GET` and `CONTROL_STATE_GET` answer `UNAVAILABLE`.
-            provider_features: ProviderFeatures {
-                controls: false,
-                ..ProviderFeatures::ALL
-            },
+            provider_features: ProviderFeatures::ALL,
         },
         retained_capacity,
     )

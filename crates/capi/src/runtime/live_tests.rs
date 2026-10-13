@@ -5,8 +5,9 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    SESSION, boxed_c_children_with_limits, command_bytes, command_bytes_at_revision, command_c,
-    event_c, generated_parity_session, limits, submit_c,
+    SESSION, automation_status, automation_target, boxed_c_children_with_limits, command_bytes,
+    command_bytes_at_revision, command_c, control_list_all_c, control_list_c, control_state_all_c,
+    control_state_c, event_c, generated_parity_session, limits, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -2108,9 +2109,10 @@ fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
     assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
 
     // Queue one automation batch at the committed revision, then edit live again.
+    let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 64);
     let record = protocol::AutomationRecord {
         kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(5),
+        handle: protocol::ParameterHandle(automation_target(&entries, 100.0)),
         start: protocol::SampleTime(1 << 20),
         end: protocol::SampleTime(1 << 20),
         start_value: 100.0,
@@ -2687,6 +2689,98 @@ fn live_effect_parameter_edits_render_like_the_browsers_lane() {
     }
 }
 
+/// Every control row (its `Debug` text: address, descriptor and value) and every state record
+/// (handle, value bits), paged through `CONTROL_LIST_GET` and `CONTROL_STATE_GET`. The two
+/// messages must agree on every value.
+fn control_readback(rig: &mut Rig) -> (Vec<String>, Vec<(u32, u32)>) {
+    let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let state = control_state_all_c(rig.session, &mut rig.request, 256);
+    let listed = entries
+        .iter()
+        .filter_map(|entry| match &entry.body {
+            protocol::ControlBody::Control(row) => Some((entry.handle, row.value.to_bits())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        state, listed,
+        "the list and the state report one value per control"
+    );
+    (
+        entries.iter().map(|entry| format!("{entry:?}")).collect(),
+        state,
+    )
+}
+
+/// #1264 gate 3, over the control list (#1552). Red if the readback keeps the old value after a
+/// live edit, or reports a value a rebuild's catalog would not: a set, a lane split and a removal
+/// back to the default.
+#[test]
+fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    // The first track's compressor starts with a ratio (ID 2) of 8 on both lanes.
+    let document = with_model(&effect_session(10, 48_000), |model| {
+        let compressor = model.tracks[0]
+            .inserts
+            .effects
+            .iter_mut()
+            .find(|effect| effect.id.as_str() == "comp")
+            .expect("compressor");
+        compressor.params.push(session::EffectParam {
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Ratio,
+            value: 8.0,
+        });
+    });
+    let model = parse_session_json(&document).expect("model");
+    let first = model.tracks[0].id.as_str();
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let edits = vec![
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            1,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            -30.0,
+        ),
+        SessionEdit::RemoveEffectParam {
+            track_id: StableId::parse(first).expect("track"),
+            rack_name: RackName::Inserts,
+            effect_id: StableId::parse("comp").expect("comp"),
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+        },
+        upsert(
+            last,
+            RackName::Console,
+            "clip",
+            1,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            12.0,
+        ),
+    ];
+
+    let mut live = Rig::new(&document);
+    live.step();
+    let before = control_readback(&mut live);
+    assert_eq!(live.apply(&edits), crate::RESULT_OK);
+    assert_eq!(live.summary().3, 0, "the live rig did not rebuild");
+    let after = control_readback(&mut live);
+    assert_ne!(after.1, before.1, "the edit changes the readback");
+
+    let mut rebuilt = Rig::new(&document);
+    rebuilt.step();
+    let mut structural = edits;
+    structural.push(content_edit(&model));
+    assert_eq!(rebuilt.apply(&structural), crate::RESULT_OK);
+    assert_eq!(rebuilt.summary().3, 1, "the second rig rebuilt");
+    assert_eq!(control_readback(&mut rebuilt), after);
+}
+
 // Issue #1265: parametric EQ parameter edits through prepared targets.
 
 /// The nine-track EQ fixture at `sample_rate_hz`, with a source long enough for a whole run, an
@@ -3031,6 +3125,59 @@ fn a_refused_eq_transaction_leaves_its_owners_idle_and_writes_no_cell() {
         "eq1's left gain wrote one target cell and its bypass one bypass cell"
     );
     assert_eq!(written.1[0], 1, "the bypass cell is the first");
+}
+
+/// #1265 gate 5, over the control list (#1552). Red if the readback keeps an EQ value's old state
+/// after a live edit, or reports one a rebuild's catalog would not.
+#[test]
+fn the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = eq_session(48_000);
+    let model = parse_session_json(&document).expect("model");
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let edits = vec![
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            3.0,
+        ),
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            66,
+            ParameterChannel::Both,
+            ParameterUnit::Hz,
+            300.0,
+        ),
+        SessionEdit::RemoveEffectParam {
+            track_id: StableId::parse(last).expect("track"),
+            rack_name: RackName::Inserts,
+            effect_id: StableId::parse("eq-insert").expect("EQ insert"),
+            parameter_id: 4,
+            channel: ParameterChannel::Both,
+        },
+    ];
+
+    let mut live = Rig::new(&document);
+    live.step();
+    let before = control_readback(&mut live);
+    assert_eq!(live.apply(&edits), crate::RESULT_OK);
+    assert_eq!(live.summary().3, 0, "the live rig did not rebuild");
+    let after = control_readback(&mut live);
+    assert_ne!(after.1, before.1, "the edit changes the readback");
+
+    let mut rebuilt = Rig::new(&document);
+    rebuilt.step();
+    let mut structural = edits;
+    structural.push(content_edit(&model));
+    assert_eq!(rebuilt.apply(&structural), crate::RESULT_OK);
+    assert_eq!(rebuilt.summary().3, 1, "the second rig rebuilt");
+    assert_eq!(control_readback(&mut rebuilt), after);
 }
 
 // Issue #1266: value-only effect bypass edits through the latency-preserving shunt.
@@ -3735,5 +3882,353 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     for _ in 0..3 {
         let block = rig.block;
         assert_eq!(bits(&rig.step()), bits(&untouched.step()), "block {block}");
+    }
+}
+
+// Issue #1552: the control list on the C ABI.
+
+/// Two tracks (each with an insert and the session's console slots), a submix that a send feeds, a
+/// `pre_fader` and a `post_fader` route into the output, and a VCA over the second track.
+fn control_list_session() -> String {
+    with_model(&effect_session(1, 48_000), |model| {
+        let track = model.tracks[0].clone();
+        let mut second = track.clone();
+        second.id = StableId::parse("eq1").expect("second track");
+        model.tracks.push(second.clone());
+        let mut second_route = model.routes[0].clone();
+        second_route.id = StableId::parse("eq1-main").expect("second route");
+        if let RouteSource::Track { track_id, .. } = &mut second_route.source {
+            *track_id = second.id;
+        }
+        model.routes.push(second_route);
+        let bus = StableId::parse("bus").expect("bus");
+        model.submixes.push(Submix {
+            id: bus.clone(),
+            builtins: track.builtins.clone(),
+            console: track.console.clone(),
+            inserts: session::Rack {
+                effects: Vec::new(),
+            },
+            fader: track.fader.clone(),
+            matrix_or_pan: track.matrix_or_pan.clone(),
+        });
+        for (route, tap) in model
+            .routes
+            .iter_mut()
+            .zip([session::SendTap::PreFader, session::SendTap::PostFader])
+        {
+            if let RouteSource::Track { tap: source, .. } = &mut route.source {
+                *source = tap;
+            }
+        }
+        let mut send = model.routes[0].clone();
+        send.id = StableId::parse("eq0-bus").expect("send");
+        send.destination = RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        };
+        let mut out = model.routes[0].clone();
+        out.id = StableId::parse("bus-main").expect("bus output");
+        out.source = RouteSource::Submix {
+            submix_id: bus,
+            tap: session::SendTap::PostPan,
+        };
+        model.routes.push(send);
+        model.routes.push(out);
+        model.vcas.push(Vca {
+            id: StableId::parse("vca").expect("vca"),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![model.tracks[1].id.clone()],
+        });
+    })
+}
+
+fn control_of(entry: &protocol::ControlEntry) -> Option<&protocol::ControlRow> {
+    match &entry.body {
+        protocol::ControlBody::Control(row) => Some(row),
+        _ => None,
+    }
+}
+
+/// The handle of the control `name` of strip `owner` in its builtin section, on the left lane.
+fn builtin_handle(entries: &[protocol::ControlEntry], owner: &str, name: &str) -> u32 {
+    entries
+        .iter()
+        .find(|entry| {
+            entry.address.owner_id.as_deref() == Some(owner)
+                && entry.address.section == protocol::ControlSection::Builtins
+                && entry.address.lane == Some(protocol::ParameterChannel::Left)
+                && control_of(entry).is_some_and(|row| row.name == name)
+        })
+        .expect("the builtin row")
+        .handle
+}
+
+/// #1552 gate 1. Red if the list misses builtins, routes, VCAs or session rows, or paging drops or
+/// repeats an entry.
+#[test]
+fn the_c_abi_lists_every_control_of_the_session_in_pages() {
+    let document = control_list_session();
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (whole, epoch, revision) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let (single, ..) = control_list_all_c(rig.session, &mut rig.request, 1);
+    assert_eq!(single, whole, "limit 1 and limit 256 list the same entries");
+    assert_eq!((epoch, revision), (1, rig.summary().0));
+
+    // Handles run from 1 without a gap, and no address is listed twice.
+    for (index, entry) in whole.iter().enumerate() {
+        assert_eq!(entry.handle as usize, index + 1);
+    }
+    let mut addresses = std::collections::HashSet::new();
+    // (An owner's header and its `own` section's header share one address.)
+    for entry in whole.iter().filter(|entry| control_of(entry).is_some()) {
+        assert!(
+            addresses.insert(format!("{:?}", entry.address)),
+            "{entry:?}"
+        );
+    }
+
+    // The owners come in C4's order: strips (tracks, then submixes), routes, VCAs, the session.
+    let owner_headers = whole
+        .iter()
+        .filter(|entry| matches!(entry.body, protocol::ControlBody::OwnerHeader(_)))
+        .map(|entry| (entry.address.owner_kind, entry.address.owner_id.clone()))
+        .collect::<Vec<_>>();
+    let expected_owners = model
+        .strips()
+        .map(|strip| {
+            (
+                protocol::ControlOwnerKind::Strip,
+                Some(strip.id.as_str().to_owned()),
+            )
+        })
+        .chain(model.routes.iter().map(|route| {
+            (
+                protocol::ControlOwnerKind::Route,
+                Some(route.id.as_str().to_owned()),
+            )
+        }))
+        .chain(model.vcas.iter().map(|vca| {
+            (
+                protocol::ControlOwnerKind::Vca,
+                Some(vca.id.as_str().to_owned()),
+            )
+        }))
+        .chain([(protocol::ControlOwnerKind::Session, None)])
+        .collect::<Vec<_>>();
+    assert_eq!(owner_headers, expected_owners);
+
+    // Every control row follows its owner's header and its section's header, and the controls
+    // are the controls of the committed model, with its values.
+    let mut owner = None;
+    let mut section = None;
+    for entry in &whole {
+        match &entry.body {
+            protocol::ControlBody::OwnerHeader(_) => {
+                owner = Some((entry.address.owner_kind, entry.address.owner_id.clone()));
+                section = None;
+            }
+            protocol::ControlBody::SectionHeader(_) => {
+                assert_eq!(
+                    owner,
+                    Some((entry.address.owner_kind, entry.address.owner_id.clone()))
+                );
+                section = Some((entry.address.section, entry.address.slot_id.clone()));
+            }
+            protocol::ControlBody::Control(_) => {
+                assert_eq!(
+                    owner,
+                    Some((entry.address.owner_kind, entry.address.owner_id.clone()))
+                );
+                assert_eq!(
+                    section,
+                    Some((entry.address.section, entry.address.slot_id.clone()))
+                );
+            }
+        }
+    }
+    let listed = whole
+        .iter()
+        .filter_map(|entry| control_of(entry).map(|row| row.value.to_bits()))
+        .collect::<Vec<_>>();
+    let committed = host_core::committed_control_values(&model, model.sample_rate_hz)
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(listed, committed);
+    for kind in [
+        protocol::ControlSection::Own,
+        protocol::ControlSection::Builtins,
+        protocol::ControlSection::Console,
+        protocol::ControlSection::Inserts,
+    ] {
+        assert!(
+            whole.iter().any(|entry| entry.address.section == kind
+                && entry.address.owner_kind == protocol::ControlOwnerKind::Strip),
+            "{kind:?}"
+        );
+    }
+
+    // The state poll reports the same values for the same handles.
+    let state = control_state_all_c(rig.session, &mut rig.request, 256);
+    let expected = whole
+        .iter()
+        .filter_map(|entry| control_of(entry).map(|row| (entry.handle, row.value.to_bits())))
+        .collect::<Vec<_>>();
+    assert_eq!(state, expected);
+}
+
+/// #1552 gate 2. Red if a live commit leaves a stale value or moves handles.
+#[test]
+fn a_live_fader_commit_updates_the_list_and_keeps_every_handle() {
+    let mut rig = Rig::new(&effect_session(10, 48_000));
+    rig.step();
+    let (before, epoch, revision) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let fader = builtin_handle(&before, "eq0", "fader_db");
+
+    assert_eq!(rig.apply(&[left_db_edit("eq0", -3.0)]), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the edit is live");
+    let (after, after_epoch, after_revision) =
+        control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!((after_epoch, after_revision), (epoch, revision + 1));
+    assert_eq!(
+        control_of(&after[fader as usize - 1]).map(|row| row.value),
+        Some(-3.0)
+    );
+    // Only the fader and the effective fader derived from it moved; every handle is where it was.
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!((old.handle, &old.address), (new.handle, &new.address));
+        if old != new {
+            let name = control_of(new).map(|row| row.name.as_str());
+            assert!(
+                matches!(name, Some("fader_db" | "effective_fader_db"))
+                    && new.address.owner_id.as_deref() == Some("eq0"),
+                "{new:?}"
+            );
+        }
+    }
+    let state = control_state_all_c(rig.session, &mut rig.request, 256);
+    assert!(state.contains(&(fader, (-3.0_f32).to_bits())));
+}
+
+/// #1552 gate 3. Red if a structural change keeps old handles valid, or a value-only rebuild
+/// invalidates a client's list.
+#[test]
+fn a_structural_commit_advances_the_epoch_and_a_value_only_rebuild_keeps_it() {
+    let document = effect_session(10, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (_, epoch, revision) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(epoch, 1);
+
+    // An insert changes the row set: the epoch advances once, and the old one is told so.
+    let mut insert = model.tracks[0].inserts.effects[0].clone();
+    insert.id = StableId::parse("comp2").expect("second insert");
+    assert_eq!(
+        rig.apply(&[SessionEdit::PutTrackEffect {
+            track_id: model.tracks[0].id.clone(),
+            rack_name: session::RackName::Inserts,
+            final_position: 1,
+            effect: insert,
+        }]),
+        crate::RESULT_OK
+    );
+    assert_eq!(rig.summary().3, 1, "an insert rebuilds");
+    let (after, epoch, after_revision) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!((epoch, after_revision), (2, revision + 1));
+    assert!(after.iter().any(|entry| {
+        entry.address.owner_id.as_deref() == Some("eq0")
+            && entry.address.slot_id.as_deref() == Some("comp2")
+    }));
+    let stale = protocol::ControlListRequest {
+        structure_epoch: 1,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
+    };
+    let expected = Some((
+        protocol::StatusCode::RevisionConflict,
+        vec!["control.list.stale".to_owned()],
+    ));
+    let request = rig.next_request();
+    assert_eq!(control_list_c(rig.session, request, &stale).err(), expected);
+    let request = rig.next_request();
+    assert_eq!(
+        control_state_c(rig.session, request, &stale).err(),
+        expected
+    );
+
+    // A rebuild-only value (the input delay) changes no address: the epoch and handles hold.
+    // (Render adopts the first rebuild's plan before a second one can be prepared.)
+    rig.step();
+    rig.step();
+    let mut builtins = model.tracks[0].builtins.clone();
+    builtins.left.delay_samples = 4;
+    builtins.right.delay_samples = 4;
+    assert_eq!(
+        rig.apply(&[SessionEdit::SetTrackBuiltins {
+            track_id: model.tracks[0].id.clone(),
+            builtins,
+            ramp_samples: None,
+        }]),
+        crate::RESULT_OK
+    );
+    assert_eq!(rig.summary().3, 1, "a delay rebuilds");
+    let (again, same_epoch, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(same_epoch, 2, "the rebuild kept the structure");
+    let delay = builtin_handle(&again, "eq0", "delay_samples");
+    assert_eq!(
+        control_of(&again[delay as usize - 1]).map(|row| row.value),
+        Some(4.0)
+    );
+    for (old, new) in after.iter().zip(&again) {
+        assert_eq!((old.handle, &old.address), (new.handle, &new.address));
+    }
+    let current = protocol::ControlListRequest {
+        structure_epoch: 2,
+        ..stale
+    };
+    let request = rig.next_request();
+    assert!(control_list_c(rig.session, request, &current).is_ok());
+}
+
+/// #1552 gate 4. Red if automation is acked for a row nothing renders.
+#[test]
+fn automation_is_admitted_for_an_effect_parameter_and_refused_for_any_other_row() {
+    let mut rig = Rig::new(&effect_session(10, 48_000));
+    rig.step();
+    let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let revision = rig.summary().0;
+    let parameter = automation_target(&entries, 0.0);
+    let request = rig.next_request();
+    assert_eq!(
+        automation_status(rig.session, request, revision, parameter, 0.0),
+        (protocol::StatusCode::Ok, Vec::new()),
+        "an effect parameter is admitted as before"
+    );
+    let fader = builtin_handle(&entries, "eq0", "fader_db");
+    let bypass = entries
+        .iter()
+        .find(|entry| {
+            entry.address.control == Some(0) && entry.address.owner_id.as_deref() == Some("eq0")
+        })
+        .expect("a bypass row")
+        .handle;
+    for handle in [fader, bypass] {
+        let request = rig.next_request();
+        assert_eq!(
+            automation_status(rig.session, request, revision, handle, 0.0),
+            (
+                protocol::StatusCode::InvalidField,
+                vec!["automation.target.unsupported".to_owned()]
+            ),
+            "handle {handle}"
+        );
     }
 }

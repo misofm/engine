@@ -38,8 +38,8 @@ pub(crate) use engine::realtime::{
     RenderIo, WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
 };
 pub(crate) use host_core::{
-    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,
-    PrepareDiagnostics, PreparedSessionControlCatalog, SessionControlProvider, SourceControlError,
+    ControlCatalog, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy,
+    PlanStateInventory, PrepareDiagnostics, SessionControlProvider, SourceControlError,
     SourceControlSet, SuccessorBase, parse_host_session, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_live_lanes_successor,
 };

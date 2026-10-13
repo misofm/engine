@@ -3790,6 +3790,101 @@ fn control_messages_dispatch_through_typed_frames_to_the_provider() {
     assert_eq!((state.last_handle, state.eof), (3, true));
 }
 
+/// A page holds at most `limit` rows and fewer when its response would not fit the endpoint's
+/// response bound: the list and the state still page through to the end, in pages that each fit,
+/// and one row that cannot fit alone is `LIMIT_EXCEEDED`.
+///
+/// Red if a request for 256 rows on a small frame is answered as an internal failure, a trimmed
+/// page is marked as the end of the list, or its cursor skips or repeats a row.
+#[test]
+fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
+    let mut endpoint = controller(8, 1);
+    let row = mock_controls().pop().expect("a control row");
+    let count = 200_u32;
+    endpoint.provider_mut().controls = (1..=count)
+        .map(|handle| crate::ControlEntry {
+            handle,
+            ..row.clone()
+        })
+        .collect();
+    let mut request_id = 0;
+    let mut handles = Vec::new();
+    let mut after_handle = 0;
+    loop {
+        request_id += 1;
+        let request = control_request(0, after_handle, 256, None);
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ControlListGet(&request),
+        );
+        let output = process_full_command(&mut endpoint, &input);
+        assert!(output.len() <= 1024, "a page fits the response bound");
+        let crate::DecodedTypedResponseFrame::Success {
+            payload: crate::DecodedSuccessResponsePayload::ControlListPage(page),
+            ..
+        } = decode_response(&output)
+        else {
+            panic!("expected a control list page");
+        };
+        assert!(!page.entries.is_empty());
+        assert_eq!(page.last_handle, page.entries.last().expect("a row").handle);
+        handles.extend(page.entries.iter().map(|entry| entry.handle));
+        after_handle = page.last_handle;
+        if page.eof {
+            break;
+        }
+        assert!(page.entries.len() < usize::from(256_u16), "a trimmed page");
+    }
+    assert_eq!(handles, (1..=count).collect::<Vec<_>>());
+    assert!(request_id > 1, "the list took more than one page");
+
+    let mut records = Vec::new();
+    let mut after_handle = 0;
+    loop {
+        request_id += 1;
+        let request = control_request(0, after_handle, 256, None);
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ControlStateGet(&request),
+        );
+        let output = process_full_command(&mut endpoint, &input);
+        assert!(output.len() <= 1024, "a page fits the response bound");
+        let crate::DecodedTypedResponseFrame::Success {
+            payload: crate::DecodedSuccessResponsePayload::ControlStatePage(page),
+            ..
+        } = decode_response(&output)
+        else {
+            panic!("expected a control state page");
+        };
+        records.extend(page.records.iter().map(|record| record.handle));
+        after_handle = page.last_handle;
+        if page.eof {
+            break;
+        }
+    }
+    assert_eq!(records, (1..=count).collect::<Vec<_>>());
+
+    // A row that does not fit a page alone cannot be served at all.
+    let mut huge = row;
+    if let crate::ControlBody::Control(control) = &mut huge.body {
+        control.display_name = "x".repeat(2_000);
+    }
+    endpoint.provider_mut().controls = vec![huge];
+    let request = control_request(0, 0, 1, None);
+    let input = full_command(
+        request_id + 1,
+        ExpectedRevision::Any,
+        crate::CommandPayload::ControlListGet(&request),
+    );
+    let output = process_full_command(&mut endpoint, &input);
+    let crate::DecodedTypedResponseFrame::NonOk { header, .. } = decode_response(&output) else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::LimitExceeded);
+}
+
 /// Gate 3: a request for a structure that is not current is `REVISION_CONFLICT` with the typed
 /// diagnostic `control.list.stale`, for both messages, and `0` always names the current one.
 ///

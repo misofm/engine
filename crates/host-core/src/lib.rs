@@ -120,8 +120,8 @@ mod limiter_linked_session;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
-    PlanSampleSource, PreparedSessionControlCatalog, SessionControlProvider,
-    SessionControlProviderError, SessionControlProviderResources,
+    ControlCatalog, PlanSampleSource, SessionControlProvider, SessionControlProviderError,
+    SessionControlProviderResources, committed_control_values,
 };
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
