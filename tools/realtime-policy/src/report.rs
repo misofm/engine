@@ -226,11 +226,9 @@ pub struct Finding {
     pub line: Option<usize>,
     /// The text of that line, trimmed. Set only with a line.
     pub source: Option<String>,
-    /// The export that the finding is about, with its prefix, when it is about one.
+    /// The export that the finding is about, with its prefix, when it is about one; for a stale
+    /// allowlist entry, the entry's canonical function path.
     pub export: Option<String>,
-    /// The canonical function path of the control-side allowlist entry that the finding is about,
-    /// when it is about one.
-    pub function: Option<String>,
 }
 
 impl Finding {
@@ -242,7 +240,6 @@ impl Finding {
             line: None,
             source: None,
             export: None,
-            function: None,
         }
     }
 
@@ -254,7 +251,6 @@ impl Finding {
             line: None,
             source: None,
             export: None,
-            function: None,
         }
     }
 
@@ -266,14 +262,12 @@ impl Finding {
             line: Some(line),
             source: Some(source.trim().to_owned()),
             export: None,
-            function: None,
         }
     }
 
     /// The same finding, about the allowlist entry for `function`.
-    pub(crate) fn about_entry(mut self, function: &str) -> Self {
-        self.function = Some(function.to_owned());
-        self
+    pub(crate) fn about_entry(self, function: &str) -> Self {
+        self.about(function)
     }
 
     /// The same finding, about `export`.
@@ -290,7 +284,6 @@ impl Finding {
             line: Some(line),
             source: None,
             export: None,
-            function: None,
         }
     }
 }
@@ -299,10 +292,12 @@ impl fmt::Display for Finding {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(out, "realtime policy failure: {}", self.class)?;
         if let Some(export) = &self.export {
-            write!(out, ": export {export}")?;
-        }
-        if let Some(function) = &self.function {
-            write!(out, ": entry {function}")?;
+            let what = if self.class == Class::StaleAllowlistEntry {
+                "entry"
+            } else {
+                "export"
+            };
+            write!(out, ": {what} {export}")?;
         }
         if let Some(path) = &self.path {
             write!(out, ": {path}")?;

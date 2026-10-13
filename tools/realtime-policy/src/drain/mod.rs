@@ -75,9 +75,16 @@
 //!   `no_implicit_prelude`, `feature(..)`, a `${..}` metavariable expression and any `proc_macro`
 //!   identifier.
 //!
-//! What stays outside the rule (D4): recursion; a pop in a helper function (`begin_block` calling
-//! `drain_controls` is one); a loop in a caller, outside the region (a loop that encloses the
-//! region inside the same function is refused above, not a limit); and a macro, defined elsewhere,
+//! A pop outside every region is no longer a limit (#1443 D1 to D3): every non-test pop under the
+//! scan roots must stand in a marked region, where this rule judges it, or in the own body of a
+//! function on the control-side allowlist of [`crate::Policy`], with exactly its site count, and
+//! every `try_pop` token is classified. [`crate::unmarked`] holds the test-code definition (a file
+//! under `<package>/tests/`, a `#[test]` or false-`cfg` node, a file that only test code declares;
+//! `#[cfg(any(test, feature = "test-support"))]` is not test code) and the allowlist.
+//!
+//! What stays outside the rule (D4): recursion; a loop in a caller, outside the region (a loop
+//! that encloses the region inside the same function is refused above, not a limit); a call from a
+//! marked loop to a function that pops (the call rule, #1444); and a macro, defined elsewhere,
 //! that expands to a loop.
 //!
 //! The limits of the tool's threat model (#1438 Hazards): code outside the workspace source, which

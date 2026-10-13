@@ -355,6 +355,56 @@ from an adversarial review). Each is placed where it belongs and marked "(root A
 - **D1 rule 3** resolves only the `#[path]` forms that #1442 D8 accepts.
 - **Hazards** refers to #1438's threat model.
 
+## Attempt record: the slice proper (stream J follow-up batch, 2026-10-13, on `70804d3c2`)
+
+Delivery mode: feature sprint (no mutation runs, short note). Re-measured on `main` at `70804d3c2`.
+
+- **What changed.** `tools/realtime-policy/src/unmarked/` (`cfg.rs`: D1 rule 2; `modules.rs`: rules 1
+  and 3; `walk.rs`: functions, canonical paths, pops, test extents; `mod.rs`: D2 and D3 and the
+  census); `Policy::control_side_allowlist` and `ControlSideEntry`; classes `UnmarkedTryPop`,
+  `UnclassifiedTryPop` and `StaleAllowlistEntry`; a file that holds a `try_pop` token is parsed (a
+  failure is `ParseError`), and one that declares `mod x;` is parsed for the module graph (a failure
+  there is silent: its modules are then not test code). Seven markers, each replacing a blank line
+  (no line moves): `crates/source/src/lib.rs` (`take_recycled_block`,
+  `observe_seek_at_block_boundary`, `acquire_current_block` with `settle_block`) and
+  `crates/host-core/src/spectrum.rs` (`cancel`..`try_read_record`, `commit_continuous` with
+  `stop_continuous`, `try_read_continuous_record`, the collection's `cancel_except`). Floors: 119 to
+  126 regions, 27 files unchanged. The drain module documentation drops the "pop in a helper" limit (D5).
+- **Real tree, re-measured.** Before the markers the tool listed 35 non-test pop lines outside regions.
+  Eleven were render-thread drains in the files above (the spec's list, minus those B3 or #1346/#1312
+  changed); 24 are control-side and are the allowlist: 13 entries, 24 sites (spec: 14 and 25).
+  Gone since the spec: `carry_drain_applies_every_record_past_a_refused_one` (no longer in the tree).
+  `PlanRetirer::try_reclaim` and `Drop for PlanRetirer::drop` are at `plan_exchange.rs:863`/`:878`.
+  `poll_meters` was marked by the guard commit. Every marked function passes the drain rule
+  unchanged (#1447, #1449 landed the bounds).
+- **D6's builtins-compiler part is void.** #1346 and #1312 moved the input, matrix and fader drains
+  onto cells (`InputReader::drain`); `LiveControlInputProcessor::process` already calls
+  `drain_controls`, and none of the three `LiveControl*` types holds a `try_pop` any more. No marker
+  and no restructure were needed, `crates/builtins-compiler/src/lib.rs` is unchanged, and #1441's
+  region at `BuiltinBankProcessor::drain_controls` is the only one there. Receiver evidence for the
+  call rule is B2b-2's to re-measure. The one test-support pop left is the harness helper
+  `tests::render_post_input_bits_with_variant` (allowlisted).
+- **Red on revert (gate 3).** With the two files at `70804d3c2` the tool reports 11 unmarked pops
+  (source 813, 1324, 1405, 1438; spectrum 544, 580, 591, 687, 729, 814, 957).
+- **Tests.** `tests/policy/unmarked.rs` (D1 rules 1 to 3, the cfg forms, the allowlist and its five
+  stale forms, the closure, the census, the parse failure, the helper outside every region) and
+  `tests/policy/drain/twins.rs` (method chain, two-phase acquire, spectrum drains, `cancel_except`).
+  Existing twins already cover `observe_seek` (`a2-v/v05_single_pop_match_receiver`) and the meter poll
+  (`per_queue_meter_poll`); the `LiveControl*` twin is void with the drains. The `v1302/adv/a08` probe
+  is not in the committed corpus, so the helper case is written out in `unmarked.rs`.
+- **D8 was incomplete.** Besides the four listed cases, two more gain classes: `trusted-names-in-
+  their-allowed-forms` now puts its function in a region, and `try-pop-imported-in-a-group` gains
+  `UnclassifiedTryPop` (an import of the name is a token that is no pop). `findings_without_a_place_
+  print_without_one` strips a marked file that holds no pop. The case policy sets an empty allowlist.
+- **Open item for root (D1, not changed).** Rule 2 reads every `feature = ".."` as true, so
+  `#[cfg(not(feature = "x"))]` evaluates false and its pops count as test code: a production build
+  without the feature compiles them. Reading features as unknown instead gives every result the spec
+  lists (the `test-support` forms stay non-test) and closes this. The real tree has no such cfg.
+- **Gates.** `cargo run --release -p realtime-policy`: ok (126 regions in 27 files);
+  `cargo test --locked -p realtime-policy`: 222 passed; fmt; clippy `-D warnings` for
+  `realtime-policy`, `source`, `host-core`; `check-workspace-policy.sh`. No shipped code changed
+  except comment markers, so no artifact gate was run.
+
 ## Authorized paths
 
 - `tools/realtime-policy/**`

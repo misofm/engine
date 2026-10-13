@@ -12,6 +12,7 @@ mod markers;
 mod render_wrap;
 mod run;
 mod source_reads;
+mod unmarked;
 mod unsafe_ownership;
 mod valid;
 mod walk;

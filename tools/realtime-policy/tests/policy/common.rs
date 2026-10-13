@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use realtime_policy::{Caller, Class, Policy, RenderThreadExport, Report, check};
+use realtime_policy::{Caller, Class, ControlSideEntry, Policy, RenderThreadExport, Report, check};
 
 /// The word that opens an unsafe item. Tests build source text from it so that this file holds no
 /// text the repository's older source scan would read as unsafe code.
@@ -55,6 +55,17 @@ pub(crate) fn policy() -> Policy {
         // The base tree has no control-side pop; a case that needs entries passes its own.
         control_side_allowlist: Vec::new(),
         ..Policy::workspace()
+    }
+}
+
+/// One control-side allowlist entry of a case. The thread and the reason are fixed text.
+pub(crate) fn entry(path: &str, function: &str, sites: usize) -> ControlSideEntry {
+    ControlSideEntry {
+        path: path.to_owned(),
+        function: function.to_owned(),
+        sites,
+        thread: "a case thread".to_owned(),
+        reason: "a case reason".to_owned(),
     }
 }
 
@@ -171,6 +182,17 @@ impl Tree {
     /// Check the tree against the case policy.
     pub(crate) fn check(&self) -> Report {
         check(&self.root, &policy())
+    }
+
+    /// Check the tree against the case policy with the control-side allowlist `entries`.
+    pub(crate) fn check_with(&self, entries: Vec<ControlSideEntry>) -> Report {
+        check(
+            &self.root,
+            &Policy {
+                control_side_allowlist: entries,
+                ..policy()
+            },
+        )
     }
 }
 

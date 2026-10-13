@@ -9,6 +9,7 @@ mod per_queue;
 mod ported;
 mod probes;
 mod trusted;
+mod twins;
 
 use realtime_policy::Class;
 
