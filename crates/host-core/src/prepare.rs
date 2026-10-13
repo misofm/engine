@@ -2781,7 +2781,7 @@ fn effective_fader(
 /// also has, how its fader/mute and matrix values differ.
 ///
 /// A family's difference is live when the classifier would emit a record for it on a plan that
-/// attaches the control kind (`live`): the strip is a track, no VCA is in either model (until
+/// attaches the control kind (`live`): the strip is a track or a submix (#1554), no VCA is in either model (until
 /// #1247 `LiveRebuild::Vca` keeps them prepared), the strip's values are in domain and its mute
 /// does not change under a `follows_mute` route (`LiveRebuild::FollowedMute`, one predicate with
 /// the classifier). Each family is judged on its own values (D4 decides per stage): a followed
@@ -2818,7 +2818,7 @@ fn join_strips<'a>(
             }
             continue;
         };
-        let live_family = live && !vca_in_play && matches!(strip.kind, StripKind::Track(_));
+        let live_family = live && !vca_in_play;
         let before = effective_fader(
             before_fader,
             committed_effective

@@ -4854,17 +4854,18 @@ mod set_control {
         })
     }
 
-    /// Gate 1, builtin families: a fader, a mute, a pan and a matrix, on a track and on a submix
-    /// strip, commit one revision with the plan epoch unchanged, and from the block their ramp
-    /// leaves behind render the bits of a plan prepared from the committed session.
-    ///
-    /// Red if a submix strip's value is left a rebuild, is written to another strip's cell, or a
-    /// family lowers to the wrong lane (the mute in the fader's place, the pan in the matrix's).
-    #[test]
-    fn submix_strips_take_live_edits() {
-        // The bus keeps no state of its own (its filters are off and its console is bypassed), so
-        // once the ramp has passed, a live edit renders like a plan prepared with it from sample 0.
-        let document = with_bus_strip(&long_session(10, 48_000), |model, submix| {
+    /// The 10-track session with a bus fed by the first track. The bus keeps no state of its own
+    /// (its filters are off and its console is bypassed), so once a ramp has passed, a live edit
+    /// renders like a plan prepared with it from sample 0. The fixture pans both lanes of every
+    /// track fully right (`pan` 1.0 and 1.0), so a send from it carries nothing on the bus's left
+    /// lane; eq0 is centred to feed both lanes.
+    fn stateless_bus_document() -> String {
+        with_bus_strip(&long_session(10, 48_000), |model, submix| {
+            model.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
+                left: 0.0,
+                right: 0.0,
+                smoothing_samples: 16,
+            };
             let track = model.tracks[0].clone();
             submix.builtins = track.builtins.clone();
             for lane in [&mut submix.builtins.left, &mut submix.builtins.right] {
@@ -4873,23 +4874,31 @@ mod set_control {
             }
             submix.fader = track.fader.clone();
             submix.matrix_or_pan = track.matrix_or_pan.clone();
-        });
+        })
+    }
+
+    /// Gate 1, builtin families: a fader, a mute, a pan and a matrix, on a track and on a submix
+    /// strip, commit one revision with the plan epoch unchanged, and from the block their ramp
+    /// leaves behind render the bits of a plan prepared from the committed session.
+    ///
+    /// Red if a submix strip's value is left a rebuild, is written to another strip's cell, or a
+    /// family lowers to the wrong lane (the mute in the fader's place, the pan in the matrix's).
+    #[test]
+    fn submix_strips_take_live_edits() {
+        let document = stateless_bus_document();
         let model = parse_session_json(&document).expect("model");
         let ramps = model.control_smoothing_samples();
         let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
         let untouched = Reference::run(&document, 40);
         for strip in ["bus", "eq0"] {
-            // The bus's left lane carries nothing audible in this session, so the bus is edited
-            // on its right lane, and the track on its left.
-            let lane = if strip == "bus" {
-                Lane::Right
-            } else {
-                Lane::Left
-            };
-            let cases: [(&str, Vec<SessionEdit>); 4] = [
+            let cases: [(&str, Vec<SessionEdit>); 5] = [
                 (
-                    "fader",
-                    vec![set(builtin(strip, FADER_DB, lane), -6.0, None)],
+                    "fader left",
+                    vec![set(builtin(strip, FADER_DB, Lane::Left), -6.0, None)],
+                ),
+                (
+                    "fader right",
+                    vec![set(builtin(strip, FADER_DB, Lane::Right), -6.0, None)],
                 ),
                 (
                     "mute",
@@ -5095,5 +5104,92 @@ mod set_control {
             ],
             "a fader and a content edit",
         );
+    }
+
+    /// A live submix fader ramp in flight is carried across a structural rebuild, as a track's is
+    /// (#1554: `join_strips`): the blocks of the rebuilt rig equal those of a twin that never
+    /// rebuilt, ramp and all, and the swap lands inside the ramp.
+    ///
+    /// Red if a submix strip restarts at rest at the swap: its fader would jump to the ramp's
+    /// target at once, where the twin is still ramping.
+    #[test]
+    fn a_live_submix_fader_ramp_is_carried_across_a_rebuild() {
+        // One stateless track (no filter, console or insert: a rebuild carries it with no gap)
+        // sent to a stateless bus, as `live_fader_across_a_carrying_swap` builds its session.
+        let mut base = super::tests::stateless_session(48_000);
+        base.tracks.truncate(1);
+        base.routes.truncate(1);
+        base.sources[0].frames = SOURCE_FRAMES;
+        let structural = super::tests::add_muted_track(&base, "a-muted");
+        let mut model = base;
+        let bus = id("bus");
+        let mut send = model.routes[0].clone();
+        send.id = id("eq0-bus");
+        send.destination = RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        };
+        let mut out = model.routes[0].clone();
+        out.id = id("bus-main");
+        out.source = RouteSource::Submix {
+            submix_id: bus.clone(),
+            tap: session::SendTap::PostPan,
+        };
+        model.routes.push(send);
+        model.routes.push(out);
+        let console = model.console.clone();
+        model.submixes.push(session::Submix::unity(bus, &console));
+        let document = session::canonical_session_json(&model).expect("canonical");
+        let ramp = model.control_smoothing_samples().fader;
+        assert!(ramp >= 256, "the session's default fader ramp spans blocks");
+        let live = [set(builtin("bus", FADER_DB, Lane::Both), -12.0, None)];
+
+        // The fader edit commits first (the successor is prepared from a base that holds it), or
+        // in the very transaction that rebuilds (the join sees the difference and retargets).
+        for combined in [false, true] {
+            let label = if combined {
+                "one transaction"
+            } else {
+                "two transactions"
+            };
+            let mut rebuilt = Rig::new(&document);
+            let mut twin = Rig::new(&document);
+            for _ in 0..4 {
+                assert_eq!(bits(&rebuilt.step()), bits(&twin.step()));
+            }
+            assert_eq!(twin.apply(&live), crate::RESULT_OK);
+            if combined {
+                let both: Vec<SessionEdit> = live
+                    .iter()
+                    .cloned()
+                    .chain(structural.iter().cloned())
+                    .collect();
+                assert_eq!(rebuilt.apply(&both), crate::RESULT_OK, "{label}");
+            } else {
+                assert_eq!(rebuilt.apply(&live), crate::RESULT_OK, "{label}");
+                assert_eq!(rebuilt.summary().3, 0, "{label}: the fader edit is live");
+                assert_eq!(rebuilt.apply(&structural), crate::RESULT_OK, "{label}");
+            }
+            assert_eq!(rebuilt.summary().3, 1, "{label}: the transaction rebuilds");
+            let settled = Reference::run(&rebuilt.snapshot(), 40);
+            let mut swap = None;
+            let mut mid_ramp = false;
+            for _ in 0..(window(rebuilt.latency(), ramp, rebuilt.quantum) + 4) {
+                let block = rebuilt.block;
+                let (one, two) = (rebuilt.step(), twin.step());
+                assert_eq!(
+                    bits(&one),
+                    bits(&two),
+                    "{label}: block {block} equals the twin that never rebuilt"
+                );
+                if swap.is_none() && crate::ffi::test_plan_carry_counts(rebuilt.plan).0 == 1 {
+                    swap = Some(block);
+                    // Still ramping: a stage restarted at rest would already be at the settled
+                    // value.
+                    mid_ramp = bits(&one) != bits(&settled[block as usize]);
+                }
+            }
+            assert!(swap.is_some(), "{label}: the successor swapped in");
+            assert!(mid_ramp, "{label}: the swap landed inside the ramp");
+        }
     }
 }
