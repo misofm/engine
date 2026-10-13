@@ -69,7 +69,8 @@ outside the repository.
 ## Decisions
 
 - **D1. The name set.** Every non-test `fn` item under the scan roots (free, inherent, trait, trait
-  default; B2b-1-D1's definition: cfg evaluated with `test` false and every feature on, `#[test]`
+  default; B2b-1-D1's definition: cfg evaluated with `test` false and every `feature = ".."` read as unknown
+  (non-test, fail closed; root fix 2026-10-13), `#[test]`
   excluded, no exemption by name) whose own body holds a pop (B1a-D5) contributes its name.
   Closures count as part of the body; nested `fn` items are their own functions. `try_pop` itself
   is not in the set.
@@ -106,6 +107,10 @@ outside the repository.
   provably cannot reach the popping function is resolved only by a restructure that root names in
   the issue that makes it; the rule does not change. B2b-1-D6 is the one such decision so far; any
   later case goes to root by name.
+  **Root amendment (2026-10-13):** the `apply_latest` rename of `InputReader`, `FaderReader` and
+  `MatrixReader` in `crates/builtins-compiler/src/lib.rs` is not a rename that hides a pop: those
+  methods read latest-target cells and pop no queue since #1346 and #1312, so the name `drain` no
+  longer described them.
 - **D4. Limits that stay** (stated in the drain rule's module documentation):
   - a loop in an unmarked caller. B2b-1-D2 still requires the helper's pop to be marked or listed,
     and every real instance is in a marked region after B2b-1, #1449 and #1345 Amendment 1;
@@ -279,6 +284,7 @@ Delivery mode: feature sprint (no mutation runs, short note). Re-measured on the
   or pass. No `impl Iterator` that pops exists.
 - **Gates run.** `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy
   --all-targets -- -D warnings`, `cargo test --locked -p realtime-policy` (241 passed). Gate 1
-  (`cargo run --locked --release -q -p realtime-policy` on the real tree) FAILS with the three
-  hits above and nothing else.
+  (`cargo run --locked --release -q -p realtime-policy` on the real tree) failed before the rename
+  with the three hits above and nothing else. After the rename (root ruling below) gate 1 passes at
+  `e9255f196`: `ok (126 marked regions in 27 files)`.
 - Root ruling 2026-10-13 (D3): the three cell-reader methods in crates/builtins-compiler/src/lib.rs are renamed from `drain` to `apply_latest`. They read latest-target cells and pop no queue since #1346 and #1312. This is a rename only, with no behaviour change.

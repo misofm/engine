@@ -89,7 +89,8 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
      `Cargo.toml`, and no `#[path]` attribute in a file outside such a directory resolves to it.
   2. An enclosing item, statement, expression or match arm carries `#[test]`, or carries
      `#[cfg(P)]` where P is false under three-valued (Kleene) logic with `test` false, every
-     `feature = ".."` true, and every other atom unknown. Several `#[cfg]` attributes on one node
+     `feature = ".."` unknown (so non-test, fail closed; root fix 2026-10-13), and every other atom
+     unknown. Several `#[cfg]` attributes on one node
      are joined with AND. `cfg_attr` is ignored, which fails closed. An inner `#![cfg(P)]` counts
      for its module or file.
   3. Every declaration that reaches its file meets rule 2. A declaration is a `mod x;` item,

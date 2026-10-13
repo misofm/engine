@@ -80,8 +80,11 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         }
         // A file that a rule reads is parsed, and a parse failure is a finding. A file that holds
         // a `try_pop` token is parsed too (#1443 D2). A file that only declares modules is parsed
-        // for the module graph (D1 rule 3), and a failure there is silent: the file's modules
-        // are then not test code.
+        // for the module graph (D1 rule 3), and a failure there is silent: the file's
+        // declarations are then missing from the graph. A module that only this file declares
+        // is then not test code (fail closed). A module that a second declaration reaches, where
+        // only the unparsable file's declaration is production and the other is `#[cfg(test)]`,
+        // is judged test code, and that case is not caught.
         let file = if markers.mentions_marker
             || source.path == whole_plan::CAPI_FFI
             || source.path.starts_with(web_host::WEB_SRC)

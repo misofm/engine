@@ -5,8 +5,8 @@
 //! that loops over the helper drains the queue until it is empty. This rule closes that: the name
 //! set (D1) holds the name of every non-test function under the scan roots whose own body holds a
 //! pop (closures count as part of the body, nested `fn` items are their own functions; test code
-//! is out, and every feature counts as on). The name is matched, not the type: the rule fails
-//! closed. Three rules (D2):
+//! is out; a `feature = ".."` predicate is read as unknown, and an unknown cfg is not test code).
+//! The name is matched, not the type: the rule fails closed. Three rules (D2):
 //!
 //! 1. In a marked region, in a loop (the body or the header of a `for`, `while` or `loop`; a
 //!    `for`'s iterator expression is outside it) or in a closure body: a method call whose method is
