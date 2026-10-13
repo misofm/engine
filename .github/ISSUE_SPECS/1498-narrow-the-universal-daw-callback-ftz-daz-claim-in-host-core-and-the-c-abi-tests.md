@@ -137,7 +137,7 @@ Gates (all at the edited tree):
 - `cargo test --locked -p capi`: all suites pass (81, 3, 11).
 - `cargo clippy --locked -p host-core -p capi --all-targets -- -D warnings`: clean.
 - `scripts/check-workspace-policy.sh`: ok. `scripts/check-realtime-policy.sh`: ok (93 marked regions).
-- No codegen change: `./target/release/audit capi` gives the same `pcm_digest` as on the base commit, 0 allocations,
+- No codegen change: `./target/release/audit capi` gives `pcm_digest` `cb10fbface44a3a4`, 0 allocations,
   0 deallocations, 0 syscalls, 0 violations. Browser: `build-web-audioworklet.sh --module-only` before
   and after the edit gives the same shipped module `429788e6...3be3` (3129218 B) and the same named
   twin `e44d96c7...50b8`.

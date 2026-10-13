@@ -453,6 +453,11 @@ Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
   282,432 (a test adds no retained bytes).
 - *n9, the stale option.* The Amendment 1 note named "drop `SessionRamps` or refresh it on every model-only commit".
   #1382 D6, as ruled 2026-10-12, drops it; the note now says so and marks the refresh option superseded.
+- *Fold-check n1.* The test's doc comment said no render allocates, "the swap" included, but the render right after
+  `apply` (the one that swaps the plan in, writing the carried strips' retargets) was not counted. It now runs through
+  `render_counted` and asserts 0 allocations and 0 frees, like the six blocks after the seek. A probe had measured 0
+  and 0. Mutation: one `Vec::with_capacity(1)` inside the counted window of that render alone: red ("the swap block
+  allocated or freed", left `(1, 1)`); reverted: green.
 
 Gates: `cargo fmt --all -- --check`; clippy `--workspace --all-targets --all-features -D warnings`; `-p capi` (87 in
 the lib); `audit capi` (0 allocations, 0 syscalls, `pcm_digest` 76525e7ef9e78cf4, as before). The rest of the gate

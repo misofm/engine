@@ -1030,7 +1030,12 @@ fn control_smoothing_rebuild_run(
     });
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "a content edit prepares a candidate");
-    rig.render();
+    let (_, swap_used) = rig.render_counted();
+    assert_eq!(
+        (swap_used.allocations, swap_used.deallocations),
+        (0, 0),
+        "the swap block allocated or freed"
+    );
     rig.seek_to_start();
     let rebuilt = (0..6)
         .map(|block| {
