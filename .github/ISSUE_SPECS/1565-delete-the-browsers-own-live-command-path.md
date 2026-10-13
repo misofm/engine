@@ -167,3 +167,21 @@ webkit on both legs.
   browser VCA mirror and its commit are deleted; #1559 gate 3 holds the shared-path half.
 - Shrinks *Make live strip records valid by construction* (#1423): no host builds a strip record
   any more; the private-field change stays as defence in depth for host-core.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** "Both legs" reads "the non-isolated leg" until #1332. The slice is
+split. All three pieces stay in this issue.
+
+- **#1565A**: D1-D3, D6 and D8 (kinds 1-6 and 9-17, their admission, `WebEffectiveView`,
+  `SessionRamps`, the tests and benchmarks). Gates 1, 3 and 5. Dependencies: #1562a and #1563B
+  (not #1564). It lands in one batch with #1381a, #1562a, #1570b and #1563B.
+- **#1565B**: the exports and mirrors (D3's export deletions, D5, D7): `control_targets.rs`,
+  `prepared-control.js`. Gate 4. Dependencies: #1565A, #1564C.
+- **#1565C**: D4 (the boot word `reserved1`). Gate 2. Dependency: #1565A.
+
+When #1565 merges, *Make the browser live-command boot word an on/off flag* (#1524) and *Test that
+a refused batch does not undo a committed browser VCA batch* (#1525) close as superseded; neither
+is implemented (root Q6).
+
+**Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.

@@ -170,3 +170,21 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
   (#1341).
 - Shrinks *Build and encode session transactions in the SDK* (#1383): its value edits are D1's
   `SET_CONTROL` encoder.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** The slice is split. Both pieces stay in this issue.
+
+- **#1563A**: D1 (the codec and the reply decoder), the Rust byte fixture and D4 (the per-engine
+  queue) on the headless engine. Gates 1 and 4. Dependencies: #1549, #1550, #1553; it lands after
+  #1532 (`sdk/src/browser/engine.ts` and `errors.ts` edit order).
+- **#1563B**: D2, D3 and D5-D9: the builders on both transports, the deletions and the eval
+  migration, and the qualification rows. Gates 2, 3 and 5. Gate 5 runs on the non-isolated leg.
+  Dependencies: #1563A, #1562a, #1559 and #1341 (root, 2026-10-13). #1563B lands in one batch with
+  #1381a, #1562a, #1570b and #1565A.
+
+- Authorized paths gain `sdk/README.md` (the reference text of the changed submit result).
+- *Build and encode session transactions in the SDK* (#1383) lands after this slice (root Q7), so
+  D1's "if #1383 is on `main` first" clause does not apply.
+
+**Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.

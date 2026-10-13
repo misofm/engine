@@ -176,3 +176,9 @@ today.
 
 Dependents: #1381 (it moves this slice's set into `SessionState`), #1293 and #1294 (their
 `seek_at` export and message use this routing), and #1297 (its drain runs in the Worker).
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** #1381a already routes every source export through `SessionState` in
+the one instance. This slice moves that routing, unchanged, to the Worker in `worker` mode. It
+depends on #1332 and #1381a.

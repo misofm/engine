@@ -265,3 +265,21 @@ and SDK are the rewritten slices #1293-#1297.
 - *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).
 
 #1382 removed from the dependencies by decision 17 (root, 2026-10-13): #1562 (formerly #1382, amended) depends on this issue's rebuild arm.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** Read "Worker" as "the control half": the one instance's message
+handler in `single` mode (first), and the Worker after #1332. `blockingRebuilds` is defined here
+(D6), not in #1332.
+
+- D1's `web.apply.spectrum_target` refusal and gate 3's fourth case are deleted (root Q4): #1593
+  keeps the session's spectrum taps on every plan it prepares.
+- The structural apply is `SessionState::command` through #1562a's entry. Gate 2's live fader edit
+  is a `SET_CONTROL`.
+- Split, all in this issue:
+  - **(a)** the rebuild apply: gates 1, 2, 3 (cases 1-3), 5, 6 and 8. Dependencies: as filed,
+    without #1332, #1387, #1310, #1327 and #1395, with #1381a for #1381 and with #1562a.
+  - **(d+e)** gate 7 and single-mode gate 9. Dependencies: (a), #1381b, #1327, #1395.
+  - **(b)** gate 4 (supersession). Dependencies: (a), #1310 (after stream B's #1344 and #1398).
+  - (c), the spectrum refusal, is dropped (root Q4).
+- #1332 and #1387 are removed from the dependencies.

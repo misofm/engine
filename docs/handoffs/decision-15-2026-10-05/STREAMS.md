@@ -98,20 +98,20 @@ No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` o
 | `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → G #1462 (three test requests' `tail_bound` field) → A payload (#1279, #1280) → G #1337 → G #1372; G #1464 (the `tail_and_rest` rename and field only) before G #1372, in either order with A's payload slices and G #1337, the later slice rebases |
 | The other `PreparedEffectMetadata {` literals in the effect crates' payload code and test helpers (`crates/transient-shaper/src/corpus.rs:190` and its peers) | G #1464 (the `composition` field only) in either order with A's payload slices; the later slice rebases |
 | `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs`, `crates/math/src/tail.rs` | G #1464 (`builtins` only) → G #1465 → G #1484 (`builtins` only) → G #1466 → G #1467 → G #1468; G #1485 after #1467, in either order with #1468, the later slice rebases; G #1487 after #1485 and #1379; G #1457 before #1464; G #1474 (`math` and `builtins` tail, after #1457) before #1465, in either order with #1464, the later slice rebases; G #1471 (`builtins` only: the `InputBoundCache` `begin_journal`/`take_journal` pair and its unit tests, #1471 Amendment 1, root 2026-10-11) after #1457, in any order with the others, the later slice rebases |
-| `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381; H #1448 (`poll_meters`, unmarked) lands in any order with the B, D, E and J slices that land before H #1332, the later slice rebases; then "H #1448's guard, landed by J after C2" (two markers replacing blank lines, in the J tool batch) after H #1448, in any order with the rest, the later slice rebases; B #1523 (`live_control_request`), B #1524 and B #1525 land before H #1332, and B #1525 before H #1562; B #1534 (`poll_meters` and the shared arm-sample predicate `read_observation_values` calls) lands before H #1332, in any order with #1523, #1524 and #1525, the later slice rebases; B #1537 (the `source_underrun_blocks` status word) before H #1332, in any order with the B, D, E and J slices; #1547 (the boot seed), #1548 (admission checks and composition) and #1555 (the depth line of `live_control_request`) land before H #1332, by named exception (root, 2026-10-13) |
+| `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381; H #1448 (`poll_meters`, unmarked) lands in any order with the B, D, E and J slices that land before H #1332, the later slice rebases; then "H #1448's guard, landed by J after C2" (two markers replacing blank lines, in the J tool batch) after H #1448, in any order with the rest, the later slice rebases; B #1523 (`live_control_request`) lands before H #1332; #1524 and #1525 are not implemented (#1565 supersedes them, root 2026-10-13); B #1534 (`poll_meters` and the shared arm-sample predicate `read_observation_values` calls) lands before H #1332, in any order with #1523, the later slice rebases; B #1537 (the `source_underrun_blocks` status word) before H #1332, in any order with the B, D, E and J slices; #1547 (the boot seed), #1548 (admission checks and composition) and #1555 (the depth line of `live_control_request`) land before H #1332, by named exception (root, 2026-10-13) |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1562 |
 | `sdk/src/browser/engine.ts` | B #1345 (the `renderWait` hook) → H #1532 (the close-path bounds) → H #1332 (root, 2026-10-12) |
-| `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only); B #1524 after B (#1399, #1349), before C #1406; B #1537 (the status word at offset 80) in any order with H and B #1349, before C #1406 |
-| `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only); B #1524 after B #1349, before C #1406; B #1537 in any order with H and B #1349, before C #1406 |
-| `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit; B #1524 and B #1525 in any order with the rest, the later slice rebases, both before H #1332; B #1534 in any order with the rest, before H #1332; B #1537 before H #1332, in any order with the rest |
-| `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them); B #1524 (the command arm of `#saturated`) before C #1406 (the ring arm of the same function); the two changes are independent; B #1534 (the `.d.ts` gain-reduction contract text only) before H #1332 and C #1406; H #1536 (the status arm and `status()` only) before H #1332, in any order with B #1524 and C #1406; B #1537 (the status reader and reply check) in any order with H and B #1349, before C #1406 |
+| `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only); B #1537 (the status word at offset 80) in any order with H and B #1349, before C #1406 |
+| `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only); B #1537 in any order with H and B #1349, before C #1406 |
+| `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit; B #1534 in any order with the rest, before H #1332; B #1537 before H #1332, in any order with the rest |
+| `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them); B #1534 (the `.d.ts` gain-reduction contract text only) before H #1332 and C #1406; H #1536 (the status arm and `status()` only) before H #1332, in any order with C #1406; B #1537 (the status reader and reply check) in any order with H and B #1349, before C #1406 |
 | `hosts/host-web/qualification/sdk-response-entry.ts`, `hosts/host-web/qualification/run.mjs` | H #1476 (the SDK instances' allocation reads and the `sdk-render-allocations` gate) and J #1480 (the continuous-spectrum probe and its predicates) in any order; the later slice rebases; H #1522 and H #1530 (two SDK instances, the `sdk-observation-wait` gate and its mutations) in any order with each other and the rest, the later slice rebases; B #1345 (the `resume-clicks` gate, its three mutations and the SDK resume-click plan in `run.mjs` only, by named exception, root 2026-10-12, batch-verdict 2 B2; the `observation-unsubscribe` gate it once also carried moved to successor S1 by #1345 Amendment 7, root 2026-10-13) in any order with the rest, the later slice rebases; B #1345 (the `spectrum-query-closed` handler only, root 2026-10-12) in any order with H #1476, #1522 and #1530; the later slice rebases; H #1535 (`run.mjs` only) in any order with the rest |
 | `hosts/host-web/qualification/qualification.js` | H owns; B #1345 edits `runObservationRun` (the disarmed run never subscribes) and adds `resumeClickPlan` and the resume counter (with the matching `resume-clicks` gate in `run.mjs`), by named exception (root, 2026-10-12, batch-verdict 2 B2). The real-context unsubscribe gate (`runObservationUnsubscribeRun`, its session document and `run.mjs` gate) that B #1345 once added there was removed by #1345 Amendment 7 (split, root 2026-10-13) and moves to successor S1, which re-adds it from the saved patch. H #1522 and H #1530 (page code for their two SDK instances) in any order with it; the later slice rebases; H #1535 re-adds the observation-unsubscribe gate from the saved patch, in any order with H #1522, #1530 and #1533 |
 | `hosts/host-web/qualification/unsubscribe-session.json` | H #1535 (re-created from the saved patch; root 2026-10-13); stream H owns later edits |
 | `hosts/host-web/MUTATIONS.md` | H #1476, H #1477, A #1479 (row `:563` only), J #1480, H #1491 and H #1492, each adding or editing its own rows, in any order; the later slice rebases. H #1492 also edited A #1479's row `:563` (its count, 4 to 6), ratified by root 2026-10-09; H #1530 (its own rows) in any order, the later slice rebases; H #1535 (its own section) in any order |
-| `scripts/test-web-audioworklet.mjs`, `sdk/test/browser-pcm-evals.mjs` | B #1399 (`scripts/test-web-audioworklet.mjs` only: the fake status reply and gate 3's case) in any order with stream H's slices and J #1496, the later slice rebases; stream H's slices (#1491: `testQualificationBoot` only) and J #1496 (`testProcessor`'s and the feed harness's recording checks only) in any order; the later slice rebases; B #1524 in any order with stream H and J #1496, the later slice rebases; H #1536 (the status cases only) and B #1537 in any order, the later slice rebases |
-| `sdk/test/writer-evals.mjs` | B #1524 (the live-control option and the default batch) and H #1539 (one new `describe`) in any order, the later slice rebases |
+| `scripts/test-web-audioworklet.mjs`, `sdk/test/browser-pcm-evals.mjs` | B #1399 (`scripts/test-web-audioworklet.mjs` only: the fake status reply and gate 3's case) in any order with stream H's slices and J #1496, the later slice rebases; stream H's slices (#1491: `testQualificationBoot` only) and J #1496 (`testProcessor`'s and the feed harness's recording checks only) in any order; the later slice rebases; H #1536 (the status cases only) and B #1537 in any order, the later slice rebases |
+| `sdk/test/writer-evals.mjs` | H #1539 (one new `describe`) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
 | `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) and J #1435 (the `sdk` "Qualify the SDK package against the shared artifact" step), J #1438 (`audit-native`: one build flag and one step) and J #1446 (`lint`: two lines removed and the step renamed), G #1428 (`test-release` steps in `qualification.yml`; under its amended D2 (R1) the release sweeps move to their own parallel required job, never `nightly.yml`) and G #1379 (one `test-release` step for host-core's `tail_composition`) in any order, the later slice rebases; J #1481 (`nightly.yml`: the `native-vectorization-report` step's `continue-on-error` line and its comment, and the file's header bullet for that job) in any order with the rest, the later slice rebases; B #1499 (the `qualification.yml` steps that run `scripts/build-capi-release.sh` and its LTO check) in any order with the rest, the later slice rebases |
@@ -308,8 +308,8 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 | 32 | #1499 | Build the shipped mobile C ABI libraries with the release profile's fat LTO, and gate it | — | G #1495 |
 | 33 | #1521 | Report live_block_errors through COUNTERS_GET on the C ABI | #1351 | — |
 | 34 | #1523 | Replace the live-control queue depth with an attach flag in host-core | #1345, #1346, #1347 | — |
-| 35 | #1524 | Make the browser live-command boot word an on/off flag | #1345, #1523 | before H #1332 and C #1406 |
-| 36 | #1525 | Test that a refused batch does not undo a committed browser VCA batch | #1345 | before H #1332 and #1562 |
+| 35 | #1524 | Make the browser live-command boot word an on/off flag | #1345, #1523 | not implemented: closes as superseded when #1565 merges (root, 2026-10-13) |
+| 36 | #1525 | Test that a refused batch does not undo a committed browser VCA batch | #1345 | not implemented: closes as superseded when #1565 merges (root, 2026-10-13) |
 | 37 | #1534 | Fold only windows published since a tap's arm into the meter frame's gain reduction | #1345 | before H #1332 (next B batch) |
 | 38 | #1537 | Report source underruns in the browser status | #1318 | before H #1332 (named exception: `crates/graph` counting only) |
 
@@ -666,7 +666,8 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
   rebase on the program (root, 2026-10-13).
 - **Branch:** `codex/controls-batch-1` (first batch).
 - **Merge order** (the ruling's table order, #1546 to #1597; a slice merges after every slice above
-  it in this list):
+  it in this list). From batch 4 on, the batch table below replaces this order for every slice it
+  lists; the other slices keep this order:
   - Registry and browser composition: #1546, #1547, #1548.
   - Effect rows, SDK types and the control list: #1549, #1550, #1551, #1552.
   - One edit and one classifier: #1553, #1554, #1555.
@@ -689,3 +690,40 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
   - #1570 (S14's event drain) lands in the same batch as #1562.
   - #1165 lands before #1592 (row `crates/host-core/src/spectrum.rs`).
   - #1547, #1548 and #1555 land before H #1332, by named exception (row `hosts/host-web/src/lib.rs`).
+  - #1524 and #1525 are not implemented; they close as superseded when #1565 merges (Q6).
+  - #1383 lands after #1563 (Q7).
+  - Single instance first (root, 2026-10-13): #1381a and #1562a target `single` mode; the Worker
+    deployment (#1331a, #1334, #1380, #1332, #1387) lands after #1565A. This overrides stream H's
+    "After" column for #1381, #1562, #1290 and #1349. #1331b (the iOS leg) is an owner-scheduled
+    human step.
+- **Lanes (root, 2026-10-13).** Two implementation lanes. **W** is the only lane that edits
+  `hosts/host-web/**`; it also carries the worklet JS and the browser qualification. **K** edits
+  the crates, capi and the `sdk/` files outside `hosts/`. Batch 4's lane C is the core lane of
+  that batch only.
+- **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together.
+  Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the
+  full CI-equivalent gate set once. If one slice fails, the batch stops: no partial flip, so `main`
+  never has two writers of one plan's revision gate and cells. No lending API. Until #1562b,
+  #1562a refuses a rebuild-path frame with `web.apply.rebuild_pending` before commit (ruling B).
+- **Batch table (plan v2, approved by root 2026-10-13).** Split pieces are defined in each
+  issue's "Amendment (decision 17, root 2026-10-13)".
+
+  | Batch | Lane | Slices, in merge order | Hot-file order |
+  |---|---|---|---|
+  | 4 | C | #TBD4, #1559, #1560, #1561 | (fixed) |
+  | 4 | K | #1570a, #1401, #1351, #1165 | (fixed) |
+  | 5 | W | #1400a -> #1400b; #1536, #1534, #1530 | `lib.rs`: #1534 then #1400b; host.js (#1536); qualification `run.mjs` (#1530); engine `plan.rs` and control-plane (#1400a, K-type code carried by W) |
+  | 5 | K | #1532 -> #1563A; #1280a, #1280b | sdk `engine.ts`/`errors.ts`: #1532 then #1563A; `live.rs`, rack, host-core `prepare.rs`/`live_delta.rs` (#1280) |
+  | 6 | W | FLIP: #1381a -> #1562a -> #1570b -> #1563B -> #1565A | `lib.rs`, `ffi.rs`, worklet JS, host.js, `abi_layout`, export lists in that order; sdk `browser/engine.ts`, `live-controls.ts` (#1563B then #1565A) |
+  | 6 | K | #1281, #1282, #1283 | `live.rs`, rack, graph, host-core |
+  | 7 | W | #1349, #1564A, #1564B, #1564C | `plan_exchange.rs`, `lib.rs`, worklet `readStatus` (#1349); sdk `generated/`, browser-v1 oracle (#1564C) |
+  | 7 | K | #1284, #1327a, #1327b, #1341a1 | engine `plan.rs` (#1327); `live.rs` (#1280 -> #1341) |
+  | 8 | W | #1565B, #1565C, #1571A, #1571B, #1535 | `lib.rs`, `ffi.rs`, `abi_layout` (#1565B); sdk `engine.ts` (#1565C then #1571); qualification (#1571B row; #1535 `run.mjs`/`qualification.js`) |
+  | 8 | K | #1395a, #1395b, #1341a2, #1341b | `spectrum.rs` (after #1165), `prepare.rs`; `live.rs` |
+  | 9 | W | #1381b, #1290a, #1290d+e, #1562b | `lib.rs`, engine `plan.rs` (`adopt_predecessor`); after the carry chain (8K) |
+  | later | W | Worker deployment: #1331a, #1334, #1380, #1332 (a, b, c), #1387 | toolchain, workflows, every host-web file; after #1565A |
+
+  Off the critical path: #1290b (after stream B's #1310, #1344, #1398); #1383 (after #1563);
+  #1331b (owner); the heavy decision-15 gates of #1530 (gate 6), #1532 (gate 7) and #1535 (gate
+  8), which move to *Post-sprint qualification of decision 15's heavy gates* (#TBD5) after the
+  sprint.

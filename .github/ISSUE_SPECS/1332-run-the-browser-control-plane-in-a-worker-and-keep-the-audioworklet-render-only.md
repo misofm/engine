@@ -332,3 +332,24 @@ Root note (2026-10-13): *Share one in-flight status read in the browser host* (#
 - *Move browser source submission and seeks into the Worker* (#1387), next.
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
 - *Admit browser live edits in the Worker through the committed model* (#1562).
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** `single` mode is the browser's first deployment and is in place
+before this slice: #1381a (`SessionState`, the service tick and the control-allocation counter of
+D1), #1562a and #1570b (the `control` and `control-event` messages). This slice is the second
+deployment of the same core entries. The `worker` mode boots in the Worker, hands the render half
+to the worklet (D2-D4), routes the existing control messages to the Worker (D7) and handles growth
+(D5). It adds no admission, service or event logic.
+
+- D1's `CONTROL_ALLOCATIONS` counter and `singleModeControlAllocations` are #1381a's.
+  `blockingRebuilds` is #1290's.
+- Gate 2's "live commands" are `SET_CONTROL` `control` messages.
+- It lands after #1565A (the old path, which writes cells on the worklet thread, is gone) and
+  after #1381a.
+- #1331 means #1331a (the desktop legs) and #1331b (the iOS leg, an owner-scheduled step). #1331
+  D9's outcome rule stands.
+- The "before H #1332" orders of #1530, #1532, #1534, #1535 and #1536 stand.
+
+Split, all in this issue: (a) the Rust exports and `worker_handoff.rs`; (b) the JS modes, the
+Worker file, the ports, `instanceMode` and the isolated leg; (c) growth and gate 4.

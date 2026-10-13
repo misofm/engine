@@ -163,3 +163,8 @@ the browser's own `applied_at_sample` arithmetic.
 ## Amendment (root, 2026-10-13): status size
 
 D2's "size stays 80" is superseded: `WebStatus` is 88 bytes, set by *Report source underruns in the browser status* (#1537), which adds `source_underrun_blocks` at offset 80. This issue's three watermark words keep offsets 56, 64 and 72, and its gate on the record size reads 88.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Root Q5.** D3's accessor is `PlanQueries::watermark()` (`crates/control-plane/src/plan.rs:111`).
+Dependency #1381 means #1381a.
