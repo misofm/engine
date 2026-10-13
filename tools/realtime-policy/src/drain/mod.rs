@@ -75,10 +75,22 @@
 //!   `no_implicit_prelude`, `feature(..)`, a `${..}` metavariable expression and any `proc_macro`
 //!   identifier.
 //!
-//! What stays outside the rule (D4): recursion; a pop in a helper function (`begin_block` calling
-//! `drain_controls` is one); a loop in a caller, outside the region (a loop that encloses the
-//! region inside the same function is refused above, not a limit); and a macro, defined elsewhere,
-//! that expands to a loop.
+//! A pop outside every region is no longer a limit (#1443 D1 to D3): every non-test pop under the
+//! scan roots must stand in a marked region, where this rule judges it, or in the own body of a
+//! function on the control-side allowlist of [`crate::Policy`], with exactly its site count, and
+//! every `try_pop` token is classified. [`crate::unmarked`] holds the test-code definition (a file
+//! under `<package>/tests/`, a `#[test]` or false-`cfg` node, a file that only test code declares;
+//! `#[cfg(any(test, feature = "test-support"))]` is not test code) and the allowlist.
+//!
+//! A call from a marked loop or closure to a function that pops is the call rule's
+//! ([`crate::calls`], #1444): it refuses the call, a path value that names such a function, and an
+//! iterator implementation that pops.
+//!
+//! What stays outside the rule (D4): recursion; a loop in a caller, outside the region (a loop
+//! that encloses the region inside the same function is refused above, not a limit); a helper two
+//! calls deep; a function value that enters a function as a parameter, a field or a return value;
+//! an implicit call other than iteration (`Drop`, `Deref`, an operator trait); and a macro,
+//! defined elsewhere, that expands to a loop.
 //!
 //! The limits of the tool's threat model (#1438 Hazards): code outside the workspace source, which
 //! the tool cannot read, type-level behaviour, because the rule reads syntax and not types, and
@@ -128,9 +140,12 @@ use crate::boundary::{Boundaries, RegionNodes};
 use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
-use facts::{Facts, PopKind, PopSite, Use};
+use facts::{Facts, Use};
+pub(crate) use facts::{PopKind, PopSite, macro_pops};
+pub(crate) use names::bare;
 use scope::{Binding, BindingKind, nearest};
-use tree::{Node, Pos, Step, Tree, Via};
+use tree::{Node, Step, Tree, Via};
+pub(crate) use tree::{Pos, pos};
 pub(crate) use trusted::NameScan;
 
 /// What a judgment reads: the file's tree, its facts, the pop's region, and every pop of the file.

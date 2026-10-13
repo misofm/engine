@@ -5,6 +5,7 @@
 
 mod binary;
 mod boundary;
+mod calls;
 mod common;
 mod drain;
 mod forbidden;
@@ -12,6 +13,7 @@ mod markers;
 mod render_wrap;
 mod run;
 mod source_reads;
+mod unmarked;
 mod unsafe_ownership;
 mod valid;
 mod walk;

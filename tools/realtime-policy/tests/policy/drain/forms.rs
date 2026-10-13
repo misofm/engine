@@ -259,9 +259,15 @@ fn a_raw_identifier_pop_is_a_pop() {
 /// D3: a loop outside a nested `fn` counts as around a pop inside it.
 #[test]
 fn a_pop_in_a_nested_function_is_judged_by_the_loops_outside_it() {
-    refuses(
+    // The loop also calls the nested function, which pops: the call rule (#1444) refuses that too.
+    expect_failure(
         "pop-in-a-nested-function-in-an-unbounded-loop",
-        "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        fn helper(control: &mut Consumer<Record>) {\n            let _ = control.try_pop();\n        }\n        helper(control);\n        break;\n    }\n}",
+        &[Edit::ReplaceLine {
+            path: super::BUILTINS_COMPILER,
+            old: super::ANCHOR,
+            new: "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        fn helper(control: &mut Consumer<Record>) {\n            let _ = control.try_pop();\n        }\n        helper(control);\n        break;\n    }\n}",
+        }],
+        &[DRAIN, Class::PoppingCall],
     );
 }
 

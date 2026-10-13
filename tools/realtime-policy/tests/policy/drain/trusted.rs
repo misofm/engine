@@ -8,9 +8,9 @@
 //! offending file, at the line of the offending name. Names that a macro expansion builds from
 //! parts are limit 4 of the threat model and have no case here.
 
-use realtime_policy::Finding;
+use realtime_policy::{Class, Finding};
 
-use super::super::common::{Edit, Tree, assert_classes};
+use super::super::common::{BEGIN, END, Edit, Tree, assert_classes};
 use super::{DRAIN, each_row};
 
 const SHADOWING: &str = "crates/shadowing/src/lib.rs";
@@ -20,18 +20,28 @@ const SPSC: &str = "crates/engine/src/realtime/spsc.rs";
 /// The base tree with `text` in a file with no marker. Returns the findings, after asserting that
 /// all are of the drain class.
 fn findings_of(name: &str, text: &str) -> Vec<Finding> {
+    findings_with(name, text, &[DRAIN])
+}
+
+/// The same, for a case whose findings have the classes `classes`.
+fn findings_with(name: &str, text: &str, classes: &[Class]) -> Vec<Finding> {
     let tree = Tree::base(name);
     tree.apply(&[Edit::Create {
         path: SHADOWING,
         text,
     }]);
-    assert_classes(&tree, &[DRAIN]).findings
+    assert_classes(&tree, classes).findings
 }
 
 /// Assert that the case is refused with every finding in the shadowing file, the first at a line
 /// that holds `needle`.
 fn refused(name: &str, text: &str, needle: &str) {
-    let findings = findings_of(name, text);
+    refused_with(name, text, needle, &[DRAIN]);
+}
+
+/// The same, for a case whose findings have the classes `classes`.
+fn refused_with(name: &str, text: &str, needle: &str, classes: &[Class]) {
+    let findings = findings_with(name, text, classes);
     assert!(
         findings
             .iter()
@@ -62,7 +72,7 @@ fn accepted(name: &str, text: &str) {
 /// example if (q) keeps the old rule that allowed any `fn try_pop(&mut self`.
 #[test]
 fn a_definition_of_try_pop_outside_the_queue_is_refused() {
-    let rows: [(&'static str, &'static str, &'static str); 3] = [
+    let rows: [(&'static str, &'static str, &'static str); 2] = [
         (
             "try-pop-looping-on-a-ring",
             "trait Spin {\n    fn try_pop(&mut self) -> Result<u32, ()>;\n}\nimpl Spin for Ring {\n    fn try_pop(&mut self) -> Result<u32, ()> {\n        while self.n > 0 {\n            self.n -= 1;\n        }\n        Ok(1)\n    }\n}\n",
@@ -73,17 +83,20 @@ fn a_definition_of_try_pop_outside_the_queue_is_refused() {
             "fn try_pop(queue: &mut Q) {}\n",
             "fn try_pop",
         ),
-        (
-            "try-pop-imported-in-a-group",
-            "use other::{try_pop, Thing};\n",
-            "use other",
-        ),
     ];
     each_row(
         rows.map(|(name, text, needle)| (name, (text, needle))),
         |name, (text, needle)| {
             refused(name, text, needle);
         },
+    );
+    // An import of the name is a `try_pop` token that is no pop, no definition and not test code,
+    // so the census refuses it as well (#1443 D2).
+    refused_with(
+        "try-pop-imported-in-a-group",
+        "use other::{try_pop, Thing};\n",
+        "use other",
+        &[DRAIN, Class::UnclassifiedTryPop],
     );
 }
 
@@ -240,6 +253,10 @@ fn a_proc_macro_that_a_macro_makes_is_refused() {
 /// opens no brace group, and a macro that emits no name.
 #[test]
 fn the_trusted_names_in_their_allowed_forms_pass() {
-    let text = "fn forms(c: &mut Consumer, o: Option<u8>) {\n    let _ = c.try_pop();\n    let _ = c.available_at_entry();\n    let _ = Consumer::try_pop(c);\n    let _ = Consumer::available_at_entry(c);\n    let _ = o.map(|x| x + 1);\n    let try_pop_count = 3;\n    let feature = try_pop_count + 1;\n    let _ = feature;\n}\n#[macro_use]\nmod vendored;\nmacro_rules! twice {\n    ($e:expr) => {\n        ($e, $e)\n    };\n}\n";
-    accepted("trusted-names-in-their-allowed-forms", text);
+    // The function stands in a region: a pop outside every region is refused (#1443 D2).
+    let text = "// @BEGIN@\nfn forms(c: &mut Consumer, o: Option<u8>) {\n    let _ = c.try_pop();\n    let _ = c.available_at_entry();\n    let _ = Consumer::try_pop(c);\n    let _ = Consumer::available_at_entry(c);\n    let _ = o.map(|x| x + 1);\n    let try_pop_count = 3;\n    let feature = try_pop_count + 1;\n    let _ = feature;\n}\n// @END@\n#[macro_use]\nmod vendored;\nmacro_rules! twice {\n    ($e:expr) => {\n        ($e, $e)\n    };\n}\n";
+    accepted(
+        "trusted-names-in-their-allowed-forms",
+        &text.replace("@BEGIN@", BEGIN).replace("@END@", END),
+    );
 }

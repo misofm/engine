@@ -69,7 +69,8 @@ outside the repository.
 ## Decisions
 
 - **D1. The name set.** Every non-test `fn` item under the scan roots (free, inherent, trait, trait
-  default; B2b-1-D1's definition: cfg evaluated with `test` false and every feature on, `#[test]`
+  default; B2b-1-D1's definition: cfg evaluated with `test` false and every `feature = ".."` read as unknown
+  (non-test, fail closed; root fix 2026-10-13), `#[test]`
   excluded, no exemption by name) whose own body holds a pop (B1a-D5) contributes its name.
   Closures count as part of the body; nested `fn` items are their own functions. `try_pop` itself
   is not in the set.
@@ -106,6 +107,10 @@ outside the repository.
   provably cannot reach the popping function is resolved only by a restructure that root names in
   the issue that makes it; the rule does not change. B2b-1-D6 is the one such decision so far; any
   later case goes to root by name.
+  **Root amendment (2026-10-13):** the `apply_latest` rename of `InputReader`, `FaderReader` and
+  `MatrixReader` in `crates/builtins-compiler/src/lib.rs` is not a rename that hides a pop: those
+  methods read latest-target cells and pop no queue since #1346 and #1312, so the name `drain` no
+  longer described them.
 - **D4. Limits that stay** (stated in the drain rule's module documentation):
   - a loop in an unmarked caller. B2b-1-D2 still requires the helper's pop to be marked or listed,
     and every real instance is in a marked region after B2b-1, #1449 and #1345 Amendment 1;
@@ -243,3 +248,44 @@ outside the repository.
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt record: attempt 1 (stream J follow-up batch, 2026-10-13, on `9ef045fbd`)
+
+Delivery mode: feature sprint (no mutation runs, short note). Re-measured on the branch (main
+`70804d3c2` plus #1443).
+
+- **What changed.** `tools/realtime-policy/src/calls.rs` (new; the call rule, D2 rules 1 to 3, D4
+  limits in its module documentation); `unmarked/walk.rs` and `unmarked/mod.rs` return the name set
+  (D1) and the non-test trait `impl`s from the walk #1443 already makes (`Popping`); `lib.rs` reads
+  `use .. as` renames of the iterator traits token by token from every file; classes
+  `PoppingCall`, `PoppingPathValue` and `PoppingIterator`; the drain module documentation (D6).
+  The rule is its own full `syn` visit with its own scopes (not the drain rule's allow-list tree),
+  so no node is skipped: locals are `let`, pattern and parameter bindings, a nested `fn` or other
+  item sees none of the function around it, and a `let` is hot when its initializer meets a name of
+  the set or a hot local at any depth.
+- **Tests.** `tests/policy/calls.rs` has every D5 case except the two it leaves to existing tests:
+  the helper-outside case gains the call-rule class in `unmarked.rs`, and the `cancel_except` twin
+  (`drain/twins.rs`) now runs the call rule unchanged and still passes. Extra cases: a call in a
+  macro token tree, a free-function and path call, the `for` iterator expression outside its loop,
+  locals named like popping functions (exempt) and the shadow ending with its block, a nested `fn`
+  that sees no local, every iterator trait with a rename in another file and `r#`, a quiet iterator
+  and a non-iterator trait that pop (accepted). One earlier case changed:
+  `a_pop_in_a_nested_function_is_judged_by_the_loops_outside_it` also gets `PoppingCall`, because
+  its loop calls the nested popping `helper`.
+- **Real tree, re-measured: 3 hits, a name collision.** The name set is 25 names (spec: 28 or 29;
+  `process` and `stage` left it with #1346/#1312/#1345). `drain` is in the set because of
+  `LiveControlEffectBankStage::drain` (`crates/rack/src/lib.rs:1513`, #1345's marked bank drain,
+  correct under the drain rule). The tool then refuses three calls whose receivers are cell readers
+  and never pop: `crates/builtins-compiler/src/lib.rs:1180` (`InputReader::drain`), `:2038`
+  (`FaderReader::drain`) and `:2074` (`MatrixReader::drain`), each in the `for .. in controls`
+  loop. This is D3's case (receiver cannot reach the popping function): the rule and the code stay
+  as they are, and root names the restructure. No other hit: the source acquire, the spectrum
+  collection, `poll_meters`, the plan exchange and the three spec-listed `.process(` calls are gone
+  or pass. No `impl Iterator` that pops exists.
+- **Gates run.** `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy
+  --all-targets -- -D warnings`, `cargo test --locked -p realtime-policy` (241 passed). Gate 1
+  (`cargo run --locked --release -q -p realtime-policy` on the real tree) failed before the rename
+  with the three hits above and nothing else. After the rename (root ruling below) gate 1 passes at
+  `e9255f196`: `ok (126 marked regions in 27 files)`.
+- Root ruling 2026-10-13 (D3): the three cell-reader methods in crates/builtins-compiler/src/lib.rs are renamed from `drain` to `apply_latest`. They read latest-target cells and pop no queue since #1346 and #1312. This is a rename only, with no behaviour change.
+- Root rescope (2026-10-13, feature sprint mode): MAJOR-1 (hoisted function values outside a let initializer) and MAJOR-2 (loops, closures and path values inside macro token trees) move to #1544. The remaining scope has no other BLOCKER or MAJOR (batch review).

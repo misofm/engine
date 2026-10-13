@@ -60,6 +60,21 @@ pub enum Class {
     ForbiddenBody,
     /// A `try_pop` in a marked region that the drain rule cannot prove bounded.
     UnboundedTryPop,
+    /// A call to a function that pops, inside a loop or a closure of a marked region (#1444 D2
+    /// rule 1).
+    PoppingCall,
+    /// A function that pops, named as a value anywhere in a marked region (#1444 D2 rule 2).
+    PoppingPathValue,
+    /// An `impl` of an iterator trait with a method that pops (#1444 D2 rule 3).
+    PoppingIterator,
+    /// A non-test `try_pop` outside every marked region, in a function that no control-side
+    /// allowlist entry admits (D2).
+    UnmarkedTryPop,
+    /// A `try_pop` identifier token that the syntax walk did not classify (D2, the census).
+    UnclassifiedTryPop,
+    /// A control-side allowlist entry whose file or function is gone, whose path matches more than
+    /// one function, or whose site count differs from the function's (D3).
+    StaleAllowlistEntry,
     /// `crates/capi/src/ffi.rs` does not exist.
     MissingCapiFfi,
     /// `crates/capi/src/ffi.rs` has no production render entry point.
@@ -145,6 +160,24 @@ impl fmt::Display for Class {
             Self::UnboundedTryPop => out.write_str(
                 "marked realtime unbounded try_pop drain (bound it with available_at_entry)",
             ),
+            Self::PoppingCall => out.write_str(
+                "marked realtime call to a popping function inside a loop or closure (move the pop out of the loop, or into the loop's own counted drain)",
+            ),
+            Self::PoppingPathValue => out.write_str(
+                "marked realtime path value that names a popping function (a function value can be called from a loop the walk does not see)",
+            ),
+            Self::PoppingIterator => out.write_str(
+                "iterator implementation whose method pops (iteration calls it with no call site to judge)",
+            ),
+            Self::UnmarkedTryPop => out.write_str(
+                "unmarked try_pop outside the control-side allowlist (mark its function as a realtime region, or list it with its thread and reason)",
+            ),
+            Self::UnclassifiedTryPop => out.write_str(
+                "try_pop token the syntax walk did not classify (not a pop, a fn definition, test code or an allowlisted pop)",
+            ),
+            Self::StaleAllowlistEntry => out.write_str(
+                "stale control-side allowlist entry (its file or function is gone, its path matches more than one function, or its site count differs)",
+            ),
             Self::MissingCapiFfi => write!(out, "missing {}", whole_plan::CAPI_FFI),
             Self::NoRenderEntry => out.write_str("has no production render entry point to scan"),
             Self::WholePlanReference => out.write_str(
@@ -209,7 +242,8 @@ pub struct Finding {
     pub line: Option<usize>,
     /// The text of that line, trimmed. Set only with a line.
     pub source: Option<String>,
-    /// The export that the finding is about, with its prefix, when it is about one.
+    /// The export that the finding is about, with its prefix, when it is about one; for a stale
+    /// allowlist entry, the entry's canonical function path.
     pub export: Option<String>,
 }
 
@@ -247,6 +281,11 @@ impl Finding {
         }
     }
 
+    /// The same finding, about the allowlist entry for `function`.
+    pub(crate) fn about_entry(self, function: &str) -> Self {
+        self.about(function)
+    }
+
     /// The same finding, about `export`.
     pub(crate) fn about(mut self, export: &str) -> Self {
         self.export = Some(export.to_owned());
@@ -269,7 +308,12 @@ impl fmt::Display for Finding {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(out, "realtime policy failure: {}", self.class)?;
         if let Some(export) = &self.export {
-            write!(out, ": export {export}")?;
+            let what = if self.class == Class::StaleAllowlistEntry {
+                "entry"
+            } else {
+                "export"
+            };
+            write!(out, ": {what} {export}")?;
         }
         if let Some(path) = &self.path {
             write!(out, ": {path}")?;
