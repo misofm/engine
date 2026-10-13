@@ -286,11 +286,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripInput",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1556,
-      "reopen": "The strip input slice (decision 17, S5) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     },
     {
       "control": 2,
@@ -321,11 +321,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripInput",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1556,
-      "reopen": "The strip input slice (decision 17, S5) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     },
     {
       "control": 3,
@@ -361,11 +361,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripInput",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1556,
-      "reopen": "The strip input slice (decision 17, S5) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     },
     {
       "control": 4,
@@ -401,11 +401,11 @@ export const CONTROLS = deepFreeze(
       "scope": "model",
       "family": "stripInput",
       "lanes": "perLane",
-      "class": "rebuildOnly",
-      "reason": "ruledLiveNotBuilt",
-      "reasonIssue": 1556,
-      "reopen": "The strip input slice (decision 17, S5) builds the live path and flips this row to live.",
-      "automatable": false
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": true
     },
     {
       "control": 5,
