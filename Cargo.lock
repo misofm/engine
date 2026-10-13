@@ -330,6 +330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "controls"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "builtins",
+ "effect-contract",
+ "session",
+]
+
+[[package]]
 name = "cpp_demangle"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,6 +943,7 @@ dependencies = [
  "builtins",
  "builtins-compiler",
  "compressor",
+ "controls",
  "dsp-reference",
  "effect-compiler",
  "effect-contract",

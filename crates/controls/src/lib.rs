@@ -1,0 +1,43 @@
+//! The control core (decision 17): every value of a session is one kind of control, listed,
+//! validated and written here and nowhere else.
+//!
+//! A control has one stable [`ControlAddress`] built from stable IDs, one [`ControlDescriptor`]
+//! that says what the value is (unit, range, taper, choices, ramp, class, render family), and one
+//! validator, [`check`]. [`list`] yields every control of a session with its descriptor and its
+//! committed value; [`get`] and [`set`] read and write one control by address.
+//!
+//! The rows come from tables and nowhere else:
+//!
+//! - a strip's builtin rows are `builtins::BUILTIN_PARAMETER_DESCRIPTORS`, bound to the model by
+//!   one `match` arm per builtin ID in [`builtin_rows`];
+//! - a strip's own rows, a route's, a VCA's and the session's are the tables in [`strip`],
+//!   [`route`], [`vca`] and [`session_rows`]; each row carries its model accessors.
+//!
+//! To add a control, add a row to its table (and the model field it reads); see decision 17,
+//! "How to add a control".
+//!
+//! This crate depends on `session`, `builtins` and `effect-contract` and on nothing above them.
+//! Lowering a changed value into a render record is `host-core`'s job, keyed by [`Family`].
+
+mod address;
+mod builtin_rows;
+mod descriptor;
+mod error;
+mod lane;
+mod live_ramps;
+mod registry;
+mod route;
+mod session_rows;
+mod strip;
+mod vca;
+
+pub use address::{ControlAddress, Lane, Owner, Section};
+pub use descriptor::{
+    Choice, ControlDescriptor, ControlScope, EFFECTIVE_SLICE, Lanes, Motion, ROUTE_SLICE, check,
+};
+pub use effect_contract::control::{
+    ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
+};
+pub use error::ControlError;
+pub use live_ramps::LiveRamps;
+pub use registry::{ControlRow, get, list, set};

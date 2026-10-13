@@ -4,6 +4,7 @@
 //! persistence envelope. Those are interchange concerns owned by issue 029.
 #![allow(missing_docs)]
 
+pub mod control;
 mod live;
 mod prepared_target;
 mod response;

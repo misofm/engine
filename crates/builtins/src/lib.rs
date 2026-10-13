@@ -22,6 +22,9 @@
 #[cfg(any(test, feature = "test-support"))]
 use core::cell::Cell;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use effect_contract::control::{
+    ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
+};
 
 use engine::{
     SampleRateHz, is_launch_sample_rate,
@@ -252,6 +255,17 @@ pub struct BuiltinParameterDescriptor {
     pub disabled_value: Option<f32>,
     /// Exact-decimal persisted-value lattice and named step ladder.
     pub lattice: effect_contract::ParameterLattice,
+    /// The `control_smoothing` row that ramps a live change; `None` is a fixed ramp that the
+    /// value's own kernel owns (the HPF and LPF coefficient ramp) or a value with no ramp.
+    pub ramp: Option<LiveRampRow>,
+    /// Whether a change is a live update or a plan rebuild, and why (decision 14, decision 17).
+    pub class: ControlClass,
+    /// The render family that carries a live change.
+    pub family: Family,
+    /// How a frontend maps the range to a control.
+    pub taper: Taper,
+    /// Continuous, toggle or enumeration.
+    pub kind: ControlKind,
 }
 
 /// Return the schema unit for one builtin parameter.
@@ -459,6 +473,17 @@ pub fn builtin_parameter_lattice_points(
     Ok(BuiltinLatticePoints { points, disabled })
 }
 
+/// The issue that makes the strip input section's values (trim, polarity, HPF, LPF) live on every
+/// host: decision 14 rules them live and decision 17 slice S5 builds the path. `0` until root
+/// numbers that issue (numbered by root); its last step flips these rows to `Live`.
+pub const STRIP_INPUT_SLICE: u32 = 0;
+
+const STRIP_INPUT_REOPEN: &str =
+    "The strip input slice (decision 17, S5) builds the live path and flips this row to live.";
+
+const DELAY_SAMPLES_REOPEN: &str = "A re-timing that does not glitch, for example a crossfaded dual \
+     read over a line sized to the 48,000-sample maximum, with that memory accepted (decision 14, D2).";
+
 pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 1,
@@ -476,6 +501,16 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        ramp: Some(LiveRampRow::PolarityInvert),
+        class: ControlClass::RebuildOnly {
+            reason: RebuildReason::RuledLiveNotBuilt {
+                issue: STRIP_INPUT_SLICE,
+            },
+            reopen: STRIP_INPUT_REOPEN,
+        },
+        family: Family::StripInput,
+        taper: Taper::Stepped,
+        kind: ControlKind::Toggle,
         lattice: effect_contract::ParameterLattice::indices(),
     },
     BuiltinParameterDescriptor {
@@ -496,6 +531,16 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        ramp: Some(LiveRampRow::InputTrim),
+        class: ControlClass::RebuildOnly {
+            reason: RebuildReason::RuledLiveNotBuilt {
+                issue: STRIP_INPUT_SLICE,
+            },
+            reopen: STRIP_INPUT_REOPEN,
+        },
+        family: Family::StripInput,
+        taper: Taper::Decibel,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.1, 1),
     },
     BuiltinParameterDescriptor {
@@ -514,6 +559,16 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
+        ramp: None,
+        class: ControlClass::RebuildOnly {
+            reason: RebuildReason::RuledLiveNotBuilt {
+                issue: STRIP_INPUT_SLICE,
+            },
+            reopen: STRIP_INPUT_REOPEN,
+        },
+        family: Family::StripInput,
+        taper: Taper::Logarithmic,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
     BuiltinParameterDescriptor {
@@ -530,6 +585,16 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::Linear64CoefficientUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: Some(0.0),
+        ramp: None,
+        class: ControlClass::RebuildOnly {
+            reason: RebuildReason::RuledLiveNotBuilt {
+                issue: STRIP_INPUT_SLICE,
+            },
+            reopen: STRIP_INPUT_REOPEN,
+        },
+        family: Family::StripInput,
+        taper: Taper::Logarithmic,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::cents(20.0, 3),
     },
     // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
@@ -553,6 +618,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Fader),
+        class: ControlClass::Live,
+        family: Family::StripLevel,
+        taper: Taper::Decibel,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.1, 1)
             .with_ladder(effect_contract::FADER_STEP_LADDER),
     },
@@ -567,6 +637,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Mute),
+        class: ControlClass::Live,
+        family: Family::StripLevel,
+        taper: Taper::Stepped,
+        kind: ControlKind::Toggle,
         lattice: effect_contract::ParameterLattice::indices(),
     },
     BuiltinParameterDescriptor {
@@ -583,6 +658,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Matrix),
+        class: ControlClass::Live,
+        family: Family::StripMatrix,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
@@ -599,6 +679,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Matrix),
+        class: ControlClass::Live,
+        family: Family::StripMatrix,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
@@ -615,6 +700,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Matrix),
+        class: ControlClass::Live,
+        family: Family::StripMatrix,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
@@ -631,6 +721,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Matrix),
+        class: ControlClass::Live,
+        family: Family::StripMatrix,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     // Issue #210 phase 2. Appended rather than inserted: the contract's self-test compares whole
@@ -658,6 +753,14 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         // all). Zero samples is an ordinary, in-domain point of a flat integer range, so this row
         // has no disabled value in that sense.
         disabled_value: None,
+        ramp: None,
+        class: ControlClass::RebuildOnly {
+            reason: RebuildReason::NewMemory,
+            reopen: DELAY_SAMPLES_REOPEN,
+        },
+        family: Family::StripInput,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(1.0, 0),
     },
     // #239 ruling 5461507633 B4: pan remains persisted intent and therefore owns a descriptor
@@ -677,6 +780,11 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        ramp: Some(LiveRampRow::Pan),
+        class: ControlClass::Live,
+        family: Family::StripMatrix,
+        taper: Taper::Linear,
+        kind: ControlKind::Continuous,
         lattice: effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
 ];
