@@ -1252,7 +1252,7 @@ model 19,434 + effect controls 19,377); eight lanes: 444,497 against 446,592. Th
 accident, so the x86 run stayed green.
 
 **Cause: commit `71b4ecdb8` (#1345 checkpoint 1).** Per-tap cells replaced the control queue and the target
-FIFO. The graph estimate grew by about 12.2 KB and the effect-control resources went from 15,345 to 19,377
+FIFO. The graph estimate grew by about 12.2 KB at four lanes (12,720 B at eight lanes) and the effect-control resources went from 15,345 to 19,377
 bytes at the reference shape (nine console-slot EQs), so the unaccounted term crossed the four-lane slack.
 
 **Fix.** The graph row's requirement is now `report.graph_session_plus_plan_bytes + model.compiled_model_bytes
@@ -1263,7 +1263,8 @@ the test asserts that so a session change cannot silently reopen the gap. The ca
 `REFERENCE_EFFECT_CONTROL_BUDGET = 21,376`, derived like `REFERENCE_MODEL_BUDGET` and the row budgets (measured
 value plus 10 %, rounded up to a 64-byte multiple): 19,377 x 1.1 = 21,314.7 -> 21,376. The 19,377 is identical
 at four and eight lanes (measured at both). The test now also admits at a cap equal to the requirement for
-every row, so an over-stated requirement (a cap that is never tight) turns red.
+every row, so an under-stated requirement (a cap below what the product admits) turns red; the one-below
+check catches an over-stated one.
 
 **Exact requirement, one below.** Graph row: four lanes (qemu-user) requirement 402,293 admits, 402,292
 refuses; eight lanes (x86) requirement 444,497 admits, 444,496 refuses. The other rows are exact at both
