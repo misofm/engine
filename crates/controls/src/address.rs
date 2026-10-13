@@ -168,10 +168,3 @@ pub struct ControlAddress {
     /// Which lane.
     pub lane: Lane,
 }
-
-impl ControlAddress {
-    /// Whether `other` names the same row of the same owner and section, on any lane.
-    pub(crate) fn same_row(&self, other: &Self) -> bool {
-        self.owner == other.owner && self.section == other.section && self.control == other.control
-    }
-}

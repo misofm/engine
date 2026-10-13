@@ -2,7 +2,7 @@
 //! through each member's effective fader and mute.
 
 use effect_contract::{ParameterLattice, ParameterUnit};
-use session::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, Vca};
+use session::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, SessionModel, StableId, Vca};
 
 use crate::address::{Owner, Section};
 use crate::descriptor::{
@@ -10,7 +10,7 @@ use crate::descriptor::{
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
-use crate::registry::{ControlRow, push_control};
+use crate::registry::{ControlRow, Resolved, push_control};
 use crate::{ControlKind, Family, LiveRampRow, Taper};
 
 const OFFSET_DB: u32 = 1;
@@ -89,6 +89,26 @@ pub(crate) fn push_rows(out: &mut Vec<ControlRow>, vca: &Vca) {
             |side| (row.read)(vca, side),
         );
     }
+}
+
+/// Find one row of VCA `id` by its control ID, as [`push_rows`] would list it.
+pub(crate) fn resolve(
+    model: &SessionModel,
+    id: &StableId,
+    control: u32,
+) -> Result<Resolved, ControlError> {
+    let vca = model
+        .vcas
+        .iter()
+        .find(|vca| vca.id == *id)
+        .ok_or(ControlError::AddressUnknown)?;
+    let row = ROWS
+        .iter()
+        .find(|row| row.id == control)
+        .ok_or(ControlError::AddressUnknown)?;
+    Ok(Resolved::stored(row.descriptor, |side| {
+        (row.read)(vca, side)
+    }))
 }
 
 /// Write one of a VCA's rows on `side`.

@@ -4,10 +4,10 @@ use session::SessionModel;
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
-use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, check};
-use crate::effective::{MonitorOverlay, effective};
+use crate::descriptor::{ControlDescriptor, Lanes, check};
+use crate::effective::{EffectiveStrip, MonitorOverlay, effective};
 use crate::error::ControlError;
-use crate::lane::Side;
+use crate::lane::{Side, both_sides, toggle};
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
 
 /// One control of a session: where it is, what it is, and its committed value.
@@ -124,52 +124,57 @@ pub fn row_descriptor(
     }
 }
 
-/// The rows of one owner, in listing order.
-fn owner_rows(
-    model: &SessionModel,
-    overlay: &MonitorOverlay,
-    owner: &Owner,
-    sample_rate: u32,
-) -> Result<Vec<ControlRow>, ControlError> {
-    let mut rows = Vec::new();
-    match owner {
-        Owner::Session => session_rows::push_rows(&mut rows, model),
-        Owner::Strip(id) => {
-            let (index, strip) = model
-                .strips()
-                .enumerate()
-                .find(|(_, strip)| strip.id == id)
-                .ok_or(ControlError::AddressUnknown)?;
-            let effective = effective(model, overlay);
-            let soloed = overlay.is_soloed(strip.id);
-            strip::push_rows(
-                &mut rows,
-                &model.console,
-                &strip,
-                &effective.strips[index],
-                soloed,
-                sample_rate,
-            );
-        }
-        Owner::Route(id) => {
-            let index = model
-                .routes
-                .iter()
-                .position(|route| route.id == *id)
-                .ok_or(ControlError::AddressUnknown)?;
-            let gate = effective(model, overlay).routes[index].gate;
-            route::push_rows(&mut rows, &model.routes[index], gate);
-        }
-        Owner::Vca(id) => {
-            let vca = model
-                .vcas
-                .iter()
-                .find(|vca| vca.id == *id)
-                .ok_or(ControlError::AddressUnknown)?;
-            vca::push_rows(&mut rows, vca);
+/// How a resolved row reaches its committed value.
+pub(crate) enum Source {
+    /// A field of the model: the value of the `left` and the `right` side (equal for a shared
+    /// row; a row that the owner's shape does not use holds its default).
+    Stored([f32; 2]),
+    /// A strip's derived row: computed from the effective values.
+    StripDerived(fn(&EffectiveStrip, Side) -> f32),
+    /// A route's derived row: computed from the route's effective gate.
+    RouteDerived(fn([bool; 2], Side) -> f32),
+    /// Held by the host (solo): the overlay's value.
+    Monitor,
+}
+
+/// One row found by address: its descriptor and where its value comes from. Built without
+/// listing the owner's other rows and without computing a derived value, so a write costs the
+/// size of the row, not the size of the model.
+pub(crate) struct Resolved {
+    pub(crate) descriptor: ControlDescriptor,
+    pub(crate) source: Source,
+}
+
+impl Resolved {
+    /// A stored row: `value` gives the committed value of a side, and a row the owner's shape does
+    /// not use reports the descriptor's default (as [`push_control`] does).
+    pub(crate) fn stored(descriptor: ControlDescriptor, value: impl Fn(Side) -> f32) -> Self {
+        let values = if descriptor.active {
+            both_sides(value)
+        } else {
+            [descriptor.default; 2]
+        };
+        Self {
+            descriptor,
+            source: Source::Stored(values),
         }
     }
-    Ok(rows)
+}
+
+/// Find the row at `address` (its owner, section and control, on any lane).
+fn resolve(
+    model: &SessionModel,
+    address: &ControlAddress,
+    sample_rate: u32,
+) -> Result<Resolved, ControlError> {
+    let control = address.control;
+    match (&address.owner, &address.section) {
+        (Owner::Session, Section::Own) => session_rows::resolve(model, control),
+        (Owner::Strip(id), section) => strip::resolve(model, id, section, control, sample_rate),
+        (Owner::Route(id), Section::Own) => route::resolve(model, id, control),
+        (Owner::Vca(id), Section::Own) => vca::resolve(model, id, control),
+        _ => Err(ControlError::AddressUnknown),
+    }
 }
 
 /// The committed value of the control at `address`.
@@ -187,19 +192,50 @@ pub fn get(
     address: &ControlAddress,
     sample_rate: u32,
 ) -> Result<f32, ControlError> {
-    let rows = owner_rows(model, overlay, &address.owner, sample_rate)?;
-    if let Some(row) = rows.iter().find(|row| row.address == *address) {
-        return Ok(row.value);
+    let resolved = resolve(model, address, sample_rate)?;
+    if !resolved.descriptor.lanes.listed().contains(&address.lane) {
+        return Err(ControlError::Lane);
     }
-    if rows.iter().any(|row| row.address.same_row(address)) {
-        Err(ControlError::Lane)
-    } else {
-        Err(ControlError::AddressUnknown)
-    }
+    let side = Side::of(address.lane);
+    Ok(match resolved.source {
+        Source::Stored(values) => side.pick(values[0], values[1]),
+        Source::Monitor => match &address.owner {
+            Owner::Strip(id) => toggle(overlay.is_soloed(id)),
+            _ => 0.0,
+        },
+        // Only a derived row pays for the effective values.
+        Source::StripDerived(read) => {
+            let effective = effective(model, overlay);
+            let Owner::Strip(id) = &address.owner else {
+                return Err(ControlError::AddressUnknown);
+            };
+            let index = model
+                .strips()
+                .position(|strip| strip.id == id)
+                .ok_or(ControlError::AddressUnknown)?;
+            read(&effective.strips[index], side)
+        }
+        Source::RouteDerived(read) => {
+            let effective = effective(model, overlay);
+            let Owner::Route(id) = &address.owner else {
+                return Err(ControlError::AddressUnknown);
+            };
+            let index = model
+                .routes
+                .iter()
+                .position(|route| route.id == *id)
+                .ok_or(ControlError::AddressUnknown)?;
+            read(effective.routes[index].gate, side)
+        }
+    })
 }
 
 /// Write `value` to the control at `address`: look it up, validate with [`check`], then change the
 /// model. Nothing changes if any step refuses.
+///
+/// The row is found by its address and its descriptor and committed value are read from that row
+/// alone: no other row of the owner is built and no effective value is computed (a transaction of
+/// many writes costs the sum of its rows, not edits times the model).
 ///
 /// `ramp` is an explicit ramp length in samples for the live path; the model write does not use
 /// it (the classifier and the lowering do), but a ramp that the row cannot honour is refused here
@@ -219,19 +255,8 @@ pub fn set(
     ramp: Option<u32>,
     sample_rate: u32,
 ) -> Result<(), ControlError> {
-    // A written row is never derived or monitor, so the overlay changes neither what `set`
-    // compares against nor what it writes.
-    let rows = owner_rows(
-        model,
-        &MonitorOverlay::default(),
-        &address.owner,
-        sample_rate,
-    )?;
-    let mut targets = rows.iter().filter(|row| row.address.same_row(address));
-    let descriptor = targets
-        .next()
-        .ok_or(ControlError::AddressUnknown)?
-        .descriptor;
+    let resolved = resolve(model, address, sample_rate)?;
+    let descriptor = resolved.descriptor;
     check(&descriptor, address.lane, value, ramp)?;
     // The effect contract treats the two zeros as one value and preparation normalises them.
     let value = if descriptor.family == Family::Effect {
@@ -239,16 +264,18 @@ pub fn set(
     } else {
         value
     };
-    if descriptor.scope == ControlScope::Monitor {
-        return Err(ControlError::Monitor);
-    }
-    let unchanged = rows
+    // `check` has refused a derived row, so only a monitor row or a stored row is left.
+    let committed = match resolved.source {
+        Source::Stored(committed) => committed,
+        Source::Monitor => return Err(ControlError::Monitor),
+        Source::StripDerived(_) | Source::RouteDerived(_) => return Err(ControlError::ReadOnly),
+    };
+    let unchanged = descriptor
+        .lanes
+        .listed()
         .iter()
-        .filter(|row| {
-            row.address.same_row(address)
-                && (address.lane == Lane::Both || row.address.lane == address.lane)
-        })
-        .all(|row| row.value.to_bits() == value.to_bits());
+        .filter(|&&lane| address.lane == Lane::Both || lane == address.lane)
+        .all(|&lane| Side::of(lane).pick(committed[0], committed[1]).to_bits() == value.to_bits());
     if unchanged {
         return Ok(());
     }

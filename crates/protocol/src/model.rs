@@ -117,6 +117,9 @@ pub enum SessionEditOpcode {
     RemoveVca = 0x0701,
     /// `SetVcaFader` (#1241).
     SetVcaFader = 0x0702,
+    /// `SetControl` (decision 17, #1553): any control by its stable address. The first code of
+    /// the control family (`0x08xx`).
+    SetControl = 0x0800,
 }
 
 impl SessionEditOpcode {
@@ -177,6 +180,7 @@ impl SessionEditOpcode {
             0x0700 => Some(Self::UpsertVca),
             0x0701 => Some(Self::RemoveVca),
             0x0702 => Some(Self::SetVcaFader),
+            0x0800 => Some(Self::SetControl),
             _ => None,
         }
     }
@@ -489,6 +493,19 @@ pub enum SessionEdit {
         /// (#1394). Transaction metadata, never model state.
         ramp_samples: Option<u32>,
     },
+    /// Set any control by its stable address (decision 17, C5, #1553). The core's one validator
+    /// refuses a bad write with a typed [`SessionEditError::Control`] before anything changes;
+    /// whether the committed edit is live or a rebuild is the classifier's answer for the
+    /// resulting model, exactly as for the per-kind edit that writes the same field.
+    SetControl {
+        address: controls::ControlAddress,
+        /// The value in the control's unit; a toggle is exactly 0 or 1 and an enumeration one of
+        /// its choice values. Not required to be finite on the wire: the validator refuses it.
+        value: f32,
+        /// This edit's own ramp length in samples; absent means the row's default. A row whose
+        /// ramp is fixed refuses an explicit length. Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
+    },
 }
 
 impl SessionEdit {
@@ -543,6 +560,7 @@ impl SessionEdit {
             Self::UpsertVca { .. } => SessionEditOpcode::UpsertVca,
             Self::RemoveVca { .. } => SessionEditOpcode::RemoveVca,
             Self::SetVcaFader { .. } => SessionEditOpcode::SetVcaFader,
+            Self::SetControl { .. } => SessionEditOpcode::SetControl,
         }
     }
 }
@@ -564,7 +582,8 @@ impl SessionEdit {
             | Self::SetRouteGainDb { ramp_samples, .. }
             | Self::SetRouteMute { ramp_samples, .. }
             | Self::SetRouteFollowsMute { ramp_samples, .. }
-            | Self::SetVcaFader { ramp_samples, .. } => *ramp_samples,
+            | Self::SetVcaFader { ramp_samples, .. }
+            | Self::SetControl { ramp_samples, .. } => *ramp_samples,
             // Listed one by one on purpose, with no wildcard: a new variant must be classified
             // here, as in `record_edit_ramps`. An existing arm that gains a `ramp_samples` field
             // still compiles, so a reviewer checks the arm of any variant that gains one.
@@ -667,6 +686,12 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
             EditRampTarget::Vca(vca_id.clone()),
             &[EditRampRow::VcaFader, EditRampRow::VcaMute],
         ),
+        // A control edit writes the one row its address names, if that row ramps.
+        SessionEdit::SetControl { address, .. } => {
+            if let Some((target, row)) = control_ramp_row(address) {
+                write(target, &[row]);
+            }
+        }
         SessionEdit::UpsertTrack { track } => {
             ramps.clear_target(&EditRampTarget::Strip(track.id.clone()));
         }
@@ -751,6 +776,49 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
     }
 }
 
+/// The sample rate at which [`control_ramp_row`] asks the control core for a row: a row's motion
+/// does not depend on the rate.
+const MOTION_SAMPLE_RATE_HZ: u32 = 48_000;
+
+/// The `(target, row)` of the recorded ramp length that a write to `address` decides (#1553 D4),
+/// or `None` for a row whose ramp is fixed (its kernel owns it, and `controls::check` has refused
+/// an explicit length) or that has no ramp row. The row is the one the control's descriptor names,
+/// so the table of which control ramps lives in the control core and nowhere else.
+fn control_ramp_row(address: &controls::ControlAddress) -> Option<(EditRampTarget, EditRampRow)> {
+    use controls::{LiveRampRow, Motion, Owner};
+    let descriptor = controls::row_descriptor(
+        address.owner.kind(),
+        address.section.kind(),
+        address.control,
+        MOTION_SAMPLE_RATE_HZ,
+    )?;
+    let Motion::Ramp(ramp_row) = descriptor.motion else {
+        return None;
+    };
+    // No wildcard: a new live ramp row must be classified here.
+    let row = match ramp_row {
+        LiveRampRow::Fader => EditRampRow::Fader,
+        LiveRampRow::Mute => EditRampRow::Mute,
+        LiveRampRow::Pan | LiveRampRow::Matrix => EditRampRow::Matrix,
+        LiveRampRow::InputTrim | LiveRampRow::PolarityInvert => EditRampRow::Input,
+        LiveRampRow::SendGain => EditRampRow::RouteGain,
+        LiveRampRow::SendMute | LiveRampRow::SendFollowsMute => EditRampRow::RouteMute,
+        LiveRampRow::SendMatrix => EditRampRow::RouteMatrix,
+        LiveRampRow::VcaOffset => EditRampRow::VcaFader,
+        LiveRampRow::VcaMute => EditRampRow::VcaMute,
+        // Solo is a monitor row (refused by `set`), the link glide has no control row with a
+        // per-edit length, and the bypass crossfade is fixed.
+        LiveRampRow::Solo | LiveRampRow::LinkGlide | LiveRampRow::BypassCrossfade => return None,
+    };
+    let target = match &address.owner {
+        Owner::Strip(id) => EditRampTarget::Strip(id.clone()),
+        Owner::Route(id) => EditRampTarget::Route(id.clone()),
+        Owner::Vca(id) => EditRampTarget::Vca(id.clone()),
+        Owner::Session => return None,
+    };
+    Some((target, row))
+}
+
 /// An edit-resolution failure before session compilation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEditError {
@@ -777,6 +845,9 @@ pub enum SessionEditError {
     /// second (#1394 D4, the bound of `control_smoothing`'s 1000 ms). The bound uses the rate the
     /// transaction commits.
     RampOutOfRange,
+    /// A `SetControl` edit was refused by the control core's validator (decision 17, C5). The
+    /// diagnostic code is the control code itself (`control.domain`, `control.read_only`, ...).
+    Control(controls::ControlError),
 }
 
 impl fmt::Display for SessionEditError {
@@ -1066,6 +1137,16 @@ pub fn apply_session_edit(
                 .find(|item| &item.id == vca_id)
                 .ok_or(SessionEditError::NotFound)?
                 .fader = fader.clone();
+        }
+        // Every check runs inside `set`, before its one model write (the acked-batch rule).
+        SessionEdit::SetControl {
+            address,
+            value,
+            ramp_samples,
+        } => {
+            let sample_rate_hz = session.sample_rate_hz;
+            controls::set(session, address, *value, *ramp_samples, sample_rate_hz)
+                .map_err(SessionEditError::Control)?;
         }
     }
     Ok(())
@@ -1855,8 +1936,9 @@ mod tests {
     /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1216 appends
     /// `SetRouteMute` (`0x0506`), #1218 appends `SetRouteFollowsMute` (`0x0507`) and #1241 opens
     /// the VCA family with `UpsertVca`, `RemoveVca` and `SetVcaFader` (`0x0700`-`0x0702`), and
-    /// #1365 appends `SetControlSmoothing` (`0x0008`): every allocated code round-trips through
-    /// `from_raw`, there are exactly 47 of them, and no retired code came back.
+    /// #1365 appends `SetControlSmoothing` (`0x0008`) and #1553 opens the control family with
+    /// `SetControl` (`0x0800`): every allocated code round-trips through
+    /// `from_raw`, there are exactly 48 of them, and no retired code came back.
     ///
     /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
     /// variant, or if an opcode is added to the enum but not to `from_raw`.
@@ -1865,7 +1947,7 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 47);
+        assert_eq!(allocated.len(), 48);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
@@ -1898,6 +1980,10 @@ mod tests {
         assert_eq!(
             SessionEditOpcode::from_raw(0x0702),
             Some(SessionEditOpcode::SetVcaFader)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0800),
+            Some(SessionEditOpcode::SetControl)
         );
         for retired in [0x0006, 0x0102, 0x0104] {
             assert_eq!(SessionEditOpcode::from_raw(retired), None);

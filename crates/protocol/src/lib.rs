@@ -29,6 +29,10 @@ pub use message_wire::{
     SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration, TransactionApplied,
     TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
 };
+/// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
+pub mod control_core {
+    pub use controls::{ControlAddress, ControlError, Lane, Owner, Section};
+}
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,
     SessionStore, SessionStoreError, apply_session_edit,

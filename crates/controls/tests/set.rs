@@ -205,6 +205,26 @@ fn set_then_get_round_trips_every_writable_row_onto_its_own_field() {
     assert_eq!(written, 90);
 }
 
+/// `get` of every listed address returns the value `list` gives, bit for bit, with a soloed
+/// strip so that the monitor and the derived rows differ from their idle values.
+///
+/// Red if the direct row lookup behind `get` and `set` (which builds neither the owner's other
+/// rows nor the effective values for a stored row) resolves a different descriptor, shape default
+/// or lane than the listing: an inactive row, a console slot, a derived row or a submix.
+#[test]
+fn get_returns_the_listed_value_of_every_row() {
+    let model = fixture();
+    let overlay = controls::MonitorOverlay::with_soloed([id("vocal")]);
+    let mut count = 0;
+    for row in list(&model, &overlay, RATE) {
+        let value = get(&model, &overlay, &row.address, RATE)
+            .unwrap_or_else(|error| panic!("{:?}: {error}", row.address));
+        assert_eq!(value.to_bits(), row.value.to_bits(), "{:?}", row.address);
+        count += 1;
+    }
+    assert!(count > 90, "the sweep must cover the fixture: {count}");
+}
+
 /// A derived row is read-only through `set`, and `check` says so.
 #[test]
 fn derived_rows_are_read_only() {

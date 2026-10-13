@@ -13,7 +13,7 @@ use crate::Family;
 use crate::address::{Owner, Section};
 use crate::descriptor::{BASE, ControlDescriptor};
 use crate::error::ControlError;
-use crate::registry::{ControlRow, push_control};
+use crate::registry::{ControlRow, Resolved, push_control};
 
 const FADER_MS: u32 = 1;
 const MUTE_MS: u32 = 2;
@@ -89,6 +89,16 @@ pub(crate) fn push_rows(out: &mut Vec<ControlRow>, model: &SessionModel) {
             |_| (row.read)(&lengths),
         );
     }
+}
+
+/// Find one row of the session by its control ID, as [`push_rows`] would list it.
+pub(crate) fn resolve(model: &SessionModel, control: u32) -> Result<Resolved, ControlError> {
+    let row = ROWS
+        .iter()
+        .find(|row| row.id == control)
+        .ok_or(ControlError::AddressUnknown)?;
+    let lengths = model.control_smoothing.unwrap_or(CONTROL_SMOOTHING_DEFAULT);
+    Ok(Resolved::stored(row.descriptor, |_| (row.read)(&lengths)))
 }
 
 /// Write one of the session's rows.

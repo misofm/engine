@@ -305,6 +305,17 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             },
             ramp_samples: None,
         },
+        // #1553: the first fader of the track by its stable address, with a ramp of 240 samples.
+        SessionEdit::SetControl {
+            address: control_core::ControlAddress {
+                owner: control_core::Owner::Strip(track_id.clone()),
+                section: control_core::Section::Builtins,
+                control: 5,
+                lane: control_core::Lane::Left,
+            },
+            value: -3.0,
+            ramp_samples: Some(240),
+        },
     ]
 }
 
@@ -793,7 +804,9 @@ pub enum ConformanceDecoder {
 /// `PARAMETER_STATE_GET` (`0x0004`, `0x0005`) as command and response frames, the capability
 /// registry lists the new pair, and the capabilities field 21 is the control page bound. The frame
 /// count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x0902_357f_75bd_ddcd;
+/// Issue #1553 (decision 17, C5) repinned it from `0902357f75bdddcd`: `SetControl` (`0x0800`)
+/// appended, 48 edits, one per allocated opcode. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x9f13_a069_93ef_a99e;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

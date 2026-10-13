@@ -7,7 +7,7 @@
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
     ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Route,
-    RouteDestination,
+    RouteDestination, SessionModel, StableId,
 };
 
 use crate::address::{Owner, Section};
@@ -16,7 +16,7 @@ use crate::descriptor::{
 };
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
-use crate::registry::{ControlRow, push_control};
+use crate::registry::{ControlRow, Resolved, Source, push_control};
 use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
 
 const GAIN_DB: u32 = 1;
@@ -250,6 +250,31 @@ pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2
             },
         );
     }
+}
+
+/// Find one row of route `id` by its control ID, as [`push_rows`] would list it.
+pub(crate) fn resolve(
+    model: &SessionModel,
+    id: &StableId,
+    control: u32,
+) -> Result<Resolved, ControlError> {
+    let route = model
+        .routes
+        .iter()
+        .find(|route| route.id == *id)
+        .ok_or(ControlError::AddressUnknown)?;
+    let row = ROWS
+        .iter()
+        .find(|row| row.id == control)
+        .ok_or(ControlError::AddressUnknown)?;
+    let descriptor = descriptor(row, route);
+    Ok(match &row.value {
+        RouteValue::Stored { read, .. } => Resolved::stored(descriptor, |_| read(route)),
+        RouteValue::Derived { read } => Resolved {
+            descriptor,
+            source: Source::RouteDerived(*read),
+        },
+    })
 }
 
 /// Write one of a route's rows.

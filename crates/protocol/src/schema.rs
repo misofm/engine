@@ -1658,6 +1658,21 @@ pub(crate) mod session {
         };
     }
 
+    /// `SET_CONTROL` (decision 17, C5): any control by its stable address (#1553 D2). The address is
+    /// the control address message of the control list; a set requires its `control` and `lane`.
+    pub(crate) mod set_control {
+        use super::*;
+        pub(crate) const ADDRESS: FieldSpec =
+            FieldSpec::msg(1, true, false, &crate::schema::control_address::SPEC);
+        pub(crate) const VALUE: FieldSpec = FieldSpec::req(2, Wire::F32);
+        /// This edit's own ramp length in samples, absent for the row's default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetControl",
+            fields: &[ADDRESS, VALUE, RAMP_SAMPLES],
+        };
+    }
+
     /// The optional `ramp_samples` field of a live-value edit's payload (#1394 D1), or `None` for
     /// an opcode that does not carry one.
     pub(crate) const fn ramp_samples_field(opcode: crate::SessionEditOpcode) -> Option<FieldSpec> {
@@ -1674,6 +1689,7 @@ pub(crate) mod session {
             SetRouteMute => Some(set_route_mute::RAMP_SAMPLES),
             SetRouteFollowsMute => Some(set_route_follows_mute::RAMP_SAMPLES),
             SetVcaFader => Some(set_vca_fader::RAMP_SAMPLES),
+            SetControl => Some(set_control::RAMP_SAMPLES),
             // Listed one by one on purpose, with no wildcard: a new opcode must be classified here,
             // as in `SessionEdit::ramp_samples`, or the build fails.
             SetSessionId
@@ -1765,6 +1781,7 @@ pub(crate) mod session {
             UpsertVca => &upsert_vca::SPEC,
             RemoveVca => &remove_vca::SPEC,
             SetVcaFader => &set_vca_fader::SPEC,
+            SetControl => &set_control::SPEC,
         }
     }
 }

@@ -516,3 +516,205 @@ fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
         assert_eq!(recorded(&store, &edits), expected, "{name}");
     }
 }
+
+// ---- #1553: SET_CONTROL --------------------------------------------------------------------
+
+use controls::{ControlAddress, ControlError, Lane, Owner, Section};
+
+/// The builtin IDs the address names (`BUILTIN_PARAMETER_DESCRIPTORS`).
+const TRIM_DB: u32 = 2;
+const FADER_DB: u32 = 5;
+const MUTE: u32 = 6;
+const PAN: u32 = 12;
+
+fn builtin(strip: &str, control: u32, lane: Lane) -> ControlAddress {
+    ControlAddress {
+        owner: Owner::Strip(id(strip)),
+        section: Section::Builtins,
+        control,
+        lane,
+    }
+}
+
+fn set_control(address: ControlAddress, value: f32, ramp_samples: Option<u32>) -> SessionEdit {
+    SessionEdit::SetControl {
+        address,
+        value,
+        ramp_samples,
+    }
+}
+
+/// #1553 D4: a `SetControl` records the one row its address names, on that address's owner, and a
+/// later one without a length removes it; a fixed-ramp row records nothing.
+///
+/// Red if the address maps to the wrong row (a fader edit also taking the mute row as the per-kind
+/// edit does, a pan on the fader row), the wrong target, or if an absent length keeps an earlier
+/// explicit one.
+#[test]
+fn set_control_records_the_row_its_address_names() {
+    let store = store();
+    let own = |owner, control| ControlAddress {
+        owner,
+        section: Section::Own,
+        control,
+        lane: Lane::Both,
+    };
+    let edits = [
+        set_control(builtin("vocal", FADER_DB, Lane::Left), 0.0, Some(37)),
+        set_control(builtin("vocal", PAN, Lane::Both), 0.5, Some(9)),
+        set_control(builtin("vocal", TRIM_DB, Lane::Both), 0.0, Some(3)),
+        set_control(own(Owner::Route(id("to-main")), 1), 0.0, Some(5)),
+        set_control(
+            ControlAddress {
+                lane: Lane::Left,
+                ..own(Owner::Vca(id("grp")), 1)
+            },
+            0.0,
+            Some(7),
+        ),
+        // The second track's fader is set, then set again without a length.
+        set_control(builtin("second", FADER_DB, Lane::Both), 0.0, Some(5)),
+        set_control(builtin("second", FADER_DB, Lane::Both), 0.0, None),
+    ];
+    let entries = recorded(&store, &edits);
+    let expected = vec![
+        (strip("vocal"), EditRampRow::Fader, 37),
+        (strip("vocal"), EditRampRow::Matrix, 9),
+        (strip("vocal"), EditRampRow::Input, 3),
+        (
+            EditRampTarget::Route(id("to-main")),
+            EditRampRow::RouteGain,
+            5,
+        ),
+        (EditRampTarget::Vca(id("grp")), EditRampRow::VcaFader, 7),
+    ];
+    assert_eq!(entries, expected);
+}
+
+/// #1553 gate 3 and 4 at the store: a refusal names its edit and its control code and changes
+/// nothing, even when an earlier edit of the transaction was valid; an explicit length on a
+/// fixed-ramp row is `control.ramp.fixed`; a length above the rate is the existing bound.
+///
+/// Red if a bad edit lets an earlier good edit commit, if a fixed-ramp row ignores a length, or if
+/// the control refusal is reported at the wrong index.
+#[test]
+fn a_refused_set_control_refuses_the_whole_transaction() {
+    let store = store();
+    let revision = store.revision();
+    let before = store.canonical_snapshot();
+    let refuse = |edits: &[SessionEdit]| {
+        store
+            .prepare_transaction(ExpectedRevision::Exact(revision), edits)
+            .err()
+            .expect("the transaction refuses")
+    };
+    let good = set_control(builtin("vocal", FADER_DB, Lane::Both), -3.0, None);
+    assert_eq!(
+        refuse(&[
+            good.clone(),
+            set_control(builtin("vocal", PAN, Lane::Both), 5.0, None)
+        ]),
+        SessionStoreError::Edit {
+            operation_index: 1,
+            error: SessionEditError::Control(ControlError::Domain),
+        }
+    );
+    // Not finite: the codec carries it, the validator refuses it at its own edit.
+    assert_eq!(
+        refuse(&[
+            good.clone(),
+            set_control(builtin("vocal", FADER_DB, Lane::Both), f32::NAN, None)
+        ]),
+        SessionStoreError::Edit {
+            operation_index: 1,
+            error: SessionEditError::Control(ControlError::Domain),
+        }
+    );
+    let bypass = ControlAddress {
+        owner: Owner::Strip(id("vocal")),
+        section: Section::Inserts(id("eq")),
+        control: 0,
+        lane: Lane::Both,
+    };
+    // The fixture's effect is not a launch effect (no rows); a launch identity gives it a bypass.
+    let launch_eq = SessionEdit::SetEffectIdentity {
+        track_id: id("vocal"),
+        rack_name: RackName::Inserts,
+        effect_id: id("eq"),
+        identity: session::EffectIdentity::Native {
+            effect_id: id("miso.parametric-eq"),
+        },
+    };
+    assert_eq!(
+        refuse(&[set_control(bypass.clone(), 1.0, None)]),
+        SessionStoreError::Edit {
+            operation_index: 0,
+            error: SessionEditError::Control(ControlError::AddressUnknown),
+        }
+    );
+    assert_eq!(
+        refuse(&[
+            launch_eq.clone(),
+            set_control(bypass.clone(), 1.0, Some(10))
+        ]),
+        SessionStoreError::Edit {
+            operation_index: 1,
+            error: SessionEditError::Control(ControlError::RampFixed),
+        }
+    );
+    assert_eq!(
+        refuse(&[set_control(
+            builtin("vocal", FADER_DB, Lane::Both),
+            0.0,
+            Some(48_001)
+        )]),
+        SessionStoreError::Edit {
+            operation_index: 0,
+            error: SessionEditError::RampOutOfRange,
+        }
+    );
+    // The same bypass without a length commits.
+    assert!(
+        store
+            .prepare_transaction(
+                ExpectedRevision::Exact(revision),
+                &[launch_eq, set_control(bypass, 1.0, None)]
+            )
+            .is_ok()
+    );
+    assert_eq!(store.revision(), revision);
+    assert_eq!(store.canonical_snapshot(), before);
+}
+
+/// #1553 gate 1 at the model: a `SetControl` writes the same field the per-kind edit writes.
+///
+/// Red if the address resolves a different field, lane or value than the old op.
+#[test]
+fn set_control_writes_what_the_per_kind_edit_writes() {
+    let base = store();
+    let per_kind = {
+        let track = vocal(&base);
+        let mut fader = track.fader.clone();
+        fader.left_db = -4.5;
+        SessionEdit::SetTrackFader {
+            track_id: track.id.clone(),
+            fader,
+            ramp_samples: None,
+        }
+    };
+    let by_address = set_control(builtin("vocal", FADER_DB, Lane::Left), -4.5, None);
+    let commit = |edit: SessionEdit| {
+        let store = self::store();
+        store
+            .prepare_transaction(ExpectedRevision::Exact(store.revision()), &[edit])
+            .expect("prepares")
+            .compiled()
+            .normalized_model()
+            .clone()
+    };
+    assert_eq!(commit(per_kind), commit(by_address));
+    // The mute row has its own address, and the left lane only.
+    let model = commit(set_control(builtin("vocal", MUTE, Lane::Left), 1.0, None));
+    let track = model.tracks.iter().find(|t| t.id == id("vocal")).unwrap();
+    assert!(track.fader.left_mute && !track.fader.right_mute);
+}

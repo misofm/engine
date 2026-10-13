@@ -315,10 +315,10 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
     // `SetTrackConsole`, #1216 appended `SetRouteMute`, #1218 `SetRouteFollowsMute`, #1241 the
-    // three VCA edits and #1365 `SetControlSmoothing`, so the boundary this row exists to probe
-    // is now 46. A smaller number still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 47);
-    limited.config.maximum_transaction_edits = 46;
+    // three VCA edits, #1365 `SetControlSmoothing` and #1553 `SetControl`, so the boundary this
+    // row exists to probe is now 47. A smaller number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 48);
+    limited.config.maximum_transaction_edits = 47;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,

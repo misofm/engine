@@ -15,7 +15,7 @@ use crate::effective::EffectiveStrip;
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::lane::{is_on, toggle};
-use crate::registry::{ControlRow, push_control};
+use crate::registry::{ControlRow, Resolved, Source, push_control};
 use crate::{ControlClass, ControlKind, ControlScope, Family, LiveRampRow, Taper};
 
 /// The own-row ID of `matrix_mode`.
@@ -305,6 +305,77 @@ pub(crate) fn push_rows(
         );
     }
     push_console(out, strip, &console.post_insert, post_entries);
+}
+
+/// Find one row of strip `id` (a track or a submix) by section and control, as [`push_rows`] would
+/// list it, without building the strip's other rows.
+pub(crate) fn resolve(
+    model: &SessionModel,
+    id: &StableId,
+    section: &Section,
+    control: u32,
+    sample_rate: u32,
+) -> Result<Resolved, ControlError> {
+    let strip = model
+        .strips()
+        .find(|strip| strip.id == id)
+        .ok_or(ControlError::AddressUnknown)?;
+    let unknown = ControlError::AddressUnknown;
+    match section {
+        Section::Own => {
+            let on_submix = matches!(strip.kind, StripKind::Submix(_));
+            let row = ROWS
+                .iter()
+                .find(|row| row.id == control && (row.on_submix || !on_submix))
+                .ok_or(unknown)?;
+            Ok(match &row.value {
+                StripValue::Stored { read, .. } => {
+                    Resolved::stored(row.descriptor, |side| read(&strip, side))
+                }
+                StripValue::Derived { read } => Resolved {
+                    descriptor: row.descriptor,
+                    source: Source::StripDerived(*read),
+                },
+                StripValue::Monitor => Resolved {
+                    descriptor: row.descriptor,
+                    source: Source::Monitor,
+                },
+            })
+        }
+        Section::Builtins => {
+            let row = builtin_rows::row(control).ok_or(unknown)?;
+            let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
+            Ok(Resolved::stored(descriptor, |side| {
+                builtin_rows::read(&strip, row, side)
+            }))
+        }
+        Section::Console(slot) => {
+            let (pre_entries, post_entries) = strip
+                .console
+                .split_at(model.console.pre_insert.len().min(strip.console.len()));
+            [
+                (&model.console.pre_insert, pre_entries),
+                (&model.console.post_insert, post_entries),
+            ]
+            .into_iter()
+            .find_map(|(slots, entries)| {
+                slots
+                    .iter()
+                    .zip(entries)
+                    .find(|(candidate, _)| candidate.slot == *slot)
+                    .map(|(candidate, entry)| Instance::console(&candidate.identity, entry))
+            })
+            .and_then(|instance| effect_rows::resolve(&instance, control))
+            .ok_or(unknown)
+        }
+        Section::Inserts(effect) => strip
+            .inserts
+            .effects
+            .iter()
+            .find(|candidate| candidate.id == *effect)
+            .and_then(|effect| effect_rows::resolve(&Instance::insert(effect), control))
+            .ok_or(unknown),
+    }
 }
 
 /// The rows of one console section of a strip.

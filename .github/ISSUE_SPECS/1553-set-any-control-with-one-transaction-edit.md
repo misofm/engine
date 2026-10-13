@@ -136,3 +136,33 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record (implementation, 2026-10-13)
+
+- **D8. `controls::get` and `controls::set` resolve one row (carry-forward from the batch-1
+  review).** `set` is now the hot control-thread path (a transaction of N `SET_CONTROL` edits), and
+  both functions used to build every row of the owner and run the allocating `effective(model)` per
+  call, so N edits cost O(N x model). `registry::resolve` now finds the one row by owner, section
+  and control ID (`strip::resolve`, `route::resolve`, `vca::resolve`, `session_rows::resolve`,
+  `effect_rows::resolve`): the descriptor comes from the section table, from the builtin table with
+  the owner's shape for `active`, or from the effect contract's descriptor, and the committed value
+  from that row's accessor alone. Only a derived row in `get` computes `effective`; `set` never does
+  (a derived row is refused by `check` first, and solo needs no overlay). Results are identical:
+  the existing `controls` tests are unchanged and green, and `get_returns_the_listed_value_of_every_row`
+  pins `get` to `list` for every row of the fixture under a soloed overlay.
+- **D9. The edit's address type.** `protocol::control_core` re-exports `controls::{ControlAddress,
+  ControlError, Lane, Owner, Section}` so `conformance` (whose dependency list the
+  `check-conformance-boundaries.sh` gate pins) can build the corpus edit without a new dependency.
+- **D10. The ramp row comes from the descriptor.** `record_edit_ramps` asks
+  `controls::row_descriptor` for the row's `Motion` and maps its `LiveRampRow` to the existing
+  `EditRampRow`, so D4's table lives in the control core and cannot drift; a row of an effect section
+  has a fixed ramp. The mapping function has no wildcard, so a new live ramp row must be classified.
+- **D11. Wire.** The address is the control list's `ControlAddress` message; the decoder requires
+  `control` and `lane` and refuses an owner ID or slot ID that disagrees with its kind or section
+  (`INVALID_FIELD`) and an unallocated owner, section or lane code (`INVALID_TLV`). The value is read
+  without the finiteness check the other float fields have, so a NaN reaches the validator
+  (`control.domain` at its own edit).
+- **Mirrors re-pinned.** `COMPLETE_SCHEMA_HASH` is `0x9f13a06993efa99e`; the same value is in
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md`, `fuzz/corpus/complete-schema-manifest.md` and the fault
+  injection search strings of `scripts/check-protocol-wasm-parity.sh` (which still named the value
+  from before #1551).
