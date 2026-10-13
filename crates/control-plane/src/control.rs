@@ -543,6 +543,19 @@ pub enum CommandError {
     Internal,
 }
 
+impl EventError {
+    /// The diagnostic text of this refusal, the same on every host (decision 17 C1). An adapter
+    /// owns only its result-code numbering.
+    #[must_use]
+    pub const fn diagnostic(self) -> &'static [u8] {
+        match self {
+            Self::BufferTooSmall { .. } => b"control.event.output.too_small",
+            Self::Backpressure => b"control.event.backpressure",
+            Self::Internal => b"control.event.internal",
+        }
+    }
+}
+
 /// What the live arm did with a structural token (#1257 D2).
 pub(crate) enum LiveCommit {
     /// The delta was live: the arm committed it, or refused it with nothing changed.
@@ -1939,4 +1952,24 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventError;
+
+    /// #1570a D2: the three event refusal texts are the C ABI's `last_error` bytes, which hosts
+    /// match on; a reworded text would silently change every adapter's diagnostic.
+    #[test]
+    fn event_refusals_spell_the_texts_every_host_reports() {
+        assert_eq!(
+            EventError::BufferTooSmall { required: 9 }.diagnostic(),
+            b"control.event.output.too_small"
+        );
+        assert_eq!(
+            EventError::Backpressure.diagnostic(),
+            b"control.event.backpressure"
+        );
+        assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
+    }
 }

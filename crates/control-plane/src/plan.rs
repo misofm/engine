@@ -286,6 +286,29 @@ impl<A: ControlAdapter> PlanState<A> {
         self.shared.render_peak_observed.load(Ordering::Relaxed)
     }
 
+    /// Publish the activity of one successfully rendered block from its two output planes.
+    ///
+    /// Issue #163 phase 4 item 2: the scan runs only for an armed observer. When
+    /// [`Self::render_peak_observed`] is true the peak starts at `0.0` and folds
+    /// `peak.max(sample.abs())` over plane 0 and then plane 1 in frame order; otherwise the block
+    /// publishes `NaN`, which the consumer reads as "not measured", so an unarmed block never
+    /// fabricates a peak of `0.0`. It costs at most one load per output sample and allocates
+    /// nothing, so it is render-safe.
+    pub fn observe_rendered_block(&self, planes: [&[f32]; 2]) {
+        let peak = if self.render_peak_observed() {
+            let mut peak = 0.0_f32;
+            for plane in planes {
+                for &sample in plane {
+                    peak = peak.max(sample.abs());
+                }
+            }
+            peak
+        } else {
+            f32::NAN
+        };
+        self.publish_render_observation(peak);
+    }
+
     /// Publish this block's observation. A `NaN` peak means "not measured this block".
     pub fn publish_render_observation(&self, peak: f32) {
         self.shared
@@ -336,10 +359,7 @@ mod tests {
         const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
     }
 
-    /// #1502 D7: a block the executor fails after the live snapshot is mirrored to the any-thread
-    /// query, and a block the shape check refuses is not.
-    #[test]
-    fn the_live_block_error_count_reaches_the_any_thread_query() {
+    fn test_state() -> PlanState<TestAdapter> {
         let plan = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id: 1,
@@ -371,7 +391,45 @@ mod tests {
             live_block_errors: AtomicU64::new(0),
             watermark: publisher.watermark_reader(),
         });
-        let mut state = PlanState::<TestAdapter>::new(owner, shared);
+        PlanState::<TestAdapter>::new(owner, shared)
+    }
+
+    /// #1570a D3: an armed observer publishes the largest absolute sample over both planes, and an
+    /// unarmed block publishes `NaN` ("not measured") instead of a fabricated `0.0`; either way
+    /// the render sequence advances once.
+    #[test]
+    fn a_rendered_block_publishes_the_peak_over_both_planes_only_when_armed() {
+        let state = test_state();
+        let left = [0.25_f32, -0.5];
+        let right = [0.75_f32, -1.5];
+
+        state.observe_rendered_block([&left, &right]);
+        assert!(f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)).is_nan());
+        assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 1);
+
+        state
+            .shared
+            .render_peak_observed
+            .store(true, Ordering::Relaxed);
+        state.observe_rendered_block([&left, &right]);
+        assert_eq!(
+            f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
+            1.5
+        );
+        assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 2);
+
+        state.observe_rendered_block([&[0.0; 2], &[0.0; 2]]);
+        assert_eq!(
+            f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
+            0.0
+        );
+    }
+
+    /// #1502 D7: a block the executor fails after the live snapshot is mirrored to the any-thread
+    /// query, and a block the shape check refuses is not.
+    #[test]
+    fn the_live_block_error_count_reaches_the_any_thread_query() {
+        let mut state = test_state();
         let queries = state.queries();
 
         let mut wide = [0.0_f32; 4];
