@@ -3812,7 +3812,7 @@ fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
     let mut after_handle = 0;
     loop {
         request_id += 1;
-        let request = control_request(0, after_handle, 256, None);
+        let request = control_request(1, after_handle, 256, None);
         let input = full_command(
             request_id,
             ExpectedRevision::Any,
@@ -3843,7 +3843,7 @@ fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
     let mut after_handle = 0;
     loop {
         request_id += 1;
-        let request = control_request(0, after_handle, 256, None);
+        let request = control_request(1, after_handle, 256, None);
         let input = full_command(
             request_id,
             ExpectedRevision::Any,

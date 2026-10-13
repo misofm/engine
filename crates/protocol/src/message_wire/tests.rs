@@ -997,7 +997,8 @@ fn control_pages_hold_exactly_two_hundred_fifty_six_rows() {
 /// Gate 1: each request rule is refused on encode and on decode alike, and a decoded refusal is
 /// `INVALID_FIELD`.
 ///
-/// Red if `limit` 0 or 257 is accepted, an owner ID rides with the session or is missing from
+/// Red if `limit` 0 or 257 is accepted, a cursor rides with epoch 0 (which names no structure
+/// to continue in), an owner ID rides with the session or is missing from
 /// another owner, or the two directions disagree on which request is valid.
 #[test]
 fn control_request_rules_refuse_on_encode_and_decode_alike() {
@@ -1019,11 +1020,16 @@ fn control_request_rules_refuse_on_encode_and_decode_alike() {
 
     type Typed = fn(&mut ControlListRequest);
     type Wire = fn(&mut Vec<Tlv>);
-    let rules: [(&str, Typed, Wire); 7] = [
+    let rules: [(&str, Typed, Wire); 8] = [
         (
             "limit 0",
             |r| r.limit = 0,
             |f| set(f, 3, &0_u16.to_le_bytes()),
+        ),
+        (
+            "a cursor at structure epoch 0",
+            |r| r.after_handle = 3,
+            |f| set(f, 2, &3_u32.to_le_bytes()),
         ),
         (
             "limit 257",

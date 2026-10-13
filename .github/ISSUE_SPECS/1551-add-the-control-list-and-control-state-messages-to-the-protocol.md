@@ -176,4 +176,8 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   `controls::ControlAddress`; `host-core`'s list builder uses the same conversion with a fallible
   ID copy. `EncodeError::InvalidField` (#1552) is the encoder's status for an address or a request
   that breaks the rules.
+- **D-fold-2. Epoch 0 with a cursor.** A request with `structure_epoch` 0 and `after_handle` other
+  than 0 is `INVALID_FIELD` on both directions: epoch 0 means "the current structure" and has no
+  handles to continue from, and honouring a cursor under it would page a list the caller never
+  pinned.
 

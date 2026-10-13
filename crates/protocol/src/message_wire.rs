@@ -492,7 +492,8 @@ pub const CONTROL_STATE_RECORD_BYTES: u16 = 8;
 /// structure, optionally of one owner. `CONTROL_STATE_GET` takes the same request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlListRequest {
-    /// The structure the caller's handles belong to; `0` for the first page. A page read at
+    /// The structure the caller's handles belong to; `0` for the first page, which has no cursor
+    /// (`after_handle` `0`; a cursor with epoch `0` is `INVALID_FIELD`). A page read at
     /// another structure answers `REVISION_CONFLICT` (`control.list.stale`).
     pub structure_epoch: u64,
     /// The last handle the caller has; `0` starts the list.
@@ -3099,10 +3100,13 @@ fn stable_id_fits(limits: crate::ProtocolLimits, text: &str) -> bool {
     text_fits(limits, text) && valid_stable_id(text)
 }
 
-/// A request's own rules, shared by both directions: `limit` is `1..=256`, and the owner ID is
-/// present exactly for a kind other than the session.
+/// A request's own rules, shared by both directions: `limit` is `1..=256`, a cursor names the
+/// structure it belongs to (epoch `0` means "the current one" and has no handles to continue
+/// from, so it holds `after_handle` `0`), and the owner ID is present exactly for a kind other than
+/// the session.
 fn control_request_is_valid(limits: crate::ProtocolLimits, value: &ControlListRequest) -> bool {
     (1..=CONTROL_PAGE_ITEMS).contains(&value.limit)
+        && (value.structure_epoch != 0 || value.after_handle == 0)
         && value.owner.as_ref().is_none_or(|owner| {
             (owner.kind == ControlOwnerKind::Session) == owner.id.is_none()
                 && owner

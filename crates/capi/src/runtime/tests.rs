@@ -421,19 +421,23 @@ pub(super) fn control_state_all_c(
 ) -> Vec<(u32, u32)> {
     let mut values = Vec::new();
     let mut after_handle = 0;
+    // A cursor names the structure it belongs to: the first page asks for the current one (`0`)
+    // and the later pages for the epoch it answered.
+    let mut epoch = 0;
     loop {
         *request_id += 1;
         let page = control_state_c(
             session,
             *request_id,
             &protocol::ControlListRequest {
-                structure_epoch: 0,
+                structure_epoch: epoch,
                 after_handle,
                 limit,
                 owner: None,
             },
         )
         .expect("a state page");
+        epoch = page.structure_epoch;
         values.extend(
             page.records
                 .iter()
