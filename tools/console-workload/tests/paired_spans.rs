@@ -1962,8 +1962,10 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
     );
 }
 
-/// Issue #1012: the staging-window bound the pairing rule rests on, refused at preparation for
-/// every launch effect, scalar and banked.
+/// Issue #1012: the per-node staging-window bound the pairing rule rests on, refused at
+/// preparation for every launch effect. (A banked live slot sizes its window by its lanes' cells
+/// and has its own rule: `rack`'s `a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity`
+/// and `a_bank_window_below_a_lanes_live_cells_is_refused_at_bind`.)
 ///
 /// A window of exactly `automation_capacity` spans is accepted; one span more (which could stage a
 /// twin across the effect's cut-off) or one span fewer (which would drop admitted records) is
@@ -1973,7 +1975,6 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
 /// unconditionally -> both refusals below fail, for every effect.
 #[test]
 fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
-    let width = BankWidth::for_backend(Backend::current()).expect("a SIMD backend");
     let registry = registry();
     let window = |spans: usize| {
         vec![
@@ -2023,39 +2024,9 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
                 descriptor.id.as_str()
             );
         }
-        let requests = vec![request; width.lanes() as usize];
-        let banked = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: Backend::current(),
-            width,
-            requests: &requests,
-            active_mask: width.full_mask(),
-        }) {
-            Ok(Some(bank)) => {
-                let metadata = bank.metadata;
-                let capacity = metadata.program_key.automation_capacity as usize;
-                assert_eq!(
-                    EffectBankProcessBlock::check_automation_window(&window(capacity), &metadata),
-                    Ok(())
-                );
-                for wrong in [capacity + 1, capacity - 1] {
-                    assert_eq!(
-                        EffectBankProcessBlock::check_automation_window(&window(wrong), &metadata),
-                        Err(ProcessBlockError::AutomationWindow),
-                        "{}: a bank window of {wrong} spans against capacity {capacity}",
-                        descriptor.id.as_str()
-                    );
-                }
-                true
-            }
-            _ => false,
-        };
-        checked.push((descriptor.id.as_str().to_owned(), banked));
+        checked.push(descriptor.id.as_str().to_owned());
     }
     assert_eq!(checked.len(), registry.len(), "{checked:?}");
-    assert!(
-        checked.iter().filter(|(_, banked)| *banked).count() >= 3,
-        "{checked:?}"
-    );
 }
 
 // =============================================================================================

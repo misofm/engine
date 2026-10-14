@@ -239,3 +239,13 @@ render code changed; the stage reads a shorter window array). Not a gate.
   bytes, 1.15 MB on the worst document); `candidate` and `dirty` could be built at `begin`.
 - `ControlRow` is 232 bytes and `controls::list` still collects the whole list for its callers
   (tests); the production callers now walk per owner.
+
+## Fold (batch 9 review)
+
+`EffectBankProcessBlock::check_automation_window` and its rows in `paired_spans.rs` are deleted (the
+rack was its last caller). `ProcessBlockError::AutomationWindow` stays: the per-node
+`EffectProcessBlock::check_automation_window` (`graph`) still raises it, and its doc now says so.
+The rack's own `RackError::AutomationWindow` states the cells rule. The size test
+`a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity` now asserts on
+`LiveControlEffectBankStage::span_storage_len`, so a regression fails as an assertion and not as an
+abort on a huge allocation.

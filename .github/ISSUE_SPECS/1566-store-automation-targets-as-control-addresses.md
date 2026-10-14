@@ -337,3 +337,20 @@ amended, with root's ruling: `control.inactive` is the fifth code of the stored-
    to the engine" (the engine's own codes through `validate()`).
 
 Measured numbers: none (no performance claim).
+
+## Fold (batch 9 review)
+
+Departure 5 above is resolved. A row is `Live` only when `automation_rate == Block`
+(`effect_rows::parameter_class`): a `None`-rate parameter keeps its prepared reason, and a
+`Sample`-rate parameter is `RebuildOnly(Correctness)` with the reopening condition "sample-accurate
+render-path delivery, a later protocol capability" (`EFFECT_CONTRACT_V1.md`). So a `Sample`-rate
+parameter is no longer automatable and `automation_diagnostics` refuses a target on it with
+`control.automation.target`, as the old `effect.automation.rate` did. The classifier's guard in
+`live_delta::parameter_records` now describes a defence that the rows already satisfy, and
+`EFFECT_CONTRACT_V1.md` states the rule.
+
+Test: `controls::effect_rows::tests::a_sample_rate_parameter_is_rebuild_only_and_not_automatable`
+holds the `Sample`-rate double. It lives in the crate (a unit test) and not in
+`controls/tests/automation.rs` because no launch effect declares a `Sample`-rate parameter and the
+integration tests reach only the launch registry; the unit test calls `parameter_descriptor` on the
+double. No launch row changed, so the control catalog and the generated SDK files are unchanged.

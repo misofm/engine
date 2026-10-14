@@ -80,7 +80,9 @@ use engine::realtime::{
     observation_slot_retained_bytes,
 };
 use lane::Lane;
-use lane::kernels::{INDEXED_RAMP_LENGTH_MAXIMUM, IndexedRamp, pdc_delay_block};
+use lane::kernels::{
+    FRAME_INDEX_OFFSETS, INDEXED_RAMP_LENGTH_MAXIMUM, IndexedRamp, pdc_delay_block,
+};
 use std::sync::Arc;
 
 use crate::{
@@ -1968,12 +1970,6 @@ impl Default for BankCrossfade {
         Self::new()
     }
 }
-
-/// `1, 2, ..., 16`: the frame-index offsets of one vector's frames, `L::WIDTH` of them (sixteen
-/// covers every lane width the `lane` crate may grow).
-const FRAME_INDEX_OFFSETS: [f32; 16] = [
-    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-];
 
 /// The ramp frames of [`BypassShunt::crossfade`] that do not fill a vector: the same arithmetic at
 /// `f32`, frame `f` at ramp index `first + f`.

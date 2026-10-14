@@ -1352,6 +1352,13 @@ impl LiveControlEffectBankStage {
         (declared, armed)
     }
 
+    /// The spans of storage this slot holds for live-control staging: one window plus the packed
+    /// array of one window per lane (#1611 D3). Zero when no lane stages a span.
+    #[must_use]
+    pub fn span_storage_len(&self) -> usize {
+        self.staging.len() + self.packed.len()
+    }
+
     /// Exact engine-owned bytes this slot's observation lanes retain. Zero when unobserved.
     #[must_use]
     pub fn observation_retained_bytes(&self) -> usize {

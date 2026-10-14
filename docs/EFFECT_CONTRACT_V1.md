@@ -388,8 +388,10 @@ registry before preparing any effect, a host observes the same refusal as before
 `effect.descriptor.invalid`.
 
 Stored automation is not judged by effect preparation. `controls::automation_diagnostics` holds each
-automation to the control row its target names (#1566): a parameter that is not `automatable` or
-whose `automation_rate` is `None` is a row that is not live, refused with `control.automation.target`.
+automation to the control row its target names (#1566). A row is live only for an `automatable`
+parameter whose `automation_rate` is `Block`: a `None`-rate parameter is prepared, and a `Sample`-rate
+one is rebuild-only for correctness (its render-path delivery is the later capability named in
+*Parameters and automation*), so a target on either is refused with `control.automation.target`.
 Host preparation and `session-validator` stage 5 report it beside the diagnostics above.
 
 ## Evidence contract

@@ -2008,8 +2008,9 @@ pub extern "C" fn miso_engine_web_v1_response_frame_ptr(bytes: u32) -> u32 {
 }
 
 /// Serve the staged request frame of `bytes` bytes through the core's session-less response entry.
-/// `RESULT_OK` when a reply frame exists (OK or non-OK) and `RESULT_INVALID_ARGUMENT` when the
-/// frame has no decodable command header, which leaves no reply.
+/// `RESULT_OK` when a reply frame exists (OK or non-OK), `RESULT_INVALID_ARGUMENT` when the frame
+/// has no decodable command header, which leaves no reply, and `RESULT_INTERNAL` when not even a
+/// non-OK reply frame could be encoded, which leaves no reply either.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_frame_submit(bytes: u32) -> u32 {
     with_response_frame_staging(|slot| {
@@ -2023,6 +2024,7 @@ pub extern "C" fn miso_engine_web_v1_response_frame_submit(bytes: u32) -> u32 {
         match host_core::serve_response_frame(request, &mut staging.reply) {
             Ok(()) => RESULT_OK,
             Err(host_core::ResponseFrameError::Malformed) => RESULT_INVALID_ARGUMENT,
+            Err(host_core::ResponseFrameError::Internal) => RESULT_INTERNAL,
         }
     })
 }

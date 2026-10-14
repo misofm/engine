@@ -697,12 +697,15 @@ const SESSIONLESS_REPLY_BYTES: usize = 16 << 20;
 /// The most request frame bytes a session-less endpoint decodes.
 const SESSIONLESS_REQUEST_FRAME_BYTES: usize = 1 << 20;
 
-/// Why [`serve_response_frame`] wrote no reply: the input has no command header that names a
-/// request, so a reply could not be correlated.
+/// Why [`serve_response_frame`] wrote no reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponseFrameError {
-    /// The command header did not decode.
+    /// The command header did not decode: the input names no request, so a reply could not be
+    /// correlated.
     Malformed,
+    /// The request was understood but not even the non-OK `INTERNAL` frame could be encoded, so
+    /// `reply` is empty. The host reports an internal failure and never an empty success.
+    Internal,
 }
 
 /// Serve one command frame without a session (#1574): the browser's response preview, which has no
@@ -720,7 +723,9 @@ pub enum ResponseFrameError {
 ///
 /// # Errors
 ///
-/// [`ResponseFrameError::Malformed`] when the command header does not decode.
+/// [`ResponseFrameError::Malformed`] when the command header does not decode, and
+/// [`ResponseFrameError::Internal`] when no reply frame, not even a non-OK one, could be encoded
+/// (`reply` is then empty).
 pub fn serve_response_frame(request: &[u8], reply: &mut Vec<u8>) -> Result<(), ResponseFrameError> {
     let decode_codec = protocol::ProtocolCodec::new(protocol::ProtocolLimits {
         max_frame_bytes: SESSIONLESS_REQUEST_FRAME_BYTES,
@@ -736,25 +741,20 @@ pub fn serve_response_frame(request: &[u8], reply: &mut Vec<u8>) -> Result<(), R
         ..protocol::ProtocolLimits::default()
     });
     let refused = |status: StatusCode, code: &str, reply: &mut Vec<u8>| {
-        write_non_ok(&encode_codec, header, status, code, reply);
+        write_non_ok(&encode_codec, header, status, code, reply)
     };
     if header.message_id != protocol::MessageId::ResponseGet {
-        refused(StatusCode::UnsupportedMessage, "protocol.failure", reply);
-        return Ok(());
+        return refused(StatusCode::UnsupportedMessage, "protocol.failure", reply);
     }
     let mut fields = [0_u16; 1024];
     let decoded = match decode_codec
         .decode_typed_command(request, &mut protocol::DecodeScratch::new(&mut fields))
     {
         Ok(decoded) => decoded,
-        Err(error) => {
-            refused(error.status(), "protocol.failure", reply);
-            return Ok(());
-        }
+        Err(error) => return refused(error.status(), "protocol.failure", reply),
     };
     let protocol::DecodedCommandPayload::ResponseGet(query) = decoded.payload else {
-        refused(StatusCode::Internal, "protocol.failure", reply);
-        return Ok(());
+        return refused(StatusCode::Internal, "protocol.failure", reply);
     };
     let outcome = match (&query.target, query.sample_rate_hz, query.quantum_frames) {
         (ResponseTarget::Configuration(_), Some(rate), Some(quantum)) => {
@@ -772,16 +772,16 @@ pub fn serve_response_frame(request: &[u8], reply: &mut Vec<u8>) -> Result<(), R
         Ok(result) => write_response_frame(&encode_codec, header, &result, reply),
         Err(error) => refused(error.status, error.code, reply),
     }
-    Ok(())
 }
 
-/// Encode a `RESPONSE_GET` success frame; a result the codec cannot encode is `INTERNAL`.
+/// Encode a `RESPONSE_GET` success frame; a result the codec cannot encode is `INTERNAL`, and an
+/// `INTERNAL` frame that cannot be encoded either is [`ResponseFrameError::Internal`].
 fn write_response_frame(
     codec: &protocol::ProtocolCodec,
     header: protocol::CommandHeader,
     result: &ResponseResult,
     reply: &mut Vec<u8>,
-) {
+) -> Result<(), ResponseFrameError> {
     let frame = protocol::TypedSuccessResponseFrame {
         request_id: header.request_id,
         revision: protocol::SessionRevision(0),
@@ -811,7 +811,7 @@ fn write_response_frame(
         match codec.encode_success_response_frame_into(&frame, reply) {
             Ok(written) => {
                 reply.truncate(written);
-                return;
+                return Ok(());
             }
             Err(protocol::EncodeError::OutputTooSmall { required }) => capacity = required,
             Err(_) => break,
@@ -824,17 +824,19 @@ fn write_response_frame(
         StatusCode::Internal,
         "response.internal",
         reply,
-    );
+    )
 }
 
 /// Encode a non-OK reply that carries one error diagnostic, echoing the request's ID and message.
+/// When the frame cannot be encoded `reply` is left empty and the error is
+/// [`ResponseFrameError::Internal`].
 fn write_non_ok(
     codec: &protocol::ProtocolCodec,
     header: protocol::CommandHeader,
     status: StatusCode,
     code: &str,
     reply: &mut Vec<u8>,
-) {
+) -> Result<(), ResponseFrameError> {
     let payload = protocol::NonOkResponse {
         diagnostics: vec![Diagnostic {
             code: code.to_owned(),
@@ -857,10 +859,12 @@ fn write_non_ok(
     };
     reply.clear();
     reply.resize(protocol::OUTER_HEADER_BYTES + 512, 0);
-    let written = codec
-        .encode_non_ok_response_frame_into(&frame, reply)
-        .unwrap_or(0);
+    let Ok(written) = codec.encode_non_ok_response_frame_into(&frame, reply) else {
+        reply.clear();
+        return Err(ResponseFrameError::Internal);
+    };
     reply.truncate(written);
+    Ok(())
 }
 
 /// Everything after the rate rules: the limits, the bypass rows, the preparation, the reply bound
@@ -2327,6 +2331,57 @@ mod tests {
     use super::*;
 
     const RATE: u32 = 48_000;
+
+    /// A reply frame that cannot be encoded is a typed failure with an empty reply, never an empty
+    /// success the host would hand on as a frame.
+    ///
+    /// Red if `write_non_ok` ignores the encode error: it returns `Ok` with `reply` truncated to
+    /// zero bytes, and `miso_engine_web_v1_response_frame_submit` answers `RESULT_OK` with no frame.
+    #[test]
+    fn a_non_ok_frame_that_cannot_be_encoded_is_an_internal_failure() {
+        let mut request = vec![0_u8; 1 << 10];
+        let length = protocol::ProtocolCodec::default()
+            .encode_command_frame_into(
+                &protocol::TypedCommandFrame {
+                    request_id: protocol::RequestId::new(7).expect("request ID"),
+                    expected_revision: protocol::ExpectedRevision::Any,
+                    payload: protocol::CommandPayload::CapabilitiesGet,
+                },
+                &mut request,
+            )
+            .expect("command frame");
+        let header = protocol::ProtocolCodec::default()
+            .decode_command_header(&request[..length])
+            .expect("header");
+        let too_small = protocol::ProtocolCodec::new(protocol::ProtocolLimits {
+            max_frame_bytes: protocol::OUTER_HEADER_BYTES,
+            ..protocol::ProtocolLimits::default()
+        });
+        let mut reply = vec![1, 2, 3];
+        assert_eq!(
+            write_non_ok(
+                &too_small,
+                header,
+                StatusCode::Internal,
+                "response.internal",
+                &mut reply
+            ),
+            Err(ResponseFrameError::Internal)
+        );
+        assert!(reply.is_empty());
+        let roomy = protocol::ProtocolCodec::default();
+        assert_eq!(
+            write_non_ok(
+                &roomy,
+                header,
+                StatusCode::Internal,
+                "response.internal",
+                &mut reply
+            ),
+            Ok(())
+        );
+        assert!(!reply.is_empty());
+    }
 
     /// Every live-ramp row maps to the wire ramp row of the same name and code. The match has no
     /// wildcard, so a new row must be classified here.
