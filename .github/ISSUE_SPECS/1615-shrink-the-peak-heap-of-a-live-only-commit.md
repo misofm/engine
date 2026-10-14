@@ -104,3 +104,17 @@ Checked against `main` at `7feb27800`.
     the bytes unchanged.
 - **Edit order.** In `protocol/src/controller.rs`: after #1567. In `host-core/src/control_provider.rs`:
   after #1341a1, #1567 and #1574. In `session/src/canonical.rs`: after #1566.
+
+## Ruling (root, 2026-10-14)
+
+- **S1 (row scratch): option A.** Reserve `fresh` and `memo` once, exactly, to the largest run
+  before the loops; no `controls` change.
+- **S2 (replay clone): option B.** At prepare, run the read-only `plan_preflight` and keep its plan
+  in the token; at commit, apply the plan on the committed cache, `complete` the entry and write the
+  final frame; size the frame staging to the measured length. While a token is outstanding every
+  other entry point refuses (odd generation), so the commit cannot fail. Prepare and commit of one
+  transaction run in one synchronous submit, so no real second request meets the refusal; the
+  decision record still states what a concurrent entry gets (a typed refusal, nothing queued, no
+  ack) and one test shows it. The token keeps its size; any re-pin of the C ABI token row comes
+  with measured numbers.
+- **S3 (owner text): option A.** A counting writer for `owner_bytes`; no buffer.

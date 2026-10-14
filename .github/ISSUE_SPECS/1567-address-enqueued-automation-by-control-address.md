@@ -154,3 +154,8 @@ Checked against `main` at `7feb27800`.
 - **Edit order.** After #1566. Before #1615 in `protocol/src/controller.rs` (#1615's S2 edits the
   structural prepare and commit; this slice edits admission). With #1574 and #1615 in
   `host-core/src/control_provider.rs`: this slice first.
+
+
+## Parked (root, 2026-10-14)
+
+Parked 2026-10-14: #1058 A9 retires AUTOMATION_ENQUEUE; close as superseded when #1058 slice 21a is filed and lands.

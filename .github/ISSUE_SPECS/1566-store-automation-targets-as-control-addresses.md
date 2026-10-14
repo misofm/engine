@@ -243,3 +243,12 @@ Checked against `main` at `7feb27800`.
   tables instead of editing them by hand, and adds the target arms to #1569 D4's `$defs` table);
   after #1602 (`host-core/src/prepare.rs`, `hosts/host-web/src/tests.rs`, different functions).
   Before #1567, and before #1615 (`session/src/canonical.rs`).
+
+## Ruling (root, 2026-10-14): `control.inactive` (the stored path only)
+
+`controls::check` returns `control.inactive` for a row that is automatable but inactive (for
+example a matrix row on a pan strip). Root ruled option A: `control.inactive` is the fifth code a
+stored automation target can be refused with, the same code `SET_CONTROL` uses for the same fault.
+D6's code set is the four filed codes plus `control.inactive`, and a gate shows one inactive
+automatable row refused with it. `ControlError` gains the automation-target variant this slice
+needs.
