@@ -2592,8 +2592,8 @@ mod tests {
     /// none of which the issue moved (`graph`'s
     /// `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow` pins that the executor's
     /// layout witnesses carry the new table) -- plus the two tables, each at one entry per emitted
-    /// op. The row binds every unit but its sixty-four inputs as dispatched units (4 bytes each)
-    /// and copies no claim.
+    /// op, and the block-end unit table of issue #1609 (one `u32` per emitted op). The row binds every
+    /// unit but its sixty-four inputs as dispatched units (4 bytes each) and copies no claim.
     #[test]
     fn the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables() {
         let workload = Workload::SixtyFourTrackGainPanRing;
@@ -2669,14 +2669,19 @@ mod tests {
             tables,
             "each table at one entry per emitted op"
         );
+        assert_eq!(
+            resource.block_end_unit_table_bytes,
+            emitted * core::mem::size_of::<u32>() as u64,
+            "the block-end unit table at one entry per emitted op"
+        );
         let before = resource.runtime_field_bytes
             + resource.emitted_op_layout_delta_bytes * emitted
             + resource.response_binding_table_bytes
             + resource.response_binding_string_bytes;
         assert_eq!(
             resource.total_bytes,
-            before + tables[0] + tables[1],
-            "the charge grows by exactly the two tables"
+            before + tables[0] + tables[1] + resource.block_end_unit_table_bytes,
+            "the charge grows by exactly the two executor tables and the block-end unit table"
         );
         let ring = SessionRuntime::new(workload);
         let bound = graph::test_only_executor_table_bytes();

@@ -253,3 +253,20 @@ one-shot record in the queue for the continuous reader (D7, pre-existing, unchan
 - **Loom flags.** `.github/workflows/qualification.yml`'s loom step copies `-C
   target-feature=+avx2,+fma` from `.cargo/config.toml`; both files now carry a comment that names
   the coupling.
+
+## Gate re-pins (batch 8 CI fold)
+
+- **Cause.** The `block_end` hook added the `block_end: bool` flag to `GraphNodeObserverBinding`
+  (80 -> 88 bytes, the same step as #816's flag) and the runtime's bind-time `block_end` unit table,
+  charged as `GraphRuntimeMetadataResourceEstimate::block_end_unit_table_bytes` (one `u32` per
+  emitted op).
+- **Measured, `resources.jsonl`.** Only the meter-bearing rows move: `engine_owned_meter_payload_bytes`
+  and `engine_owned_retained_payload_bytes` rise by 8 per meter (1 meter: +8, e.g. 1166 -> 1174 at
+  1 track, 1178 -> 1186 at 4 and 65,537 tracks; 7 meters: +56, e.g. 11522 -> 11578, 11606 -> 11662).
+  The three `meters = 0` rows, the processor payload, the largest allocation and the allocation
+  count do not move (the table is graph metadata, not a builtins resource). `MANIFEST.tsv`
+  `resources.jsonl` hash 57eb5083... -> 7a9c9284...; `ACCEPTED_MANIFEST_SHA256` (both
+  `fixture_builtins.rs` and `builtins_graph.rs`) -> `f99fdbf2...`; `GRAPH_OBSERVER_BINDING_BYTES` 80 -> 88.
+- **Test.** `console-workload`'s `the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`
+  now adds the block-end table (one `u32` per emitted op, 2052 bytes on the 513-op row) to the exact sum.
+- **Fuzz lock.** `fuzz/Cargo.lock` gains loom 0.7.2 and its transitive entries (additions only).
