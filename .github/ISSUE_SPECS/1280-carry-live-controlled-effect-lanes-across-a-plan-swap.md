@@ -359,3 +359,59 @@ AVX2 host (a console bank binds at the width its build executes, #1017).
 - Pending Observe records of a carried lane are still lost at the swap (D3, #1280b).
 - `cargo run -p realtime-policy` fails at the base on `hosts/host-web/tests/control_command_heap.rs`
   (`unsafe` outside the approved files); it is not from this slice.
+
+## Decision record: #1280c (batch 10)
+
+**Shipped.** D4 (the extraction and the retarget) and gate 5. After this slice a live difference on a
+carried effect lane no longer restarts the strip: the lane carries, then the successor retargets it
+to the new committed value.
+
+- **One per-instance function.** `effect_instance_records` (`host-core/src/prepare.rs`, beside the
+  strip derivation it mirrors) holds what `live_delta.rs` had in `effect_records`'s body,
+  `parameter_records` and `design_targets`, and `same_params`; `live_delta.rs` keeps `locate` and
+  `effect_records`, which now only adds the live address. It returns `Ok(None)` for no difference,
+  `Ok(Some(EffectInstanceRecords))` for a live one and `Err(LiveRebuild)` for a prepared one
+  (another identity, quality, sidechain or link mode; a bypass of an effect that does not lower it,
+  by `lowers_session_bypass`; a parameter that is not `Block`-rate; a parameter that does not
+  resolve; a ramp the indexed law refuses). The join calls it per surviving instance through
+  `join_chains`, so a difference is live in the carry exactly when it is live on the live path.
+  `same_console_entry`, `same_insert` and `committed_chain` are deleted: the lowered pair
+  (`SessionModel::lower_strip`) of both models is compared by that function.
+- **Join states.** `ConsoleOwnerJoin` and `InsertOwnerJoin` hold `FamilyJoin<EffectInstanceRecords>`
+  and the instance's `LiveEffectAddress`. A live difference of a slot or insert at another position
+  is prepared (another address); a `Same` one still carries.
+- **The write.** `resolve_effect_carry` takes the producer step as a callback, called only for a
+  lane whose layout and kind already match: `prepare_effect_retarget` preflights every record on the
+  successor's own producer (a record the lane has no cell for refuses the lane, and the strip
+  restarts), and, for the EQ, begins the owner transaction, applies the edits and preflights the
+  targets. The writes happen after `stamp_held_gate(base.revision)`, in the block that writes the
+  strip retargets: `write_bypass` with a `BypassSwitch` at the session's `mute_ms` ramp
+  (`bypass_ramp_samples`), `write` for a parameter record, `publish_candidate_targets` and
+  `commit_owner` for the EQ. Nothing is written when preparation fails before that block.
+
+**Departures.**
+
+- Parameter ramps from `SuccessorBase::edit_ramps`: an effect parameter record has no ramp (the
+  effect smooths it itself) and `EditRampRow` has no effect-parameter row, so only the bypass has a
+  length, and it is the session's. Nothing to read from `edit_ramps` here.
+- The test gate's successor helper (`LivePlan::successor`) now takes the commit's gate steps (stamp
+  the revision again, publish it), as `CellPlan::successor_at` already did. Without them a retarget
+  stamped at preparation is never published on the successor's gate.
+
+**Gate and tests** (`crates/host-core/tests/successor_swap.rs`, `crates/host-core/src/prepare.rs`):
+
+| Gate | Test |
+|---|---|
+| 5 | `a_live_difference_on_a_carried_lane_is_retargeted_at_{eight,four}_lanes`: a compressor threshold, an EQ band gain and a compressor bypass, each on three carried lanes. Run 1 is the structural swap with the retarget, run 2 writes the same edit to A before the swap and prepares B from a base that holds it. Bit-identical in every block, `restarted` empty, a clean swap block (zero allocations and frees), and not vacuous against a swap that leaves the lane at its old value. |
+| join | `the_per_instance_function_separates_live_from_prepared`, `a_live_difference_carries_only_when_the_successor_accepts_its_records` |
+| classifier | `a_changed_effect_row_without_a_record_is_a_rebuild` (unchanged, through the moved function) |
+
+The four-lane case is `ignore`d on this AVX2 host (#1017), as the #1280a cases are.
+
+**Found, not fixed.** `ChainJoin::may_carry` ignores surviving inserts, so a strip that could carry
+only inserts builds no `carry_program` for sources; the insert carry installs its own table and
+works, so nothing is wrong today, but the name says more than it checks.
+
+### `audit capi` digest (batch 10)
+
+The C ABI render audit commits one structural transaction after its first call (it adds a muted track, `tools/audit/src/capi.rs`). Before #1280a that swap restarted every strip with a console EQ slot; now the slots carry their state across it. So `audit capi`'s `pcm_digest` moves from `76525e7ef9e78cf4` (every batch through 9) to `9bc5ec3d8a4c223c`, measured at `f0e387307` and its parent `869ffb78b`; allocations, frees and render errors stay 0. CI checks the digest's format only.

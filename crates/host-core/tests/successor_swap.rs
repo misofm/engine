@@ -1013,7 +1013,15 @@ impl LivePlan {
                 backend,
             )
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-        Self::new(prepared, handles)
+        let mut successor = Self::new(prepared, handles);
+        // The commit's gate steps (#1277 D10): the handle inherits the preparation's open stamp
+        // (a retarget's), stamps the revision again and publishes it.
+        let _ = successor
+            .gate
+            .stamp(successor::SUCCESSOR_REVISION)
+            .expect("the open revision stamps again");
+        successor.gate.publish(successor::SUCCESSOR_REVISION);
+        successor
     }
 
     fn push(&mut self, write: &LiveWrite) {
@@ -4888,9 +4896,9 @@ fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
 // A console slot or a banked insert of a plan prepared with live controls is a
 // `LiveControlEffectBankStage` lane. Every case writes through the plan's own producers, stamped
 // on the plan's own gate, and compares the swapped run with the post-edit session prepared fresh
-// and fed the same values at the same blocks. A live difference between the two sessions is not
-// carried yet (#1280c), so every case leaves the sessions' values equal and moves its values
-// through the cells.
+// and fed the same values at the same blocks. These cases leave the sessions' values equal and
+// move their values through the cells; the last case (#1280c) differs in live values and shows
+// that the successor retargets the carried lane.
 
 use effect_contract::{BypassSwitch, EffectControlRecord};
 use host_core::LiveEffectAddress;
@@ -4906,6 +4914,9 @@ enum EffectValue {
     Parameter { index: u32, value: f32 },
     /// The parametric EQ's first band gain, on both channels (two prepared targets).
     BandGain(f32),
+    /// The same band gain as one owner transaction for both channels, which is what a live commit
+    /// of a session edit publishes.
+    BandGainBoth(f32),
     /// The bypass cell with its crossfade ramp.
     Bypass(BypassSwitch),
 }
@@ -4951,6 +4962,13 @@ fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
                 support::push_eq_parameter(producer, gate, BAND_GAIN_INDEX, channel, value);
             }
         }
+        EffectValue::BandGainBoth(value) => support::push_eq_parameter(
+            producer,
+            gate,
+            BAND_GAIN_INDEX,
+            effect_contract::ParameterChannel::Both,
+            value,
+        ),
         EffectValue::Bypass(switch) => {
             producer
                 .preflight_bypass(switch)
@@ -5541,4 +5559,171 @@ fn a_changed_control_kind_carries_no_effect_lane_at_eight_lanes() {
 )]
 fn a_changed_control_kind_carries_no_effect_lane_at_four_lanes() {
     a_changed_control_kind_carries_no_effect_lane(Backend::Simd4);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1280c: a live difference on a carried lane no longer restarts the strip. The lane
+// carries, then the successor retargets it to the new committed value (D4, D15-7).
+
+/// `model` with every entry of `track`'s console slot `slot` for parameter `parameter_id` set to
+/// `value` (a per-lane parameter has one entry per channel).
+fn with_console_param_all(
+    mut model: SessionModel,
+    track: &str,
+    slot: &str,
+    parameter_id: u32,
+    value: f32,
+) -> SessionModel {
+    let entry = track_mut(&mut model, track)
+        .console
+        .iter_mut()
+        .find(|entry| entry.slot.as_str() == slot)
+        .expect("console slot");
+    let mut found = false;
+    for param in entry
+        .params
+        .iter_mut()
+        .filter(|param| param.parameter_id == parameter_id)
+    {
+        param.value = value;
+        found = true;
+    }
+    assert!(found, "parameter {parameter_id} of {slot}");
+    model
+}
+
+/// `model` with `track`'s console slot `slot` bypassed.
+fn with_console_bypass(mut model: SessionModel, track: &str, slot: &str) -> SessionModel {
+    track_mut(&mut model, track)
+        .console
+        .iter_mut()
+        .find(|entry| entry.slot.as_str() == slot)
+        .expect("console slot")
+        .bypass = true;
+    model
+}
+
+/// One live edit of gate 5: how it edits the model, and the writes that make the same edit on a
+/// running plan (the control plane's live commit).
+struct LiveEdit {
+    name: &'static str,
+    edit: fn(SessionModel, &str) -> SessionModel,
+    write: fn(&'static str, usize, u32) -> Vec<EffectWrite>,
+}
+
+const RETARGETED: [&str; 3] = ["eq1", "eq4", "eq8"];
+
+/// Gate 5: B changes a carried lane's compressor threshold, an EQ band gain (live values), or
+/// bypasses it. Run 1 is the structural swap: B is prepared from the post-edit session, the lanes
+/// carry and the successor retargets them to the new values. Run 2 writes the same edits to A just
+/// before the swap and prepares B from a base that holds them. The two runs are bit-identical in
+/// every block, and no strip is in the restart set. Without the retarget the carried lane keeps
+/// the old value, which the last assertion shows is audible.
+fn a_live_difference_on_a_carried_lane_is_retargeted(backend: Backend) {
+    let slots = ["eq", "comp"];
+    let ramp = LiveRamps::for_session(&console_session(false, &slots))
+        .for_row(LiveRampRow::BypassCrossfade);
+    let edits = [
+        LiveEdit {
+            name: "compressor threshold",
+            edit: |model, strip| with_console_param_all(model, strip, "comp", 1, -40.0),
+            write: |strip, block, _| {
+                vec![EffectWrite {
+                    block,
+                    strip,
+                    address: COMP_ADDRESS,
+                    value: EffectValue::Parameter {
+                        index: THRESHOLD_INDEX,
+                        value: -40.0,
+                    },
+                }]
+            },
+        },
+        LiveEdit {
+            name: "EQ band gain",
+            edit: |model, strip| with_console_param_all(model, strip, "eq", 4, 2.0),
+            write: |strip, block, _| {
+                vec![EffectWrite {
+                    block,
+                    strip,
+                    address: EQ_ADDRESS,
+                    value: EffectValue::BandGainBoth(2.0),
+                }]
+            },
+        },
+        LiveEdit {
+            name: "compressor bypass",
+            edit: |model, strip| with_console_bypass(model, strip, "comp"),
+            write: |strip, block, ramp| {
+                vec![EffectWrite {
+                    block,
+                    strip,
+                    address: COMP_ADDRESS,
+                    value: EffectValue::Bypass(BypassSwitch {
+                        bypassed: true,
+                        ramp_samples: ramp,
+                    }),
+                }]
+            },
+        },
+    ];
+    let feed = bursty_feed(SOURCE, 5);
+    for LiveEdit { name, edit, write } in edits {
+        let what = format!("{backend:?} {name}");
+        let (a, b) = live_console_pair();
+        let edit_all = |model: &SessionModel| RETARGETED.into_iter().fold(model.clone(), edit);
+        let b_edited = Session::compile(edit_all(&b.model));
+        let a_edited = edit_all(&a.model);
+        let writes: Vec<EffectWrite> = RETARGETED
+            .into_iter()
+            .flat_map(|strip| write(strip, SWAP_BLOCK, ramp))
+            .collect();
+        // Run 1: the structural swap, with the retarget.
+        let run = effect_run(&a, Some((&b_edited, &a.model)), &feed, &[], &[], backend);
+        assert_clean_swap(&run, &what);
+        assert_eq!(
+            run.restarted,
+            Vec::<Box<str>>::new(),
+            "{what}: nothing restarts"
+        );
+        // Run 2: live edit on A, then the structural swap from a base that holds it.
+        let reference = effect_run(
+            &a,
+            Some((&b_edited, &a_edited)),
+            &feed,
+            &writes,
+            &[],
+            backend,
+        );
+        assert_clean_swap(&reference, &format!("{what} reference"));
+        assert_eq!(
+            first_effect_difference(&run, &reference),
+            None,
+            "{what}: carry, then retarget equals live edit, then structural edit"
+        );
+        // Not vacuous: the carried lane keeps its old value without the retarget, and the edit
+        // is audible in the swap block.
+        let stale = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+        assert_ne!(
+            stale.blocks[SWAP_BLOCK + 1],
+            run.blocks[SWAP_BLOCK + 1],
+            "{what}: the edit is audible after the swap"
+        );
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_live_difference_on_a_carried_lane_is_retargeted_at_eight_lanes() {
+    a_live_difference_on_a_carried_lane_is_retargeted(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_live_difference_on_a_carried_lane_is_retargeted_at_four_lanes() {
+    a_live_difference_on_a_carried_lane_is_retargeted(Backend::Simd4);
 }
