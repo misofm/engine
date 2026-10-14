@@ -11,8 +11,9 @@
 //! The ceilings are the numbers measured on this head with a few KB of slack. The steady call is
 //! the same at every track count: a live-only commit must not depend on the session's size. The
 //! numbers print with `--nocapture`.
-
-#![cfg(feature = "test-support")]
+//!
+//! It lives in `parameter-metadata`, which links host-web and the audited allocator already:
+//! `scripts/check-bench-policy.sh` keeps `bench-support` out of every `hosts/` package.
 
 use bench_support::alloc::{
     current_thread_counters, current_thread_delta_since, current_thread_peak,
@@ -125,8 +126,10 @@ fn frame(request: u64, revision: u64, edits: &[SessionEdit]) -> Vec<u8> {
 /// The qualification's session at `tracks` tracks: the first is `track`, the rest are copies of it
 /// with their own IDs and routes.
 fn document(tracks: usize) -> (String, u64) {
-    let mut model = parse_session_json(include_str!("../qualification/observation-session.json"))
-        .expect("the observation session parses");
+    let mut model = parse_session_json(include_str!(
+        "../../../hosts/host-web/qualification/observation-session.json"
+    ))
+    .expect("the observation session parses");
     let template = model.tracks[0].clone();
     let route = model.routes[0].clone();
     for index in 1..tracks {
