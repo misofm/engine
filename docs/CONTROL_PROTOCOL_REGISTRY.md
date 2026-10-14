@@ -63,7 +63,7 @@ A control row's own rules: all numbers are finite and `minimum <= maximum`; choi
 
 **Result** (`ResponseResult`), all fields optional on the wire and shaped as one of two forms. The tag form is `1:request-tag U64 O` alone (the strip target, served by #1578). The curve form is `2:sample-rate-hz U32`, `3:configuration-id U64`, `4:floor-db F32`, `5:bypass BOOL`, `6:section-count U32`, `7:enabled-left U32`, `8:enabled-right U32`, `9:retained-bytes U64`, `10:frequencies-hz PACKED_F32`, with at least one of `11:left-db PACKED_F32` and `12:right-db PACKED_F32`, and `13:sections-left-db`, `14:sections-right-db` (`PACKED_F32`, section-major) each present only with its side's total. Fields 11 and 12 have the length of field 10 (at least 2 points); fields 13 and 14 have `section-count` times that length. The enabled masks hold bit `min(index, 31)` per enabled section. All values are finite. The codec refuses every other shape, on encode and on decode. `protocol::response_result_encoded_len(points, channels, section_count, sections)` is the exact frame length of a curve reply.
 
-**Refusals** carry one error diagnostic whose `code` is the table below. Overrides, owner and axis codes come from one table in `host_core` (`ResponseQueryError::refusal`).
+**Refusals** carry one error diagnostic whose `code` is the table below. Overrides, owner and axis codes come from one table in `host_core` (`ResponseQueryError::refusal`). A request that is wrong in several ways is refused with the core's refusal first, in the core's order: rate, points, override count, axis, then the owner's.
 
 | Status | Code | Cause |
 | --- | --- | --- |
@@ -72,6 +72,7 @@ A control row's own rules: all numbers are finite and `minimum <= maximum`; choi
 | `INVALID_FIELD` | `response.rate` | a rate or quantum that is not a launch value (a session endpoint cannot reach it) |
 | `INVALID_FIELD` | `response.rate.session` | `sample-rate-hz` or `quantum-frames` present on a session endpoint |
 | `INVALID_FIELD` | `response.override.control` | a control that is no parameter of the target |
+| `INVALID_FIELD` | `response.override.bypass` | a bypass value other than exactly `0` or `1` (a typed provider caller; the wire codec refuses it earlier, without a code) |
 | `INVALID_FIELD` | `response.override.lane` | a lane on a shared parameter |
 | `INVALID_FIELD` | `response.override.duplicate` | a (control, lane) pair twice, or `both` beside a lane |
 | `LIMIT_EXCEEDED` | `response.override.count` | more than 256 overrides |

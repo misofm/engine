@@ -10,6 +10,8 @@ The fixed automation command payload is `16 + 16 + (8 + 32n) = 40 + 32n`; its co
 
 A `RESPONSE_GET` curve reply has a fixed layout: the outer header, eight scalar fields (`4+8+4+1+4+4+4+8` value bytes, each with its prefix and padding), the axis of `4p` bytes and, for each requested side, a total of `4p` bytes and, when sections are requested, `4sp` bytes of section curves, for `p` points and `s` sections. `response_result_encoded_len` gives the exact frame length, and the provider refuses a request whose reply would exceed the response bound before it computes any curve (#1573).
 
+**`RESPONSE_GET` worst cases.** The reply is `49,368 + 32,768s` bytes for `p = 4,096` points, both sides and `s` sections requested. The largest owner is the parametric EQ with `s = 6` sections, so the worst reply is 245,976 bytes (about 240 KiB, `response_result_encoded_len(4096, both, 6, true)`); the input filters have 2 sections (114,904 bytes). An endpoint whose response bound (the smaller of `max_frame_bytes` and `maximum_cached_response_bytes`) is below that refuses the largest requests with `response.reply_too_large` before any curve is computed, and a caller that must always be answered sets `points` or `sections` to fit. The request is bounded by 256 override rows, the outer header, the configuration's other fields, the required and the optional scalar fields: 16,672 bytes plus the effect ID's field, which costs `8 + n + pad8(n)` for an ID of `n` bytes. That is 16,936 bytes for a 255-byte ID and 82,216 bytes at the default 65,536-byte string limit (measured with `encoded_response_request_len`).
+
 ## Prepared resources
 
 | Resource | Sizing rule |

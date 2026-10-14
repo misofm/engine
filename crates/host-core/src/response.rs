@@ -823,6 +823,31 @@ impl ResponseQueryError {
     }
 }
 
+/// The checks of a response query that need no owner, in the order every host reports them: an
+/// unsupported rate, a point count outside `2..=4096`, more than [`RESPONSE_MAXIMUM_OVERRIDES`]
+/// override rows, then the frequency axis. [`prepare_response_query`] runs them first; a host that
+/// shapes the request before calling it (the control provider folds override rows into a bypass
+/// and cutoffs) runs them before its own shaping, so the core's refusal wins whichever request
+/// word is wrong first.
+pub(crate) fn check_response_request(
+    sample_rate_hz: u32,
+    grid: ResponsePreviewGrid,
+    override_count: usize,
+) -> Result<(), ResponseQueryError> {
+    if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+        return Err(ResponseQueryError::SampleRate);
+    }
+    if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&grid.points()) {
+        return Err(ResponseQueryError::Points);
+    }
+    if override_count > RESPONSE_MAXIMUM_OVERRIDES {
+        return Err(ResponseQueryError::Overrides);
+    }
+    // The axis rules are the query's, not the owner's: refuse a bad axis here, before any owner is
+    // prepared, so a host answers it the same way and with the same code.
+    check_response_axis(grid, sample_rate_hz).map_err(ResponseQueryError::Preview)
+}
+
 /// A response query whose owner is prepared; `curves` evaluates it.
 pub struct PreparedResponseQuery {
     preview: PreparedResponsePreview,
@@ -867,21 +892,11 @@ pub struct ResponseCurves {
 pub fn prepare_response_query(
     query: &ResponseQuery<'_>,
 ) -> Result<PreparedResponseQuery, ResponseQueryError> {
-    if !engine::is_launch_sample_rate(engine::SampleRateHz(query.sample_rate_hz)) {
-        return Err(ResponseQueryError::SampleRate);
-    }
-    let points = query.grid.points();
-    if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
-        return Err(ResponseQueryError::Points);
-    }
-    if let ResponsePreviewTarget::Effect { overrides, .. } = query.target
-        && overrides.len() > RESPONSE_MAXIMUM_OVERRIDES
-    {
-        return Err(ResponseQueryError::Overrides);
-    }
-    // The axis rules are the query's, not the owner's: refuse a bad axis here, before any owner is
-    // prepared, so a host answers it the same way and with the same code.
-    check_response_axis(query.grid, query.sample_rate_hz).map_err(ResponseQueryError::Preview)?;
+    let override_count = match query.target {
+        ResponsePreviewTarget::Effect { overrides, .. } => overrides.len(),
+        ResponsePreviewTarget::InputFilters { .. } => 0,
+    };
+    check_response_request(query.sample_rate_hz, query.grid, override_count)?;
     let preview = prepare_response_preview(ResponsePreviewRequest {
         configuration_id: query.configuration_id,
         sample_rate_hz: query.sample_rate_hz,

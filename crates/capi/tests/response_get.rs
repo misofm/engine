@@ -81,6 +81,10 @@ struct Endpoint {
 
 impl Endpoint {
     fn new(frame_bytes: u64) -> Self {
+        Self::with_session(frame_bytes, SESSION)
+    }
+
+    fn with_session(frame_bytes: u64, document: &str) -> Self {
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
             abi_version: ABI_VERSION,
@@ -107,8 +111,8 @@ impl Endpoint {
             assert_eq!(
                 miso_engine_v1_compile_session(
                     engine,
-                    SESSION.as_ptr(),
-                    SESSION.len() as u64,
+                    document.as_ptr(),
+                    document.len() as u64,
                     &compile_limits,
                     &mut diagnostics,
                     &mut session,
@@ -305,15 +309,25 @@ fn core_curves(
     channels: ResponseChannels,
     sections: bool,
 ) -> host_core::ResponseCurves {
+    core_curves_at(RATE, 20_000.0, target, channels, sections)
+}
+
+fn core_curves_at(
+    rate: u32,
+    maximum_hz: f32,
+    target: ResponsePreviewTarget<'_>,
+    channels: ResponseChannels,
+    sections: bool,
+) -> host_core::ResponseCurves {
     prepare_response_query(&ResponseQuery {
         configuration_id: 0x5eed_1573,
-        sample_rate_hz: RATE,
+        sample_rate_hz: rate,
         quantum_frames: QUANTUM,
         target,
         grid: ResponsePreviewGrid::Logarithmic {
             points: 96,
             minimum_hz: 20.0,
-            maximum_hz: 20_000.0,
+            maximum_hz,
         },
         channels,
         sections,
@@ -474,6 +488,103 @@ fn a_configuration_request_answers_the_curves_of_the_core() {
     assert_eq!(both, pair);
     let flat = curves_of(&mut endpoint, Vec::new());
     assert_ne!(both.left_db, flat.left_db, "the override took effect");
+}
+
+/// A section enabled on the left lane alone reaches the left mask and not the right one, and the
+/// curves of the lane that has it differ from the lane that does not; and at 44.1 and 96 kHz the
+/// reply is the core's at the session's own rate, with the axis limit that rate's Nyquist. The
+/// shared 48 kHz fixture cannot tell a left/right swap in the masks (every override there is
+/// symmetric) or a hard-coded rate.
+///
+/// Red if the reply swaps the lane masks, enables a one-lane override on both lanes, or serves
+/// the 48 kHz rate to a session at another rate.
+#[test]
+fn a_one_lane_section_and_another_session_rate_reach_the_reply() {
+    let mut endpoint = Endpoint::new(1 << 20);
+    let flat = {
+        let reply = endpoint.ask(&request(eq_target(), 96));
+        let Reply::Result(ResponseResult::Curves(curves)) = reply else {
+            panic!("curves");
+        };
+        curves
+    };
+    let band_3 = 0b100;
+    assert_eq!(
+        (flat.enabled_left & band_3, flat.enabled_right & band_3),
+        (0, 0),
+        "band 3 starts disabled on both lanes"
+    );
+    let mut left_only = request(eq_target(), 96);
+    left_only.overrides = vec![
+        row(BAND_3_ENABLED, ParameterChannel::Left, 1.0),
+        row(BAND_3_GAIN, ParameterChannel::Left, 9.0),
+    ];
+    let Reply::Result(ResponseResult::Curves(curves)) = endpoint.ask(&left_only) else {
+        panic!("curves");
+    };
+    assert_eq!(curves.enabled_left & band_3, band_3, "the left mask has it");
+    assert_eq!(curves.enabled_right & band_3, 0, "the right mask does not");
+    assert_eq!(curves.enabled_right, flat.enabled_right);
+    assert_ne!(curves.left_db, flat.left_db, "the left curve moved");
+    assert_eq!(curves.right_db, flat.right_db, "the right curve did not");
+    let left_rows = [
+        ResponseParameterOverride {
+            parameter_id: BAND_3_ENABLED,
+            channel: effect_contract::ParameterChannel::Left,
+            value: 1.0,
+        },
+        ResponseParameterOverride {
+            parameter_id: BAND_3_GAIN,
+            channel: effect_contract::ParameterChannel::Left,
+            value: 9.0,
+        },
+    ];
+    let eq_with = |rows| ResponsePreviewTarget::Effect {
+        effect_id: EQ,
+        overrides: rows,
+        quality: effect_contract::EffectQuality::Normal,
+        bypass: false,
+        link_mode: effect_contract::LinkMode::DualMono,
+    };
+    let rows = &left_rows[..];
+    let expected = core_curves(eq_with(rows), ResponseChannels::Both, true);
+    assert_same_curves(&Reply::Result(ResponseResult::Curves(curves)), &expected);
+
+    for rate in [44_100_u32, 96_000] {
+        let mut model = session::parse_session_json(SESSION).expect("fixture parses");
+        model.sample_rate_hz = rate;
+        let document = session::canonical_session_json(&model).expect("canonical session");
+        let mut endpoint = Endpoint::with_session(1 << 20, &document);
+        let mut query = request(eq_target(), 96);
+        query.overrides = left_only.overrides.clone();
+        query.maximum_hz = rate as f32 / 2.0;
+        let reply = endpoint.ask(&query);
+        let at_rate = core_curves_at(
+            rate,
+            rate as f32 / 2.0,
+            eq_with(rows),
+            ResponseChannels::Both,
+            true,
+        );
+        assert_same_curves(&reply, &at_rate);
+        let Reply::Result(ResponseResult::Curves(curves)) = &reply else {
+            panic!("curves at {rate}");
+        };
+        assert_eq!(curves.sample_rate_hz, rate);
+        // Nyquist of the session's rate is inside the axis; the 48 kHz fixture's would not be at
+        // 44.1 kHz, so a hard-coded rate refuses or moves this reply.
+        assert_eq!(
+            curves.frequencies_hz.last().copied(),
+            Some(rate as f32 / 2.0)
+        );
+        // One hertz past Nyquist is refused at this rate.
+        let mut past = query.clone();
+        past.maximum_hz = rate as f32 / 2.0 + 1.0;
+        let Reply::Refused { codes, .. } = endpoint.ask(&past) else {
+            panic!("an axis past Nyquist at {rate}");
+        };
+        assert_eq!(codes, ["response.grid"]);
+    }
 }
 
 /// Gate 3: each refusal a configuration target can reach is its status and code, with one error

@@ -24,9 +24,9 @@ use protocol::{
 use session::{EffectIdentity, SessionModel, StripKind};
 
 use crate::response::{
-    RESPONSE_MAXIMUM_OVERRIDES, ResponseChannels, ResponseParameterOverride, ResponsePreviewError,
-    ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery,
-    ResponseQueryError, ResponseRefusal, input_filter_target, prepare_response_query,
+    ResponseChannels, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
+    ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
+    ResponseRefusal, check_response_request, input_filter_target, prepare_response_query,
 };
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
@@ -618,12 +618,27 @@ fn serve_response(
             "response.target.unavailable",
         ));
     };
+    let points = request.points as usize;
+    let grid = match request.grid {
+        ResponseGrid::Linear => ResponsePreviewGrid::Linear {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        },
+        ResponseGrid::Logarithmic => ResponsePreviewGrid::Logarithmic {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        },
+    };
+    // The core's checks come first, in the core's order (rate, points, override count, axis), so
+    // the refusal of a request that is wrong in several ways is the same on every host. The
+    // provider's own rules follow.
+    check_response_request(model.sample_rate_hz, grid, request.overrides.len())
+        .map_err(query_refusal)?;
     // A session endpoint has one rate and one quantum, the session's.
     if request.sample_rate_hz.is_some() || request.quantum_frames.is_some() {
         return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
-    }
-    if request.overrides.len() > RESPONSE_MAXIMUM_OVERRIDES {
-        return Err(query_refusal(ResponseQueryError::Overrides));
     }
     let defaults = ResponsePreviewLimits::default();
     let maximum_prepared_bytes = request
@@ -672,14 +687,14 @@ fn serve_response(
                 ResponsePreviewError::DuplicateParameter,
             )));
         }
+        // The bypass is a switch: its value is exactly 0 or 1, and a value between is its own
+        // refusal, not "no such parameter".
         bypass = Some(if row.value.to_bits() == 1.0_f32.to_bits() {
             true
         } else if row.value.to_bits() == 0.0_f32.to_bits() {
             false
         } else {
-            return Err(query_refusal(ResponseQueryError::Preview(
-                ResponsePreviewError::InvalidParameter,
-            )));
+            return Err(refuse(StatusCode::InvalidField, "response.override.bypass"));
         });
     }
     let target = match configuration {
@@ -704,19 +719,6 @@ fn serve_response(
         },
         ResponseConfiguration::InputFilters => input_filter_target(&rows)
             .map_err(|error| query_refusal(ResponseQueryError::Preview(error)))?,
-    };
-    let points = request.points as usize;
-    let grid = match request.grid {
-        ResponseGrid::Linear => ResponsePreviewGrid::Linear {
-            points,
-            minimum_hz: request.minimum_hz,
-            maximum_hz: request.maximum_hz,
-        },
-        ResponseGrid::Logarithmic => ResponsePreviewGrid::Logarithmic {
-            points,
-            minimum_hz: request.minimum_hz,
-            maximum_hz: request.maximum_hz,
-        },
     };
     let channels = ResponseChannels::from_raw(request.channels as u8)
         .ok_or_else(|| refuse(StatusCode::Internal, "response.internal"))?;
@@ -2011,7 +2013,8 @@ mod tests {
     use effect_contract::{AutomationRate, ParameterChannel as PreparedChannel};
     use effect_contract::{ParameterChannelPolicy, ParameterDomain};
 
-    use protocol::{ControlOwnerKind, ParameterChannel};
+    use crate::RESPONSE_MAXIMUM_OVERRIDES;
+    use protocol::{ControlOwnerKind, ParameterChannel, ResponseOverride};
 
     use super::*;
 
@@ -2102,6 +2105,102 @@ mod tests {
         fn next_absolute_sample(&self) -> u64 {
             self.0.load(Ordering::Acquire)
         }
+    }
+
+    fn response_request() -> ResponseGetRequest {
+        ResponseGetRequest {
+            target: ResponseTarget::Configuration(ResponseConfiguration::Effect {
+                effect: "miso.parametric-eq".to_owned(),
+                quality: session::EffectQuality::Normal,
+                link_mode: session::LinkMode::DualMono,
+            }),
+            grid: ResponseGrid::Logarithmic,
+            points: 64,
+            minimum_hz: 20.0,
+            maximum_hz: 20_000.0,
+            channels: ParameterChannel::Both,
+            sections: false,
+            overrides: Vec::new(),
+            configuration_id: None,
+            sample_rate_hz: None,
+            quantum_frames: None,
+            maximum_prepared_bytes: None,
+            maximum_state_bytes: None,
+            maximum_scratch_bytes: None,
+            maximum_automation_spans: None,
+            maximum_reply_bytes: None,
+        }
+    }
+
+    /// A request that is wrong in several ways is refused with the core's refusal first, in the
+    /// core's order (rate, points, override count, axis), before the provider's own rules (a
+    /// rate on a session endpoint, a zero byte budget, the bypass); and a bypass value between 0
+    /// and 1 is `response.override.bypass`, not "no such parameter".
+    ///
+    /// Red if the provider shapes the overrides before it asks the core, so a request with one bad
+    /// point count and one bad bypass value answers the bypass, or the bypass shares the code of an
+    /// unknown parameter.
+    #[test]
+    fn response_get_asks_the_core_first_and_names_a_bad_bypass() {
+        let model = nine_track();
+        let (mut provider, _clock) = provider_of(&model);
+        let bypass = |value: f32| ResponseOverride {
+            control: protocol::RESPONSE_BYPASS_CONTROL,
+            lane: ParameterChannel::Both,
+            value,
+        };
+        let mut refusal = |request: &ResponseGetRequest| {
+            let error = provider
+                .response_get(&model, request)
+                .expect_err("a refusal");
+            (error.status, error.code)
+        };
+
+        let mut both_wrong = response_request();
+        both_wrong.overrides = vec![bypass(0.5)];
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::InvalidField, "response.override.bypass"),
+            "a bypass between 0 and 1 has its own code"
+        );
+        both_wrong.points = 1;
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::InvalidField, "response.points"),
+            "the point count is the core's and comes first"
+        );
+        both_wrong.points = 64;
+        both_wrong.minimum_hz = f32::NAN;
+        both_wrong.sample_rate_hz = Some(RATE);
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::InvalidField, "response.grid"),
+            "the axis is the core's and precedes the session-rate rule"
+        );
+        both_wrong.minimum_hz = 20.0;
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::InvalidField, "response.rate.session"),
+            "then the provider's own rules"
+        );
+        both_wrong.sample_rate_hz = None;
+        both_wrong.overrides = vec![bypass(0.5); RESPONSE_MAXIMUM_OVERRIDES + 1];
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::LimitExceeded, "response.override.count"),
+            "the override count precedes the bypass rows"
+        );
+        // An unknown parameter keeps the code it had.
+        let mut unknown = response_request();
+        unknown.overrides = vec![ResponseOverride {
+            control: 9_999,
+            lane: ParameterChannel::Both,
+            value: 1.0,
+        }];
+        assert_eq!(
+            refusal(&unknown),
+            (StatusCode::InvalidField, "response.override.control")
+        );
     }
 
     fn nine_track() -> session::SessionModel {
