@@ -271,3 +271,11 @@ The slice is split. Both pieces stay in this issue.
   batch with #1381a, #1562a, #1563B and #1565A.
 
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+## Implementation record (#1570a, batch 4 review fold, 2026-10-14)
+
+Gate 5 (the C ABI is unchanged), `audit capi` on the merge base `205a8d2b4` and on the batch 4 fold
+head: `pcm_digest` `76525e7ef9e78cf4` on both (`cargo run --locked --release -p audit -- capi`,
+`total_violations` 0). PR evidence, not a committed test. The fold also makes `control-plane` own
+every command refusal text: `CommandError::diagnostic` beside `EventError::diagnostic`, which the
+C ABI calls (#1562a needs it).

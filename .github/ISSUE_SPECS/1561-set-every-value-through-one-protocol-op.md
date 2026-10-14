@@ -139,3 +139,12 @@ Commands: `cargo test --locked --workspace --all-features`,
   `SET_CONTROL` encoder.
 - Shrinks *Encode the session, submix, output, route, automation and VCA edits in the SDK*
   (#1385): the route, VCA and `control_smoothing` value ops are gone; the structural encoders stay.
+
+## Evidence record
+
+Batch 4 review fold, 2026-10-14. Gate 3 (claims kept), `audit capi` on the merge base `205a8d2b4` and
+on the batch 4 fold head: `{"kind":"issue022_capi_render_audit","calls":100000,"sample_rate_hz":48000,"quantum_frames":128,"pcm_digest":"76525e7ef9e78cf4","total_violations":0}`
+(`cargo run --locked --release -p audit -- capi`). The two digests are equal. The fold also fixes
+D3's accept rule: `SetTrackConsole` is accepted only after a `SetConsole` of the same transaction
+that changes the console (the candidate console differs from the committed one); a `SetConsole` that
+repeats the committed console does not open it.
