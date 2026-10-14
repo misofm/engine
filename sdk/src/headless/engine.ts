@@ -385,7 +385,8 @@ export type ValidationResult =
     readonly ok: false;
     readonly phase: ErrorPhase;
     readonly code: MisoErrorCode;
-    readonly result: number;
+    /** The engine result code; `undefined` when the SDK raised `code` without one. */
+    readonly result: number | undefined;
     readonly diagnostics: readonly MisoDiagnostic[];
   };
 

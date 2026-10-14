@@ -37,7 +37,7 @@ export type ResponseWorkerError = Readonly<{
   readonly message: string;
   readonly phase?: string;
   readonly code?: string;
-  readonly result?: number;
+  readonly result?: number | undefined;
   readonly diagnostics?: readonly Readonly<{ readonly code: string; readonly path: string }>[];
 }>;
 

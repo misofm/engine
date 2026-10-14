@@ -11,7 +11,18 @@ export type { ErrorPhase, ResultCodeName, BootResultAliasName };
  * rejected the options block -- so the vocabulary a caller sees is the union of both spellings and
  * the SDK chooses by context. Adopted ruling 5462139867 finding 2.
  */
-export type MisoErrorCode = ResultCodeName | BootResultAliasName;
+export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCode;
+
+/**
+ * A code the SDK itself raises when a bounded wait does not settle. It comes from the SDK, not
+ * from the engine, so an error that carries it has no engine `result`.
+ *
+ * - `spectrumCloseTimeout`: the spectrum Worker's close did not settle while `close()` waited.
+ * - `hostDisposeTimeout`: the worklet host did not answer its dispose request.
+ * - `contextCloseTimeout`: `AudioContext.close()` did not settle (it also covers the boot-path
+ *   context closes).
+ */
+export type SdkTimeoutCode = "spectrumCloseTimeout" | "hostDisposeTimeout" | "contextCloseTimeout";
 
 const RESULT_NAMES: ReadonlyMap<number, ResultCodeName> = new Map(
   ABI_LAYOUT.constants.resultCodes.map((row) => [row.value, row.name] as const),
@@ -72,7 +83,8 @@ export function parseDiagnostics(text: string): readonly MisoDiagnostic[] {
 export interface MisoEngineErrorInit {
   readonly phase: ErrorPhase;
   readonly code: MisoErrorCode;
-  readonly result: number;
+  /** The engine's result code; absent when the SDK itself raised `code` (an `SdkTimeoutCode`). */
+  readonly result?: number | undefined;
   readonly diagnostics?: readonly MisoDiagnostic[];
 }
 
@@ -88,7 +100,8 @@ export interface MisoEngineErrorInit {
 export class MisoEngineError extends Error {
   readonly phase: ErrorPhase;
   readonly code: MisoErrorCode;
-  readonly result: number;
+  /** The engine's result code, or `undefined` when the SDK raised `code` and the engine returned none. */
+  readonly result: number | undefined;
   readonly diagnostics: readonly MisoDiagnostic[];
 
   constructor(message: string, init: MisoEngineErrorInit) {

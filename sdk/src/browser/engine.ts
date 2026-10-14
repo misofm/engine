@@ -2,6 +2,7 @@ import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
+import type { SdkTimeoutCode } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { SourceSpec } from "../core/types.ts";
@@ -221,7 +222,14 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
   /** Bind the semantic live controls once; rejects with MisoUsageError when none were attached. */
   liveControls(): Promise<EngineLiveControls>;
-  /** Dispose the worklet host, then close its context. Safe to call more than once. */
+  /**
+   * Dispose the worklet host, then close its context. Safe to call more than once.
+   *
+   * Each step that can hang waits at most 10 s. A step that does not settle rejects `close()` with
+   * a `lifecycle` `MisoEngineError` whose code names it (`spectrumCloseTimeout`,
+   * `hostDisposeTimeout`, `contextCloseTimeout`); the context close is still attempted. A settled
+   * close is not run again: every later call returns the same promise.
+   */
   close(): Promise<void>;
 }
 
@@ -376,6 +384,42 @@ function validateSpectrumCollectionQuery(
     throw new MisoUsageError("spectrum maximumCaptureBytes exceeds the browser capture bound");
   }
   return query;
+}
+
+/** The longest `close()` waits for one step that can hang (D1 of issue #1532). */
+const CLOSE_STEP_TIMEOUT_MS = 10_000;
+
+/**
+ * Await `run()` for at most `CLOSE_STEP_TIMEOUT_MS`. A step that does not settle in time rejects
+ * with a `lifecycle` `MisoEngineError` that names `step` and carries `code`. The timer is cleared
+ * when the step settles, and a step that settles after its timeout stays observed, so it never
+ * becomes an unhandled rejection.
+ */
+function boundedCloseStep<T>(step: string, code: SdkTimeoutCode, run: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new MisoEngineError(`close: ${step} did not settle within ${CLOSE_STEP_TIMEOUT_MS} ms`, {
+        phase: "lifecycle",
+        code,
+      }));
+    }, CLOSE_STEP_TIMEOUT_MS);
+    let pending: Promise<T>;
+    try {
+      pending = run();
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+    pending.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+function boundedContextClose(context: AudioContextLike): Promise<void> {
+  return boundedCloseStep("AudioContext close", "contextCloseTimeout", async () => { await context.close(); });
 }
 
 async function awaitSpectrum<T>(
@@ -542,7 +586,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       context = candidate;
       break;
     }
-    await candidate.close();
+    await boundedContextClose(candidate);
   }
   if (context === undefined) {
     throw new MisoEngineError(
@@ -560,7 +604,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
   try {
     assertQuantumMatch(context.renderQuantumSize, shape.quantumFrames);
   } catch (error) {
-    await context.close();
+    // The boot error stays the answer; the bound only ends the wait for the context.
+    try { await boundedContextClose(context); } catch { /* the quantum refusal is the failure to report */ }
     throw error;
   }
 
@@ -1308,24 +1353,44 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
         closePromise ??= (async () => {
-          try {
-            if (trackResponsePromise !== undefined) {
-              try { await (trackResponse ?? await trackResponsePromise)?.close(); } catch { /* host close remains authoritative */ }
-            }
-            if (spectrumPromise !== undefined) {
-              try { await (spectrum ?? await spectrumPromise)?.close(); } catch { /* host close remains authoritative */ }
-            }
-            await host.dispose();
-          } finally {
-            // A failed MessagePort disposal must not leak the much larger AudioContext.
-            await context.close();
+          // The first failure in step order wins; later ones are dropped (D4).
+          let failed = false;
+          let failure: unknown;
+          const fail = (error: unknown): void => {
+            if (!failed) { failed = true; failure = error; }
+          };
+          if (trackResponsePromise !== undefined) {
+            // Bounded by BrowserTrackResponse.create's own 5 s deadline; its close is synchronous.
+            try { await (trackResponse ?? await trackResponsePromise)?.close(); } catch { /* host close remains authoritative */ }
           }
+          if (spectrumPromise !== undefined) {
+            try {
+              await boundedCloseStep("spectrum close", "spectrumCloseTimeout",
+                async () => { await (spectrum ?? await spectrumPromise)?.close(); });
+            } catch (error) {
+              // A spectrum rejection is dropped (host close stays authoritative); a timeout is kept.
+              if (error instanceof MisoEngineError && error.code === "spectrumCloseTimeout") fail(error);
+            }
+          }
+          try {
+            await boundedCloseStep("worklet host dispose", "hostDisposeTimeout", async () => { await host.dispose(); });
+          } catch (error) {
+            fail(error);
+          }
+          try {
+            // A failed or stalled MessagePort disposal must not leak the much larger AudioContext.
+            await boundedContextClose(context);
+          } catch (error) {
+            fail(error);
+          }
+          if (failed) throw failure;
         })();
         return closePromise;
       },
     });
   } catch (error) {
-    await context.close();
+    // The boot error stays the answer; the bound only ends the wait for the context.
+    try { await boundedContextClose(context); } catch { /* the worklet boot failure is the failure to report */ }
     throw error;
   }
 }
