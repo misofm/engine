@@ -13,11 +13,21 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// control allocation counter. The worklet's message handler calls them outside `process()` and
 /// outside every render-locked window, because their allocations and frees are the control
 /// counter's (`render_lock.rs`).
-const UNWRAPPED_EXPORTS: [&str; 4] = [
+///
+/// Issue #1562a adds the five control exports of the generic command entry (D1): the request
+/// staging address, the command, the response address and length, and the committed revision. They
+/// run in the message handler too, and `SessionState::command` allocates and frees, so they are
+/// never inside a render-locked window.
+const UNWRAPPED_EXPORTS: [&str; 9] = [
     "dispose",
     "render_allocation_count",
     "service",
     "control_allocation_count",
+    "control_request_ptr",
+    "control_command",
+    "control_response_ptr",
+    "control_response_bytes",
+    "control_revision",
 ];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a

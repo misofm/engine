@@ -664,6 +664,18 @@ pub trait RuntimePreparer: Send {
         bound_cache: &mut InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
+
+    /// The code of the diagnostic this preparer refuses a structural transaction with, or `None`
+    /// to take it (issue #1562a D9).
+    ///
+    /// A command frame whose transaction the live classifier sends to the rebuild arm asks this
+    /// first, before the revision is stamped, the successor is prepared or anything is queued, so
+    /// a refusal here leaves the model, the revision, the overlay, the cells and the plan as they
+    /// were, and no acknowledgement has gone out. The code is one whole-session diagnostic line
+    /// (`code\t$\n`). The default takes every rebuild, as the C ABI does.
+    fn refuse_rebuild(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Prepare one plan plus its source producers, and project its resource accounting.

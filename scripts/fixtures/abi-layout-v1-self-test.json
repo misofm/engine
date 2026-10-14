@@ -15,6 +15,11 @@
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
+    "miso_engine_web_v1_control_command",
+    "miso_engine_web_v1_control_request_ptr",
+    "miso_engine_web_v1_control_response_bytes",
+    "miso_engine_web_v1_control_response_ptr",
+    "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -635,7 +640,7 @@
     ]
   },
   "constants": {
-    "resultCodes": [{ "value": 0, "name": "ok" }, { "value": 1, "name": "invalidArgument" }, { "value": 2, "name": "abiMismatch" }, { "value": 3, "name": "wrongState" }, { "value": 4, "name": "bufferTooSmall" }, { "value": 5, "name": "refusedBudget" }, { "value": 6, "name": "backpressure" }, { "value": 7, "name": "unsupported" }, { "value": 8, "name": "renderRejected" }, { "value": 9, "name": "reprepareRequired" }, { "value": 255, "name": "internal" }],
+    "resultCodes": [{ "value": 0, "name": "ok" }, { "value": 1, "name": "invalidArgument" }, { "value": 2, "name": "abiMismatch" }, { "value": 3, "name": "wrongState" }, { "value": 4, "name": "bufferTooSmall" }, { "value": 5, "name": "refusedBudget" }, { "value": 6, "name": "backpressure" }, { "value": 7, "name": "unsupported" }, { "value": 8, "name": "renderRejected" }, { "value": 9, "name": "reprepareRequired" }, { "value": 10, "name": "compileRejected" }, { "value": 255, "name": "internal" }],
     "bootResultAliases": [{ "value": 1, "name": "refusedDocument" }, { "value": 2, "name": "refusedOptions" }, { "value": 3, "name": "refusedLifecycle" }],
     "states": [{ "value": 2, "name": "ready" }, { "value": 3, "name": "failed" }, { "value": 4, "name": "disposed" }],
     "backends": [{ "value": 0, "name": "scalar" }, { "value": 1, "name": "simd128" }],

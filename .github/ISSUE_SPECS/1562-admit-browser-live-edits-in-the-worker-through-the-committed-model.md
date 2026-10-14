@@ -237,3 +237,137 @@ The slice is split. Both pieces stay in this issue.
   refusal and gate 11. Dependencies: #1562a, #1381b, #1290a.
 
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+## Record of #1562a (flip batch, written 2026-10-14)
+
+### What shipped
+
+- **D1.** Five exports on the control half, all unwrapped and counted as control allocations:
+  `miso_engine_web_v1_control_request_ptr(handle, len)`, `_control_command(handle, len)`,
+  `_control_response_ptr(handle)`, `_control_response_bytes(handle)` and
+  `_control_revision(handle) -> u64` (the fifth is carry-forward 2). `control_command` runs
+  `SessionState::command` on the staged bytes and decodes nothing. The one `miso.control.v1`
+  message (`{requestId, frame}`, reply `{requestId, result, response, revision}`) travels on the
+  node's port; the worklet stages, runs and copies the response out in `receiveControl` /
+  `readControlCommand`, in the message handler, and the service step follows as after every message.
+  The main-realm host has `control(frame)`. The staging is one new 16 KiB buffer
+  (`PreparedBuffers::control_request`, charged in the bridge's retained rows), not the old command
+  staging: that one holds 256 records of 48 bytes, 12 KiB, under `maximum_control_frame_bytes`.
+- **Result codes.** One new browser result code, `RESULT_COMPILE_REJECTED = 10`
+  (`compileRejected`), for a typed refusal before commit; the other `CommandError`s map to the
+  existing codes. After any failure the response bytes are the refusal's diagnostic text. A refused
+  transaction that the core encodes (`control.domain`) is still `RESULT_OK` with a non-ok frame, as on
+  the C ABI. The mirrors (`abi_layout.rs` and its test, `check-abi-layout-v1.py`, its fixture, the
+  regenerated JSON and `abi.ts`, `render-thread-exports.json`, `policy.rs`, both `.d.ts`,
+  `check-web-audioworklet.sh`) carry the exports and the code.
+- **D9.** `RuntimePreparer::refuse_rebuild(&self) -> Option<&'static str>` (default `None`; the
+  C ABI's preparer takes every rebuild). `SessionState::command` asks it between `commit_live`'s
+  rebuild verdict and the rebuild arm (`control.rs`), drops the token and returns
+  `CompileRejected(web.apply.rebuild_pending)`. `WebRuntimePreparer` refuses unless its
+  `allow_rebuild` switch is set, and only the test-support republish
+  (`structural_command_for_test`, #1381a gates 2 and 4) sets it, for the one call. Nothing is
+  stamped, prepared, queued or acknowledged before the refusal.
+- **D5, D6.** Nothing to do: #1381a's preparer already attaches `controls::live_lanes`, and the
+  core resolves every ramp from the committed model.
+
+### Rules for the next slices
+
+- **One request-ID allocator.** The frame carries the sender's request ID and the core's replay
+  cache refuses a reused ID with different bytes; it answers a byte-identical resend
+  `protocol.failure` (a refused frame consumes its ID, the rebuild-pending refusal included). So one
+  allocator serves the whole `SessionState::command` endpoint. For #1563B: the SDK's
+  `ControlTransactionQueue` (`#nextRequestId`) is that allocator, and every catalog or state read
+  the SDK sends through `host.control()` takes its ID from the same counter; the host method never
+  rewrites a frame; a retry of a refused frame takes a new ID.
+- **Revision seed.** `control_revision()` (and the `revision` of every `miso.control.v1` reply,
+  and the header of any reply frame) is the committed revision. #1563B constructs the queue with
+  `initialRevision` from it after a successful boot.
+- **edit_path.** It is in the response frame (`TransactionApplied.edit_path`), unchanged: the
+  parity test and the admission tests decode `live`, `model_only`, `monitor` from it. `rebuild`
+  never comes back from the browser before #1562b.
+- **Reliable event lane (for #1570b).** Every committed transaction queues a `SESSION_COMMITTED`
+  event on the core's reliable lane, and an undrained lane refuses the next commit with
+  backpressure. #1562a has no reader: the tests drain through the test-support
+  `drain_reliable_events_for_test`. Until #1570b drains the lane in the message handler, a page that
+  sends more transactions than the lane holds is refused; the batch lands whole, so this is
+  #1570b's to close before the flip is reachable.
+- **Memory growth.** `control_command` allocates (the transaction, the classifier's model clone and
+  JSON, the catalog stage). The worklet treats a moved `memory.buffer` as sticky
+  (`reprepareRequired`) as it does everywhere; the boot's transient peak, which stays in the
+  allocator's free lists, is larger than a control frame's.
+
+### Evidence
+
+- Gate 1 (`tests/control_admission.rs`): 22 rows, each its own boot, one transaction. The reply is
+  `live`, the revision is +1, the plan epoch is unchanged, the parsed committed document holds the
+  value on each lane, and the blocks are bit-identical to a plan prepared from the committed
+  document and fed the same PCM from frame 0 for 18 rows. Deviations from the filed text:
+  - `hpf`, `lpf`, the effect parameter and the EQ band gain are not bit-identical to a fresh plan at
+    any block: the running plan smooths the coefficient through filter or effect state, so its
+    output converges on the fresh plan's (the test asserts the largest difference at the end is
+    under half that at block 8; measured 7e-4 for `hpf` and 1.3e-2 for `lpf` at block 38 of 40).
+    Gate 8 holds the same four rows bit-equal to the C ABI at four rates, which is the claim that
+    can hold.
+  - `follows_mute` and the VCA member are rows only in a state where they change a gate or a gain,
+    so each has a setup transaction (mute `t1`; a VCA offset of -3 dB). Otherwise the core answers
+    `model_only`.
+  - The VCA member row compares from block 20 (the edit has no length of its own and ramps over the
+    session's fader length).
+  - The `delay_samples` part of gate 1 is #1562b's; gate 11 holds its refusal.
+- Gate 2: sample-exact on a session with no insert: 0 steps at the first sample of the block
+  after the commit, 480 reaches the target at the 480th sample of the ramp (sample index 479), an
+  absent length equals the explicit session length and is not a step, for fader, mute and pan.
+  Solo is not in this table: its `mute_ms` resolution is the core's (#1559's tests), and the browser
+  adds no resolution of its own to test.
+- Gate 3: solo replies `monitor` with the revision unchanged, the document is untouched, the blocks
+  equal a fresh plan under the same solo, and a later live fader edit keeps the solo. "A structural
+  transaction keeps the solo" is #1562b's (a structural transaction is refused here).
+- Gate 4: a valid fader edit, a solo and an out-of-domain pan are refused `control.domain`; the
+  revision, document and the next 8 blocks equal a run without the call.
+- Gate 5 (`tests/worker_admission_realtime.rs`, single-thread form; the workspace has no
+  `bench_support::alloc`, so the binary registers the module's own counting allocator as
+  `plan_exchange_threads.rs` does): 1,000 `SET_CONTROL` frames between 1,000 renders, the
+  render-locked count exactly zero across every render, the control count moving across the frames.
+  The browser halves (the counter in a real page) are gate 7's. The two-thread form is #1332's.
+- Gate 6: `mute_ms` 5 then a mute with no length equals the mute with an explicit 240 and differs
+  from the default; a strip's `pan_window_samples` 100 then a pan with no length equals an explicit
+  100 and differs from the default.
+- Gate 8 (`tests/control_parity.rs`, un-ignored): the browser leg sends the C ABI leg's frames
+  through D1; the verdicts (path and revision, or the refusal's codes), every block's bits at 44.1,
+  48, 88.2 and 96 kHz, the superseded count, every row of `CONTROL_LIST_GET` and `CONTROL_STATE_GET`
+  and the `SESSION_SNAPSHOT_GET` bytes are equal. The script gained `follows_mute` off and on, a VCA
+  member added, and `matrix_mode` of a matrix strip to pan (live) and back to the matrix (`model_only`
+  on both hosts, as the effective 2x2 is unchanged). The rows are compared one by one because the C ABI leg's 4 KiB frames
+  page differently.
+- Gate 9: `cargo test -p capi` passes; `target/release/audit capi` reports `pcm_digest`
+  `76525e7ef9e78cf4`.
+- Gate 11 (`a_rebuild_frame_is_refused_before_commit_and_changes_nothing`): a `SET_CONTROL` on
+  `delay_samples` returns `RESULT_COMPILE_REJECTED` with `web.apply.rebuild_pending\t$\n`; the
+  committed revision, the plan epoch and the document are unchanged, no commit event is queued, the
+  host takes the next live edit at the unchanged revision, and the next blocks equal a run that never
+  saw the frame.
+- Worklet harness (`scripts/test-web-audioworklet.mjs`): the control message stages the frame, runs
+  the export, returns the response unchanged with the revision, carries a typed refusal without
+  going sticky, refuses a frame the staging refuses, goes sticky on a malformed message and on a
+  moved memory; the host sends a copy with the buffer transferred, refuses a bad frame locally, and
+  fails on a malformed reply.
+- `check-sdk-headless.sh`: 25 failing subtests, the number #1381a recorded; all of them send the old
+  command kinds or read their effects. #1563B (the SDK sends `SET_CONTROL`) restores the edit-driven
+  ones; #1565A deletes or rewrites the tests of the old kinds (`round_trip.rs` in
+  `tools/parameter-metadata` is one: it still sends kind 4 and fails on `unsupportedKind`, as it did
+  at #1381a's head).
+- **Classifier cost (carry-forward 4).** `classify_live_delta_with_monitor` on a 64-track session
+  (one source, route and no insert per track, one fader edit), native release build, x86-64: about
+  2.0 ms per call (200 calls); a whole `control_command` with a fader edit about 1.9 ms. It clones
+  the model and serializes both the committed and the masked model to canonical JSON for each edit,
+  so it is linear in the session, and the same cost lands in the worklet's message handler, on the
+  audio thread, in the one-instance mode: in Wasm, several times native, against a 2.7 ms quantum at
+  48 kHz and 128 frames. It is slow enough to glitch a large session. A successor is opened: replace
+  the whole-document comparison of step 1 by a field-wise comparison of the masked model (the same
+  verdict, no JSON), then re-time. #1562a does not change the classifier (a non-goal).
+
+### Not done here
+
+- Browser qualification rows (gate 7) in three browsers: no local browser runs in sprint mode; the
+  rows and the `CONTROL_LIST_GET` row belong to the batch's qualification run.
+- `npm run qualify` and `check-sdk-types.sh` (needs `npm ci`).

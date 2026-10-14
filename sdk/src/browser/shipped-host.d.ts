@@ -925,6 +925,20 @@ export interface MisoRenderAllocations {
   readonly count: number;
 }
 
+/// The reply to one control frame (issue 1562a D1). `response` is the response frame the engine's
+/// control plane built, unchanged, when `result` is `0`; for another result it is the refusal's
+/// diagnostic text (`code\tpath\n` lines), for example `web.apply.rebuild_pending` with `result: 10`
+/// for a transaction that needs a plan rebuild, which this module cannot apply in place yet. A
+/// refused transaction is still `result: 0` with a non-ok response frame, as on the C ABI.
+/// `revision` is the committed session revision after the call.
+export interface MisoControlReply {
+  readonly tag: "miso.control.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly response: Uint8Array;
+  readonly revision: bigint;
+}
+
 export interface MisoAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
@@ -973,6 +987,15 @@ export interface MisoAudioWorkletHost {
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
   renderAllocationCount(): Promise<MisoRenderAllocations>;
+  /// Send one command frame to the engine's control plane (issue 1562a D1): the frames the C ABI's
+  /// `miso_engine_v1_submit_command` accepts, a `SESSION_TRANSACTION_APPLY` of `SET_CONTROL` edits,
+  /// `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, counters and capabilities.
+  /// Nothing in the frame is decoded here, and the engine decodes it in the worklet's message
+  /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
+  /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
+  /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
+  /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port.
+  control(frame: Uint8Array): Promise<MisoControlReply>;
   /// Submit one live-control batch as a single transaction (issue 137 D1).
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;
   /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).

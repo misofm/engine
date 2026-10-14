@@ -42,6 +42,11 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
+    "miso_engine_web_v1_control_command",
+    "miso_engine_web_v1_control_request_ptr",
+    "miso_engine_web_v1_control_response_bytes",
+    "miso_engine_web_v1_control_response_ptr",
+    "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -2078,6 +2083,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 9,
         "name": "reprepareRequired"
+      },
+      {
+        "value": 10,
+        "name": "compileRejected"
       },
       {
         "value": 255,

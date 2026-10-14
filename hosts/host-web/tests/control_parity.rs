@@ -3,16 +3,18 @@
 //!
 //! One script of control edits, played once through the C ABI (`SET_CONTROL` inside
 //! `SESSION_TRANSACTION_APPLY`, through the exported `miso_engine_v1_*` entries) and once through
-//! the browser host (`AudioWorkletEngineHost` with today's command records, and, for the EQ and
-//! the input filters, the prepared targets the browser's own preparers design). Both legs run
-//! natively in this process, so they run the same lane width; lane-width parity stays with the G5
-//! corpus and the #106 F4 session parity gate.
+//! the browser host (`AudioWorkletEngineHost`, through the generic command-frame entry of issue
+//! #1562a D1: the very same frames, unchanged, as `SessionState::command` receives them). Both
+//! legs run natively in this process, so they run the same lane width; lane-width parity stays
+//! with the G5 corpus and the #106 F4 session parity gate.
 //!
-//! Per scripted edit the test compares whether the edit was accepted or refused (with the code on
-//! each side for a refusal), the path (the C ABI reply's `edit_path`, which must be `live`, or
-//! `monitor` for solo; the browser has no rebuild path, so an accepted browser command is a live
-//! one), and, per block, the bits of the two output planes. At the end the two hosts report the
-//! same `live_values_superseded` count. The whole run repeats at 44.1, 48, 88.2 and 96 kHz.
+//! Per scripted edit the test compares the verdict of the two hosts whole: committed with the same
+//! path (`live`, or `monitor` for solo) and the same revision, or refused with the same control
+//! codes. Per block it compares the bits of the two output planes. At the end the two hosts report
+//! the same `live_values_superseded` count, and every page of `CONTROL_LIST_GET` and
+//! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
+//! repeats at 44.1, 48, 88.2 and 96 kHz. The rebuild part of the browser's parity (a
+//! `delay_samples` edit) is #1562b's: until then the browser refuses it `web.apply.rebuild_pending`.
 //!
 //! It absorbs #1364 gate 3 (the edits carry no per-edit ramp, so each host resolves the session's
 //! own length, and one pan carries a window of its own while another does not) and #1399 (a fader,
@@ -27,7 +29,6 @@
 
 use core::ptr;
 
-use builtins::{BuiltinLaneSelector, PreparedInputFilterTarget};
 use capi::{
     ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
     ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
@@ -35,126 +36,21 @@ use capi::{
     SubmitReport,
 };
 use controls::{ControlAddress, Lane, Owner, Section};
-use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel as ContractChannel};
-use host_core::{
-    EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, InputFilterEdit,
-    InputFilterPreparer,
-};
-use host_web::{
-    ABI_VERSION, AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM,
-    COMMAND_FADER_DB, COMMAND_INPUT_FILTERS, COMMAND_MATRIX, COMMAND_MUTE, COMMAND_PAN,
-    COMMAND_POLARITY_INVERT, COMMAND_REASON_DOMAIN, COMMAND_REASON_NONE,
-    COMMAND_REASON_NOT_SOLOABLE, COMMAND_REASON_UNKNOWN_VCA, COMMAND_RECORD_BYTES,
-    COMMAND_ROUTE_GAIN_DB, COMMAND_ROUTE_MATRIX, COMMAND_ROUTE_MUTE, COMMAND_SOLO, COMMAND_TRIM_DB,
-    COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE, RACK_INSERTS, RACK_NOT_APPLICABLE, RESULT_OK,
-    SESSION_DEFAULT_RAMP, WebBootOptions,
-};
 use protocol::{
-    CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
-    DecodedTypedResponseFrame, EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
-    SessionRevision, StatusCode, TypedCommandFrame,
+    CommandPayload, ControlListRequest, CounterId, CountersRequest, DecodeScratch,
+    DecodedSuccessResponsePayload, DecodedTypedResponseFrame, EditPath, ExpectedRevision,
+    ProtocolCodec, RequestId, SessionEdit, SessionRevision, TypedCommandFrame,
 };
 use session::{
-    DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit,
-    RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix, Vca,
-    canonical_session_json, parse_session_json,
+    DualMonoFader, ParameterChannel, SessionModel, StableId, Vca, canonical_session_json,
 };
 
-const QUANTUM: u32 = 128;
-const BLOCKS: u64 = 64;
-/// The strip window of `t1`'s pan, in samples. `t2`'s pan has none (`pan_ms` applies).
-const PAN_WINDOW: u32 = 200;
+mod common;
+use common::*;
+
+const ROUTE_FOLLOWS_MUTE_ROW: u32 = 7;
+const MATRIX_MODE_ROW: u32 = 1;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-
-// The builtin and own-row IDs `SET_CONTROL` addresses (`controls`' tables).
-const POLARITY_INVERT: u32 = 1;
-const TRIM_DB: u32 = 2;
-const HPF_HZ: u32 = 3;
-const LPF_HZ: u32 = 4;
-const FADER_DB: u32 = 5;
-const MUTE: u32 = 6;
-const MATRIX_LL: u32 = 7;
-const PAN: u32 = 12;
-const SOLO: u32 = 2;
-const ROUTE_GAIN_DB: u32 = 1;
-const ROUTE_MUTE: u32 = 2;
-const ROUTE_MATRIX_LL: u32 = 3;
-const VCA_OFFSET_DB: u32 = 1;
-const VCA_MUTE: u32 = 2;
-
-/// A strip of the session and its browser strip index (tracks in ID order, then submixes).
-#[derive(Clone, Copy)]
-struct Strip {
-    id: &'static str,
-    index: u32,
-}
-
-const T1: Strip = Strip { id: "t1", index: 0 };
-const T2: Strip = Strip { id: "t2", index: 1 };
-const T3: Strip = Strip { id: "t3", index: 2 };
-const BUS: Strip = Strip { id: "b", index: 3 };
-
-/// One insert of a track: its ID, its native identity and its position in the track's inserts
-/// (the browser's `effect_index`).
-#[derive(Clone, Copy)]
-struct Insert {
-    track: Strip,
-    id: &'static str,
-    native: &'static str,
-    position: u32,
-}
-
-const EQ: Insert = Insert {
-    track: T1,
-    id: "eq",
-    native: "miso.parametric-eq",
-    position: 0,
-};
-const COMPRESSOR: Insert = Insert {
-    track: T1,
-    id: "comp",
-    native: "miso.compressor",
-    position: 1,
-};
-const GATE: Insert = Insert {
-    track: T2,
-    id: "gate",
-    native: "miso.gate-expander",
-    position: 0,
-};
-const CLIP: Insert = Insert {
-    track: T2,
-    id: "clip",
-    native: "miso.soft-clip",
-    position: 1,
-};
-const SHAPER: Insert = Insert {
-    track: T2,
-    id: "shaper",
-    native: "miso.transient-shaper",
-    position: 2,
-};
-const MULTIBAND: Insert = Insert {
-    track: T3,
-    id: "multi",
-    native: "miso.multiband-compressor",
-    position: 0,
-};
-const LIMITER: Insert = Insert {
-    track: T3,
-    id: "limiter",
-    native: "miso.true-peak-limiter",
-    position: 1,
-};
-const DELAY: Insert = Insert {
-    track: T3,
-    id: "delay",
-    native: "miso.delay",
-    position: 2,
-};
-const INSERTS: [Insert; 8] = [
-    EQ, COMPRESSOR, GATE, CLIP, SHAPER, MULTIBAND, LIMITER, DELAY,
-];
 
 /// Which lane(s) of a dual-mono value an edit writes.
 #[derive(Clone, Copy)]
@@ -165,15 +61,6 @@ enum Lanes {
 }
 
 impl Lanes {
-    /// The browser's wire `channel` byte.
-    fn byte(self) -> u8 {
-        match self {
-            Self::Left => 0,
-            Self::Right => 1,
-            Self::Both => 2,
-        }
-    }
-
     fn lane(self) -> Lane {
         match self {
             Self::Left => ParameterChannel::Left,
@@ -182,21 +69,6 @@ impl Lanes {
         }
     }
 }
-
-/// A VCA by its stable ID and its browser VCA index (canonical ID order).
-#[derive(Clone, Copy)]
-struct VcaRef {
-    id: &'static str,
-    index: u32,
-}
-
-const VCA: VcaRef = VcaRef { id: "v", index: 0 };
-/// A VCA the session does not have: the C ABI names it by an unknown ID, the browser by an index
-/// past the last VCA.
-const NO_VCA: VcaRef = VcaRef {
-    id: "nobody",
-    index: 1,
-};
 
 /// One live edit of the script, in terms both hosts can express.
 #[derive(Clone, Copy)]
@@ -235,14 +107,14 @@ enum Edit {
         hpf_hz: f32,
         lpf_hz: f32,
     },
-    /// A block-rate effect parameter, through the browser's direct command.
+    /// A block-rate effect parameter.
     Parameter {
         insert: Insert,
         parameter: u32,
         lanes: Lanes,
         value: f32,
     },
-    /// A parametric EQ parameter on both lanes, through the browser's prepared target.
+    /// A parametric EQ parameter on both lanes.
     EqParameter {
         parameter: u32,
         value: f32,
@@ -274,18 +146,30 @@ enum Edit {
         strip: Strip,
         on: bool,
     },
+    /// The send's `follows_mute` (a route's own row).
+    FollowsMute {
+        follows: bool,
+    },
+    /// A strip's `matrix_mode` (a strip's own row): `true` is the matrix, `false` the pan.
+    MatrixMode {
+        strip: Strip,
+        matrix: bool,
+    },
+    /// The VCA's members become `t2` and `t3` (a VCA member added), through `UpsertVca`, with the
+    /// offset and mute the VCA holds at that block.
+    VcaGainsMember,
 }
 
 /// How a scripted edit must end on both hosts.
 #[derive(Clone, Copy, PartialEq)]
 enum Outcome {
-    /// Accepted: `live` on the C ABI (`monitor` for solo), admitted on the browser.
+    /// Accepted: `live` on both hosts (`monitor` for solo).
     Accepted,
-    /// Accepted and a no-op: the edit repeats the committed value, so the C ABI answers
-    /// `model_only` and writes no record, and the browser admits the command and writes none.
+    /// Accepted and a no-op: the edit repeats the committed value, so both hosts answer
+    /// `model_only` and write no record.
     Unchanged,
-    /// Refused: the C ABI's control code and the browser's `COMMAND_REASON_*`.
-    Refused { code: &'static str, reason: u32 },
+    /// Refused: the control code, on both hosts.
+    Refused { code: &'static str },
 }
 
 /// One scripted edit: the block it is submitted before, its ramp length (`None` is the session's
@@ -315,12 +199,12 @@ const fn live_ramped(block: u64, edit: Edit, ramp: u32) -> Step {
     }
 }
 
-const fn refused(block: u64, edit: Edit, code: &'static str, reason: u32) -> Step {
+const fn refused(block: u64, edit: Edit, code: &'static str) -> Step {
     Step {
         block,
         edit,
         ramp: None,
-        outcome: Outcome::Refused { code, reason },
+        outcome: Outcome::Refused { code },
     }
 }
 
@@ -588,6 +472,47 @@ fn script() -> Vec<Step> {
                 on: false,
             },
         ),
+        // Unmuted after the solo is off: while it is on, the solo mutes `t1` anyway, and the unmute
+        // would change no effective value (`model_only`).
+        live(
+            57,
+            Edit::Mute {
+                strip: T1,
+                lanes: Lanes::Both,
+                muted: false,
+            },
+        ),
+        // The send's `follows_mute`, with `t1` muted: following closes the send, and not following
+        // lets it through. Then a strip's pan or matrix, and a member added to the VCA.
+        live(
+            45,
+            Edit::Mute {
+                strip: T1,
+                lanes: Lanes::Both,
+                muted: true,
+            },
+        ),
+        live(47, Edit::FollowsMute { follows: false }),
+        live(52, Edit::FollowsMute { follows: true }),
+        // A strip's matrix to pan is a live write; back to the matrix keeps the effective 2x2 the
+        // plan already holds, so the core writes no record (`model_only`) while the committed
+        // documents differ. Both hosts must say the same.
+        live(
+            36,
+            Edit::MatrixMode {
+                strip: T3,
+                matrix: false,
+            },
+        ),
+        unchanged(
+            39,
+            Edit::MatrixMode {
+                strip: T3,
+                matrix: true,
+            },
+            480,
+        ),
+        live(56, Edit::VcaGainsMember),
         // Unmute the track that block 8 muted, so its mute ramps out and back in.
         live(
             30,
@@ -682,7 +607,6 @@ fn script() -> Vec<Step> {
                 db: 30.0,
             },
             "control.domain",
-            COMMAND_REASON_DOMAIN,
         ),
         refused(
             59,
@@ -691,7 +615,6 @@ fn script() -> Vec<Step> {
                 on: true,
             },
             "control.address.unknown",
-            COMMAND_REASON_NOT_SOLOABLE,
         ),
         refused(
             60,
@@ -701,603 +624,8 @@ fn script() -> Vec<Step> {
                 db: -3.0,
             },
             "control.address.unknown",
-            COMMAND_REASON_UNKNOWN_VCA,
         ),
     ]
-}
-
-/// The session at `rate`: tracks `t1`..`t3` over their own sources, submix `b` routed to the
-/// output, `t1` sending `pre_fader` into `b` with `follows_mute`, VCA `v` holding `t2`, and one
-/// instance of every launch native effect over the tracks.
-fn model_at(rate: u32) -> SessionModel {
-    let mut model = parse_session_json(include_str!("browser-v1/command-session.json"))
-        .expect("accepted command fixture");
-    model.sample_rate_hz = rate;
-    model.quantum_frames = QUANTUM;
-    let source = model.sources[0].clone();
-    let track = model.tracks[0].clone();
-    let route = model.routes[0].clone();
-    // The fixture's EQ has band 1 enabled, as a low shelf at 1 kHz, so its gain is audible.
-    let eq = track.inserts.effects[0].clone();
-    model.sources.clear();
-    model.tracks.clear();
-    model.routes.clear();
-    for (index, strip) in [T1, T2, T3].into_iter().enumerate() {
-        let mut source = source.clone();
-        source.id = StableId::parse(&format!("src-{}", strip.id)).expect("source ID");
-        source.frames = u64::from(QUANTUM) * (BLOCKS + 8);
-        let mut track = track.clone();
-        track.id = StableId::parse(strip.id).expect("track ID");
-        track.source_id = source.id.clone();
-        track.fader.left_db = -2.0 - index as f32;
-        track.fader.right_db = -2.0 - index as f32;
-        track.matrix_or_pan = match strip.id {
-            "t1" => MatrixOrPan::Pan {
-                left: -0.8,
-                right: 0.6,
-                smoothing_samples: PAN_WINDOW,
-            },
-            "t2" => MatrixOrPan::Pan {
-                left: -0.5,
-                right: 0.4,
-                smoothing_samples: 0,
-            },
-            _ => MatrixOrPan::Matrix {
-                ll: 0.9,
-                lr: 0.1,
-                rl: 0.2,
-                rr: 0.8,
-                smoothing_samples: 0,
-            },
-        };
-        track.inserts.effects = INSERTS
-            .iter()
-            .filter(|insert| insert.track.id == strip.id)
-            .map(|insert| {
-                let mut effect = eq.clone();
-                effect.id = StableId::parse(insert.id).expect("effect ID");
-                effect.identity = EffectIdentity::Native {
-                    effect_id: StableId::parse(insert.native).expect("native effect ID"),
-                };
-                if insert.id != "eq" {
-                    // Every other insert takes its default parameters, but for the gate's hold:
-                    // its default (100 ms) keeps an open gate open for longer than the run's tail
-                    // at 96 kHz, so a threshold edit would never be heard there.
-                    effect.params.clear();
-                }
-                if insert.id == "gate" {
-                    effect.params.push(EffectParam {
-                        parameter_id: 6,
-                        channel: ParameterChannel::Both,
-                        unit: ParameterUnit::Milliseconds,
-                        value: 0.0,
-                    });
-                }
-                effect
-            })
-            .collect();
-        let mut route = route.clone();
-        route.id = StableId::parse(&format!("{}-main", strip.id)).expect("route ID");
-        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
-            panic!("the fixture routes a track")
-        };
-        *track_id = track.id.clone();
-        model.sources.push(source);
-        model.tracks.push(track);
-        model.routes.push(route);
-    }
-    let bus = StableId::parse(BUS.id).expect("submix ID");
-    model
-        .submixes
-        .push(Submix::unity(bus.clone(), &model.console));
-    let mut send = model.routes[0].clone();
-    send.id = StableId::parse("t1-b").expect("route ID");
-    send.source = RouteSource::Track {
-        track_id: StableId::parse(T1.id).expect("track ID"),
-        tap: SendTap::PreFader,
-    };
-    send.destination = RouteDestination::SubmixInput {
-        submix_id: bus.clone(),
-    };
-    send.follows_mute = true;
-    let mut out = model.routes[0].clone();
-    out.id = StableId::parse("b-main").expect("route ID");
-    out.source = RouteSource::Submix {
-        submix_id: bus,
-        tap: SendTap::PostPan,
-    };
-    model.routes.push(send);
-    model.routes.push(out);
-    model.vcas.push(Vca {
-        id: StableId::parse(VCA.id).expect("VCA ID"),
-        fader: DualMonoFader {
-            left_db: 0.0,
-            right_db: 0.0,
-            left_mute: false,
-            right_mute: false,
-        },
-        members: vec![StableId::parse(T2.id).expect("track ID")],
-    });
-    model
-}
-
-/// A deterministic, never-silent sample for source `feed`, lane `lane`, absolute frame `frame`.
-fn sample(feed: u64, lane: u64, frame: u64) -> f32 {
-    let mut z = (feed + 1)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(lane.wrapping_mul(0xBF58_476D_1CE4_E5B9))
-        .wrapping_add(frame.wrapping_mul(0x94D0_49BB_1331_11EB));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    let unit = (z >> 40) as f32 / (1_u64 << 24) as f32 * 2.0 - 1.0;
-    // Source 1 (`t2`) is quiet, so a gate threshold edit has a level to act on; the others are loud.
-    unit * if feed == 1 { 0.25 } else { 0.8 }
-}
-
-fn planes(feed: u64, block: u64) -> [Vec<f32>; 2] {
-    let first = block * u64::from(QUANTUM);
-    [0, 1].map(|lane| {
-        (0..u64::from(QUANTUM))
-            .map(|offset| sample(feed, lane, first + offset))
-            .collect()
-    })
-}
-
-fn bits(pcm: &[f32]) -> Vec<u32> {
-    pcm.iter().map(|sample| sample.to_bits()).collect()
-}
-
-// ---------------------------------------------------------------------------------------------
-// The browser leg
-// ---------------------------------------------------------------------------------------------
-
-/// The browser leg: native `AudioWorkletEngineHost` with commands staged as the worklet stages
-/// them, one submission per edit.
-struct Browser {
-    host: AudioWorkletEngineHost,
-    rate: u32,
-}
-
-/// What the browser said about one submission.
-#[derive(Debug, PartialEq)]
-struct BrowserVerdict {
-    result: u32,
-    reason: u32,
-    admitted: u32,
-}
-
-impl Browser {
-    fn new(model: &SessionModel) -> Self {
-        let document = canonical_session_json(model).expect("canonical session");
-        let options = WebBootOptions {
-            require_sample_rate_hz: model.sample_rate_hz,
-            require_quantum_frames: QUANTUM,
-            source_ring_frames: QUANTUM * 2,
-            live_control_command_queue_records: 64,
-            ..WebBootOptions::explicit_defaults()
-        };
-        let host = AudioWorkletEngineHost::boot(document.as_bytes(), options)
-            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())));
-        Self {
-            host,
-            rate: model.sample_rate_hz,
-        }
-    }
-
-    /// Stage one record at slot 0.
-    #[allow(clippy::too_many_arguments)]
-    fn stage(
-        &mut self,
-        kind: u32,
-        rack: u8,
-        channel: u8,
-        index: u32,
-        effect_index: u32,
-        parameter_id: u32,
-        ramp: u32,
-        values: [f32; 4],
-    ) {
-        let staging = self.host.command_staging_mut().expect("command staging");
-        let record = &mut staging[..COMMAND_RECORD_BYTES as usize];
-        record.fill(0);
-        record[0] = u8::try_from(kind).expect("frozen kind");
-        record[1] = rack;
-        record[2] = channel;
-        record[4..8].copy_from_slice(&index.to_le_bytes());
-        record[8..12].copy_from_slice(&effect_index.to_le_bytes());
-        record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
-        record[16..20].copy_from_slice(&ramp.to_le_bytes());
-        for (slot, value) in values.iter().enumerate() {
-            record[24 + slot * 4..28 + slot * 4].copy_from_slice(&value.to_le_bytes());
-        }
-    }
-
-    fn verdict(&self, result: u32) -> BrowserVerdict {
-        let report = self.host.command_report();
-        assert_eq!(report.result, result, "the report names the call's result");
-        BrowserVerdict {
-            result,
-            reason: report.reason,
-            admitted: report.admitted,
-        }
-    }
-
-    fn submit(&mut self) -> BrowserVerdict {
-        let result = self.host.submit_commands(1);
-        self.verdict(result)
-    }
-
-    /// One edit as the browser takes it, with `ramp` as the record's length word.
-    fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> BrowserVerdict {
-        let ramp_word = ramp.unwrap_or(SESSION_DEFAULT_RAMP);
-        let none = RACK_NOT_APPLICABLE;
-        match edit {
-            Edit::Fader { strip, lanes, db } => {
-                self.stage(
-                    COMMAND_FADER_DB,
-                    none,
-                    lanes.byte(),
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [db, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::Mute {
-                strip,
-                lanes,
-                muted,
-            } => {
-                let value = f32::from(u8::from(muted));
-                self.stage(
-                    COMMAND_MUTE,
-                    none,
-                    lanes.byte(),
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::Pan { strip, left, right } => {
-                self.stage(
-                    COMMAND_PAN,
-                    none,
-                    255,
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [left, right, 0.0, 0.0],
-                );
-            }
-            Edit::Matrix { strip, values } => {
-                self.stage(
-                    COMMAND_MATRIX,
-                    none,
-                    255,
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    values,
-                );
-            }
-            Edit::Trim { strip, lanes, db } => {
-                self.stage(
-                    COMMAND_TRIM_DB,
-                    none,
-                    lanes.byte(),
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [db, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::Polarity {
-                strip,
-                lanes,
-                inverted,
-            } => {
-                let value = f32::from(u8::from(inverted));
-                self.stage(
-                    COMMAND_POLARITY_INVERT,
-                    none,
-                    lanes.byte(),
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::Filters {
-                strip,
-                hpf_hz,
-                lpf_hz,
-            } => return self.filters(strip, hpf_hz, lpf_hz),
-            Edit::Parameter {
-                insert,
-                parameter,
-                lanes,
-                value,
-            } => {
-                // An effect parameter carries no length word: the effect smooths it itself.
-                self.stage(
-                    COMMAND_EFFECT_PARAM,
-                    RACK_INSERTS,
-                    lanes.byte(),
-                    insert.track.index,
-                    insert.position,
-                    parameter,
-                    0,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::EqParameter { parameter, value } => return self.eq_parameter(parameter, value),
-            Edit::Bypass { insert, bypassed } => {
-                let value = f32::from(u8::from(bypassed));
-                self.stage(
-                    COMMAND_EFFECT_BYPASS,
-                    RACK_INSERTS,
-                    255,
-                    insert.track.index,
-                    insert.position,
-                    0,
-                    0,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            // The one send is live route 0.
-            Edit::SendGain { db } => {
-                self.stage(
-                    COMMAND_ROUTE_GAIN_DB,
-                    none,
-                    255,
-                    0,
-                    0,
-                    0,
-                    ramp_word,
-                    [db, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::SendMute { muted } => {
-                let value = f32::from(u8::from(muted));
-                self.stage(
-                    COMMAND_ROUTE_MUTE,
-                    none,
-                    255,
-                    0,
-                    0,
-                    0,
-                    ramp_word,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::SendMatrix { values } => {
-                self.stage(COMMAND_ROUTE_MATRIX, none, 255, 0, 0, 0, ramp_word, values);
-            }
-            Edit::VcaOffset { vca, lanes, db } => {
-                self.stage(
-                    COMMAND_VCA_FADER_DB,
-                    none,
-                    lanes.byte(),
-                    vca.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [db, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::VcaMute { vca, lanes, muted } => {
-                let value = f32::from(u8::from(muted));
-                self.stage(
-                    COMMAND_VCA_MUTE,
-                    none,
-                    lanes.byte(),
-                    vca.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-            Edit::Solo { strip, on } => {
-                let value = f32::from(u8::from(on));
-                self.stage(
-                    COMMAND_SOLO,
-                    none,
-                    255,
-                    strip.index,
-                    0,
-                    0,
-                    ramp_word,
-                    [value, 0.0, 0.0, 0.0],
-                );
-            }
-        }
-        self.submit()
-    }
-
-    /// The pair of input filters on both lanes, through the targets the browser's preparer designs
-    /// from the owner's committed seeds.
-    fn filters(&mut self, strip: Strip, hpf_hz: f32, lpf_hz: f32) -> BrowserVerdict {
-        self.stage(
-            COMMAND_INPUT_FILTERS,
-            RACK_NOT_APPLICABLE,
-            2,
-            strip.index,
-            0,
-            0,
-            0,
-            [hpf_hz, lpf_hz, 0.0, 0.0],
-        );
-        assert_eq!(self.host.copy_input_filter_config(strip.index), RESULT_OK);
-        let config = self.host.eq_target_config().expect("input filter config");
-        let sample_rate = u32::from_le_bytes(config[8..12].try_into().expect("rate"));
-        let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
-        let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
-        let mut seeds = [0.0_f32; 4];
-        for (index, seed) in seeds.iter_mut().enumerate() {
-            let offset = 32 + index * 4;
-            *seed = f32::from_bits(u32::from_le_bytes(
-                config[offset..offset + 4].try_into().expect("seed"),
-            ));
-        }
-        let mut targets = [PreparedInputFilterTarget {
-            lanes: BuiltinLaneSelector::Both,
-            section: 0,
-            pair: [0.0; 2],
-            coefficients: [0.0; 6],
-        }; 4];
-        let (_, count) = InputFilterPreparer
-            .prepare(
-                sample_rate,
-                &seeds,
-                &[InputFilterEdit {
-                    parameter_id: 0,
-                    channel: ContractChannel::Both,
-                    value0: hpf_hz,
-                    value1: lpf_hz,
-                }],
-                &mut targets,
-            )
-            .expect("prepared input filter targets");
-        let companion = self
-            .host
-            .prepared_companion_mut()
-            .expect("prepared companion");
-        companion.fill(0);
-        companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
-        companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
-        companion[8..16].copy_from_slice(&generation.to_le_bytes());
-        companion[16..20].copy_from_slice(&(count as u32).to_le_bytes());
-        for (index, target) in targets[..count].iter().enumerate() {
-            let record = &mut companion[24 + index * 80..104 + index * 80];
-            record[0..4].copy_from_slice(&strip.index.to_le_bytes());
-            record[4..8].copy_from_slice(&u32::from(RACK_NOT_APPLICABLE).to_le_bytes());
-            record[16..24].copy_from_slice(&base_revision.to_le_bytes());
-            record[24..28].copy_from_slice(&target.section.to_le_bytes());
-            let lanes: u32 = match target.lanes {
-                BuiltinLaneSelector::Left => 0,
-                BuiltinLaneSelector::Right => 1,
-                BuiltinLaneSelector::Both => 2,
-            };
-            record[28..32].copy_from_slice(&lanes.to_le_bytes());
-            record[32..36].copy_from_slice(&target.pair[0].to_bits().to_le_bytes());
-            record[36..40].copy_from_slice(&target.pair[1].to_bits().to_le_bytes());
-            for (word, value) in target.coefficients.iter().copied().enumerate() {
-                record[56 + word * 4..60 + word * 4]
-                    .copy_from_slice(&value.to_bits().to_le_bytes());
-            }
-        }
-        let bytes = u32::try_from(24 + count * 80).expect("companion size");
-        let result = self.host.submit_prepared_commands(1, bytes);
-        self.verdict(result)
-    }
-
-    /// One EQ parameter on both lanes: the record, the designed target and the prepared
-    /// submission.
-    fn eq_parameter(&mut self, parameter: u32, value: f32) -> BrowserVerdict {
-        self.stage(
-            COMMAND_EFFECT_PARAM,
-            RACK_INSERTS,
-            2,
-            EQ.track.index,
-            EQ.position,
-            parameter,
-            0,
-            [value, 0.0, 0.0, 0.0],
-        );
-        assert_eq!(
-            self.host
-                .copy_eq_target_config(EQ.track.index, u32::from(RACK_INSERTS), EQ.position),
-            RESULT_OK
-        );
-        let config = self.host.eq_target_config().expect("EQ target config");
-        let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
-        let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
-        let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
-        for (index, seed) in seeds.iter_mut().enumerate() {
-            let offset = 32 + index * 4;
-            *seed = f32::from_bits(u32::from_le_bytes(
-                config[offset..offset + 4].try_into().expect("seed"),
-            ));
-        }
-        let mut targets = [effect_contract::PreparedEffectTarget {
-            slot: 0,
-            channel: ContractChannel::Both,
-            words: [0; PREPARED_EFFECT_TARGET_WORDS],
-        }; EQ_TARGET_CAPACITY];
-        let (_, count) = EqTargetPreparer::new(
-            host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
-        )
-        .expect("EQ target preparer")
-        .prepare(
-            self.rate,
-            &seeds,
-            &[EqTargetEdit {
-                parameter_id: parameter,
-                channel: ContractChannel::Both,
-                value,
-            }],
-            &mut targets,
-        )
-        .expect("prepared EQ target");
-        assert_eq!(count, 1, "one edit touches one EQ section");
-        let companion = self
-            .host
-            .prepared_companion_mut()
-            .expect("prepared companion");
-        companion.fill(0);
-        companion[0..4].copy_from_slice(&24_u32.to_le_bytes());
-        companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
-        companion[8..16].copy_from_slice(&generation.to_le_bytes());
-        companion[16..20].copy_from_slice(&(count as u32).to_le_bytes());
-        let record = &mut companion[24..104];
-        record[0..4].copy_from_slice(&EQ.track.index.to_le_bytes());
-        record[4..8].copy_from_slice(&u32::from(RACK_INSERTS).to_le_bytes());
-        record[8..12].copy_from_slice(&EQ.position.to_le_bytes());
-        record[16..24].copy_from_slice(&base_revision.to_le_bytes());
-        record[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
-        record[28..32].copy_from_slice(&2_u32.to_le_bytes());
-        for (index, word) in targets[0].words.iter().enumerate() {
-            let offset = 32 + index * 4;
-            record[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
-        }
-        let result = self.host.submit_prepared_commands(1, 104);
-        self.verdict(result)
-    }
-
-    fn step(&mut self, block: u64) -> Vec<u32> {
-        for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
-            let [left, right] = planes(feed as u64, block);
-            assert_eq!(
-                self.host.submit_source(
-                    format!("src-{}", strip.id).as_bytes(),
-                    1,
-                    block * u64::from(QUANTUM),
-                    self.rate,
-                    &[&left, &right],
-                    QUANTUM,
-                    false,
-                ),
-                RESULT_OK,
-                "browser source {}",
-                strip.id
-            );
-        }
-        assert_eq!(self.host.render_next(), RESULT_OK, "browser render");
-        bits(self.host.output_pcm().expect("browser output"))
-    }
-
-    fn superseded(&self) -> u64 {
-        self.host.status().live_values_superseded
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1334,15 +662,6 @@ fn limits() -> CompileLimits {
         maximum_vcas: 100,
         reserved: [0; 2],
     }
-}
-
-/// What the C ABI said about one transaction.
-#[derive(Debug, PartialEq)]
-enum CVerdict {
-    /// Committed, with the path the reply names.
-    Applied(EditPath),
-    /// Refused with the control codes of its diagnostics.
-    Refused(Vec<String>),
 }
 
 /// The C ABI leg: exported entries, edits as `SET_CONTROL` transactions.
@@ -1541,6 +860,36 @@ impl CAbi {
                 address(Owner::Vca(id(vca.id)), Section::Own, VCA_MUTE, lanes.lane()),
                 toggle(muted),
             )],
+            Edit::FollowsMute { follows } => vec![set(
+                address(
+                    route(),
+                    Section::Own,
+                    ROUTE_FOLLOWS_MUTE_ROW,
+                    ParameterChannel::Both,
+                ),
+                toggle(follows),
+            )],
+            Edit::MatrixMode { strip, matrix } => vec![set(
+                address(
+                    Owner::Strip(id(strip.id)),
+                    Section::Own,
+                    MATRIX_MODE_ROW,
+                    ParameterChannel::Both,
+                ),
+                toggle(matrix),
+            )],
+            Edit::VcaGainsMember => vec![SessionEdit::UpsertVca {
+                vca: Vca {
+                    id: id(VCA.id),
+                    fader: DualMonoFader {
+                        left_db: -3.0,
+                        right_db: -3.0,
+                        left_mute: false,
+                        right_mute: false,
+                    },
+                    members: vec![id(T2.id), id(T3.id)],
+                },
+            }],
             Edit::Solo { strip, on } => vec![set(
                 address(
                     Owner::Strip(id(strip.id)),
@@ -1592,37 +941,17 @@ impl CAbi {
     }
 
     /// One scripted edit as one transaction at the committed revision.
-    fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> CVerdict {
+    fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> Verdict {
         let edits = Self::edits(edit, ramp);
         let response = self.send(
             CommandPayload::SessionTransactionApply(&edits),
             ExpectedRevision::Exact(SessionRevision(self.revision)),
         );
-        let mut fields = [0_u16; 64];
-        match ProtocolCodec::default()
-            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-            .expect("transaction response")
-        {
-            DecodedTypedResponseFrame::Success { header, payload } => {
-                let DecodedSuccessResponsePayload::SessionTransactionApplied(applied) = payload
-                else {
-                    panic!("expected a transaction success")
-                };
-                assert_eq!(header.status, StatusCode::Ok);
-                self.revision = header.revision.0;
-                CVerdict::Applied(applied.edit_path)
-            }
-            DecodedTypedResponseFrame::NonOk { header, payload } => {
-                assert_eq!(header.status, StatusCode::ValidationFailed);
-                CVerdict::Refused(
-                    payload
-                        .diagnostics
-                        .into_iter()
-                        .map(|diagnostic| diagnostic.code.to_string())
-                        .collect(),
-                )
-            }
+        let verdict = decode_verdict(&response);
+        if let Verdict::Applied { revision, .. } = &verdict {
+            self.revision = *revision;
         }
+        verdict
     }
 
     /// Drain the reliable lane so a later commit is never backpressured by an unread event.
@@ -1743,64 +1072,112 @@ impl Drop for CAbi {
 // The comparison
 // ---------------------------------------------------------------------------------------------
 
+/// Every page of `CONTROL_LIST_GET` and `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes
+/// through one host's command entry, as text and bytes that two hosts can compare.
+fn dump(
+    mut send: impl FnMut(CommandPayload<'_>, ExpectedRevision) -> Vec<u8>,
+) -> (Vec<String>, Vec<u8>) {
+    let mut rows = Vec::new();
+    for state in [false, true] {
+        let mut epoch = 0;
+        let mut after = 0;
+        loop {
+            let request = ControlListRequest {
+                structure_epoch: epoch,
+                after_handle: after,
+                limit: 256,
+                owner: None,
+            };
+            let bytes = send(
+                if state {
+                    CommandPayload::ControlStateGet(&request)
+                } else {
+                    CommandPayload::ControlListGet(&request)
+                },
+                ExpectedRevision::Any,
+            );
+            let mut fields = [0_u16; 4096];
+            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
+                .decode_typed_response(&bytes, &mut DecodeScratch::new(&mut fields))
+                .expect("a control page")
+            else {
+                panic!("expected a control page")
+            };
+            // The pages differ in size between the hosts (the C ABI leg's frame is smaller), so
+            // the rows are compared one by one, the page header once.
+            let (eof, last, page_epoch) = match payload {
+                DecodedSuccessResponsePayload::ControlListPage(page) => {
+                    if after == 0 {
+                        rows.push(format!("list r{} e{}", page.revision, page.structure_epoch));
+                    }
+                    rows.extend(page.entries.iter().map(|entry| format!("{entry:?}")));
+                    (page.eof, page.last_handle, page.structure_epoch)
+                }
+                DecodedSuccessResponsePayload::ControlStatePage(page) => {
+                    if after == 0 {
+                        rows.push(format!(
+                            "state r{} e{}",
+                            page.revision, page.structure_epoch
+                        ));
+                    }
+                    rows.extend(page.records.iter().map(|record| format!("{record:?}")));
+                    (page.eof, page.last_handle, page.structure_epoch)
+                }
+                _ => panic!("expected a control page"),
+            };
+            if eof {
+                break;
+            }
+            epoch = page_epoch;
+            after = last;
+        }
+    }
+    let snapshot = snapshot_bytes(send);
+    (rows, snapshot)
+}
+
 /// One run of `steps` on both legs. Returns the browser's blocks and the final superseded count
 /// (equal on both legs, asserted here).
 fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
     let model = model_at(rate);
-    let mut browser = Browser::new(&model);
+    let mut browser = Rig::new(&model);
     let mut c_abi = CAbi::new(&model);
     let mut blocks = Vec::new();
     for block in 0..BLOCKS {
         for (position, step) in steps.iter().enumerate().filter(|(_, s)| s.block == block) {
             let label = format!("{rate} Hz: step {position} before block {block}");
-            let b = browser.edit(step.edit, step.ramp);
+            let b = browser.transaction(&CAbi::edits(step.edit, step.ramp));
             let c = c_abi.edit(step.edit, step.ramp);
+            assert_eq!(b, c, "{label}: the two hosts give one verdict");
+            let solo = matches!(step.edit, Edit::Solo { .. });
             match step.outcome {
                 Outcome::Accepted => {
-                    let path = if matches!(step.edit, Edit::Solo { .. }) {
+                    let path = if solo {
                         EditPath::Monitor
                     } else {
                         EditPath::Live
                     };
-                    assert_eq!(c, CVerdict::Applied(path), "{label}: the C ABI path");
-                    assert_eq!(
-                        b,
-                        BrowserVerdict {
-                            result: RESULT_OK,
-                            reason: COMMAND_REASON_NONE,
-                            admitted: 1,
-                        },
-                        "{label}: the browser admits the command live"
+                    assert!(
+                        matches!(&c, Verdict::Applied { path: got, .. } if *got == path),
+                        "{label}: the path is {path:?}, got {c:?}"
                     );
                 }
                 Outcome::Unchanged => {
-                    assert_eq!(
-                        c,
-                        CVerdict::Applied(if matches!(step.edit, Edit::Solo { .. }) {
-                            EditPath::Monitor
-                        } else {
-                            EditPath::ModelOnly
-                        }),
-                        "{label}: the C ABI path"
-                    );
-                    assert_eq!(
-                        b,
-                        BrowserVerdict {
-                            result: RESULT_OK,
-                            reason: COMMAND_REASON_NONE,
-                            admitted: 1,
-                        },
-                        "{label}: the browser admits the command"
+                    let path = if solo {
+                        EditPath::Monitor
+                    } else {
+                        EditPath::ModelOnly
+                    };
+                    assert!(
+                        matches!(&c, Verdict::Applied { path: got, .. } if *got == path),
+                        "{label}: the path is {path:?}, got {c:?}"
                     );
                 }
-                Outcome::Refused { code, reason } => {
+                Outcome::Refused { code } => {
                     assert!(
-                        matches!(&c, CVerdict::Refused(codes) if codes.iter().any(|c| c == code)),
-                        "{label}: the C ABI refuses with {code}, got {c:?}"
+                        matches!(&c, Verdict::Refused { codes, .. } if codes.iter().any(|c| c == code)),
+                        "{label}: refused with {code}, got {c:?}"
                     );
-                    assert_eq!(b.admitted, 0, "{label}: the browser admits nothing");
-                    assert_ne!(b.result, RESULT_OK, "{label}: the browser refuses");
-                    assert_eq!(b.reason, reason, "{label}: the browser's reason");
                 }
             }
         }
@@ -1814,9 +1191,25 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
     }
     let superseded = c_abi.superseded();
     assert_eq!(
-        browser.superseded(),
+        browser.host.status().live_values_superseded,
         superseded,
         "{rate} Hz: the browser status reports the superseded count the C ABI reports"
+    );
+    // Gate 8: the control list, the control state and the committed document are the same bytes.
+    let (browser_pages, browser_snapshot) =
+        dump(|payload, expected| browser.command(payload, expected));
+    let (c_pages, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
+    assert_eq!(
+        browser_pages.len(),
+        c_pages.len(),
+        "{rate} Hz: the same number of control rows"
+    );
+    for (index, (b, c)) in browser_pages.iter().zip(&c_pages).enumerate() {
+        assert_eq!(b, c, "{rate} Hz: control row {index} differs");
+    }
+    assert_eq!(
+        browser_snapshot, c_snapshot,
+        "{rate} Hz: the committed documents are byte-identical"
     );
     (blocks, superseded)
 }
@@ -1829,7 +1222,6 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
 /// one host. The control run proves the script is heard: the edits move the output away from a
 /// run with no edits, and dropping any one edit changes some block at 48 kHz.
 #[test]
-#[ignore = "the browser leg is the retained command path, which holds no cell producers since #1381a; #1562a replaces it and #1565A deletes it in this batch"]
 fn both_hosts_give_the_same_result_for_the_same_control_edits() {
     let steps = script();
     for rate in RATES {
@@ -1855,11 +1247,11 @@ fn both_hosts_give_the_same_result_for_the_same_control_edits() {
 /// that differ by one edit, which the C ABI would answer `model_only` when the edit left out was
 /// the one that made a later edit a change.
 fn browser_blocks(rate: u32, steps: &[Step]) -> Vec<Vec<u32>> {
-    let mut browser = Browser::new(&model_at(rate));
+    let mut browser = Rig::new(&model_at(rate));
     (0..BLOCKS)
         .map(|block| {
             for step in steps.iter().filter(|step| step.block == block) {
-                browser.edit(step.edit, step.ramp);
+                browser.transaction(&CAbi::edits(step.edit, step.ramp));
             }
             browser.step(block)
         })
@@ -1891,7 +1283,6 @@ fn replaces(earlier: &Edit, later: &Edit) -> bool {
 /// from the full script in some block, so no row of the parity run is a silent no-op on both hosts
 /// (a row that edited nothing would pass the comparison above on any defect).
 #[test]
-#[ignore = "the browser leg is the retained command path, which holds no cell producers since #1381a; #1562a replaces it and #1565A deletes it in this batch"]
 fn every_scripted_edit_is_heard() {
     let rate = 48_000;
     // The repeats are left out: with the edit they repeat omitted, a repeat is a change on the

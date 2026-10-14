@@ -142,6 +142,7 @@ async function testMainRealm() {
   let readyMutation = null;
   let statusMutation = null;
   let renderAllocationsMutation = null;
+  let controlMutation = null;
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
@@ -201,6 +202,16 @@ async function testMainRealm() {
             tag: "miso.renderallocations.v1", requestId: received.requestId, result: 0, count: 0,
           };
           if (renderAllocationsMutation !== null) response = renderAllocationsMutation(response);
+        } else if (received.tag === "miso.control.v1") {
+          // Issue #1562a D1: the frame comes back reversed as the response, so the test can see
+          // that the host sent the caller's bytes and returns the engine's unchanged.
+          const frame = received.frame;
+          response = {
+            tag: "miso.control.v1", requestId: received.requestId, result: 0,
+            response: new Uint8Array([...frame].reverse()), revision: 2n,
+          };
+          if (controlMutation !== null) response = controlMutation(response);
+          responseTransfer = response.response instanceof Uint8Array ? [response.response.buffer] : [];
         } else if (received.tag === "miso.command.v1") {
           response = {
             tag: "miso.ack.v1",
@@ -1351,6 +1362,32 @@ async function testMainRealm() {
       "the status reply carries the single-mode control allocation count",
     );
 
+    // Issue #1562a D1, gate 7's host half: a control frame is copied, posted whole as one
+    // `miso.control.v1` message with its buffer transferred, and the reply is the engine's
+    // response bytes unchanged with the committed revision. The host decodes nothing in the frame.
+    {
+      const frame = new Uint8Array([1, 2, 3]);
+      const reply = await host.control(frame);
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.result, 0);
+      assert.deepEqual([...reply.response], [3, 2, 1]);
+      assert.equal(reply.revision, 2n);
+      assert.equal(frame.byteLength, 3, "the caller keeps its frame: the host sends a copy");
+      const posted = events.filter((event) => event[1] === "miso.control.v1");
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0][3], 1, "the frame's buffer is transferred");
+      await localErrorResult(host.control(new Uint8Array(0)), 1);
+      await localErrorResult(host.control(new Uint8Array(16385)), 1);
+      await localErrorResult(host.control([1, 2]), 1);
+      assert.equal(
+        events.filter((event) => event[1] === "miso.control.v1").length,
+        1,
+        "a refused frame never reaches the port",
+      );
+      const largest = await host.control(new Uint8Array(16384));
+      assert.equal(largest.response.byteLength, 16384, "the largest frame is sent");
+    }
+
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -1399,6 +1436,30 @@ async function testMainRealm() {
     await errorResult(schemaHost.status(), 255);
     statusMutation = null;
     await schemaHost.dispose();
+
+    // Issue #1562a D1: a malformed control reply is a schema failure, sticky for the host.
+    for (const mutate of [
+      (reply) => ({ ...reply, revision: -1n }),
+      (reply) => ({ ...reply, revision: 1 }),
+      (reply) => ({ ...reply, response: [1] }),
+      (reply) => ({ ...reply, result: 11 }),
+      (reply) => ({ ...reply, extra: 1 }),
+    ]) {
+      const controlHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      controlMutation = (reply) => {
+        const mutated = mutate(reply);
+        return mutated;
+      };
+      await errorResult(controlHost.control(new Uint8Array([1])), 255);
+      controlMutation = null;
+      await controlHost.dispose().catch(() => undefined);
+    }
 
     // #1536: concurrent status calls share one read and are never refused for being in flight.
     const sharedStatusHost = async () => createMisoAudioWorkletHost({
@@ -2461,7 +2522,13 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     spectrumHopCapabilityResult: 1,
     // Issue #1381a: the service step's handles and result, and the control counter's value.
     service: [], serviceResult: 0, controlAllocations: 5,
+    // Issue #1562a D1: the control frames the fake received, the result it answers with, the
+    // response it leaves, the committed revision, and whether it grows its memory under a command.
+    control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
+    controlGrowsMemory: false, controlRequestRefusals: 0,
   };
+  const controlRequestPointer = 50000;
+  const controlResponsePointer = 56000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
   // Assignment 8's opaque prepared companion staging is present in the real worklet even while
@@ -2699,6 +2766,28 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return calls.serviceResult;
     },
     miso_engine_web_v1_control_allocation_count: () => calls.controlAllocations,
+    miso_engine_web_v1_control_request_ptr: (_handle, length) => {
+      if (calls.controlRequestRefusals > 0 || length === 0 || length > 16384) {
+        calls.controlRequestRefusals = Math.max(0, calls.controlRequestRefusals - 1);
+        return 0;
+      }
+      return controlRequestPointer;
+    },
+    miso_engine_web_v1_control_command: (handle, length) => {
+      calls.control.push({
+        handle,
+        frame: new Uint8Array(memory.buffer, controlRequestPointer, length).slice(),
+      });
+      new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
+        .set(calls.controlResponse);
+      if (calls.controlGrowsMemory) memory.buffer = new ArrayBuffer(65536 + 65536);
+      return calls.controlResult;
+    },
+    miso_engine_web_v1_control_response_ptr: () => (
+      calls.controlResponse.length === 0 ? 0 : controlResponsePointer
+    ),
+    miso_engine_web_v1_control_response_bytes: () => calls.controlResponse.length,
+    miso_engine_web_v1_control_revision: () => calls.controlRevision,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
@@ -3582,6 +3671,82 @@ async function testProcessor() {
       const steps = fake.calls.service.length;
       processor.port.onmessage({ data: { tag: "miso.service.v1" } });
       assert.equal(fake.calls.service.length, steps, "no service step after dispose");
+    }
+
+    // Issue #1562a D1, gate 7's worklet half: a `miso.control.v1` message stages its frame,
+    // runs the control command in the message handler and replies with the response frame
+    // unchanged and the committed revision. The worklet decodes nothing in the frame.
+    {
+      const { processor, fake } = makeProcessor();
+      const frame = new Uint8Array([1, 2, 3, 4, 5]);
+      processor.port.onmessage({ data: { tag: "miso.control.v1", requestId: 1, frame } });
+      assert.equal(fake.calls.control.length, 1);
+      assert.deepEqual([...fake.calls.control[0].frame], [1, 2, 3, 4, 5], "the frame is staged as is");
+      const reply = processor.port.posts.at(-1).message;
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.requestId, 1);
+      assert.equal(reply.result, 0);
+      assert.deepEqual([...reply.response], [9, 8, 7], "the response frame comes back unchanged");
+      assert.equal(reply.revision, 4n, "the reply carries the committed revision");
+      assert.equal(
+        fake.calls.service.length, 1,
+        "the control message is followed by one service step, and process() runs none",
+      );
+      // A refusal carries its result and diagnostic bytes, and leaves the worklet ready.
+      fake.calls.controlResult = 10;
+      fake.calls.controlResponse = Uint8Array.from(
+        "web.apply.rebuild_pending\t$\n", (character) => character.charCodeAt(0),
+      );
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([7]) },
+      });
+      const refused = processor.port.posts.at(-1).message;
+      assert.equal(refused.tag, "miso.control.v1");
+      assert.equal(refused.result, 10);
+      assert.equal(
+        String.fromCharCode(...refused.response),
+        "web.apply.rebuild_pending\t$\n",
+      );
+      assert.equal(processor.ready, true, "a typed refusal is not sticky");
+      // A frame the staging buffer refuses is a typed result with no response, not sticky.
+      fake.calls.controlRequestRefusals = 1;
+      fake.calls.controlResponse = new Uint8Array(0);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([7]) },
+      });
+      const oversize = processor.port.posts.at(-1).message;
+      assert.equal(oversize.tag, "miso.control.v1");
+      assert.equal(oversize.result, 1);
+      assert.equal(oversize.response.byteLength, 0);
+      assert.equal(fake.calls.control.length, 2, "a refused staging runs no command");
+      assert.equal(processor.ready, true);
+    }
+    {
+      // A malformed control message is a protocol error, like a malformed command, and sticky.
+      for (const bad of [
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array(0) },
+        { tag: "miso.control.v1", requestId: 1, frame: [1, 2] },
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]), extra: 1 },
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array(new ArrayBuffer(8), 2, 4) },
+      ]) {
+        const { processor, fake } = makeProcessor();
+        processor.port.onmessage({ data: bad });
+        assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.equal(fake.calls.control.length, 0, "a malformed message reaches no export");
+        assert.equal(processor.ready, false);
+      }
+    }
+    {
+      // The module's memory moving under a command detaches every view: sticky, as elsewhere.
+      const { processor, fake } = makeProcessor();
+      fake.calls.controlGrowsMemory = true;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1");
+      assert.equal(failure.result, 255);
+      assert.equal(processor.ready, false);
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply

@@ -61,6 +61,7 @@ RESULT_CODES = [
     (7, "unsupported"),
     (8, "renderRejected"),
     (9, "reprepareRequired"),
+    (10, "compileRejected"),
     (255, "internal"),
 ]
 BOOT_RESULT_ALIASES = [(1, "refusedDocument"), (2, "refusedOptions"), (3, "refusedLifecycle")]
@@ -126,6 +127,11 @@ EXPORTS = [
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
+    "miso_engine_web_v1_control_command",
+    "miso_engine_web_v1_control_request_ptr",
+    "miso_engine_web_v1_control_response_bytes",
+    "miso_engine_web_v1_control_response_ptr",
+    "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",

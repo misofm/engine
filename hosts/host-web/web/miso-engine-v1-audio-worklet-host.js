@@ -5,7 +5,7 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
-const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255]);
+const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255]);
 
 // Canonical minimal module: `() -> v128` implemented by `i32.const 0; i8x16.splat`.
 //
@@ -94,6 +94,11 @@ const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #137 D1: the frozen 48-byte little-endian command record.
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
+// Issue #1562a D1: the control frames in flight on the port at once. The worklet answers them in
+// arrival order; a flood is refused here with `RESULT_BACKPRESSURE` before any transfer.
+const MAXIMUM_CONTROL_IN_FLIGHT = 64;
+// The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
+const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
 // Issue #143: the largest `liveControlObservationTaps` the frozen configuration accepts.
 const MAXIMUM_OBSERVATION_TAPS = 16;
 // Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
@@ -731,6 +736,7 @@ class MisoAudioWorkletHost {
   #statusFollow = null;
   #inFlightRenderAllocations = 0;
   #inFlightCommands = 0;
+  #inFlightControl = 0;
   #inFlightObservationReads = 0;
   #inFlightTrackResponses = 0;
   #inFlightSpectrum = 0;
@@ -925,6 +931,8 @@ class MisoAudioWorkletHost {
       this.#inFlightCommands -= 1;
     } else if (pending.response === "preparedCommand") {
       this.#inFlightCommands -= 1;
+    } else if (pending.response === "control") {
+      this.#inFlightControl -= 1;
     } else if (pending.response === "observationRead") {
       this.#inFlightObservationReads -= 1;
     } else if (pending.response === "trackResponse") {
@@ -1038,6 +1046,8 @@ class MisoAudioWorkletHost {
             "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
             "records",
           ]
+        : pending.response === "control"
+          ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "eqConfig"
           ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
@@ -1077,6 +1087,8 @@ class MisoAudioWorkletHost {
         ? "miso.eq-target-config.v1"
         : pending.response === "preparedCommand"
           ? "miso.ack.v1"
+      : pending.response === "control"
+        ? "miso.control.v1"
       : pending.response === "sessionMap"
         ? "miso.sessionmap.v1"
         : pending.response === "observationMap"
@@ -1098,6 +1110,12 @@ class MisoAudioWorkletHost {
       && validU64(message.appliedAtSample)
       && message.records instanceof Uint8Array
       && message.records.byteLength === pending.commandCount * COMMAND_RECORD_BYTES
+    );
+    const validControl = pending.response !== "control" || (
+      message.response instanceof Uint8Array
+      && message.response.buffer instanceof ArrayBuffer
+      && message.response.byteLength <= MAXIMUM_CONTROL_FRAME_BYTES
+      && validU64(message.revision)
     );
     const validConfig = pending.response !== "eqConfig"
       || (validCommandReason(message.reason)
@@ -1187,7 +1205,7 @@ class MisoAudioWorkletHost {
       || (message.result === RESULT_OK && validU32(message.count));
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validConfig || !validSessionMap
+        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validConfig || !validSessionMap
         || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum) {
       this.#fail(webError(255, message.requestId));
       return;
@@ -1214,6 +1232,7 @@ class MisoAudioWorkletHost {
     const follow = this.#statusFollow;
     this.#statusFollow = null;
     this.#inFlightRenderAllocations = 0;
+    this.#inFlightControl = 0;
     this.#inFlightObservationReads = 0;
     this.#inFlightTrackResponses = 0;
     this.#inFlightSpectrum = 0;
@@ -1235,6 +1254,7 @@ class MisoAudioWorkletHost {
     if (response === "command" || response === "preparedCommand") {
       return this.#inFlightCommands >= this.#commandQueueRecords;
     }
+    if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
     if (response === "trackResponse") return this.#inFlightTrackResponses >= 1;
     if (response === "spectrum") return this.#inFlightSpectrum >= 1;
@@ -1253,6 +1273,8 @@ class MisoAudioWorkletHost {
       this.#inFlightRenderAllocations += 1;
     } else if (response === "command" || response === "preparedCommand") {
       this.#inFlightCommands += 1;
+    } else if (response === "control") {
+      this.#inFlightControl += 1;
     } else if (response === "observationRead") {
       this.#inFlightObservationReads += 1;
     } else if (response === "trackResponse") {
@@ -1421,6 +1443,37 @@ class MisoAudioWorkletHost {
       return Promise.reject(webError(1));
     }
     return this.#submitPrepared(encodeCommands(request.commands), request.commands.length);
+  }
+
+  /// Send one command frame to the engine's control plane and resolve with its reply (issue
+  /// #1562a D1, #1332 D7). The frame is any command frame the C ABI's
+  /// `miso_engine_v1_submit_command` accepts: a `SESSION_TRANSACTION_APPLY` carrying `SET_CONTROL`
+  /// edits, `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, the counter and
+  /// capability queries. The host decodes nothing in it and the engine decodes it once, in the
+  /// worklet's message handler, never in `process()`.
+  ///
+  /// The reply is `{ result, response, revision }`: `response` is the response frame bytes
+  /// unchanged on `RESULT_OK` (a refused transaction is still an ok call with a non-ok response
+  /// frame, as on the C ABI), else the refusal's diagnostic text (`code\tpath\n` lines), for
+  /// example `web.apply.rebuild_pending` for a transaction that needs a plan rebuild, which this
+  /// module cannot apply in place yet. `revision` is the committed revision after the call.
+  ///
+  /// **Request IDs.** The frame carries the sender's own request ID, and the engine's replay cache
+  /// refuses a reused ID with different bytes. One allocator must therefore serve every frame sent
+  /// through this method (the SDK's transaction queue and any catalog read share it): this method
+  /// never rewrites a frame, and a second allocator would collide.
+  ///
+  /// The frame is copied; the caller keeps its array. A frame over the engine's
+  /// `maximum_control_frame_bytes` or one that is empty is refused locally with
+  /// `RESULT_INVALID_ARGUMENT`, and more than 64 frames in flight with `RESULT_BACKPRESSURE`.
+  control(frame) {
+    if (!(frame instanceof Uint8Array) || frame.byteLength === 0
+        || frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES) {
+      return Promise.reject(webError(1));
+    }
+    const copy = new Uint8Array(frame.byteLength);
+    copy.set(frame);
+    return this.#request({ tag: "miso.control.v1", frame: copy }, [copy.buffer], "control");
   }
 
   /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).

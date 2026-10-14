@@ -85,6 +85,7 @@ const SOURCE_FIELDS = [
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
+const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 const EQ_CONFIG_FIELDS = ["tag", "requestId", "trackIndex", "rack", "effectIndex"];
 const PREPARED_COMMAND_FIELDS = ["tag", "requestId", "count", "records", "companion"];
 const EQ_CONFIG_BYTES = 272;
@@ -1031,6 +1032,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSeek(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
+    } else if (message?.tag === "miso.control.v1" && exactFields(message, CONTROL_FIELDS)) {
+      this.receiveControl(message);
     } else if (message?.tag === "miso.eq-target-config.v1"
         && exactFields(message, EQ_CONFIG_FIELDS)) {
       this.receiveEqTargetConfig(message);
@@ -1603,6 +1606,59 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       appliedAtSample: report.getBigUint64(24, true),
       records: message.records,
     }, [message.records.buffer]);
+  }
+
+  /// Issue #1562a D1: one command frame through the control plane's `SessionState::command`, the
+  /// entry the C ABI's `miso_engine_v1_submit_command` runs. It runs here, in the message handler
+  /// and never in `process()`: `single` mode's control work, whose allocations the status counts.
+  /// The worklet decodes nothing in the frame. The reply carries the exports' result word, the
+  /// response frame bytes unchanged (after a failure, the refusal's diagnostic text), and the
+  /// committed revision after the call. A frame the staging buffer cannot hold is a typed refusal
+  /// of a well-formed request, not a protocol error.
+  receiveControl(message) {
+    const frame = message.frame;
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || !(frame instanceof Uint8Array) || !(frame.buffer instanceof ArrayBuffer)
+        || (typeof SharedArrayBuffer !== "undefined" && frame.buffer instanceof SharedArrayBuffer)
+        || frame.byteLength === 0 || frame.byteOffset !== 0
+        || frame.byteLength !== frame.buffer.byteLength) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    const reply = this.readControlCommand(frame);
+    if (reply === null) {
+      this.sticky(RESULT_INTERNAL, message.requestId);
+      return;
+    }
+    this.port.postMessage({
+      tag: "miso.control.v1",
+      requestId: message.requestId,
+      result: reply.result,
+      response: reply.response,
+      revision: reply.revision,
+    }, [reply.response.buffer]);
+  }
+
+  /// Stage `frame`, run it and copy the response out of the module's memory. `null` when the
+  /// module's memory moved under the call (a control allocation grew it), which the caller reports
+  /// as a sticky internal failure like every other detached view.
+  readControlCommand(frame) {
+    const length = frame.byteLength;
+    const pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
+    let result = RESULT_INVALID_ARGUMENT;
+    if (pointer !== 0) {
+      new Uint8Array(this.exports.memory.buffer, pointer, length).set(frame);
+      result = this.exports.miso_engine_web_v1_control_command(this.handle, length);
+    }
+    if (this.exports.memory.buffer !== this.memoryBuffer) return null;
+    const responsePointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
+    const responseBytes = this.exports.miso_engine_web_v1_control_response_bytes(this.handle);
+    const response = new Uint8Array(responsePointer === 0 ? 0 : responseBytes);
+    if (responsePointer !== 0) {
+      response.set(new Uint8Array(this.memoryBuffer, responsePointer, responseBytes));
+    }
+    const revision = this.exports.miso_engine_web_v1_control_revision(this.handle);
+    return { result, response, revision };
   }
 
   /// Copy one addressed owner configuration. This request is control-plane only; the fixed Rust

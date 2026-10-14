@@ -27,7 +27,7 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use builtins::{
@@ -159,6 +159,10 @@ pub const RESULT_UNSUPPORTED: u32 = 7;
 pub const RESULT_RENDER_REJECTED: u32 = 8;
 /// The browser configuration changed and requires a fresh host.
 pub const RESULT_REPREPARE_REQUIRED: u32 = 9;
+/// The control plane refused a structural command frame with a typed diagnostic (issue #1562a),
+/// the browser's counterpart of the C ABI's compile-rejected result. The diagnostic is found at
+/// the control response, in place of a response frame.
+pub const RESULT_COMPILE_REJECTED: u32 = 10;
 /// An internal invariant failed *and was detected by a checked path*.
 ///
 /// A panic does not produce this code on `wasm32`: the target is `panic = abort`, so a panic traps
@@ -1478,6 +1482,9 @@ struct PreparedBuffers {
     output_pcm: Box<[f32]>,
     /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-control staging (issue #137 D1).
     command: Box<[u8]>,
+    /// One control frame (issue #1562a D1): [`CONTROL_FRAME_BYTES`], the boot's
+    /// `maximum_control_frame_bytes`. Staged by the page, read by the control plane in place.
+    control_request: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
     /// One fixed workspace for the trusted prepared-control companion and addressed EQ config.
     prepared_control: Option<Box<PreparedControlWorkspace>>,
@@ -1785,6 +1792,9 @@ struct ReadyOwnership {
     /// and effect producers, the plan's revision gate, the plan publisher and the retirer. It is
     /// the one owner of the producers; the retained command path below holds none.
     control: WebSession,
+    /// The preparer's rebuild switch (#1562a D9), for the test-support republish.
+    #[cfg(feature = "test-support")]
+    allow_rebuild: Arc<AtomicBool>,
     /// The any-thread projection of the plan: its resource row and the applied-revision watermark
     /// (#1381a D5).
     queries: PlanQueries<WebAdapter>,
@@ -2323,6 +2333,19 @@ pub struct AudioWorkletEngineHost {
     /// Optional prepared cadence for the ordinary spectrum capture.
     spectrum_hop: Option<SpectrumHop>,
     diagnostic_len: usize,
+    /// What the last control command left to read (issue #1562a D1).
+    control_response: ControlResponse,
+}
+
+/// What [`AudioWorkletEngineHost::control_response`] reads (issue #1562a D1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlResponse {
+    /// Nothing: no control command has run, or the last one was refused before it ran.
+    None,
+    /// The control plane's response frame of this length, in its response scratch.
+    Frame(usize),
+    /// The refusal's diagnostic, `diagnostic_len` bytes of the diagnostic buffer.
+    Diagnostic,
 }
 
 static NEXT_HOST_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -2533,6 +2556,7 @@ impl AudioWorkletEngineHost {
             host_generation,
             spectrum_hop: spectrum_request.as_ref().and(spectrum_hop),
             diagnostic_len: 0,
+            control_response: ControlResponse::None,
         })
     }
 
@@ -2602,8 +2626,31 @@ impl AudioWorkletEngineHost {
             .ready
             .as_mut()
             .ok_or(control_plane::CommandError::Internal)?;
-        let length = ready.control.command(request, CONTROL_FRAME_BYTES)?;
-        Ok(ready.control.command_response(length).to_vec())
+        ready.allow_rebuild.store(true, Ordering::Release);
+        let length = ready.control.command(request, CONTROL_FRAME_BYTES);
+        ready.allow_rebuild.store(false, Ordering::Release);
+        Ok(ready.control.command_response(length?).to_vec())
+    }
+
+    /// Drain the control plane's reliable event lane and return the number of events read (issue
+    /// #1562a): the commit events a transaction leaves queued. The lane's reader is #1570b's; until
+    /// then a test that commits more transactions than the lane holds drains it here, because an
+    /// undrained lane refuses the next live commit with backpressure. It clobbers the last control
+    /// response, which shares the control plane's scratch.
+    #[cfg(feature = "test-support")]
+    pub fn drain_reliable_events_for_test(&mut self) -> usize {
+        let Some(ready) = self.ready.as_mut() else {
+            return 0;
+        };
+        let mut count = 0;
+        while let Ok(Some(_)) = ready
+            .control
+            .dequeue_event(control_plane::EventLane::Reliable, CONTROL_FRAME_BYTES)
+        {
+            count += 1;
+        }
+        self.control_response = ControlResponse::None;
+        count
     }
 
     /// The epoch of the plan that renders (#1381a gates 2 and 4): 0 for the boot plan, and one
@@ -2612,6 +2659,108 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn active_plan_epoch_for_test(&self) -> Option<u64> {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
+    }
+
+    /// The staging buffer for one control command frame of `len` bytes (issue #1562a D1), or
+    /// `None` when `len` is zero or exceeds the boot's `maximum_control_frame_bytes`
+    /// (16 KiB) or the host is not ready. The page writes the frame here and
+    /// calls [`Self::control_command`].
+    pub fn control_request_mut(&mut self, len: u32) -> Option<&mut [u8]> {
+        if self.status.state != STATE_READY || len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
+            return None;
+        }
+        self.buffers
+            .as_mut()
+            .map(|buffers| &mut *buffers.control_request)
+    }
+
+    /// Run the staged control command frame of `len` bytes through the control plane (issue
+    /// #1562a D1): the same [`control_plane::SessionState::command`] the C ABI's
+    /// `miso_engine_v1_submit_command` runs, so any frame it accepts is accepted here: a
+    /// transaction (live, model-only or monitor), the control list and state queries, the
+    /// snapshot, counters and capabilities. The browser decodes nothing in the frame.
+    ///
+    /// This is control work: the worklet's message handler in `single` mode, never `process()`.
+    /// Its allocations are the instance's counted control allocations. It does not touch the
+    /// status's sticky state: a refusal leaves the host ready and the model, revision, overlay and
+    /// cells as they were (D4, the acked-batch rule is the core's).
+    ///
+    /// Results: [`RESULT_OK`], with the response frame at [`Self::control_response`] (a refused
+    /// transaction is still [`RESULT_OK`] with a non-ok response frame, as on the C ABI);
+    /// [`RESULT_WRONG_STATE`] for a host that is not ready; [`RESULT_INVALID_ARGUMENT`] for a
+    /// length that is zero or over the frame ceiling, or a frame the control plane cannot
+    /// correlate; [`RESULT_BUFFER_TOO_SMALL`] for a response over the control frame;
+    /// [`RESULT_BACKPRESSURE`] for a queue or plan with no room now; [`RESULT_COMPILE_REJECTED`]
+    /// for a typed refusal before commit, `web.apply.rebuild_pending` for a transaction that needs
+    /// a plan rebuild (D9); [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
+    /// response is the refusal's diagnostic (`code\tpath\n` lines).
+    pub fn control_command(&mut self, len: u32) -> u32 {
+        self.control_response = ControlResponse::None;
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
+            return self.record(RESULT_INVALID_ARGUMENT);
+        }
+        let Some((buffers, ready)) = self.buffers.as_mut().zip(self.ready.as_mut()) else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let request = &buffers.control_request[..len as usize];
+        match ready.control.command(request, CONTROL_FRAME_BYTES) {
+            Ok(length) => {
+                self.control_response = ControlResponse::Frame(length);
+                self.record(RESULT_OK)
+            }
+            Err(error) => {
+                let diagnostic = error.diagnostic();
+                let kept = diagnostic.len().min(buffers.diagnostic.len());
+                buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+                self.diagnostic_len = kept;
+                self.control_response = ControlResponse::Diagnostic;
+                self.record(match error {
+                    control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+                    control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                    control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
+                    control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+                    control_plane::CommandError::Internal => RESULT_INTERNAL,
+                })
+            }
+        }
+    }
+
+    /// What the last [`Self::control_command`] left to read (issue #1562a D1): its response frame
+    /// after a [`RESULT_OK`], the refusal's diagnostic after another result, empty before any
+    /// command. Valid until the next control call.
+    #[must_use]
+    pub fn control_response(&self) -> &[u8] {
+        match (
+            self.control_response,
+            self.ready.as_ref(),
+            self.buffers.as_ref(),
+        ) {
+            (ControlResponse::Frame(length), Some(ready), _) => {
+                ready.control.command_response(length)
+            }
+            (ControlResponse::Diagnostic, _, Some(buffers)) => {
+                &buffers.diagnostic[..self.diagnostic_len]
+            }
+            _ => &[],
+        }
+    }
+
+    /// The committed session revision (issue #1562a, carry-forward 2): what the SDK's transaction
+    /// queue starts its expected revision from after a successful boot. It advances by one for
+    /// each transaction the control plane commits, whatever its path, and is `0` for a session
+    /// that was never edited and for a host that is not ready.
+    #[must_use]
+    pub fn committed_revision(&self) -> u64 {
+        self.ready.as_ref().map_or(0, |ready| {
+            ready
+                .control
+                .committed_session()
+                .normalized_model()
+                .revision
+        })
     }
 
     /// Run the control plane's service step once (#1381a D5, #1348 D1): bring the provider epochs
@@ -7099,6 +7248,7 @@ fn project_buffers(
         source_pcm_bytes,
         output_pcm_bytes,
         command_bytes,
+        CONTROL_FRAME_BYTES,
         bridge_metadata,
     ];
     let retained = rows.into_iter().try_fold(0_u64, |total, row| {
@@ -7158,6 +7308,7 @@ fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuff
             .map_err(allocation)?,
         command: boxed_zero_u8(projection.command_records * COMMAND_RECORD_BYTES)
             .map_err(allocation)?,
+        control_request: boxed_zero_u8(CONTROL_FRAME_BYTES as u32).map_err(allocation)?,
         plane_references: boxed_uninit_planes(
             u32::try_from(projection.source_samples / u64::from(projection.report.quantum_frames))
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
@@ -7832,6 +7983,10 @@ impl HostAttachment for RenderCompanions {
     }
 }
 
+/// The diagnostic code of a command frame whose transaction needs a plan rebuild, which the
+/// browser cannot apply in place yet (issue #1562a D9; #1562b removes the refusal).
+pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
+
 /// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): `prepare_web_host` for the
 /// session's boot options and spectrum request, with the render-side companions moved into the
 /// plan.
@@ -7845,6 +8000,11 @@ pub struct WebRuntimePreparer {
     /// Where the boot preparation leaves its facts for the host (#1381a), or `None` for a preparer
     /// that is only called.
     record: Option<Arc<Mutex<BootRecord>>>,
+    /// Whether the command path takes a structural transaction (issue #1562a D9). It is `false`:
+    /// the browser has no in-place structural edit until #1562b, so a frame that classifies as a
+    /// rebuild is refused `web.apply.rebuild_pending` before anything is committed. Only the
+    /// test-support republish of #1381a's gates opens it, for one call.
+    allow_rebuild: Arc<AtomicBool>,
 }
 
 impl WebRuntimePreparer {
@@ -7855,6 +8015,7 @@ impl WebRuntimePreparer {
             options,
             spectrum,
             record: None,
+            allow_rebuild: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -7866,6 +8027,10 @@ impl WebRuntimePreparer {
 }
 
 impl control_plane::RuntimePreparer for WebRuntimePreparer {
+    fn refuse_rebuild(&self) -> Option<&'static str> {
+        (!self.allow_rebuild.load(Ordering::Acquire)).then_some(REBUILD_PENDING)
+    }
+
     fn prepare(
         &self,
         compiled: &CompiledSession,
@@ -8017,6 +8182,8 @@ fn compile_ready(
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer =
         WebRuntimePreparer::new(options, spectrum_request.cloned()).recording(Arc::clone(&record));
+    #[cfg(feature = "test-support")]
+    let allow_rebuild = Arc::clone(&preparer.allow_rebuild);
     let limits = control_limits(caps, memory_budget);
     let control_plane::CompiledChildren {
         session: mut control,
@@ -8519,6 +8686,8 @@ fn compile_ready(
     let ready = ReadyOwnership {
         control,
         queries,
+        #[cfg(feature = "test-support")]
+        allow_rebuild,
         commands_enabled,
         // #1381a: the control plane owns the plan's gate and every producer of its cells. The
         // retained command path keeps empty slots where it held them, and refuses what needs them.

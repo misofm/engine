@@ -1214,6 +1214,15 @@ where
                     LiveCommit::Done(result) => return result,
                     LiveCommit::Rebuild(prepared) => prepared,
                 };
+                // #1562a D9: an adapter that cannot take a rebuild yet refuses here, with the
+                // token dropped unsent (nothing is stamped, prepared or queued, so the frame has
+                // no acknowledgement to drop). The C ABI's preparer takes every rebuild.
+                if let Some(code) = self.preparer.refuse_rebuild() {
+                    drop(prepared);
+                    return Err(CommandError::CompileRejected(crate::error::diagnostic(
+                        code,
+                    )));
+                }
                 // Issue #1042: while the atomic lags the providers, a render call has swapped plans
                 // but not yet published the epoch. The retired plan's row stays for any-thread
                 // readers, so the report table is full and no candidate could be admitted: refuse

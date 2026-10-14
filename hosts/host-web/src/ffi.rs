@@ -38,8 +38,11 @@
 //! since issue #1381a, `service` and `control_allocation_count`. The service step is the single
 //! instance's control work: the worklet's message handler runs it after every control message,
 //! never in `process()`, and it frees every plan and attachment render displaced, so its calls are
-//! the *control* allocations that `control_allocation_count` reads. The render-locked count stays
-//! zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
+//! the *control* allocations that `control_allocation_count` reads. Since issue #1562a the generic
+//! command-frame entry (`control_request_ptr`, `control_command`, `control_response_ptr`,
+//! `control_response_bytes`, `control_revision`) is control work of the same kind: it runs
+//! `SessionState::command` in the message handler and is unwrapped, its allocations counted as
+//! control allocations. The render-locked count stays zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
 //! wrapped or not, among them the 28 unwrapped ones it calls after the `boot` export returns a
 //! handle.
 
@@ -3988,6 +3991,66 @@ pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
 }
 
+/// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
+/// zero for an invalid handle, a host that is not ready, or a `len` that is zero or over the boot's
+/// `maximum_control_frame_bytes`. The page writes one command frame there, then calls
+/// [`miso_engine_web_v1_control_command`]. Control side only.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) -> u32 {
+    with_host_mut(handle, 0, |host| {
+        host.control_request_mut(len)
+            .map_or(0, |staging| pointer_u32(staging.as_ptr()))
+    })
+}
+
+/// Run the staged control command frame of `len` bytes through the control plane's
+/// `SessionState::command`, the entry the C ABI's `miso_engine_v1_submit_command` runs (issue
+/// #1562a D1). In `single` mode it runs in the worklet's message handler, never in `process()`; it
+/// is not render-locked, so its allocations are counted as the instance's control allocations.
+///
+/// Results: [`RESULT_OK`] (the response frame is at [`miso_engine_web_v1_control_response_ptr`],
+/// and a refused transaction is still an ok call with a non-ok frame); [`RESULT_INVALID_ARGUMENT`]
+/// for a wrong handle, a bad length or a frame the core cannot correlate;
+/// [`RESULT_WRONG_STATE`]; [`RESULT_BUFFER_TOO_SMALL`]; [`RESULT_BACKPRESSURE`];
+/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.rebuild_pending`);
+/// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.control_command(len)
+    })
+}
+
+/// Return the address of the last control command's response (issue #1562a D1), valid until the
+/// next control call, or zero for an invalid handle or a host with nothing to read.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_response_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        let response = host.control_response();
+        if response.is_empty() {
+            0
+        } else {
+            pointer_u32(response.as_ptr())
+        }
+    })
+}
+
+/// Return the byte length of the last control command's response, zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_response_bytes(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.control_response().len()).unwrap_or(0)
+    })
+}
+
+/// Return the committed session revision (issue #1562a, carry-forward 2), zero for an invalid
+/// handle or a session never edited. The SDK's transaction queue seeds its expected revision from
+/// it after a successful boot.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_revision(handle: u32) -> u64 {
+    with_host(handle, 0, AudioWorkletEngineHost::committed_revision)
+}
+
 /// Copy the plan's applied-revision watermark into its fixed record (issue #1381a D5), found at
 /// [`miso_engine_web_v1_watermark_ptr`]. Control side only.
 ///
@@ -4750,6 +4813,34 @@ pub mod native_staging {
                     .map_err(|error| format!("{error:?}")),
             )
         })
+    }
+
+    /// Stage one control frame as the worklet does through `miso_engine_web_v1_control_request_ptr`,
+    /// run `miso_engine_web_v1_control_command` and read the response through the response
+    /// exports' record (issue #1562a D1). Returns the export's result and the response bytes (the
+    /// response frame after an ok result, else the refusal's diagnostic), or `None` for a handle
+    /// or a frame length the staging refuses.
+    pub fn control_command(handle: u32, frame: &[u8]) -> Option<(u32, Vec<u8>)> {
+        let length = u32::try_from(frame.len()).ok()?;
+        let staged = super::with_host_mut(handle, false, |host| {
+            host.control_request_mut(length)
+                .map(|staging| staging[..frame.len()].copy_from_slice(frame))
+                .is_some()
+        });
+        if !staged {
+            return None;
+        }
+        let result = super::miso_engine_web_v1_control_command(handle, length);
+        let response =
+            super::with_host(handle, Vec::new(), |host| host.control_response().to_vec());
+        Some((result, response))
+    }
+
+    /// Drain the reliable event lane of the host `handle` names (issue #1562a), the reader the
+    /// browser does not have until #1570b. Returns the events read.
+    #[cfg(feature = "test-support")]
+    pub fn drain_reliable_events(handle: u32) -> usize {
+        super::with_host_mut(handle, 0, |host| host.drain_reliable_events_for_test())
     }
 
     /// The epoch of the plan that renders, for the host `handle` names (#1381a gates 2 and 4).

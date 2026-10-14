@@ -324,8 +324,8 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
     }
     assert_eq!(
         results.len(),
-        11,
-        "the base ladder is the eleven frozen result codes"
+        12,
+        "the base ladder is the twelve frozen result codes (#1562a added compileRejected)"
     );
 }
 
