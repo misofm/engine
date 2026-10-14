@@ -724,19 +724,27 @@ function noProgress(): MisoEngineError {
   return malformed("a page is not the last and does not advance the cursor");
 }
 
-/**
- * Read the whole control list: `CONTROL_LIST_GET` pages of `filter.pageLimit` rows (256 by
- * default) until `eof`.
- *
- * A page refused `control.list.stale` (the structure changed since the first page) restarts the read
- * from the first page; after {@link CONTROL_LIST_RESTARTS} restarts it rejects with
- * `MisoEngineError` `control.list.stale`. Any other refusal rejects with `MisoControlRefusal`. The
- * pages of one list always share one `structure_epoch`.
- */
-export async function readControlList(
-  transport: ControlListTransport,
-  filter?: ControlListFilter,
-): Promise<ControlList> {
+/** The steps of a read: a generator yields each request frame and is resumed with the core's reply. */
+type Steps<T> = Generator<Uint8Array, T, Uint8Array>;
+
+/** Run a read against a send function that answers at once. */
+function driveSync<T>(steps: Steps<T>, send: (frame: Uint8Array) => Uint8Array): T {
+  let step = steps.next();
+  while (step.done !== true) step = steps.next(send(step.value));
+  return step.value;
+}
+
+/** Run a read against a send function that may answer later. */
+async function driveAsync<T>(
+  steps: Steps<T>,
+  send: (frame: Uint8Array) => Uint8Array | PromiseLike<Uint8Array>,
+): Promise<T> {
+  let step = steps.next();
+  while (step.done !== true) step = steps.next(await send(step.value));
+  return step.value;
+}
+
+function* listSteps(requestIds: ControlRequestIds, filter: ControlListFilter | undefined): Steps<ControlList> {
   const limit = pageLimit(filter);
   const owner = filter?.owner;
   for (let attempt = 0; attempt <= CONTROL_LIST_RESTARTS; attempt += 1) {
@@ -747,15 +755,15 @@ export async function readControlList(
     const headers: ControlHeader[] = [];
     const controls: ControlListEntry[] = [];
     for (;;) {
-      const requestId = transport.requestIds.next();
-      const reply = decodeControlListPage(await transport.send(encodeControlListRequest({
+      const requestId = requestIds.next();
+      const reply = decodeControlListPage(yield encodeControlListRequest({
         kind: "list",
         requestId,
         structureEpoch: epoch,
         afterHandle: after,
         limit,
         owner,
-      })));
+      }));
       requireReply(reply, requestId);
       if (!reply.ok) {
         if (isStale(reply.refusal)) {
@@ -789,6 +797,94 @@ export async function readControlList(
     });
   }
   throw staleError();
+}
+
+/**
+ * Read the whole control list: `CONTROL_LIST_GET` pages of `filter.pageLimit` rows (256 by
+ * default) until `eof`.
+ *
+ * A page refused `control.list.stale` (the structure changed since the first page) restarts the read
+ * from the first page; after {@link CONTROL_LIST_RESTARTS} restarts it rejects with
+ * `MisoEngineError` `control.list.stale`. Any other refusal rejects with `MisoControlRefusal`. The
+ * pages of one list always share one `structure_epoch`.
+ */
+export function readControlList(
+  transport: ControlListTransport,
+  filter?: ControlListFilter,
+): Promise<ControlList> {
+  return driveAsync(listSteps(transport.requestIds, filter), transport.send);
+}
+
+/**
+ * The strips of the running session in the core's order (decision 17, C4; #1564 D5): the owner
+ * header rows of kind `track`, then `submix`, as the list gives them. Strip `i` of a meter frame, an
+ * observation binding or a response is `[...tracks, ...submixes][i]`. The order belongs to one
+ * `structureEpoch`; a reply that names another epoch means it may have changed.
+ */
+export interface ControlStripOrder {
+  readonly structureEpoch: bigint;
+  readonly tracks: readonly string[];
+  readonly submixes: readonly string[];
+}
+
+/** The strip order of an already read list: its track and submix owner headers, in list order. */
+export function stripOrderOf(list: ControlList): ControlStripOrder {
+  const tracks: string[] = [];
+  const submixes: string[] = [];
+  for (const header of list.headers) {
+    if (header.row !== "owner" || (header.kind !== "track" && header.kind !== "submix")) continue;
+    const owner = header.address.owner;
+    if (owner.kind !== "strip") throw malformed("a strip header does not name a strip");
+    (header.kind === "track" ? tracks : submixes).push(owner.id);
+  }
+  return Object.freeze({
+    structureEpoch: list.structureEpoch,
+    tracks: Object.freeze(tracks),
+    submixes: Object.freeze(submixes),
+  });
+}
+
+/**
+ * Probe the current structure epoch with the smallest list request the core serves (one row of the
+ * session owner), then read the full list only when the epoch is not `known`'s.
+ */
+function* stripOrderSteps(
+  requestIds: ControlRequestIds,
+  known: ControlStripOrder | undefined,
+): Steps<ControlStripOrder> {
+  const requestId = requestIds.next();
+  const probe = decodeControlListPage(yield encodeControlListRequest({
+    kind: "list",
+    requestId,
+    structureEpoch: 0n,
+    afterHandle: 0,
+    limit: 1,
+    owner: { kind: "session" },
+  }));
+  requireReply(probe, requestId);
+  if (!probe.ok) throw refusalError(probe.refusal);
+  if (known !== undefined && known.structureEpoch === probe.page.structureEpoch) return known;
+  return stripOrderOf(yield* listSteps(requestIds, undefined));
+}
+
+/**
+ * The strip order of the session, read from the core's list. Pass the order read last as `known`:
+ * a probe that finds the same epoch returns it without reading the list again. A browser reads it
+ * through the host's `control` message, so the send may answer later.
+ */
+export function readControlStripOrder(
+  transport: ControlListTransport,
+  known?: ControlStripOrder,
+): Promise<ControlStripOrder> {
+  return driveAsync(stripOrderSteps(transport.requestIds, known), transport.send);
+}
+
+/** {@link readControlStripOrder} against a core that answers at once (the in-process engine). */
+export function readControlStripOrderSync(
+  transport: { readonly send: (frame: Uint8Array) => Uint8Array; readonly requestIds: ControlRequestIds },
+  known?: ControlStripOrder,
+): ControlStripOrder {
+  return driveSync(stripOrderSteps(transport.requestIds, known), transport.send);
 }
 
 /**

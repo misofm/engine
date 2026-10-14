@@ -452,8 +452,9 @@ for (const initialLiveControls of [undefined, {}, { observationTaps: 0 }, { obse
     assert.equal(engine.liveControls(), pending, "live-control Promise is cached");
     const controls = await pending;
     assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
-    // The probe that reads the core's revision, then the one transaction.
-    assert.equal(maps, 1); assert.equal(frames.length, 2);
+    // The probe that reads the core's revision, the strip-order reads of the control list (the
+    // epoch probe and one page, #1564 D5), then the one transaction.
+    assert.equal(maps, 1); assert.equal(frames.length, 4);
     assert.equal(engine.context.state, "running");
     await engine.close(); await engine.close();
     assert.deepEqual(closed, ["host", "context"]);
@@ -473,19 +474,21 @@ test("a browser engine's live controls address a submix by its strip index", asy
     createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
-      async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false }; },
-      control: scriptedControl({ frames }),
+      // The worklet's own tracks and submixes (its index exports) are wrong on purpose: the SDK
+      // takes the strip order from the core's list (#1564 D5) and must not read these.
+      async sessionMap() { return { tracks: ["wrong"], submixes: ["zzz"], sources: [], metersAttached: false }; },
+      control: scriptedControl({ frames, strips: { tracks: ["t"], submixes: ["aaa", "bus"] } }),
       async dispose() {},
     }),
   });
   try {
     const controls = await engine.liveControls();
     assert.equal((await controls.submit(controls.edit.submix("bus").faderDb(-6))).ok, true);
-    assert.equal(frames.length, 2, "the revision probe, then one transaction");
-    const ids = frames.slice(1).map((frame) => new TextDecoder().decode(frame));
+    assert.equal(frames.length, 4, "the revision probe, the strip-order reads, then one transaction");
+    const ids = frames.slice(3).map((frame) => new TextDecoder().decode(frame));
     assert.ok(ids[0].includes("bus"), "the transaction names the bus by its stable ID");
     assert.equal((await controls.submit(controls.edit.submix("aaa").mute(true))).ok, true);
-    assert.ok(new TextDecoder().decode(frames[2]).includes("aaa"));
+    assert.ok(new TextDecoder().decode(frames[4]).includes("aaa"));
     // Observation records address a strip by index: the track, then the submixes in the host's order.
     const record = controls.edit.submix("bus").effect("inserts", 0, "miso.compressor")
       .observe("Gain Reduction", true, 1);

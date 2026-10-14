@@ -29,7 +29,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserLiveControls } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { createTrackResponse } from "./response.ts";
@@ -663,8 +663,13 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       shape.submixes,
       policy.liveControls !== undefined,
     );
-    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes.
-    const strips = (): readonly string[] => [...shape.tracks, ...shape.submixes];
+    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes. The
+    // order is the core's control list (#1564 D5), read again whenever its structure epoch moves.
+    const stripOrder = createBrowserStripOrder(host);
+    const strips = async (): Promise<readonly string[]> => {
+      const order = await stripOrder();
+      return [...order.tracks, ...order.submixes];
+    };
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -675,14 +680,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           result: reply.result,
         });
       }
-      return enrichObservationMap(strips(), reply.bindings as readonly RawObservationBinding[]);
+      return enrichObservationMap(await strips(), reply.bindings as readonly RawObservationBinding[]);
     };
     const readObservations = async (
       selections: readonly ObservationSelection[],
     ): Promise<readonly ObservationReadResult[]> => {
       validateObservationSelections(selections);
       const map = await observationMap();
-      const addresses = resolveObservationAddressesWithTracks(map, strips(), selections);
+      const stripIds = await strips();
+      const addresses = resolveObservationAddressesWithTracks(map, stripIds, selections);
       const reply = await host.readObservations({ selections: [...addresses] });
       if (reply.result !== constantValue("resultCodes", "ok")) {
         throw new MisoEngineError("the browser host refused the selected observation read", {
@@ -693,7 +699,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return decodeObservationRows(
         map,
-        strips(),
+        stripIds,
         selections,
         addresses,
         reply.rows as readonly RawObservationRow[],

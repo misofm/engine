@@ -329,3 +329,72 @@ builder row`; `inserts:` and `console: parameter, bypass and link mode stage wha
 `sdk/test/live-controls-types.ts`. Run, with the artifacts of piece A: `check-sdk-types.sh`,
 `check-sdk-generated.sh`, `check-sdk-headless.sh` (521 tests, 520 pass, 1 todo from before),
 `sdk-package.sh check`, `check-sdk-deletions.py`, `check-workspace-policy.sh`.
+
+## Decision record: piece C, strip order from the list (batch 8)
+
+**Shipped (D5, gate 5).** The SDK calls no `miso_engine_web_v1_live_control_*` export and reads no
+route or VCA order. The strip order is the owner headers of kind `track`, then `submix`, of the core's
+control list (`ControlStripOrder { structureEpoch, tracks, submixes }`, read by `stripOrderOf` in
+`sdk/src/core/control-list.ts`). The paging loop of `readControlList` is now a generator (`listSteps`)
+that an async driver (`readControlList`, `readControlStripOrder`) and a sync driver
+(`readControlStripOrderSync`) both run, so the in-process engine and the browser read the list with
+one piece of code.
+
+- **Headless.** `WasmBoundary.stripOrder()` feeds `shape()`, `sessionMap()`, `observationMap()` and
+  `readObservations()`. `shape()` does not run on the render path any more (`OfflineEngine.render()`
+  takes the quantum from `status()`).
+- **Re-read on a new epoch.** Each `stripOrder()` call first asks for one row of the session owner (the
+  smallest page the core serves) and reads the whole list only when that page's `structure_epoch` is
+  not the one of the cached order. This follows the spec's "after every reply whose epoch differs"
+  without the boundary decoding every reply, and it is never stale. `pollMeters()` is a per-block call:
+  it uses the cached order and re-reads only when a frame's header `trackCount` disagrees with it.
+  `reboot()` and `dispose()` clear the cache.
+- **One allocator per endpoint.** The strip-order reads send frames, and the core takes request IDs in
+  ascending order. `WasmBoundary.controlRequestIds` is therefore the one allocator of the instance's
+  control endpoint, and `OfflineEngine.controlTransactions()` and `controls()` use it (a second
+  `ControlRequestIds` on the same core collides: piece A's finding).
+- **Browser.** `createBrowserLiveControls` takes `tracks` and `submixes` of its map from the list
+  through the host's `control` message (sources and the meter lease still come from the worklet's
+  `miso.sessionmap.v1`); `createBrowserStripOrder(host)` serves observation (`observationMap`,
+  `readObservations`) with the same probe-then-read rule. The scratch boot's `shape` (the strips the
+  meter projection uses) comes from `WasmBoundary.shape()` and so from the list.
+- **Exports not required.** `exportsOf` skips the four index exports (`UNUSED_EXPORTS` in
+  `boundary.ts`), so a module without them boots. #1565B deletes the exports, drops their names from
+  the generated layout and deletes this set.
+
+**Departures from the text.** (1) The browser meter feed keeps the strip ids of the boot-time shape
+(`createMeasurementFeeds(host, shape.tracks, ...)`); a frame for another shape is refused
+`abiMismatch` by `meterProjection` as before. No structure change that moves strips can commit before
+#1562b, so there is nothing to follow yet. A successor that re-reads on a refused frame belongs with
+#1562b. (2) The test fixtures that serve a browser host from a headless engine (`engineHost`) renumber
+the browser's frames onto the engine's one allocator (`onEndpointIds`, `control-support.mjs`), and the
+scripted fake hosts answer `CONTROL_LIST_GET` with strip headers (`stripListReply`).
+
+**Gates and tests** (`sdk/test/strip-order-evals.mjs`, 4 tests): gate 5, `a module without the
+live_control_* exports boots, meters and observes` (shape, session map, a completed meter frame, the
+observation map and a read on the headless engine, on a copy of the export object with the four
+exports deleted; red on the old boundary with `abiMismatch ... does not export
+miso_engine_web_v1_live_control_submix_count`) and `a module that has the exports never sees them
+called` (counts calls across boot, shape, meters, observation and `loadSession`); D5, `the list is
+read once per epoch and again after the epoch moves` (an unchanged epoch returns the same order
+object; a live `matrix_mode` switch makes a new one) and `the browser reader follows a new epoch and
+keeps the order of an unchanged one`. `browser-defaults-evals.mjs` now makes the worklet's own
+`tracks`/`submixes` wrong on purpose in the submix test, so reading them fails it. Frame counts in
+`browser-defaults-evals.mjs` and the request-ID assertion in `live-controls-evals.mjs` count the
+epoch probe and the list page. Run, with the artifacts of this tree: `check-sdk-types.sh`,
+`check-sdk-headless.sh` (525 tests, 524 pass, 1 todo from before), `check-sdk-generated.sh`,
+`sdk-package.sh check`, `check-sdk-deletions.py`, `check-workspace-policy.sh`.
+
+**For #1565B** (readers of `live_control_{track,submix}_{count,id}` left): host-web
+`ffi.rs:4112-4144` (four exports) and `lib.rs:2895`, `:2906` (`copy_live_control_{track,submix}_id`);
+`render_lock.rs:26-27` (a comment); the worklet `miso-engine-v1-audio-worklet.js:611-645` (strip order
+for `miso.sessionmap.v1`, answered at `:1024-1038`) and the host-side validation of that map in
+`miso-engine-v1-audio-worklet-host.js` (`sessionMap`, `:1049`); the Rust tests `tests.rs:3502-3529`,
+`:4702-4737`, `:4870`; `hosts/host-web/tests/browser-v1/direct-oracle.mjs:316`, `:383`;
+`scripts/test-web-audioworklet.mjs:2733-2741`, `:4300-4307`; the export lists in
+`scripts/check-web-audioworklet.sh:290-293`, `scripts/check-abi-layout-v1.py:138-141`,
+`scripts/fixtures/abi-layout-v1-self-test.json:26-29`, `tools/parameter-metadata/src/abi_layout.rs:148-151`
+and the mirrors they generate (`sdk/assets/miso-engine-v1-abi-layout.json`, `sdk/src/generated/abi.ts`);
+and the SDK's `UNUSED_EXPORTS` (`sdk/src/core/boundary.ts`). The SDK's `MisoSessionMap` type
+(`shipped-host.d.ts`, a pinned mirror of the host's `.d.ts`) still carries `tracks`/`submixes`, which
+the SDK now ignores.

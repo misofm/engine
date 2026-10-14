@@ -34,7 +34,7 @@ import type {
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 import { decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
-import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
+import { ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type {
   ControlList,
@@ -302,7 +302,8 @@ export class OfflineEngine {
    */
   controlTransactions(): ControlTransactionQueue {
     if (this.#controlQueue === undefined) {
-      const requestIds = new ControlRequestIds();
+      // The boundary's one allocator: its strip-order reads draw from the same endpoint.
+      const requestIds = this.#boundary.controlRequestIds;
       // The core reports its own frame ceiling, which the queue holds every transaction under.
       const limits = decodeControlLimits(
         this.#boundary.controlFrame(encodeRevisionProbe(requestIds.next())),
@@ -345,7 +346,7 @@ export class OfflineEngine {
     return {
       send: (frame) => this.#boundary.controlFrame(frame),
       // The one allocator of this endpoint: the engine's replay cache refuses a reused ID.
-      requestIds: this.controlTransactions().requestIds,
+      requestIds: this.#boundary.controlRequestIds,
     };
   }
 
@@ -433,7 +434,7 @@ export class OfflineEngine {
   }
 
   render(actualFrames?: number): { readonly left: Float32Array; readonly right: Float32Array } {
-    return this.#boundary.render(actualFrames ?? this.shape().quantumFrames);
+    return this.#boundary.render(actualFrames ?? this.status().quantumFrames);
   }
 
   submitCommands(records: Uint8Array, count: number): CommandReport {

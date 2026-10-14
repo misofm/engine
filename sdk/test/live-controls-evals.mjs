@@ -647,8 +647,11 @@ describe("#1563B -- the browser transport posts the same frames and decodes the 
       assert.equal(report.appliedOperations, 2);
       assert.equal(report.revision, engine.controlRevision());
       const ids = frames.map((frame) => new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true));
-      assert.deepEqual(ids, [1n, 2n], "the probe and the transaction share one allocator");
-      assert.equal(controls.queue.requestIds.next(), 3n, "a catalog read would draw the next ID");
+      // The probe, the strip-order reads of the control list (#1564 D5) and the transaction draw
+      // from one allocator: the IDs are 1, 2, 3.. with no repeat and no gap.
+      assert.deepEqual(ids, ids.map((_, index) => BigInt(index + 1)), "one allocator serves every frame");
+      assert.ok(ids.length >= 3, "a probe, a strip-order read and a transaction");
+      assert.equal(controls.queue.requestIds.next(), BigInt(ids.length + 1), "a catalog read would draw the next ID");
     } finally {
       engine.dispose();
     }

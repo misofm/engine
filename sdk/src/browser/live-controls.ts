@@ -3,7 +3,8 @@ import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
-import type { ControlListTransport } from "../core/control-list.ts";
+import { readControlStripOrder } from "../core/control-list.ts";
+import type { ControlListTransport, ControlStripOrder } from "../core/control-list.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
@@ -53,6 +54,19 @@ export async function createBrowserControlListTransport(
 ): Promise<ControlListTransport> {
   const queue = await createBrowserControlQueue(host);
   return { send: hostControlSend(host), requestIds: queue.requestIds };
+}
+
+/**
+ * The strip order of the host's running session, read from the core's control list (#1564 D5).
+ * Each call probes the structure epoch and reads the list again only when it differs from the
+ * epoch of the order returned last, so a structure change is followed and nothing is read twice.
+ */
+export function createBrowserStripOrder(host: MisoAudioWorkletHost): () => Promise<ControlStripOrder> {
+  let known: ControlStripOrder | undefined;
+  return async () => {
+    known = await readControlStripOrder(await createBrowserControlListTransport(host), known);
+    return known;
+  };
 }
 
 const hostQueues = new WeakMap<object, Promise<ControlTransactionQueue>>();
@@ -113,13 +127,17 @@ export async function createBrowserLiveControls(
   booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
   const remoteMap = await host.sessionMap();
+  const queue = await createBrowserControlQueue(host);
+  // The strip order is the core's control list (#1564 D5), not the worklet's index exports: the
+  // map keeps the worklet's sources and meter lease, and takes the tracks and submixes from the
+  // owner headers.
+  const order = await readControlStripOrder({ send: hostControlSend(host), requestIds: queue.requestIds });
   const map: SessionMap = Object.freeze({
-    tracks: Object.freeze([...remoteMap.tracks]),
+    tracks: order.tracks,
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
-    submixes: Object.freeze([...remoteMap.submixes]),
+    submixes: order.submixes,
   });
-  const queue = await createBrowserControlQueue(host);
   return new EngineLiveControls(map, {
     queue,
     observe: async (edits): Promise<CommandReport> => {

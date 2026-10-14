@@ -206,6 +206,8 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
   const host = fakeHost();
   const reads = [];
   Object.assign(host, {
+    // The strip order the SDK reads from the core's list: the track, then the bus.
+    control: scriptedControl({ strips: { tracks: ["t"], submixes: ["bus"] } }),
     async observationMap() {
       return {
         tag: "miso.observationmap.v1", result: 0,

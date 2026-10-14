@@ -11,6 +11,9 @@ import {
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { controlCallFailure } from "./control-frame.ts";
+import { readControlStripOrderSync } from "./control-list.ts";
+import type { ControlStripOrder } from "./control-list.ts";
+import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 import { TrackResponseModule } from "./live-response.ts";
 import type {
@@ -86,6 +89,15 @@ const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
   SPECTRUM_HOP_CAPABILITY,
   SPECTRUM_HOP_BOOT,
 ]);
+// Exports the SDK no longer calls (#1564 D5: the strip order is the core's control list). A module
+// that has them boots, and one that lacks them boots too. The host deletes them in #1565B, which also
+// drops these names from the generated layout and this set.
+const UNUSED_EXPORTS: ReadonlySet<string> = new Set([
+  "miso_engine_web_v1_live_control_submix_count",
+  "miso_engine_web_v1_live_control_submix_id",
+  "miso_engine_web_v1_live_control_track_count",
+  "miso_engine_web_v1_live_control_track_id",
+]);
 type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
 
@@ -94,7 +106,7 @@ function exportsOf(instance: WebAssembly.Instance): ExportTable {
   for (const name of ABI_LAYOUT.exports) {
     // These are additive spectrum-hop exports. An older asset remains valid for the legacy boot
     // path and is checked only when a caller explicitly requests the prepared spectrum hop.
-    if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
+    if (OPTIONAL_ADDITIVE_EXPORTS.has(name) || UNUSED_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
         phase: "asset",
@@ -318,6 +330,10 @@ export class WasmBoundary {
   #controlListenerFailures = 0;
   #optionBytes: Uint8Array;
   #metersAttached: boolean;
+  /** The one request-ID allocator of this instance's control endpoint (the core refuses a reused ID). */
+  readonly #controlRequestIds = new ControlRequestIds();
+  /** The strip order read last, with the structure epoch it belongs to. */
+  #stripOrder: ControlStripOrder | undefined;
   #trackResponse: TrackResponseModule | undefined;
   #spectrum: SpectrumModule | undefined;
   #spectrumQuery: SpectrumQuery | undefined;
@@ -384,6 +400,7 @@ export class WasmBoundary {
     // the current session has been disposed.
     const spectrumHopBoot = requireSpectrumHopCapability(this.#exports, snapshot.spectrumHopFrames);
     this.dispose();
+    this.#stripOrder = undefined;
     const staged = stage(
       this.#exports,
       document,
@@ -470,18 +487,7 @@ export class WasmBoundary {
         frames: BigInt(this.#exports.miso_engine_web_v1_source_frames(handle, index)),
       }));
     }
-    const trackCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle));
-    const tracks: string[] = [];
-    for (let index = 0; index < trackCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_track_id(handle, index));
-      tracks.push(this.#readIdBuffer(idBytes));
-    }
-    const submixCount = Number(this.#exports.miso_engine_web_v1_live_control_submix_count(handle));
-    const submixes: string[] = [];
-    for (let index = 0; index < submixCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_submix_id(handle, index));
-      submixes.push(this.#readIdBuffer(idBytes));
-    }
+    const { tracks, submixes } = this.stripOrder();
     return Object.freeze({
       sampleRateHz,
       quantumFrames,
@@ -490,9 +496,32 @@ export class WasmBoundary {
       sourceRingFrames: defaultSourceRingFrames(sampleRateHz, quantumFrames),
       backend: backendValue === constantValue("backends", "simd128") ? "simd128" : "scalar",
       sources: Object.freeze(sources),
-      tracks: Object.freeze(tracks),
-      submixes: Object.freeze(submixes),
+      tracks,
+      submixes,
     });
+  }
+
+  /**
+   * The one allocator of request IDs for this instance's control endpoint. Every frame sent through
+   * {@link controlFrame} draws its ID from it: the core takes IDs in ascending order and refuses a
+   * reused one, so two allocators on one core collide.
+   */
+  get controlRequestIds(): ControlRequestIds {
+    return this.#controlRequestIds;
+  }
+
+  /**
+   * The strips of the running session in the core's own order: the owner headers of its control list
+   * (decision 17, C4; #1564 D5), tracks then submixes. A probe reads the structure epoch; the list is
+   * read again only when the epoch is not the one the cached order belongs to.
+   */
+  stripOrder(): ControlStripOrder {
+    this.#live();
+    this.#stripOrder = readControlStripOrderSync(
+      { send: (frame) => this.controlFrame(frame), requestIds: this.#controlRequestIds },
+      this.#stripOrder,
+    );
+    return this.#stripOrder;
   }
 
   /** The engine's state word, named through the generated vocabulary. */
@@ -588,8 +617,8 @@ export class WasmBoundary {
       });
     }
     // Issue #1210 D5: a binding's index is a strip index, the tracks then the submixes.
-    const shape = this.shape();
-    const strips = [...shape.tracks, ...shape.submixes];
+    const order = this.stripOrder();
+    const strips = [...order.tracks, ...order.submixes];
     const raw: RawObservationBinding[] = [];
     const readId = (length: number, path: string): string => {
       if (!Number.isSafeInteger(length) || length <= 0 || length > idCapacity) {
@@ -665,8 +694,8 @@ export class WasmBoundary {
     const handle = this.#live();
     const map = this.observationMap();
     // Issue #1210 D5: selections resolve against the strips, the tracks then the submixes.
-    const shape = this.shape();
-    const strips = [...shape.tracks, ...shape.submixes];
+    const order = this.stripOrder();
+    const strips = [...order.tracks, ...order.submixes];
     const addresses = resolveObservationAddressesWithTracks(map, strips, selections);
     const selectionPointer = Number(this.#exports.miso_engine_web_v1_observation_selection_ptr());
     const selectionCapacity = Number(this.#exports.miso_engine_web_v1_observation_selection_capacity());
@@ -1089,15 +1118,25 @@ export class WasmBoundary {
   /** Drain completed meter windows, copying their values out of mutable Wasm memory. */
   pollMeters(): MeterFrame | undefined {
     const handle = this.#live();
+    // The strip order the last read of the core's list gave; read once, then only when a frame's
+    // header disagrees with it (a poll is a per-block call and must not probe the core each time).
+    const known = this.#stripOrder ?? this.stripOrder();
     const windows = Number(this.#exports.miso_engine_web_v1_meter_poll(handle));
     if (windows === 0) return undefined;
 
-    const header = new StructView(
+    const readHeader = (): StructView => new StructView(
       this.#exports.memory,
       "meterHeader",
       Number(this.#exports.miso_engine_web_v1_meter_header_ptr(handle)),
     );
-    const trackCount = this.shape().tracks.length;
+    let header = readHeader();
+    let trackCount = known.tracks.length;
+    if (header.u32("trackCount") !== trackCount) {
+      // The structure may have changed since the order was read. A control call can grow the
+      // module's memory, so the header view is taken again after it.
+      trackCount = this.stripOrder().tracks.length;
+      header = readHeader();
+    }
     const reportedWindows = header.u32("windows");
     const masterGrPresent = header.u32("masterGrPresent");
     const submixCount = header.u32("submixCount");
@@ -1397,6 +1436,7 @@ export class WasmBoundary {
     this.#spectrumActiveQuery = undefined;
     const result = Number(this.#exports.miso_engine_web_v1_dispose(this.#handle));
     this.#handle = 0;
+    this.#stripOrder = undefined;
     if (result !== constantValue("resultCodes", "ok")) {
       throw new MisoEngineError("the engine refused to dispose this handle", {
         phase: "lifecycle",
