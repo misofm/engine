@@ -42,7 +42,9 @@
 //! command-frame entry (`control_request_ptr`, `control_command`, `control_response_ptr`,
 //! `control_response_bytes`, `control_revision`) is control work of the same kind: it runs
 //! `SessionState::command` in the message handler and is unwrapped, its allocations counted as
-//! control allocations. The render-locked count stays zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
+//! control allocations. Since issue #1570b `control_event`, the event entry, is the same kind of
+//! control work, and the worklet's message handler drains both event lanes through it. The
+//! render-locked count stays zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
 //! wrapped or not, among them the 28 unwrapped ones it calls after the `boot` export returns a
 //! handle.
 
@@ -4021,6 +4023,30 @@ pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u
     })
 }
 
+/// Dequeue the next event of `lane` through the control plane's `SessionState::dequeue_event`, the
+/// entry the C ABI's `miso_engine_v1_dequeue_event` runs (issue #1570b D1). `lane` is `0` for the
+/// reliable lane and `1` for the lossy lane. On [`RESULT_OK`] the event frame is at
+/// [`miso_engine_web_v1_control_response_ptr`] with [`miso_engine_web_v1_control_response_bytes`]
+/// bytes, and zero bytes means the lane is empty. The staging is shared with
+/// [`miso_engine_web_v1_control_command`]: the frame is valid until the next `control_command` or
+/// `control_event` call. A Wasm caller cannot hand the module an output buffer, so the pointer
+/// exports are the transport and the dequeue itself is the core's.
+///
+/// Control side only: in `single` mode the worklet's message handler, never `process()`. It is not
+/// render-locked, so its allocations are control allocations, and it leaves the status's last
+/// result alone.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle or a lane other than `0`
+/// or `1` (nothing is dequeued); [`RESULT_REFUSED_LIFECYCLE`] for a host with no control half;
+/// [`RESULT_BACKPRESSURE`], [`RESULT_BUFFER_TOO_SMALL`] or [`RESULT_INTERNAL`] for the core's
+/// matching event refusal, whose text is then the session diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_event(handle: u32, lane: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.control_event(lane)
+    })
+}
+
 /// Return the address of the last control command's response (issue #1562a D1), valid until the
 /// next control call, or zero for an invalid handle or a host with nothing to read.
 #[unsafe(no_mangle)]
@@ -4836,11 +4862,17 @@ pub mod native_staging {
         Some((result, response))
     }
 
-    /// Drain the reliable event lane of the host `handle` names (issue #1562a), the reader the
-    /// browser does not have until #1570b. Returns the events read.
-    #[cfg(feature = "test-support")]
-    pub fn drain_reliable_events(handle: u32) -> usize {
-        super::with_host_mut(handle, 0, |host| host.drain_reliable_events_for_test())
+    /// Run `miso_engine_web_v1_control_event` on `lane` and read the frame through the response
+    /// exports' record (issue #1570b D1), as the worklet's drain does. Returns the export's result
+    /// and the event frame (empty for an empty lane or a refusal).
+    pub fn control_event(handle: u32, lane: u32) -> (u32, Vec<u8>) {
+        let result = super::miso_engine_web_v1_control_event(handle, lane);
+        let frame = if result == super::RESULT_OK {
+            super::with_host(handle, Vec::new(), |host| host.control_response().to_vec())
+        } else {
+            Vec::new()
+        };
+        (result, frame)
     }
 
     /// The epoch of the plan that renders, for the host `handle` names (#1381a gates 2 and 4).

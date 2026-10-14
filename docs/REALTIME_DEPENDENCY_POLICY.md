@@ -247,7 +247,7 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    `miso_engine_web_v1_` prefix, the worklet handlers that call it after boot, and whether its
    body is one `render_locked` call (`wrapped`). It has four `wrapped: false` entries, `dispose`,
    `render_allocation_count` and, since #1381a, `service` and `control_allocation_count`, and
-   since #1562a the five control-frame exports, each with its reason. `tools/realtime-policy` proves that every
+   since #1562a the five control-frame exports and since #1570b `control_event`, each with its reason. `tools/realtime-policy` proves that every
    `wrapped` entry's body is that call. The harnesses `scripts/test-web-audioworklet.mjs` and
    `sdk/test/browser-pcm-evals.mjs` fail when a worklet calls an export that the table does not
    list. This document does not repeat the names, so that they cannot drift from the table.
@@ -276,7 +276,10 @@ displaced) count in the control counter `CONTROL_ALLOCATIONS` of `render_lock.rs
 Since #1562a the generic command-frame entry (`control_request_ptr`, `control_command`,
 `control_response_ptr`, `control_response_bytes` and `control_revision`) is the same kind of
 export: `control_command` runs `SessionState::command` in the message handler, which allocates and
-frees, so its allocations are control allocations too. The render-locked count stays exactly zero. The spectrum
+frees, so its allocations are control allocations too. Since #1570b the event entry `control_event`
+is the same kind: the worklet's message handler drains the reliable lane and then the lossy lane
+through it, after every message and service step, and posts each frame to the page. The
+render-locked count stays exactly zero. The spectrum
 request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
 sets: the worklet calls them only during boot, before the `boot` export, where the collection
 staging is sized and allocated by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside

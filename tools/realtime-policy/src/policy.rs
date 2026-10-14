@@ -18,13 +18,18 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// staging address, the command, the response address and length, and the committed revision. They
 /// run in the message handler too, and `SessionState::command` allocates and frees, so they are
 /// never inside a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 9] = [
+///
+/// Issue #1570b adds `control_event` (D1), the event entry: the worklet's message handler dequeues
+/// both event lanes through it after each message, and `SessionState::dequeue_event` runs the
+/// service step and encodes the frame, so it is control work of the same kind.
+const UNWRAPPED_EXPORTS: [&str; 10] = [
     "dispose",
     "render_allocation_count",
     "service",
     "control_allocation_count",
     "control_request_ptr",
     "control_command",
+    "control_event",
     "control_response_ptr",
     "control_response_bytes",
     "control_revision",
@@ -175,7 +180,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 22] = [
+        const UNSAFE_ALLOWLIST: [&str; 23] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -196,6 +201,7 @@ impl Policy {
             "hosts/host-web/src/render_lock.rs",
             "hosts/host-web/tests/boot_transient_budget.rs",
             "hosts/host-web/tests/control_parity.rs",
+            "hosts/host-web/tests/protocol_cross_host.rs",
             "tools/bench-support/src/alloc.rs",
             "tools/audit/src/capi.rs",
         ];

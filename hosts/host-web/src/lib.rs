@@ -181,6 +181,13 @@ pub const RESULT_REFUSED_OPTIONS: u32 = RESULT_ABI_MISMATCH;
 /// Boot was attempted while a live handle already existed.
 pub const RESULT_REFUSED_LIFECYCLE: u32 = RESULT_WRONG_STATE;
 
+/// The reliable event lane of `miso_engine_web_v1_control_event` (issue #1570b D1): the C ABI's
+/// `EVENT_LANE_RELIABLE`.
+pub const EVENT_LANE_RELIABLE: u32 = 0;
+/// The lossy telemetry lane of `miso_engine_web_v1_control_event` (issue #1570b D1): the C ABI's
+/// `EVENT_LANE_LOSSY`.
+pub const EVENT_LANE_LOSSY: u32 = 1;
+
 /// A session and render plan are ready.
 pub const STATE_READY: u32 = 2;
 /// A sticky preparation or render failure occurred.
@@ -1799,6 +1806,9 @@ struct ReadyOwnership {
     /// The preparer's rebuild switch (#1562a D9), for the test-support republish.
     #[cfg(feature = "test-support")]
     allow_rebuild: Arc<AtomicBool>,
+    /// The limits the control half was built with (#1570b D6), for the cross-host proof.
+    #[cfg(feature = "test-support")]
+    limits: ControlLimits,
     /// The any-thread projection of the plan: its resource row and the applied-revision watermark
     /// (#1381a D5).
     queries: PlanQueries<WebAdapter>,
@@ -2636,25 +2646,13 @@ impl AudioWorkletEngineHost {
         Ok(ready.control.command_response(length?).to_vec())
     }
 
-    /// Drain the control plane's reliable event lane and return the number of events read (issue
-    /// #1562a): the commit events a transaction leaves queued. The lane's reader is #1570b's; until
-    /// then a test that commits more transactions than the lane holds drains it here, because an
-    /// undrained lane refuses the next live commit with backpressure. It clobbers the last control
-    /// response, which shares the control plane's scratch.
+    /// The [`ControlLimits`] the control half was built with (#1570b D6), read-only: the cross-host
+    /// proof builds the C ABI's compile limits from it field for field, so both hosts advertise the
+    /// same capabilities.
     #[cfg(feature = "test-support")]
-    pub fn drain_reliable_events_for_test(&mut self) -> usize {
-        let Some(ready) = self.ready.as_mut() else {
-            return 0;
-        };
-        let mut count = 0;
-        while let Ok(Some(_)) = ready
-            .control
-            .dequeue_event(control_plane::EventLane::Reliable, CONTROL_FRAME_BYTES)
-        {
-            count += 1;
-        }
-        self.control_response = ControlResponse::None;
-        count
+    #[must_use]
+    pub fn control_limits_for_test(&self) -> Option<ControlLimits> {
+        self.ready.as_ref().map(|ready| ready.limits)
     }
 
     /// The epoch of the plan that renders (#1381a gates 2 and 4): 0 for the boot plan, and one
@@ -2728,6 +2726,56 @@ impl AudioWorkletEngineHost {
                     control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
                     control_plane::CommandError::Internal => RESULT_INTERNAL,
                 })
+            }
+        }
+    }
+
+    /// Dequeue the next event of `lane` (issue #1570b D1): `0` is the reliable lane, `1` the lossy
+    /// lane, the C ABI's codes. This is the browser form of `miso_engine_v1_dequeue_event`: the
+    /// same [`control_plane::SessionState::dequeue_event`], with the whole response scratch as
+    /// capacity. The frame is then at [`Self::control_response`], which shares the staging of
+    /// [`Self::control_command`] and is valid until the next control call. An empty lane leaves it
+    /// empty (zero bytes).
+    ///
+    /// Control work, like the command entry: the worklet's message handler in `single` mode, never
+    /// `process()`. Like [`Self::service`] it leaves the status's last result alone, so a drain
+    /// never overwrites a refusal the host has yet to read.
+    ///
+    /// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a lane other than `0` or `1`, which
+    /// dequeues nothing; [`RESULT_WRONG_STATE`] for a host that is not ready (and so
+    /// [`RESULT_REFUSED_LIFECYCLE`], the same code, for an instance with no control half);
+    /// [`RESULT_BACKPRESSURE`], [`RESULT_BUFFER_TOO_SMALL`] and [`RESULT_INTERNAL`] for the
+    /// matching [`control_plane::EventError`]. A refusal leaves the response empty and writes the
+    /// core's text for it ([`control_plane::EventError::diagnostic`]) into the session diagnostic.
+    pub fn control_event(&mut self, lane: u32) -> u32 {
+        self.control_response = ControlResponse::None;
+        let lane = match lane {
+            EVENT_LANE_RELIABLE => control_plane::EventLane::Reliable,
+            EVENT_LANE_LOSSY => control_plane::EventLane::Lossy,
+            _ => return RESULT_INVALID_ARGUMENT,
+        };
+        if self.status.state != STATE_READY {
+            return RESULT_REFUSED_LIFECYCLE;
+        }
+        let Some((buffers, ready)) = self.buffers.as_mut().zip(self.ready.as_mut()) else {
+            return RESULT_REFUSED_LIFECYCLE;
+        };
+        match ready.control.dequeue_event(lane, CONTROL_FRAME_BYTES) {
+            Ok(Some(length)) => {
+                self.control_response = ControlResponse::Frame(length);
+                RESULT_OK
+            }
+            Ok(None) => RESULT_OK,
+            Err(error) => {
+                let diagnostic = error.diagnostic();
+                let kept = diagnostic.len().min(buffers.diagnostic.len());
+                buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+                self.diagnostic_len = kept;
+                match error {
+                    control_plane::EventError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                    control_plane::EventError::Backpressure => RESULT_BACKPRESSURE,
+                    control_plane::EventError::Internal => RESULT_INTERNAL,
+                }
             }
         }
     }
@@ -3866,6 +3914,20 @@ impl AudioWorkletEngineHost {
                 let next_absolute_sample = plan.owner().next_absolute_sample();
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
+                // #1570b D3: the block's activity, published by the control plane's one rule
+                // (the peak scan runs only for an armed observer, `NaN` otherwise), so the
+                // service step stages the telemetry events and `TRANSPORT_GET` reports the
+                // effective sample exactly as on the C ABI. At most `2 * quantum` loads, no
+                // allocation, indexed with `get` so no `slice_index_fail` joins the call graph.
+                if let (Some(left), Some(right)) = (
+                    buffers.output_pcm.get(..quantum),
+                    buffers
+                        .output_pcm
+                        .get(quantum..)
+                        .and_then(|tail| tail.get(..quantum)),
+                ) {
+                    plan.observe_rendered_block([left, right]);
+                }
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
                 self.status.live_values_superseded = ready.live_values_superseded.get();
@@ -8692,6 +8754,8 @@ fn compile_ready(
         queries,
         #[cfg(feature = "test-support")]
         allow_rebuild,
+        #[cfg(feature = "test-support")]
+        limits,
         commands_enabled,
         // #1381a: the control plane owns the plan's gate and every producer of its cells. The
         // retained command path keeps empty slots where it held them, and refuses what needs them.

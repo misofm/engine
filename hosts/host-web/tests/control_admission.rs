@@ -417,7 +417,7 @@ fn a_rebuild_frame_is_refused_before_commit_and_changes_nothing() {
     let before_document = document(&mut rig);
     let before_revision = rig.host.committed_revision();
     let epoch = rig.host.active_plan_epoch_for_test();
-    rig.host.drain_reliable_events_for_test();
+    drain_events(&mut rig.host);
 
     let edits = [set(
         strip_row("t1", DELAY_SAMPLES, ParameterChannel::Both),
@@ -443,7 +443,7 @@ fn a_rebuild_frame_is_refused_before_commit_and_changes_nothing() {
     assert_eq!(rig.host.active_plan_epoch_for_test(), epoch, "no plan");
     assert_eq!(document(&mut rig), before_document, "no committed change");
     assert_eq!(
-        rig.host.drain_reliable_events_for_test(),
+        drain_events(&mut rig.host),
         0,
         "nothing was acknowledged: no commit event is queued"
     );

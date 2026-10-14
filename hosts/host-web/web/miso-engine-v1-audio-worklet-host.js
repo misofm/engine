@@ -749,6 +749,10 @@ class MisoAudioWorkletHost {
   #ringBlocks;
   #onMeterFrame = null;
   #onTelemetryFrame = null;
+  /// Issue #1570b D5: the listeners of the engine's protocol events, in subscription order, and the
+  /// count of frames that arrived with none.
+  #controlEventListeners = new Set();
+  #discardedControlEvents = 0;
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
@@ -1012,6 +1016,28 @@ class MisoAudioWorkletHost {
         return;
       }
       this.#onTelemetryFrame?.(Object.freeze(message));
+      return;
+    }
+    // Issue #1570b D5: a protocol event of the engine's control plane is unsolicited too. It is
+    // delivered whole and in arrival order, with the lane it came from; an event is not the ack of
+    // a command (the command's reply is), so a frame that has no listener is dropped and counted,
+    // and no engine state changes with it.
+    if (message?.tag === "miso.control-event.v1") {
+      if (!hasExactFields(message, ["tag", "lane", "frame"])
+          || (message.lane !== 0 && message.lane !== 1)
+          || !(message.frame instanceof Uint8Array)
+          || !(message.frame.buffer instanceof ArrayBuffer)
+          || message.frame.byteLength === 0
+          || message.frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES) {
+        this.#fail(webError(255, this.#oldestRequestId()));
+        return;
+      }
+      if (this.#controlEventListeners.size === 0) {
+        this.#discardedControlEvents += 1;
+        return;
+      }
+      const event = Object.freeze({ lane: message.lane, frame: message.frame });
+      for (const listener of [...this.#controlEventListeners]) listener(event);
       return;
     }
     const pending = this.#pending.get(message?.requestId) ?? null;
@@ -1758,6 +1784,23 @@ class MisoAudioWorkletHost {
     );
   }
 
+  /// @internal Subscribe to the engine's protocol events (issue #1570b D5). Every listener is
+  /// called with `{ lane, frame }` for each event, in arrival order: `lane` is `0` for the reliable
+  /// lane and `1` for the lossy lane, and `frame` is the event frame bytes the engine encoded,
+  /// unchanged. Returns the unsubscribe function. A frame that arrives while no listener is
+  /// subscribed is dropped and counted in `discardedControlEvents`; an event is not the ack of a
+  /// command, so the drop changes no engine state.
+  onControlEvent(listener) {
+    if (typeof listener !== "function") throw webError(1);
+    this.#controlEventListeners.add(listener);
+    return () => { this.#controlEventListeners.delete(listener); };
+  }
+
+  /// @internal The count of engine events that arrived with no listener subscribed (issue #1570b D5).
+  get discardedControlEvents() {
+    return this.#discardedControlEvents;
+  }
+
   async dispose() {
     if (this.#disposed) return;
     this.#stopServiceTick();
@@ -1766,6 +1809,7 @@ class MisoAudioWorkletHost {
     this.#observations.clear();
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
+    this.#controlEventListeners.clear();
     this.#preparedControl?.close();
     this.#preparedControl = null;
     this.#port.onmessage = null;

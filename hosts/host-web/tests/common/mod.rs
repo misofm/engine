@@ -298,6 +298,24 @@ pub(crate) fn decode_verdict(response: &[u8]) -> Verdict {
     }
 }
 
+/// The control half's drain of both event lanes (issue #1570b D4): the reliable lane until a call
+/// returns 0 bytes, then the lossy lane the same way, at most 16 calls per lane. Returns the events
+/// read. An undrained reliable lane refuses the next commit with backpressure, so a test that
+/// commits more than the lane holds drains here.
+pub(crate) fn drain_events(host: &mut AudioWorkletEngineHost) -> usize {
+    let mut count = 0;
+    for lane in [host_web::EVENT_LANE_RELIABLE, host_web::EVENT_LANE_LOSSY] {
+        for _ in 0..16 {
+            assert_eq!(host.control_event(lane), RESULT_OK, "event lane {lane}");
+            if host.control_response().is_empty() {
+                break;
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
 /// The browser leg: a native `AudioWorkletEngineHost` driven through the generic command-frame
 /// entry (issue #1562a D1), as the worklet's message handler drives it, with one request-ID
 /// allocator for every frame it sends.
@@ -391,8 +409,8 @@ impl Rig {
         if let Verdict::Applied { revision, .. } = &verdict {
             self.revision = *revision;
         }
-        // A commit queues its reliable events, whose reader is #1570b's.
-        self.host.drain_reliable_events_for_test();
+        // A commit queues its reliable events; the control half's drain reads them (#1570b D4).
+        drain_events(&mut self.host);
         verdict
     }
 

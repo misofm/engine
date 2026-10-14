@@ -86,6 +86,11 @@ const SOURCE_FIELDS = [
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
+// Issue #1570b D4: the two event lanes in drain order (the C ABI's lane codes: reliable, lossy) and
+// the most `control_event` calls one drain makes on a lane. The queues hold at most 2 reliable
+// events, 2 render diagnostics and 1 telemetry event, so a bound of 16 is never the limit.
+const CONTROL_EVENT_LANES = [0, 1];
+const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
 const EQ_CONFIG_FIELDS = ["tag", "requestId", "trackIndex", "rack", "effectIndex"];
 const PREPARED_COMMAND_FIELDS = ["tag", "requestId", "count", "records", "companion"];
 const EQ_CONFIG_BYTES = 272;
@@ -270,6 +275,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.port.onmessage = (event) => {
       this.receive(event.data);
       this.serviceControl();
+      this.drainControlEvents();
     };
     try {
       const result = this.initialize(options?.processorOptions);
@@ -995,6 +1001,42 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
     const result = this.exports.miso_engine_web_v1_service(this.handle);
     if (result !== RESULT_OK) this.sticky(result, this.lastRequestId);
+  }
+
+  /// Issue #1570b D4: drain the engine's two event lanes after a message and its service step, in
+  /// the message handler and never in `process()`. The reliable lane first, then the lossy lane;
+  /// each is read until `control_event` returns an empty frame, at most
+  /// `MAXIMUM_CONTROL_EVENTS_PER_LANE` calls (more cannot be queued: the rest waits for the next
+  /// drain). Each frame is copied out of the module's memory and posted in dequeue order as
+  /// `control-event { lane, frame }`. A dequeue the engine refuses stops that lane's drain and
+  /// takes the error path once: it is sticky for the host, never a retry loop. Nothing here
+  /// decodes a frame, and a commit's reliable events are what keeps the next commit from
+  /// backpressure, so this drain is what lets a page send unlimited transactions.
+  drainControlEvents() {
+    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    for (const lane of CONTROL_EVENT_LANES) {
+      for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
+        const result = this.exports.miso_engine_web_v1_control_event(this.handle, lane);
+        if (this.exports.memory.buffer !== this.memoryBuffer) {
+          this.sticky(RESULT_INTERNAL, this.lastRequestId);
+          return;
+        }
+        if (result !== RESULT_OK) {
+          this.sticky(result, this.lastRequestId);
+          return;
+        }
+        const bytes = this.exports.miso_engine_web_v1_control_response_bytes(this.handle);
+        if (bytes === 0) break;
+        const pointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
+        if (pointer === 0) {
+          this.sticky(RESULT_INTERNAL, this.lastRequestId);
+          return;
+        }
+        const frame = new Uint8Array(bytes);
+        frame.set(new Uint8Array(this.memoryBuffer, pointer, bytes));
+        this.port.postMessage({ tag: "miso.control-event.v1", lane, frame }, [frame.buffer]);
+      }
+    }
   }
 
   receive(message) {

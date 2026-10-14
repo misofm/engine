@@ -1,0 +1,929 @@
+//! Issue #1570b gates 1 to 3: the browser serves every protocol command and event through the core,
+//! and gives the same bytes as the C ABI.
+//!
+//! Both legs run natively in this process. The C ABI leg is the `capi` FFI, built with the limits
+//! the browser's control half was built with (D6). The browser leg is `AudioWorkletEngineHost`
+//! through the Rust functions the exports call: `control_command`, `control_event`, `service` and
+//! `render_next`. Both boot the browser fixture `browser-v1/session.json` with its source extended
+//! to 8,192 frames and are fed the same PCM.
+
+#![cfg(feature = "test-support")]
+#![allow(unsafe_code)]
+
+use core::alloc::Layout;
+use core::cell::Cell;
+use core::ffi::c_void;
+use core::ptr;
+use std::alloc::{GlobalAlloc, System};
+
+use capi::{
+    ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
+    ENGINE_CONFIG_SIZE, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
+    RESULT_OK as C_RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
+    SubmitReport,
+};
+use control_plane::ControlLimits;
+use controls::{ControlAddress, Owner, Section};
+use host_web::{
+    AudioWorkletEngineHost, EVENT_LANE_LOSSY, EVENT_LANE_RELIABLE, RESULT_OK, WebBootOptions,
+};
+use protocol::{
+    CommandPayload, ControlListRequest, CounterId, CountersRequest, DiagnosticSeverity,
+    DiagnosticsRequest, ExpectedRevision, ProtocolCodec, RequestId, SampleTime, SessionEdit,
+    SessionRevision, SessionSnapshotRequest, TelemetryConfiguration, TransportSetRequest,
+    TransportState, TypedCommandFrame,
+};
+use session::{ParameterChannel, StableId, canonical_session_json, parse_session_json};
+
+mod common;
+use common::{QUANTUM, Verdict, bits, decode_verdict, planes};
+
+const SESSION: &str = include_str!("browser-v1/session.json");
+const SOURCE_ID: &str = "fixture-source";
+const TRACK_ID: &str = "track";
+const RATE: u32 = 48_000;
+const FADER_DB: u32 = 5;
+/// The most `control_event` calls the control half's drain makes on a lane (D4).
+const DRAIN_CALLS: usize = 16;
+
+const MESSAGE_SESSION_COMMITTED: u16 = 0x8001;
+const MESSAGE_TRANSPORT_STATE: u16 = 0x8010;
+const MESSAGE_METER_BATCH: u16 = 0x8020;
+const MESSAGE_COUNTER_SNAPSHOT: u16 = 0x8021;
+const MESSAGE_DIAGNOSTIC: u16 = 0x8030;
+
+/// The fixture at `frames` source frames.
+fn document(frames: u64) -> String {
+    let mut model = parse_session_json(SESSION).expect("the fixture parses");
+    model.sources[0].frames = frames;
+    canonical_session_json(&model).expect("canonical session")
+}
+
+fn options() -> WebBootOptions {
+    WebBootOptions {
+        require_sample_rate_hz: RATE,
+        require_quantum_frames: QUANTUM,
+        source_ring_frames: QUANTUM * 2,
+        live_control_command_queue_records: 64,
+        ..WebBootOptions::explicit_defaults()
+    }
+}
+
+fn boot_browser(frames: u64) -> AudioWorkletEngineHost {
+    AudioWorkletEngineHost::boot(document(frames).as_bytes(), options())
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())))
+}
+
+/// One command frame.
+fn frame(request: u64, expected: ExpectedRevision, payload: CommandPayload<'_>) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 16 << 10];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: expected,
+                payload,
+            },
+            &mut bytes,
+        )
+        .expect("command frame");
+    bytes.truncate(length);
+    bytes
+}
+
+fn fader_edit(db: f32) -> [SessionEdit; 1] {
+    [SessionEdit::SetControl {
+        address: ControlAddress {
+            owner: Owner::Strip(StableId::parse(TRACK_ID).expect("track ID")),
+            section: Section::Builtins,
+            control: FADER_DB,
+            lane: ParameterChannel::Both,
+        },
+        value: db,
+        ramp_samples: None,
+    }]
+}
+
+/// The message ID of an event frame, after checking it is an event frame.
+fn event_message(event: &[u8]) -> u16 {
+    assert_eq!(event[14], 3, "an event frame");
+    u16::from_le_bytes([event[16], event[17]])
+}
+
+/// D4's drain over one host's event entry: the reliable lane until a call returns 0 bytes, then the
+/// lossy lane the same way, at most [`DRAIN_CALLS`] calls per lane.
+fn drain(mut next: impl FnMut(u32) -> (u32, Vec<u8>)) -> Vec<(u32, Vec<u8>)> {
+    let mut events = Vec::new();
+    for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+        for _ in 0..DRAIN_CALLS {
+            let (result, event) = next(lane);
+            assert_eq!(result, RESULT_OK, "lane {lane}");
+            if event.is_empty() {
+                break;
+            }
+            events.push((lane, event));
+        }
+    }
+    events
+}
+
+// ---------------------------------------------------------------------------------------------
+// The thread-scoped allocation counter
+// ---------------------------------------------------------------------------------------------
+
+thread_local! {
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The process's allocator: `System`, counting each thread's own allocations and frees. A host
+/// adapter may not depend on `bench-support` (`scripts/check-bench-policy.sh` bans it under
+/// `hosts/`), so this test counts as `boot_transient_budget.rs` does.
+struct CountingAllocator;
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn counted(counter: &'static std::thread::LocalKey<Cell<u64>>) {
+    let _ = counter.try_with(|count| count.set(count.get() + 1));
+}
+
+// SAFETY: every request is forwarded unchanged to `System`; the thread-local counters observe the
+// operations but never alter a pointer, size, alignment or lifetime.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        counted(&ALLOCATIONS);
+        // SAFETY: forwards the allocator-provided layout unchanged.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        counted(&ALLOCATIONS);
+        // SAFETY: forwards the allocator-provided layout unchanged.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        counted(&DEALLOCATIONS);
+        // SAFETY: forwards the original pointer and layout unchanged.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        counted(&ALLOCATIONS);
+        // SAFETY: forwards the original allocation arguments unchanged.
+        unsafe { System.realloc(pointer, layout, new_size) }
+    }
+}
+
+/// This thread's allocations and frees so far.
+fn thread_counts() -> (u64, u64) {
+    (ALLOCATIONS.with(Cell::get), DEALLOCATIONS.with(Cell::get))
+}
+
+/// Fails loudly if the counting allocator is not the process's: a heap allocation must move it.
+fn assert_installed() {
+    let before = thread_counts();
+    let probe = Vec::<u8>::with_capacity(64);
+    let after = thread_counts();
+    drop(probe);
+    assert!(
+        after.0 > before.0,
+        "the counting allocator is not installed in this process"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The browser leg
+// ---------------------------------------------------------------------------------------------
+
+struct Browser {
+    host: AudioWorkletEngineHost,
+}
+
+impl Browser {
+    fn new(frames: u64) -> Self {
+        Self {
+            host: boot_browser(frames),
+        }
+    }
+
+    /// Stage and run one frame. Returns the export's result and the response bytes (the response
+    /// frame after `RESULT_OK`, else the refusal's diagnostic).
+    fn send(&mut self, frame: &[u8]) -> (u32, Vec<u8>) {
+        let length = u32::try_from(frame.len()).expect("frame length");
+        self.host
+            .control_request_mut(length)
+            .expect("the request staging")[..frame.len()]
+            .copy_from_slice(frame);
+        let result = self.host.control_command(length);
+        (result, self.host.control_response().to_vec())
+    }
+
+    fn event(&mut self, lane: u32) -> (u32, Vec<u8>) {
+        let result = self.host.control_event(lane);
+        (result, self.host.control_response().to_vec())
+    }
+
+    fn drain(&mut self) -> Vec<(u32, Vec<u8>)> {
+        drain(|lane| self.event(lane))
+    }
+
+    fn feed(&mut self, block: u64) {
+        let [left, right] = planes(0, block);
+        assert_eq!(
+            self.host.submit_source(
+                SOURCE_ID.as_bytes(),
+                1,
+                block * u64::from(QUANTUM),
+                RATE,
+                &[&left, &right],
+                QUANTUM,
+                false,
+            ),
+            RESULT_OK,
+            "browser source"
+        );
+    }
+
+    fn step(&mut self, block: u64) -> Vec<u32> {
+        self.feed(block);
+        assert_eq!(self.host.render_next(), RESULT_OK, "browser render");
+        bits(self.host.output_pcm().expect("browser output"))
+    }
+
+    fn service(&mut self) {
+        assert_eq!(self.host.service(), RESULT_OK, "browser service");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The C ABI leg
+// ---------------------------------------------------------------------------------------------
+
+/// The C ABI's compile limits from the browser's own, field for field (D6).
+fn compile_limits(limits: ControlLimits) -> CompileLimits {
+    CompileLimits {
+        struct_size: COMPILE_LIMITS_SIZE,
+        source_ring_frames: limits.source_ring_frames,
+        maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
+        reserved0: 0,
+        maximum_document_bytes: limits.maximum_document_bytes,
+        maximum_diagnostic_bytes: limits.maximum_diagnostic_bytes,
+        maximum_tracks: limits.maximum_tracks,
+        maximum_sources: limits.maximum_sources,
+        maximum_routes: limits.maximum_routes,
+        maximum_effects: limits.maximum_effects,
+        maximum_graph_session_plus_plan_bytes: limits.maximum_graph_session_plus_plan_bytes,
+        maximum_source_total_bytes: limits.maximum_source_total_bytes,
+        maximum_source_overhead_bytes: limits.maximum_source_overhead_bytes,
+        maximum_effect_state_bytes: limits.maximum_effect_state_bytes,
+        maximum_effect_scratch_bytes: limits.maximum_effect_scratch_bytes,
+        maximum_builtin_retained_bytes: limits.maximum_builtin_retained_bytes,
+        maximum_capi_retained_bytes: limits.maximum_control_retained_bytes,
+        maximum_named_allocation_bytes: limits.maximum_named_allocation_bytes,
+        maximum_meter_streams: limits.maximum_meter_streams,
+        maximum_meter_items: limits.maximum_meter_items,
+        maximum_meter_bytes: limits.maximum_meter_bytes,
+        maximum_control_frame_bytes: limits.maximum_control_frame_bytes,
+        maximum_replay_bytes: limits.maximum_replay_bytes,
+        maximum_replay_entries: limits.maximum_replay_entries,
+        maximum_submixes: limits.maximum_submixes,
+        maximum_vcas: limits.maximum_vcas,
+        reserved: [0; 2],
+    }
+}
+
+struct CAbi {
+    session: *mut Session,
+    plan: *mut Plan,
+    frame_capacity: usize,
+}
+
+impl CAbi {
+    fn new(frames: u64, limits: ControlLimits) -> Self {
+        let document = document(frames);
+        let config = EngineConfig {
+            struct_size: ENGINE_CONFIG_SIZE,
+            abi_version: C_ABI_VERSION,
+            reserved: [0; 4],
+        };
+        let mut engine = ptr::null_mut();
+        let mut session = ptr::null_mut();
+        let mut plan = ptr::null_mut();
+        let mut storage = [0_u8; 4_096];
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: 0,
+        };
+        let limits = compile_limits(limits);
+        // SAFETY: Every descriptor and output location lives for the complete call, and the engine
+        // handle is destroyed once after compilation, as the C ABI documents.
+        unsafe {
+            assert_eq!(
+                capi::miso_engine_v1_engine_create(&config, &mut engine),
+                C_RESULT_OK
+            );
+            assert_eq!(
+                capi::miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &limits,
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                ),
+                C_RESULT_OK,
+                "{}",
+                String::from_utf8_lossy(&storage[..diagnostics.required_bytes as usize])
+            );
+            capi::miso_engine_v1_engine_destroy(engine);
+        }
+        Self {
+            session,
+            plan,
+            frame_capacity: usize::try_from(limits.maximum_control_frame_bytes)
+                .expect("frame ceiling"),
+        }
+    }
+
+    fn last_error(&self) -> Vec<u8> {
+        let mut text = vec![0_u8; 1_024];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: text.as_mut_ptr(),
+            capacity_bytes: text.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and `out` is owned storage for the call.
+        let code = unsafe {
+            capi::miso_engine_v1_last_error(self.session.cast::<c_void>().cast_const(), &mut out)
+        };
+        assert_eq!(code, C_RESULT_OK);
+        text.truncate(out.required_bytes as usize);
+        text
+    }
+
+    /// One frame. Returns the result and the response bytes: the response frame after
+    /// `RESULT_OK`, else the session's diagnostic text, as the browser leg reports a failure.
+    fn send(&mut self, request: &[u8]) -> (u32, Vec<u8>) {
+        let mut response = vec![0_u8; self.frame_capacity];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the frame and `out` are owned
+        // storage that outlives the synchronous call.
+        let code = unsafe {
+            capi::miso_engine_v1_submit_command(
+                self.session,
+                request.as_ptr(),
+                request.len() as u64,
+                &mut out,
+            )
+        };
+        if code == C_RESULT_OK {
+            response.truncate(out.required_bytes as usize);
+            (code, response)
+        } else {
+            (code, self.last_error())
+        }
+    }
+
+    fn event(&mut self, lane: u32) -> (u32, Vec<u8>) {
+        let mut event = vec![0_u8; self.frame_capacity];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: event.as_mut_ptr(),
+            capacity_bytes: event.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; `out` is owned storage.
+        let code = unsafe { capi::miso_engine_v1_dequeue_event(self.session, lane, &mut out) };
+        event.truncate(out.required_bytes as usize);
+        (code, event)
+    }
+
+    fn drain(&mut self) -> Vec<(u32, Vec<u8>)> {
+        drain(|lane| self.event(lane))
+    }
+
+    fn service(&mut self) {
+        // SAFETY: The session is live and used by this thread alone.
+        let code = unsafe { capi::miso_engine_v1_service(self.session) };
+        assert_eq!(code, C_RESULT_OK, "C ABI service");
+    }
+
+    fn feed(&mut self, block: u64) {
+        let [left, right] = planes(0, block);
+        let pointers = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: SOURCE_CHUNK_SIZE,
+            sample_rate_hz: RATE,
+            generation: 1,
+            start_frame: block * u64::from(QUANTUM),
+            planes: pointers.as_ptr(),
+            plane_count: 2,
+            frames: QUANTUM,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the chunk's planes and the
+        // report are owned storage that outlives the synchronous call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_submit_planar_f32(
+                self.session,
+                SOURCE_ID.as_ptr(),
+                SOURCE_ID.len() as u64,
+                &chunk,
+                &mut report,
+            )
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI source");
+        assert_eq!(report.accepted_frames, u64::from(QUANTUM));
+    }
+
+    /// Render block `block` into `pcm` and return the call's result.
+    fn render(&mut self, block: u64, pcm: &mut [f32]) -> u32 {
+        let output = PlanarOutput {
+            struct_size: PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM,
+            plane_stride_samples: QUANTUM,
+            reserved: [0; 2],
+        };
+        // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
+        unsafe {
+            capi::miso_engine_v1_render_f32_planar(self.plan, block * u64::from(QUANTUM), &output)
+        }
+    }
+
+    fn step(&mut self, block: u64) -> Vec<u32> {
+        self.feed(block);
+        let mut pcm = vec![f32::NAN; QUANTUM as usize * 2];
+        assert_eq!(self.render(block, &mut pcm), C_RESULT_OK, "C ABI render");
+        bits(&pcm)
+    }
+}
+
+impl Drop for CAbi {
+    fn drop(&mut self) {
+        // SAFETY: Each handle is live, unique and destroyed once; the plan goes first.
+        unsafe {
+            capi::miso_engine_v1_plan_destroy(self.plan);
+            capi::miso_engine_v1_session_destroy(self.session);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 1
+// ---------------------------------------------------------------------------------------------
+
+/// The two legs and the script's bookkeeping.
+struct Legs {
+    browser: Browser,
+    c: CAbi,
+    revision: u64,
+    request: u64,
+    events: [Vec<(u32, Vec<u8>)>; 2],
+}
+
+impl Legs {
+    fn new() -> Self {
+        let browser = Browser::new(8_192);
+        let limits = browser
+            .host
+            .control_limits_for_test()
+            .expect("the control half's limits");
+        let c = CAbi::new(8_192, limits);
+        let revision = browser.host.committed_revision();
+        Self {
+            browser,
+            c,
+            revision,
+            request: 0,
+            events: [Vec::new(), Vec::new()],
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.request += 1;
+        self.request
+    }
+
+    /// Send `frame` to both legs and require the same result and the same bytes.
+    fn both(&mut self, step: &str, frame: &[u8]) -> Vec<u8> {
+        let (browser_result, browser_response) = self.browser.send(frame);
+        let (c_result, c_response) = self.c.send(frame);
+        assert_eq!(browser_result, c_result, "{step}: the result codes");
+        assert_eq!(
+            browser_response, c_response,
+            "{step}: the response bytes (or the refusal text)"
+        );
+        browser_response
+    }
+
+    /// A command at the committed revision when it requires one, else with no precondition.
+    fn command(&mut self, step: &str, payload: CommandPayload<'_>) -> Vec<u8> {
+        let request = self.next();
+        let expected = if matches!(
+            payload,
+            CommandPayload::SessionTransactionApply(_)
+                | CommandPayload::AutomationEnqueue(_)
+                | CommandPayload::TransportSet(_)
+                | CommandPayload::TelemetryConfigure(_)
+        ) {
+            ExpectedRevision::Exact(SessionRevision(self.revision))
+        } else {
+            ExpectedRevision::Any
+        };
+        let bytes = frame(request, expected, payload);
+        self.both(step, &bytes)
+    }
+
+    /// Drain both legs in D4's order and require equal event sequences.
+    fn drain(&mut self, step: &str) {
+        let browser = self.browser.drain();
+        let c = self.c.drain();
+        assert_eq!(browser, c, "{step}: the drained events, lane and bytes");
+        self.events[0].extend(browser);
+    }
+
+    fn block(&mut self, block: u64) {
+        let browser = self.browser.step(block);
+        let c = self.c.step(block);
+        assert_eq!(browser, c, "block {block}: the output is bit-identical");
+        self.browser.service();
+        self.c.service();
+    }
+}
+
+/// Test value: red if any command or event takes a browser-only path, if the browser publishes no
+/// render activity (no telemetry events, a wrong `effective_sample`), or if the two hosts are built
+/// with different protocol limits.
+#[test]
+fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
+    let mut legs = Legs::new();
+
+    // 1. CAPABILITIES_GET.
+    legs.command("1 capabilities", CommandPayload::CapabilitiesGet);
+
+    // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
+    let mut offset = 0_u64;
+    loop {
+        let response = legs.command(
+            "2 snapshot",
+            CommandPayload::SessionSnapshotGet(SessionSnapshotRequest {
+                offset,
+                maximum_bytes: 64,
+            }),
+        );
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::SessionSnapshot(chunk),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut protocol::DecodeScratch::new(&mut fields))
+            .expect("a snapshot chunk")
+        else {
+            panic!("expected a snapshot chunk")
+        };
+        offset += chunk.canonical_json_chunk.len() as u64;
+        if chunk.eof {
+            break;
+        }
+    }
+    assert!(offset > 64, "the snapshot took more than one page");
+
+    // 3. TRANSPORT_GET. Kept for the replay in step 14.
+    let transport_request = legs.next();
+    let transport_get = frame(
+        transport_request,
+        ExpectedRevision::Any,
+        CommandPayload::TransportGet,
+    );
+    legs.both("3 transport get", &transport_get);
+
+    // 4. TRANSPORT_SET to playing at position 0.
+    legs.command(
+        "4 transport set",
+        CommandPayload::TransportSet(TransportSetRequest {
+            state: TransportState::Playing,
+            position: Some(SampleTime(0)),
+        }),
+    );
+    legs.drain("after 4");
+
+    // 5. TELEMETRY_CONFIGURE: meter handle 1 and LIVE_VALUES_SUPERSEDED at period 1, diagnostics
+    // on at Info.
+    legs.command(
+        "5 telemetry",
+        CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+            meter_handles: vec![1],
+            meter_period_blocks: 1,
+            counter_ids: vec![CounterId::LiveValuesSuperseded],
+            counter_period_blocks: 1,
+            diagnostics_enabled: true,
+            minimum_diagnostic_severity: DiagnosticSeverity::Info,
+        }),
+    );
+    legs.drain("after 5");
+
+    // 6. CONTROL_LIST_GET, first page.
+    legs.command(
+        "6 control list",
+        CommandPayload::ControlListGet(&ControlListRequest {
+            structure_epoch: 0,
+            after_handle: 0,
+            limit: 256,
+            owner: None,
+        }),
+    );
+
+    // 7. One SESSION_TRANSACTION_APPLY with one SET_CONTROL fader edit.
+    let request = legs.next();
+    let revision = legs.revision;
+    let edit = fader_edit(-6.0);
+    let response = legs.both(
+        "7 transaction",
+        &frame(
+            request,
+            ExpectedRevision::Exact(SessionRevision(revision)),
+            CommandPayload::SessionTransactionApply(&edit),
+        ),
+    );
+    let Verdict::Applied { revision, .. } = decode_verdict(&response) else {
+        panic!("the fader edit is refused")
+    };
+    legs.revision = revision;
+    legs.drain("after 7");
+
+    // 8. Eight render blocks, with a service step after each.
+    for block in 0..8 {
+        legs.block(block);
+    }
+    legs.drain("after 8");
+
+    // 9. COUNTERS_GET for all counters.
+    legs.command(
+        "9 counters",
+        CommandPayload::CountersGet(&CountersRequest {
+            all: true,
+            ids: Vec::new(),
+        }),
+    );
+
+    // 10. DIAGNOSTICS_GET after sequence 0, limit 16, at Info.
+    legs.command(
+        "10 diagnostics",
+        CommandPayload::DiagnosticsGet(DiagnosticsRequest {
+            after_sequence: 0,
+            limit: 16,
+            minimum_severity: DiagnosticSeverity::Info,
+        }),
+    );
+
+    // 11. AUTOMATION_ENQUEUE with one record.
+    let record = protocol::AutomationRecord {
+        kind: protocol::AutomationKind::Point,
+        handle: protocol::ParameterHandle(1),
+        start: SampleTime(1),
+        end: SampleTime(1),
+        start_value: 0.0,
+        end_value: 0.0,
+    };
+    legs.command(
+        "11 automation",
+        CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
+            records: core::slice::from_ref(&record),
+        }),
+    );
+
+    // 12. A frame with message ID 0x0004.
+    let mut unknown_message = frame(
+        legs.next(),
+        ExpectedRevision::Any,
+        CommandPayload::TransportGet,
+    );
+    unknown_message[16..18].copy_from_slice(&0x0004_u16.to_le_bytes());
+    legs.both("12 message 0x0004", &unknown_message);
+
+    // 13. A frame with a wrong magic.
+    let mut wrong_magic = frame(
+        legs.next(),
+        ExpectedRevision::Any,
+        CommandPayload::TransportGet,
+    );
+    wrong_magic[0] = 0;
+    legs.both("13 wrong magic", &wrong_magic);
+
+    // 14. Step 3's exact bytes again: a replay.
+    legs.both("14 replay", &transport_get);
+
+    // 15. Step 3's request ID with different bytes.
+    let reused = frame(
+        transport_request,
+        ExpectedRevision::Exact(SessionRevision(legs.revision)),
+        CommandPayload::TransportGet,
+    );
+    legs.both("15 request ID reuse", &reused);
+
+    legs.drain("at the end");
+
+    // The browser leg published every kind of protocol event, and the C ABI leg's equal sequence
+    // says the same.
+    let kinds: Vec<u16> = legs.events[0]
+        .iter()
+        .map(|(_, event)| event_message(event))
+        .collect();
+    for (name, message) in [
+        ("SESSION_COMMITTED", MESSAGE_SESSION_COMMITTED),
+        ("TRANSPORT_STATE", MESSAGE_TRANSPORT_STATE),
+        ("METER_BATCH", MESSAGE_METER_BATCH),
+        ("COUNTER_SNAPSHOT", MESSAGE_COUNTER_SNAPSHOT),
+        ("DIAGNOSTIC", MESSAGE_DIAGNOSTIC),
+    ] {
+        assert!(kinds.contains(&message), "no {name} event in {kinds:04x?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2
+// ---------------------------------------------------------------------------------------------
+
+/// One fader transaction at the committed revision. A refusal is a non-ok response frame in an ok
+/// call, as on the C ABI.
+fn transaction(browser: &mut Browser, request: u64, revision: &mut u64, db: f32) -> Verdict {
+    let edit = fader_edit(db);
+    let (result, response) = browser.send(&frame(
+        request,
+        ExpectedRevision::Exact(SessionRevision(*revision)),
+        CommandPayload::SessionTransactionApply(&edit),
+    ));
+    assert_eq!(result, RESULT_OK, "transaction {request}");
+    let verdict = decode_verdict(&response);
+    if let Verdict::Applied { revision: next, .. } = &verdict {
+        *revision = *next;
+    }
+    verdict
+}
+
+/// Test value: red if the control half stops draining its event lanes, so the browser refuses its
+/// third commit. The undrained boot shows what the drain is for.
+#[test]
+fn draining_the_event_lanes_lets_the_browser_commit_without_end() {
+    let mut browser = Browser::new(8_192);
+    let mut revision = browser.host.committed_revision();
+    for request in 1..=20 {
+        let db = if request % 2 == 0 { -6.0 } else { -3.0 };
+        assert!(
+            matches!(
+                transaction(&mut browser, request, &mut revision, db),
+                Verdict::Applied { .. }
+            ),
+            "transaction {request} commits"
+        );
+        let drained = browser.drain();
+        assert_eq!(drained.len(), 1, "transaction {request}: its commit event");
+        assert_eq!(event_message(&drained[0].1), MESSAGE_SESSION_COMMITTED);
+    }
+
+    let mut undrained = Browser::new(8_192);
+    let mut revision = undrained.host.committed_revision();
+    for request in 1..=2 {
+        assert!(
+            matches!(
+                transaction(
+                    &mut undrained,
+                    request,
+                    &mut revision,
+                    -6.0 + request as f32
+                ),
+                Verdict::Applied { .. }
+            ),
+            "transaction {request} commits into the empty lane"
+        );
+    }
+    let Verdict::Refused {
+        codes,
+        revision: kept,
+    } = transaction(&mut undrained, 3, &mut revision, -6.0)
+    else {
+        panic!("an undrained reliable lane refuses the third commit")
+    };
+    assert_eq!(codes, ["protocol.backpressure"]);
+    assert_eq!(kept, revision, "the refused commit changed nothing");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 3
+// ---------------------------------------------------------------------------------------------
+
+const WARM_BLOCKS: u64 = 8;
+const MEASURED_BLOCKS: u64 = 64;
+const REALTIME_FRAMES: u64 = (WARM_BLOCKS + MEASURED_BLOCKS + 8) * QUANTUM as u64;
+
+fn telemetry_frame(request: u64, revision: u64) -> Vec<u8> {
+    frame(
+        request,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+            meter_handles: vec![1],
+            meter_period_blocks: 1,
+            counter_ids: vec![CounterId::LiveValuesSuperseded],
+            counter_period_blocks: 1,
+            diagnostics_enabled: true,
+            minimum_diagnostic_severity: DiagnosticSeverity::Info,
+        }),
+    )
+}
+
+/// Run `render` after `blocks` warm-up blocks and require zero allocations and frees around each of
+/// `MEASURED_BLOCKS` calls.
+fn assert_render_never_allocates(
+    leg: &str,
+    mut prepare: impl FnMut(u64),
+    mut render: impl FnMut(u64),
+    mut after: impl FnMut(),
+) {
+    for block in 0..WARM_BLOCKS + MEASURED_BLOCKS {
+        prepare(block);
+        let mark = thread_counts();
+        render(block);
+        let counts = thread_counts();
+        if block >= WARM_BLOCKS {
+            assert_eq!(
+                (counts.0 - mark.0, counts.1 - mark.1),
+                (0, 0),
+                "{leg}: block {block} allocated or freed in a render call"
+            );
+        }
+        after();
+    }
+}
+
+/// Test value: red if the moved peak scan, or the browser's call to it, allocates on the render
+/// thread. Telemetry is configured, so the scan runs on every block.
+#[test]
+fn the_render_call_never_allocates_with_telemetry_configured() {
+    assert_installed();
+
+    let mut browser = Browser::new(REALTIME_FRAMES);
+    let (result, _) = browser.send(&telemetry_frame(1, browser.host.committed_revision()));
+    assert_eq!(result, RESULT_OK);
+    browser.drain();
+    browser.service();
+    let host = std::cell::RefCell::new(browser);
+    assert_render_never_allocates(
+        "browser",
+        |block| host.borrow_mut().feed(block),
+        |_| assert_eq!(host.borrow_mut().host.render_next(), RESULT_OK),
+        || {
+            let mut browser = host.borrow_mut();
+            browser.service();
+            browser.drain();
+        },
+    );
+
+    let limits = host
+        .borrow()
+        .host
+        .control_limits_for_test()
+        .expect("the control half's limits");
+    let mut c = CAbi::new(REALTIME_FRAMES, limits);
+    let (code, _) = c.send(&telemetry_frame(1, host.borrow().host.committed_revision()));
+    assert_eq!(code, C_RESULT_OK);
+    c.drain();
+    c.service();
+    let c = std::cell::RefCell::new(c);
+    let mut pcm = vec![f32::NAN; QUANTUM as usize * 2];
+    assert_render_never_allocates(
+        "miso_engine_v1_render_f32_planar",
+        |block| c.borrow_mut().feed(block),
+        |block| assert_eq!(c.borrow_mut().render(block, &mut pcm), C_RESULT_OK),
+        || {
+            let mut c = c.borrow_mut();
+            c.service();
+            c.drain();
+        },
+    );
+}

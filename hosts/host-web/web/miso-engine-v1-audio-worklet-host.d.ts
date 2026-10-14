@@ -939,6 +939,14 @@ export interface MisoControlReply {
   readonly revision: bigint;
 }
 
+/// One protocol event of the engine's control plane (issue 1570b D5): the frame bytes the engine
+/// encoded, unchanged, and the lane it came from, `0` for the reliable lane and `1` for the lossy
+/// lane.
+export interface MisoControlEvent {
+  readonly lane: 0 | 1;
+  readonly frame: Uint8Array;
+}
+
 export interface MisoAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
@@ -1054,6 +1062,15 @@ export interface MisoAudioWorkletHost {
   telemetry(
     request: { enabled: boolean; onFrame: ((frame: MisoTelemetryFrame) => void) | null },
   ): Promise<MisoAck>;
+  /// @internal Subscribe to the engine's protocol events (issue 1570b D5): every command's
+  /// `SESSION_COMMITTED`, `TRANSPORT_STATE`, `METER_BATCH`, `COUNTER_SNAPSHOT`, `DIAGNOSTIC` and the
+  /// other events of the control protocol, as the engine encoded them. The listener gets each
+  /// event with its lane (`0` reliable, `1` lossy) in arrival order. Returns the unsubscribe
+  /// function. An event is not the ack of a command: the command's reply is.
+  onControlEvent(listener: (event: MisoControlEvent) => void): () => void;
+  /// @internal The count of engine events that arrived while no listener was subscribed (issue
+  /// 1570b D5). Such an event is dropped here, which changes no engine state.
+  readonly discardedControlEvents: number;
   dispose(): Promise<void>;
 }
 

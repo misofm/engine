@@ -122,8 +122,20 @@ fn a_thousand_control_frames_between_renders_never_allocate_in_a_render_call() {
             assert_eq!(path, EditPath::Live, "block {block}: the edit is live");
             assert_eq!(next, revision + 1, "block {block}: the revision advances");
             revision = next;
-            // The commit event's reader is #1570b's; a test drains it so the lane never fills.
-            native_staging::drain_reliable_events(handle);
+            // The control half's drain (#1570b D4), as the worklet's message handler runs it: the
+            // commit event is read so the lane never fills.
+            for lane in [host_web::EVENT_LANE_RELIABLE, host_web::EVENT_LANE_LOSSY] {
+                loop {
+                    let (result, event) = native_staging::control_event(handle, lane);
+                    assert_eq!(
+                        result, RESULT_OK,
+                        "block {block}: the event drain, lane {lane}"
+                    );
+                    if event.is_empty() {
+                        break;
+                    }
+                }
+            }
             control_calls_between +=
                 host_web::miso_engine_web_v1_control_allocation_count() - control;
 

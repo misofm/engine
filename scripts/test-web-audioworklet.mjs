@@ -1388,6 +1388,33 @@ async function testMainRealm() {
       assert.equal(largest.response.byteLength, 16384, "the largest frame is sent");
     }
 
+    // Issue #1570b D5, gate 4's host half: an engine event reaches every listener as
+    // `{ lane, frame }` in arrival order; a frame that arrives with no listener is dropped and
+    // counted, and unsubscribing stops delivery.
+    {
+      const deliver = (lane, bytes) => host.node.port.onmessage({
+        data: { tag: "miso.control-event.v1", lane, frame: new Uint8Array(bytes) },
+      });
+      assert.equal(host.discardedControlEvents, 0);
+      deliver(0, [1]);
+      deliver(1, [2]);
+      assert.equal(host.discardedControlEvents, 2, "each frame with no listener is counted");
+      const seen = [];
+      const other = [];
+      const off = host.onControlEvent((event) => seen.push([event.lane, [...event.frame]]));
+      host.onControlEvent((event) => other.push(event.lane));
+      deliver(1, [3, 4]);
+      deliver(0, [5]);
+      assert.deepEqual(seen, [[1, [3, 4]], [0, [5]]], "events arrive in order with their lane");
+      assert.deepEqual(other, [1, 0], "every listener is called");
+      off();
+      deliver(0, [6]);
+      assert.equal(seen.length, 2, "an unsubscribed listener hears nothing more");
+      assert.equal(other.length, 3);
+      assert.equal(host.discardedControlEvents, 2, "a frame with a listener left is not a drop");
+      assert.throws(() => host.onControlEvent("not a function"));
+    }
+
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -2526,7 +2553,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // response it leaves, the committed revision, and whether it grows its memory under a command.
     control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
     controlGrowsMemory: false, controlRequestRefusals: 0,
+    // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
+    // `control_event` call the fake received, and the result it answers with.
+    events: [[], []], eventCalls: [], eventResult: 0,
   };
+  // What `control_response_*` reads now: the last control command's response, or the event frame
+  // the last `control_event` dequeued (empty for an empty lane), as the real exports share their
+  // staging (issue #1570b D1).
+  let currentEvent = null;
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
@@ -2781,12 +2815,25 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
         .set(calls.controlResponse);
       if (calls.controlGrowsMemory) memory.buffer = new ArrayBuffer(65536 + 65536);
+      currentEvent = null;
       return calls.controlResult;
     },
-    miso_engine_web_v1_control_response_ptr: () => (
-      calls.controlResponse.length === 0 ? 0 : controlResponsePointer
-    ),
-    miso_engine_web_v1_control_response_bytes: () => calls.controlResponse.length,
+    miso_engine_web_v1_control_event: (handle, lane) => {
+      calls.eventCalls.push({ handle, lane });
+      currentEvent = new Uint8Array(0);
+      if (calls.eventResult !== 0) return calls.eventResult;
+      const frame = calls.events[lane]?.shift();
+      if (frame !== undefined) {
+        currentEvent = frame;
+        new Uint8Array(memory.buffer, controlResponsePointer, frame.length).set(frame);
+      }
+      return 0;
+    },
+    miso_engine_web_v1_control_response_ptr: () => {
+      const response = currentEvent ?? calls.controlResponse;
+      return response.length === 0 ? 0 : controlResponsePointer;
+    },
+    miso_engine_web_v1_control_response_bytes: () => (currentEvent ?? calls.controlResponse).length,
     miso_engine_web_v1_control_revision: () => calls.controlRevision,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
@@ -3747,6 +3794,93 @@ async function testProcessor() {
       assert.equal(failure.tag, "miso.error.v1");
       assert.equal(failure.result, 255);
       assert.equal(processor.ready, false);
+    }
+
+    // Issue #1570b D4, gate 4's worklet half: after a `control` message and after a service tick
+    // the control half drains the reliable lane until `control_event` returns 0 bytes, then the
+    // lossy lane, and posts each frame as a `control-event` message in that order. It stops at 16
+    // calls per lane, and `process()` never calls `control_event`.
+    {
+      const { processor, fake } = makeProcessor();
+      const events = (lane) => processor.port.posts
+        .map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1" && message.lane === lane);
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.deepEqual(fake.calls.eventCalls, [], "process() never dequeues an event");
+      // A service tick drains: two reliable frames, then one lossy frame, in dequeue order.
+      fake.calls.events[0].push(new Uint8Array([1, 1]), new Uint8Array([2, 2, 2]));
+      fake.calls.events[1].push(new Uint8Array([9]));
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(
+        fake.calls.eventCalls.map((call) => [call.handle, call.lane]),
+        [[1, 0], [1, 0], [1, 0], [1, 1], [1, 1]],
+        "the reliable lane is read until empty, then the lossy lane until empty",
+      );
+      const posted = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1");
+      assert.deepEqual(
+        posted.map((message) => [message.lane, [...message.frame]]),
+        [[0, [1, 1]], [0, [2, 2, 2]], [1, [9]]],
+        "each frame is posted whole, reliable lane first, in dequeue order",
+      );
+      assert(posted.every((message) => Object.keys(message).length === 3));
+      assert(
+        processor.port.posts.filter((post) => post.message.tag === "miso.control-event.v1")
+          .every((post) => post.transferCount === 1),
+        "each frame's buffer is transferred",
+      );
+      // A control message drains after its own reply, never before it.
+      fake.calls.events[0].push(new Uint8Array([7]));
+      const before = processor.port.posts.length;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      const tags = processor.port.posts.slice(before).map((post) => post.message.tag);
+      assert.deepEqual(tags, ["miso.control.v1", "miso.control-event.v1"]);
+      assert.equal(events(0).length, 3);
+      assert.equal(events(1).length, 1);
+      assert.equal(processor.ready, true);
+    }
+    {
+      // At most 16 calls per lane per drain: the rest waits for the next drain.
+      const { processor, fake } = makeProcessor();
+      for (let index = 0; index < 20; index += 1) fake.calls.events[0].push(new Uint8Array([index]));
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(
+        fake.calls.eventCalls.filter((call) => call.lane === 0).length,
+        16,
+        "a drain makes 16 reliable calls",
+      );
+      assert.equal(
+        fake.calls.eventCalls.filter((call) => call.lane === 1).length, 1,
+        "the lossy lane is read after the bounded reliable lane",
+      );
+      assert.equal(fake.calls.events[0].length, 4);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.events[0].length, 0, "the next drain takes the rest");
+      const frames = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1");
+      assert.deepEqual(frames.map((message) => message.frame[0]), [...Array(20).keys()]);
+    }
+    {
+      // A refused dequeue stops the drain, takes the error path once and is not retried.
+      const { processor, fake } = makeProcessor();
+      fake.calls.events[0].push(new Uint8Array([5]));
+      fake.calls.eventResult = 6;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.eventCalls.length, 1, "a refusal ends the drain");
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1");
+      assert.equal(failure.result, 6);
+      assert.equal(processor.ready, false);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.eventCalls.length, 1, "a failed worklet drains no more");
+    }
+    {
+      // A dispose drains nothing: the handle is gone.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+      assert.deepEqual(fake.calls.eventCalls, []);
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply
