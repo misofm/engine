@@ -326,7 +326,7 @@ impl RevisionGate {
     /// Control reads it on its own gate, or anyone reads it once control is quiescent: the record
     /// is not protected against a concurrent publish.
     #[must_use]
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision_at_or_below(self.word.load(Ordering::Acquire) & PUBLICATION_MAX)
     }
 

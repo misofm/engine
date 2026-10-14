@@ -310,7 +310,7 @@ impl<A: ControlAdapter> PlanState<A> {
     }
 
     /// Publish this block's observation. A `NaN` peak means "not measured this block".
-    pub fn publish_render_observation(&self, peak: f32) {
+    fn publish_render_observation(&self, peak: f32) {
         self.shared
             .render_sample
             .store(self.owner.next_absolute_sample(), Ordering::Release);
