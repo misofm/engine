@@ -256,6 +256,11 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`) calls `source_submit` (`:386`)
    and `source_seek` (`:445`) at the top of its `process()` (`:306-328`) before it renders, and
    `source_seek` again from its attach node's `prepare-seek` handler (`:539`).
+   Since batch 7 review B1 the two exports reach the sources through
+   `SessionState::submit_unserviced` and `seek_unserviced`, which run no service step: the step
+   takes the report lock, drops retired plans and stages counter snapshots, so it belongs to the
+   message handler alone (`render_locked_source.rs` measures both exports after a render with
+   counter telemetry configured: zero allocations).
 2. **The exports whose bodies run inside `render_locked`.** Every export of set 1 except
    `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also eleven staging accessors that the engine
    worklet calls only during boot: `observation_id_ptr`, `observation_id_capacity`,

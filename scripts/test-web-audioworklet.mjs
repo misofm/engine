@@ -3692,7 +3692,8 @@ async function testProcessor() {
       assert.equal(processor.ready, true, "a typed refusal is not sticky");
       // A frame the staging buffer refuses is a typed result with no response, not sticky.
       fake.calls.controlRequestRefusals = 1;
-      fake.calls.controlResponse = new Uint8Array(0);
+      // The previous command's response is still in the module; a refused staging has none.
+      fake.calls.controlResponse = new Uint8Array([9, 9, 9]);
       processor.port.onmessage({
         data: { tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([7]) },
       });
@@ -3725,9 +3726,16 @@ async function testProcessor() {
       processor.port.onmessage({
         data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
       });
-      const failure = processor.port.posts.at(-1).message;
+      // The reply was read from the new buffer and is posted whole, then the instance goes sticky
+      // with RESULT_REPREPARE_REQUIRED (9): the committed frame is never lost to a detached view.
+      const posts = processor.port.posts.map((post) => post.message);
+      const reply = posts.at(-2);
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.requestId, 1);
+      const failure = posts.at(-1);
       assert.equal(failure.tag, "miso.error.v1");
-      assert.equal(failure.result, 255);
+      assert.equal(failure.result, 9);
+      assert.equal(failure.requestId, 1);
       assert.equal(processor.ready, false);
     }
 
