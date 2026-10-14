@@ -17,5 +17,12 @@ realtime-audit = []
 # MIT licensed; test/model-checking only. It is not reachable from production, Wasm, or render.
 loom = "=0.7.2"
 
+# Issue #1609: `host-core`'s spectrum handoff model builds this crate as a *dependency* under
+# `--cfg loom`, where the ring's `sync` shim names `loom`. A dev-dependency does not reach a
+# dependency's build, so the same pinned crate is a dependency under that cfg alone. Nothing
+# reaches it in a build without `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
+
 [lints]
 workspace = true
