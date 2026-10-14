@@ -454,6 +454,10 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
   source feed after a published swap would reclaim the displaced plan inside the source export's
   render-locked window (and inside the PCM-feed worklet's `process()`). Nothing publishes a plan
   in the browser yet, so nothing triggers it today.
+  **Resolved (batch 7 review B1):** the browser's `submit_source` and `seek_source` call
+  `SessionState::submit_unserviced` and `seek_unserviced`, which run no service step; the C ABI keeps
+  `submit` and `seek` (service first). `render_locked_source.rs` measures the source exports after a
+  render with counter telemetry configured: zero render-locked allocations.
 - `check-browser-expected-resources.py` stops at the command timeline digest (the identity digest
   and the resource rows are checked first and hold); `check-sdk-headless.sh` fails 25 subtests, all
   of them command-driven; 113 host-web unit tests and the two `control_parity.rs` tests are

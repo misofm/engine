@@ -2192,19 +2192,39 @@ where
     /// Feeds a source of the newest committed session. A source that persists across a pending
     /// structural transaction is fed through its moved producer into the ring the running plan
     /// still renders and its successor carries (issue #1273 D3).
+    ///
+    /// Runs the service step first, so it is a control-thread call: [`Self::service`] takes the
+    /// shared report lock, drops retired plans and may allocate. A call made while render is
+    /// locked uses [`Self::submit_unserviced`].
     pub fn submit(
         &mut self,
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<source::SubmitReport, SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
+        self.submit_unserviced(id, submission)
+    }
+
+    /// [`Self::submit`] without the service step: the same routing to the newest committed
+    /// session's sources, and nothing else.
+    ///
+    /// The browser's PCM feed drains its rings inside the AudioWorklet's `process()` and submits
+    /// from there, where taking the report lock, dropping a retired plan and staging a counter
+    /// snapshot are all forbidden (batch 7 review B1). The path allocates nothing and takes no
+    /// lock. The service step still runs, in the host's message handler, before the next control
+    /// call, so no state the step maintains is skipped, only deferred.
+    pub fn submit_unserviced(
+        &mut self,
+        id: &[u8],
+        submission: SourceSubmission<'_>,
+    ) -> Result<source::SubmitReport, SourceFailure> {
         self.newest_providers_mut()
             .sources
             .submit(id, submission)
             .map_err(SourceFailure::Control)
     }
 
-    /// Queues a seek on a source of the newest committed session.
+    /// Queues a seek on a source of the newest committed session, after the service step.
     pub fn seek(
         &mut self,
         id: &[u8],
@@ -2212,6 +2232,16 @@ where
         source_frame: u64,
     ) -> Result<(), SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
+        self.seek_unserviced(id, generation, source_frame)
+    }
+
+    /// [`Self::seek`] without the service step; see [`Self::submit_unserviced`].
+    pub fn seek_unserviced(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        source_frame: u64,
+    ) -> Result<(), SourceFailure> {
         self.newest_providers_mut()
             .sources
             .seek(id, generation, source_frame)

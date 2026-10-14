@@ -2955,8 +2955,9 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         // #1381a D2: through the control plane's source routing, which feeds the sources of the
-        // newest committed session and runs its service step first.
-        let result = ready.control.submit(
+        // newest committed session. It runs no service step: this is called from `process()` in the
+        // PCM-feed worklet, and the service step locks and allocates (batch 7 review B1).
+        let result = ready.control.submit_unserviced(
             source_id,
             SourceSubmission {
                 generation,
@@ -2999,7 +3000,10 @@ impl AudioWorkletEngineHost {
         if !plan.can_prepare_source_seek(source_index) {
             return self.record(RESULT_WRONG_STATE);
         }
-        let code = match ready.control.seek(source_id, generation, source_frame) {
+        let code = match ready
+            .control
+            .seek_unserviced(source_id, generation, source_frame)
+        {
             Ok(()) => {
                 if plan.prepare_source_seek(source_index, generation, source_frame) {
                     RESULT_OK

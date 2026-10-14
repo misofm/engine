@@ -21,6 +21,10 @@ use host_web::{
     SPECTRUM_REQUEST_BYTES, SPECTRUM_TARGET_TRACK_POST_PAN, WebBootOptions, WebSpectrumRequest,
     native_staging,
 };
+use protocol::{
+    CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, ProtocolCodec, RequestId,
+    SessionRevision, TelemetryConfiguration, TypedCommandFrame,
+};
 
 #[global_allocator]
 static ALLOCATOR: RenderLockedAllocator<System> = RenderLockedAllocator(System);
@@ -218,6 +222,55 @@ fn lease_and_spectrum_exports(handle: u32, before: u32) {
     );
 }
 
+/// Batch 7 review B1: with counter telemetry configured, the first control call after a render
+/// stages a counter snapshot (an allocation). The PCM feed calls the source exports from
+/// `process()` right after a render, so they must not run the service step: the snapshot is the
+/// message handler's.
+fn source_exports_after_a_render_with_counter_telemetry_never_allocate(handle: u32) {
+    let revision = session::parse_session_json(std::str::from_utf8(DOCUMENT).expect("UTF-8"))
+        .expect("the session parses")
+        .revision;
+    let mut bytes = vec![0_u8; 4 << 10];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meter_handles: Vec::new(),
+                    meter_period_blocks: 0,
+                    counter_ids: vec![CounterId::LiveValuesSuperseded],
+                    counter_period_blocks: 1,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            },
+            &mut bytes,
+        )
+        .expect("the telemetry frame");
+    let (result, _) =
+        native_staging::control_command(handle, &bytes[..length]).expect("the frame stages");
+    assert_eq!(result, RESULT_OK, "counter telemetry is configured");
+    render(handle, 2);
+    let before = host_web::miso_engine_web_v1_render_allocation_count();
+    let id = SOURCE_ID.len() as u32;
+    assert!(native_staging::source_id(handle, SOURCE_ID));
+    assert!(native_staging::source_pcm(handle, 0.25));
+    unchanged(
+        before,
+        "source_seek after a render with counter telemetry",
+        host_web::miso_engine_web_v1_source_seek(handle, id, 8, 0),
+        RESULT_OK,
+    );
+    render(handle, 1);
+    unchanged(
+        before,
+        "source_submit after a render with counter telemetry",
+        host_web::miso_engine_web_v1_source_submit(handle, id, 8, 0, 2, QUANTUM_FRAMES, 0),
+        RESULT_OK,
+    );
+}
+
 fn post_boot_control_exports_never_allocate_in_the_render_locked_window() {
     let handle = boot();
     assert_ne!(handle, 0, "the observation session boots");
@@ -233,6 +286,7 @@ fn post_boot_control_exports_never_allocate_in_the_render_locked_window() {
         host_web::miso_engine_web_v1_render_allocation_count(),
         before
     );
+    source_exports_after_a_render_with_counter_telemetry_never_allocate(handle);
     assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
