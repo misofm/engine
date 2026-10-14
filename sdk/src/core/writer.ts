@@ -1,10 +1,15 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { CommandReasonName } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
-import { controlEditKey, validateControlEdit } from "./control-frame.ts";
+import {
+  CONTROL_TRANSACTION_HEADER_BYTES,
+  controlEditBytes,
+  controlEditKey,
+  validateControlEdit,
+} from "./control-frame.ts";
 import type { ControlFrameEdit } from "./control-frame.ts";
 import type { ControlAppliedReport } from "./control-queue.ts";
-import { MisoControlRefusal, MisoUsageError } from "./errors.ts";
+import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "./errors.ts";
 import { laneEditWord } from "../internal/ramp.ts";
 
 /**
@@ -103,6 +108,10 @@ export interface WriterStats {
 /** What a writer needs of the transaction queue: one atomic submit. */
 export interface ControlSubmitter {
   submit(edits: readonly ControlFrameEdit[]): Promise<ControlAppliedReport>;
+  /** The host's frame ceiling in bytes. A batch is cut by bytes before it passes it. */
+  readonly maximumFrameBytes?: number | undefined;
+  /** The host's ceiling on the edits of one transaction. */
+  readonly maximumTransactionEdits?: number | undefined;
 }
 
 interface WriterLimits {
@@ -210,10 +219,29 @@ type Attempt =
   | { readonly kind: "admitted"; readonly admitted: number }
   | { readonly kind: "flow"; readonly reason: CommandReasonName };
 
+/**
+ * Whether a failed submit leaves its edits worth sending again. A full queue (the core's control
+ * queue or the plan's in-flight limit) drains. Anything else the core or the queue answered with
+ * is about the edits themselves and never succeeds on resend. An error that is not one of the
+ * SDK's (a lost port) says nothing about them.
+ */
+function isFlowControl(error: unknown): boolean {
+  if (error instanceof MisoControlRefusal) return error.status === "backpressure";
+  return error instanceof MisoEngineError && error.code === "backpressure";
+}
+
+function isTerminal(error: unknown): boolean {
+  return !isFlowControl(error)
+    && (error instanceof MisoControlRefusal || error instanceof MisoEngineError
+      || error instanceof MisoUsageError);
+}
+
 export class LiveControlWriter {
   readonly #send: (edits: readonly (ControlFrameEdit | LaneEdit)[]) => Promise<Attempt>;
   readonly #controlEdits: boolean;
   readonly #maximumBatch: number;
+  #frameBytes: () => number | undefined = () => undefined;
+  #transactionEdits: () => number | undefined = () => undefined;
   /** Insertion-ordered by key, which is what makes coalescing a map update rather than a scan. */
   readonly #pending = new Map<string, ControlFrameEdit | LaneEdit>();
   #batch: number;
@@ -251,16 +279,15 @@ export class LiveControlWriter {
       if (queue === null || typeof queue.submit !== "function") {
         throw new MisoUsageError("LiveControlWriter queue must have a submit function");
       }
+      this.#frameBytes = () => queue.maximumFrameBytes;
+      this.#transactionEdits = () => queue.maximumTransactionEdits;
       this.#send = async (edits) => {
         try {
           await queue.submit(edits as readonly ControlFrameEdit[]);
         } catch (error: unknown) {
-          if (error instanceof MisoControlRefusal) {
-            // Flow control is typed and retryable. Anything else the core refused never succeeds on
-            // resend, and is surfaced by the throw.
-            if (error.status === "backpressure") return { kind: "flow", reason: BACKPRESSURE_NAME };
-            this.#escalations += 1;
-          }
+          // Flow control is typed and retryable. Anything else the core or the queue refused never
+          // succeeds on resend: `#flushOnce` drops the edits it names and surfaces the throw.
+          if (isFlowControl(error)) return { kind: "flow", reason: BACKPRESSURE_NAME };
           throw error;
         }
         return { kind: "admitted", admitted: edits.length };
@@ -277,7 +304,6 @@ export class LiveControlWriter {
         const report = await records(edits as readonly LaneEdit[]);
         if (report.ok) return { kind: "admitted", admitted: report.admitted };
         if (report.reason !== BACKPRESSURE) {
-          this.#escalations += 1;
           throw new MisoUsageError(
             `the live controls refused a batch for ${report.reasonName} at record ${report.rejectedIndex}; `
             + "this is a caller error, not flow control, and will not succeed on retry",
@@ -335,6 +361,43 @@ export class LiveControlWriter {
   }
 
   /**
+   * The next batch: the oldest pending edits, as many as the batch size allows and, for value
+   * edits, as many as one frame holds. At least one, so a batch always makes progress.
+   */
+  #takeStaged(): [string, ControlFrameEdit | LaneEdit][] {
+    const rows = [...this.#pending.entries()];
+    const most = Math.min(this.#batch, rows.length, this.#transactionEdits() ?? Number.POSITIVE_INFINITY);
+    const ceiling = this.#controlEdits ? this.#frameBytes() : undefined;
+    if (ceiling === undefined) return rows.slice(0, most);
+    const staged: [string, ControlFrameEdit | LaneEdit][] = [];
+    let bytes = CONTROL_TRANSACTION_HEADER_BYTES;
+    for (const row of rows) {
+      if (staged.length >= most) break;
+      bytes += controlEditBytes(row[1] as ControlFrameEdit);
+      if (staged.length > 0 && bytes > ceiling) break;
+      staged.push(row);
+    }
+    return staged;
+  }
+
+  /**
+   * A batch the core or the queue refused for good leaves nothing to resend. A refusal that names
+   * an edit (`editIndex`, in the batch's own order) drops that edit alone, so the others go out on
+   * the next flush; a refusal that names none, or a call that failed as a whole, drops the batch.
+   * Edits are cleared by identity, as after an admission: a newer value staged meanwhile stays.
+   */
+  #dropRefused(staged: readonly [string, ControlFrameEdit | LaneEdit][], error: unknown): void {
+    this.#escalations += 1;
+    const named = error instanceof MisoControlRefusal ? error.editIndex : undefined;
+    const doomed = named !== undefined && named >= 0 && named < staged.length
+      ? [staged[named]!]
+      : staged;
+    for (const [key, edit] of doomed) {
+      if (this.#pending.get(key) === edit) this.#pending.delete(key);
+    }
+  }
+
+  /**
    * Attempt one batch.
    *
    * On a flow-control refusal nothing is admitted, so nothing is removed from the pending map --
@@ -343,9 +406,14 @@ export class LiveControlWriter {
    * queue's worth of stale intermediates.
    *
    * A refusal that is *not* flow control throws (a `MisoControlRefusal` carrying the core's code for
-   * a value). Backpressure will succeed on retry once the render thread drains; an out-of-domain
-   * value or an unknown address never will, so retrying it silently would be an infinite loop
-   * wearing the costume of resilience.
+   * a value) and removes what it refused from `pending` first. Backpressure, whether the core's
+   * (a `backpressure` status) or the plan's (a `MisoEngineError` with code `backpressure`), will
+   * succeed on retry once the render thread drains; an out-of-domain value, an unknown address or a
+   * plan that is being rebuilt never will, so keeping it staged would be an infinite loop wearing the
+   * costume of resilience. The refusal names an edit (`editIndex`) when the core named one, and only
+   * that edit is removed; a refusal that names none removes the whole batch, the rule the queue
+   * applies to its own callers. An error that is not the SDK's own (a lost port) leaves the batch
+   * staged.
    *
    * Flushes are serialized: a call entered while a prior submit is still outstanding waits for it
    * rather than picking its batch out of a map the earlier flush has not yet applied to. See
@@ -369,14 +437,20 @@ export class LiveControlWriter {
         nextBatch: this.#batch,
       });
     }
-    const take = Math.min(this.#batch, this.#pending.size);
     // Keyed pairs rather than bare keys: what is cleared after a success is identified by the
     // EDIT, not by its address. See the delete below.
-    const staged = [...this.#pending.entries()].slice(0, take);
+    const staged = this.#takeStaged();
+    const take = staged.length;
     const edits = staged.map(([, edit]) => edit);
 
     this.#flushes += 1;
-    const attempt = await this.#send(edits);
+    let attempt: Attempt;
+    try {
+      attempt = await this.#send(edits);
+    } catch (error: unknown) {
+      if (isTerminal(error)) this.#dropRefused(staged, error);
+      throw error;
+    }
 
     if (attempt.kind === "admitted") {
       for (const [key, edit] of staged) {

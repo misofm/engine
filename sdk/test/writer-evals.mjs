@@ -18,7 +18,8 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { LiveControlWriter } from "../src/core/writer.ts";
-import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
+import { CONTROL_TRANSACTION_HEADER_BYTES, controlEditBytes } from "../src/core/control-frame.ts";
+import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
@@ -640,8 +641,9 @@ describe("the writer contract -- races the async boundary opens", () => {
       writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
       await assert.rejects(() => writer.flush(), MisoControlRefusal);
       assert.equal(writer.stats.escalations, 1);
-      assert.equal(writer.pending, 1, "an escalated batch admits nothing and drops nothing");
+      assert.equal(writer.pending, 0, "the refused edit is removed, so it is never resent");
 
+      writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
       const recovered = await writer.flush();
       assert.equal(recovered.refused, false, "the next flush is a fresh attempt, not an inheritance");
       assert.equal(recovered.admitted, 1);
@@ -720,4 +722,144 @@ test("writer construction requires exactly one callable submission path", () => 
   assert.doesNotThrow(() => new LiveControlWriter({ submit }));
   assert.doesNotThrow(() => new LiveControlWriter({ submitEdits: submit }));
   assert.doesNotThrow(() => new LiveControlWriter({ queue: { submit } }));
+});
+
+describe("the writer does not get stuck on a refusal (batch 7 M3)", () => {
+  const ghost = (edit) => ({ ...edit, address: { ...edit.address, owner: { kind: "strip", id: "ghost" } } });
+
+  test("a refusal that names an edit removes that edit alone, whatever it was refused for", async () => {
+    // Plausible defect: the refused edit stays staged, the batch is one atomic submit, and every
+    // later flush resends it and is refused again: the writer is stuck for good.
+    const engine = await pausedEngine();
+    try {
+      const writer = new LiveControlWriter({ queue: engine.controlTransactions() });
+      const good = [gainEdit(GAIN_IDS[0], 2, -1), gainEdit(GAIN_IDS[1], 2, -2)];
+      // An unknown ID, between two lawful edits.
+      writer.stage(good[0]);
+      writer.stage(ghost(gainEdit(GAIN_IDS[2], 2, -3)));
+      writer.stage(good[1]);
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoControlRefusal && error.code === "control.address.unknown" && error.editIndex === 1);
+      assert.equal(writer.pending, 2, "only the edit the core named is gone");
+      assert.equal((await writer.flush()).admitted, 2, "the others go out on the next flush");
+      assert.equal(writer.pending, 0);
+
+      // A value outside its domain, first in the batch.
+      writer.stage(faderEdit(2, 1.0e9));
+      writer.stage(gainEdit(GAIN_IDS[0], 2, -4));
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoControlRefusal && error.editIndex === 0);
+      assert.equal(writer.pending, 1);
+      assert.equal((await writer.flush()).admitted, 1);
+      assert.equal(writer.stats.escalations, 2);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a newer value staged while the refused batch was in flight stays", async () => {
+    const engine = await pausedEngine();
+    try {
+      const queue = engine.controlTransactions();
+      const writer = new LiveControlWriter({
+        queue: {
+          submit: async (edits) => {
+            await Promise.resolve();
+            // The hand moves while the refusal is on its way back.
+            writer.stage(ghost(gainEdit(GAIN_IDS[0], 2, -9)));
+            return queue.submit(edits);
+          },
+        },
+      });
+      writer.stage(ghost(gainEdit(GAIN_IDS[0], 2, -1)));
+      await assert.rejects(writer.flush(), MisoControlRefusal);
+      assert.equal(writer.pending, 1, "cleared by identity: the newer edit of that address is still staged");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a whole-batch refusal clears the batch; a call-level failure of the plan does too", async () => {
+    // Plausible defect: a refusal or a call failure that names no edit (rebuild pending) keeps the
+    // whole batch staged, and it is resent forever.
+    const wholeBatch = [
+      new MisoControlRefusal({
+        code: "control.domain", status: "validation_failed", revision: 3n,
+        editIndex: undefined, diagnostics: [],
+      }),
+      new MisoEngineError("the engine refused a control frame", {
+        phase: "lifecycle",
+        code: "compileRejected",
+        diagnostics: [{ code: "web.apply.rebuild_pending", path: "$" }],
+      }),
+      new MisoUsageError("the control transaction queue was closed"),
+    ];
+    for (const failure of wholeBatch) {
+      const writer = new LiveControlWriter({ queue: { submit: async () => { throw failure; } } });
+      for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
+      await assert.rejects(writer.flush(), (error) => error === failure);
+      assert.equal(writer.pending, 0, failure.name);
+      assert.equal(writer.stats.escalations, 1);
+      assert.equal(writer.stats.refusals, 0);
+    }
+  });
+
+  test("backpressure of the plan, and an error that is not the SDK's, are not terminal", async () => {
+    // Plausible defect: plan backpressure (a MisoEngineError, not a refusal frame) is thrown as an
+    // escalation and loses the hand's position, or a lost port empties the pending edits.
+    const calls = [];
+    const full = new MisoEngineError("the plan is full", { phase: "lifecycle", code: "backpressure" });
+    const lost = new Error("port closed");
+    const failures = [full, lost];
+    const writer = new LiveControlWriter({
+      queue: {
+        submit: async (edits) => {
+          calls.push(edits.length);
+          const failure = failures.shift();
+          if (failure !== undefined) throw failure;
+          return { ok: true, revision: 1n, path: "live", appliedOperations: edits.length };
+        },
+      },
+    });
+    for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
+    const refused = await writer.flush();
+    assert.equal(refused.refused, true);
+    assert.equal(refused.reason, "backpressure");
+    assert.equal(writer.pending, GAIN_IDS.length);
+    await assert.rejects(writer.flush(), (error) => error === lost);
+    assert.equal(writer.pending, GAIN_IDS.length, "nothing says these edits are at fault");
+    assert.equal(writer.stats.escalations, 0);
+    assert.equal((await writer.drain()).refused, false);
+    assert.equal(writer.pending, 0);
+  });
+});
+
+describe("the writer sizes a batch by bytes (batch 7 M4)", () => {
+  test("no submit is larger than the host's frame, and every edit still lands", async () => {
+    // Plausible defect: the default batch of 256 edits (~160 bytes each) is one frame over the
+    // host's 4 KiB or 16 KiB ceiling, which fails on every send and is resent forever.
+    const edits = GAIN_IDS.flatMap((parameterId) => [0, 1, 2].map((lane) => gainEdit(parameterId, lane, -1)));
+    const each = controlEditBytes(edits[0]);
+    const ceiling = CONTROL_TRANSACTION_HEADER_BYTES + 4 * each + 1;
+    const sent = [];
+    const writer = new LiveControlWriter({
+      queue: {
+        maximumFrameBytes: ceiling,
+        maximumTransactionEdits: 1000,
+        submit: async (batch) => {
+          const bytes = CONTROL_TRANSACTION_HEADER_BYTES
+            + batch.reduce((total, edit) => total + controlEditBytes(edit), 0);
+          sent.push(bytes);
+          assert.ok(bytes <= ceiling, `a ${bytes} byte submit is over the ${ceiling} byte ceiling`);
+          return { ok: true, revision: 1n, path: "live", appliedOperations: batch.length };
+        },
+      },
+    });
+    for (const edit of edits) writer.stage(edit);
+    const outcome = await writer.drain(edits.length);
+    assert.equal(writer.pending, 0);
+    assert.equal(writer.stats.admitted, edits.length);
+    assert.ok(sent.length >= Math.ceil(edits.length / 4), "cut into frames of four");
+    assert.ok(outcome.admitted > 0);
+  });
 });
