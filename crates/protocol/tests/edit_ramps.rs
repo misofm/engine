@@ -11,7 +11,8 @@ use protocol::{
     SessionStoreError,
 };
 use session::{
-    CompileCaps, EditRampRow, EditRampTarget, RackName, StableId, Submix, Vca, parse_session_json,
+    CompileCaps, ConsoleEntry, ConsoleSlot, EditRampRow, EditRampTarget, EffectIdentity,
+    EffectQuality, LinkMode, RackName, StableId, Submix, Vca, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -46,6 +47,23 @@ fn store() -> SessionStore {
         members: vec![],
     };
     model.tracks.push(second);
+    // One console slot, so that a `SetConsole` can change the console (a `SetTrackConsole` is
+    // accepted only after one that does) without rewriting any strip's entries.
+    model.console.pre_insert.push(ConsoleSlot {
+        slot: id("comp"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: LinkMode::Maximum,
+    });
+    for track in &mut model.tracks {
+        track.console.push(ConsoleEntry {
+            slot: id("comp"),
+            bypass: false,
+            params: Vec::new(),
+        });
+    }
     model
         .submixes
         .push(Submix::unity(id("bus"), &model.console));
@@ -81,10 +99,13 @@ fn fader(store: &SessionStore, track: &str, ramp_samples: Option<u32>) -> Sessio
     )
 }
 
-/// The edits that declare nothing new but let a `SetTrackConsole` follow (decision 17, #1561 D3).
+/// The edit that changes the console without touching the slot set (the slot's quality moves), so
+/// a `SetTrackConsole` may follow (decision 17, #1561 D3).
 fn declare(store: &SessionStore, ramp_samples: Option<u32>) -> SessionEdit {
+    let mut console = store.compiled().normalized_model().console.clone();
+    console.pre_insert[0].quality = EffectQuality::High;
     SessionEdit::SetConsole {
-        console: store.compiled().normalized_model().console.clone(),
+        console,
         ramp_samples,
     }
 }

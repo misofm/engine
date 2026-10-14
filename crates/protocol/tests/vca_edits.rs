@@ -12,8 +12,8 @@ use protocol::{
     SessionRevision, SessionStore, SessionStoreError, SessionTransactionFrame,
 };
 use session::{
-    CompileCaps, DualMonoFader, SessionModel, StableId, Vca, canonical_session_json,
-    parse_session_json,
+    CompileCaps, Console, ConsoleSlot, DualMonoFader, EffectIdentity, EffectQuality, LinkMode,
+    SessionModel, StableId, Vca, canonical_session_json, parse_session_json,
 };
 
 const BUILTINS: &str = r#"{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 20.0, "lpf_hz": 20000.0, "delay_samples": 0 }"#;
@@ -388,8 +388,20 @@ fn vca_refusals_commit_nothing() {
         (
             "0211 at a VCA ID",
             vec![
+                // A console that differs from the committed one, so that the check of the VCA ID
+                // is reached; the edit refuses at its own index, before any final validation.
                 SessionEdit::SetConsole {
-                    console: base().console,
+                    console: Console {
+                        pre_insert: vec![ConsoleSlot {
+                            slot: id("eq"),
+                            identity: EffectIdentity::Native {
+                                effect_id: id("miso.parametric-eq"),
+                            },
+                            quality: EffectQuality::Normal,
+                            link_mode: LinkMode::DualMono,
+                        }],
+                        post_insert: Vec::new(),
+                    },
                     ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {

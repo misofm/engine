@@ -247,11 +247,16 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
             ),
         ),
         (
-            "SetTrackConsole on one track, after SetConsole",
+            "SetTrackConsole on one track, after a SetConsole that changes the console",
             vec![
                 SessionEdit::SetConsole {
                     console: Console {
-                        pre_insert: vec![eq_slot()],
+                        pre_insert: vec![slot(
+                            "eq",
+                            "miso.parametric-eq",
+                            EffectQuality::High,
+                            LinkMode::DualMono,
+                        )],
                         post_insert: Vec::new(),
                     },
                     ramp_samples: None,
@@ -268,7 +273,7 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
             ],
             document(
                 8,
-                &console(&[EQ_SLOT], &[]),
+                &console(&[EQ_SLOT_HIGH], &[]),
                 &entries(&[EQ_ENTRY]),
                 &entries(&[edited]),
             ),
@@ -789,6 +794,8 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
     for track in &mut start.tracks {
         track.console.push(entry("comp", false, Vec::new()));
     }
+    let mut changed_declaration = start.console.clone();
+    changed_declaration.pre_insert[0].quality = EffectQuality::High;
     for (name, console, code) in [
         (
             "add",
@@ -809,9 +816,10 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
         let mut store = SessionStore::new(start.clone(), caps()).expect("start compiles");
         let snapshot = store.canonical_snapshot().to_owned();
         let edits = through_the_wire(&[
-            // The same declaration, so only the entries differ.
+            // The same slot set at another quality: the console differs from the committed one
+            // (so the `SetTrackConsole` is allowed), and only the entries break the slot set.
             SessionEdit::SetConsole {
-                console: start.console.clone(),
+                console: changed_declaration.clone(),
                 ramp_samples: None,
             },
             SessionEdit::SetTrackConsole {
@@ -923,10 +931,13 @@ fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
 /// #1561 gate 2 (D3). `SetTrackConsole` is structural: a transaction that carries one with no
 /// `SetConsole` before it is refused at that edit with `session.edit.value_op_retired`, and nothing
 /// commits -- not even an earlier edit of the transaction. Setting the same knob with `SET_CONTROL`
-/// commits, and so does the `SetTrackConsole` once a `SetConsole` precedes it.
+/// commits, and so does the `SetTrackConsole` once a `SetConsole` that changes the console
+/// precedes it. A `SetConsole` that repeats the committed console does not open it (the window
+/// would be a second path to a knob's value for any client that sends the unchanged console first).
 ///
 /// Red if `SetTrackConsole` stays a second path to a console knob's value, if the check looks at
-/// a `SetConsole` that comes after it, or if the structural use (after a `SetConsole`) breaks.
+/// a `SetConsole` that comes after it or at a `SetConsole` that changed nothing, or if the
+/// structural use (after a changing `SetConsole`) breaks.
 #[test]
 fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
     let mut store = store();
@@ -937,8 +948,22 @@ fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
         console: vec![entry("eq", true, eq_entry().params)],
         ramp_samples: None,
     };
-    let declare = || SessionEdit::SetConsole {
+    // The committed console, repeated: it changes nothing, so it opens nothing.
+    let repeat = || SessionEdit::SetConsole {
         console: base().console,
+        ramp_samples: None,
+    };
+    // The same slot at another quality: the console differs from the committed one.
+    let declare = || SessionEdit::SetConsole {
+        console: Console {
+            pre_insert: vec![slot(
+                "eq",
+                "miso.parametric-eq",
+                EffectQuality::High,
+                LinkMode::DualMono,
+            )],
+            post_insert: Vec::new(),
+        },
         ramp_samples: None,
     };
     for (name, edits, index) in [
@@ -957,6 +982,11 @@ fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
             "before the SetConsole",
             vec![bypassed.clone(), declare()],
             0,
+        ),
+        (
+            "after a SetConsole that repeats the committed console",
+            vec![repeat(), bypassed.clone()],
+            1,
         ),
     ] {
         let edits = through_the_wire(&edits);

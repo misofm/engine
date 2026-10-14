@@ -170,7 +170,7 @@ pub enum SessionEdit {
     /// slot must rewrite every strip's entries in the same transaction (`SetTrackConsole`,
     /// `UpsertTrack` or `UpsertSubmix`), or the final validation refuses the whole transaction and
     /// nothing is committed. `SetTrackConsole` is accepted only after a `SetConsole` of the same
-    /// transaction (#1561 D3).
+    /// transaction that changed the console (#1561 D3).
     SetConsole {
         console: Console,
         /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
@@ -275,9 +275,11 @@ pub enum SessionEdit {
     /// slot set (decision 12, #1561 D3).
     ///
     /// It carries that strip's entries, `bypass` and `params`, one entry per session slot in slot
-    /// order. It is structural only: a transaction without a `SetConsole` before it is refused
-    /// with [`SessionEditError::ValueOpRetired`] at this edit, because a console knob's value is
-    /// set with [`SessionEdit::SetControl`]. An entry array that adds, drops or reorders a slot
+    /// order. It is structural only: it is accepted only when an earlier `SetConsole` of the
+    /// transaction made the candidate console differ from the committed one. Otherwise it is
+    /// refused with [`SessionEditError::ValueOpRetired`] at this edit, before any write, because a
+    /// console knob's value is set with [`SessionEdit::SetControl`]; a `SetConsole` that repeats
+    /// the committed console does not open it. An entry array that adds, drops or reorders a slot
     /// refuses at the transaction's final validation.
     SetTrackConsole {
         /// Existing strip: a track ID or a submix ID, tracks first (#1204).
@@ -664,8 +666,8 @@ pub enum SessionEditError {
     /// A `SetControl` edit was refused by the control core's validator (decision 17, C5). The
     /// diagnostic code is the control code itself (`control.domain`, `control.read_only`, ...).
     Control(controls::ControlError),
-    /// A `SetTrackConsole` edit came in a transaction with no `SetConsole` before it (decision 17,
-    /// #1561 D3). The op only gives a strip its entries after the slot set changed; a console
+    /// A `SetTrackConsole` edit came in a transaction with no earlier `SetConsole` that changed the
+    /// console (decision 17, #1561 D3). The op only gives a strip its entries after the slot set changed; a console
     /// knob's value is set with `SetControl`. The diagnostic code is `session.edit.value_op_retired`.
     ValueOpRetired,
 }
@@ -1085,19 +1087,17 @@ impl SessionStore {
         let mut control_writes = ControlRampWrites::new();
         let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
         // #1561 D3: `SetTrackConsole` is structural, so it is accepted only after a `SetConsole`
-        // of the same transaction changed the slot set.
-        let mut console_declared = false;
+        // of the same transaction actually changed the console: the candidate's console, with the
+        // earlier edits applied, must differ from the committed one.
         for (operation_index, edit) in edits.iter().enumerate() {
             let refused = |error| SessionStoreError::Edit {
                 operation_index,
                 error,
             };
-            match edit {
-                SessionEdit::SetConsole { .. } => console_declared = true,
-                SessionEdit::SetTrackConsole { .. } if !console_declared => {
-                    return Err(refused(SessionEditError::ValueOpRetired));
-                }
-                _ => {}
+            if matches!(edit, SessionEdit::SetTrackConsole { .. })
+                && candidate.console == self.compiled.normalized_model().console
+            {
+                return Err(refused(SessionEditError::ValueOpRetired));
             }
             if monitor
                 && let SessionEdit::SetControl {

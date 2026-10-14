@@ -18,10 +18,10 @@ use protocol::{
     SessionRevision, SessionStore, SessionStoreError, SessionTransactionFrame,
 };
 use session::{
-    CompileCaps, ConsoleEntry, DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality,
-    LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RouteSource, SendTap,
-    SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, canonical_session_json,
-    parse_session_json,
+    CompileCaps, Console, ConsoleEntry, DualMonoFader, Effect, EffectIdentity, EffectParam,
+    EffectQuality, LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName,
+    RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix,
+    canonical_session_json, parse_session_json,
 };
 
 const BUILTINS: &str = r#"{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 20.0, "lpf_hz": 20000.0, "delay_samples": 0 }"#;
@@ -172,7 +172,18 @@ fn submix<'a>(model: &'a mut SessionModel, submix_id: &str) -> &'a mut Submix {
 /// One transaction per strip opcode (`0204`-`0209`, `020c`, `0211`) and per kind of strip row of
 /// `SET_CONTROL`, each addressed to submix `bus`, with the change it makes to the bus written
 /// directly on the model.
+///
+/// A `SetConsole` of a case is applied to the expected model too: it is the console change that
+/// lets a `SetTrackConsole` follow, and it changes the session's console, not the bus.
 type Case = (&'static str, Vec<SessionEdit>, fn(&mut Submix));
+
+/// The base console with its slot at another quality: a change, so that a `SetTrackConsole` may
+/// follow it (#1561 D3).
+fn high_quality_console() -> Console {
+    let mut console = base().console;
+    console.pre_insert[0].quality = EffectQuality::High;
+    console
+}
 
 fn cases() -> Vec<Case> {
     let bus = || id("bus");
@@ -364,7 +375,7 @@ fn cases() -> Vec<Case> {
             "0211 SetTrackConsole after 0007 SetConsole",
             vec![
                 SessionEdit::SetConsole {
-                    console: base().console,
+                    console: high_quality_console(),
                     ramp_samples: None,
                 },
                 SessionEdit::SetTrackConsole {
@@ -417,6 +428,11 @@ fn every_strip_opcode_edits_a_submix() {
         let mut expected = base();
         expected.revision = 8;
         change(submix(&mut expected, "bus"));
+        for edit in &edits {
+            if let SessionEdit::SetConsole { console, .. } = edit {
+                expected.console = console.clone();
+            }
+        }
         assert_ne!(
             submix(&mut expected, "bus"),
             submix(&mut base(), "bus"),
