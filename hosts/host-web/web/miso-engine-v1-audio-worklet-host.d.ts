@@ -102,9 +102,12 @@
 //
 // The gain-reduction section is recomputed from the taps armed when each frame is polled. An
 // unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-// has published. `masterGrDb` is `null` when the designated strip has none.
+// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an armed
+// tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame leaves
+// that tap out until a window that opens at or after that sample closes. A strip's slot
+// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at or
+// after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is `null`
+// when the designated strip has none.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
@@ -687,9 +690,12 @@ export interface MisoMeterFrame {
   ///
   /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
   /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-  /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-  /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-  /// has published. `masterGrDb` is `null` when the designated strip has none.
+  /// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an
+  /// armed tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame
+  /// leaves that tap out until a window that opens at or after that sample closes. A strip's slot
+  /// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at
+  /// or after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is
+  /// `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
   /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///

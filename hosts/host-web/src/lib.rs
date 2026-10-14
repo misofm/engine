@@ -1143,9 +1143,12 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 ///
 /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
 /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-/// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-/// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-/// has published. `masterGrDb` is `null` when the designated strip has none.
+/// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an armed
+/// tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame leaves
+/// that tap out until a window that opens at or after that sample closes. A strip's slot
+/// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at or
+/// after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is `null`
+/// when the designated strip has none.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebMeterHeader {
@@ -2652,9 +2655,12 @@ impl AudioWorkletEngineHost {
     ///
     /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
     /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-    /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-    /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-    /// has published. `masterGrDb` is `null` when the designated strip has none.
+    /// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an
+    /// armed tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the
+    /// frame leaves that tap out until a window that opens at or after that sample closes. A
+    /// strip's slot (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows
+    /// that opened at or after their last subscribe, and `0` when no armed tap has such a window.
+    /// `masterGrDb` is `null` when the designated strip has none.
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
@@ -4055,7 +4061,12 @@ impl AudioWorkletEngineHost {
                 {
                     continue;
                 }
-                let Some(window) = reader.read() else {
+                // Issue #1534 D1-D4: a window from before the tap's last subscribe is no window.
+                // It writes no slot, marks nothing present and is not acknowledged; the first
+                // fresh window's acknowledgement covers its sequence.
+                let Some(window) = reader.read().and_then(|window| {
+                    window_since_arm(&ready.observation_arm_samples, effect, tap_index, window)
+                }) else {
                     continue;
                 };
                 reader.acknowledge(window.sequence);
@@ -6580,6 +6591,27 @@ fn resolve_observation(
     Ok((effect, tap_index))
 }
 
+/// The one rule for whether an armed tap's latest window counts (issue #1534 D5): it counts only
+/// if it opened at or after the tap's last subscribe, the `applied_at_sample` that
+/// `arm_samples[effect][tap_index]` records. An observation cell conflates and keeps its last
+/// window for ever, so a window from before a re-subscribe or a re-arm is a stale reading of the
+/// previous arm and is the same as no window. An absent arm sample is `0`. The selected read
+/// ([`read_observation_values`]) and the meter frame (`poll_meters`) both call it, so they cannot
+/// drift apart; it uses `get` only, because `poll_meters` runs inside `process()`.
+fn window_since_arm(
+    arm_samples: &[Box<[u64]>],
+    effect: usize,
+    tap_index: usize,
+    window: ObservationWindow,
+) -> Option<ObservationWindow> {
+    let arm_sample = arm_samples
+        .get(effect)
+        .and_then(|samples| samples.get(tap_index))
+        .copied()
+        .unwrap_or(0);
+    (window.first_sample >= arm_sample).then_some(window)
+}
+
 fn read_observation_values(
     ready: &ReadyOwnership,
     sample_rate_hz: u32,
@@ -6595,17 +6627,13 @@ fn read_observation_values(
         & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
     let window = (armed != 0)
         .then(|| {
-            let arm_sample = ready
-                .observation_arm_samples
-                .get(effect)
-                .and_then(|samples| samples.get(tap_index))
-                .copied()
-                .unwrap_or(0);
             handle
                 .readers
                 .get(tap_index)
                 .and_then(|reader| reader.read())
-                .filter(|window| window.first_sample >= arm_sample)
+                .and_then(|window| {
+                    window_since_arm(&ready.observation_arm_samples, effect, tap_index, window)
+                })
         })
         .flatten();
     let status = if armed == 0 {

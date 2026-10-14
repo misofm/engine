@@ -6755,6 +6755,122 @@ fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
     assert_eq!(undesignated.meter_header().master_track_plus_one, 0);
 }
 
+/// Issue #1534: the meter frame leaves a tap out until a window that opened at or after its latest
+/// subscribe closes, for a re-subscribe after an unsubscribe and for a re-arm of an armed tap.
+///
+/// Test value: red if the meter frame folds a tap's window from before its latest subscribe, so a
+/// re-subscribed (or re-armed) tap shows its old reduction as new, or if the fold drops the first
+/// window the subscribe opened. No other test re-subscribes a tap and then reads the meter frame.
+#[test]
+fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 2, Some(0));
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+
+    let selection = ObservationSelection {
+        track_id: "t0",
+        rack: LiveEffectRack::Inserts,
+        effect_slot_id: "comp",
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    // The tap's own cell, read without consuming it.
+    let cell_first_sample = |host: &AudioWorkletEngineHost| {
+        let ready = host.ready.as_ref().expect("ready ownership");
+        let (effect, tap) = resolve_observation(ready, &selection).expect("resolved selection");
+        ready.effect_observations[effect]
+            .as_ref()
+            .expect("observation handle")
+            .readers[tap]
+            .read()
+            .map(|window| window.first_sample)
+    };
+
+    let mut block = 0_u64;
+    for _ in 0..32 {
+        feed_and_render_tracks(&mut host, block, 0.5);
+        block += 1;
+    }
+    while host.poll_meters() != 0 {}
+    let (armed, armed_master) = gain_reduction(&host);
+    assert!(armed[0] > 0.0, "the stale value the defect leaks");
+    assert_eq!(armed_master, Some(armed[0]));
+
+    // Unsubscribe: the frame leaves the tap out at once, though its cell keeps the last window.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    for _ in 0..2 {
+        feed_and_render_tracks(&mut host, block, 0.5);
+        block += 1;
+        while host.poll_meters() != 0 {
+            let (slots, master) = gain_reduction(&host);
+            assert_eq!(slots[0].to_bits(), 0.0_f32.to_bits(), "disarmed tap");
+            assert_eq!(master, None);
+        }
+    }
+    assert!(
+        cell_first_sample(&host).is_some(),
+        "the cell keeps a window"
+    );
+
+    // Renders `blocks` blocks, polling every frame. A frame whose tap has no window since `arm`
+    // reads zero and an absent master; a frame whose tap has one agrees with it.
+    let drive = |host: &mut AudioWorkletEngineHost, block: &mut u64, arm: u64, blocks: u32| {
+        let (mut stale_frames, mut fresh_frames) = (0_u32, 0_u32);
+        let mut first_fresh = None;
+        for _ in 0..blocks {
+            feed_and_render_tracks(host, *block, 0.5);
+            *block += 1;
+            let first_sample = cell_first_sample(host);
+            let fresh = first_sample.is_some_and(|first| first >= arm);
+            if fresh && first_fresh.is_none() {
+                first_fresh = first_sample;
+            }
+            while host.poll_meters() != 0 {
+                let (slots, master) = gain_reduction(host);
+                if fresh {
+                    fresh_frames += 1;
+                    assert!(slots[0] > 0.0, "a fresh window folds: {slots:?}");
+                    assert_eq!(master, Some(slots[0]));
+                } else {
+                    stale_frames += 1;
+                    assert_eq!(
+                        slots[0].to_bits(),
+                        0.0_f32.to_bits(),
+                        "a window from before the subscribe is left out"
+                    );
+                    assert_eq!(master, None);
+                }
+            }
+        }
+        assert!(stale_frames > 0, "a frame before the first new window");
+        assert!(fresh_frames > 0, "a frame after the first new window");
+        assert_eq!(
+            first_fresh,
+            Some(arm),
+            "the first new window opens at the arm"
+        );
+    };
+
+    // Leg 1: re-subscribe after the unsubscribe.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 8, true), RESULT_OK);
+    let resubscribed = host.command_report().applied_at_sample;
+    assert!(
+        cell_first_sample(&host).is_some_and(|first| first < resubscribed),
+        "a stale window exists to leak"
+    );
+    drive(&mut host, &mut block, resubscribed, 12);
+
+    // Leg 2: re-arm an armed tap, the SDK `update()` path.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 4, true), RESULT_OK);
+    let rearmed = host.command_report().applied_at_sample;
+    assert!(
+        cell_first_sample(&host).is_some_and(|first| first < rearmed),
+        "the armed tap's old window predates the re-arm"
+    );
+    drive(&mut host, &mut block, rearmed, 8);
+}
+
 /// Issue #143 E8: misuse and the typed refusals of an observation subscription.
 ///
 /// Test value: red if a refused submission arms or moves anything (the "nothing was armed or

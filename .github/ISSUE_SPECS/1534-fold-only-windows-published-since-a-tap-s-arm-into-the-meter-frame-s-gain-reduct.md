@@ -199,4 +199,24 @@ interval.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- Attempt 1 (batch 5 lane W, `codex/controls-batch-5w`, from `ceca59af2`): implemented, sprint mode
+  (normal tests; no mutation runs M1-M3; no local real-browser run).
+  - Red first: on the unchanged code
+    `a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window` failed at step 3/5
+    ("a window from before the subscribe is left out"): the slot read bits `1099946259`
+    (`0x41900000`, 18.0 dB, the stale value `R`) where `0` was expected. Green after the fix.
+
+## Decision record
+
+- Anchors moved on this base: `poll_meters` is at `hosts/host-web/src/lib.rs:3774` (its tap loop
+  at about `:4040`), `read_observation_values` at about `:6425`; Amendment 6's text was found by
+  the deliverable-2 grep in `lib.rs` (struct doc on `WebMeterHeader`, and `meter_frame` doc) and in
+  both `.d.ts` twins (file comment and `MisoMeterFrame.trackGrDb`). D6 replaced all six places and
+  the twins stay byte-identical.
+- D5 helper: `window_since_arm(arm_samples, effect, tap_index, window) -> Option<ObservationWindow>`
+  (private, `get`-only, `0` for an absent arm sample). `poll_meters` and `read_observation_values`
+  both call it; the selected read's behaviour is unchanged.
+- D3/D4: a window that fails the predicate hits the existing `continue` before
+  `acknowledge`, the slot write, `observation_present` and `observed_any`.
+- Test: the cell is read through `resolve_observation` in a local closure; the shared
+  `drive` closure runs both legs (re-subscribe after unsubscribe with 12 blocks, re-arm with 8).
