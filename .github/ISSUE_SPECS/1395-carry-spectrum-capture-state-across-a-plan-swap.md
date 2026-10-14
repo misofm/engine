@@ -162,3 +162,40 @@ swap"), which decision 15 rejects (D15-14). Only a changed or added capture star
   for the successor entry points the gates use.
 
 **Decision 17 amendment (2026-10-13).** D1 and D2 are unchanged. D5's "The C ABI has nothing to carry" ends with #1593: the C ABI gains spectrum captures, and its control plane pairs them with D3's `pair_carried` when it promotes the adopted candidate, on the control thread, from a pairing list built by D1's key at preparation. #1596 moves the browser to the same control-side pairing, so from then on no host pairs spectrum readers in the swap block.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** In `crates/host-core/src/spectrum.rs`: `SPECTRUM_OBSERVER_HANDLE` `:31`,
+  `SpectrumTarget` `:204`, `SpectrumCapture` `:525`, `SpectrumCaptureCollection` `:967`, `select`
+  `:1088`, the observer's `impl GraphRuntimeObserver` `:2497` (its `block_end` `:2543`, from
+  #1609). The successor entries exist since #1401: `prepare.rs:1201` (single) and `:1233`
+  (collection).
+- **Where the readers live now.** Since #1591 and #1592 the captures are held by host-core's
+  `SpectrumService` (`crates/host-core/src/spectrum_service.rs:585`), on the control side. Since
+  #1381a the browser moves its capture out of the plan's attachment into it at boot. So D3's "a host
+  whose captures live inside the plan calls them in the swap block" fits no host, and D5's browser
+  sentence is void. **D5 now reads:** both hosts pair on the control side when the adopted
+  candidate is promoted, as #1593 D5 states for the C ABI. This slice adds that pairing to
+  `SpectrumService` as one method (the successor's prepared captures in, D3's rules applied, the
+  result installed), built from D3's two functions. The browser's call is #1290 (d); the C ABI's is
+  #1593.
+- **The pairing list.** The swap block writes the carry record into the plan, which the control
+  side cannot read in Worker mode. The control side builds the same list at preparation from D1's
+  key, and applies it at promotion when the adoption carried; when the hand-over was refused
+  (`CarryOutcome::PredecessorMismatch`, counted by `RealtimePlanOwner::carry_mismatch_count`) it
+  installs the successor's fresh captures. Gates 1-3 call the `SpectrumService` method after the
+  adoption block instead of calling `pair_carried` in it.
+- **One-shot conflict with #1618 (open).** #1618 recommends settling an in-flight one-shot capture
+  to `Invalid` at a swap (its option A). Gate 3's last sentence carries it instead. Recommendation:
+  a carried observer keeps its one-shot state (D2 moves the whole observer, so it completes and
+  gate 3 stands); #1618's settle applies only to a capture that does not carry (its key changed or
+  it was removed) and to a refused hand-over. #1618 lands after this slice, rescoped so; root
+  rules.
+- **Engine edit.** `ObserverKind::Spectrum` is declared by #1327a if root accepts the fold in
+  #1327's batch 10 amendment; then this slice edits no engine file. Otherwise the variant is this
+  slice's one `plan.rs` edit, under its own one-attempt rule.
+- **Split (plan v2).** #1395a: the single capture (gates 1, 3's single part, 4); #1395b: the
+  collection (gate 2, 3's collection part).
+- **Dependencies.** #1327a (the table, the record and the section). #1401 is closed.

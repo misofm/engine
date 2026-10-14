@@ -115,3 +115,40 @@ route level (decision 15, D15-9). The retarget of a carried send whose live valu
 
 - *Carry compensation lines across a plan swap* (#1283).
 - None on #1225: the send retarget lives there (D8) and #1225 depends on this slice.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** `LiveRoute` is `crates/graph/src/runtime.rs:861` (its `drain` `:902`), the
+  `NodeKind::LiveRoute` variant `:1166`, `TrackDelayLine` `:1039`, `NodeKind::TrackDelay` `:1124`,
+  `NodeKind::SumDelay` `:1144`, `Runtime::track_delays` `:2607`.
+- **Send records are live now.** #1225, #1226 and #1557 are closed. For a route into a submix the
+  registry's gain, matrix, mute and `follows_mute` rows are `Live` (`crates/controls/src/route.rs`)
+  on both hosts, and the browser reaches them through the core since the flip (#1342 is still open
+  but has nothing left to make live). A route into the output has no `LiveRoute` lane and stays
+  prepared. So the Context bullet "Until they land the classifier emits no route record" and D2's
+  case "a send with any other value difference" apply only to routes into the output.
+- **#1225 D8 moves back here.** #1225 closed as superseded by #1557, and its decision 17 amendment
+  moves its D8 (carry, then retarget for sends) to this issue. The bullet "Moved out", the non-goal
+  "No send retarget (#1225 D8)" and the Dependencies line on #1225 are void. New:
+  - **D3. Carry, then retarget (D15-7; #1225 D8).** The classifier's per-route derivation
+    (`route_records`, `crates/host-core/src/live_delta.rs:1416`) becomes one per-route function that
+    `classify_live_delta` and the successor join both call (the pattern of #1277 D5). It works on
+    effective values: a route's effective gate follows its source strip's effective mute (#1558
+    D1). For every carried send whose live values differ between `committed` and the successor's
+    model, the successor entry writes the route's record into the successor's route cell
+    (`RouteControlProducer::write`, `crates/host-core/src/route_controls.rs:237`) with
+    `stamp_held_gate(base.revision)`, in the retarget block with the strips (`prepare.rs:2644`),
+    with the ramp from `SuccessorBase::edit_ramps`. The write cannot fail (#1347).
+  - **Gate 5 (new; #1225 gate 7).** On gate 1's session, B is A plus a muted track whose ID sorts
+    first, and B also changes the carried send's gain. Run 1 is the structural swap with D3's
+    retarget. Run 2 writes the same value to A just before the swap and prepares B from a base that
+    holds it. Every block of the two runs is bit-identical. It turns red if a carried send keeps
+    the predecessor's level (a missing retarget) or if the retarget applies a block early or late.
+- **D2's drain with cells.** A route lane holds a latest-target cell since #1347. "Drain the
+  predecessor's route lane (the records present at entry)" reads: apply the predecessor's pending
+  cell value under `LiveSnapshot::ALL` with `CellReader::read_counted`, as the strip carry does
+  (#1277 D8), then copy the ramp, its position and its mute. No engine edit.
+- **Authorized paths** gain `crates/host-core/src/live_delta.rs` (D3's extraction only).
+- **Dependencies.** #1283 (shared files). #1225 is removed.

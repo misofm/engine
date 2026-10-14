@@ -475,3 +475,31 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
 - Root ruled the multiplier 20 -> 25 (25 MiB = 26,214,400 bytes, the tightest whole multiplier
   above the measurement). A CI measurement above 25 MiB stops the batch and goes to root. The
   successor "Shrink the always-attached per-effect live lanes" (#1611) aims to return the pin to 20.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14): #1381b
+
+Checked against `12d4a4f9d`.
+
+- **Spectrum leaves the hook.** The capture is in host-core's `SpectrumService`, not in
+  `RenderCompanions` (#1381a's D3 evidence). D3's **Spectrum** bullet is void now, not only after
+  #1596: spectrum continuity across a swap is #1395's control-side pairing at promotion, which
+  #1290 (d) calls. Gate 2's spectrum assertions ("a spectrum read ... no spectrum `Failed` epoch")
+  move to #1290 (d+e) gate 7.
+- **Dependencies of #1381b:** #1381a, #1327a and #1327b. #1395 is removed.
+- **Engine edit.** D3's `HostAttachment::adopt_predecessor` and its call in
+  `PreparedRenderPlan::carry_from` (now `crates/engine/src/realtime/plan.rs:1158`; the filed `:917`
+  moved). #1327's batch 10 amendment recommends that #1327a makes this edit with its own; then
+  #1381b edits no engine file and only implements `RenderCompanions::adopt_predecessor`. Otherwise
+  it is #1381b's own `plan.rs` edit, under its own one-attempt rule. D3's owner accessor
+  (`RealtimePlanOwner::active_attachment_mut`, `plan_exchange.rs:708`) landed with #1381a.
+- **Master window.** #1581 (open) D5 deletes the browser's master ring. If it lands first, D3's
+  master-window bullets and gate 3's `METER_VALID_MASTER` part go with it. #1582 (open) moves the
+  meter fold into host-core's `MeterDelivery`, still in the render half; D3's delivery-state copy
+  then targets that struct. The readers stay in the render half in both cases, so the swap-block
+  hook stays.
+- **Gates.** Gate 2's two-thread form needs #1332 (open); #1381b runs gate 2's pairing assertions
+  in the single-thread form, as #1381a ran gate 2, and gate 3. `bench_support::alloc` exists
+  (`tools/bench-support`, `assert_installed`); host-web may add the dev-dependency, as the
+  authorized paths allow.
+- **Anchors in `hosts/host-web/src/lib.rs` moved** (the attachment is reached at `:1846` and
+  `:2652`); lane W re-reads them at implementation.
