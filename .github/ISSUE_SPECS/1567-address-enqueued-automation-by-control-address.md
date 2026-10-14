@@ -154,3 +154,8 @@ Checked against `main` at `7feb27800`.
 - **Edit order.** After #1566. Before #1615 in `protocol/src/controller.rs` (#1615's S2 edits the
   structural prepare and commit; this slice edits admission). With #1574 and #1615 in
   `host-core/src/control_provider.rs`: this slice first.
+
+## Ruling (root, 2026-10-14): `control.inactive`
+
+As for #1566: an enqueued record whose address names an automatable but inactive row is refused
+`control.inactive`, the fifth code of D3's set, the same code `SET_CONTROL` uses.
