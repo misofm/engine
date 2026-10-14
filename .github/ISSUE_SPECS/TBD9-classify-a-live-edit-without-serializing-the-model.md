@@ -114,20 +114,22 @@ Design (this slice):
   per-strip loop (`:436-494`) and the route loop (`:505-538`) become functions of an iterator of
   strip or route indices: the full path passes all of them, the fast path the touched ones in index
   order. So the records and their order come from one body.
-- **D6. Local effective values.** `EffectiveDiff` gains a second form, built for a set of strips and
-  routes, that holds the effective values of those strips in both models (and their VCA reach and
-  solo terms) and the gates of those routes. The dense form is unchanged in behavior and keeps
-  `join_strips` as it is. Both forms answer `level_changed`, `level_records`, `lengths`, `gates`,
-  `gate_length` and `source_strips` from the same rule code, and a missing local entry makes the
-  accessor refuse, which D3 turns into the fallback. The local form is seeded with:
+- **D6. Local effective values.** The ramp rules of the level and gate records move out of
+  `EffectiveDiff` into `LevelRules` (`prepare.rs`), which both forms ask; `EffectiveDiff` (every
+  strip, used by `join_strips`) keeps its behavior. The local form is `LocalDiff` (`live_delta.rs`):
+  the effective values of the strips an edit reaches in both models, with their VCA reach and solo
+  terms, and the gates of the sends it reaches. The lowering reads either through one private trait
+  (`LevelDiff`); a strip or send the local form does not hold has unchanged effective values, and a
+  value the lowering needs and the form lacks makes the accessor refuse, which D3 turns into the
+  fallback. It is seeded with:
   - the strip of each changed `StripLevel` row (fader, mute);
   - the strips a changed VCA reaches (members, and members of nested VCAs): new
     `SessionModel::strips_reached_by(vca)`;
   - the strips whose solo differs between the two overlays; **all** strips when `any_solo` differs
     between them (the solo term of every strip moves);
-  - the routes whose own row changed, the sources of those routes, and every route whose source strip
-    is seeded and whose effective mute differs in either model (a following send's gate): one scan of
-    the routes comparing sources, no allocation per route.
+  - the routes whose own row changed, the sources of those routes, and, only when a seeded strip's
+    effective mute differs, every route that follows its source's mute and whose source is such a
+    strip (one scan of the routes comparing sources, no allocation per route).
 - **D7. One strip, the same rules.** New `controls::LocalInputs` implements `EffectiveInputs` for
   one strip (and any route), with that strip's VCA reach from new
   `SessionModel::vca_reach_of(strip)`, and `controls::any_solo_in(model, overlay)` answers
@@ -170,6 +172,8 @@ Design (this slice):
 - `crates/protocol/src/{model.rs,controller.rs}` (the rows accessor and its tests).
 - `crates/host-core/src/{live_delta.rs,prepare.rs,lib.rs}` (`EffectiveDiff` and its helpers in
   `prepare.rs` only), `crates/host-core/tests/live_edit_classifier.rs`.
+- `hosts/host-web/tests/control_command_timing.rs` (new, ignored: one descriptive timing line of a
+  whole command; no `hosts/host-web/src` change).
 - `crates/control-plane/src/control.rs` (`commit_live` only).
 - This spec.
 
@@ -206,9 +210,9 @@ release build (pcm `76525e7ef9e78cf4`).
    fader, mute, pan, matrix, trim, polarity, filters, effect parameter, bypass, send, VCA and solo
    rows through the fast path and each fallback through the full path.
 2. **Cost does not grow with the session.** For one live-only transaction of each kind (fader, mute,
-   pan, trim, effect parameter, send gain, VCA offset, solo), the allocations and frees of the
-   classification on the audited allocator's thread-scoped counters are equal at 64 and at 256
-   tracks (rich sessions whose VCAs and sends do not grow), and the fast path was taken. The solo
+   pan, trim, effect parameter, send gain and mute, VCA offset and mute, solo), the allocations and
+   frees of the classification on the audited allocator's thread-scoped counters are equal at 8, 64
+   and 256 tracks (rich sessions whose VCAs and sends do not grow), and the fast path was taken. The solo
    that moves `any_solo` is excluded: it moves every strip's mute, so its output grows.
 3. **Timing (descriptive).** One line per size, native release, from the ignored `timing_line`
    test: the fader edit of the Context on 64 and 256 tracks, before and after. No threshold.
@@ -240,3 +244,86 @@ One day for one sonnet-high implementer: deliverables 1-3 are small, 4 is the da
 split at deliverable 4's local `EffectiveDiff`: a first commit that takes the fast path for every
 transaction with no derived change (pan, trim, effect parameter, polarity, filters), and a second for
 fader, mute, VCA, send and solo.
+
+## Implementation record
+
+### Deviations from the brief
+
+- **The local form is its own type, not a second form of `EffectiveDiff`.** The rules are shared
+  through `LevelRules` and a private trait; `EffectiveDiff`'s fields lost their per-strip
+  `StripRef` vectors (`strip_at` reads a strip in `O(1)`) and gained no variant.
+- **Two small cost fixes beside the classifier, in `controls`:** `strip_index` (binary search with a
+  scan fallback, the same answer as a scan on any model) now serves `owner_index`, and
+  `MonitorOverlay::retain_strips_of` uses it. `commit_live` calls `MonitorOverlay::after` before the
+  classifier, and that was `O(soloed x strips)`.
+- **The parity script is replayed from a table in `host-core`'s test, not imported.**
+  `control_parity.rs` keeps `script()` private to its binary and needs the browser host. The test
+  rebuilds the parity session (`common::model_at`) and the script's `SET_CONTROL` edits, with its
+  ramps, solo steps and refusals, and plays them through the real `SessionStore`.
+- **`hosts/host-web/tests/control_command_timing.rs`** is the one file outside the engine crates,
+  an ignored timing test. No `hosts/host-web/src` or `sdk/` file changed.
+- **`cargo doc --all-features` fails on this branch before and after this slice** (an unresolved
+  link at `crates/control-plane/src/control.rs:236`). CI builds the docs with default features, which
+  pass.
+
+### What falls back
+
+`classify_live_edit` runs the full classifier, and returns its answer, error included, for: any
+transaction with an edit that is not a `SetControl` (`UpsertVca`, structural edits); a session row
+(`control_smoothing`); a strip's `matrix_mode`; any changed row of class rebuild-only (an insert's
+link mode, `delay_samples`, an EQ band's kind, a route into the output, a delay's bypass); an address
+that does not resolve in both models or a derived row; and any lowering refusal. The random
+differential reaches each of these: `matrix_mode`, `fader_ms`, `link_mode` and a structural edit
+through the full path, with live, rebuild-only and no-record verdicts.
+
+### Evidence
+
+Native release, x86-64 (AVX2), one fader edit on a session of one source, route and no insert per
+track, 200 calls, `crates/host-core/tests/live_edit_classifier.rs::timing_line`:
+
+| tracks | full classifier (before) | `classify_live_edit` (after) |
+| --- | --- | --- |
+| 64 | 1.94 ms | 1.07 us |
+| 256 | 7.99 ms | 1.25 us |
+
+The whole `control_command` of the same edit (`hosts/host-web/tests/control_command_timing.rs`, the
+browser host's entry, which is `SessionState::command` and so the C ABI's too), with the full
+classifier forced as before and with this slice:
+
+| tracks | before | after |
+| --- | --- | --- |
+| 64 | 1.80 ms | 267 us |
+| 256 | 7.94 ms | 1.11 ms |
+
+The command is still linear in the session: the protocol's own preparation of the same transaction
+(`SessionStore::prepare_transaction`: a model clone and a compile with canonical JSON) takes 206 us
+at 64 tracks and 804 us at 256, about three quarters of what is left; the rest is
+`live_admission` (`check_counts` over the prospective model) and `ControlCatalog::stage_values`,
+which builds `controls::effective` for the whole model and reads the derived rows of every strip and
+send. None is the classifier. A wasm number was not taken: the pinned `-Zbuild-std` nightly build of
+the worklet and its node driver are not a cheap harness; the code is the same.
+
+Allocations of one classification (same at 8, 64 and 256 tracks; `allocations/frees`): fader
+15/15; fader under a nested VCA 21/21; mute 15/15; mute of a strip a send follows 20/20; pan
+10/10; trim 11/11; effect parameter 41/29; send gain 16/16; send mute 28/28; VCA offset 43/42;
+VCA mute 31/31; solo with another strip soloed measured equal in the same test. The mute of a
+strip a send follows scans the routes once (comparing sources); it allocates nothing per route.
+
+Mutation checks, each red in `live_edit_classifier.rs` and restored: no VCA seeds (differential and
+cost), `all_strips` off (differential), no scan for following sends (differential), and a copy of
+the track IDs in the fast path (cost).
+
+Gates run on this head: `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+--no-deps`; `cargo test --locked` for `controls`, `session`, `protocol --all-features`, `host-core
+--all-features`, `control-plane --features test-support`, `capi` and `host-web --features
+test-support`; `scripts/check-workspace-policy.sh`; `realtime_policy`; `audit capi` (pcm
+`76525e7ef9e78cf4`, 0 violations).
+
+### Successor (for root)
+
+The remaining linear parts of a live commit, in order of share: the protocol's model clone and
+compile in `prepare_transaction` (it needs a transaction form that edits the committed compilation
+in place and re-derives only what the rows touch, which is a protocol and session change), the
+catalog stage's whole-model `effective` and derived-row pass, and `check_counts`. None changes a
+classification.

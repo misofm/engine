@@ -9,7 +9,9 @@
 //! - [`effective_gate`]: one route's gate, per source lane.
 //!
 //! [`effective_into`] is a loop over them, [`effective`] builds the inputs of a model and calls it,
-//! and a host that updates one strip at a time calls the blocks. Nobody spells a rule again.
+//! and a host that updates one strip at a time calls the blocks, over [`LocalInputs`] and
+//! [`any_solo_in`], which read one strip and the overlay without building the model's tables.
+//! Nobody spells a rule again.
 
 use core::fmt;
 
@@ -67,7 +69,7 @@ impl MonitorOverlay {
     /// Drop every soloed ID that names no strip of `model`: a removed strip keeps no solo.
     pub fn retain_strips_of(&mut self, model: &SessionModel) {
         self.soloed
-            .retain(|id| model.strips().any(|strip| strip.id == id));
+            .retain(|id| crate::registry::strip_index(model, id).is_some());
     }
 
     /// The overlay after `writes`, applied in order, on a session whose strips are `next`'s, and
@@ -426,6 +428,142 @@ impl EffectiveInputs for ModelInputs<'_> {
             mute: model.mute,
             follows_mute: model.follows_mute,
             source_strip: self.sources[route],
+        }
+    }
+}
+
+/// Whether some soloable strip of `model` is soloed under `overlay`: [`any_solo`] over
+/// [`ModelInputs`], read from the overlay's sorted IDs instead of from every strip. A soloed ID that
+/// names a submix, or no strip, does not count. Allocation-free; the cost is the number of soloed
+/// strips times a binary search over the tracks, which a compiled session's normalized model lists
+/// in ID order.
+#[must_use]
+pub fn any_solo_in(model: &SessionModel, overlay: &MonitorOverlay) -> bool {
+    overlay.soloed().iter().any(|id| {
+        model
+            .tracks
+            .binary_search_by(|track| track.id.cmp(id))
+            .is_ok()
+    })
+}
+
+/// [`EffectiveInputs`] for **one strip** of a model, and any of its routes (TBD9 D7): the inputs
+/// of [`effective_strip`] for that strip and of [`effective_follow`] and [`effective_gate`] for
+/// any route, with no table built for the other strips. The strip's VCA reach is
+/// [`SessionModel::vca_reach_of`]; a route's source strip is found by binary search over the
+/// sorted strip IDs (tracks, then submixes), so the model must be a compiled session's normalized
+/// model.
+///
+/// [`EffectiveInputs::reach`] answers for the strip given to [`Self::new`] only; a call for another
+/// strip is a caller fault (a debug assertion).
+#[derive(Clone, Debug)]
+pub struct LocalInputs<'a> {
+    model: &'a SessionModel,
+    overlay: &'a MonitorOverlay,
+    strip: usize,
+    reach: Vec<usize>,
+}
+
+impl<'a> LocalInputs<'a> {
+    /// The inputs for strip number `strip` of `model` under `overlay`; `None` if the model has no
+    /// such strip.
+    #[must_use]
+    pub fn new(model: &'a SessionModel, overlay: &'a MonitorOverlay, strip: usize) -> Option<Self> {
+        let id = strip_id_at(model, strip)?;
+        Some(Self {
+            model,
+            overlay,
+            strip,
+            reach: model.vca_reach_of(id),
+        })
+    }
+
+    /// The VCAs that reach the strip: [`SessionModel::vca_reach_of`], handed over so a caller that
+    /// keeps the strip's values keeps its reach without a second table.
+    #[must_use]
+    pub fn into_reach(self) -> Vec<usize> {
+        self.reach
+    }
+}
+
+/// The ID of strip number `strip` of `model` (a track, then a submix).
+fn strip_id_at(model: &SessionModel, strip: usize) -> Option<&StableId> {
+    match model.tracks.get(strip) {
+        Some(track) => Some(&track.id),
+        None => model
+            .submixes
+            .get(strip - model.tracks.len())
+            .map(|submix| &submix.id),
+    }
+}
+
+impl EffectiveInputs for LocalInputs<'_> {
+    fn strip_count(&self) -> usize {
+        self.model.tracks.len() + self.model.submixes.len()
+    }
+
+    fn own_fader(&self, strip: usize) -> ([f32; 2], [bool; 2]) {
+        let tracks = self.model.tracks.len();
+        let fader = if strip < tracks {
+            &self.model.tracks[strip].fader
+        } else {
+            &self.model.submixes[strip - tracks].fader
+        };
+        (
+            [fader.left_db, fader.right_db],
+            [fader.left_mute, fader.right_mute],
+        )
+    }
+
+    fn soloed(&self, strip: usize) -> bool {
+        strip_id_at(self.model, strip).is_some_and(|id| self.overlay.is_soloed(id))
+    }
+
+    fn solo_safe(&self, strip: usize) -> bool {
+        strip >= self.model.tracks.len()
+    }
+
+    fn reach(&self, strip: usize) -> &[usize] {
+        debug_assert_eq!(
+            strip, self.strip,
+            "LocalInputs reads the reach of one strip"
+        );
+        &self.reach
+    }
+
+    fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]) {
+        let fader = &self.model.vcas[vca].fader;
+        (
+            [fader.left_db, fader.right_db],
+            [fader.left_mute, fader.right_mute],
+        )
+    }
+
+    fn route_count(&self) -> usize {
+        self.model.routes.len()
+    }
+
+    fn route(&self, route: usize) -> EffectiveRouteInput {
+        let model = &self.model.routes[route];
+        let id = source_id(model);
+        let tracks = self.model.tracks.len();
+        let source_strip = self
+            .model
+            .tracks
+            .binary_search_by(|track| track.id.cmp(id))
+            .ok()
+            .or_else(|| {
+                self.model
+                    .submixes
+                    .binary_search_by(|submix| submix.id.cmp(id))
+                    .ok()
+                    .map(|at| tracks + at)
+            })
+            .unwrap_or(self.strip_count());
+        EffectiveRouteInput {
+            mute: model.mute,
+            follows_mute: model.follows_mute,
+            source_strip,
         }
     }
 }

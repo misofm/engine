@@ -135,13 +135,13 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
-#[cfg(all(feature = "control-provider", feature = "test-support"))]
-pub use live_delta::take_lowered_owner_count;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
-    classify_live_delta_with_monitor,
+    classify_live_delta_with_monitor, classify_live_edit,
 };
+#[cfg(all(feature = "control-provider", feature = "test-support"))]
+pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,

@@ -1,6 +1,6 @@
 //! The control list and the one read and write path: [`list`], [`get`], [`set`].
 
-use session::{SessionModel, StripRef};
+use session::{SessionModel, StableId, StripRef};
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
@@ -88,11 +88,9 @@ pub fn owner_count(model: &SessionModel) -> usize {
 pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
     let strips = model.tracks.len() + model.submixes.len();
     match owner {
-        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
-        Owner::Route(id) => model
-            .routes
-            .iter()
-            .position(|route| route.id == *id)
+        Owner::Strip(id) => strip_index(model, id),
+        Owner::Route(id) => search(&model.routes, id, |route| &route.id)
+            .or_else(|| model.routes.iter().position(|route| route.id == *id))
             .map(|index| strips + index),
         Owner::Vca(id) => model
             .vcas
@@ -101,6 +99,25 @@ pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
             .map(|index| strips + model.routes.len() + index),
         Owner::Session => Some(owner_count(model) - 1),
     }
+}
+
+/// The index of the strip `id` in [`SessionModel::strips`] order (the tracks, then the submixes),
+/// or `None` when the model has no such strip: the same answer as a scan, in `O(log n)` on a model
+/// whose tracks and submixes are in ID order (a compiled session's normalized model), and by a scan
+/// on any other.
+#[must_use]
+pub fn strip_index(model: &SessionModel, id: &StableId) -> Option<usize> {
+    search(&model.tracks, id, |track| &track.id)
+        .or_else(|| {
+            search(&model.submixes, id, |submix| &submix.id).map(|at| model.tracks.len() + at)
+        })
+        .or_else(|| model.strips().position(|strip| strip.id == id))
+}
+
+/// A binary search for the item whose ID is `id`. Right when `items` are in ID order; on any other
+/// slice it may miss, and the caller then scans.
+fn search<T>(items: &[T], id: &StableId, id_of: impl Fn(&T) -> &StableId) -> Option<usize> {
+    items.binary_search_by(|item| id_of(item).cmp(id)).ok()
 }
 
 /// Which kind of owner an index of [`list`]'s owner order names, and where in its table.
@@ -303,7 +320,7 @@ impl Resolved {
 }
 
 /// Find the row at `address` (its owner, section and control, on any lane).
-fn resolve(
+pub(crate) fn resolve(
     model: &SessionModel,
     address: &ControlAddress,
     sample_rate: u32,

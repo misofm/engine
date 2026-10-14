@@ -1491,7 +1491,10 @@ where
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
         let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
         let monitor_only = prepared.get().is_monitor_only();
-        let Ok(delta) = host_core::classify_live_delta_with_monitor(
+        // TBD9: a transaction of `SetControl`s is classified from the rows it names, with no model
+        // clone and no canonical JSON; any other, and any row the fast path cannot judge, runs the
+        // full classifier inside this one call.
+        let Ok(delta) = host_core::classify_live_edit(
             self.controller.session().compiled().normalized_model(),
             next,
             host_core::LiveRamps::for_session(next),
@@ -1501,6 +1504,7 @@ where
                 next: &monitor_change.overlay,
                 ramp: monitor_change.ramp,
             },
+            transaction.set_control_rows(),
         ) else {
             // A monitor-only transaction never rebuilds (#1603 D7): its records are strip mute and
             // route gate records, which every plan carries, so a rebuild verdict is a defect.

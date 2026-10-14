@@ -906,6 +906,7 @@ pub struct PreparedSessionTransaction {
     edit_ramps: EditRamps,
     monitor_edits: Vec<controls::MonitorWrite>,
     monitor_only: bool,
+    set_control_rows: Option<Vec<controls::ControlAddress>>,
 }
 
 impl PreparedSessionTransaction {
@@ -934,6 +935,16 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub fn monitor_edits(&self) -> &[controls::MonitorWrite] {
         &self.monitor_edits
+    }
+
+    /// The addresses of the rows the transaction wrote to the model, in transaction order, when
+    /// **every** edit of the transaction is a `SetControl` (a write to a monitor row is in
+    /// [`Self::monitor_edits`], not here); `None` as soon as one edit is another kind. A host that
+    /// classifies the transaction reads the rows it names instead of comparing the two models
+    /// whole, because a `SetControl` writes its row and nothing else (TBD9 D2).
+    #[must_use]
+    pub fn set_control_rows(&self) -> Option<&[controls::ControlAddress]> {
+        self.set_control_rows.as_deref()
     }
 
     /// Whether every edit of the transaction is a write to a monitor row. Such a transaction
@@ -1086,6 +1097,7 @@ impl SessionStore {
         let mut edit_ramps = EditRamps::new();
         let mut control_writes = ControlRampWrites::new();
         let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
+        let mut set_control_rows: Option<Vec<controls::ControlAddress>> = Some(Vec::new());
         // #1561 D3: `SetTrackConsole` is structural, so it is accepted only after a `SetConsole`
         // of the same transaction actually changed the console: the candidate's console, with the
         // earlier edits applied, must differ from the committed one.
@@ -1120,6 +1132,10 @@ impl SessionStore {
                 }
             }
             apply_session_edit(&mut candidate, edit).map_err(refused)?;
+            match (edit, &mut set_control_rows) {
+                (SessionEdit::SetControl { address, .. }, Some(rows)) => rows.push(address.clone()),
+                _ => set_control_rows = None,
+            }
             record_edit_ramps(&mut edit_ramps, &mut control_writes, edit)
                 .map_err(|error| refused(SessionEditError::Control(error)))?;
         }
@@ -1154,6 +1170,7 @@ impl SessionStore {
             edit_ramps,
             monitor_edits,
             monitor_only,
+            set_control_rows,
         })
     }
 
@@ -1388,6 +1405,76 @@ mod tests {
             value,
             None,
         )
+    }
+
+    /// TBD9 D2. `set_control_rows` names the rows a transaction of `SetControl`s wrote, in
+    /// transaction order, and is `None` as soon as one edit is another kind. A write to a monitor
+    /// row is not a model write, so it is not in the list, and a transaction of such writes alone
+    /// has an empty list.
+    ///
+    /// Red if a structural edit leaves the list `Some` (a host would then classify the transaction
+    /// from the rows and miss the structure), or a row of the transaction is missing from it.
+    #[test]
+    fn set_control_rows_name_the_rows_of_a_transaction_of_set_controls() {
+        let store = store();
+        let revision = ExpectedRevision::Exact(store.revision());
+        let rows = |edits: &[SessionEdit]| {
+            store
+                .prepare_transaction_with_monitor(revision, edits)
+                .expect("prepares")
+                .set_control_rows()
+                .map(<[_]>::to_vec)
+        };
+        let mute = route_row("to-main", "mute", 1.0);
+        let gain = route_row("to-main", "gain_db", -3.0);
+        let wanted = |edit: &SessionEdit| match edit {
+            SessionEdit::SetControl { address, .. } => address.clone(),
+            _ => unreachable!("a SetControl"),
+        };
+        assert_eq!(
+            rows(&[mute.clone(), gain.clone()]),
+            Some(vec![wanted(&mute), wanted(&gain)])
+        );
+        let track = store.compiled().normalized_model().tracks[0].id.clone();
+        let solo = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Own,
+                control: 2,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        assert_eq!(rows(std::slice::from_ref(&solo)), Some(Vec::new()));
+        assert_eq!(
+            rows(&[solo.clone(), gain.clone()]),
+            Some(vec![wanted(&gain)])
+        );
+        let structural = SessionEdit::RemoveVca {
+            vca_id: id("nobody"),
+        };
+        // A structural edit among them is refused by its own resolution here (no such VCA), so the
+        // case that matters is a structural edit that applies: an upsert.
+        assert!(
+            store
+                .prepare_transaction_with_monitor(revision, &[structural])
+                .is_err()
+        );
+        let upsert = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: id("extra"),
+                fader: session::DualMonoFader {
+                    left_db: 0.0,
+                    right_db: 0.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: Vec::new(),
+            },
+        };
+        assert_eq!(rows(&[gain.clone(), upsert.clone()]), None);
+        assert_eq!(rows(&[upsert, gain]), None);
     }
 
     #[test]
