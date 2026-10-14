@@ -49,6 +49,11 @@ mod common;
 use common::*;
 
 const ROUTE_FOLLOWS_MUTE_ROW: u32 = 7;
+/// The own-row ID of a strip's `effective_fader_db`, a derived row.
+const EFFECTIVE_FADER_DB: u32 = 64;
+/// The VCA the script adds, and the one that holds it and `v`.
+const ADDED_VCA: VcaRef = VcaRef { id: "w" };
+const OUTER_VCA: VcaRef = VcaRef { id: "outer" };
 const MATRIX_MODE_ROW: u32 = 1;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
@@ -170,6 +175,30 @@ enum Edit {
     /// The VCA's members become `t2` and `t3` (a VCA member added), through `UpsertVca`, with the
     /// offset and mute the VCA holds at that block.
     VcaGainsMember,
+    /// One lane of a strip's high-pass.
+    HpfLane {
+        strip: Strip,
+        lanes: Lanes,
+        hz: f32,
+    },
+    /// A strip's `matrix_mode` on its left lane: a shared row has no lanes (`control.lane`).
+    MatrixModeLane {
+        strip: Strip,
+    },
+    /// A write to a derived row, the strip's effective fader (`control.read_only`).
+    EffectiveFader {
+        strip: Strip,
+        db: f32,
+    },
+    /// Two fader lanes in one transaction with two different ramp lengths, which share one ramp
+    /// row (`control.ramp.conflict`).
+    FaderLaneRamps {
+        strip: Strip,
+    },
+    /// A VCA added (`UpsertVca`) that holds `t3`.
+    AddVca,
+    /// A VCA that holds the VCA `v` and the added VCA `w`: a nested VCA.
+    NestedVca,
 }
 
 /// How a scripted edit must end on both hosts.
@@ -216,6 +245,15 @@ const fn refused(block: u64, edit: Edit, code: &'static str) -> Step {
         block,
         edit,
         ramp: None,
+        outcome: Outcome::Refused { code },
+    }
+}
+
+const fn refused_ramped(block: u64, edit: Edit, ramp: u32, code: &'static str) -> Step {
+    Step {
+        block,
+        edit,
+        ramp: Some(ramp),
         outcome: Outcome::Refused { code },
     }
 }
@@ -644,6 +682,53 @@ fn script() -> Vec<Step> {
             480,
         ),
         unchanged(39, Edit::SendMute { muted: false }, 480),
+        // A submix's trim and pan (switched from its matrix first), one lane of a high-pass. A
+        // route into the output has no live lane: its gain and mute are a plan rebuild, which the
+        // C ABI applies and the browser refuses `web.apply.rebuild_pending` until #1562b (D9), so
+        // its rows join this script with that issue.
+        live(
+            48,
+            Edit::Trim {
+                strip: BUS,
+                lanes: Lanes::Both,
+                db: -3.0,
+            },
+        ),
+        live(
+            49,
+            Edit::MatrixMode {
+                strip: BUS,
+                matrix: false,
+            },
+        ),
+        live(
+            50,
+            Edit::Pan {
+                strip: BUS,
+                left: -0.3,
+                right: 0.2,
+            },
+        ),
+        live(
+            23,
+            Edit::HpfLane {
+                strip: T1,
+                lanes: Lanes::Left,
+                hz: 120.0,
+            },
+        ),
+        // A VCA added, then a VCA that holds it and the first one (nested), then a move of the
+        // outer VCA, which reaches the members of both.
+        live(51, Edit::AddVca),
+        live(53, Edit::NestedVca),
+        live(
+            54,
+            Edit::VcaOffset {
+                vca: OUTER_VCA,
+                lanes: Lanes::Both,
+                db: -4.0,
+            },
+        ),
         // Refusals: one each, in the order the table in the doc names them.
         refused(
             58,
@@ -670,6 +755,41 @@ fn script() -> Vec<Step> {
                 db: -3.0,
             },
             "control.address.unknown",
+        ),
+        refused(61, Edit::MatrixModeLane { strip: T3 }, "control.lane"),
+        // `t1` is in pan mode: a matrix row is inactive until the mode changes.
+        refused(
+            61,
+            Edit::Matrix {
+                strip: T1,
+                values: [0.7, 0.3, -0.2, 0.9],
+            },
+            "control.inactive",
+        ),
+        refused(
+            62,
+            Edit::EffectiveFader {
+                strip: T1,
+                db: -3.0,
+            },
+            "control.read_only",
+        ),
+        // An explicit ramp on a row whose ramp is fixed (an effect parameter).
+        refused_ramped(
+            62,
+            Edit::Parameter {
+                insert: GATE,
+                parameter: 1,
+                lanes: Lanes::Both,
+                value: -20.0,
+            },
+            480,
+            "control.ramp.fixed",
+        ),
+        refused(
+            63,
+            Edit::FaderLaneRamps { strip: T2 },
+            "control.ramp.conflict",
         ),
     ]
 }
@@ -959,6 +1079,59 @@ impl CAbi {
                     members: vec![id(T2.id), id(T3.id)],
                 },
             }],
+            Edit::HpfLane { strip, lanes, hz } => {
+                vec![set(Self::strip_address(strip, HPF_HZ, lanes), hz)]
+            }
+            Edit::MatrixModeLane { strip } => vec![set(
+                address(
+                    Owner::Strip(id(strip.id)),
+                    Section::Own,
+                    MATRIX_MODE_ROW,
+                    ParameterChannel::Left,
+                ),
+                1.0,
+            )],
+            Edit::EffectiveFader { strip, db } => vec![set(
+                address(
+                    Owner::Strip(id(strip.id)),
+                    Section::Own,
+                    EFFECTIVE_FADER_DB,
+                    ParameterChannel::Left,
+                ),
+                db,
+            )],
+            Edit::FaderLaneRamps { strip } => [(Lanes::Left, 64), (Lanes::Right, 480)]
+                .into_iter()
+                .map(|(lanes, length)| SessionEdit::SetControl {
+                    address: Self::strip_address(strip, FADER_DB, lanes),
+                    value: -5.0,
+                    ramp_samples: Some(length),
+                })
+                .collect(),
+            Edit::AddVca => vec![SessionEdit::UpsertVca {
+                vca: Vca {
+                    id: id(ADDED_VCA.id),
+                    fader: DualMonoFader {
+                        left_db: -2.0,
+                        right_db: -2.0,
+                        left_mute: false,
+                        right_mute: false,
+                    },
+                    members: vec![id(T3.id)],
+                },
+            }],
+            Edit::NestedVca => vec![SessionEdit::UpsertVca {
+                vca: Vca {
+                    id: id(OUTER_VCA.id),
+                    fader: DualMonoFader {
+                        left_db: -1.0,
+                        right_db: -1.0,
+                        left_mute: false,
+                        right_mute: false,
+                    },
+                    members: vec![id(VCA.id), id(ADDED_VCA.id)],
+                },
+            }],
             Edit::Solo { strip, on } => vec![set(
                 address(
                     Owner::Strip(id(strip.id)),
@@ -1009,8 +1182,8 @@ impl CAbi {
         response
     }
 
-    /// One scripted edit as one transaction at the committed revision.
-    fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> Verdict {
+    /// One scripted edit as one transaction at the committed revision, and the reply frame's bytes.
+    fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> (Verdict, Vec<u8>) {
         let edits = Self::edits(edit, ramp);
         let response = self.send(
             CommandPayload::SessionTransactionApply(&edits),
@@ -1020,7 +1193,7 @@ impl CAbi {
         if let Verdict::Applied { revision, .. } = &verdict {
             self.revision = *revision;
         }
-        verdict
+        (verdict, response)
     }
 
     /// Drain the reliable lane so a later commit is never backpressured by an unread event.
@@ -1215,9 +1388,13 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
     for block in 0..BLOCKS {
         for (position, step) in steps.iter().enumerate().filter(|(_, s)| s.block == block) {
             let label = format!("{rate} Hz: step {position} before block {block}");
-            let b = browser.transaction(&CAbi::edits(step.edit, step.ramp));
-            let c = c_abi.edit(step.edit, step.ramp);
+            let (b, b_reply) = browser.transaction_reply(&CAbi::edits(step.edit, step.ramp));
+            let (c, c_reply) = c_abi.edit(step.edit, step.ramp);
             assert_eq!(b, c, "{label}: the two hosts give one verdict");
+            assert_eq!(
+                b_reply, c_reply,
+                "{label}: the two hosts give the same reply bytes"
+            );
             let solo = matches!(step.edit, Edit::Solo { .. });
             match step.outcome {
                 Outcome::Accepted => {

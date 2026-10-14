@@ -427,6 +427,11 @@ impl Rig {
 
     /// One transaction at the committed revision.
     pub(crate) fn transaction(&mut self, edits: &[SessionEdit]) -> Verdict {
+        self.transaction_reply(edits).0
+    }
+
+    /// [`Self::transaction`], and the reply frame's bytes as the entry returned them.
+    pub(crate) fn transaction_reply(&mut self, edits: &[SessionEdit]) -> (Verdict, Vec<u8>) {
         let response = self.command(
             CommandPayload::SessionTransactionApply(edits),
             ExpectedRevision::Exact(SessionRevision(self.revision)),
@@ -437,7 +442,7 @@ impl Rig {
         }
         // A commit queues its reliable events; the control half's drain reads them (#1570b D4).
         drain_events(&mut self.host);
-        verdict
+        (verdict, response)
     }
 
     /// Submit block `block`'s PCM for the three tracks and render it. Returns the output's bits.

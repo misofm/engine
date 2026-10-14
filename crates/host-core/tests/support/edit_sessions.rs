@@ -8,9 +8,9 @@ use controls::{
 };
 use protocol::{SessionEdit, SessionStore};
 use session::{
-    CompileCaps, Console, DualMonoFader, Effect, EffectIdentity, EffectQuality, LinkMode,
-    MatrixOrPan, RouteDestination, RouteSource, SendTap, SessionModel, SidechainDeclaration,
-    StableId, Submix, Vca, parse_session_json,
+    CompileCaps, Console, ConsoleEntry, ConsoleSlot, DualMonoFader, Effect, EffectIdentity,
+    EffectQuality, LinkMode, MatrixOrPan, RouteDestination, RouteSource, SendTap, SessionModel,
+    SidechainDeclaration, StableId, Submix, Vca, parse_session_json,
 };
 
 pub(crate) const FIXTURE: &str =
@@ -85,18 +85,34 @@ pub(crate) fn plain_session(tracks: usize) -> SessionModel {
     model
 }
 
-/// The fixture's pre-insert console slot on every strip, an insert of a launch effect on each of
-/// the first eight tracks, submix `bus` with sends from `t0000` (following its mute) and `t0001`,
+/// The fixture's pre-insert console slot and a post-insert one (a soft clipper) on every strip, an
+/// insert of a launch effect on each of the first eight tracks (two on `t0000`), submix `bus` with sends from `t0000` (following its mute) and `t0001`,
 /// VCA `v1` over `t0001` and `t0002` and VCA `v0` over `v1` and `t0003`. Every structure here is
 /// the same for any `tracks >= 8`: only the number of plain tracks grows.
 pub(crate) fn rich_session(tracks: usize) -> SessionModel {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
-    let template = model.tracks[0].clone();
+    // A post-insert slot beside the fixture's pre-insert one, so a console edit reaches both
+    // sections. Every strip carries every slot.
+    model.console.post_insert = vec![ConsoleSlot {
+        slot: id("post-clip"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.soft-clip"),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: LinkMode::DualMono,
+    }];
+    let mut template = model.tracks[0].clone();
+    template.console.push(ConsoleEntry {
+        slot: id("post-clip"),
+        bypass: false,
+        params: Vec::new(),
+    });
     let route = model.routes[0].clone();
     model.tracks.clear();
     model.routes.clear();
-    let inserts: [(&str, &str, &str); 8] = [
+    let inserts: [(&str, &str, &str); 9] = [
         ("t0000", "eq", "miso.parametric-eq"),
+        ("t0000", "comp0", "miso.compressor"),
         ("t0001", "comp", "miso.compressor"),
         ("t0002", "gate", "miso.gate-expander"),
         ("t0003", "delay", "miso.delay"),
@@ -555,10 +571,28 @@ pub(crate) fn draw_case(draw: &mut Draw, current: &SessionModel) -> Case {
     for _ in 0..1 + draw.next(4) {
         let group = &by_kind[draw.next(by_kind.len())];
         let row = group[draw.next(group.len())];
-        let value = draw_value(draw, row);
-        let ramp = (matches!(row.descriptor.motion, Motion::Ramp(_)) && draw.next(3) == 0)
+        let mut value = draw_value(draw, row);
+        let mut ramp = (matches!(row.descriptor.motion, Motion::Ramp(_)) && draw.next(3) == 0)
             .then(|| [0, 64, 480][draw.next(3)]);
-        edits.push(SessionEdit::set_control(row.address.clone(), value, ramp));
+        let mut address = row.address.clone();
+        // One edit in ten asks for something a row refuses: a NaN, a value past the domain, a ramp
+        // over a second, or the wrong lane (`Both` on a per-lane row, a lane on a `Both` row).
+        if draw.next(10) == 0 {
+            let d = &row.descriptor;
+            match draw.next(4) {
+                0 => value = f32::NAN,
+                1 => value = d.maximum.abs().max(1.0) * 4.0 + 1.0e3,
+                2 => ramp = Some(rate + 1),
+                _ => {
+                    address.lane = if address.lane == Lane::Both {
+                        Lane::Left
+                    } else {
+                        Lane::Both
+                    };
+                }
+            }
+        }
+        edits.push(SessionEdit::set_control(address, value, ramp));
         names.push(row.descriptor.name);
     }
     if draw.next(16) == 0 {

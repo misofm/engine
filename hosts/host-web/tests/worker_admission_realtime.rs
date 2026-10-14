@@ -28,6 +28,8 @@ use protocol::{
 };
 use session::{ParameterChannel, StableId, canonical_session_json, parse_session_json};
 
+mod common;
+
 #[global_allocator]
 static ALLOCATOR: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 
@@ -165,6 +167,155 @@ fn a_thousand_control_frames_between_renders_never_allocate_in_a_render_call() {
         assert!(
             host_web::miso_engine_web_v1_control_allocation_count() > control_before,
             "the status reports the control allocations"
+        );
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    })
+    .join()
+    .expect("the run completes");
+}
+
+/// One live edit of each owner kind, by `kind % 5`: a strip fader, an insert parameter, a console
+/// slot parameter, a send's gain and a VCA offset, over the parity session of `common`.
+fn owner_edit(kind: u64, high: bool) -> SessionEdit {
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    let (owner, section, control, lane, low, up) = match kind % 5 {
+        0 => (
+            Owner::Strip(id("t1")),
+            Section::Builtins,
+            common::FADER_DB,
+            ParameterChannel::Both,
+            -6.0,
+            -3.0,
+        ),
+        1 => (
+            Owner::Strip(id("t1")),
+            Section::Inserts(id("comp")),
+            1,
+            ParameterChannel::Left,
+            -30.0,
+            -24.0,
+        ),
+        2 => (
+            Owner::Strip(id("t1")),
+            Section::Console(id(common::PRE_SLOT)),
+            1,
+            ParameterChannel::Left,
+            -30.0,
+            -24.0,
+        ),
+        3 => (
+            Owner::Route(id("t1-b")),
+            Section::Own,
+            common::ROUTE_GAIN_DB,
+            ParameterChannel::Both,
+            -6.0,
+            -3.0,
+        ),
+        _ => (
+            Owner::Vca(id("v")),
+            Section::Own,
+            common::VCA_OFFSET_DB,
+            ParameterChannel::Both,
+            -3.0,
+            -1.0,
+        ),
+    };
+    SessionEdit::SetControl {
+        address: ControlAddress {
+            owner,
+            section,
+            control,
+            lane,
+        },
+        value: if high { up } else { low },
+        ramp_samples: None,
+    }
+}
+
+/// 640 live `SET_CONTROL` transactions between renders, one owner kind at a time (a strip, an
+/// insert, a console slot, a send, a VCA), on the parity session: the control frames allocate in
+/// the control count, and no render call allocates or frees.
+///
+/// Test value: red if a live edit of an insert, a console slot, a send or a VCA does any control
+/// work inside the next render call (the plan's lanes, a catalog row or a retired table dropped on
+/// the render side), which the strip-fader loop above does not reach.
+#[test]
+fn live_edits_of_every_owner_kind_between_renders_never_allocate_in_a_render_call() {
+    const SOURCES: [&str; 3] = ["src-t1", "src-t2", "src-t3"];
+    const BLOCKS: u64 = 640;
+    std::thread::spawn(|| {
+        let model = common::model_at(48_000);
+        let document = canonical_session_json(&model).expect("canonical");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: QUANTUM_FRAMES,
+            source_ring_frames: QUANTUM_FRAMES * 2,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let length =
+            native_staging::boot(options, document.as_bytes()).expect("the session stages");
+        let handle = host_web::miso_engine_web_v1_boot(length);
+        assert_ne!(handle, 0, "the parity session boots");
+        let mut revision = model.revision;
+        let mut render_allocations = 0;
+        let mut control_calls = 0;
+        for block in 0..BLOCKS {
+            let control = host_web::miso_engine_web_v1_control_allocation_count();
+            let edits = [owner_edit(block, (block / 5) % 2 == 1)];
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; 4_096];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(block + 1).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                        payload: CommandPayload::SessionTransactionApply(&edits),
+                    },
+                    &mut bytes,
+                )
+                .expect("a transaction frame");
+            let (result, response) =
+                native_staging::control_command(handle, &bytes[..length]).expect("a live handle");
+            assert_eq!(result, RESULT_OK, "block {block}: the control call");
+            let (path, next) = committed(&response);
+            assert_eq!(path, EditPath::Live, "block {block}: the edit is live");
+            revision = next;
+            for lane in [host_web::EVENT_LANE_RELIABLE, host_web::EVENT_LANE_LOSSY] {
+                loop {
+                    let (result, event) = native_staging::control_event(handle, lane);
+                    assert_eq!(result, RESULT_OK, "block {block}: the event drain");
+                    if event.is_empty() {
+                        break;
+                    }
+                }
+            }
+            control_calls += host_web::miso_engine_web_v1_control_allocation_count() - control;
+            for source in SOURCES {
+                assert!(native_staging::source_id(handle, source.as_bytes()));
+                assert!(native_staging::source_pcm(handle, 0.1));
+                let fed = host_web::miso_engine_web_v1_source_submit(
+                    handle,
+                    source.len() as u32,
+                    1,
+                    block * u64::from(QUANTUM_FRAMES),
+                    2,
+                    QUANTUM_FRAMES,
+                    0,
+                );
+                // The sources hold 72 blocks; a later feed is refused at the end of the region.
+                if block < 64 {
+                    assert_eq!(fed, RESULT_OK, "block {block}: the feed of {source}");
+                }
+            }
+            let before = host_web::miso_engine_web_v1_render_allocation_count();
+            let rendered = host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES);
+            render_allocations += host_web::miso_engine_web_v1_render_allocation_count() - before;
+            assert_eq!(rendered, RESULT_OK, "block {block}: the render");
+        }
+        assert_eq!(render_allocations, 0, "a render call allocated or freed");
+        assert!(
+            control_calls > 0,
+            "the control frames' allocations are counted"
         );
         assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
     })
