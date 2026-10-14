@@ -91,9 +91,11 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// keeps for the session, which the browser did not hold before -- the control catalog, the
 /// protocol queues, the replay cache, the control frame scratch, the plan exchange and the strip,
 /// effect and send producers. For this one-strip fixture the control plane's row is 427,534 bytes
-/// (x86-64), and the rest of each bridge row grew from about 100 KB to 535,489 (metadata) and
+/// (x86-64; the catalog's 9,556 bytes, charged on their own since batch 6, are inside it and no longer
+/// a separate term), and the rest of each bridge row grew from about 100 KB to 535,489 (metadata) and
 /// 556,100 (retained), measured on x86-64. The ceilings are those values plus 10 %, rounded up to
-/// 64 bytes: 589,056 and 611,712. `builtin_retained_bytes` rose from 2,887 to 4,041
+/// 64 bytes: 589,056 and 611,712 (after the rebase onto batch 6's final head the rows measure 535,497 and
+/// 556,108, 8 bytes more; the ceilings stand). `builtin_retained_bytes` rose from 2,887 to 4,041
 /// because the plan's lanes are the control plane's (decision 17 C6), which attaches the strips'
 /// input lanes (trim, polarity and filters) where the browser's no-commands options attached none:
 /// 4,041 * 1.1 = 4,445.1, so 4,480. The four-lane values are inferred, as before.

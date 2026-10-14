@@ -400,13 +400,33 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
    policy region of `plan_exchange.rs`), with thin `PlanState` wrappers. Without them the paused
    seek (`seek_source` prepares the consumer so new PCM enters a full ring) and the live response
    capture lose their only route to the plan once the owner holds it.
-2. **`PARSE_TRANSIENT_MULTIPLIER` 20 to 26.** The worst 1 MiB boot document (512 tracks, 4 effects)
-   grows the wasm high-water to 25,427,968 bytes with the control plane's catalog and producers
-   retained; `check-web-boot-budget.mjs` pins 26 (7.2 % headroom).
+2. **`PARSE_TRANSIENT_MULTIPLIER` 20 to 26, open for root.** The worst 1 MiB boot document
+   (192 tracks, 4 inserts each, 768 effects) grows the wasm high-water to 25,427,968 bytes (batch 6
+   final head: 16,121,856), where the root-ruled pin is 20,971,520 plus one page (21,037,056). The
+   growth is 4,390,912 bytes over it and is 24.25 MiB, under root's 25 MiB line. The pin stays 26
+   only so the rest of the AudioWorklet gate runs; root rules on it. Nothing is held twice: the
+   catalog (`ControlCatalog`, 887,888 bytes in this document) is built once by the preparer and the
+   control plane's provider takes it, `ReadyOwnership` holds no `PreparedHost`, and the compiled
+   model is the control plane's one canonical copy (527,071 bytes) read through
+   `committed_session()`. Measured on a native allocator (peak 14,691,515 to 19,810,096; retained
+   after boot 6,450,366 to 13,449,640, so +6,999,274), by allocation site: the 768 effects' live
+   lanes from `attach_effect_live_controls` hold 4.0 MB (5.2 KB each: 2,304 + 720 + 720 + 672 +
+   384 + 192 + 96 + 96 + 60), the render side's bank live lanes hold 2.4 MB (14,080 and 1,760
+   and 1,280 bytes for each of 96 bank effects, and 4,096 bytes for each of 192 strips twice), and
+   the control plane's own fixed rows hold the rest (0.4 MB: the provider's 128 KiB diagnostics, the
+   64 KiB replay cache, four 32 KiB queues, two 16 KiB frames). All of it is the lanes and protocol
+   machinery decision 17 C6 gives every session; none of it duplicates a browser structure.
 3. **Retained budgets re-pinned** (`retained_ceilings.rs`, `expected.json` ceilings): the bridge
    rows charge the control plane's `control_retained_bytes` (427,534 bytes for the one-strip
    fixture), `builtin_retained_bytes` rises because the control plane attaches the strip input
-   lanes.
+   lanes. The 427,534 bytes are the control plane's protocol machinery for one session, and the
+   catalog (9,556 bytes, charged since batch 6 as its own bridge term) is inside it, charged once:
+   the provider's diagnostics (131,072), the replay cache (65,536), four queue rings (32,768 each),
+   two control frames (16,384 each) and a 16,432-byte ring, the queue index rows (10,240 and 6,144),
+   the plan exchange, the epoch rows and the catalog. Nothing in it is a second copy of a browser
+   structure. Measured on x86-64 after the rebase onto batch 6's final head: the two bridge rows
+   are 1,584,073 and 1,604,684 (ceilings 1,637,632 and 1,660,288); the shipped module's are
+   1,576,061 and 1,596,672 (ceilings 1,628,864 and 1,651,520). No ceiling moved by the rebase.
 4. **The integration binary is `plan_exchange_threads.rs`, single-thread form** (gate 4), with the
    module's own counting allocator instead of `bench_support::alloc` (the workspace has no such
    crate). Its session has empty console sections, no insert and filters off: console slots,
@@ -424,9 +444,12 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
 - The prepared commands (`prepared_command_submit`: EQ targets, builtin input filters) are refused
   whole as unsupported, the EQ and input-filter configuration copies answer `RESULT_UNSUPPORTED`,
   and the live route count and IDs read zero.
-- The live response capture (`track_response_capture`) answers `RESULT_UNSUPPORTED` on the
-  nine-track EQ fixture: the plan now carries the lanes the control plane chose (decision 17 C6)
-  where the boot words chose none. Not traced further; #1570b serves the response query.
+- The live response capture (`track_response_capture`) works: on the nine-track EQ fixture it
+  answers `RESULT_OK` for `eq0`, `eq4` and `eq8` under the default options, with 64 command
+  records, with observation taps and with meters, and the two live-response FFI tests pass. The earlier note was wrong about the capture. What the SDK evals that
+  query a response (`live-response-evals.mjs` 312, `response-subscription-evals.mjs` 83) fail on is
+  their edit leg: the band-1 gain edit is refused `unsupportedKind`, so the response after the
+  edit equals the one before it. #1562a, which carries the edit kinds, restores them.
 - A hazard for #1290: `SessionState::submit` and `seek` run the service step first, so the first
   source feed after a published swap would reclaim the displaced plan inside the source export's
   render-locked window (and inside the PCM-feed worklet's `process()`). Nothing publishes a plan
