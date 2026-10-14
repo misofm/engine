@@ -4296,6 +4296,88 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     }
 }
 
+/// #1315 gate 2. With the `automation` provider feature clear, `AUTOMATION_ENQUEUE` is
+/// `UNAVAILABLE` before the revision and domain checks and queues nothing, and the capabilities
+/// record lists no command `0x0006` and clears flag bit 5 while still listing event `0x8002`; with
+/// it set (the default) the same batch is served and both are listed.
+///
+/// Red if the feature switch leaks into the protocol's own automation semantics (the enabled batch
+/// stops being served), a disabled controller still acks or queues the batch, or the registry
+/// advertises a command the controller refuses or breaks the wire rule tying bit 5 to `0x0006`.
+#[test]
+fn a_controller_without_the_automation_feature_refuses_and_does_not_advertise_the_command() {
+    let records = [crate::AutomationRecord {
+        kind: crate::AutomationKind::Point,
+        handle: ParameterHandle(AUTOMATABLE_CONTROL),
+        start: SampleTime(0),
+        end: SampleTime(0),
+        start_value: 0.25,
+        end_value: 0.25,
+    }];
+    let capabilities = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
+        let response = endpoint.process(capability(request_id, b"registry"));
+        let decoded = ProtocolCodec::default()
+            .decode_capabilities(response.payload(), 27)
+            .expect("a capabilities record that passes the wire validator");
+        let ids = |bytes: &[u8]| {
+            bytes
+                .chunks_exact(2)
+                .map(|id| u16::from_le_bytes([id[0], id[1]]))
+                .collect::<Vec<_>>()
+        };
+        (
+            ids(decoded.supported_commands),
+            ids(decoded.supported_events),
+            decoded.flags.0 & (1 << 5) != 0,
+        )
+    };
+    let enqueue = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue {
+                records: &records,
+            }),
+        );
+        let output = process_full_command(endpoint, &input);
+        match decode_response(&output) {
+            crate::DecodedTypedResponseFrame::Success { .. } => StatusCode::Ok,
+            crate::DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+        }
+    };
+    let occupancy = |endpoint: &mut ProtocolController<MockProvider>| {
+        endpoint
+            .queues_mut()
+            .report(crate::QueueKind::Automation)
+            .occupancy
+    };
+
+    let mut endpoint = controller(8, 4);
+    let (commands, events, bit) = capabilities(&mut endpoint, 1);
+    assert!(commands.contains(&6) && events.contains(&0x8002) && bit);
+    endpoint.set_provider_features(ProviderFeatures {
+        automation: false,
+        ..ProviderFeatures::ALL
+    });
+    let (commands, events, bit) = capabilities(&mut endpoint, 2);
+    assert!(!commands.contains(&6), "{commands:?}");
+    assert!(!bit, "flag bit 5");
+    assert!(events.contains(&0x8002), "the session family keeps 0x8002");
+    assert!(
+        commands.contains(&3),
+        "the rest of the registry is unchanged"
+    );
+    assert_eq!(enqueue(&mut endpoint, 3), StatusCode::Unavailable);
+    assert_eq!(
+        occupancy(&mut endpoint),
+        0,
+        "a refused batch queues nothing"
+    );
+    endpoint.set_provider_features(ProviderFeatures::ALL);
+    assert_eq!(enqueue(&mut endpoint, 4), StatusCode::Ok);
+    assert_eq!(occupancy(&mut endpoint), 1);
+}
+
 /// `AUTOMATION_ENQUEUE` keeps its domain rules over the control row the provider lends: only an
 /// automatable control row admits a record, a toggle admits `0` and `1`, an enumeration admits its
 /// choices, and a header or a missing handle is refused.
