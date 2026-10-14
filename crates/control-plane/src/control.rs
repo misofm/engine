@@ -667,6 +667,27 @@ pub enum EventError {
     Internal,
 }
 
+/// Write one preflighted effect record. A bypass takes the transaction's crossfade ramp
+/// (#1341 D1), every other record is written as it is.
+fn write_effect_record(
+    producer: &mut host_core::EffectControlProducer,
+    stamp: engine::realtime::LiveStamp<'_>,
+    record: effect_contract::EffectControlRecord,
+    bypass_ramp_samples: u32,
+) {
+    let written = match record {
+        effect_contract::EffectControlRecord::Bypass(bypassed) => producer.write_bypass(
+            stamp,
+            effect_contract::BypassSwitch {
+                bypassed,
+                ramp_samples: bypass_ramp_samples,
+            },
+        ),
+        record => producer.write(stamp, record),
+    };
+    written.unwrap_or_else(|_| unreachable!("every effect record passed its producer's preflight"));
+}
+
 pub(crate) fn map_encode_error(error: EncodeError) -> CommandError {
     match error {
         EncodeError::OutputTooSmall { required } => CommandError::BufferTooSmall {
@@ -1797,9 +1818,14 @@ where
             let producer = &owners.effects[index];
             for &record in &instance.records {
                 match record {
-                    // Written on every instance, the EQ's too.
-                    effect_contract::EffectControlRecord::Bypass(_) => {
-                        if producer.preflight(record).is_err() {
+                    // Written on every instance, the EQ's too, with the session's crossfade ramp
+                    // (#1341 D1).
+                    effect_contract::EffectControlRecord::Bypass(bypassed) => {
+                        let switch = effect_contract::BypassSwitch {
+                            bypassed,
+                            ramp_samples: instance.bypass_ramp_samples,
+                        };
+                        if producer.preflight_bypass(switch).is_err() {
                             return LiveCommit::Done(Err(CommandError::Internal));
                         }
                     }
@@ -1887,19 +1913,23 @@ where
                 match &instance.targets {
                     None => {
                         for &record in &instance.records {
-                            producer.write(stamp, record).unwrap_or_else(|_| {
-                                unreachable!("every effect record passed its producer's preflight")
-                            });
+                            write_effect_record(
+                                producer,
+                                stamp,
+                                record,
+                                instance.bypass_ramp_samples,
+                            );
                         }
                     }
                     Some(targets) => {
                         for &record in &instance.records {
                             if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
-                                producer.write(stamp, record).unwrap_or_else(|_| {
-                                    unreachable!(
-                                        "every effect record passed its producer's preflight"
-                                    )
-                                });
+                                write_effect_record(
+                                    producer,
+                                    stamp,
+                                    record,
+                                    instance.bypass_ramp_samples,
+                                );
                             }
                         }
                         let base_revision = producer

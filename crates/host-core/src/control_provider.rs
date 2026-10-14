@@ -1844,6 +1844,13 @@ impl Shape {
         let descriptor = &row.descriptor;
         let (ramp_row, default_ramp_samples) = match descriptor.motion {
             Motion::Ramp(live) => (Some(ramp_row(live)), ramps.for_row(live)),
+            // The bypass crossfade has no per-edit length, so its row is fixed, and the length it
+            // runs over is the session's `mute_ms` (#1341).
+            Motion::Fixed
+                if descriptor.family == controls::Family::Effect && descriptor.name == "bypass" =>
+            {
+                (None, ramps.for_row(LiveRampRow::BypassCrossfade))
+            }
             // A coefficient ramp that the effect's own kernel owns.
             Motion::Fixed => (
                 None,

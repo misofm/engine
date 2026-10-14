@@ -2823,6 +2823,58 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     );
 }
 
+/// #1341 D1. Red if a bypass record carries a ramp other than the session's `mute_ms` length (the
+/// fader's or pan's, or a per-edit mute length: the bypass is the one live row with no per-edit
+/// length), if a flip with `mute_ms = 0` is not a step, or if a parameter-only edit carries a ramp.
+#[test]
+fn a_bypass_flip_carries_the_sessions_mute_ramp_and_nothing_else() {
+    let current = with_bypassable();
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let ramp_of = |ramps: LiveRamps, edit_ramps: &EditRamps, flip: bool| {
+        let next = edited(&current, |next| {
+            if flip {
+                next.tracks[0].inserts.effects[0].bypass = true;
+            } else {
+                inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+            }
+        });
+        let delta = classify_live_delta(&current, &next, ramps, edit_ramps).expect("live");
+        assert_eq!(delta.effects.len(), 1);
+        delta.effects[0].bypass_ramp_samples
+    };
+    assert_eq!(ramp_of(session_ramps, &EditRamps::new(), true), 300);
+    assert_eq!(ramp_of(STEP, &EditRamps::new(), true), 0);
+    assert_eq!(ramp_of(session_ramps, &EditRamps::new(), false), 0);
+    let mut edit_ramps = EditRamps::new();
+    edit_ramps.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Mute,
+        Some(50),
+    );
+    assert_eq!(
+        ramp_of(session_ramps, &edit_ramps, true),
+        300,
+        "no per-edit length"
+    );
+    // A ramp the indexed law cannot spell is a domain refusal, never a record.
+    let too_long = LiveRamps {
+        mute_samples: lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM + 1,
+        ..session_ramps
+    };
+    let next = edited(&current, |next| {
+        next.tracks[0].inserts.effects[0].bypass = true
+    });
+    assert_eq!(
+        classify_live_delta(&current, &next, too_long, &EditRamps::new()).map(|_| ()),
+        Err(LiveRebuild::Domain)
+    );
+}
+
 /// #1266 D1 on the EQ. Red if an EQ's bypass record reaches its target designer (which refuses
 /// it, so the edit would rebuild) or displaces its parameter edits: the bypass goes first and the
 /// targets are the parameter edits' alone.

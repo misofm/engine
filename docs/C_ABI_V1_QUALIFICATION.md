@@ -763,7 +763,18 @@ the rack's latency-preserving bypass shunt (decision 14).
   applies the transaction; the block applies the bypass first.
   The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
   so the effect's state continues either way and prepared latency does not change. The switch is a
-  step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.
+  linear crossfade over the session's `mute_ms` (#1341): the record carries `mute_ms` in samples
+  (the one live row with no per-edit length, so an edit's own `ramp_samples` does not apply) and
+  the lane mixes `dry + (wet - dry) * m(k)` on the indexed ramp law, `m` from the mix the lane is at
+  (`1` wet, `0` dry) to its target, over the frames from the block that applies the record. The
+  dry side stays latency-matched throughout. From the first frame after the ramp the output is
+  the settled select, bit for bit; a session whose `mute_ms` is 0 steps at the record's block. A
+  record for the target the lane is already heading for changes nothing, and a reversal continues
+  from the current mix. It may ride with every other live edit.
+  In this slice the crossfade runs in the per-node render path (an insert that its cohort does not
+  bank, such as a lone track's); a lane inside an effect bank still steps until the banked
+  kernel lands (#1341a2). The browser edits through the same core, so it crossfades alike
+  (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
 - **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
   compressor: their session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
@@ -774,7 +785,8 @@ the rack's latency-preserving bypass shunt (decision 14).
   instance's own state is the same either way. An effect downstream of it keeps the live history,
   as after any live edit, so the from-sample-0 oracle holds only while that downstream memory fits
   the window. On the gate fixture (a compressor insert, then a soft-clip console slot), from
-  E + ceil(latency / quantum) + 1 on, a live bypass or lift renders bit-identically to a plan
+  E + ceil((latency + `mute_ms` in samples) / quantum) + 1 on, a live bypass or lift renders
+  bit-identically to a plan
   compiled from the committed snapshot and fed the same source from sample 0, on one and ten
   tracks at the four launch rates. A second stateful effect after the switched one (a compressor
   after a compressor) does not converge within that window; its difference decays.

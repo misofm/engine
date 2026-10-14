@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use effect_contract::{
-    AutomationSpanKind, ChannelSymmetryWitness, EffectCellWriter, EffectControlLane,
+    AutomationSpanKind, BypassSwitch, ChannelSymmetryWitness, EffectCellWriter, EffectControlLane,
     EffectControlRecord, EffectLaneShape, EffectLaneSpec, EffectWriteRefusal,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
     Staged, effect_control_lane,
@@ -114,6 +114,16 @@ impl Rig {
         for record in records {
             self.writer.write(stamp, *record).expect("preflighted");
         }
+        self.pin.publish(&self.gate, revision);
+        Ok(())
+    }
+
+    /// One bypass switch, with its crossfade ramp, as a transaction of its own.
+    pub(crate) fn commit_bypass(&mut self, switch: BypassSwitch) -> Result<(), EffectWriteRefusal> {
+        switch.check()?;
+        let revision = self.pin.last_published() + 1;
+        let stamp = self.pin.stamp(revision).expect("a legal revision");
+        self.writer.write_bypass(stamp, switch)?;
         self.pin.publish(&self.gate, revision);
         Ok(())
     }

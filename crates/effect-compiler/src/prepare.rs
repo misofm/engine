@@ -1,8 +1,8 @@
 use effect_contract::{
-    AutomationRate, EffectCellWriter, EffectControlLane, EffectControlRecord, EffectDescriptor,
-    EffectLaneShape, EffectLaneSpec, EffectQuality, EffectWriteRefusal, InitialParameterValue,
-    LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane, ObservePushError,
-    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
+    AutomationRate, BypassSwitch, EffectCellWriter, EffectControlLane, EffectControlRecord,
+    EffectDescriptor, EffectLaneShape, EffectLaneSpec, EffectQuality, EffectWriteRefusal,
+    InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
+    ObservePushError, ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
     PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
     PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError, effect_control_lane,
     expected_prepared_metadata,
@@ -849,6 +849,30 @@ impl EffectControlProducer {
     ) -> Result<(), EffectWriteRefusal> {
         self.preflight(record)?;
         self.writer.write(stamp, record)
+    }
+
+    /// Check, without writing, that [`Self::write_bypass`] would take `switch`: its ramp fits the
+    /// indexed ramp law.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal::Ramp`].
+    pub fn preflight_bypass(&self, switch: BypassSwitch) -> Result<(), EffectWriteRefusal> {
+        switch.check()
+    }
+
+    /// Write `switch` as the newest value of the bypass cell, stamped with the revision of the
+    /// transaction that commits it: the bypass and its crossfade ramp as one unit (#1341 D1).
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal::Ramp`], with nothing written. The caller has preflighted the switch.
+    pub fn write_bypass(
+        &mut self,
+        stamp: LiveStamp<'_>,
+        switch: BypassSwitch,
+    ) -> Result<(), EffectWriteRefusal> {
+        self.writer.write_bypass(stamp, switch)
     }
 
     /// Queue one observation subscription for the lane's next drain, in order (D15-2: an

@@ -45,6 +45,7 @@ use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
+use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
     EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks,
     Route, RouteDestination, SessionModel, StableId, StripRef, canonical_session_json,
@@ -128,6 +129,12 @@ pub struct LiveEffectRecords<'a> {
     /// Its `Bypass` record, like every other instance's, is written as it is, ahead of the
     /// targets.
     pub records: Vec<EffectControlRecord>,
+    /// The crossfade ramp, in samples, that the [`EffectControlRecord::Bypass`] in `records`
+    /// carries: the session's `mute_ms` through [`LiveRampRow::BypassCrossfade`] (#1341 D1), the one
+    /// live row with no per-edit length, so `0` (a step) only when the session's `mute_ms` is 0.
+    /// `0` when `records` holds no bypass. A host writes the bypass with this ramp
+    /// (`EffectControlProducer::write_bypass`), never as a bare record.
+    pub bypass_ramp_samples: u32,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
     /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
@@ -1714,13 +1721,20 @@ fn effect_records<'a>(
             ctx.next.structure().sample_rate_hz,
         )?
     };
+    let mut bypass_ramp_samples = 0;
     if let Some(bypass) = bypass {
+        // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
+        bypass_ramp_samples = ctx.ramps.for_row(LiveRampRow::BypassCrossfade);
+        if bypass_ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+            return Err(LiveRebuild::Domain);
+        }
         records.insert(0, EffectControlRecord::Bypass(bypass));
     }
     Ok((!records.is_empty()).then(|| LiveEffectRecords {
         strip_id: target.after.id.as_str(),
         address,
         records,
+        bypass_ramp_samples,
         targets,
     }))
 }

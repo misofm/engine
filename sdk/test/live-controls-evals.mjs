@@ -564,10 +564,10 @@ describe("#1563B gate 3 -- every builder renders as the document that holds its 
     settle: 40,
   }));
 
-  // The bypass is a crossfade in the core (#1341); its row moves to that issue's gates. Until then
-  // the edit is admitted and the output settles to the bypassed render only if the core's live
-  // bypass is the shunt, so this row is recorded and not gating.
-  test("effect bypass on a console slot", { todo: "#1341: the core crossfades the bypass" }, () => liveEqualsBooted({
+  // A console slot always banks, and the bank still steps its bypass until #1341a2; either way the
+  // output settles to the render of the document that holds the bypass. The crossfade itself is
+  // gated on an insert below.
+  test("effect bypass on a console slot", () => liveEqualsBooted({
     base: compressor(),
     booted: variant(compressor(), (d) => { d.tracks[0].console[0].bypass = true; }),
     edit: (e) => e.track("t").console("compressor", "miso.compressor").bypass(true),
@@ -625,6 +625,101 @@ describe("#1563B gate 3 -- every builder renders as the document that holds its 
       booted: vcaSession({ fx: { leftMute: true } }).toJson(),
       edit: (e) => e.vca("fx").mute(true, { channel: "left", smoothingSamples: 0 }),
     });
+  });
+});
+
+/**
+ * #1341a1, the amendment gate taken from #1563B gate 3: the SDK's `bypass` builder (a `SET_CONTROL`
+ * on control `0` of an effect section) crossfades an insert over the session's `mute_ms` ramp, on
+ * the headless engine and through the browser's core path, with the same bits in every block.
+ *
+ * Four engines render one input: W never bypassed, D booted bypassed, H bypassed live through the
+ * headless controls, B bypassed live through the browser transport (`SET_CONTROL` frames into the
+ * core). The C ABI leg of the same law is `crates/capi` `live_tests.rs`
+ * (`a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control`), and
+ * the C ABI against the browser host is `hosts/host-web/tests/control_parity.rs`.
+ */
+describe("#1341a1 -- the SDK bypass builder crossfades an insert over the session ramp", () => {
+  const frames = 128 * 64;
+  const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
+  const threshold = compressor.parameters.find((row) => row.name === "threshold");
+  const insertDocument = () => sessionDocument({
+    frames,
+    effects: {
+      inserts: [effectEntry(
+        "ins",
+        compressor.id,
+        compressor.parameters.map((row) => ({
+          id: row.id,
+          unit: row.unitName,
+          value: row.id === threshold.id ? -30 : row.default,
+          channel: "both",
+        })),
+      )],
+    },
+  });
+  /** The default session `mute_ms` is 10 ms. */
+  const rampSamples = 480;
+  const quantum = 128;
+
+  test("headless and browser paths render the same crossfade, and it settles on the bypassed document", async () => {
+    const [wet, dry, headless, browser] = await Promise.all([
+      boot(insertDocument()),
+      boot(variant(insertDocument(), (d) => { d.tracks[0].inserts.effects[0].bypass = true; })),
+      boot(insertDocument()),
+      boot(insertDocument()),
+    ]);
+    try {
+      const before = 4;
+      const total = 16;
+      const submit = async () => {
+        const headlessControls = headless.liveControls();
+        const browserControls = await createBrowserLiveControls(engineHost(browser));
+        const reports = [
+          await headlessControls.submit(headlessControls.edit.track("t").insert("ins", "miso.compressor").bypass(true)),
+          await browserControls.submit(browserControls.edit.track("t").insert("ins", "miso.compressor").bypass(true)),
+        ];
+        for (const report of reports) {
+          assert.equal(report.ok, true);
+          assert.equal(report.path, "live");
+        }
+        assert.equal(reports[0].revision, reports[1].revision, "one revision on both transports");
+      };
+      const blocks = { wet: [], dry: [], headless: [], browser: [] };
+      for (let block = 0; block < total; block += 1) {
+        if (block === before) await submit();
+        for (const [name, engine] of Object.entries({ wet, dry, headless, browser })) {
+          feedDistinct(engine, block);
+          blocks[name].push(engine.render());
+        }
+      }
+      const same = (a, b) => a.left.every((x, i) => Object.is(x, b.left[i]))
+        && a.right.every((x, i) => Object.is(x, b.right[i]));
+      // Bit for bit per block, on both transports.
+      blocks.headless.forEach((block, index) => {
+        assert.ok(same(block, blocks.browser[index]), `block ${index}: headless equals browser`);
+      });
+      // Until the submit the live engines are the never-bypassed one.
+      for (let block = 0; block < before; block += 1) {
+        assert.ok(same(blocks.headless[block], blocks.wet[block]), `block ${block} precedes the edit`);
+      }
+      assert.ok(!same(blocks.wet[total - 1], blocks.dry[total - 1]), "the bypass is audible");
+      // The ramp reaches the output after the chain's own delay; the blocks that sit between the
+      // controls are the crossfade: a step has at most one, a ramp over `rampSamples` spans
+      // `ceil(rampSamples / quantum)` or one more.
+      const between = blocks.headless.map((block, index) =>
+        !same(block, blocks.wet[index]) && !same(block, blocks.dry[index]));
+      const rampBlocks = Math.ceil(rampSamples / quantum);
+      const count = between.filter(Boolean).length;
+      assert.ok(count >= rampBlocks && count <= rampBlocks + 1,
+        `${count} blocks sit between wet and dry; the 10 ms ramp spans ${rampBlocks} or ${rampBlocks + 1}`);
+      const last = between.lastIndexOf(true);
+      for (let block = last + 1; block < total; block += 1) {
+        assert.ok(same(blocks.headless[block], blocks.dry[block]), `block ${block} equals the booted bypass`);
+      }
+    } finally {
+      for (const engine of [wet, dry, headless, browser]) engine.dispose();
+    }
   });
 });
 

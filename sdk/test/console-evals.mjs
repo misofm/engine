@@ -787,7 +787,10 @@ function addressedStrip(bypassed = undefined, variant = undefined) {
     { slot: "pre-comp", effectId: "miso.compressor" },
   ];
   if (variant === "reordered console") preInsert.reverse();
-  let built = session({ id: "console.live", sampleRateHz: 48_000, revision: 1 })
+  // The claim is which instance a bypass reaches, not how it fades, and a live bypass of an insert
+  // crossfades over the session's `muteMs` (#1341): the session authors the hard switch, so the
+  // live render is the authored one from the first sample.
+  let built = session({ id: "console.live", sampleRateHz: 48_000, revision: 1, controlSmoothing: HARD_SWITCH })
     .source("sa", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
     .source("sb", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
     .console({ preInsert, postInsert: [{ slot: "post-eq", effectId: "miso.parametric-eq" }] })
@@ -821,6 +824,9 @@ function addressedStrip(bypassed = undefined, variant = undefined) {
   }
   return built;
 }
+
+/** A session whose live ramps are all steps, so a live bypass lands on its first sample. */
+const HARD_SWITCH = Object.freeze({ muteMs: 0, faderMs: 0, panMs: 0 });
 
 /** The refusal `withSession()` makes for a session that did not write the booted document. */
 const NOT_BOOTED = (error) => error instanceof MisoUsageError
@@ -987,7 +993,8 @@ const AUDIBLE = Object.freeze({
 
 /** One track whose one insert, `fx`, is `effectId`, audible, with its session bypass `bypassed`. */
 function oneInsert(effectId, bypassed) {
-  return session({ id: "console.prepared-bypass", sampleRateHz: 48_000, revision: 1 })
+  // The claim is that the lift reaches the render, not how it fades (#1341): the hard switch.
+  return session({ id: "console.prepared-bypass", sampleRateHz: 48_000, revision: 1, controlSmoothing: HARD_SWITCH })
     .source("s", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
     .track("t", { source: "s", inserts: [effect(effectId, AUDIBLE[effectId], { slotId: "fx", bypass: bypassed })] })
     .output("out")

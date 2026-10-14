@@ -35,7 +35,7 @@
 //! | [`DESIGNED`](ChannelSymmetryWitness::DESIGNED) | preparation: every designed per-lane word the stage's kernel reads compares bit-equal between the channels | a recompile with asymmetric parameters |
 //! | [`RESTORED`](ChannelSymmetryWitness::RESTORED) | restore: the left and right payload sections compared byte-equal | a restore whose sections differ |
 //! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word, unless it is a one-channel `Parameter` or `PreparedTarget` whose block also applied its bit-equal other-channel twin (the pairing rule below) |
-//! | [`UNBYPASSED`](ChannelSymmetryWitness::UNBYPASSED) | preparation | a live bypass on an upstream stage; **restored** when it is lifted |
+//! | [`UNBYPASSED`](ChannelSymmetryWitness::UNBYPASSED) | preparation | a live bypass on an upstream stage, from the record that starts its crossfade; **restored** when the lift's crossfade settles at wet, or at the record for a lift with a zero-sample ramp (#1341 D6) |
 //!
 //! # The hook rule is structural, not a list of kinds
 //!

@@ -888,3 +888,294 @@ fn the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit() {
         "the delay's prepared bypass and a shunt now agree; it may leave NEVER_BANKED_EFFECTS"
     );
 }
+
+// ---- #1341: the bypass crossfade over the session ramp, per node ----------------------------------
+
+/// What a per-node live instance does with its bypass: nothing (W, never bypassed), a session
+/// bypass from preparation (D), or a live bypass by records.
+enum Bypassing {
+    Never,
+    FromPreparation,
+    /// `(block, bypassed, ramp_samples)`, in block order.
+    Records(Vec<(u64, bool, u32)>),
+}
+
+/// One per-node live instance rendered in the order `runtime::LiveControlEffect` runs it: stage
+/// the lane, capture the dry block when the lane needs it or the shunt feeds a line, run the
+/// effect, then mix the dry block back in. Returns every block's output.
+///
+/// `L` is the width of the mix kernel, so the same run at two widths pins that the crossfade is a
+/// function of the frame index and not of the vector width.
+fn render_per_node<L: lane::Lane>(
+    effect_id: &str,
+    bypassing: &Bypassing,
+    blocks: u64,
+) -> (usize, Vec<[Vec<f32>; 2]>) {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let factory = registry.get_shared_ascii(effect_id).expect("launch effect");
+    let descriptor = factory.descriptor();
+    let case = cases(descriptor)[0];
+    let values = default_values(descriptor);
+    let effect_contract::PreparedEffect {
+        processor: mut effect,
+        metadata,
+    } = factory
+        .prepare(request(descriptor, case, false, &values))
+        .expect("instance");
+    let latency = usize::try_from(metadata.latency.0).expect("latency fits");
+    let mut shunt = effect_contract::BypassShunt::new(QUANTUM as usize, latency);
+    let superseded = LiveValuesSuperseded::new();
+    let (gate, mut pin) = RevisionGate::pair(0);
+    let (mut writer, mut lane) = match bypassing {
+        Bypassing::Records(_) => {
+            let (writer, lane) = effect_control_lane(
+                EffectLaneSpec {
+                    shape: EffectLaneShape::from_live_parameters([], 0),
+                    bypass: false,
+                    observation_depth: 0,
+                },
+                &superseded,
+            )
+            .expect("the live lane");
+            (Some(writer), lane)
+        }
+        Bypassing::FromPreparation => (None, EffectControlLane::without_channel(true)),
+        Bypassing::Never => (None, EffectControlLane::without_channel(false)),
+    };
+    let mut signal = Rng::new(0x1341);
+    let mut output = Vec::new();
+    for block in 0..blocks {
+        if let (Bypassing::Records(records), Some(writer)) = (bypassing, writer.as_mut()) {
+            for &(at, bypassed, ramp_samples) in records {
+                if at == block {
+                    let revision = pin.last_published() + 1;
+                    let stamp = pin.stamp(revision).expect("a legal revision");
+                    writer
+                        .write_bypass(
+                            stamp,
+                            effect_contract::BypassSwitch {
+                                bypassed,
+                                ramp_samples,
+                            },
+                        )
+                        .expect("a bypass cell");
+                    pin.publish(&gate, revision);
+                }
+            }
+        }
+        let first_sample = block * u64::from(QUANTUM);
+        lane.stage(&mut [], first_sample, gate.snapshot());
+        let mut left = input_block(0, 0, block, Level::Loud, &mut signal);
+        let mut right = input_block(0, 1, block, Level::Loud, &mut signal);
+        let needs_dry = lane.needs_dry();
+        if needs_dry || shunt.feeds_line() {
+            shunt.capture(&left, &right);
+        }
+        process_scalar(effect.as_mut(), &mut left, &mut right, block);
+        if needs_dry {
+            lane.apply_bypass::<L>(&shunt, &mut left, &mut right);
+        }
+        output.push([left, right]);
+    }
+    (latency, output)
+}
+
+/// The wet mix of a crossfade of `length` frames from `start` to `target`, at ramp index `k`, from
+/// the indexed ramp law alone.
+fn mix_at(start: f32, target: f32, length: u32, k: u32) -> f32 {
+    lane::kernels::IndexedRamp::new([start, 0.0, 0.0, 0.0], [target, 0.0, 0.0, 0.0], length)
+        .coefficients_at(k)[0]
+}
+
+/// `dry + (wet - dry) * m`, as a separate subtract, multiply and add.
+fn mixed(dry: f32, wet: f32, m: f32) -> f32 {
+    dry + (wet - dry) * m
+}
+
+/// A zero-latency effect that changes the loud test signal, and one with latency.
+const ZERO_AND_LATENT: [&str; 2] = ["miso.compressor", "miso.true-peak-limiter"];
+
+/// How many of `a`'s samples differ from `b`'s, in the blocks `from..`: the evidence that a
+/// comparison of the two is not vacuous.
+fn differing(a: &[[Vec<f32>; 2]], b: &[[Vec<f32>; 2]], from: usize) -> usize {
+    a[from..]
+        .iter()
+        .zip(&b[from..])
+        .flat_map(|(a, b)| a.iter().flatten().zip(b.iter().flatten()))
+        .filter(|(a, b)| folded(**a) != folded(**b))
+        .count()
+}
+
+const RAMP: u32 = 480;
+const RECORD_BLOCK: u64 = 3;
+
+/// Gate 1 of #1341: a live bypass crossfades over the session ramp, per node, and settles on
+/// today's whole-block select. X is bypassed by a record at block 3 with a 480-sample ramp at
+/// quantum 128, so the ramp ends inside block 6. Before the record X is W; inside the ramp it is
+/// `D + (W - D) * m(k)` with `m` from the indexed ramp law alone and `k` counted from the record's
+/// first frame; from the ramp's end it is D bit for bit. A zero-latency effect and one with
+/// latency (the true-peak limiter), at the host's width and at scalar width.
+///
+/// Test value: red if `m` comes from an accumulated sum or a fused multiply-add, if the ramp is
+/// off by a frame at the block boundary, if the settled frames compute the formula instead of
+/// copying the dry words, or if the mix reads another width's `m`.
+#[test]
+fn a_live_bypass_crossfades_per_node_over_the_ramp_and_settles_on_the_select() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 12;
+        let (latency, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![(RECORD_BLOCK, true, RAMP)]);
+        let (_, crossfaded) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        let (_, scalar) = render_per_node::<f32>(effect_id, &records, blocks);
+        assert_eq!(
+            latency == 0,
+            effect_id == ZERO_AND_LATENT[0],
+            "{effect_id}: the pair covers one zero-latency effect and one with latency"
+        );
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the crossfade proves nothing"
+        );
+        assert!(
+            differing(&crossfaded, &wet, RECORD_BLOCK as usize) > 0
+                && differing(&crossfaded, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the crossfade is neither the wet nor the dry output"
+        );
+        let mut inside = 0_usize;
+        for block in 0..blocks {
+            for channel in 0..2 {
+                let what = format!("{effect_id} block {block} channel {channel}");
+                assert_bits(
+                    &format!("{what}: the host width equals scalar width"),
+                    &crossfaded[block as usize][channel],
+                    &scalar[block as usize][channel],
+                );
+                let expected: Vec<f32> = (0..QUANTUM)
+                    .map(|frame| {
+                        let (w, d) = (
+                            wet[block as usize][channel][frame as usize],
+                            dry[block as usize][channel][frame as usize],
+                        );
+                        if block < RECORD_BLOCK {
+                            return w;
+                        }
+                        let k = (block - RECORD_BLOCK) * u64::from(QUANTUM) + u64::from(frame) + 1;
+                        if k < u64::from(RAMP) {
+                            inside += 1;
+                            mixed(d, w, mix_at(1.0, 0.0, RAMP, k as u32))
+                        } else {
+                            d
+                        }
+                    })
+                    .collect();
+                assert_bits(&what, &crossfaded[block as usize][channel], &expected);
+            }
+        }
+        assert_eq!(
+            inside,
+            2 * (RAMP as usize - 1),
+            "{effect_id}: the ramp frames"
+        );
+    }
+}
+
+/// Gate 4 of #1341: a record with a zero-sample ramp is a step. X equals D from the first sample of
+/// the record's block, which is what an un-ramped bypass always rendered.
+///
+/// Test value: red if a zero length is not a step, which would move today's bits for an explicit
+/// `mute_ms = 0`.
+#[test]
+fn a_bypass_record_with_a_zero_ramp_steps_at_the_first_sample_of_its_block() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 8;
+        let (_, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![(RECORD_BLOCK, true, 0)]);
+        let (_, stepped) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the step proves nothing"
+        );
+        for block in 0..blocks as usize {
+            let expected = if block < RECORD_BLOCK as usize {
+                &wet
+            } else {
+                &dry
+            };
+            for channel in 0..2 {
+                assert_bits(
+                    &format!("{effect_id} block {block} channel {channel}"),
+                    &stepped[block][channel],
+                    &expected[block][channel],
+                );
+            }
+        }
+    }
+}
+
+/// Gate 3 of #1341, per node: the un-bypass record lands at block 5, at `k = 256` of the 480-frame
+/// ramp. From block 5 the output follows `IndexedRamp::new([m(256), 0, 0, 0], [1, 0, 0, 0], 480)`
+/// with no jump, and equals W exactly from 480 frames later. A second bypass record for the
+/// target the lane is already heading for, in block 7, changes nothing.
+///
+/// Test value: red if a reversal restarts from the settled endpoint (a jump) instead of from the
+/// current mix, or if a repeated target restarts the ramp.
+#[test]
+fn a_reversal_continues_from_the_current_mix_and_a_repeat_changes_nothing() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 14;
+        let (_, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![
+            (RECORD_BLOCK, true, RAMP),
+            (5, false, RAMP),
+            (7, false, RAMP),
+        ]);
+        let (_, reversed) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the reversal proves nothing"
+        );
+        // Blocks 3 and 4 rendered 256 ramp frames; the last of them used m(256).
+        let resume = mix_at(1.0, 0.0, RAMP, 256);
+        let mut continuing = 0_usize;
+        for block in 0..blocks as usize {
+            for channel in 0..2 {
+                let expected: Vec<f32> = (0..QUANTUM as usize)
+                    .map(|frame| {
+                        let (w, d) = (wet[block][channel][frame], dry[block][channel][frame]);
+                        let block = block as u64;
+                        if block < RECORD_BLOCK {
+                            w
+                        } else if block < 5 {
+                            let k = (block - RECORD_BLOCK) * u64::from(QUANTUM) + frame as u64 + 1;
+                            mixed(d, w, mix_at(1.0, 0.0, RAMP, k as u32))
+                        } else {
+                            let k = (block - 5) * u64::from(QUANTUM) + frame as u64 + 1;
+                            if k < u64::from(RAMP) {
+                                continuing += 1;
+                                mixed(d, w, mix_at(resume, 1.0, RAMP, k as u32))
+                            } else {
+                                w
+                            }
+                        }
+                    })
+                    .collect();
+                assert_bits(
+                    &format!("{effect_id} block {block} channel {channel}"),
+                    &reversed[block][channel],
+                    &expected,
+                );
+            }
+        }
+        assert_eq!(
+            continuing,
+            2 * (RAMP as usize - 1),
+            "{effect_id}: the second ramp"
+        );
+    }
+}

@@ -239,3 +239,128 @@ this issue.
   on control `0` of an effect section) renders, on the headless engine and through the browser's
   core path, the same crossfade over the session ramp as the C ABI, bit for bit per block.
   #1563B no longer waits for this slice; only that row does.
+
+## Decision record (decision 17, lane K, batch 5)
+
+### The a1 / a2 / b split
+
+The slice ships in three coherent commits, each with its own gates.
+
+| Part | Content | Gates |
+|---|---|---|
+| **a1** (this commit) | Per node: D1 (the cell and the producers), D2, D3 and D5 (per node), D6; the C ABI producer; the docs; the per-node render and its tests. The bank steps unchanged. | 1, 3 (per node), 4, 5, 7, 9 |
+| **a2** (next) | D4's banked kernel: the interleaved mix with a per-lane select, the bank's capture and restore. | 2, 3 (banked) |
+| **b** (after #1280) | D7: the mix ramp and its position carried across a plan swap in #1280's move-mode lane carry. | 6 |
+
+The SDK `bypass` builder row (Q2 amendment) is **pending**: its browser leg runs only after #1562a
+(the browser core path), and its headless leg needs the browser's `LiveRamps` of #1364. Nothing in
+a1 builds it.
+
+### Adaptations to today's code
+
+- **The cell is already a latest-target cell** (#1345 landed): `EffectCells::bypass` is a
+  `LatestCell<2>` now (`bypassed`, `ramp_samples`), read in the one drain.
+- **The record keeps its shape.** `EffectControlRecord::Bypass(bool)` is matched exhaustively by the
+  browser host, whose source another lane owns, so it stays the *step* spelling (the same write with
+  a ramp of 0, which is D1's browser value). The ramp-carrying unit is `BypassSwitch { bypassed,
+  ramp_samples }`, written by `EffectCellWriter::write_bypass` and
+  `EffectControlProducer::write_bypass` (preflight `check`/`preflight_bypass`, refusal
+  `EffectWriteRefusal::Ramp` above `INDEXED_RAMP_LENGTH_MAXIMUM`). The classifier's
+  `LiveEffectRecords::bypass_ramp_samples` carries the session ramp beside the `Bypass` record, and
+  the control plane writes the pair as one `BypassSwitch`. Folding the ramp into the record itself,
+  and giving the browser's `COMMAND_EFFECT_BYPASS` the session ramp, is #1393 with the browser lane.
+- **Registry.** The bypass row's motion is `Motion::Fixed` (no per-edit length, so `SET_CONTROL`
+  on control 0 cannot carry a length) and `LiveRampRow::BypassCrossfade` maps to `mute_ms`; the
+  delay and the multiband bypass stay `rebuild_only` through `lowers_session_bypass`. The control
+  list now reports the bypass row's `default_ramp_samples` as the session's mute ramp (was 0).
+- **Ramp index.** Frame `f` of a block at ramp position `p` takes `k = p + f + 1`, the convention of
+  `route_mix_ramp_block`: the first ramp frame is already one step along, the ramp reaches its target
+  on the `length`-th frame, and `m_now` at a reversal is `m(p)`, the last rendered frame's mix. The
+  settled frames are never computed.
+- **Lane API.** `needs_dry()` (bypassed or ramping, D5), `bypass_ramping()`, `bypass_mix()`,
+  `apply_bypass::<L>(shunt, left, right)` (mix and advance) and `advance_bypass_mix(frames)` on
+  `EffectControlLane`; `BypassShunt::crossfade::<L>` is the kernel, with the outlined `f32` tail.
+  D6: a record admits `Bypass(true)` into the witness whenever the target is dry or the ramp is
+  longer than 0; the advance that settles a lane at wet admits `Bypass(false)`.
+- **The bank, until a2.** `LiveControlEffectBankStage` still restores dry words by the lane's
+  target (`bypassed()`), so a banked lane steps at its record exactly as before. It calls
+  `advance_bypass_mix(frames)` once per block so each lane's ramp state, and the `UNBYPASSED` term it
+  restores, stay in step with the timeline. A console slot always banks, so on the C ABI only a
+  per-node insert (a remainder group) crossfades until a2 lands; a2 deletes the interim.
+- **Test adaptations (hazard 1).** The C ABI tests that compare a live bypass with a rebuild wait
+  `window(latency, mute ramp, quantum)`, and the two that compare with the browser's stepping lane
+  author `control_smoothing = hard switch`.
+
+### Evidence
+
+- `bypass_shunt_identity.rs`: the exact law per node (gate 1) for a zero-latency effect (compressor)
+  and one with latency (true-peak limiter), at the host width and at scalar width; the reversal at
+  `k = 256` and a repeated target (gate 3, per node); the zero ramp (gate 4).
+- `live_control.rs`: the witness, `needs_dry`, the repeated target, a zero ramp and the refusal.
+- `live_delta.rs`: the record's ramp is the session's `mute_ms` (no per-edit length) and a ramp above
+  the law's bound is `Domain`.
+- C ABI (gate 5, `live_tests.rs`): a bypass transaction follows the law with the session's
+  `mute_ms` and lands on a control booted bypassed, for a zero-latency effect and one with
+  latency, at `mute_ms` 10 and 0, with no allocation in a ramp block. The law holds there to a few ulps
+  of the block peak, because the strip's gain stages follow the effect and round; gate 1 pins it
+  exactly at the effect's output.
+
+## Decision record: #1341a1 (batch 8)
+
+The per-node crossfade (commit `b6bbc44e3`, built on a pre-flip base) was re-applied onto `main` at
+`32cee58d0`, after the batch 6-7 flip made the browser a thin client of the core's `SessionState`.
+
+### What shipped
+
+The a1 content of the batch 5 decision record above, unchanged: `BypassSwitch { bypassed,
+ramp_samples }` as the two-word bypass cell, the per-node lane crossfade (`EffectControlLane`,
+`BypassShunt::crossfade`), `LiveEffectRecords::bypass_ramp_samples` filled from the session's
+`mute_ms`, the control plane's `write_effect_record`, the bypass row's `default_ramp_samples`, and
+the docs. A bank (a console slot, or any banked cohort) still steps; that is a2.
+
+### Departures from the batch 5 text, and why
+
+- **The browser needs no separate producer.** `COMMAND_EFFECT_BYPASS` and the browser's own live
+  lane are gone from `main`: the browser sends `SET_CONTROL` frames into the core, whose control
+  plane writes the `BypassSwitch` (with the session ramp) for every host. So #1341a1 crossfades the
+  browser too, and #1393 (already superseded by #1563) has no work left. D1's "browser writes a ramp
+  of 0" no longer applies. The stale comments that said so were corrected
+  (`EffectControlRecord::Bypass`, `live_tests.rs`, `C_ABI_V1_QUALIFICATION.md`).
+- **D7 (carry) does not apply now.** The #1280 carries are not on `main`, and
+  `crates/engine/src/realtime/latest_cell.rs` is not touched. The mix ramp and its position `k` are
+  carried by #1280's move-mode lane carry; that extension moves with #1341b.
+
+### Amendment gate (SDK `bypass` builder, from #1563B gate 3)
+
+The browser leg is reachable now, as the browser is the core's `SESSION_STATE` through frames. The
+gate is three tests, one per layer, because the C ABI, the headless engine and the browser host run
+one core:
+
+- C ABI: `capi` `a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control`
+  (the law, at `mute_ms` 10 and 0, with zero allocation in a ramp block).
+- C ABI against the browser host, bit for bit per block, at 44.1, 48, 88.2 and 96 kHz:
+  `hosts/host-web/tests/control_parity.rs` `a_live_bypass_crossfades_alike_on_both_hosts` (new), plus
+  the scripted insert and console-slot bypass rows of
+  `both_hosts_give_the_same_result_for_the_same_control_edits`. The new test fails on a step (a step
+  spans at most one block, a ramp spans `ceil(mute_ms * rate / 128)` or one more) and on a wrong
+  length, and requires the render to equal the booted-bypassed one from the ramp's end.
+- SDK: `sdk/test/live-controls-evals.mjs` "the SDK bypass builder crossfades an insert over the
+  session ramp": the builder's `SET_CONTROL`, through the headless engine and through the browser
+  transport (`createBrowserLiveControls` over `engineHost`), renders the same bits in every block,
+  with the same count of crossfade blocks as the law, and settles on the booted-bypassed document.
+  The "effect bypass on a console slot" row left `todo` and gates (it settles on the booted
+  document; the console slot steps until a2).
+
+### Test adaptations (hazard 1)
+
+- `sdk/test/console-evals.mjs`: the two evals that compare a live insert bypass with the authored
+  one author `controlSmoothing` of zero (`HARD_SWITCH`); the claim there is addressing, not fading.
+- `hosts/host-web/tests/control_admission.rs`: the insert "bypass" row compares with the fresh plan
+  from block 16 (after the ramp and the strip's delay compensation) instead of from block 0.
+
+### Conflicts met on `main`
+
+`crates/control-plane/src/control.rs` (the effect-record write loop moved under the `if let
+Some(stamp)` publication block: kept main's shape, both write sites call `write_effect_record`) and
+`crates/host-core/src/control_provider.rs` (`control_row` became `Shape::of`: the bypass arm of the
+`Motion::Fixed` match moved there).

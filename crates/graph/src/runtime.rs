@@ -3671,14 +3671,16 @@ fn execute_op(
             // timeline by construction rather than by two clocks agreeing.
             let staged = live.stage(snapshot, first_sample);
             let automation = &live.spans[..staged.staged];
-            let bypassed = live.control.bypassed();
-            // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and
-            // only when this block is bypassed. `bypassed` is already decided here — the control
-            // drain that could change it ran above — so the capture is skippable for an
-            // un-bypassed block *unless* the shunt carries a latency line, which has to be fed on
-            // every block whatever the bypass state. Both readers of `dry_*` are later in this
-            // same block, so nothing crosses a block boundary and the skip moves no rendered bit.
-            let capture_dry = bypassed || live.shunt.feeds_line();
+            // Issue #163 phase 4 item 4: the dry staging is read only by the mix below, and only
+            // when this block is bypassed or its bypass crossfade is running (#1341 D5). That is
+            // already decided here — the control drain that could change it ran above — so the
+            // capture is skippable for a block that is settled wet *unless* the shunt carries a
+            // latency line, which has to be fed on every block whatever the bypass state. Both
+            // readers of `dry_*` are later in this same block, so nothing crosses a block
+            // boundary and the skip moves no rendered bit. A crossfade toward wet still captures
+            // its last block, because the lane is ramping when the block begins.
+            let needs_dry = live.control.needs_dry();
+            let capture_dry = needs_dry || live.shunt.feeds_line();
             let effect = &mut live.effect;
             for target in live.control.prepared_targets() {
                 effect
@@ -3722,9 +3724,10 @@ fn execute_op(
                     let _ = effect.processor.process(block);
                 }
             }
-            if bypassed {
+            if needs_dry {
                 let (out_left, out_right) = output_planes(arena, &mut host, output);
-                live.shunt.apply(out_left, out_right);
+                live.control
+                    .apply_bypass::<FrameLane>(&live.shunt, out_left, out_right);
             }
             // Issue #143: after `process`, and after the bypass shunt, so an observed value always
             // describes the block that was actually emitted.

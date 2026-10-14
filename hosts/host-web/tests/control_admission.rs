@@ -237,16 +237,22 @@ fn live_rows() -> Vec<Row> {
             insert_row("t1", "eq", EQ_BAND_GAIN, ParameterChannel::Both),
             -9.0,
         ),
-        fixed_row(
-            "bypass",
-            insert_row(
-                "t1",
-                "comp",
-                controls::BYPASS_CONTROL,
-                ParameterChannel::Both,
-            ),
-            1.0,
-        ),
+        // An insert's bypass crossfades over the session's `mute_ms` ramp (#1341), which reaches
+        // the output after the strip's delay compensation: the plan equals the fresh one from
+        // the block the ramp has ended in. The ramp itself is held by `control_parity.rs`.
+        Row {
+            from_block: 16,
+            ..fixed_row(
+                "bypass",
+                insert_row(
+                    "t1",
+                    "comp",
+                    controls::BYPASS_CONTROL,
+                    ParameterChannel::Both,
+                ),
+                1.0,
+            )
+        },
         // One console slot in each section (batch 7 review M6): a parameter and a bypass of each.
         fixed_row(
             "pre-insert slot parameter",

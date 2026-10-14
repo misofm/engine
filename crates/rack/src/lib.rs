@@ -1705,6 +1705,12 @@ impl LiveControlEffectBankStage {
                 }
             }
         }
+        // The lanes' bypass crossfades advance by the block (#1341 D6). The bank does not mix a
+        // crossfade yet, so a lane steps to its target at its record exactly as it always did;
+        // the advance keeps each lane's state, and the witness term it restores, in step.
+        for channel in self.lanes[..lane_count].iter_mut().flatten() {
+            channel.advance_bypass_mix(frames);
+        }
         // 3. Latency-matched dry restore for exactly the bypassed lanes. `any_bypassed` is the
         //    disjunction of the per-lane test below, decided before the capture; when it is false
         //    this whole loop was already a no-op, and skipping it also proves the capture above

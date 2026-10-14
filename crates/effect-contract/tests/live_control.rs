@@ -13,7 +13,7 @@ use effect_contract::{
     BypassShunt, EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
     ParameterChannelPolicy,
 };
-use lane_rig::{Rig, both, left, right, target};
+use lane_rig::{Rig, UNBYPASSED, both, left, right, target};
 
 /// A shape with `Left`/`Right` cells for each `PerLane` index and one `Both` cell for each
 /// `Shared` one.
@@ -367,4 +367,97 @@ fn a_value_above_the_snapshot_waits_and_is_applied_once() {
         0,
         "nothing was replaced before a snapshot covered it"
     );
+}
+
+/// #1341 D2, D5, D6: a bypass switch with a ramp starts a crossfade the lane steps through by the
+/// block. A ramping lane counts as bypassed for the witness from the record until the ramp settles
+/// at wet, and needs the dry block until then; a record whose target is the one the lane is
+/// already heading for changes nothing; a switch with no ramp steps at the record.
+///
+/// Test value: a lane that restores `UNBYPASSED` at the un-bypass record (collapse engaging
+/// while the dry mix is still in the output), or that restarts its ramp on a repeated target, or
+/// that stops needing the dry block one block early.
+#[test]
+fn a_bypass_crossfade_is_bypassed_to_the_witness_and_needs_dry_until_it_settles_at_wet() {
+    use effect_contract::BypassSwitch;
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    assert!(!rig.lane.needs_dry() && !rig.lane.bypass_ramping());
+    assert_eq!(rig.lane.bypass_mix(), 1.0);
+
+    rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert!(rig.lane.bypassed() && rig.lane.bypass_ramping() && rig.lane.needs_dry());
+    assert!(
+        !rig.lane.symmetry().holds(UNBYPASSED),
+        "bypassed from the record"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 1.0, "no frame has rendered yet");
+    rig.lane.advance_bypass_mix(128);
+    let after_one_block = rig.lane.bypass_mix();
+    assert!(after_one_block < 1.0 && after_one_block > 0.0);
+
+    // The same target again, mid-ramp: nothing restarts.
+    rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert_eq!(rig.lane.bypass_mix(), after_one_block);
+    rig.lane.advance_bypass_mix(128);
+    rig.lane.advance_bypass_mix(128);
+    assert!(
+        !rig.lane.bypass_ramping() && rig.lane.needs_dry(),
+        "settled dry still needs dry"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 0.0);
+
+    // The way back is a crossfade too: bypassed for the witness until it settles at wet.
+    rig.commit_bypass(BypassSwitch {
+        bypassed: false,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert!(!rig.lane.bypassed() && rig.lane.bypass_ramping() && rig.lane.needs_dry());
+    assert!(!rig.lane.symmetry().holds(UNBYPASSED));
+    rig.lane.advance_bypass_mix(128);
+    rig.lane.advance_bypass_mix(128);
+    assert!(rig.lane.bypass_ramping() && !rig.lane.symmetry().holds(UNBYPASSED));
+    rig.lane.advance_bypass_mix(128);
+    assert!(!rig.lane.bypass_ramping() && !rig.lane.needs_dry());
+    assert!(
+        rig.lane.symmetry().holds(UNBYPASSED),
+        "restored when the ramp settles at wet"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 1.0);
+
+    // A zero ramp is a step, in both directions.
+    rig.commit_bypass(BypassSwitch::step(true)).expect("a cell");
+    rig.stage();
+    assert!(rig.lane.needs_dry() && !rig.lane.bypass_ramping());
+    assert!(!rig.lane.symmetry().holds(UNBYPASSED));
+    assert_eq!(rig.lane.bypass_mix(), 0.0);
+    rig.commit_bypass(BypassSwitch::step(false))
+        .expect("a cell");
+    rig.stage();
+    assert!(!rig.lane.needs_dry() && rig.lane.symmetry().holds(UNBYPASSED));
+}
+
+/// A ramp the indexed ramp law cannot spell is refused before the first write.
+#[test]
+fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
+    use effect_contract::BypassSwitch;
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    let refused = rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM + 1,
+    });
+    assert_eq!(refused, Err(EffectWriteRefusal::Ramp));
+    rig.stage();
+    assert!(!rig.lane.bypassed());
 }

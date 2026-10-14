@@ -61,6 +61,20 @@ bypassed track keeps its bank. Two effects keep their session bypass as a prepar
 compressor, whose whole-bank D7 recovery would let a bypassed lane silence its bank-mates
 (issue #1100).
 
+A live bypass change crossfades (#1341). The bypass cell holds the bypass and the crossfade's ramp
+length in samples as one unit (`BypassSwitch`; the `Bypass(bool)` record is the same write with a
+ramp of 0, a step). The lane keeps the mix `m` (`1` wet, `0` dry) as an `IndexedRamp` of one word
+and its frame position. A record whose bypass is the one the lane is already heading for changes
+nothing; otherwise it starts a ramp from the current `m` to the target, so a reversal continues
+without a jump. Frame `k` of the ramp (counted from 1 at the first frame of the block that applies
+the record) mixes `dry + (wet - dry) * m(k)` as a separate subtract, multiply and add (no fused
+multiply-add), the same `m` for both channels, linear in amplitude because dry and wet are the same
+latency-matched signal. A settled lane is selected, not computed: settled dry copies the dry words
+and settled wet keeps the wet words, so the output after the ramp is the whole-block select of an
+un-ramped bypass, and a ramp of 0 samples renders exactly that. The dry block is captured when the
+lane is bypassed or ramping, or the shunt feeds a latency line. A ramping lane counts as bypassed
+for the channel-symmetry witness until it settles at wet.
+
 Class-A identity, the same bits on every lane width and target, treats every NaN as one value
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`
 before comparing or hashing, the engine does not canonicalize NaNs at render, and finite input
