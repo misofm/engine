@@ -139,6 +139,19 @@ pub struct LiveDelta<'a> {
     pub effects: Vec<LiveEffectRecords<'a>>,
     /// One entry per route into a submix that has a record, in canonical route-ID order (#1557 D2).
     pub routes: Vec<LiveRouteRecord<'a>>,
+    /// The list-order indices (`controls::owner_count`'s order) of every owner with at least one
+    /// row whose value bits differ between the two models, of any class and family: the owners a
+    /// control catalog has to read again (#1600 D1). A derived row is not counted, since it
+    /// follows other controls, and it is the catalog's to refresh from the effective values.
+    /// A strip whose solo differs between the two monitor overlays is counted too: its solo row is
+    /// a host value, not a model row. Ascending, with no duplicate. Empty when the models differ in no control value.
+    ///
+    /// Only the rows both models list are compared, so a VCA added or removed names no VCA owner
+    /// here; a catalog compares its own owner list.
+    pub changed_owners: Vec<usize>,
+    /// Whether a row of family `Setting` (the session's `control_smoothing` lengths) differs. Such
+    /// a row changes the descriptors of every owner, not only its own (`default_ramp_samples`).
+    pub settings_changed: bool,
 }
 
 impl LiveDelta<'_> {
@@ -155,6 +168,10 @@ impl LiveDelta<'_> {
             strips,
             effects,
             routes,
+            // Which owners changed and whether a setting did are the catalog's inputs, not
+            // records: a model-only commit moves values and has no record.
+            changed_owners: _,
+            settings_changed: _,
         } = self;
         strips.is_empty() && effects.is_empty() && routes.is_empty()
     }
@@ -335,8 +352,17 @@ pub fn classify_live_delta_with_monitor<'a>(
     // changed (#1558 D1). A VCA added or removed has no row in the diff, so the lists decide.
     // A change of the overlay moves the effective mutes without moving a row.
     let mut derived = current.vcas != next.vcas || monitor.committed != monitor.next;
+    let mut changed_owners: Vec<usize> = Vec::new();
+    let mut settings_changed = false;
     for change in &changes {
         let descriptor = &change.descriptor;
+        if let Some(position) = owner_position(next, &change.address.owner) {
+            // The changes come in list order, but the VCA rows follow the session's.
+            if let Err(at) = changed_owners.binary_search(&position) {
+                changed_owners.insert(at, position);
+            }
+        }
+        settings_changed |= descriptor.family == Family::Setting;
         match descriptor.class {
             ControlClass::RebuildOnly { reason, .. } => {
                 return Err(LiveRebuild::RebuildOnly(reason));
@@ -384,12 +410,28 @@ pub fn classify_live_delta_with_monitor<'a>(
         }
     }
 
+    // A strip whose solo differs between the two overlays changed its solo row, which is no
+    // model row and so has no entry in `changes` (#1600 D1, #1559).
+    if monitor.committed != monitor.next {
+        for (index, strip) in next.strips().enumerate() {
+            if monitor.committed.is_soloed(strip.id) != monitor.next.is_soloed(strip.id)
+                && let Err(at) = changed_owners.binary_search(&index)
+            {
+                changed_owners.insert(at, index);
+            }
+        }
+    }
+
     // Step 4.
     refuse_unresolvable_params(current, next)?;
 
     // Step 5. The effective values of both models, once (decision 17, C7).
     let diff = derived.then(|| EffectiveDiff::new(current, next, ramps, edit_ramps, monitor));
-    let mut delta = LiveDelta::default();
+    let mut delta = LiveDelta {
+        changed_owners,
+        settings_changed,
+        ..LiveDelta::default()
+    };
     let mut work = work.into_iter().peekable();
     for (index, after) in next.strips().enumerate() {
         let mut item = work
@@ -596,6 +638,26 @@ enum Lowered<'a> {
     Effect(Option<LiveEffectRecords<'a>>),
     Route(Option<LiveRouteRecord<'a>>),
     Nothing,
+}
+
+/// The index of `owner` in the control list's owner order: the strips, the routes, the VCAs, the
+/// session.
+fn owner_position(model: &SessionModel, owner: &Owner) -> Option<usize> {
+    let strips = model.tracks.len() + model.submixes.len();
+    match owner {
+        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
+        Owner::Route(id) => model
+            .routes
+            .iter()
+            .position(|route| route.id == *id)
+            .map(|index| strips + index),
+        Owner::Vca(id) => model
+            .vcas
+            .iter()
+            .position(|vca| vca.id == *id)
+            .map(|index| strips + model.routes.len() + index),
+        Owner::Session => Some(controls::owner_count(model) - 1),
+    }
 }
 
 #[cfg(feature = "test-support")]

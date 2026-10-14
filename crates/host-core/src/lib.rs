@@ -122,8 +122,10 @@ mod limiter_linked_session;
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
     CatalogResources, ControlCatalog, PlanSampleSource, SessionControlProvider,
-    SessionControlProviderError, SessionControlProviderResources,
+    SessionControlProviderError, SessionControlProviderResources, StagedCatalog, StagedValues,
 };
+#[cfg(all(feature = "control-provider", feature = "test-support"))]
+pub use control_provider::{fail_next_stages, take_stage_counts};
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };

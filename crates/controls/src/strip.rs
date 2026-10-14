@@ -263,21 +263,7 @@ pub(crate) fn push_rows(
     sample_rate: u32,
 ) {
     let owner = Owner::Strip(strip.id.clone());
-    let on_submix = matches!(strip.kind, StripKind::Submix(_));
-    for row in ROWS.iter().filter(|row| row.on_submix || !on_submix) {
-        push_control(
-            out,
-            &owner,
-            &Section::Own,
-            row.id,
-            &row.descriptor,
-            |side| match &row.value {
-                StripValue::Stored { read, .. } => read(strip, side),
-                StripValue::Derived { read } => read(effective, side),
-                StripValue::Monitor => toggle(soloed),
-            },
-        );
-    }
+    push_own_rows(out, strip, effective, soloed, false);
     for row in builtin_rows::rows() {
         let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
         push_control(
@@ -305,6 +291,45 @@ pub(crate) fn push_rows(
         );
     }
     push_console(out, strip, &console.post_insert, post_entries);
+}
+
+/// Append the rows of a strip's own table, in listing order; with `derived_only`, only the
+/// derived ones (the effective fader and mute), which are the rows that other owners' values move.
+fn push_own_rows(
+    out: &mut Vec<ControlRow>,
+    strip: &StripRef<'_>,
+    effective: &EffectiveStrip,
+    soloed: bool,
+    derived_only: bool,
+) {
+    let owner = Owner::Strip(strip.id.clone());
+    let on_submix = matches!(strip.kind, StripKind::Submix(_));
+    for row in ROWS.iter().filter(|row| {
+        (row.on_submix || !on_submix)
+            && (!derived_only || row.descriptor.class == ControlClass::Derived)
+    }) {
+        push_control(
+            out,
+            &owner,
+            &Section::Own,
+            row.id,
+            &row.descriptor,
+            |side| match &row.value {
+                StripValue::Stored { read, .. } => read(strip, side),
+                StripValue::Derived { read } => read(effective, side),
+                StripValue::Monitor => toggle(soloed),
+            },
+        );
+    }
+}
+
+/// Append only a strip's derived rows (its effective fader and mute), in listing order.
+pub(crate) fn push_derived_rows(
+    out: &mut Vec<ControlRow>,
+    strip: &StripRef<'_>,
+    effective: &EffectiveStrip,
+) {
+    push_own_rows(out, strip, effective, false, true);
 }
 
 /// Find one row of strip `id` (a track or a submix) by section and control, as [`push_rows`] would

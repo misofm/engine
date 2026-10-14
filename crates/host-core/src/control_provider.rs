@@ -82,6 +82,61 @@ pub struct ControlCatalog {
     resources: CatalogResources,
 }
 
+/// The catalog of a live commit's committed model, staged before the commit's first write
+/// (#1600). [`SessionControlProvider::publish_staged_catalog`] applies it after the commit.
+pub enum StagedCatalog {
+    /// The catalog differs from the current one in values alone: the writes to apply.
+    Values(StagedValues),
+    /// The catalog differs in an address, a header or a descriptor, or a setting changed: the whole
+    /// catalog, as [`ControlCatalog::build`] gives it.
+    Full(ControlCatalog),
+}
+
+/// The value writes of a values-only refresh: pairs of an entry index and its new value, in a
+/// vector reserved exactly before the commit.
+pub struct StagedValues {
+    writes: Vec<(u32, f32)>,
+}
+
+impl StagedValues {
+    /// The number of values this refresh writes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.writes.len()
+    }
+
+    /// Whether this refresh writes no value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.writes.is_empty()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static STAGED_OWNERS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static FULL_STAGES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static STAGE_FAILURES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// How many changed owners [`ControlCatalog::stage_live`] has read on this thread since the last
+/// call, and how many of its results were [`StagedCatalog::Full`]; resets both (#1600 D7). A
+/// test shows that one fader edit reads one owner and takes no full catalog.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_stage_counts() -> (usize, usize) {
+    (
+        STAGED_OWNERS.with(|count| count.replace(0)),
+        FULL_STAGES.with(|count| count.replace(0)),
+    )
+}
+
+/// Make the next `count` calls of [`ControlCatalog::stage_live`] on this thread fail, so a test
+/// can show that a refusal before the first write commits nothing.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fail_next_stages(count: usize) {
+    STAGE_FAILURES.with(|failures| failures.set(count));
+}
+
 /// What a catalog row is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RowKind {
@@ -365,6 +420,39 @@ impl SessionControlProvider {
         }
         self.catalog = catalog;
         self.revision = revision;
+    }
+
+    /// The staged catalog of a live commit's model, read before the commit's first write
+    /// ([`ControlCatalog::stage_live`] on the catalog the provider holds).
+    ///
+    /// # Errors
+    ///
+    /// [`SessionControlProviderError`] as [`ControlCatalog::stage_live`].
+    pub fn stage_live_catalog(
+        &self,
+        next: &SessionModel,
+        overlay: &MonitorOverlay,
+        sample_rate: u32,
+        delta: &crate::LiveDelta<'_>,
+    ) -> Result<StagedCatalog, SessionControlProviderError> {
+        self.catalog.stage_live(next, overlay, sample_rate, delta)
+    }
+
+    /// Publish a catalog staged by [`Self::stage_live_catalog`], committed as session revision
+    /// `revision`, without allocation or failure. A values-only stage writes its values and keeps
+    /// the structure epoch; a full catalog replaces the current one as
+    /// [`Self::replace_session_catalog`] does, and so advances the epoch exactly when an address,
+    /// a header or a descriptor differs.
+    pub fn publish_staged_catalog(&mut self, staged: StagedCatalog, revision: u64) {
+        match staged {
+            StagedCatalog::Values(staged) => {
+                for (index, value) in staged.writes {
+                    self.catalog.values[index as usize] = value;
+                }
+                self.revision = revision;
+            }
+            StagedCatalog::Full(catalog) => self.replace_session_catalog(catalog, revision),
+        }
     }
 
     /// The retained bytes and largest allocation of the catalog the provider holds now.
@@ -802,22 +890,7 @@ impl ControlCatalog {
                     values.push(0.0);
                 }
                 if section_opens {
-                    let identity = match &address.section {
-                        Section::Console(slot) => model
-                            .console
-                            .slots()
-                            .find(|candidate| candidate.slot == *slot)
-                            .map(|candidate| &candidate.identity),
-                        Section::Inserts(id) => strip.and_then(|strip| {
-                            strip
-                                .inserts
-                                .effects
-                                .iter()
-                                .find(|candidate| candidate.id == *id)
-                                .map(|candidate| &candidate.identity)
-                        }),
-                        Section::Own | Section::Builtins => None,
-                    };
+                    let identity = section_identity(model, strip.as_ref(), &address.section);
                     effect = identity.and_then(contract);
                     let effect_identity = match identity {
                         Some(EffectIdentity::Native { effect_id })
@@ -969,12 +1042,327 @@ impl ControlCatalog {
                 .all(|(left, right)| same_descriptor(left, right))
     }
 
+    /// Stage the catalog of the committed model `next` of a live commit, before the commit's first
+    /// write (#1600). `overlay` is the monitor overlay the commit leaves, the one a full build of
+    /// the committed catalog reads: the derived rows and a strip's `solo` row follow it (#1559
+    /// D11). `self` is the catalog of the model the delta starts from, and `delta` is
+    /// [`classify_live_delta`](crate::classify_live_delta)'s for the two.
+    ///
+    /// It returns [`StagedCatalog::Values`] when the committed catalog differs from `self` in
+    /// values alone: no setting changed, the owners are the same, and every owner that has a changed
+    /// value lists the same addresses and descriptors (every `f32` by bits) as before. The staged
+    /// writes are the rows of the changed owners and every derived row, read from one effective
+    /// pass, so the cost is the changed owners' rows plus the strips and routes, never the whole
+    /// list. Any other delta returns [`StagedCatalog::Full`], the catalog [`Self::build`] gives.
+    ///
+    /// Either way the result is what a full build would give once applied (an `f32` by bits); in
+    /// a test build the `Values` case builds the full catalog and checks it. Nothing is written
+    /// and nothing is published: a refusal here leaves the commit unstarted.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionControlProviderError`] if an allocation fails or the list outgrows the table
+    /// indices.
+    pub fn stage_live(
+        &self,
+        next: &SessionModel,
+        overlay: &MonitorOverlay,
+        sample_rate: u32,
+        delta: &crate::LiveDelta<'_>,
+    ) -> Result<StagedCatalog, SessionControlProviderError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if STAGE_FAILURES.with(|count| {
+            let pending = count.get();
+            count.set(pending.saturating_sub(1));
+            pending > 0
+        }) {
+            return Err(SessionControlProviderError);
+        }
+        if let Some(staged) = self.stage_values(next, overlay, sample_rate, delta)? {
+            #[cfg(any(test, feature = "test-support"))]
+            if cfg!(debug_assertions) {
+                let full = Self::build(next, overlay, sample_rate)?;
+                assert!(
+                    self.same_structure(&full),
+                    "a values-only stage must keep every address, header and descriptor"
+                );
+                let mut values = self.values.clone();
+                for &(index, value) in &staged.writes {
+                    values[index as usize] = value;
+                }
+                assert!(
+                    values.len() == full.values.len()
+                        && values
+                            .iter()
+                            .zip(&full.values)
+                            .all(|(left, right)| left.to_bits() == right.to_bits()),
+                    "a values-only stage must give the values of a full build"
+                );
+            }
+            return Ok(StagedCatalog::Values(staged));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        FULL_STAGES.with(|count| count.set(count.get() + 1));
+        Self::build(next, overlay, sample_rate).map(StagedCatalog::Full)
+    }
+
+    /// The writes that bring `self` to the catalog of `next`, or `None` when a values-only
+    /// refresh cannot (a setting changed, the owners differ, or a changed owner lists other
+    /// addresses or descriptors).
+    fn stage_values(
+        &self,
+        next: &SessionModel,
+        overlay: &MonitorOverlay,
+        sample_rate: u32,
+        delta: &crate::LiveDelta<'_>,
+    ) -> Result<Option<StagedValues>, SessionControlProviderError> {
+        if delta.settings_changed || !self.lists_owners_of(next) {
+            return Ok(None);
+        }
+        let effective = controls::effective(next, overlay);
+        let ramps = LiveRamps::for_session(next);
+        let strip_count = next.tracks.len() + next.submixes.len();
+        // The derived rows sit in the first section of a strip and of a route.
+        let derived_owners = strip_count + next.routes.len();
+
+        // The runs of the rows to read again, and a bound of the writes, before any is made.
+        let mut runs = Vec::new();
+        runs.try_reserve_exact(delta.changed_owners.len())
+            .map_err(|_| SessionControlProviderError)?;
+        let mut capacity = 0_usize;
+        for &owner in &delta.changed_owners {
+            let Some(run) = self.owner_run(owner) else {
+                return Ok(None);
+            };
+            capacity += run.len();
+            runs.push(run);
+        }
+        for owner in 0..derived_owners {
+            capacity += self.derived_indices(owner).count();
+        }
+        let mut writes = Vec::new();
+        writes
+            .try_reserve_exact(capacity)
+            .map_err(|_| SessionControlProviderError)?;
+        let mut fresh = Vec::new();
+        let mut memo: HashMap<u32, Shape, BuildHasherDefault<DefaultHasher>> = HashMap::default();
+
+        for (&owner, run) in delta.changed_owners.iter().zip(runs) {
+            #[cfg(any(test, feature = "test-support"))]
+            STAGED_OWNERS.with(|count| count.set(count.get() + 1));
+            fresh.clear();
+            controls::owner_rows_with(next, &effective, overlay, owner, sample_rate, &mut fresh);
+            let strip = (owner < strip_count)
+                .then(|| next.strips().nth(owner))
+                .flatten();
+            if !self.stage_run(
+                next,
+                strip.as_ref(),
+                owner,
+                run,
+                &fresh,
+                ramps,
+                &mut memo,
+                &mut writes,
+            )? {
+                return Ok(None);
+            }
+        }
+        for owner in 0..derived_owners {
+            fresh.clear();
+            controls::derived_rows_with(next, &effective, owner, &mut fresh);
+            let indices = self.derived_indices(owner);
+            if indices.clone().count() != fresh.len() {
+                return Ok(None);
+            }
+            for (index, row) in indices.zip(&fresh) {
+                if !self.address_matches(&self.rows[index], owner, &row.address) {
+                    return Ok(None);
+                }
+                writes.push((index_of(index)?, row.value));
+            }
+        }
+        Ok(Some(StagedValues { writes }))
+    }
+
+    /// Whether the catalog's owners are the owners of `next`, in the list's order: the strips,
+    /// the routes, the VCAs and the session. A VCA added or removed fails it.
+    fn lists_owners_of(&self, next: &SessionModel) -> bool {
+        let strips = next
+            .strips()
+            .map(|strip| (ControlOwnerKind::Strip, Some(strip.id)));
+        let routes = next
+            .routes
+            .iter()
+            .map(|route| (ControlOwnerKind::Route, Some(&route.id)));
+        let vcas = next
+            .vcas
+            .iter()
+            .map(|vca| (ControlOwnerKind::Vca, Some(&vca.id)));
+        let expected = strips
+            .chain(routes)
+            .chain(vcas)
+            .chain([(ControlOwnerKind::Session, None)]);
+        self.owners.len() == controls::owner_count(next)
+            && self.owners.iter().zip(expected).all(|(owner, (kind, id))| {
+                owner.kind == kind && owner.id.as_deref() == id.map(session::StableId::as_str)
+            })
+    }
+
+    /// The index range of owner number `owner`'s entries: its header and everything after it
+    /// until the next owner's. `None` when the list has no such owner.
+    fn owner_run(&self, owner: usize) -> Option<core::ops::Range<usize>> {
+        let owner = u32::try_from(owner).ok()?;
+        let start = self.rows.partition_point(|row| self.owner_of(row) < owner);
+        let length = self.rows[start..].partition_point(|row| self.owner_of(row) == owner);
+        (length > 0 && self.rows[start].kind == RowKind::Owner).then_some(start..start + length)
+    }
+
+    /// The entries of the derived rows of strip or route number `owner`, in list order. They are
+    /// control rows of the owner's first section.
+    fn derived_indices(&self, owner: usize) -> impl Iterator<Item = usize> + Clone + '_ {
+        let start = u32::try_from(owner).ok().map_or(self.rows.len(), |owner| {
+            self.rows.partition_point(|row| self.owner_of(row) < owner)
+        });
+        // The owner's header, its first section's header, then that section's rows.
+        let first = (start + 2).min(self.rows.len());
+        (first..self.rows.len())
+            .take_while(|&index| self.rows[index].kind == RowKind::Control)
+            .filter(|&index| {
+                self.descriptors[self.rows[index].descriptor as usize].class
+                    == ControlClass::Derived
+            })
+    }
+
+    /// Whether the entry `record` lists the control at `address`, of owner number `owner`.
+    fn address_matches(
+        &self,
+        record: &RowRecord,
+        owner: usize,
+        address: &controls::ControlAddress,
+    ) -> bool {
+        if record.kind != RowKind::Control
+            || record.control != address.control
+            || record.lane != ParameterChannel::from(address.lane)
+        {
+            return false;
+        }
+        let section = &self.sections[record.parent as usize];
+        let owner_record = &self.owners[section.owner as usize];
+        let (owner_id, slot_id) = (
+            match &address.owner {
+                Owner::Session => None,
+                Owner::Strip(id) | Owner::Route(id) | Owner::Vca(id) => Some(id.as_str()),
+            },
+            match &address.section {
+                Section::Own | Section::Builtins => None,
+                Section::Console(id) | Section::Inserts(id) => Some(id.as_str()),
+            },
+        );
+        section.owner as usize == owner
+            && owner_record.kind == ControlOwnerKind::from_controls(address.owner.kind())
+            && owner_record.id.as_deref() == owner_id
+            && section.section == ControlSection::from_controls(address.section.kind())
+            && section.slot_id.as_deref() == slot_id
+    }
+
+    /// Check one changed owner's `fresh` rows against its stored `run`, and stage the value of
+    /// each. `Ok(false)` when the owner lists other addresses, other section headers or other
+    /// descriptors than the run holds, which a values-only refresh cannot express.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_run(
+        &self,
+        model: &SessionModel,
+        strip: Option<&session::StripRef<'_>>,
+        owner: usize,
+        run: core::ops::Range<usize>,
+        fresh: &[controls::ControlRow],
+        ramps: LiveRamps,
+        memo: &mut HashMap<u32, Shape, BuildHasherDefault<DefaultHasher>>,
+        writes: &mut Vec<(u32, f32)>,
+    ) -> Result<bool, SessionControlProviderError> {
+        // The run opens with the owner's header.
+        let mut at = run.start + 1;
+        let mut section: Option<&controls::Section> = None;
+        let mut effect: Option<&'static EffectDescriptor> = None;
+        for row in fresh {
+            if section != Some(&row.address.section) {
+                // A section opens with its header, whose section and slot are the row's.
+                let Some(header) = self.rows.get(at).filter(|record| {
+                    at < run.end
+                        && record.kind == RowKind::Section
+                        && self.sections[record.parent as usize].owner as usize == owner
+                }) else {
+                    return Ok(false);
+                };
+                let stored = &self.sections[header.parent as usize];
+                let slot_id = match &row.address.section {
+                    Section::Own | Section::Builtins => None,
+                    Section::Console(id) | Section::Inserts(id) => Some(id.as_str()),
+                };
+                if stored.section != ControlSection::from_controls(row.address.section.kind())
+                    || stored.slot_id.as_deref() != slot_id
+                {
+                    return Ok(false);
+                }
+                section = Some(&row.address.section);
+                effect = section_identity(model, strip, &row.address.section).and_then(contract);
+                at += 1;
+            }
+            let Some(record) = self.rows.get(at).filter(|_| at < run.end) else {
+                return Ok(false);
+            };
+            if !self.address_matches(record, owner, &row.address) {
+                return Ok(false);
+            }
+            let shape = Shape::of(row, ramps, effect);
+            if memo.get(&record.descriptor) != Some(&shape) {
+                let stored = &self.descriptors[record.descriptor as usize];
+                if !same_descriptor(&shape.to_row()?, stored) {
+                    return Ok(false);
+                }
+                memo.try_reserve(1)
+                    .map_err(|_| SessionControlProviderError)?;
+                memo.insert(record.descriptor, shape);
+            }
+            writes.push((index_of(at)?, row.value));
+            at += 1;
+        }
+        // The run holds nothing that the owner no longer lists.
+        Ok(at == run.end)
+    }
+
     /// Every wire entry, with the committed values filled in.
     #[cfg(test)]
     fn entries(&self) -> Vec<ControlEntry> {
         (0..self.rows.len())
             .map(|index| self.entry(index))
             .collect()
+    }
+}
+
+/// The native effect identity of an effect section of `strip` (a console slot or an insert), or
+/// `None` for any other section.
+fn section_identity<'a>(
+    model: &'a SessionModel,
+    strip: Option<&session::StripRef<'a>>,
+    section: &Section,
+) -> Option<&'a EffectIdentity> {
+    match section {
+        Section::Console(slot) => model
+            .console
+            .slots()
+            .find(|candidate| candidate.slot == *slot)
+            .map(|candidate| &candidate.identity),
+        Section::Inserts(id) => strip.and_then(|strip| {
+            strip
+                .inserts
+                .effects
+                .iter()
+                .find(|candidate| candidate.id == *id)
+                .map(|candidate| &candidate.identity)
+        }),
+        Section::Own | Section::Builtins => None,
     }
 }
 
@@ -1491,8 +1879,14 @@ mod tests {
     }
 
     fn provider_of(model: &session::SessionModel) -> (SessionControlProvider, Arc<Clock>) {
-        let catalog =
-            ControlCatalog::build(model, &MonitorOverlay::default(), RATE).expect("catalog");
+        provider_under(model, &MonitorOverlay::default())
+    }
+
+    fn provider_under(
+        model: &session::SessionModel,
+        overlay: &MonitorOverlay,
+    ) -> (SessionControlProvider, Arc<Clock>) {
+        let catalog = ControlCatalog::build(model, overlay, RATE).expect("catalog");
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let sample_source: Arc<dyn PlanSampleSource> = Arc::clone(&clock) as Arc<_>;
         let provider = SessionControlProvider::try_new(
@@ -2329,5 +2723,405 @@ mod tests {
             2,
             "a second equal catalog keeps it"
         );
+    }
+
+    // Issue #1600: a live commit refreshes only the changed owners' rows.
+
+    /// Nine tracks, a submix that eq0's send feeds with `follows_mute`, and a VCA over eq1.
+    fn staged_session() -> session::SessionModel {
+        let mut model = nine_track();
+        let track = model.tracks[0].clone();
+        let bus = session::StableId::parse("bus").expect("ID");
+        model.submixes.push(session::Submix {
+            id: bus.clone(),
+            builtins: track.builtins.clone(),
+            console: track.console.clone(),
+            inserts: session::Rack {
+                effects: Vec::new(),
+            },
+            fader: track.fader.clone(),
+            matrix_or_pan: track.matrix_or_pan.clone(),
+        });
+        let mut send = model.routes[0].clone();
+        send.id = session::StableId::parse("eq0-bus").expect("ID");
+        send.destination = session::RouteDestination::SubmixInput { submix_id: bus };
+        send.follows_mute = true;
+        model.routes.push(send);
+        model.vcas.push(session::Vca {
+            id: session::StableId::parse("vca0").expect("ID"),
+            fader: track.fader.clone(),
+            members: vec![model.tracks[1].id.clone()],
+        });
+        compile(&model).normalized_model().clone()
+    }
+
+    /// The control `name` of owner `owner` in `section`, on `lane`.
+    fn address_of(
+        model: &session::SessionModel,
+        owner: &Owner,
+        section: &Section,
+        name: &str,
+        lane: session::ParameterChannel,
+    ) -> controls::ControlAddress {
+        controls::list(model, &MonitorOverlay::default(), RATE)
+            .find(|row| {
+                row.address.owner == *owner
+                    && row.address.section == *section
+                    && row.descriptor.name == name
+                    && row.address.lane == lane
+            })
+            .unwrap_or_else(|| panic!("{name}"))
+            .address
+    }
+
+    fn strip_id(id: &str) -> Owner {
+        Owner::Strip(session::StableId::parse(id).expect("ID"))
+    }
+
+    fn write(model: &mut session::SessionModel, address: &controls::ControlAddress, value: f32) {
+        controls::set(model, address, value, None, RATE).expect("an accepted value");
+    }
+
+    /// What one staged live commit gave: the provider that published it, the owners the stage
+    /// read and the full catalogs it took.
+    struct Staged {
+        provider: SessionControlProvider,
+        owners_read: usize,
+        full_stages: usize,
+        /// The list of a provider built fresh from the committed model, and its epoch.
+        fresh: (Vec<ControlEntry>, u64),
+    }
+
+    /// Commit `edit` on `before` as a live commit would: classify, stage from the current
+    /// catalog, publish, and compare with a provider built from the committed model.
+    fn live_commit(
+        before: &session::SessionModel,
+        edit: impl FnOnce(&mut session::SessionModel),
+    ) -> Staged {
+        let none = MonitorOverlay::default();
+        live_commit_under(before, &none, &none, edit)
+    }
+
+    /// As [`live_commit`], with the monitor overlay the provider's catalog was built under
+    /// (`committed`) and the one the commit leaves (`left`): the stage and the fresh build both
+    /// read `left` (#1600 D1, #1559 D11).
+    fn live_commit_under(
+        before: &session::SessionModel,
+        committed: &MonitorOverlay,
+        left: &MonitorOverlay,
+        edit: impl FnOnce(&mut session::SessionModel),
+    ) -> Staged {
+        let mut next = before.clone();
+        edit(&mut next);
+        let (mut provider, _clock) = provider_under(before, committed);
+        let delta = crate::classify_live_delta_with_monitor(
+            before,
+            &next,
+            LiveRamps::for_session(&next),
+            &session::EditRamps::new(),
+            crate::MonitorBase {
+                committed,
+                next: left,
+                ramp: None,
+            },
+        )
+        .expect("a live delta");
+        take_stage_counts();
+        let staged = provider
+            .stage_live_catalog(&next, left, RATE, &delta)
+            .expect("staged");
+        let (owners_read, full_stages) = take_stage_counts();
+        assert_eq!(
+            matches!(staged, StagedCatalog::Full(_)),
+            full_stages == 1,
+            "the counter agrees with the result"
+        );
+        provider.publish_staged_catalog(staged, 2);
+        assert_eq!(provider.revision, 2);
+        let (mut fresh_provider, _clock) = provider_under(&next, left);
+        let fresh = (whole_list(&mut fresh_provider, 256), 1);
+        Staged {
+            provider,
+            owners_read,
+            full_stages,
+            fresh,
+        }
+    }
+
+    impl Staged {
+        /// Every page at limit 256 equals the fresh provider's, entry by entry, and the epoch is
+        /// `epoch`.
+        fn assert_same_as_fresh(&mut self, epoch: u64) {
+            let list = whole_list(&mut self.provider, 256);
+            assert_eq!(list.len(), self.fresh.0.len());
+            for (staged, fresh) in list.iter().zip(&self.fresh.0) {
+                assert_eq!(staged.handle, fresh.handle);
+                assert_eq!(staged.address, fresh.address);
+                match (&staged.body, &fresh.body) {
+                    (ControlBody::Control(left), ControlBody::Control(right)) => {
+                        assert_eq!(left.value.to_bits(), right.value.to_bits(), "{}", left.name);
+                        assert!(same_descriptor(left, right), "{}", left.name);
+                    }
+                    (left, right) => assert_eq!(left, right),
+                }
+            }
+            assert_eq!(self.provider.structure_epoch(), epoch);
+        }
+    }
+
+    /// Gate 1 of #1600. One lane of a fader, a submix's mute, a console EQ parameter, a VCA
+    /// offset, two edits on two strips and a send gain each give the list
+    /// of a fresh build, keep the epoch, and take no full catalog; a `control_smoothing` change and
+    /// a `matrix_mode` switch take the full catalog and advance the epoch.
+    ///
+    /// Red if the patched list differs from a full rebuild in any value or descriptor, or the epoch
+    /// moves when it should not, or stays when it should move.
+    #[test]
+    fn a_staged_live_commit_gives_the_list_of_a_full_build() {
+        use session::ParameterChannel::{Both, Left, Right};
+        let model = staged_session();
+        type Edit = Box<dyn Fn(&mut session::SessionModel)>;
+        let cases: [(&str, Edit); 6] = [
+            (
+                "a track fader lane",
+                Box::new(|m| {
+                    let a = address_of(m, &strip_id("eq3"), &Section::Builtins, "fader_db", Left);
+                    write(m, &a, -4.5);
+                }),
+            ),
+            (
+                "a submix mute",
+                Box::new(|m| {
+                    let a = address_of(m, &strip_id("bus"), &Section::Builtins, "mute", Right);
+                    write(m, &a, 1.0);
+                }),
+            ),
+            (
+                "a console EQ parameter",
+                Box::new(|m| {
+                    let slot = m.console.slots().next().expect("a slot").slot.clone();
+                    let a = controls::list(m, &MonitorOverlay::default(), RATE)
+                        .find(|row| {
+                            row.address.owner == strip_id("eq2")
+                                && row.address.section == Section::Console(slot.clone())
+                                && row.descriptor.family == controls::Family::Effect
+                                && row.descriptor.name != "bypass"
+                                && row.descriptor.class == controls::ControlClass::Live
+                        })
+                        .expect("a live effect row")
+                        .address;
+                    let current =
+                        controls::get(m, &MonitorOverlay::default(), &a, RATE).expect("a value");
+                    let descriptor = controls::list(m, &MonitorOverlay::default(), RATE)
+                        .find(|row| row.address == a)
+                        .expect("row")
+                        .descriptor;
+                    let value = if current == descriptor.minimum {
+                        descriptor.maximum
+                    } else {
+                        descriptor.minimum
+                    };
+                    write(m, &a, value);
+                }),
+            ),
+            (
+                "a VCA offset",
+                Box::new(|m| {
+                    let vca = Owner::Vca(session::StableId::parse("vca0").expect("ID"));
+                    let a = address_of(m, &vca, &Section::Own, "offset_db", Left);
+                    write(m, &a, -6.0);
+                }),
+            ),
+            (
+                "two edits on two strips",
+                Box::new(|m| {
+                    let a = address_of(m, &strip_id("eq0"), &Section::Builtins, "fader_db", Left);
+                    write(m, &a, -1.0);
+                    let b = address_of(m, &strip_id("eq5"), &Section::Builtins, "mute", Left);
+                    write(m, &b, 1.0);
+                }),
+            ),
+            (
+                "a send gain",
+                Box::new(|m| {
+                    let route = Owner::Route(session::StableId::parse("eq0-bus").expect("ID"));
+                    let a = address_of(m, &route, &Section::Own, "gain_db", Both);
+                    write(m, &a, -3.0);
+                }),
+            ),
+        ];
+        for (name, edit) in cases {
+            let mut staged = live_commit(&model, edit);
+            assert_eq!(staged.full_stages, 0, "{name} takes no full catalog");
+            assert!(staged.owners_read >= 1, "{name}");
+            staged.assert_same_as_fresh(1);
+        }
+
+        let mut smoothing = live_commit(&model, |m| {
+            let a = address_of(m, &Owner::Session, &Section::Own, "fader_ms", Both);
+            write(m, &a, 55.0);
+        });
+        assert_eq!(smoothing.full_stages, 1, "a setting takes the full catalog");
+        smoothing.assert_same_as_fresh(2);
+
+        let mut matrix = live_commit(&model, |m| {
+            let a = address_of(m, &strip_id("eq1"), &Section::Own, "matrix_mode", Both);
+            write(m, &a, 1.0);
+        });
+        assert_eq!(
+            matrix.full_stages, 1,
+            "a `matrix_mode` switch takes the full catalog"
+        );
+        matrix.assert_same_as_fresh(2);
+    }
+
+    /// Gate 2 of #1600. A strip's mute reaches the gate row of a send that follows its mute and the
+    /// strip's own effective rows, though the route is not in the delta's changed owners.
+    ///
+    /// Red if derived values are refreshed only for the changed owners.
+    #[test]
+    fn a_followed_mute_refreshes_the_send_gate_of_an_unchanged_route() {
+        use session::ParameterChannel::Left;
+        let model = staged_session();
+        let mut staged = live_commit(&model, |m| {
+            let a = address_of(m, &strip_id("eq0"), &Section::Builtins, "mute", Left);
+            write(m, &a, 1.0);
+        });
+        assert_eq!(
+            staged.owners_read, 1,
+            "only the strip is read as a changed owner"
+        );
+        assert_eq!(staged.full_stages, 0);
+        staged.assert_same_as_fresh(1);
+        let list = whole_list(&mut staged.provider, 256);
+        let gate = list
+            .iter()
+            .find(|entry| {
+                entry.address.owner_id.as_deref() == Some("eq0-bus")
+                    && matches!(&entry.body, ControlBody::Control(row) if row.name == "effective_gate")
+                    && entry.address.lane == Some(ParameterChannel::Left)
+            })
+            .expect("the gate row");
+        assert_eq!(
+            control_value(gate),
+            1.0,
+            "the route follows the muted strip"
+        );
+    }
+
+    /// A solo-only (monitor) commit changes no model row, yet the strip's `solo` row and every
+    /// strip's and route's effective rows follow the overlay the commit leaves (#1600 D1, #1559).
+    ///
+    /// Red if the stage reads the default overlay or skips the strip whose solo changed: the
+    /// `solo` row stays 0 and the other strips' effective mutes stay unmuted.
+    #[test]
+    fn a_solo_only_commit_refreshes_the_solo_row_and_the_derived_rows() {
+        let model = staged_session();
+        let none = MonitorOverlay::default();
+        let eq0 = session::StableId::parse("eq0").expect("ID");
+        let solo = MonitorOverlay::with_soloed([eq0]);
+        // Solo on, then off again; the model is the same in both.
+        for (committed, left) in [(&none, &solo), (&solo, &none)] {
+            let mut staged = live_commit_under(&model, committed, left, |_| {});
+            assert_eq!(staged.full_stages, 0, "a solo change takes no full catalog");
+            assert_eq!(
+                staged.owners_read, 1,
+                "only the soloed strip is read as changed"
+            );
+            staged.assert_same_as_fresh(1);
+        }
+        let mut staged = live_commit_under(&model, &none, &solo, |_| {});
+        let list = whole_list(&mut staged.provider, 256);
+        let value_of = |owner: &str, name: &str| {
+            let entry = list
+                .iter()
+                .find(|entry| {
+                    entry.address.owner_id.as_deref() == Some(owner)
+                        && entry.address.lane != Some(ParameterChannel::Right)
+                        && matches!(&entry.body, ControlBody::Control(row) if row.name == name)
+                })
+                .unwrap_or_else(|| panic!("{owner} {name}"));
+            control_value(entry)
+        };
+        assert_eq!(value_of("eq0", "solo"), 1.0);
+        assert_eq!(value_of("eq1", "solo"), 0.0);
+        assert_eq!(value_of("eq0", "effective_mute"), 0.0);
+        assert_eq!(
+            value_of("eq1", "effective_mute"),
+            1.0,
+            "another strip is solo-muted"
+        );
+    }
+
+    /// Gate 4 of #1600. One fader edit on a 64-track session with 4 submixes reads exactly one
+    /// owner and takes no full catalog.
+    ///
+    /// Red if the live commit still reads every owner.
+    #[test]
+    fn one_fader_edit_on_a_large_session_reads_one_owner() {
+        let mut model = staged_session();
+        let template = model.tracks[0].clone();
+        for index in 0..55 {
+            let mut track = template.clone();
+            track.id = session::StableId::parse(&format!("zz{index:02}")).expect("ID");
+            model.tracks.push(track);
+        }
+        for index in 0..3 {
+            let mut submix = model.submixes[0].clone();
+            submix.id = session::StableId::parse(&format!("bus{index}")).expect("ID");
+            model.submixes.push(submix);
+        }
+        let model = compile(&model).normalized_model().clone();
+        assert_eq!((model.tracks.len(), model.submixes.len()), (64, 4));
+        let mut staged = live_commit(&model, |m| {
+            let a = address_of(
+                m,
+                &strip_id("zz17"),
+                &Section::Builtins,
+                "fader_db",
+                session::ParameterChannel::Left,
+            );
+            write(m, &a, -2.0);
+        });
+        assert_eq!((staged.owners_read, staged.full_stages), (1, 0));
+        staged.assert_same_as_fresh(1);
+    }
+
+    /// Gate 5 of #1600. A stage that fails reports it before the provider is touched: nothing is
+    /// published and the list is the list it was.
+    ///
+    /// Red if the stage moves after the first value write.
+    #[test]
+    fn a_failed_stage_leaves_the_catalog_as_it_was() {
+        let model = staged_session();
+        let mut next = model.clone();
+        let a = address_of(
+            &next,
+            &strip_id("eq3"),
+            &Section::Builtins,
+            "fader_db",
+            session::ParameterChannel::Left,
+        );
+        write(&mut next, &a, -9.0);
+        let (mut provider, _clock) = provider_of(&model);
+        let before = whole_list(&mut provider, 256);
+        let delta = crate::classify_live_delta(
+            &model,
+            &next,
+            LiveRamps::for_session(&next),
+            &session::EditRamps::new(),
+        )
+        .expect("a live delta");
+        fail_next_stages(1);
+        assert!(
+            provider
+                .stage_live_catalog(&next, &MonitorOverlay::default(), RATE, &delta)
+                .is_err()
+        );
+        assert_eq!(whole_list(&mut provider, 256), before);
+        assert_eq!(provider.revision, 1);
+        provider
+            .stage_live_catalog(&next, &MonitorOverlay::default(), RATE, &delta)
+            .expect("the failure was one-shot");
     }
 }

@@ -158,4 +158,61 @@ Half a day to one day, one sonnet-high implementer.
 
 ## Decision record
 
-- (empty)
+Built on batch 5's head (#1599 compact catalog, #1558 VCA add/remove live, #1559 monitor overlay,
+#1561). Adaptations to the spec as written:
+
+- **D1 as written, plus the owner-list check.** `LiveDelta` gains `changed_owners` (ascending
+  list-order owner indices, from the `changed_controls` result that the classifier already
+  holds, no second diff) and `settings_changed`. A VCA added or removed has no row in that diff
+  (#1558), so `stage_live` compares the catalog's owner list (kind and ID, in list order) with the
+  model's and takes `Full` when they differ.
+- **D2: `controls::owner_rows_with(model, overlay, effective, owner, rate, out)`.** It takes the
+  overlay as well as the effective values, since a strip's `solo` row reads the overlay. `list` is
+  a loop over it. `controls::derived_rows_with` appends only the derived rows of a strip or a route
+  (their effective fader, mute and gate), from the same effective pass.
+- **D3, derived rows.** The staged writes are the changed owners' rows, then the derived rows of
+  every strip and route, all from one `effective(next, overlay)` of the monitor overlay the commit leaves. Derived rows cross
+  owners (a VCA move, a followed mute), so they are read for every strip and route, not only for
+  the changed ones. They are found in each owner's first section by walking its few own rows after
+  an O(log n) binary search of the owner's run (owner indices are monotone along the entries), so
+  nothing scans the whole list.
+- **D3, `Values` test.** For each changed owner the fresh rows must match its stored run: the same
+  section headers, the same addresses and, row by row, the same descriptor (the row's `Shape`
+  turned into a wire descriptor and compared by bits with the stored one, memoised per stored
+  descriptor so an owner with 300 rows builds a handful). A `matrix_mode` switch therefore takes
+  `Full` by itself (its pan and matrix rows flip `active`). A `control_smoothing` change takes
+  `Full` (it moves `default_ramp_samples` of every owner), by `settings_changed`.
+- **D4/D5.** `SessionControlProvider::publish_staged_catalog` writes the pairs (no allocation,
+  cannot fail, keeps the epoch) or calls `replace_session_catalog`, which keeps the #1552 epoch
+  rule. In a test build (`cfg(any(test, feature = "test-support"))`, debug assertions on) the
+  `Values` path builds the full catalog and asserts that it has the same structure and the same
+  values, bit for bit, as the patched one.
+- **D7.** `host_core::take_stage_counts()` returns the changed owners read and the full catalogs
+  staged since the last call; `host_core::fail_next_stages(n)` makes the next `n` stages fail, for
+  gate 5 (a typed `CommandError::Internal`, before any write).
+- **Admission charge (acked-batch and double-live).** The catalog is staged inside the live
+  admission, before the first write, as the full build was. A `Values` stage holds one small
+  vector and no table, so it is charged as no growth and the current catalog's largest allocation;
+  a `Full` stage is charged exactly as before (growth and largest allocation of the new
+  catalog). The published figures (`follow_catalog`, the report row) read the provider's catalog
+  after the publish, so the two paths use one rule.
+- **Monitor overlay (adapted onto batch 4's #1559/#1603, rebased onto `a1c143de3`).**
+  `ControlCatalog::stage_live`, `stage_live_catalog` and `live_admission` take the
+  `MonitorOverlay` the commit leaves (`monitor_change.overlay`, the one `ControlCatalog::build`
+  and `live_admission` already read), not the default one. The derived rows, the changed owners'
+  rows (a strip's `solo` row) and the test-build assertion (patched catalog equals the full build)
+  all read it. A solo has no model row, so `changed_controls` never names the soloed strip:
+  `classify_live_delta_with_monitor` adds every strip whose solo differs between `monitor.committed`
+  and `monitor.next` to `changed_owners`. A solo-only transaction therefore reads the soloed strip
+  as a changed owner, refreshes every derived row (the solo-muted strips' effective mutes, the
+  sends that follow them) and takes no full catalog.
+  Gate: `a_solo_only_commit_refreshes_the_solo_row_and_the_derived_rows`, which is red when the
+  stage reads the default overlay or when the classifier skips the soloed strip. The one test that
+  used the retired `SessionEdit::SetControlSmoothing` now writes the three session rows through
+  `SET_CONTROL` (`smoothing_edits`, #1561).
+- **Cost.** On a 64-track, 4-submix, 6,373-entry session, one `fader_db` edit: the full catalog
+  build is 1.22 ms and `stage_values` is 54 microseconds (release, one run, descriptive; no
+  transient full copy). The classifier's two `controls::list` passes remain (a non-goal; not measured here).
+- **No change under `crates/engine/src/realtime/`.**
+- **Gate 1 VCA row.** The VCA offset case runs through the C ABI (a VCA owner is a changed owner of
+  its own and its members' derived rows are refreshed).

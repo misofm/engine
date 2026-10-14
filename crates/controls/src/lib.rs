@@ -58,7 +58,7 @@ pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
 pub use registry::{
-    ControlRow, check_monitor, get, list, owner_count, owner_rows_with, row_descriptor, row_motion,
-    row_scope, set,
+    ControlRow, check_monitor, derived_rows_with, get, list, owner_count, owner_rows_with,
+    row_descriptor, row_motion, row_scope, set,
 };
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};
