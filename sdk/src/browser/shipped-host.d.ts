@@ -680,7 +680,7 @@ export interface MisoWebBootOptions {
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.ObservationUnbound`. A nonzero value also allocates the command staging
+  /// `MisoCommandReason.UnsupportedKind`. A nonzero value also allocates the command staging
   /// that carries the subscription records; without it `command()` is refused `UnsupportedKind`.
   liveControlObservationTaps: bigint;
   /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for

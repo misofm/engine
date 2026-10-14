@@ -196,8 +196,6 @@ interface LiveControlLayout {
   readonly console: readonly LayoutRow[];
   readonly tracks: ReadonlyMap<string, StripInstances>;
   readonly submixes: ReadonlyMap<string, StripInstances>;
-  /** The IDs of the session's routes into the output, which are never live (issue #1223 D4). */
-  readonly outputRoutes: ReadonlySet<string>;
 }
 
 /** Which kind of strip a strip-level edit builder addresses; it names the strip in messages. */
@@ -266,11 +264,7 @@ function layoutOf(session: SessionLike, map: SessionMap): LiveControlLayout {
         + "live controls resolve IDs only against the session the engine booted",
     );
   }
-  const outputRoutes = new Set(model.routes
-    .filter((route) => (route.destination as Readonly<Record<string, unknown>> | undefined)?.kind
-      === "output_input")
-    .map((route) => String(route.id)));
-  return Object.freeze({ console: Object.freeze(slots), tracks, submixes, outputRoutes });
+  return Object.freeze({ console: Object.freeze(slots), tracks, submixes });
 }
 
 /**
