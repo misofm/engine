@@ -969,6 +969,7 @@ dependencies = [
 name = "host-web"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "builtins",
  "builtins-compiler",
  "capi",

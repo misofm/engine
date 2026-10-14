@@ -37,6 +37,10 @@ session.workspace = true
 math.workspace = true
 
 [dev-dependencies]
+# Dev-only (#1615): `tests/control_command_heap.rs` measures a live commit's peak heap with the
+# audited allocator's thread-scoped counters and live-heap window. Never linked into the browser
+# artifact.
+bench-support.workspace = true
 # Dev-only (#1560): `tests/control_parity.rs` links the C ABI beside this host and feeds both the
 # same session and the same control edits, encoded with `protocol` (below); it absorbed #1364's
 # `control_smoothing_parity.rs`. Never linked into the browser artifact: a dev-dependency does not

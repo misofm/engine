@@ -4,20 +4,20 @@
 //! live-only transaction needs at once is what can grow the wasm memory (`memory.grow`) there. The
 //! test is the qualification's nine-edit transaction (seven parametric-EQ edits on console slot
 //! `eq-simd1`, then the two input-filter cutoffs of the left lane) on `observation-session.json`,
-//! and the same nine edits on sessions of 64 and 256 tracks. It measures with a thread-scoped
-//! counting allocator, relative to the heap live at the call's entry.
+//! and the same nine edits on sessions of 64 and 256 tracks. It measures with the audited
+//! allocator's thread-scoped counters and live-heap window (`bench_support::alloc`), relative to the
+//! heap live at the call's entry.
 //!
 //! The ceilings are the numbers measured on this head with a few KB of slack. The steady call is
 //! the same at every track count: a live-only commit must not depend on the session's size. The
 //! numbers print with `--nocapture`.
 
 #![cfg(feature = "test-support")]
-#![allow(unsafe_code)]
 
-use core::alloc::Layout;
-use core::cell::Cell;
-use std::alloc::{GlobalAlloc, System};
-
+use bench_support::alloc::{
+    current_thread_counters, current_thread_delta_since, current_thread_peak,
+    current_thread_peak_reset,
+};
 use controls::{ControlAddress, Owner, Section};
 use host_web::{EVENT_LANE_LOSSY, EVENT_LANE_RELIABLE, RESULT_OK, WebBootOptions, native_staging};
 use protocol::{
@@ -27,86 +27,6 @@ use protocol::{
 use session::{
     ParameterChannel, RouteSource, SendTap, StableId, canonical_session_json, parse_session_json,
 };
-
-thread_local! {
-    static ARMED: Cell<bool> = const { Cell::new(false) };
-    static LIVE: Cell<usize> = const { Cell::new(0) };
-    static PEAK: Cell<usize> = const { Cell::new(0) };
-    static REQUESTED: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-struct PeakAllocator;
-
-#[global_allocator]
-static ALLOCATOR: PeakAllocator = PeakAllocator;
-
-fn allocated(bytes: usize) {
-    allocated_with(bytes, bytes);
-}
-
-/// `grown` is what the live heap gains; `requested` is what the caller asked of the allocator (a
-/// `realloc` asks for its whole new size).
-fn allocated_with(grown: usize, requested: usize) {
-    if !ARMED.try_with(Cell::get).unwrap_or(false) {
-        return;
-    }
-    ALLOCATIONS.with(|count| count.set(count.get() + 1));
-    REQUESTED.with(|total| total.set(total.get() + requested));
-    LIVE.with(|live| {
-        let next = live.get().saturating_add(grown);
-        live.set(next);
-        PEAK.with(|peak| peak.set(peak.get().max(next)));
-    });
-}
-
-fn deallocated(bytes: usize) {
-    if !ARMED.try_with(Cell::get).unwrap_or(false) {
-        return;
-    }
-    LIVE.with(|live| live.set(live.get().saturating_sub(bytes)));
-}
-
-// SAFETY: every allocator request is forwarded unchanged to `System`; the thread-local counters
-// observe successful operations but never alter their pointers, sizes, alignments or lifetimes.
-unsafe impl GlobalAlloc for PeakAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            allocated(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            allocated(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        deallocated(layout.size());
-        // SAFETY: forwards the original pointer and layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: forwards the original allocation arguments unchanged.
-        let replacement = unsafe { System.realloc(pointer, layout, new_size) };
-        if !replacement.is_null() {
-            if new_size >= layout.size() {
-                allocated_with(new_size - layout.size(), new_size);
-            } else {
-                deallocated(layout.size() - new_size);
-            }
-        }
-        replacement
-    }
-}
 
 /// What one measured call took: allocations, requested bytes, peak live bytes above the entry, and
 /// the live bytes left when it returned.
@@ -119,19 +39,16 @@ struct Heap {
 }
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, Heap) {
-    ARMED.with(|armed| armed.set(false));
-    LIVE.with(|live| live.set(0));
-    PEAK.with(|peak| peak.set(0));
-    REQUESTED.with(|requested| requested.set(0));
-    ALLOCATIONS.with(|count| count.set(0));
-    ARMED.with(|armed| armed.set(true));
+    let mark = current_thread_counters();
+    current_thread_peak_reset();
     let result = operation();
-    ARMED.with(|armed| armed.set(false));
+    let window = current_thread_peak();
+    let delta = current_thread_delta_since(mark);
     let heap = Heap {
-        allocations: ALLOCATIONS.with(Cell::get),
-        requested: REQUESTED.with(Cell::get),
-        peak: PEAK.with(Cell::get),
-        left: LIVE.with(Cell::get),
+        allocations: usize::try_from(delta.allocations).expect("count fits"),
+        requested: usize::try_from(delta.requested_bytes).expect("bytes fit"),
+        peak: usize::try_from(window.peak_bytes).expect("bytes fit"),
+        left: usize::try_from(window.live_bytes).expect("bytes fit"),
     };
     (result, heap)
 }
