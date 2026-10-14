@@ -241,3 +241,13 @@ Split, both in this issue:
   change the quantum or the ring, so the boot compile is the only place the refusal can occur.
 - **D4 (`HostAttachment`) is not done in this commit.** It edits
   `crates/engine/src/realtime/plan.rs`, under the realtime-directory rule; see the lane report.
+
+**D4, 2026-10-14 (root's conditions, binding).** `PreparedRenderPlan` carries
+`host_attachment: Option<Box<dyn HostAttachment>>`, with `HostAttachment`, `set_host_attachment`
+and `host_attachment_mut::<T>` as filed. Render never reads, calls or drops the attachment; it drops
+only with the plan, on the retirement path, off the render thread; no allocation is added to
+render. The conditions are held by two tests, in two crates because `engine` forbids `unsafe` and
+cannot install an allocator: `crates/engine/tests/host_attachment.rs` (render and the swap never call
+the attachment; the displaced plan's attachment survives the swap and drops on the retirer's thread;
+the downcast) and `crates/host-core/tests/host_attachment_render.rs` (a plan with an attachment
+renders and swaps with zero allocator calls on the render thread, through the audited allocator).

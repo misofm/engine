@@ -28,11 +28,11 @@ pub use observe::{
     observation_slot_retained_bytes,
 };
 pub use plan::{
-    CarryOutcome, PlanRevisionGate, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
-    PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
-    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
-    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSink, plan_revision_gate_retained_bytes,
+    CarryOutcome, HostAttachment, PlanRevisionGate, PlanUnitEligibility, PrepareRenderPlan,
+    PreparedPlanExecutor, PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError,
+    RenderIo, RenderReport, RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture,
+    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotRequest,
+    ResponseSnapshotSection, ResponseSnapshotSink, plan_revision_gate_retained_bytes,
 };
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeError, PlanExchangeResourceReport, PlanPublisher,

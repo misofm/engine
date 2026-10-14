@@ -713,9 +713,25 @@ pub struct PreparedRenderPlan {
     gate: Arc<RevisionGate>,
     /// The pin of `gate` until [`Self::take_revision_gate`] hands the control handle out.
     gate_pin: Option<GatePin>,
+    /// Host data that travels with the plan (issue #1400 D4). Render never reads, calls or drops
+    /// it: it is set on the control thread before publication, and drops with the plan on the
+    /// retirement path.
+    host_attachment: Option<Box<dyn HostAttachment>>,
     _not_sync: Cell<()>,
     #[cfg(test)]
     drop_observer: Option<DropObserver>,
+}
+
+/// Host data a plan carries from its preparation to its retirement (issue #1400 D4).
+///
+/// The engine only stores it and drops it with the plan. Render never touches it: the control
+/// plane reaches it through [`PreparedRenderPlan::host_attachment_mut`] before the plan is
+/// published, and a host that renders through the plan's owner reads it there. `Send` because
+/// the plan moves to the render thread; the drop runs wherever the plan is reclaimed, which is
+/// off the render thread.
+pub trait HostAttachment: Send + 'static {
+    /// The attachment as `Any`, for [`PreparedRenderPlan::host_attachment_mut`]'s downcast.
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any;
 }
 
 #[cfg(test)]
@@ -752,10 +768,24 @@ impl PreparedRenderPlan {
             executor: None,
             gate: Arc::new(gate),
             gate_pin: Some(gate_pin),
+            host_attachment: None,
             _not_sync: Cell::new(()),
             #[cfg(test)]
             drop_observer: None,
         })
+    }
+    /// Attach host data to this plan (issue #1400 D4), on the control thread before the plan is
+    /// published. A second call replaces the first, which drops here, on the calling thread.
+    pub fn set_host_attachment(&mut self, value: Box<dyn HostAttachment>) {
+        self.host_attachment = Some(value);
+    }
+    /// The attachment as a `T`, or `None` when the plan carries none or carries another type.
+    /// Control side only: render never calls this.
+    pub fn host_attachment_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.host_attachment
+            .as_mut()?
+            .as_any_mut()
+            .downcast_mut::<T>()
     }
     /// Hand out this plan's one revision-gate handle (#1502 D1): the first call returns it, every
     /// later call `None`. The plan keeps the shared gate for render; only the holder of the
