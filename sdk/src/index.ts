@@ -94,3 +94,5 @@ export type {
   StepDeclaration as LatticeStepDeclaration,
   StepSizeName as LatticeStepSizeName,
 } from "./core/lattice.ts";
+export * from "./core/control-frame.ts";
+export * from "./core/control-queue.ts";

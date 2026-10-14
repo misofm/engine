@@ -32,6 +32,7 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
+import { ControlTransactionQueue } from "../core/control-queue.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -119,6 +120,8 @@ export class OfflineEngine {
   #booted: Uint8Array | undefined;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
+  /** The engine's one transaction queue (#1563 D4), made on first use. */
+  #controlQueue: ControlTransactionQueue | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
   readonly #spectrumLimits: SpectrumSubscriptionLimits | undefined;
 
@@ -276,6 +279,20 @@ export class OfflineEngine {
       this.#booted);
   }
 
+  /**
+   * This engine's one control transaction queue (#1563 D4).
+   *
+   * Every `SET_CONTROL` transaction this engine sends goes through it, one in flight at a time, each
+   * with the committed revision the last reply reported. The queue calls the core in process through
+   * the module's control entry; a module without that entry refuses the first transaction with
+   * `unsupported`. It starts over at the booted session's revision on `loadSession()` and closes on
+   * `dispose()`.
+   */
+  controlTransactions(): ControlTransactionQueue {
+    return this.#controlQueue ??= new ControlTransactionQueue((frame) =>
+      this.#boundary.controlFrame(frame));
+  }
+
   nextAbsoluteSample(): bigint {
     return this.#boundary.nextAbsoluteSample();
   }
@@ -338,6 +355,7 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
+    this.#controlQueue?.reset();
     // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
     this.#session = undefined;
     this.#booted = undefined;
@@ -348,6 +366,7 @@ export class OfflineEngine {
   }
 
   dispose(): void {
+    this.#controlQueue?.close();
     this.#observationSubscriptions?.invalidate(true);
     this.#boundary.dispose();
   }

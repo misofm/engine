@@ -1,0 +1,503 @@
+import { CONTROLS } from "../generated/controls.ts";
+import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
+import { MisoEngineError, MisoUsageError } from "./errors.ts";
+
+/**
+ * The SDK's one encoder of `SESSION_TRANSACTION_APPLY` frames of `SET_CONTROL` edits, and its one
+ * decoder of the reply (decision 17, C5; #1563 D1).
+ *
+ * # What this file does not do
+ *
+ * It checks no domain. A value is a JavaScript number, and the core refuses an out-of-range one with
+ * its own `control.domain`; an unknown strip or row comes back as `control.address.unknown`. The only
+ * refusals here make the frame unencodable (an ID that is not a string, a ramp that is not a `u32`).
+ *
+ * # The wire it writes
+ *
+ * MISO Control BTLV v1 (`crates/protocol`): a 48-byte little-endian outer header, then fields of
+ * `id:u16, wire:u8, flags:u8, length:u32`, the value, and zero padding to 8 bytes. A nested message
+ * starts with `count:u32, reserved:u32`. The field numbers below are the protocol schema's
+ * (`crates/protocol/src/schema.rs`: `session::transaction`, `session::edit`, `session::set_control`,
+ * `control_address`); `crates/protocol/tests/fixtures/set-control-frames.json` holds the Rust codec's
+ * bytes for a fixed list of edits and `sdk/test/control-frame-evals.mjs` compares this encoder to it.
+ */
+
+const HEADER_BYTES = 48;
+const MAGIC = [0x4d, 0x49, 0x53, 0x4f, 0x43, 0x54, 0x4c, 0x00] as const;
+const PROTOCOL_MAJOR = 1;
+const PROTOCOL_MINOR = 0;
+const KIND_COMMAND = 1;
+const KIND_RESPONSE = 2;
+const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+const EDIT_SET_CONTROL = 0x0800;
+const U32_MAXIMUM = 0xffff_ffff;
+const U64_MAXIMUM = 0xffff_ffff_ffff_ffffn;
+
+const WIRE_U8 = 1;
+const WIRE_U16 = 2;
+const WIRE_U32 = 3;
+const WIRE_U64 = 4;
+const WIRE_F32 = 6;
+const WIRE_UTF8 = 9;
+const WIRE_MESSAGE = 11;
+
+/** The stable address of one lane of one control, by the row's numeric ID. */
+export interface ControlWireAddress {
+  /** The owner: the session, or a strip, route or VCA by stable ID. */
+  readonly owner: ControlOwner;
+  /** The part of the owner: its own rows, builtins, a console slot or an insert. */
+  readonly section: ControlSection;
+  /**
+   * The row's ID inside the section (the core's `control` number). In an insert or console section
+   * `0` is the effect's bypass and every other value is the effect's parameter ID.
+   */
+  readonly control: number;
+  /** `left`, `right`, or `both` lanes at once. */
+  readonly lane: ControlLane;
+}
+
+/** One `SET_CONTROL` edit: a value for one lane of one control, with an optional ramp length. */
+export interface ControlFrameEdit {
+  readonly address: ControlWireAddress;
+  /** Sent as an IEEE 754 binary32. The core refuses what the row's domain does not allow. */
+  readonly value: number;
+  /** The edit's own ramp in samples, a `u32`. Absent leaves the choice to the core's row default. */
+  readonly rampSamples?: number;
+}
+
+/** What a frame of `SET_CONTROL` edits needs besides the edits. */
+export interface ControlTransactionRequest {
+  /** A nonzero `u64` the endpoint correlates the reply by and refuses to see twice. */
+  readonly requestId: bigint;
+  /** The committed revision this transaction was built against, as the reply last reported it. */
+  readonly expectedRevision: bigint;
+  readonly edits: readonly ControlFrameEdit[];
+}
+
+const OWNER_CODES = new Map<string, number>(
+  CONTROLS.address.ownerKinds.map((row) => [row.name, row.code] as const),
+);
+const SECTION_CODES = new Map<string, number>(
+  CONTROLS.address.sectionKinds.map((row) => [row.name, row.code] as const),
+);
+const LANE_CODES = new Map<string, number>(
+  CONTROLS.address.lanes.map((row) => [row.name, row.code] as const),
+);
+
+const ENCODER = new TextEncoder();
+const DECODER = new TextDecoder("utf-8", { fatal: true });
+
+function pad(length: number): number {
+  return (8 - (length & 7)) & 7;
+}
+
+/** A field: its 8-byte prefix, the value, and zero padding to the next multiple of 8. */
+function field(id: number, wire: number, mandatory: boolean, value: Uint8Array): Uint8Array {
+  const out = new Uint8Array(8 + value.length + pad(value.length));
+  const view = new DataView(out.buffer);
+  view.setUint16(0, id, true);
+  out[2] = wire;
+  out[3] = mandatory ? 1 : 0;
+  view.setUint32(4, value.length, true);
+  out.set(value, 8);
+  return out;
+}
+
+function concat(parts: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+/** A nested message body: `count:u32, reserved:u32`, then its fields. */
+function messageBody(fields: readonly Uint8Array[]): Uint8Array {
+  const header = new Uint8Array(8);
+  new DataView(header.buffer).setUint32(0, fields.length, true);
+  return concat([header, ...fields]);
+}
+
+function nested(id: number, mandatory: boolean, fields: readonly Uint8Array[]): Uint8Array {
+  return field(id, WIRE_MESSAGE, mandatory, messageBody(fields));
+}
+
+function u8(value: number): Uint8Array {
+  return Uint8Array.of(value);
+}
+
+function u16(value: number): Uint8Array {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, value, true);
+  return out;
+}
+
+function u32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value, true);
+  return out;
+}
+
+function f32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setFloat32(0, value, true);
+  return out;
+}
+
+function text(value: string): Uint8Array {
+  return ENCODER.encode(value);
+}
+
+function requireId(value: unknown, what: string): string {
+  if (typeof value !== "string") {
+    throw new MisoUsageError(`${what} must be a string`);
+  }
+  return value;
+}
+
+function requireU32(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > U32_MAXIMUM) {
+    throw new MisoUsageError(`${what} must be an integer in [0, ${U32_MAXIMUM}]`);
+  }
+  return value;
+}
+
+function requireU64(value: unknown, what: string): bigint {
+  if (typeof value !== "bigint" || value < 0n || value > U64_MAXIMUM) {
+    throw new MisoUsageError(`${what} must be a bigint in [0, 2^64 - 1]`);
+  }
+  return value;
+}
+
+function lookup(table: ReadonlyMap<string, number>, name: unknown, what: string): number {
+  const code = typeof name === "string" ? table.get(name) : undefined;
+  if (code === undefined) {
+    throw new MisoUsageError(`${what} ${String(name)} is not one of ${[...table.keys()].join(", ")}`);
+  }
+  return code;
+}
+
+function addressMessage(address: ControlWireAddress): Uint8Array {
+  const { owner, section } = address;
+  const fields: Uint8Array[] = [
+    field(1, WIRE_U8, true, u8(lookup(OWNER_CODES, owner?.kind, "an owner kind"))),
+  ];
+  if (owner.kind !== "session") {
+    fields.push(field(2, WIRE_UTF8, false, text(requireId(owner.id, "an owner ID"))));
+  }
+  fields.push(field(3, WIRE_U8, true, u8(lookup(SECTION_CODES, section?.kind, "a section kind"))));
+  if (section.kind === "console") {
+    fields.push(field(4, WIRE_UTF8, false, text(requireId(section.slot, "a console slot ID"))));
+  } else if (section.kind === "inserts") {
+    fields.push(field(4, WIRE_UTF8, false, text(requireId(section.effect, "an insert ID"))));
+  }
+  fields.push(field(5, WIRE_U32, false, u32(requireU32(address.control, "a control row ID"))));
+  fields.push(field(6, WIRE_U8, false, u8(lookup(LANE_CODES, address.lane, "a lane"))));
+  return messageBody(fields);
+}
+
+function editField(edit: ControlFrameEdit): Uint8Array {
+  if (typeof edit.value !== "number") {
+    throw new MisoUsageError("a control value must be a number");
+  }
+  const payload: Uint8Array[] = [
+    field(1, WIRE_MESSAGE, true, addressMessage(edit.address)),
+    field(2, WIRE_F32, true, f32(edit.value)),
+  ];
+  if (edit.rampSamples !== undefined) {
+    payload.push(field(3, WIRE_U32, false, u32(requireU32(edit.rampSamples, "rampSamples"))));
+  }
+  return nested(1, true, [
+    field(1, WIRE_U16, true, u16(EDIT_SET_CONTROL)),
+    nested(2, true, payload),
+  ]);
+}
+
+/**
+ * Refuse, with `MisoUsageError`, an edit that cannot be encoded, before it is staged anywhere. It is
+ * the same check `encodeControlTransaction` makes, and nothing about the value's domain.
+ */
+export function validateControlEdit(edit: ControlFrameEdit): void {
+  editField(edit);
+}
+
+/**
+ * Encode one `SESSION_TRANSACTION_APPLY` command frame of `SET_CONTROL` edits, in order.
+ *
+ * Throws `MisoUsageError` before producing any byte when a request cannot be encoded: no edits, a
+ * zero or out-of-range request ID or revision, an ID that is not a string, a ramp that is not a
+ * `u32`, or an owner, section or lane the protocol has no code for.
+ */
+export function encodeControlTransaction(request: ControlTransactionRequest): Uint8Array {
+  const requestId = requireU64(request.requestId, "requestId");
+  if (requestId === 0n) throw new MisoUsageError("requestId must not be zero");
+  const expectedRevision = requireU64(request.expectedRevision, "expectedRevision");
+  if (request.edits.length === 0) {
+    throw new MisoUsageError("a control transaction needs at least one edit");
+  }
+  const payload = concat(request.edits.map(editField));
+  const out = new Uint8Array(HEADER_BYTES + payload.length);
+  const view = new DataView(out.buffer);
+  out.set(MAGIC, 0);
+  view.setUint16(8, PROTOCOL_MAJOR, true);
+  view.setUint16(10, PROTOCOL_MINOR, true);
+  view.setUint16(12, HEADER_BYTES, true);
+  out[14] = KIND_COMMAND;
+  out[15] = 0;
+  view.setUint16(16, MESSAGE_SESSION_TRANSACTION_APPLY, true);
+  view.setUint16(18, 0, true);
+  view.setUint32(20, payload.length, true);
+  view.setBigUint64(24, requestId, true);
+  view.setBigUint64(32, expectedRevision, true);
+  view.setUint32(40, request.edits.length, true);
+  view.setUint32(44, 0, true);
+  out.set(payload, HEADER_BYTES);
+  return out;
+}
+
+/** How the core applied a committed transaction (`TransactionApplied.edit_path`). */
+export type ControlEditPath = "live" | "model_only" | "rebuild" | "monitor";
+
+const EDIT_PATHS: ReadonlyMap<number, ControlEditPath> = new Map([
+  [1, "live"],
+  [2, "model_only"],
+  [3, "rebuild"],
+  // The monitor overlay (solo) lands with #1559; its code is accepted here so the decoder needs no
+  // change when the core starts to send it.
+  [4, "monitor"],
+]);
+
+/** The protocol's response status registry, by name. */
+export type ControlStatusName =
+  | "ok"
+  | "malformed_frame"
+  | "unsupported_version"
+  | "unsupported_message"
+  | "unknown_required_field"
+  | "invalid_field"
+  | "limit_exceeded"
+  | "revision_conflict"
+  | "revision_exhausted"
+  | "request_id_reuse"
+  | "replay_expired"
+  | "backpressure"
+  | "validation_failed"
+  | "not_found"
+  | "unavailable"
+  | "time_in_past"
+  | "automation_order"
+  | "pcm_forbidden"
+  | "internal";
+
+const STATUS_NAMES: readonly ControlStatusName[] = [
+  "ok",
+  "malformed_frame",
+  "unsupported_version",
+  "unsupported_message",
+  "unknown_required_field",
+  "invalid_field",
+  "limit_exceeded",
+  "revision_conflict",
+  "revision_exhausted",
+  "request_id_reuse",
+  "replay_expired",
+  "backpressure",
+  "validation_failed",
+  "not_found",
+  "unavailable",
+  "time_in_past",
+  "automation_order",
+  "pcm_forbidden",
+  "internal",
+];
+
+const SEVERITY_NAMES = ["", "info", "warning", "error"] as const;
+
+/** One diagnostic of a refused transaction. */
+export interface ControlDiagnostic {
+  /** The core's stable dotted code, such as `control.domain` or `control.address.unknown`. */
+  readonly code: string;
+  readonly severity: "info" | "warning" | "error";
+  /** The index of the edit the diagnostic names, when it names one. */
+  readonly operationIndex: number | undefined;
+  readonly detail: string | undefined;
+}
+
+/** The queue detail a `backpressure` reply carries. */
+export interface ControlBackpressure {
+  readonly queueKind: number;
+  readonly capacity: bigint;
+  readonly occupancy: bigint;
+}
+
+/** A decoded reply to a `SESSION_TRANSACTION_APPLY` command. */
+export interface ControlReply {
+  readonly requestId: bigint;
+  readonly status: ControlStatusName;
+  /** The session revision the reply reports: committed on success, observed on a refusal. */
+  readonly revision: bigint;
+  /** Present exactly when `status` is `ok`. */
+  readonly applied: { readonly appliedOperations: number; readonly editPath: ControlEditPath } | undefined;
+  /** The leading diagnostics of a refusal, in the core's order. */
+  readonly diagnostics: readonly ControlDiagnostic[];
+  readonly omittedDiagnostics: number;
+  readonly backpressure: ControlBackpressure | undefined;
+}
+
+function malformed(why: string): MisoEngineError {
+  return new MisoEngineError(`the control reply is malformed: ${why}`, {
+    phase: "lifecycle",
+    code: "internal",
+  });
+}
+
+interface RawField {
+  readonly id: number;
+  readonly wire: number;
+  readonly value: Uint8Array;
+}
+
+/** Read `count` fields of one message level: ascending IDs, zero padding, nothing left over. */
+function readFields(bytes: Uint8Array, count: number): RawField[] {
+  const fields: RawField[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let cursor = 0;
+  let previous = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (cursor + 8 > bytes.length) throw malformed("a field ends the frame early");
+    const id = view.getUint16(cursor, true);
+    const wire = bytes[cursor + 2] ?? 0;
+    const flags = bytes[cursor + 3] ?? 0;
+    const length = view.getUint32(cursor + 4, true);
+    if (id === 0 || wire < 1 || wire > 15 || (flags & ~1) !== 0 || (index !== 0 && id < previous)) {
+      throw malformed("a field header is invalid");
+    }
+    const start = cursor + 8;
+    const end = start + length;
+    const padded = end + pad(length);
+    if (padded > bytes.length) throw malformed("a field is longer than its message");
+    for (let at = end; at < padded; at += 1) {
+      if (bytes[at] !== 0) throw malformed("field padding is not zero");
+    }
+    fields.push({ id, wire, value: bytes.subarray(start, end) });
+    previous = id;
+    cursor = padded;
+  }
+  if (cursor !== bytes.length) throw malformed("bytes follow the last field");
+  return fields;
+}
+
+function nestedFields(value: Uint8Array): RawField[] {
+  if (value.length < 8) throw malformed("a nested message has no header");
+  const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
+  if (view.getUint32(4, true) !== 0) throw malformed("a nested message reserved word is not zero");
+  return readFields(value.subarray(8), view.getUint32(0, true));
+}
+
+function scalar(fields: readonly RawField[], id: number, wire: number, width: number): DataView | undefined {
+  const found = fields.filter((row) => row.id === id);
+  if (found.length > 1) throw malformed(`field ${id} repeats`);
+  const row = found[0];
+  if (row === undefined) return undefined;
+  if (row.wire !== wire || row.value.length !== width) throw malformed(`field ${id} has the wrong type`);
+  return new DataView(row.value.buffer, row.value.byteOffset, row.value.byteLength);
+}
+
+function decodeDiagnostic(value: Uint8Array): ControlDiagnostic {
+  const fields = nestedFields(value);
+  const codeField = fields.find((row) => row.id === 1);
+  if (codeField === undefined || codeField.wire !== WIRE_UTF8) throw malformed("a diagnostic has no code");
+  const severity = scalar(fields, 2, WIRE_U8, 1)?.getUint8(0);
+  const named = severity === undefined ? undefined : SEVERITY_NAMES[severity];
+  if (named === undefined || named === "") throw malformed("a diagnostic has no severity");
+  const detailField = fields.find((row) => row.id === 4);
+  return Object.freeze({
+    code: DECODER.decode(codeField.value),
+    severity: named,
+    operationIndex: scalar(fields, 5, WIRE_U32, 4)?.getUint32(0, true),
+    detail: detailField === undefined ? undefined : DECODER.decode(detailField.value),
+  });
+}
+
+/**
+ * Decode the reply to a `SESSION_TRANSACTION_APPLY` command.
+ *
+ * A reply the core sent is always decodable, refusals included: a refusal is a value (its `status`,
+ * `diagnostics` and the `revision` the core observed), not an exception. Bytes that are not a valid
+ * reply to this command raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
+ */
+export function decodeControlReply(bytes: Uint8Array): ControlReply {
+  if (bytes.length < HEADER_BYTES) throw malformed("the frame is shorter than its header");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let index = 0; index < MAGIC.length; index += 1) {
+    if (bytes[index] !== MAGIC[index]) throw malformed("the magic is wrong");
+  }
+  if (view.getUint16(8, true) !== PROTOCOL_MAJOR) throw malformed("the protocol major version is not 1");
+  if (view.getUint16(12, true) !== HEADER_BYTES) throw malformed("the header length is not 48");
+  if (bytes[14] !== KIND_RESPONSE || bytes[15] !== 0) throw malformed("the frame is not a response");
+  if (view.getUint16(16, true) !== MESSAGE_SESSION_TRANSACTION_APPLY) {
+    throw malformed("the response is for another command");
+  }
+  const status = STATUS_NAMES[view.getUint16(18, true)];
+  if (status === undefined) throw malformed("the status is not registered");
+  const payloadLength = view.getUint32(20, true);
+  if (HEADER_BYTES + payloadLength !== bytes.length) throw malformed("the payload length is wrong");
+  const requestId = view.getBigUint64(24, true);
+  if (requestId === 0n) throw malformed("the request ID is zero");
+  if (view.getUint32(44, true) !== 0) throw malformed("the reserved word is not zero");
+  const fields = readFields(bytes.subarray(HEADER_BYTES), view.getUint32(40, true));
+  const revision = view.getBigUint64(32, true);
+
+  if (status === "ok") {
+    const appliedOperations = scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true);
+    const code = scalar(fields, 2, WIRE_U8, 1)?.getUint8(0);
+    const editPath = code === undefined ? undefined : EDIT_PATHS.get(code);
+    if (appliedOperations === undefined || editPath === undefined) {
+      throw malformed("a successful reply holds no applied-operations count and known edit path");
+    }
+    return Object.freeze({
+      requestId,
+      status,
+      revision,
+      applied: Object.freeze({ appliedOperations, editPath }),
+      diagnostics: Object.freeze([]),
+      omittedDiagnostics: 0,
+      backpressure: undefined,
+    });
+  }
+
+  const diagnostics = fields
+    .filter((row) => row.id === 1)
+    .map((row) => {
+      if (row.wire !== WIRE_MESSAGE) throw malformed("a diagnostic is not a message");
+      return decodeDiagnostic(row.value);
+    });
+  const omittedDiagnostics = scalar(fields, 2, WIRE_U32, 4)?.getUint32(0, true);
+  if (omittedDiagnostics === undefined) throw malformed("a refusal has no omitted-diagnostics count");
+  const backpressureField = fields.find((row) => row.id === 3);
+  let backpressure: ControlBackpressure | undefined;
+  if (backpressureField !== undefined) {
+    if (backpressureField.wire !== WIRE_MESSAGE) throw malformed("backpressure is not a message");
+    const inner = nestedFields(backpressureField.value);
+    const queueKind = scalar(inner, 1, WIRE_U8, 1)?.getUint8(0);
+    const capacity = scalar(inner, 2, WIRE_U64, 8)?.getBigUint64(0, true);
+    const occupancy = scalar(inner, 3, WIRE_U64, 8)?.getBigUint64(0, true);
+    if (queueKind === undefined || capacity === undefined || occupancy === undefined) {
+      throw malformed("backpressure is incomplete");
+    }
+    backpressure = Object.freeze({ queueKind, capacity, occupancy });
+  }
+  return Object.freeze({
+    requestId,
+    status,
+    revision,
+    applied: undefined,
+    diagnostics: Object.freeze(diagnostics),
+    omittedDiagnostics,
+    backpressure,
+  });
+}

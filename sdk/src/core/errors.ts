@@ -146,3 +146,61 @@ export class MisoUsageError extends Error {
     this.diagnosticCode = diagnosticCode;
   }
 }
+
+/**
+ * A control transaction the core refused (#1563 D4).
+ *
+ * `code` is the core's own, the first diagnostic's stable dotted code (`control.domain`,
+ * `control.address.unknown`, ...), or the reply's status name (`revision_conflict`, `backpressure`,
+ * ...) when the core sent no diagnostic. The SDK adds no code of its own. A refused transaction
+ * changed nothing and is not retried. `revision` is the revision the core reported with the refusal.
+ */
+export class MisoControlRefusal extends Error {
+  readonly code: string;
+  /** The reply's status name, such as `validation_failed`. */
+  readonly status: string;
+  readonly revision: bigint;
+  /** The index, in the transaction that was sent, of the edit the first diagnostic names. */
+  readonly editIndex: number | undefined;
+  readonly diagnostics: readonly {
+    readonly code: string;
+    readonly detail: string | undefined;
+    readonly operationIndex: number | undefined;
+  }[];
+  /** The refusal as a `ControlReport` (`ok: false`). */
+  readonly report: {
+    readonly ok: false;
+    readonly revision: bigint;
+    readonly code: string;
+    readonly editIndex?: number;
+  };
+
+  constructor(init: {
+    readonly code: string;
+    readonly status: string;
+    readonly revision: bigint;
+    readonly editIndex: number | undefined;
+    readonly diagnostics: MisoControlRefusal["diagnostics"];
+  }) {
+    super(
+      `the core refused the control transaction: ${init.code}`
+        + (init.editIndex === undefined ? "" : ` at edit ${init.editIndex}`),
+    );
+    this.name = "MisoControlRefusal";
+    this.code = init.code;
+    this.status = init.status;
+    this.revision = init.revision;
+    this.editIndex = init.editIndex;
+    this.diagnostics = Object.freeze([...init.diagnostics]);
+    this.report = Object.freeze(
+      init.editIndex === undefined
+        ? { ok: false as const, revision: init.revision, code: init.code }
+        : { ok: false as const, revision: init.revision, code: init.code, editIndex: init.editIndex },
+    );
+  }
+
+  /** The core's code, as `MisoEngineError` and `MisoUsageError` spell it. */
+  get diagnosticCode(): string {
+    return this.code;
+  }
+}
