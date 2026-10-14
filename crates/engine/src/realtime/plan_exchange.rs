@@ -18,8 +18,11 @@
 //! control thread publishes each committed revision on the gate of the plan that carries its
 //! content (`PlanRevisionGate::publish`), and render takes each block's live snapshot from the
 //! gate of the plan it runs and advances the applied-revision watermark (`watermark.rs`) to it
-//! (D2, D3). A withdrawn candidate takes its revision along by construction. The mailbox carries
-//! no revision.
+//! (D2, D3). The gate orders publications by an internal number that each carries its session
+//! revision (#1603); the watermark advances to the snapshot's revision, so a monitor write (a
+//! publication that spends no revision) never moves it and it is never above the committed
+//! revision. A withdrawn candidate takes its revision along by construction.
+//! The mailbox carries no revision.
 //!
 //! Every candidate is reserved with a [`PlanAdoption`] (#1311): adopt at the next block, no
 //! earlier than a scheduled sample, or no earlier than a sample and only once the running plan

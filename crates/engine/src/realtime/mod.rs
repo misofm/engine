@@ -19,9 +19,9 @@ pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaStereoPair, ArenaStereoPlanes, DisjointArena, DisjointArenaError,
 };
 pub use latest_cell::{
-    CellRead, CellReader, CellWriter, DirtyReader, DirtyWord, GATE_REVISION_MAX, GatePin,
+    CellRead, CellReader, CellWriter, DirtyReader, DirtyWord, GATE_REVISION_MAX, GateKey, GatePin,
     LatestCell, LiveSnapshot, LiveStamp, LiveValuesSuperseded, RevisionGate, SharedAllocation,
-    StampRefused,
+    StampRefusal, StampRefused,
 };
 pub use observe::{
     ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow, observation_slot,
@@ -939,6 +939,262 @@ mod tests {
             assert_eq!(report.live_snapshot.revision(), 3);
         }
 
+        /// A probe executor over one cell: each block drains the cell the way a stage drains its
+        /// lane, and publishes the newest applied value as `(revision << 32 | publication) + 1` (0 for
+        /// none). Atomics only: it runs inside the render scope.
+        struct CellProbe {
+            cell: Arc<LatestCell<2>>,
+            dirty: Arc<DirtyWord>,
+            reader: CellReader,
+            stage: DirtyReader,
+            applied: Arc<AtomicU64>,
+        }
+
+        impl PreparedPlanExecutor for CellProbe {
+            fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
+                let pending = self.stage.pending(&self.dirty);
+                if pending & 1 == 0 {
+                    return;
+                }
+                if let CellRead::Applied { words, .. } =
+                    self.reader.read(&self.cell, snapshot, &mut self.stage, 0)
+                {
+                    self.applied.store(
+                        (u64::from(words[0]) << 32 | u64::from(words[1])) + 1,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+
+            fn render(
+                &mut self,
+                _arena: &mut BufferArena,
+                mut output: PlanarBufferMut<'_>,
+                _time: RenderTime,
+            ) -> Result<(), RenderError> {
+                output.plane_mut(0)?.fill(0.0);
+                Ok(())
+            }
+        }
+
+        /// What control keeps of the newest plan: its handle, cell and writer.
+        struct Newest {
+            gate: PlanRevisionGate,
+            cell: Arc<LatestCell<2>>,
+            dirty: Arc<DirtyWord>,
+            writer: CellWriter<2>,
+        }
+
+        /// A probe plan whose cell holds the model value of `revision`, stamped on the plan's held
+        /// gate as a successor's carry retargets are, with its handle taken and published.
+        fn probe_plan_at(
+            id: u64,
+            revision: u64,
+            applied: &Arc<AtomicU64>,
+        ) -> (PreparedRenderPlan, Newest) {
+            let cell = Arc::new(LatestCell::<2>::new());
+            let dirty = Arc::new(DirtyWord::new());
+            let mut plan = PreparedRenderPlan::prepare_with_executor(
+                PrepareRenderPlan {
+                    plan_id: id,
+                    envelope: prepared(id).envelope(),
+                    scratch: &[],
+                },
+                Box::new(CellProbe {
+                    cell: Arc::clone(&cell),
+                    dirty: Arc::clone(&dirty),
+                    reader: CellReader::new(),
+                    stage: DirtyReader::new(),
+                    applied: Arc::clone(applied),
+                }),
+            )
+            .expect("plan");
+            let mut writer = CellWriter::<2>::new();
+            let stamp = plan
+                .stamp_held_gate(revision)
+                .expect("held")
+                .expect("a revision above 0");
+            writer.write(&cell, &dirty, 0, stamp, [revision as u32, 1]);
+            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
+            (
+                plan,
+                Newest {
+                    gate,
+                    cell,
+                    dirty,
+                    writer,
+                },
+            )
+        }
+
+        fn seeded(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+
+        /// #1603 gate 4: with monitor writes under a revision, model commits and successor plans
+        /// racing a rendering plan on another thread, the watermark is never above the revision
+        /// control had begun to publish, the block that reports a revision applies exactly that
+        /// revision's newest value, the watermark counts one exact revision per model revision,
+        /// and the last block reads the last value written.
+        #[test]
+        fn the_watermark_counts_model_revisions_only_under_monitor_writes() {
+            for seed in 1..=20_u64 {
+                monitor_run(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            }
+        }
+
+        fn monitor_run(mut rng: u64) {
+            use std::sync::atomic::AtomicBool;
+            const STEPS: u32 = 10_000;
+            const FIRST: u64 = 1;
+            let applied = Arc::new(AtomicU64::new(0));
+            let announced = Arc::new(AtomicU64::new(FIRST));
+            let done = AtomicBool::new(false);
+            let finished = AtomicBool::new(false);
+            let final_word = AtomicU64::new(0);
+            let (plan, mut newest) = probe_plan_at(1, FIRST, &applied);
+            let (mut publisher, mut realtime, mut retirer) =
+                plan_exchange_at_revision(plan, &mut newest.gate, FIRST, one_retirement())
+                    .expect("exchange");
+            let reader = publisher.watermark_reader();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let mut sample = 0_u64;
+                    let mut reported = FIRST;
+                    let mut last_applied = 0_u64;
+                    let mut blocks = 0_u64;
+                    loop {
+                        // Read `done` first: a block after it sees every write.
+                        let stop = done.load(Ordering::Acquire);
+                        let report = realtime
+                            .render(
+                                RenderIo {
+                                    output: PlanarBufferMut::try_new(&mut [1.0_f32; 2], 1, 2, 2)
+                                        .expect("output"),
+                                },
+                                RenderTime {
+                                    absolute_sample: sample,
+                                },
+                            )
+                            .expect("render");
+                        let snapshot = report.render.live_snapshot;
+                        let watermark = reader.read().expect("no render in flight");
+                        assert_eq!(watermark.revision, snapshot.revision());
+                        assert!(
+                            watermark.revision <= announced.load(Ordering::Relaxed),
+                            "watermark {} above the revision control began to publish",
+                            watermark.revision
+                        );
+                        let word = applied.load(Ordering::Relaxed);
+                        assert!(word > 0, "the plan's first block applies its model value");
+                        let (value_revision, value_publication) =
+                            ((word - 1) >> 32, (word - 1) & 0xffff_ffff);
+                        assert_eq!(
+                            value_revision,
+                            snapshot.revision(),
+                            "the block reports the revision whose value it applied"
+                        );
+                        assert_eq!(
+                            value_publication,
+                            snapshot.publication(),
+                            "every publication writes the cell, so the block applied its own"
+                        );
+                        assert!(word >= last_applied, "an applied value went backwards");
+                        last_applied = word;
+                        if watermark.revision > reported {
+                            assert_eq!(watermark.first_sample, sample);
+                            reported = watermark.revision;
+                        }
+                        assert_eq!(
+                            watermark.exact,
+                            watermark.revision - FIRST,
+                            "one exact revision per model revision"
+                        );
+                        sample += QUANTUM;
+                        blocks += 1;
+                        assert!(blocks < 200_000_000, "render never converged");
+                        if stop && word == final_word.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    finished.store(true, Ordering::Release);
+                });
+
+                let mut revision = FIRST;
+                let mut publication = 1_u64;
+                let mut plan_id = 1_u64;
+                for step in 0..STEPS {
+                    let _ = retirer.try_reclaim();
+                    match seeded(&mut rng) % 100 {
+                        0..=39 => {
+                            announced.fetch_max(revision + 1, Ordering::Relaxed);
+                            let stamp = newest.gate.stamp(revision + 1).expect("next revision");
+                            let key = stamp.key();
+                            newest.writer.write(
+                                &newest.cell,
+                                &newest.dirty,
+                                0,
+                                stamp,
+                                [(revision + 1) as u32, key.publication() as u32],
+                            );
+                            newest.gate.publish_key(key);
+                            revision += 1;
+                            publication = key.publication();
+                        }
+                        40..=84 => {
+                            let stamp = newest
+                                .gate
+                                .stamp_monitor(revision)
+                                .expect("a monitor stamp");
+                            let key = stamp.key();
+                            assert_eq!(
+                                (key.revision(), key.publication()),
+                                (revision, publication + 1),
+                                "a monitor write spends a publication and no revision"
+                            );
+                            newest.writer.write(
+                                &newest.cell,
+                                &newest.dirty,
+                                0,
+                                stamp,
+                                [revision as u32, key.publication() as u32],
+                            );
+                            newest.gate.publish_key(key);
+                            publication = key.publication();
+                        }
+                        _ => {
+                            announced.fetch_max(revision + 1, Ordering::Relaxed);
+                            plan_id += 1;
+                            let (plan, mut candidate) =
+                                probe_plan_at(plan_id, revision + 1, &applied);
+                            candidate.gate.publish(revision + 1);
+                            if let Ok(reservation) =
+                                publisher.reserve_replacement(plan, PlanAdoption::Next)
+                            {
+                                reservation.commit();
+                                newest = candidate;
+                                revision += 1;
+                                publication = 1;
+                            }
+                        }
+                    }
+                    if step % 64 == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+                final_word.store((revision << 32 | publication) + 1, Ordering::Relaxed);
+                done.store(true, Ordering::Release);
+                while !finished.load(Ordering::Acquire) {
+                    let _ = retirer.try_reclaim();
+                    std::thread::yield_now();
+                }
+                assert_eq!(read(&publisher).revision, revision);
+            });
+        }
+
         /// A plan hands out its gate handle once: a second handle would be a second writer with
         /// its own pin (#1502 D1).
         #[test]
@@ -990,7 +1246,7 @@ mod tests {
         /// stamped on the handle while it is open breaks the publish-before-stamp rule (#1432).
         #[cfg(debug_assertions)]
         #[test]
-        #[should_panic(expected = "while revision Some(5) is stamped")]
+        #[should_panic(expected = "is stamped and not yet published")]
         fn the_handle_inherits_the_open_stamp_of_a_held_gate() {
             let mut plan = prepared(1);
             let _ = plan

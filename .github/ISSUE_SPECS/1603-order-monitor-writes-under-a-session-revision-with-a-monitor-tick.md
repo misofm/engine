@@ -1,5 +1,9 @@
 # Order monitor writes under a session revision with a monitor tick
 
+> **Superseded in part (2026-10-13, root, binding):** the implementation takes option C, not this
+> spec's 36/27 packing. D1 (key layout), D2 (tick), D3 (`stamp_monitor` tick rule), the ceiling
+> change (deliverable 2, gate 6) and gate 3's tick wording do not apply. See "Decision record".
+
 Decision 17, root ruling of 2026-10-13 (option B for #1559's revision gap). Architecture change in
 `engine::realtime`. Code anchors verified on `93337ffbe` (main) and `79f172730` (#1559).
 Issue number: assigned at filing (written here as #1603). Feature sprint mode (owner,
@@ -310,3 +314,65 @@ the SDK tests that `sdk/package.json` runs, `scripts/check-workspace-policy.sh`.
 One day for one sonnet-high implementer. Deliverables 1, 2 and 4 are one commit, because the
 gate and the ceiling must not drift. If the day runs over, split at deliverable 3: the host-core
 test file lands as a second commit of the same issue in the same batch, before #1559.
+
+## Decision record
+
+- **Chosen design: option C (root's binding change of 2026-10-13), no session-format change.**
+  The gate orders publications by an internal `u64` publication number (1 for a gate's first
+  publication; 0 is the birth state; 63 bits, never exposed on any wire, session or status field).
+  Every publication carries its session revision. A model commit is a new publication that carries
+  the new revision (`stamp(r + 1)`); a monitor write is a new publication that carries the current
+  revision (`stamp_monitor(r)`). The session revision ceiling stays `2^63 - 1`; no schema,
+  validator, SDK, doc or C ABI constant changes, and deliverable 2 and gate 6 do not apply (their
+  existing tests pass unchanged).
+- **Why C meets root's condition.** The gate word is `ANNOUNCED | publication number` and has no
+  room for a 63-bit revision, so the revision is not in the word. It lives in a three-slot record
+  on the gate (`(number, revision)` per slot, plain stores only), written by `publish_key` before
+  its `swap`, with the same A/B slot rule the cells use (`A` the newest publication, `B` the
+  pinned one, the third slot is overwritten). Render's `snapshot` is the one `fetch_or`, then
+  three number loads and one revision load of the slot with the greatest number at or below its
+  snapshot. That slot is protected, so the pair is never torn and there is no retry loop and no
+  lock. Render's added work is four loads per block per plan. The new loom model
+  (`spsc_loom_cells_monitor_writes_race_reads`) asserts that a snapshot's revision is the revision
+  of its own publication under races, and the existing candidate-claim model now asserts it
+  through the record too.
+- **Watermark.** `plan_exchange.rs` still advances to `live_snapshot.revision()`, now the revision
+  of the last applied publication. It never exceeds the committed revision (a monitor publication
+  carries the revision already committed) and `exact` counts one per model revision. `watermark.rs`
+  is unchanged.
+- **API (replaces D3).** `stamp(revision)` and `publish(&gate, revision)` keep their signatures
+  and mean a model publication. New: `stamp_monitor(revision)` (refuses `NotPublishedRevision`
+  when `revision` is not the last published revision, and `PublicationsExhausted`),
+  `publish_key(&gate, key)`, `LiveStamp::key() -> GateKey`, `GateKey::{publication, revision}`,
+  `LiveSnapshot::publication()`, `RevisionGate::publication`,
+  `GatePin::last_published_key`, and `PlanRevisionGate::{stamp_monitor, publish_key,
+  last_published_key}`. `StampRefusal` is `NotAbovePublished`, `AboveCeiling`,
+  `NotPublishedRevision`, `PublicationsExhausted`. There is no tick and no tick overflow, so D7's
+  `BACKPRESSURE` for an exhausted tick does not exist; only 2^63 - 1 publications on one plan's
+  gate would exhaust the number, which is a typed stamp refusal.
+  `LiveStamp::pinned()` returns the pinned publication number. `GatePin::publish(revision)` now
+  asserts the ceiling in every build. `publish_key` debug-asserts that the key is the stamped one,
+  so an abandoned stamp cannot leak its writes into a different revision.
+- **Cost accepted.** Each plan's gate allocation grows from one word to the word plus a
+  three-slot record (`plan_revision_gate_retained_bytes`, charged by the host preparation).
+- **Gate 3 command.** `RUSTFLAGS="--cfg loom" cargo test --locked -p engine --release
+  spsc_loom_cells` does not build here (loom is a dev-dependency). The run uses the qualification
+  form: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test
+  --locked --release -p engine --lib spsc_loom`; all 14 models pass.
+- **Gate 4 shape.** `the_watermark_counts_model_revisions_only_under_monitor_writes` in
+  `crates/engine/src/realtime/mod.rs`. Control steps are 40% model commit, 45% monitor write, 15%
+  successor (a fresh probe plan with its own gate, cell and pin, published on its own gate at
+  `r + 1`, then reserved with `PlanAdoption::Next`; if the mailbox or the single retirement credit
+  refuses it, the candidate is dropped and no revision is spent). Writes always go to the newest
+  plan. Render checks per block: the watermark equals the snapshot revision and is at most the
+  revision control announced; the applied value carries the snapshot's revision and its own
+  publication number; applied values never go backwards across plans; a watermark rise names the
+  block's first sample; `exact` equals `revision - first`. The run ends when the last block
+  applies the last value written. 20 seeds.
+- **Gate 5 shape.** `crates/host-core/tests/monitor_tick.rs`. Render and control run on the test
+  thread with thread-scoped `bench_support::alloc` windows around the control calls and around
+  every `render` call. The pending-candidate case uses an independent host as the candidate; its
+  source reads in order from its first block, so the adopting block renders the candidate's block
+  0, which the test compares to a twin of the target session at block 0.
+- **Header prose.** `crates/capi/include/miso_engine_v1.h` has no ceiling prose and needs none:
+  nothing it states changes. The ruling's C8 text is applied with option C's wording.

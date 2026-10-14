@@ -1,8 +1,8 @@
 //! Structurally immutable prepared plan and bounded silence reference renderer.
 
 use super::{
-    BufferArena, BufferArenaError, GatePin, LiveSnapshot, LiveStamp, PlanarBufferMut, RevisionGate,
-    StampRefused,
+    BufferArena, BufferArenaError, GateKey, GatePin, LiveSnapshot, LiveStamp, PlanarBufferMut,
+    RevisionGate, StampRefused,
 };
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{alloc::Layout, cell::Cell, num::NonZeroUsize, sync::atomic::AtomicUsize};
@@ -605,16 +605,22 @@ impl core::fmt::Debug for PlanRevisionGate {
 }
 
 impl PlanRevisionGate {
-    /// The newest revision published on the gate.
+    /// The revision carried by the newest publication on the gate.
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.gate.revision()
     }
 
-    /// The revision the gate was last published at, or built at.
+    /// The revision carried by the gate's last publication, or the revision it was built at.
     #[must_use]
     pub const fn last_published(&self) -> u64 {
         self.pin.last_published()
+    }
+
+    /// The gate's last publication: number 0 and the built-at revision before the first.
+    #[must_use]
+    pub const fn last_published_key(&self) -> GateKey {
+        self.pin.last_published_key()
     }
 
     /// Stamp the writes of a transaction that commits as `revision` (#1432 `GatePin::stamp`). The
@@ -630,10 +636,35 @@ impl PlanRevisionGate {
         self.pin.stamp(revision)
     }
 
+    /// Stamp the writes of a monitor publication under the committed `revision`: the next
+    /// publication number, carrying `revision` again (#1603 `GatePin::stamp_monitor`). A monitor
+    /// write spends no revision. The stamp borrows the handle, so the key cannot be published
+    /// while a write holds it.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, in every build and changing nothing, a `revision` other than the one the gate
+    /// published last
+    /// ([`NotPublishedRevision`](crate::realtime::StampRefusal::NotPublishedRevision)) and a gate
+    /// with no publication number left
+    /// ([`PublicationsExhausted`](crate::realtime::StampRefusal::PublicationsExhausted)). A caller
+    /// takes the stamp as its last fallible step and publishes the stamp's key.
+    pub fn stamp_monitor(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
+        self.pin.stamp_monitor(revision)
+    }
+
     /// Publish `revision` on the plan's gate, as the commit's last write (#1432
-    /// `GatePin::publish`). Render's next snapshot of the gate covers it.
+    /// `GatePin::publish`): a new publication that carries `revision`. Render's next snapshot of the gate covers it.
     pub fn publish(&mut self, revision: u64) {
         self.pin.publish(&self.gate, revision);
+    }
+
+    /// Publish `key` on the plan's gate, as the commit's last write (#1603
+    /// `GatePin::publish_key`): a caller reads `stamp.key()` into a local and publishes it, so a
+    /// monitor publication and a model commit take the same call. Render's next snapshot of the
+    /// gate covers it.
+    pub fn publish_key(&mut self, key: GateKey) {
+        self.pin.publish_key(&self.gate, key);
     }
 }
 
