@@ -176,10 +176,15 @@ V0_CRATE_HASH = re.compile(r"Cs[0-9A-Za-z]*_")
 # review of new dynamic dispatch on the render thread, never a re-pin without its reason.
 INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_render": {
-        "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan6render": (
-            1,
-            "`executor.invalidate_observers()` on a failed block, through the plan's "
-            "`Box<dyn PreparedPlanExecutor>`",
+        # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
+        # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
+        # `render_inner` and counts a failed block itself.
+        "_RNvMs6_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner11enter_block": (
+            2,
+            "`running.prime_ready(...)`, the running plan's readiness hook, asked for a `Primed` "
+            "candidate only (#1311), and `carry_from`'s executor hand-over at an adopted swap "
+            "(#1273), both through the plan's `Box<dyn PreparedPlanExecutor>`; the runtime "
+            "render-locked count covers them",
         ),
         "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
             2,
@@ -188,12 +193,15 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "plan's `Box<dyn PreparedPlanExecutor>`; the runtime render-locked count covers them",
         ),
     },
-    "miso_engine_web_v1_meter_poll": {},
-    "miso_engine_web_v1_command_submit": {
-        "_RNvMs0_NtCs_15effect_compiler7controlNtB5_18EffectControlOwner4edit": (
-            1,
-            "`factory.descriptor()` on the owner's `Arc<dyn NativeEffectFactory>`",
+    "miso_engine_web_v1_meter_poll": {
+        "_RNvMs5_Cs_8host_webNtB5_22AudioWorkletEngineHost11poll_meters": (
+            2,
+            "`PlanState::active_attachment_mut::<RenderCompanions>()` (#1381a D3): the active "
+            "plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the downcast asks its "
+            "`type_id`, one `call_indirect` each, neither of which allocates or drops",
         ),
+    },
+    "miso_engine_web_v1_command_submit": {
         "_RNvMs1_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer25publish_candidate_targets": (
             4,
             "the owner's `Arc<dyn NativeEffectFactory>`: `target_preparation()` and the "

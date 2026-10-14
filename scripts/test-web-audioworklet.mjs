@@ -119,6 +119,18 @@ async function testMainRealm() {
     AudioWorkletNode: globalThis.AudioWorkletNode,
     validate: WebAssembly.validate,
     compile: WebAssembly.compile,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+  };
+  // Issue #1381a D6: the host's one timer, the single-mode service tick, is driven by hand, so a
+  // test posts exactly the ticks it means to and no real interval keeps the process alive.
+  const intervals = [];
+  globalThis.setInterval = (callback, delay) => {
+    intervals.push({ callback, delay, cleared: false });
+    return intervals.length;
+  };
+  globalThis.clearInterval = (id) => {
+    if (intervals[id - 1] !== undefined) intervals[id - 1].cleared = true;
   };
   const events = [];
   let fetchCount = 0;
@@ -157,8 +169,13 @@ async function testMainRealm() {
       this.closeCount += 1;
     }
 
-    postMessage(message, transfer) {
+    postMessage(message, transfer = []) {
       const received = structuredClone(message, { transfer });
+      if (received.tag === "miso.service.v1") {
+        // The service tick is no request: it carries no request ID and gets no reply.
+        events.push(["service"]);
+        return;
+      }
       events.push(["request", received.tag, received.requestId, transfer.length]);
       const respond = () => {
         let response;
@@ -176,7 +193,7 @@ async function testMainRealm() {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
             lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
-            memoryBytes: 65536,
+            memoryBytes: 65536, singleModeControlAllocations: 3,
           };
           if (statusMutation !== null) response = statusMutation(response);
         } else if (received.tag === "miso.renderallocations.v1") {
@@ -1328,6 +1345,12 @@ async function testMainRealm() {
     assert.equal(status.tag, "miso.status.v1");
     assert.equal(status.memoryBytes, host.memoryBytes);
     assert.equal(status.liveValuesSuperseded, 7n, "the status reply carries the superseded count");
+    assert.equal(
+      status.singleModeControlAllocations,
+      3,
+      "the status reply carries the single-mode control allocation count",
+    );
+
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -2369,12 +2392,43 @@ async function testMainRealm() {
     assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
+    // Issue #1381a D6, gate 6: the host's one timer is the single-mode service tick. It starts
+    // with the host, once per quantum, and each tick is the bare `miso.service.v1` message: no
+    // request ID, so the tick takes no place in the request sequence and never makes a status read
+    // follow another; and it gets no reply. A dispose stops it before the dispose request.
+    {
+      const tickHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const timer = intervals.at(-1);
+      assert.equal(timer.cleared, false, "the tick runs while the host does");
+      assert.equal(timer.delay, 1, "one quantum of 64 frames at 48 kHz, rounded to a millisecond");
+      const before = events.length;
+      timer.callback();
+      timer.callback();
+      assert.deepEqual(events.slice(before), [["service"], ["service"]], "a tick posts the message");
+      const read = tickHost.status();
+      timer.callback();
+      assert.equal((await read).requestId, (await tickHost.status()).requestId - 1,
+        "a tick consumes no request ID");
+      await tickHost.dispose();
+      assert.equal(timer.cleared, true, "dispose stops the tick");
+      const afterDispose = events.length;
+      timer.callback();
+      assert.equal(events.length, afterDispose, "a tick after dispose posts nothing");
+    }
     await runPlainDataMatrix();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;
     WebAssembly.validate = original.validate;
     WebAssembly.compile = original.compile;
+    globalThis.setInterval = original.setInterval;
+    globalThis.clearInterval = original.clearInterval;
   }
 }
 
@@ -2405,6 +2459,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
     spectrumHopCapabilityResult: 1,
+    // Issue #1381a: the service step's handles and result, and the control counter's value.
+    service: [], serviceResult: 0, controlAllocations: 5,
   };
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
@@ -2638,6 +2694,11 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     miso_engine_web_v1_track_response_result_ptr: () => trackResponseSnapshotPointer,
     miso_engine_web_v1_track_response_result_bytes: () => 0,
     miso_engine_web_v1_track_response_close: () => 0,
+    miso_engine_web_v1_service: (handle) => {
+      calls.service.push(handle);
+      return calls.serviceResult;
+    },
+    miso_engine_web_v1_control_allocation_count: () => calls.controlAllocations,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
@@ -3463,6 +3524,64 @@ async function testProcessor() {
       const status = processor.port.posts.at(-1).message;
       assert.equal(status.memoryBytes, 65536);
       assert.equal(status.nextAbsoluteSample, 64n);
+      assert.equal(
+        status.singleModeControlAllocations,
+        5,
+        "the status carries the control allocation count",
+      );
+    }
+
+    // Issue #1381a D6, gate 4's worklet half: the control handler runs one service step after
+    // every message it handles, the main realm's `miso.service.v1` tick included, and never in
+    // `process()`. The tick is no request: it has no request ID, takes no place in the request
+    // sequence and gets no reply. A step commits and acknowledges nothing, so a good one posts
+    // nothing.
+    {
+      const { processor, fake } = makeProcessor();
+      const posts = processor.port.posts.length;
+      assert.equal(fake.calls.service.length, 0, "construction runs no service step");
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.equal(fake.calls.service.length, 0, "process() never services");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(fake.calls.service, [1], "the tick services once, on the host's handle");
+      assert.equal(processor.port.posts.length, posts, "the tick gets no reply");
+      assert.equal(processor.lastRequestId, 0, "the tick takes no request ID");
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      assert.equal(fake.calls.service.length, 2, "a request is followed by one service step");
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.status.v1");
+      // A tick with an extra field is not the tick: it is an unknown message, which is sticky.
+      processor.port.onmessage({ data: { tag: "miso.service.v1", requestId: 2 } });
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+      assert.equal(processor.ready, false);
+      const stepsAtFailure = fake.calls.service.length;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(
+        fake.calls.service.length,
+        stepsAtFailure,
+        "a failed worklet runs no further service step",
+      );
+    }
+    {
+      // An epoch failure of the service step is sticky, with the export's result.
+      const { processor, fake } = makeProcessor();
+      fake.calls.serviceResult = 255;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1");
+      assert.equal(failure.result, 255);
+      assert.equal(processor.ready, false);
+      const left = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, new Float32Array(64)]]), true);
+      assert(left.every((sample) => sample === 0), "a failed worklet renders silence");
+    }
+    {
+      // A dispose stops the service steps: the handle is gone.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+      assert.equal(fake.calls.dispose, 1);
+      const steps = fake.calls.service.length;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.service.length, steps, "no service step after dispose");
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply

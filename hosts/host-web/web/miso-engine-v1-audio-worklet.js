@@ -263,7 +263,13 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.observationSelectionView = null;
     this.preparedCompanion = null;
     this.clock = renderClock();
-    this.port.onmessage = (event) => this.receive(event.data);
+    // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
+    // handler, outside `process()`. The service step follows every message, the main realm's
+    // `miso.service.v1` tick included, so a displaced plan is reclaimed here and never in render.
+    this.port.onmessage = (event) => {
+      this.receive(event.data);
+      this.serviceControl();
+    };
     try {
       const result = this.initialize(options?.processorOptions);
       if (result !== RESULT_OK) this.failInitialization(result, 0);
@@ -981,8 +987,20 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.port.postMessage(message, this.transferList(planes));
   }
 
+  /// Issue #1381a D5, D6: one control-plane service step. It commits and acknowledges nothing, so a
+  /// success posts nothing; an epoch failure is sticky. Its allocations and frees are the
+  /// instance's control allocations, which the status reports.
+  serviceControl() {
+    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    const result = this.exports.miso_engine_web_v1_service(this.handle);
+    if (result !== RESULT_OK) this.sticky(result, this.lastRequestId);
+  }
+
   receive(message) {
     if (this.disposed) return;
+    // The main realm's service tick carries no request ID: it is not a request, so it takes no
+    // place in the request sequence and gets no reply. The step itself runs after this handler.
+    if (message?.tag === "miso.service.v1" && exactFields(message, ["tag"])) return;
     const returnedPlanes = Array.isArray(message?.planes) ? message.planes : undefined;
     if (!Number.isSafeInteger(message?.requestId) || message.requestId <= this.lastRequestId) {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
@@ -1081,6 +1099,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         result: RESULT_OK,
         ...this.readStatus(),
         memoryBytes: this.exports.memory.buffer.byteLength,
+        // Issue #1381a (#1332 D1): the allocator calls this instance made outside render-locked
+        // windows, which in `single` mode is the one place the engine allocates on an audio
+        // thread: boot, control messages and service steps.
+        singleModeControlAllocations: this.exports.miso_engine_web_v1_control_allocation_count(),
       });
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);

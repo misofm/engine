@@ -909,6 +909,12 @@ export interface MisoStatus {
   /// writing no cell, for input, route, VCA and submix edits.
   readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
+  /// The allocator calls the instance made outside its render-locked windows (issue 1381a, issue
+  /// 1332 D1): its boot, its control messages and its service steps. In this module's `single`
+  /// mode the control work runs in the worklet's message handler, so this counts the one place the
+  /// engine allocates on an audio thread; the render-locked count (`renderAllocationCount()`)
+  /// stays exactly zero.
+  readonly singleModeControlAllocations: number;
 }
 
 /// The instance's render-locked allocator count (issue 1333 D3). Decision 15 requires zero.

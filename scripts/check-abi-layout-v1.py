@@ -125,6 +125,7 @@ EXPORTS = [
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -185,6 +186,7 @@ EXPORTS = [
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
     "miso_engine_web_v1_source_frames",
@@ -238,6 +240,8 @@ EXPORTS = [
     "miso_engine_web_v1_track_response_snapshot_set_bytes",
     "miso_engine_web_v1_track_response_track_id_capacity",
     "miso_engine_web_v1_track_response_track_id_ptr",
+    "miso_engine_web_v1_watermark_ptr",
+    "miso_engine_web_v1_watermark_read",
 ]
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 # The dead two-phase lifecycle's vocabulary. Named so its return is a failure rather than a
@@ -250,6 +254,7 @@ STRUCTURES = {
     "resourceReport": 224,
     "meterHeader": 72,
     "commandReport": 48,
+    "planWatermark": 96,
     "observationSelection": 32,
     "observationResult": 96,
     "responseRequest": 128,
@@ -292,6 +297,12 @@ ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 COMMAND_RECORD_FIELDS = [
     "kind", "rack", "channel", "reserved0", "trackIndex", "effectIndex", "parameterId",
     "smoothingSamples", "reserved1", "values", "reserved2",
+]
+# The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
+# for field and in its order (#1314 D6), without a pre-roll counter.
+PLAN_WATERMARK_FIELDS = [
+    "structSize", "reserved0", "revision", "firstSample", "outcomeFlags", "exactCount",
+    "transitionFallbackCount", "supersededCount", "reserved",
 ]
 RESPONSE_REQUEST_FIELDS = [
     "structSize", "abiVersion", "target", "grid", "channels", "fields", "quality", "linkMode",
@@ -492,6 +503,7 @@ def validate(document: object) -> None:
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
     for name, expected_fields in (
+        ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("observationSelection", OBSERVATION_SELECTION_FIELDS),
         ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
@@ -629,6 +641,16 @@ def self_test() -> int:
     def drop_export(document: dict) -> None:
         document["exports"].pop()
 
+    def drop_service_export(document: dict) -> None:
+        export = "miso_engine_web_v1_service"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError("the service export exists in the valid fixture") from error
+
+    def drop_watermark_field(document: dict) -> None:
+        document["structures"]["planWatermark"]["fields"].pop(2)
+
     def drop_spectrum_hop_capability_export(document: dict) -> None:
         export = "miso_engine_web_v1_spectrum_hop_capability"
         try:
@@ -695,6 +717,8 @@ def self_test() -> int:
         ("a status word is widened", widen_field),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
+        ("the service export is dropped", drop_service_export),
+        ("the watermark record omits a field", drop_watermark_field),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),

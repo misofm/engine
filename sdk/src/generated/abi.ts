@@ -41,6 +41,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -101,6 +102,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
     "miso_engine_web_v1_source_frames",
@@ -153,7 +155,9 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_track_response_snapshot_ptr",
     "miso_engine_web_v1_track_response_snapshot_set_bytes",
     "miso_engine_web_v1_track_response_track_id_capacity",
-    "miso_engine_web_v1_track_response_track_id_ptr"
+    "miso_engine_web_v1_track_response_track_id_ptr",
+    "miso_engine_web_v1_watermark_ptr",
+    "miso_engine_web_v1_watermark_read"
   ],
   "structures": {
     "bootOptions": {
@@ -533,6 +537,56 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 32,
           "type": "u64[2]"
+        }
+      ]
+    },
+    "planWatermark": {
+      "bytes": 96,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "revision",
+          "offset": 8,
+          "type": "u64"
+        },
+        {
+          "name": "firstSample",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "outcomeFlags",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "exactCount",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "transitionFallbackCount",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "supersededCount",
+          "offset": 48,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 56,
+          "type": "u64[5]"
         }
       ]
     },

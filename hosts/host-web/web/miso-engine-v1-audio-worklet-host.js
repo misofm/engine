@@ -746,6 +746,7 @@ class MisoAudioWorkletHost {
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
+  #serviceTick = null;
   #numericBackend;
   #sampleRateHz;
   #quantumFrames;
@@ -789,6 +790,37 @@ class MisoAudioWorkletHost {
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
     this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+    this.#startServiceTick();
+  }
+
+  // Issue #1381a D6: in `single` mode the instance's control work runs in the worklet's message
+  // handler, so the worklet needs a message to run its service step on. This is that message: one
+  // `miso.service.v1` per quantum, from the one timer the main realm may hold. The browser may
+  // clamp the period; no deadline depends on it, because deadlines are counted in render samples.
+  // The loop starts when boot succeeds and stops before dispose, and on a failure.
+  // SERVICE_TICK_BEGIN
+  #startServiceTick() {
+    const periodMs = Math.max(1, Math.round((1000 * this.#quantumFrames) / this.#sampleRateHz));
+    this.#serviceTick = setInterval(() => this.#postServiceTick(), periodMs);
+  }
+  // SERVICE_TICK_END
+
+  #postServiceTick() {
+    if (this.#disposed || this.#stickyError !== null) {
+      this.#stopServiceTick();
+      return;
+    }
+    try {
+      this.#port.postMessage({ tag: "miso.service.v1" });
+    } catch (_) {
+      this.#stopServiceTick();
+    }
+  }
+
+  #stopServiceTick() {
+    if (this.#serviceTick === null) return;
+    clearInterval(this.#serviceTick);
+    this.#serviceTick = null;
   }
 
   #ensurePreparedControl() {
@@ -1032,7 +1064,7 @@ class MisoAudioWorkletHost {
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
-          "memoryBytes",
+          "memoryBytes", "singleModeControlAllocations",
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
@@ -1149,6 +1181,7 @@ class MisoAudioWorkletHost {
       && validU64(message.nextAbsoluteSample) && validU64(message.renderedQuanta)
       && validU64(message.liveValuesSuperseded)
       && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes === this.memoryBytes
+      && validU32(message.singleModeControlAllocations)
     );
     const validRenderAllocations = pending.response !== "renderAllocations"
       || (message.result === RESULT_OK && validU32(message.count));
@@ -1171,6 +1204,7 @@ class MisoAudioWorkletHost {
   // maps are cleared first so a `reject` handler that re-enters sees a settled host.
   #fail(error) {
     this.#stickyError = error;
+    this.#stopServiceTick();
     this.#preparedControl?.invalidate();
     const unsettled = [...this.#pending.values()];
     this.#pending.clear();
@@ -1673,6 +1707,7 @@ class MisoAudioWorkletHost {
 
   async dispose() {
     if (this.#disposed) return;
+    this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     this.#disposed = true;
     this.#observations.clear();
