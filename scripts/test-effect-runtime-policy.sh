@@ -195,9 +195,9 @@ helper_count_output="$(PATH="$temp/wc-fail:$PATH" bash "$temp/scripts/check-effe
     printf 'effect helper count partial error escaped: %s\n' "$helper_count_output" >&2; exit 1;
 }
 
-# Issue #1462 batch follow-ups: the two diagnostics the registry (#1462) and session preparation
-# (#1335) raise are required. Renaming one everywhere the gate searches must fail it, by name.
-for code in effect.tail_bound.inconsistent effect.automation.rate; do
+# Issue #1462 batch follow-ups: the diagnostic the registry (#1462) raises is required (#1566 moved
+# the automation rate refusal to `controls`). Renaming it everywhere the gate searches must fail it, by name.
+for code in effect.tail_bound.inconsistent; do
     saved="$temp/diagnostic-saved"
     rm -rf -- "$saved"
     mkdir -p "$saved/crates"

@@ -141,7 +141,8 @@ pub mod keys {
  (route_destination,"Route-destination fields.";KIND="kind":1,SUBMIX_ID="submix_id":2,OUTPUT_ID="output_id":2)
  (channel_matrix,"Channel-matrix fields.";LL="ll":1,LR="lr":2,RL="rl":3,RR="rr":4)
  (automation,"Automation fields.";ID="id":1,TARGET="target":2,SEGMENTS="segments":3)
- (target,"Automation-target fields.";ENTITY_ID="entity_id":1,RACK="rack":2,EFFECT_ID="effect_id":3,PARAMETER_ID="parameter_id":4,CHANNEL="channel":5)
+ // An automation target is a control address (#1566): the ids are `control_address`'s wire field ids. `slot_id` is present in the `console` and `inserts` arms only.
+ (target,"Automation-target fields (a control address).";OWNER="owner":1,OWNER_ID="owner_id":2,SECTION="section":3,SLOT_ID="slot_id":4,CONTROL="control":5,LANE="lane":6)
  (segment,"Automation-segment fields.";SHAPE="shape":1,START_SAMPLE="start_sample":2,END_SAMPLE="end_sample":3,START_VALUE="start_value":4,END_VALUE="end_value":5,UNIT="unit":6)
  }
 }
@@ -296,17 +297,48 @@ mod walk {
           v.id(f::ID,&s.id),s.source.record(Some(f::SOURCE),o,v),s.destination.record(Some(f::DESTINATION),o,v),s.channel_matrix.record(Some(f::CHANNEL_MATRIX),o,v),v.f32(f::GAIN_DB,s.gain_db),v.bool(f::MUTE,s.mute),v.bool(f::FOLLOWS_MUTE,s.follows_mute)
         }
         Automation=>automation |s,v,o,f| [2+s.segments.len() as u32] {v.id(f::ID,&s.id),s.target.record(Some(f::TARGET),o,v),array(f::SEGMENTS,&s.segments,o,v)}
-        AutomationTarget=>target |s,v,_o,f| [5] {
-          v.id(f::ENTITY_ID,&s.entity_id),v.token(f::RACK,token(s.rack.token(),s.rack.wire())),v.id(f::EFFECT_ID,&s.effect_id),
-          v.u32(f::PARAMETER_ID,s.parameter_id),v.token(f::CHANNEL,token(s.channel.token(),s.channel.wire()))
-        }
         AutomationSegment=>segment |s,v,_o,f| [6] {
           v.token(f::SHAPE,token(s.shape.token(),s.shape.wire())),v.u64(f::START_SAMPLE,s.start_sample),v.u64(f::END_SAMPLE,s.end_sample),
           v.f32(f::START_VALUE,s.start_value),v.f32(f::END_VALUE,s.end_value),v.token(f::UNIT,token(s.unit.token(),s.unit.wire()))
         }
     }
 
+    /// The owner token of an address: the field-free kind's name and code. A session-owned address is
+    /// refused by validation before any walk that reaches a writer; it is walked as `session` and
+    /// carries no id.
+    fn owner_events<V: ModelVisitor>(
+        owner: &Owner,
+        f: &[FieldKey; 2],
+        v: &mut V,
+    ) -> Result<(), V::Error> {
+        let kind = owner.kind();
+        v.token(f[0], token(kind.name(), kind.code()))?;
+        owner.id().map_or(Ok(()), |id| v.id(f[1], id))
+    }
+    fn section_token<V: ModelVisitor>(
+        key: FieldKey,
+        section: &Section,
+        v: &mut V,
+    ) -> Result<(), V::Error> {
+        let kind = section.kind();
+        v.token(key, token(kind.name(), kind.code()))
+    }
+
     variants! {
+      ControlAddress=>target |v,f,_o| {
+        [Self { owner, section: Section::Own, control, lane }]=>5 "own" {
+          owner_events(owner,&[f::OWNER,f::OWNER_ID],v),section_token(f::SECTION,&Section::Own,v),v.u32(f::CONTROL,*control),v.token(f::LANE,token(lane.token(),lane.wire()))
+        }
+        [Self { owner, section: Section::Builtins, control, lane }]=>5 "builtins" {
+          owner_events(owner,&[f::OWNER,f::OWNER_ID],v),section_token(f::SECTION,&Section::Builtins,v),v.u32(f::CONTROL,*control),v.token(f::LANE,token(lane.token(),lane.wire()))
+        }
+        [Self { owner, section: section @ Section::Console(slot), control, lane }]=>6 "console" {
+          owner_events(owner,&[f::OWNER,f::OWNER_ID],v),section_token(f::SECTION,section,v),v.id(f::SLOT_ID,slot),v.u32(f::CONTROL,*control),v.token(f::LANE,token(lane.token(),lane.wire()))
+        }
+        [Self { owner, section: section @ Section::Inserts(slot), control, lane }]=>6 "inserts" {
+          owner_events(owner,&[f::OWNER,f::OWNER_ID],v),section_token(f::SECTION,section,v),v.id(f::SLOT_ID,slot),v.u32(f::CONTROL,*control),v.token(f::LANE,token(lane.token(),lane.wire()))
+        }
+      }
       EffectIdentity=>identity |v,f,_o| {
         [Self::Native { effect_id }]=>2 "native" {v.token(f::KIND,token("native",1)),v.id(f::EFFECT_ID,effect_id)}
         [Self::ThirdPartyCid { cid }]=>2 "cid" {v.token(f::KIND,token("cid",2)),v.text(f::CID,cid)}

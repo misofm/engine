@@ -1,3 +1,5 @@
+import type { ControlAddress } from "../generated/controls.ts";
+import type { ControlWireAddress } from "./control-frame.ts";
 import type {
   EffectId,
   EffectParameter,
@@ -24,15 +26,6 @@ import type {
  * observations and the automation targets all name an effect by one of them.
  */
 export type Rack = "console" | "inserts";
-
-/**
- * The three racks an automation target may name.
- *
- * `builtins` is not a rack of instances -- it is the strip's own fixed section, admitted as an
- * automation target by issue #178 under #210's D2. It is spelled here rather than in `Rack`
- * because a caller must not be able to place an effect in it.
- */
-export type AutomationRack = Rack | "builtins";
 
 export type Channel = "left" | "right" | "both";
 
@@ -326,22 +319,22 @@ export interface AutomationSegment {
 }
 
 /**
- * What a span addresses.
+ * What a span addresses: the control address that `edit.set` and the control list use (#1566).
  *
- * `slotId` names an effect by its stable ID, never a positional index, so inserting an effect
- * ahead of an automated one cannot silently re-point the automation. For `rack: "console"` it is
- * the console slot's ID, and for `rack: "inserts"` the insert's ID on this track. For
- * `rack: "builtins"` there is no instance to name and the key may be omitted; the builder writes
- * the schema's fixed `"strip"` literal, and refuses any other spelling.
+ * A {@link ControlAddress} names the row (`control`) by its machine name, the way the generated
+ * control tables spell it, and a {@link ControlWireAddress} by its numeric ID, which is what every
+ * row of `engine.controls()` carries. `owner` is a `strip` (a track or a submix), a `route` or a
+ * `vca`; the session is not an owner, because no session row is automatable. `section` is `own`,
+ * `builtins`, a `console` slot or the `inserts` entry of that strip, each named by its stable ID
+ * (`slot`, `effect`), never by a positional index, so inserting an effect ahead of an automated
+ * one cannot silently re-point the automation.
+ *
+ * The builder checks what the session document checks: the owner exists, a route or a VCA uses
+ * `own`, and a console slot or an insert exists on the strip. Whether the row is automatable
+ * (live, not derived, not a monitor or setting row), takes the lane, and accepts the span's values
+ * is the engine's rule, and its refusal comes back from `validate()` and preparation.
  */
-export interface AutomationTarget {
-  readonly trackId: string;
-  readonly rack: AutomationRack;
-  readonly slotId?: string;
-  /** A catalog parameter name for an effect, or a builtin parameter name for `builtins`. */
-  readonly parameter: string;
-  readonly channel: Channel;
-}
+export type AutomationTarget = ControlAddress | ControlWireAddress;
 
 export interface AutomationSpec {
   readonly id: string;

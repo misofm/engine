@@ -5,6 +5,7 @@
 //! and returns an immutable non-publishable compilation artifact for later compiler issues. The
 //! [`VisitModel`] API exposes one schema-keyed emit-side walk for canonical and wire consumers.
 
+mod address;
 mod canonical;
 mod compile;
 mod diagnostic;
@@ -20,6 +21,7 @@ mod value;
 mod vca;
 mod visit;
 
+pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use canonical::canonical_session_json;
 pub use compile::{CompileCaps, CompiledSession, OutputShape, compile_session};
 pub use diagnostic::{
@@ -33,7 +35,6 @@ pub use in_place::{
 };
 pub use model::*;
 pub use parse::parse_session_json;
-pub use validate::{BUILTIN_AUTOMATION_EFFECT_ID, BUILTIN_AUTOMATION_TARGETS};
 pub use vca::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, VcaNesting, VcaSum, vca_effective_db};
 pub use visit::{FieldKey, ModelVisitor, Token, VARIANT_ARMS, VisitModel, WalkOrder, keys};
 

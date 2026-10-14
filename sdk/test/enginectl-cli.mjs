@@ -73,7 +73,12 @@ function request(overrides = {}) {
     ],
     automation: [{
       id: "eq-ride",
-      target: { trackId: "vocal", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
+      target: {
+        owner: { kind: "strip", id: "vocal" },
+        section: { kind: "console", slot: "eq" },
+        control: "band_1_gain_db",
+        lane: "both",
+      },
       segments: [{ shape: "linear", startSample: "0", endSample: "480", startValue: -2, endValue: 0 }],
     }],
     ...overrides,
@@ -252,7 +257,12 @@ describe("enginectl session build", () => {
       .route({ id: "to-main", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } })
       .automation({
         id: "eq-ride",
-        target: { trackId: "vocal", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
+        target: {
+        owner: { kind: "strip", id: "vocal" },
+        section: { kind: "console", slot: "eq" },
+        control: "band_1_gain_db",
+        lane: "both",
+      },
         segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -2, endValue: 0 }],
       });
     const original = request();

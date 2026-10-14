@@ -281,7 +281,8 @@ fn vca_references_and_namespace_refuse_at_their_paths() {
 }
 
 /// Gate 2: a VCA ID never satisfies a lookup that wants a strip or an output -- a route source or
-/// destination, a sidechain source or an automation target.
+/// destination, a sidechain source or a `strip` automation target (a VCA is addressed as
+/// `owner: "vca"`, #1566).
 #[test]
 fn a_vca_is_not_a_route_endpoint_sidechain_or_automation_target() {
     let missing = DiagnosticCode::MissingEntityReference;
@@ -326,8 +327,8 @@ fn a_vca_is_not_a_route_endpoint_sidechain_or_automation_target() {
             "$.tracks[0].inserts.effects[0].sidechain.source.track_id",
         ),
         (
-            |root| root["automation"][0]["target"]["entity_id"] = json!("drums"),
-            "$.automation[0].target.entity_id",
+            |root| root["automation"][0]["target"]["owner_id"] = json!("drums"),
+            "$.automation[0].target.owner_id",
         ),
     ];
     for (edit, path) in cases {

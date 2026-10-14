@@ -1,10 +1,10 @@
 //! Canonical fixture and full tagged-surface round-trip checks.
 
 use session::{
-    AutomationTarget, CompileCaps, Console, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity,
-    EffectParam, EffectQuality, LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, RackName,
-    Route, RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId,
-    canonical_session_json, compile_session, parse_session_json,
+    CompileCaps, Console, ConsoleEntry, ConsoleSlot, ControlAddress, Effect, EffectIdentity,
+    EffectParam, EffectQuality, LinkMode, MatrixOrPan, Owner, ParameterChannel, ParameterUnit,
+    Route, RouteDestination, RouteSource, Section, SendTap, Sidechain, SidechainDeclaration,
+    StableId, canonical_session_json, compile_session, parse_session_json,
 };
 
 const REPRESENTATIVE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -222,15 +222,14 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         tap: SendTap::PreFader,
     };
     model.routes.push(pre_fader);
-    model.automation[0].target.channel = ParameterChannel::Both;
+    model.automation[0].target.lane = ParameterChannel::Both;
     let mut console_automation = model.automation[0].clone();
     console_automation.id = id("desk-eq-gain");
-    console_automation.target = AutomationTarget {
-        entity_id: id("vocal"),
-        rack: RackName::Console,
-        effect_id: id("desk-eq"),
-        parameter_id: 2,
-        channel: ParameterChannel::Left,
+    console_automation.target = ControlAddress {
+        owner: Owner::Strip(id("vocal")),
+        section: Section::Console(id("desk-eq")),
+        control: 2,
+        lane: ParameterChannel::Left,
     };
     model.automation.push(console_automation);
 
@@ -258,7 +257,7 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         reparsed
             .automation
             .iter()
-            .any(|automation| automation.target.rack == RackName::Console)
+            .any(|automation| matches!(automation.target.section, Section::Console(_)))
     );
     assert!(
         reparsed

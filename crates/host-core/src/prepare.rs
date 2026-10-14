@@ -1905,7 +1905,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
 
     let registry =
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
-    let mut effects = prepare_native_session_effects(
+    // The stored automation is held to the row it names here, beside the effect diagnostics, so
+    // every host refuses a session alike (#1566 D7).
+    let automation: Vec<effect_compiler::EffectDiagnostic> =
+        controls::automation_diagnostics(compiled.normalized_model(), compiled.sample_rate().0)
+            .into_iter()
+            .map(|diagnostic| effect_compiler::EffectDiagnostic {
+                code: diagnostic.code,
+                path: diagnostic.path,
+            })
+            .collect();
+    let mut effects = match prepare_native_session_effects(
         compiled,
         registry,
         EffectCompileCaps {
@@ -1913,8 +1923,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,
             maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
         },
-    )
-    .map_err(effect_diagnostics)?;
+    ) {
+        Ok(effects) if automation.is_empty() => effects,
+        Ok(_) => {
+            return Err(effect_diagnostics(
+                effect_compiler::EffectDiagnosticSet::sorted(automation),
+            ));
+        }
+        Err(set) => {
+            return Err(effect_diagnostics(
+                effect_compiler::EffectDiagnosticSet::sorted(
+                    set.0.into_iter().chain(automation).collect(),
+                ),
+            ));
+        }
+    };
     let (effect_state_bytes, effect_scratch_bytes) =
         effects
             .entries

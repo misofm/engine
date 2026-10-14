@@ -100,23 +100,28 @@ Closed tokens:
 - channel: `left`, `right`, `both`
 - unit: `db`, `hz`, `milliseconds`, `samples`, `linear`, `ratio`
 - automation shape: `step`, `linear`, `exponential`
-- automation rack: `console`, `inserts`, `builtins`
+- automation target owner: `strip`, `route`, `vca`; section: `own`, `builtins`, `console`, `inserts`
 - tap, in signal order, the same seven on a track and a submix: `input`, `post_input`,
   `insert_send` (after `pre_insert`), `insert_return` (after the inserts), `pre_fader` (after
   `post_insert`), `post_fader`, `post_pan`. A pre-fader tap is not gated by the fader mute. The
   retired spellings (`post_input_builtins`, `post_simd1`, `post_dynamic`,
   `post_simd2_pre_fader`, `post_matrix`) are `schema.invalid_enum`.
 
-Automation targets contain `entity_id`, `rack`, `effect_id`, `parameter_id`, `channel`.
-`entity_id` names a strip: a track or a submix. For `rack: "console"`, `effect_id` is the slot ID;
-for `rack: "inserts"`, the insert's ID; either must name a parameter/channel pair already declared
-on that strip's (the track's or the submix's) entry or insert. The engine accepts a submix target;
-the SDK's `.automation()` builder and `enginectl`'s target still take a `trackId` only, so author
-a submix target in the JSON itself. For
-`rack: "builtins"`, `effect_id` is `"strip"`; IDs 1 polarity, 2 trim, 3 HPF, 4 LPF, 5 fader,
-6 mute and 12 pan accept left/right/both, while matrix IDs 7-10 accept `both` only. Delay (11) is
-prepared-only and cannot be automated. Stored automation is inert today: it authors and
-round-trips, and renders nothing.
+An automation target is a control address, the one `SET_CONTROL` and the control list use. Its keys,
+in order: `owner` (`strip`, `route` or `vca`), `owner_id`, `section` (`own`, `builtins`, `console` or
+`inserts`), `slot_id` (only in a `console` or `inserts` section: the console slot or the insert ID;
+any other section refuses it as `schema.unknown_field`), `control` (the row ID inside the section)
+and `lane` (`left`, `right` or `both`). `owner: "strip"` names a track or a submix; a `route` or
+`vca` owner uses `section: "own"` (a send's `gain_db` is row 1 of its route, a VCA's `offset_db` row
+1). In `builtins`, IDs 1 polarity, 2 trim, 3 HPF, 4 LPF, 5 fader, 6 mute and 12 pan accept
+left/right/both, while matrix IDs 7-10 accept `both` only, and only on a strip in matrix mode. In
+`console` and `inserts`, `control` is the effect's parameter ID (`0` is its bypass). The session
+validator checks only that the owner, slot or insert exists; whether the row is automatable (not
+rebuild-only like `delay_samples` 11 or an EQ band's `enabled`, not derived, not a monitor or
+setting row), takes the lane, unit and values is `control.address.unknown`,
+`control.automation.target`, `control.inactive`, `control.lane` or `control.domain` at prepare-effects. A
+parameter does not have to be declared on the strip. Stored automation is inert today: it authors
+and round-trips, and renders nothing.
 
 ## VCA groups
 
@@ -126,7 +131,7 @@ every member's own fader, and whose mutes mute every member (VCAs are inert at p
 #1242). `members` is an array of ID strings naming tracks, submixes and other VCAs, each once; an
 output is never a member, VCAs nest and overlap, and a diamond is legal, but membership is acyclic.
 A VCA's ID is in the graph-entity namespace, yet it is never a route endpoint, a sidechain source
-or an automation target. The canonical writer sorts `vcas` and each `members` list by ID; save each
+or a `strip` automation target (an `owner: "vca"` target names it instead). The canonical writer sorts `vcas` and each `members` list by ID; save each
 member's own fader and each VCA's own offset, never a computed effective value.
 
 ## Control smoothing
@@ -142,7 +147,7 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
 | Defect | Code | Stage |
 | --- | --- | --- |
 | A VCA on a membership cycle (a self-member included), at `$.vcas[<i>]` | `vca.cycle` | typed-model |
-| A member that is not a declared track, submix or VCA; a VCA ID as a route endpoint, sidechain source or automation target | `reference.missing_entity` | typed-model |
+| A member that is not a declared track, submix or VCA; a VCA ID as a route endpoint, sidechain source or `strip` automation owner | `reference.missing_entity` | typed-model |
 | A repeated member; a VCA ID already used by a track, submix, output or VCA | `id.duplicate` | typed-model |
 | A VCA offset outside `[-144, 24]` dB | `numeric.out_of_schema_range` | typed-model |
 

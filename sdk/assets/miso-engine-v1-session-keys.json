@@ -344,13 +344,48 @@
     },
     {
       "module": "target",
-      "arm": null,
+      "arm": "builtins",
       "keys": [
-        ["entity_id", "id"],
-        ["rack", "token"],
-        ["effect_id", "id"],
-        ["parameter_id", "integer"],
-        ["channel", "token"]
+        ["owner", "token"],
+        ["owner_id", "id"],
+        ["section", "token"],
+        ["control", "integer"],
+        ["lane", "token"]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "console",
+      "keys": [
+        ["owner", "token"],
+        ["owner_id", "id"],
+        ["section", "token"],
+        ["slot_id", "id"],
+        ["control", "integer"],
+        ["lane", "token"]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "inserts",
+      "keys": [
+        ["owner", "token"],
+        ["owner_id", "id"],
+        ["section", "token"],
+        ["slot_id", "id"],
+        ["control", "integer"],
+        ["lane", "token"]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "own",
+      "keys": [
+        ["owner", "token"],
+        ["owner_id", "id"],
+        ["section", "token"],
+        ["control", "integer"],
+        ["lane", "token"]
       ]
     },
     {
@@ -539,7 +574,10 @@
     {
       "key": "target",
       "records": [
-        { "module": "target", "arm": null }
+        { "module": "target", "arm": "builtins" },
+        { "module": "target", "arm": "console" },
+        { "module": "target", "arm": "inserts" },
+        { "module": "target", "arm": "own" }
       ]
     },
     {

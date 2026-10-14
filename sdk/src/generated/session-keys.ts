@@ -772,26 +772,112 @@ export const SESSION_KEYS = deepFreeze(
     },
     {
       "module": "target",
-      "arm": null,
+      "arm": "builtins",
       "keys": [
         [
-          "entity_id",
-          "id"
-        ],
-        [
-          "rack",
+          "owner",
           "token"
         ],
         [
-          "effect_id",
+          "owner_id",
           "id"
         ],
         [
-          "parameter_id",
+          "section",
+          "token"
+        ],
+        [
+          "control",
           "integer"
         ],
         [
-          "channel",
+          "lane",
+          "token"
+        ]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "console",
+      "keys": [
+        [
+          "owner",
+          "token"
+        ],
+        [
+          "owner_id",
+          "id"
+        ],
+        [
+          "section",
+          "token"
+        ],
+        [
+          "slot_id",
+          "id"
+        ],
+        [
+          "control",
+          "integer"
+        ],
+        [
+          "lane",
+          "token"
+        ]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "inserts",
+      "keys": [
+        [
+          "owner",
+          "token"
+        ],
+        [
+          "owner_id",
+          "id"
+        ],
+        [
+          "section",
+          "token"
+        ],
+        [
+          "slot_id",
+          "id"
+        ],
+        [
+          "control",
+          "integer"
+        ],
+        [
+          "lane",
+          "token"
+        ]
+      ]
+    },
+    {
+      "module": "target",
+      "arm": "own",
+      "keys": [
+        [
+          "owner",
+          "token"
+        ],
+        [
+          "owner_id",
+          "id"
+        ],
+        [
+          "section",
+          "token"
+        ],
+        [
+          "control",
+          "integer"
+        ],
+        [
+          "lane",
           "token"
         ]
       ]
@@ -1104,7 +1190,19 @@ export const SESSION_KEYS = deepFreeze(
       "records": [
         {
           "module": "target",
-          "arm": null
+          "arm": "builtins"
+        },
+        {
+          "module": "target",
+          "arm": "console"
+        },
+        {
+          "module": "target",
+          "arm": "inserts"
+        },
+        {
+          "module": "target",
+          "arm": "own"
         }
       ]
     },

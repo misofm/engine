@@ -5,9 +5,9 @@ use effect_contract::{
     ParameterDescriptor, ParameterLattice, ParameterUnit, parameter_value_valid,
 };
 
-use crate::address::Lane;
 use crate::error::ControlError;
 use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
+use session::Lane;
 
 /// The class of a value that a ruling makes live and whose issue has not landed.
 pub(crate) const fn ruled_live_not_built(issue: u32, reopen: &'static str) -> ControlClass {

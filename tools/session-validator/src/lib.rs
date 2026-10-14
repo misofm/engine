@@ -391,6 +391,12 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
             return skipped_tail(stages, 5);
         }
     };
+    // The stored automation is held to the row it names (#1566 D7), beside the effect diagnostics.
+    let mut diagnostics: Vec<_> =
+        controls::automation_diagnostics(compiled.normalized_model(), compiled.sample_rate().0)
+            .into_iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.path))
+            .collect();
     if let Err(set) = prepare_native_session_effects(
         &compiled,
         registry,
@@ -400,16 +406,18 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
             maximum_automation_spans_per_block: u32::MAX,
         },
     ) {
-        let mut diagnostics = set.0;
+        diagnostics.extend(
+            set.0
+                .into_iter()
+                .map(|diagnostic| (diagnostic.code, diagnostic.path)),
+        );
+    }
+    if !diagnostics.is_empty() {
         diagnostics.sort();
         stages.push(stage(
             4,
             StageStatus::Fail,
-            preparation_diagnostics(
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| (diagnostic.code, diagnostic.path)),
-            ),
+            preparation_diagnostics(diagnostics.into_iter()),
         ));
         return skipped_tail(stages, 5);
     }

@@ -1,7 +1,7 @@
 //! Dual-mono lane helpers shared by the row tables.
 
-use crate::address::Lane;
 use crate::descriptor::Lanes;
+use session::Lane;
 
 /// One side of a dual-mono strip, as a row accessor sees it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

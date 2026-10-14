@@ -1,9 +1,9 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
-    AutomationShape, AutomationTarget, ConsoleEntry, Diagnostic, DiagnosticCode, DiagnosticSet,
-    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit,
+    AutomationShape, ConsoleEntry, ControlAddress, Diagnostic, DiagnosticCode, DiagnosticSet,
+    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, Owner, ParameterUnit,
     ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Rack,
-    RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source,
+    RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section, SessionModel, Source,
     Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
@@ -20,6 +20,7 @@ enum GraphEntity<'a> {
 }
 struct Index<'a> {
     sources: HashMap<&'a str, &'a Source>,
+    routes: HashSet<&'a str>,
     graph: HashMap<&'a str, GraphEntity<'a>>,
 }
 #[derive(Default)]
@@ -173,7 +174,11 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
         }
     }
 
-    let index = Index { sources, graph };
+    let index = Index {
+        sources,
+        routes: route_ids,
+        graph,
+    };
     let mut local = LocalUniqueness::default();
     validate_sources(session, &root, &mut diagnostics);
     validate_console(session, &root, &mut diagnostics);
@@ -860,101 +865,98 @@ fn validate_route_destination(
     }
 }
 
-/// The one `effect_id` a `rack = "builtins"` automation target may name.
-///
-/// The strip is a single fixed object, not a rack of instances, so there is nothing to identify --
-/// but Session V1 has no optional keys (`docs/SESSION_SCHEMA_V1.md`), so the field cannot simply be
-/// omitted. It carries a fixed, validated literal instead, which is the C2 rule applied to a key
-/// whose value is determined: the document still declares five target fields and the reader still
-/// reads five, and a target that names anything else is refused rather than silently ignored.
-pub const BUILTIN_AUTOMATION_EFFECT_ID: &str = "strip";
-
-/// The builtin parameters a session may name as an automation target, `(id, per_lane)`.
-///
-/// # Why this table is spelled here
-///
-/// `session` depends on `engine` and nothing else -- that is a policy
-/// (`scripts/check-session-policy.sh`), not an accident -- so this crate cannot read
-/// `BUILTIN_PARAMETER_DESCRIPTORS` and this is a deliberate second spelling of it, exactly as
-/// `scripts/check-parameter-metadata-v1.py` is a second spelling of the command-kind list. The two
-/// are held together by `builtins_compiler`'s
-/// `builtin_automation_targets_match_the_parameter_abi`, which can see both crates and compares
-/// them row by row: a descriptor whose `update_rate` moves without this table moving is red there.
-///
-/// # Why the list is exactly the block-target rows
-///
-/// A target names something the render plane can be *told* to change. The row that remains
-/// `BuiltinParameterUpdateRate::PreparedOnly` is `delay_samples` (11); it has no post-preparation
-/// write path, so an automation span addressed at it could only ever be inert syntax. The input
-/// filter rows have a prepared-target write path and are included here.
-///
-/// `per_lane` is the descriptor's `BuiltinParameterScope`: a `PerLane` parameter may be addressed
-/// `left`, `right` or `both`, while the four matrix coefficients are one shared 2x2 and can only
-/// be addressed `both`.
-pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 11] = [
-    // `polarity_invert` and `trim_db`: live since #210 phase 3.
-    (1, true),
-    (2, true),
-    // `hpf_hz` and `lpf_hz`: live through the prepared input-filter owner (#808).
-    (3, true),
-    (4, true),
-    // `fader_db` and `mute`: live since #140 B.
-    (5, true),
-    (6, true),
-    // `matrix_ll/lr/rl/rr`: live since #137 D1, and `MatrixShared`.
-    (7, false),
-    (8, false),
-    (9, false),
-    (10, false),
-    // #239 ruling 5461507633 B4: persisted pan intent is a per-lane builtin row.
-    (12, true),
-];
-
-/// Validate one `rack = "builtins"` automation target against the builtin parameter ABI.
-///
-/// # What this does and does not unblock (#178, ruled by #210's D2)
-///
-/// It extends the target **vocabulary** and nothing else. No lowering reads the session's
-/// automation table -- for this rack or for any of the other three -- so a valid `builtins` target
-/// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
-/// and it renders nothing. Rendering stored session automation, builtin targets included, is
-/// owned by #1058 (research first); #140, which once gated it, was descoped by the 2026-09-28
-/// owner ruling. The natural destination is still the drains #210 phases 1 and 3 built
-/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), whose block-first-sample
-/// semantics match a span. Nothing here builds that feed or should be read as having built it.
-fn validate_builtin_automation_target(
-    target: &AutomationTarget,
+/// Check that an automation target names things that exist (#1566 D5). Structure only: whether the
+/// row at the address exists, is automatable and takes the lane is `controls`' rule, which reads
+/// the row table this crate cannot see.
+fn validate_automation_target(
+    target: &ControlAddress,
+    index: &Index<'_>,
     path: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let target_path = path.key("target");
-    if target.effect_id.as_str() != BUILTIN_AUTOMATION_EFFECT_ID {
-        error(
-            diagnostics,
-            DiagnosticCode::MissingEntityReference,
-            &target_path.key("effect_id"),
-            "builtins automation must name the strip",
-        );
-    }
-    let Some((_, per_lane)) = BUILTIN_AUTOMATION_TARGETS
-        .iter()
-        .find(|(id, _)| *id == target.parameter_id)
-    else {
-        error(
-            diagnostics,
-            DiagnosticCode::MissingEntityReference,
-            &target_path.key("parameter_id"),
-            "parameter ID is not an automatable builtin parameter",
-        );
+    let owner_path = path.key("owner_id");
+    // A strip carries inserts and a console entry per slot; a route and a VCA have an own section
+    // and nothing else.
+    let strip = match &target.owner {
+        Owner::Session => {
+            error(
+                diagnostics,
+                DiagnosticCode::InvalidEnum,
+                &path.key("owner"),
+                "a session control is not automatable; the owner is a strip, a route or a VCA",
+            );
+            return;
+        }
+        Owner::Strip(id) => match index.graph.get(id.as_str()) {
+            Some(GraphEntity::Track(track)) => Some((&track.inserts, track.console.as_slice())),
+            Some(GraphEntity::Submix(submix)) => Some((&submix.inserts, submix.console.as_slice())),
+            _ => {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &owner_path,
+                    "automation target must be a declared track or submix",
+                );
+                return;
+            }
+        },
+        Owner::Route(id) => {
+            if !index.routes.contains(id.as_str()) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &owner_path,
+                    "automation target must be a declared route",
+                );
+            }
+            None
+        }
+        Owner::Vca(id) => {
+            if !matches!(index.graph.get(id.as_str()), Some(GraphEntity::Vca(_))) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &owner_path,
+                    "automation target must be a declared VCA",
+                );
+            }
+            None
+        }
+    };
+    let Some((inserts, console)) = strip else {
+        if target.section != Section::Own {
+            error(
+                diagnostics,
+                DiagnosticCode::InvalidEnum,
+                &path.key("section"),
+                "a route or VCA target uses the own section",
+            );
+        }
         return;
     };
-    if !*per_lane && target.channel != ParameterChannel::Both {
-        error(
-            diagnostics,
-            DiagnosticCode::InvalidEnum,
-            &target_path.key("channel"),
-            "shared builtin parameters are addressed as both",
-        );
+    // Rack size is resource-bounded; these are intentional local searches.
+    match &target.section {
+        Section::Own | Section::Builtins => {}
+        Section::Console(slot) => {
+            if !console.iter().any(|entry| entry.slot == *slot) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &path.key("slot_id"),
+                    "console slot is absent from the strip",
+                );
+            }
+        }
+        Section::Inserts(slot) => {
+            if !inserts.effects.iter().any(|effect| effect.id == *slot) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &path.key("slot_id"),
+                    "effect ID is absent from the strip's inserts",
+                );
+            }
+        }
     }
 }
 
@@ -976,68 +978,7 @@ fn validate_automation(
             );
         }
 
-        // A target may name a track or (inert until #1058) a submix strip (#1199 D6), and a
-        // console target on either names that strip's entry for the slot (#1202).
-        let strip = match index.graph.get(automation.target.entity_id.as_str()) {
-            Some(GraphEntity::Track(track)) => Some((&track.inserts, track.console.as_slice())),
-            Some(GraphEntity::Submix(submix)) => Some((&submix.inserts, submix.console.as_slice())),
-            _ => {
-                error(
-                    diagnostics,
-                    DiagnosticCode::MissingEntityReference,
-                    &path.key("target").key("entity_id"),
-                    "automation target must be a declared track or submix",
-                );
-                None
-            }
-        };
-        if let Some((inserts, console)) = strip {
-            // Rack size is resource-bounded; this is one of two intentional local searches.
-            let params = match automation.target.rack {
-                RackName::Inserts => Some(
-                    inserts
-                        .effects
-                        .iter()
-                        .find(|effect| effect.id == automation.target.effect_id)
-                        .map(|effect| effect.params.as_slice()),
-                ),
-                // A console slot is addressed by its slot ID, in either section (decision 12).
-                RackName::Console => Some(
-                    console
-                        .iter()
-                        .find(|entry| entry.slot == automation.target.effect_id)
-                        .map(|entry| entry.params.as_slice()),
-                ),
-                // The strip is not a rack of effects, so there is nothing to search; the arm
-                // below validates the target against the builtin parameter ABI instead.
-                RackName::Builtins => None,
-            };
-            if let Some(params) = params {
-                if let Some(params) = params {
-                    // Parameter count is resource-bounded; keep the local `(id, channel)` search.
-                    if !params.iter().any(|parameter| {
-                        parameter.parameter_id == automation.target.parameter_id
-                            && parameter.channel == automation.target.channel
-                    }) {
-                        error(
-                            diagnostics,
-                            DiagnosticCode::MissingEntityReference,
-                            &path.key("target").key("parameter_id"),
-                            "parameter/channel is absent from selected effect",
-                        );
-                    }
-                } else {
-                    error(
-                        diagnostics,
-                        DiagnosticCode::MissingEntityReference,
-                        &path.key("target").key("effect_id"),
-                        "effect ID is absent from selected rack",
-                    );
-                }
-            } else {
-                validate_builtin_automation_target(&automation.target, &path, diagnostics);
-            }
-        }
+        validate_automation_target(&automation.target, index, &path.key("target"), diagnostics);
 
         let segments_path = path.key("segments");
         let mut previous_start = None;

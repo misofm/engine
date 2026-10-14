@@ -472,7 +472,12 @@ function automation(value: unknown, path: string): AutomationSpec {
   const raw = record(value, path);
   keys(raw, ["id", "target", "segments"], ["id", "target", "segments"], path);
   const target = record(raw.target, `${path}.target`);
-  keys(target, ["trackId", "rack", "slotId", "parameter", "channel"], ["trackId", "rack", "parameter", "channel"], `${path}.target`);
+  keys(target, ["owner", "section", "control", "lane"], ["owner", "section", "control", "lane"], `${path}.target`);
+  // The control address `edit.set` takes (#1566): the builder checks the owner, the slot and the row.
+  const owner = record(target.owner, `${path}.target.owner`);
+  keys(owner, ["kind", "id"], ["kind", "id"], `${path}.target.owner`);
+  const section = record(target.section, `${path}.target.section`);
+  keys(section, ["kind", "slot", "effect"], ["kind"], `${path}.target.section`);
   const segments = array(raw.segments, `${path}.segments`).map((value, index) => {
     const where = `${path}.segments[${index}]`;
     const segment = record(value, where);
@@ -487,13 +492,22 @@ function automation(value: unknown, path: string): AutomationSpec {
   });
   return {
     id: string(raw.id, `${path}.id`),
+    // The kinds are checked by the builder, which refuses what the engine's grammar refuses.
     target: {
-      trackId: string(target.trackId, `${path}.target.trackId`),
-      rack: string(target.rack, `${path}.target.rack`) as AutomationSpec["target"]["rack"],
-      ...(target.slotId === undefined ? {} : { slotId: string(target.slotId, `${path}.target.slotId`) }),
-      parameter: string(target.parameter, `${path}.target.parameter`),
-      channel: string(target.channel, `${path}.target.channel`) as AutomationSpec["target"]["channel"],
-    },
+      owner: {
+        kind: string(owner.kind, `${path}.target.owner.kind`),
+        id: string(owner.id, `${path}.target.owner.id`),
+      },
+      section: {
+        kind: string(section.kind, `${path}.target.section.kind`),
+        ...(section.slot === undefined ? {} : { slot: string(section.slot, `${path}.target.section.slot`) }),
+        ...(section.effect === undefined ? {} : { effect: string(section.effect, `${path}.target.section.effect`) }),
+      },
+      control: typeof target.control === "number"
+        ? target.control
+        : string(target.control, `${path}.target.control`),
+      lane: string(target.lane, `${path}.target.lane`),
+    } as unknown as AutomationSpec["target"],
     segments,
   };
 }

@@ -1,4 +1,6 @@
 import { CATALOG } from "../generated/catalog.ts";
+import { CONTROLS } from "../generated/controls.ts";
+import type { ControlLane } from "../generated/controls.ts";
 import type { BuiltinParameter, EffectDescriptor, EffectId } from "../generated/catalog.ts";
 import { MisoUsageError } from "./errors.ts";
 import { normalizeControlSmoothing } from "../internal/control-smoothing.ts";
@@ -164,14 +166,6 @@ const SEND_TAPS: ReadonlySet<string> = new Set([
   "post_pan",
 ]);
 const IDENTITY_MATRIX: Matrix2x2 = Object.freeze({ ll: 1, lr: 0, rl: 0, rr: 1 });
-
-/**
- * The one `effect_id` a `rack = "builtins"` automation target may carry.
- *
- * The strip is a chassis, not a rack of instances, so it has nothing to identify -- but V1 has no
- * optional keys, so the field is written with the schema's fixed literal instead of omitted.
- */
-const BUILTIN_STRIP_EFFECT_ID = "strip";
 
 /**
  * The native effects a console slot may name (owner decision 12, "Eligibility").
@@ -866,12 +860,18 @@ export class SessionBuilder {
   }
 
   /**
-   * Declare an automation span set.
+   * Declare an automation span set on a control address (#1566).
    *
-   * The whole table is consumed by nothing today -- no lowering reads it, for the strip or for any
-   * effect rack -- so what this verb buys is authoring and round-tripping, not motion. The schema
-   * says so plainly and so does this comment, because a builder that let a caller believe a fader
-   * ride would render would be the more expensive kind of wrong.
+   * `target` is the address `edit.set` and the control list use: an owner (a strip, a route or a
+   * VCA), a section, a row and a lane. The builder checks what the session document checks, that
+   * the owner exists and the console slot or insert is on the strip, and writes the span in the
+   * row's unit; the engine decides whether the row is automatable and takes the lane and the
+   * values, and `validate()` reports it.
+   *
+   * The whole table is consumed by nothing today -- no lowering reads it -- so what this verb buys
+   * is authoring and round-tripping, not motion. The schema says so plainly and so does this
+   * comment, because a builder that let a caller believe a fader ride would render would be the
+   * more expensive kind of wrong.
    */
   automation(spec: AutomationSpec): SessionBuilder {
     stableId(spec?.id, "automation().id");
@@ -957,19 +957,7 @@ export class SessionBuilder {
   }
 
   #validateAutomation(spec: AutomationSpec, path: string): void {
-    const target = spec.target;
-    if (target === null || typeof target !== "object") {
-      fail(`${path}.target`, "expected an automation target");
-    }
-    stableId(target.trackId, `${path}.target.trackId`);
-    const track = this.#state.tracks.find((entry) => entry.id === target.trackId);
-    if (track === undefined) {
-      fail(`${path}.target.trackId`, `'${target.trackId}' is not a declared track`);
-    }
-    if (!["left", "right", "both"].includes(target.channel)) {
-      fail(`${path}.target.channel`, "expected left, right or both");
-    }
-    resolveAutomationTarget(target, track, this.#state.console ?? [], `${path}.target`);
+    resolveAutomationTarget(spec.target, this.#state, `${path}.target`);
     if (spec.segments.length === 0) {
       fail(`${path}.segments`, "automation must declare at least one segment");
     }
@@ -1386,120 +1374,150 @@ function normalizeConsole(slots: readonly ConsoleSlotEntry[]): ModelRecord {
   return freeze({ pre_insert: section("pre_insert"), post_insert: section("post_insert") });
 }
 
+/** A stored automation's target, resolved to the keys the session document writes. */
 interface ResolvedAutomationTarget {
-  readonly parameterId: number;
+  readonly owner: "strip" | "route" | "vca";
+  readonly ownerId: string;
+  readonly section: "own" | "builtins" | "console" | "inserts";
+  /** The console slot or the insert: present exactly in a `console` or `inserts` section. */
+  readonly slotId: string | undefined;
+  readonly control: number;
+  readonly lane: ControlLane;
+  /** The unit of the row the target names, which every span of the automation is written in. */
   readonly unit: string;
-  readonly effectId: string;
-  /** Absent for the strip, whose values are not bounded by an effect descriptor row. */
-  readonly row: EffectParameterRow | undefined;
+}
+
+/** One row of a control table, as far as an automation target reads it. */
+interface ControlTableRow {
+  readonly control: number;
+  readonly name: string;
+  readonly unit: string;
 }
 
 /**
- * Resolve an automation target to its ABI parameter id and unit token.
+ * Resolve an automation target (#1566, decision 17 C2) to the keys of the session document.
  *
- * The racks answer differently on purpose. An effect target is resolved through the *declared
- * instance*: a `console` target names a session slot and reads this track's entry for it, an
- * `inserts` target names one of this track's inserts, and in both the `(parameter_id, channel)`
- * pair must already appear in that instance's params, which is exactly what the engine checks. A
- * `builtins` target has no instance, so it is resolved against the builtin parameter ABI and
- * restricted to the rows that declare `blockTarget`. The prepared input-filter rows are live
- * through the paired command path; `delay_samples` remains prepared-only and is refused here. An
- * effect target is likewise restricted to the rows that are `automatable` at the `block` rate, as
- * the engine's preparation is (`effect.automation.rate`).
+ * A target is a control address, the one `edit.set` and the control list use. This resolves only
+ * what the session document checks: the owner exists in its namespace, a route or a VCA uses its
+ * `own` section, and a console slot or an insert exists on the strip. It also finds the row, by
+ * name or by numeric ID in the generated control tables, because the span is written in the row's
+ * unit. Whether the row is automatable, takes the lane and accepts the span's values is the
+ * engine's rule (`controls::automation_diagnostics`), reported by `validate()` and preparation:
+ * a rebuild-only row, a derived row, a monitor row, a setting or a lane the row lacks all build.
  */
 function resolveAutomationTarget(
   target: AutomationTarget,
-  track: TrackEntry,
-  slots: readonly ConsoleSlotEntry[],
+  state: BuilderState,
   path: string,
 ): ResolvedAutomationTarget {
-  if (target.rack === "builtins") {
-    if (target.slotId !== undefined && target.slotId !== BUILTIN_STRIP_EFFECT_ID) {
-      fail(`${path}.slotId`, `builtins automation must name the strip, not '${target.slotId}'`);
+  if (target === null || typeof target !== "object") {
+    fail(path, "expected an automation target");
+  }
+  const owner = target.owner as { readonly kind?: unknown; readonly id?: unknown } | undefined;
+  const section = target.section as
+    | { readonly kind?: unknown; readonly slot?: unknown; readonly effect?: unknown }
+    | undefined;
+  if (owner === null || typeof owner !== "object") fail(`${path}.owner`, "expected an owner");
+  if (section === null || typeof section !== "object") fail(`${path}.section`, "expected a section");
+  if (owner.kind !== "strip" && owner.kind !== "route" && owner.kind !== "vca") {
+    fail(
+      `${path}.owner.kind`,
+      "expected strip, route or vca; no session row is automatable",
+      CODE.invalidEnum,
+    );
+  }
+  const ownerId = stableId(owner.id, `${path}.owner.id`);
+  if (section.kind !== "own" && section.kind !== "builtins" && section.kind !== "console"
+    && section.kind !== "inserts") {
+    fail(`${path}.section.kind`, "expected own, builtins, console or inserts", CODE.invalidEnum);
+  }
+  if (!["left", "right", "both"].includes(target.lane)) {
+    fail(`${path}.lane`, "expected left, right or both", CODE.invalidEnum);
+  }
+
+  // The owner exists, and a route or a VCA has an own section and nothing else.
+  let strip: { readonly inserts: readonly EffectDecl[] } | undefined;
+  if (owner.kind === "strip") {
+    const track = state.tracks.find((entry) => entry.id === ownerId);
+    const submix = state.submixes.find((entry) => entry.id === ownerId);
+    if (track === undefined && submix === undefined) {
+      fail(`${path}.owner.id`, `'${ownerId}' is not a declared track or submix`, CODE.missingEntity);
     }
-    const row = CATALOG.builtins.parameters.find((candidate) => candidate.name === target.parameter);
-    if (row === undefined) {
-      fail(`${path}.parameter`, `'${target.parameter}' is not a builtin parameter`);
+    strip = { inserts: (track?.spec.inserts ?? submix?.spec?.inserts) ?? [] };
+  } else if (owner.kind === "route") {
+    if (!state.routes.some((route) => route.id === ownerId)) {
+      fail(`${path}.owner.id`, `'${ownerId}' is not a declared route`, CODE.missingEntity);
     }
-    if (row.updateRate !== "blockTarget") {
-      fail(
-        `${path}.parameter`,
-        `${row.name} is prepared-only, so a span addressed at it could only ever be inert`,
-      );
+  } else if (!state.vcas.some((vca) => vca.id === ownerId)) {
+    fail(`${path}.owner.id`, `'${ownerId}' is not a declared VCA`, CODE.missingEntity);
+  }
+  if (strip === undefined && section.kind !== "own") {
+    fail(`${path}.section.kind`, `a ${owner.kind} has an own section only`, CODE.invalidEnum);
+  }
+
+  // The slot or the insert exists on the strip; the effect it runs names the rows of the section.
+  let slotId: string | undefined;
+  let rows: readonly ControlTableRow[];
+  if (section.kind === "console" || section.kind === "inserts") {
+    if (strip === undefined) throw new MisoUsageError("unreachable: a strip owner");
+    let effectId: string | undefined;
+    if (section.kind === "console") {
+      slotId = stableId(section.slot, `${path}.section.slot`);
+      effectId = (state.console ?? []).find((slot) => slot.slot === slotId)?.effectId;
+      if (effectId === undefined) {
+        fail(`${path}.section.slot`, `'${slotId}' is not a console slot of this session`, CODE.missingEntity);
+      }
+    } else {
+      slotId = stableId(section.effect, `${path}.section.effect`);
+      const inserts = strip.inserts;
+      effectId = inserts.find((decl, position) => insertId(decl, position) === slotId)?.effectId;
+      if (effectId === undefined) {
+        fail(`${path}.section.effect`, `'${slotId}' is not one of ${ownerId}'s inserts`, CODE.missingEntity);
+      }
     }
-    if (row.scope !== "perLane" && target.channel !== "both") {
-      fail(`${path}.channel`, `${row.name} is one shared value and is addressed as 'both'`);
-    }
-    return {
-      parameterId: row.id,
-      unit: row.unitName,
-      effectId: BUILTIN_STRIP_EFFECT_ID,
-      row: undefined,
+    const effect = CONTROLS.effects[effectId as EffectId] as unknown as {
+      readonly bypass: ControlTableRow;
+      readonly parameters: readonly ControlTableRow[];
+      readonly linkMode: ControlTableRow | null;
     };
-  }
-  if (target.rack !== "console" && target.rack !== "inserts") {
-    fail(`${path}.rack`, "expected console, inserts or builtins", CODE.invalidEnum);
-  }
-  const slotId = stableId(target.slotId, `${path}.slotId`);
-  let effectId: string;
-  let declaredValue: unknown;
-  let channel: Channel;
-  if (target.rack === "console") {
-    const slot = slots.find((candidate) => candidate.slot === slotId);
-    const entry = (track.spec.console ?? []).find((candidate) => candidate.slot === slotId);
-    if (slot === undefined || entry === undefined) {
-      fail(`${path}.slotId`, `'${slotId}' is not a console slot of this session`, CODE.missingEntity);
-    }
-    effectId = slot.effectId;
-    declaredValue = (entry.parameters as Readonly<Record<string, unknown>> | undefined)
-      ?.[target.parameter];
-    channel = entry.channel ?? "both";
+    rows = [
+      effect.bypass,
+      ...effect.parameters,
+      ...(section.kind === "inserts" && effect.linkMode !== null ? [effect.linkMode] : []),
+    ];
+  } else if (section.kind === "builtins") {
+    rows = CONTROLS.builtins;
   } else {
-    const declared = track.spec.inserts ?? [];
-    const decl = declared.find((candidate, position) => insertId(candidate, position) === slotId);
-    if (decl === undefined) {
-      fail(`${path}.slotId`, `'${slotId}' is not one of ${track.id}'s inserts`, CODE.missingEntity);
-    }
-    effectId = decl.effectId;
-    declaredValue = decl.parameters[target.parameter as keyof typeof decl.parameters];
-    channel = decl.options.channel;
+    rows = owner.kind === "strip" ? CONTROLS.stripOwn
+      : owner.kind === "route" ? CONTROLS.routeOwn
+      : CONTROLS.vcaOwn;
   }
-  const descriptor = effectDescriptor(effectId, `${path}.slotId`);
-  const row = effectParameter(descriptor, target.parameter, `${path}.parameter`);
-  // Decision 15 E1 (#1335 D5): the engine refuses an effect target that is not automatable or not
-  // block-rate (`effect.automation.rate`), so the builder refuses it too, as it does a builtin.
-  if (!row.automatable || row.automationRateName !== "block") {
+  const control = (target as { readonly control: unknown }).control;
+  const row = typeof control === "number"
+    ? rows.find((candidate) => candidate.control === control)
+    : rows.find((candidate) => candidate.name === control);
+  if (row === undefined) {
     fail(
-      `${path}.parameter`,
-      `${row.name} is prepared-only, so a span addressed at it could only ever be inert`,
+      `${path}.control`,
+      `${String(control)} is not a control of this ${owner.kind}'s ${section.kind} section`,
+      // The engine's own code for an address with no row (`controls::automation_diagnostics`).
+      "control.address.unknown",
     );
   }
-  if (row.channelPolicyName === "shared" && target.channel !== "both") {
-    fail(`${path}.channel`, `${row.name} is a shared parameter and is addressed as 'both'`);
-  }
-  if (declaredValue === undefined
-    || !parameterRows(descriptor, target.parameter, declaredValue, channel, `${path}.parameter`)
-      .some((entry) => entry.channel === target.channel)) {
-    fail(
-      `${path}.parameter`,
-      `${row.name} is not declared on '${slotId}' for channel '${target.channel}'`,
-      CODE.missingEntity,
-    );
-  }
-  return { parameterId: row.id, unit: row.unitName, effectId: slotId, row };
+  return {
+    owner: owner.kind,
+    ownerId,
+    section: section.kind,
+    slotId,
+    control: row.control,
+    lane: target.lane,
+    unit: row.unit,
+  };
 }
 
-function normalizeAutomation(
-  spec: AutomationSpec,
-  tracks: readonly TrackEntry[],
-  slots: readonly ConsoleSlotEntry[],
-): ModelRecord {
+function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRecord {
   const path = `automation("${spec.id}")`;
-  const track = tracks.find((entry) => entry.id === spec.target.trackId);
-  if (track === undefined) {
-    fail(`${path}.target.trackId`, `'${spec.target.trackId}' is not a declared track`);
-  }
-  const resolved = resolveAutomationTarget(spec.target, track, slots, `${path}.target`);
+  const resolved = resolveAutomationTarget(spec.target, state, `${path}.target`);
   let previousStart: bigint | undefined;
   let previousEnd: bigint | undefined;
   const segments = spec.segments.map((segment, index) => {
@@ -1518,10 +1536,9 @@ function normalizeAutomation(
     }
     previousStart = start;
     previousEnd = end;
+    // A value is an `f32`; whether the row accepts it is the engine's rule.
     const value = (raw: number, field: string): number => {
-      const normalized = resolved.row === undefined
-        ? f32(raw, `${where}.${field}`)
-        : automationScalar(resolved.row, raw, `${where}.${field}`);
+      const normalized = f32(raw, `${where}.${field}`);
       if (segment.shape === "exponential" && normalized <= 0) {
         fail(`${where}.${field}`, "exponential segments require positive values");
       }
@@ -1538,32 +1555,16 @@ function normalizeAutomation(
   });
   return freeze({
     id: spec.id,
-    target: {
-      entity_id: spec.target.trackId,
-      rack: spec.target.rack,
-      effect_id: resolved.effectId,
-      parameter_id: resolved.parameterId,
-      channel: spec.target.channel,
-    },
+    target: freeze({
+      owner: resolved.owner,
+      owner_id: resolved.ownerId,
+      section: resolved.section,
+      ...(resolved.slotId === undefined ? {} : { slot_id: resolved.slotId }),
+      control: resolved.control,
+      lane: resolved.lane,
+    }),
     segments,
   });
-}
-
-/** An automation value is already in wire units, so an enum rides its numeric value. */
-function automationScalar(row: EffectParameterRow, raw: number, path: string): number {
-  const value = f32(raw, path);
-  if (row.domainName === "boolean" && value !== 0 && value !== 1) {
-    fail(path, `${row.name} is boolean, so a span value must be 0 or 1`);
-  }
-  if (row.domainName === "enumeration"
-    && !row.enumChoices.some((choice) => Math.fround(choice.value) === value)) {
-    fail(path, `${value} is not a declared choice for ${row.name}`);
-  }
-  if (row.domainName === "continuous"
-    && (value < Math.fround(row.minimum) || value > Math.fround(row.maximum))) {
-    fail(path, `${row.name} is outside its catalog domain [${row.minimum}, ${row.maximum}]`);
-  }
-  return value;
 }
 
 function normalizeTrack(
@@ -1653,7 +1654,7 @@ function normalize(state: BuilderState): SessionModel {
     }))
     .sort(byId);
   const automation = state.automation
-    .map((spec) => normalizeAutomation(spec, state.tracks, slots))
+    .map((spec) => normalizeAutomation(spec, state))
     .sort(byId);
   return freeze({
     schema_version: 1,

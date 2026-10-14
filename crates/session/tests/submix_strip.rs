@@ -6,8 +6,9 @@
 
 use serde_json::{Map, Value, json};
 use session::{
-    CompileCaps, DiagnosticCode, DiagnosticSet, MatrixOrPan, ParameterChannel, RackName,
-    SessionModel, StableId, Submix, canonical_session_json, compile_session, parse_session_json,
+    CompileCaps, ControlAddress, DiagnosticCode, DiagnosticSet, MatrixOrPan, Owner,
+    ParameterChannel, Section, SessionModel, StableId, Submix, canonical_session_json,
+    compile_session, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -467,18 +468,19 @@ fn compile_session_canonicalizes_submix_parameters() {
 
 /// D6: an automation target may name a submix's insert; a missing insert on it is refused as on a
 /// track. A console target on a submix names the submix's entry for the slot (#1199 verdict
-/// MINOR-2, #1202): accepted when the entry carries the parameter, refused at the target's
-/// `effect_id` when the slot is absent and at its `parameter_id` when the parameter is.
+/// MINOR-2, #1202): accepted when the strip carries the slot, refused at the target's `slot_id`
+/// when it does not. Whether the parameter exists is the control core's rule (#1566 D5).
 #[test]
 fn automation_target_may_name_a_submix() {
     let mut strip = strip_json();
     strip["console"] = console_entries();
     let mut model = parse_session_json(&with_console_strip(strip)).expect("strip session parses");
-    let target = &mut model.automation[0].target;
-    target.entity_id = id("bus");
-    target.effect_id = id("bus-eq");
-    target.parameter_id = 2;
-    target.channel = ParameterChannel::Both;
+    model.automation[0].target = ControlAddress {
+        owner: Owner::Strip(id("bus")),
+        section: Section::Inserts(id("bus-eq")),
+        control: 2,
+        lane: ParameterChannel::Both,
+    };
     canonical_session_json(&model).expect("a submix insert is a valid target");
 
     let refused_at = |model: &SessionModel, field: &str| {
@@ -492,24 +494,17 @@ fn automation_target_may_name_a_submix() {
         );
     };
     let mut missing = model.clone();
-    missing.automation[0].target.effect_id = id("absent");
-    refused_at(&missing, "effect_id");
+    missing.automation[0].target.section = Section::Inserts(id("absent"));
+    refused_at(&missing, "slot_id");
 
     let mut console = model;
-    let target = &mut console.automation[0].target;
-    target.rack = RackName::Console;
-    target.effect_id = id("tone");
-    target.parameter_id = 2;
-    target.channel = ParameterChannel::Left;
+    console.automation[0].target.section = Section::Console(id("tone"));
+    console.automation[0].target.lane = ParameterChannel::Left;
     canonical_session_json(&console).expect("a submix console entry is a valid target");
 
-    let mut absent_slot = console.clone();
-    absent_slot.automation[0].target.effect_id = id("bus-eq");
-    refused_at(&absent_slot, "effect_id");
-
-    let mut absent_param = console;
-    absent_param.automation[0].target.channel = ParameterChannel::Right;
-    refused_at(&absent_param, "parameter_id");
+    let mut absent_slot = console;
+    absent_slot.automation[0].target.section = Section::Console(id("bus-eq"));
+    refused_at(&absent_slot, "slot_id");
 }
 
 /// D5 (#1199) and D4 (#1202): `Submix::unity` is the transparent strip -- one bypassed entry with

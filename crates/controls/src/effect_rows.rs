@@ -21,7 +21,6 @@ use session::{
     ParameterUnit as SessionUnit, SessionModel, StableId,
 };
 
-use crate::address::{ControlAddress, Lane, Owner, Section};
 use crate::descriptor::{
     BASE, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, ruled_live_not_built,
 };
@@ -29,6 +28,7 @@ use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::registry::{ControlRow, Resolved, push_control};
 use crate::{ControlClass, ControlKind, Family, RebuildReason, Taper};
+use session::{ControlAddress, Lane, Owner, Section};
 
 /// The control ID of an effect's bypass.
 pub const BYPASS_CONTROL: u32 = 0;
@@ -382,7 +382,7 @@ pub(crate) fn resolve(instance: &Instance<'_>, control: u32) -> Option<Resolved>
 }
 
 /// The contract unit as the session spells it.
-const fn session_unit(unit: ParameterUnit) -> SessionUnit {
+pub(crate) const fn session_unit(unit: ParameterUnit) -> SessionUnit {
     match unit {
         ParameterUnit::Db => SessionUnit::Db,
         ParameterUnit::Hz => SessionUnit::Hz,

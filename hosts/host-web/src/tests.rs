@@ -117,7 +117,7 @@ struct DenseInvalidAutomationDocument {
 fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDocument {
     const BASE: &str = include_str!("../tests/browser-v1/session.json");
     const EMPTY_AUTOMATION: &str = "\"automation\": []";
-    const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"entity_id":"track","rack":"builtins","effect_id":"strip","parameter_id":5,"channel":"both"},"segments":["#;
+    const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"owner":"strip","owner_id":"track","section":"builtins","control":5,"lane":"both"},"segments":["#;
     const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
     const FOOTER: &str = "]}]";
 

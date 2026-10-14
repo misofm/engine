@@ -27,10 +27,10 @@ use host_core::{
     compile_host_session, prepare_host_runtime, prepare_host_runtime_with_live_controls,
 };
 use session::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
-    ConsoleSlot, ControlSmoothing, DualMonoFader, EditRampRow, EditRampTarget, EditRamps,
-    EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit, RackName,
-    RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix, Vca,
+    Automation, AutomationSegment, AutomationShape, Console, ConsoleEntry, ConsoleSlot,
+    ControlAddress, ControlSmoothing, DualMonoFader, EditRampRow, EditRampTarget, EditRamps,
+    EffectIdentity, EffectParam, MatrixOrPan, Owner, ParameterChannel, ParameterUnit,
+    RouteDestination, RouteSource, Section, SendTap, SessionModel, StableId, Submix, Vca,
     canonical_session_json, parse_session_json,
 };
 
@@ -1104,12 +1104,11 @@ fn structural_edits_need_a_rebuild() {
 fn fader_ride(model: &SessionModel) -> Automation {
     Automation {
         id: id("fader-ride"),
-        target: AutomationTarget {
-            entity_id: model.tracks[0].id.clone(),
-            rack: RackName::Builtins,
-            effect_id: id(session::BUILTIN_AUTOMATION_EFFECT_ID),
-            parameter_id: 5,
-            channel: ParameterChannel::Both,
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Builtins,
+            control: 5,
+            lane: ParameterChannel::Both,
         },
         segments: vec![AutomationSegment {
             shape: AutomationShape::Linear,
@@ -3011,12 +3010,11 @@ fn submix_effect_params_are_live() {
 fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -> Automation {
     Automation {
         id: id("eq-ride"),
-        target: AutomationTarget {
-            entity_id: model.tracks[0].id.clone(),
-            rack: RackName::Inserts,
-            effect_id: id("eq"),
-            parameter_id,
-            channel: ParameterChannel::Left,
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Inserts(id("eq")),
+            control: parameter_id,
+            lane: ParameterChannel::Left,
         },
         segments: vec![AutomationSegment {
             shape: AutomationShape::Step,
@@ -3038,11 +3036,8 @@ fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -
 #[test]
 fn an_automation_on_a_prepared_effect_parameter_needs_a_rebuild() {
     let mut declared = with_effects();
-    // The automations need their `(parameter, channel)` declared on the instance.
-    declared.tracks[0].inserts.effects[2].params = vec![
-        param(1, ParameterChannel::Left, ParameterUnit::Linear, 1.0),
-        param(4, ParameterChannel::Left, ParameterUnit::Db, 0.0),
-    ];
+    // An automation names the row, not a declared parameter (#1566 D5): the instance states none.
+    declared.tracks[0].inserts.effects[2].params = Vec::new();
     let current = normalized(&declared);
     assert_eq!(
         classify_effects(&current, |next| {

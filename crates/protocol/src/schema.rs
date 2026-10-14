@@ -1252,18 +1252,6 @@ pub(crate) mod session {
             ],
         };
     }
-    pub(crate) mod automation_target {
-        use super::*;
-        pub(crate) const ENTITY_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const RACK: FieldSpec = FieldSpec::req(2, Wire::U8);
-        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
-        pub(crate) const PARAMETER_ID: FieldSpec = FieldSpec::req(4, Wire::U32);
-        pub(crate) const CHANNEL: FieldSpec = FieldSpec::req(5, Wire::U8);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "AutomationTarget",
-            fields: &[ENTITY_ID, RACK, EFFECT_ID, PARAMETER_ID, CHANNEL],
-        };
-    }
     pub(crate) mod automation_segment {
         use super::*;
         pub(crate) const SHAPE: FieldSpec = FieldSpec::req(1, Wire::U8);
@@ -1287,8 +1275,9 @@ pub(crate) mod session {
     pub(crate) mod automation {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        // The target is the address `SET_CONTROL` and the control list carry (#1566 D4).
         pub(crate) const TARGET: FieldSpec =
-            FieldSpec::msg(2, true, false, &automation_target::SPEC);
+            FieldSpec::msg(2, true, false, &crate::schema::control_address::SPEC);
         pub(crate) const SEGMENT: FieldSpec =
             FieldSpec::msg(3, true, true, &automation_segment::SPEC);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -1580,7 +1569,7 @@ pub(crate) mod session {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec =
-            FieldSpec::msg(2, true, false, &automation_target::SPEC);
+            FieldSpec::msg(2, true, false, &crate::schema::control_address::SPEC);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetAutomationTarget",
             fields: &[ID, VALUE],
@@ -1725,10 +1714,10 @@ mod tests {
         use std::collections::BTreeSet;
 
         use super::session::{
-            automation, automation_segment, automation_target, builtins, channel_builtins,
-            channel_matrix, console, console_entry, console_slot, effect, effect_identity, fader,
-            matrix_or_pan, output, output_profile, param, rack, render_profile, route,
-            route_destination, route_source, sidechain, source, submix, track, vca,
+            automation, automation_segment, builtins, channel_builtins, channel_matrix, console,
+            console_entry, console_slot, effect, effect_identity, fader, matrix_or_pan, output,
+            output_profile, param, rack, render_profile, route, route_destination, route_source,
+            sidechain, source, submix, track, vca,
         };
 
         // (keys module, its wire message, IDs the wire carries with no key). `None` is a keys
@@ -1761,8 +1750,8 @@ mod tests {
             ("route_destination", Some(&route_destination::SPEC), &[]),
             ("channel_matrix", Some(&channel_matrix::SPEC), &[]),
             ("automation", Some(&automation::SPEC), &[]),
-            // #1566 replaces this pairing with `control_address` when it lands.
-            ("target", Some(&automation_target::SPEC), &[]),
+            // An automation target is a control address (#1566): the keys are its field IDs.
+            ("target", Some(&control_address::SPEC), &[]),
             ("segment", Some(&automation_segment::SPEC), &[]),
         ];
 

@@ -382,7 +382,15 @@ const SCHEMA_RECORDS: &[(&str, &[(&str, Option<&str>)])] = &[
     ),
     ("channel_matrix", &[("channel_matrix", None)]),
     ("route", &[("route", None)]),
-    ("automation_target", &[("target", None)]),
+    (
+        "automation_target",
+        &[
+            ("target", Some("own")),
+            ("target", Some("builtins")),
+            ("target", Some("console")),
+            ("target", Some("inserts")),
+        ],
+    ),
     ("automation_segment", &[("segment", None)]),
     ("automation", &[("automation", None)]),
 ];

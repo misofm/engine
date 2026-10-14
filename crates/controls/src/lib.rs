@@ -23,7 +23,7 @@
 //! launch effect registry) and on nothing above them.
 //! Lowering a changed value into a render record is `host-core`'s job, keyed by [`Family`].
 
-mod address;
+mod automation;
 mod builtin_rows;
 mod descriptor;
 mod diff;
@@ -43,7 +43,7 @@ mod tables;
 mod vca;
 mod view;
 
-pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
+pub use automation::{ControlDiagnostic, automation_diagnostics};
 pub use descriptor::{Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check};
 pub use diff::{ChangedControl, changed_controls, changed_rows, writes_only_its_row};
 pub use effect_contract::control::{
@@ -66,5 +66,6 @@ pub use registry::{
     owner_index, owner_rows_in, owner_rows_with, row_descriptor, row_motion, row_scope, set,
     strip_index,
 };
+pub use session::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};
 pub use view::ModelView;
