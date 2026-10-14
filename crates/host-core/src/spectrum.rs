@@ -34,6 +34,42 @@ const ARMED: u8 = 1;
 const CAPTURING: u8 = 2;
 const COMPLETE: u8 = 3;
 const INVALID: u8 = 4;
+/// Bits of the one-shot state word that hold the phase; the arm generation fills the rest.
+const PHASE_BITS: u32 = 3;
+const PHASE_MASK: u64 = (1 << PHASE_BITS) - 1;
+/// The one-shot state word: the phase in bits 0-2 and the arm generation in bits 3-63.
+///
+/// Under `--cfg loom` the word is loom's atomic, so `spectrum_handoff_loom` explores the real
+/// transitions below.
+#[cfg(not(loom))]
+type StateWord = AtomicU64;
+#[cfg(loom)]
+type StateWord = loom::sync::atomic::AtomicU64;
+
+/// Pack a phase and an arm generation into one state word.
+const fn state_word(generation: u64, phase: u8) -> u64 {
+    (generation << PHASE_BITS) | phase as u64
+}
+
+/// The phase held in `word`.
+const fn word_phase(word: u64) -> u8 {
+    (word & PHASE_MASK) as u8
+}
+
+/// The arm generation held in `word`.
+const fn word_generation(word: u64) -> u64 {
+    word >> PHASE_BITS
+}
+
+/// `word` with its phase replaced and its generation kept.
+const fn word_with_phase(word: u64, phase: u8) -> u64 {
+    (word & !PHASE_MASK) | phase as u64
+}
+
+/// A fresh state word at generation 0 in `phase`.
+fn new_state_word(phase: u8) -> Arc<StateWord> {
+    Arc::new(StateWord::new(state_word(0, phase)))
+}
 const CONTINUOUS_WARMING: u8 = 0;
 const CONTINUOUS_CAPTURING: u8 = 1;
 const CONTINUOUS_WAITING: u8 = 2;
@@ -401,7 +437,7 @@ fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureRe
 struct SpectrumStateAllocation {
     strong: std::sync::atomic::AtomicUsize,
     weak: std::sync::atomic::AtomicUsize,
-    state: AtomicU8,
+    state: StateWord,
 }
 
 /// Preparation refusal for a selected spectrum boundary or its bounded storage.
@@ -457,6 +493,9 @@ pub(crate) struct SpectrumCapturedRecord {
     stream_epoch: u64,
     sequence: u64,
     dropped_captures: u64,
+    /// The arm generation a one-shot window was captured under; 0 in continuous mode, which does
+    /// not read it. The reader discards a record whose generation is not the state word's.
+    arm_generation: u64,
 }
 
 impl SpectrumCapturedRecord {
@@ -485,7 +524,7 @@ impl SpectrumCapturedRecord {
 /// Control-side ownership of one prepared graph observer.
 pub struct SpectrumCapture {
     consumer: Consumer<SpectrumCapturedRecord>,
-    state: Arc<AtomicU8>,
+    state: Arc<StateWord>,
     mode: Arc<AtomicU8>,
     shared: Arc<SpectrumContinuousShared>,
     seen_failures: u64,
@@ -501,25 +540,6 @@ pub struct SpectrumCapture {
 }
 
 impl SpectrumCapture {
-    #[cfg(test)]
-    fn new_one_shot_for_test(
-        consumer: Consumer<SpectrumCapturedRecord>,
-        state: Arc<AtomicU8>,
-        target: SpectrumTarget,
-    ) -> Self {
-        Self {
-            consumer,
-            state,
-            mode: Arc::new(AtomicU8::new(ONE_SHOT_MODE)),
-            shared: SpectrumContinuousShared::new(),
-            seen_failures: 0,
-            seen_drops: 0,
-            recovery_pending: false,
-            target,
-            channels: SpectrumChannels::Left,
-        }
-    }
-
     /// Arm the capture for the next complete graph window.
     ///
     /// Arming is a control-side operation.  The first successfully observed block establishes
@@ -528,8 +548,23 @@ impl SpectrumCapture {
         if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
             return Err(SpectrumCaptureError::Busy);
         }
+        // Only `arm` changes the generation, and it moves `(g, IDLE)` to `(g + 1, ARMED)` in one
+        // step, so a window armed before a cancel can never be mistaken for this one. A failed
+        // compare-and-swap means the word moved: the capture is busy, as before.
+        let word = self.state.load(Ordering::Acquire);
+        if word_phase(word) != IDLE {
+            return Err(SpectrumCaptureError::Busy);
+        }
+        let generation = word_generation(word)
+            .checked_add(1)
+            .ok_or(SpectrumCaptureError::Busy)?;
         self.state
-            .compare_exchange(IDLE, ARMED, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                word,
+                state_word(generation, ARMED),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .map(|_| ())
             .map_err(|_| SpectrumCaptureError::Busy)
     }
@@ -560,8 +595,29 @@ impl SpectrumCapture {
                 .store(CONTINUOUS_WAITING, Ordering::Release);
             self.mode.store(ONE_SHOT_MODE, Ordering::Release);
         }
-        self.state.store(IDLE, Ordering::Release);
+        self.park_idle();
         self.recovery_pending = false;
+    }
+
+    /// Store `(g, IDLE)` at the word's current generation.
+    ///
+    /// Only control changes the generation, so the load is exact. Render moves the word only by
+    /// a compare-and-swap from a phase it latched, so this store makes any render transition
+    /// still in flight fail: a cancelled window is abandoned, never completed.
+    fn park_idle(&self) {
+        let word = self.state.load(Ordering::Acquire);
+        self.park_idle_at(word_generation(word));
+    }
+
+    /// Exchange the word for `(generation, IDLE)`.
+    ///
+    /// Every write to the word is a read-modify-write, so control's and render's writes sit in
+    /// one total modification order and a render swap that read the old word cannot land after
+    /// this one and survive it.
+    fn park_idle_at(&self, generation: u64) {
+        let _ = self
+            .state
+            .swap(state_word(generation, IDLE), Ordering::AcqRel);
     }
 
     /// Try to take the completed window from its control-side queue.
@@ -570,30 +626,83 @@ impl SpectrumCapture {
     }
 
     /// Try to take the completed one-shot record from its control-side queue.
+    ///
+    /// Render may publish from another thread. A record is the result only when it carries the
+    /// state word's arm generation: a record of an earlier generation is a cancelled window that
+    /// landed after its cancel drained the queue, and it is discarded here (at most
+    /// [`SPECTRUM_RESULT_SLOTS`] pops, so a stale record never fails or delays the next arm's
+    /// window beyond the next block).
     pub(crate) fn try_read_record(
         &mut self,
     ) -> Result<SpectrumCapturedRecord, SpectrumCaptureReadError> {
         if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
             return Err(SpectrumCaptureReadError::NotArmed);
         }
-        match self.state.load(Ordering::Acquire) {
-            COMPLETE => match self.consumer.try_pop() {
-                Ok(record) => {
-                    self.state.store(IDLE, Ordering::Release);
-                    Ok(record)
+        let word = self.state.load(Ordering::Acquire);
+        let generation = word_generation(word);
+        match word_phase(word) {
+            // The word was loaded before the pop, so render may have started and completed the
+            // window of this generation in between: a record of the loaded generation is the
+            // result in every live phase, `ARMED` included.
+            ARMED | CAPTURING | COMPLETE => {
+                let available = self
+                    .consumer
+                    .available_at_entry()
+                    .min(SPECTRUM_RESULT_SLOTS);
+                for _ in 0..available {
+                    let Ok(record) = self.consumer.try_pop() else {
+                        break;
+                    };
+                    if record.arm_generation == generation {
+                        self.settle_read(generation);
+                        return Ok(record);
+                    }
                 }
-                Err(_) => Err(SpectrumCaptureReadError::Pending),
-            },
-            ARMED | CAPTURING => Err(SpectrumCaptureReadError::Pending),
+                Err(SpectrumCaptureReadError::Pending)
+            }
             INVALID => {
-                // The failed render may have queued a completed window before its error. The
-                // queue has one slot, so one bounded pop clears that stale result.
-                let _ = self.consumer.try_pop();
-                self.state.store(IDLE, Ordering::Release);
+                // Nothing queued under this generation is a result. Render invalidates only a
+                // window it holds, but an earlier cancelled window may still occupy the slot.
+                let available = self
+                    .consumer
+                    .available_at_entry()
+                    .min(SPECTRUM_RESULT_SLOTS);
+                for _ in 0..available {
+                    if self.consumer.try_pop().is_err() {
+                        break;
+                    }
+                }
+                self.park_idle_at(generation);
                 Err(SpectrumCaptureReadError::Invalid)
             }
             IDLE => Err(SpectrumCaptureReadError::NotArmed),
             _ => Err(SpectrumCaptureReadError::Invalid),
+        }
+    }
+
+    /// Move the word to `(g, IDLE)` after a record of generation `g` was taken.
+    ///
+    /// The record was pushed after render latched `(g, CAPTURING)`, so the word reloaded here is
+    /// `(g, CAPTURING)` or, once render swapped, `(g, COMPLETE)`: one compare-and-swap from it
+    /// and, if render completed the window in between, one more from `COMPLETE`. Two attempts,
+    /// no loop.
+    fn settle_read(&self, generation: u64) {
+        let idle = state_word(generation, IDLE);
+        let word = self.state.load(Ordering::Acquire);
+        if word_generation(word) != generation || !matches!(word_phase(word), CAPTURING | COMPLETE)
+        {
+            return;
+        }
+        let Err(actual) =
+            self.state
+                .compare_exchange(word, idle, Ordering::AcqRel, Ordering::Acquire)
+        else {
+            return;
+        };
+        if actual == word_with_phase(word, COMPLETE) {
+            let _ = self
+                .state
+                .compare_exchange(actual, idle, Ordering::AcqRel, Ordering::Acquire);
         }
     }
     // REALTIME_POLICY_END
@@ -604,7 +713,7 @@ impl SpectrumCapture {
         quantum_frames: u32,
     ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
         if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
-            || self.state.load(Ordering::Acquire) != IDLE
+            || word_phase(self.state.load(Ordering::Acquire)) != IDLE
         {
             return Err(SpectrumContinuousCaptureError::Busy);
         }
@@ -622,7 +731,7 @@ impl SpectrumCapture {
         hop: SpectrumHop,
     ) -> Result<SpectrumCadence, SpectrumContinuousCaptureError> {
         if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
-            || self.state.load(Ordering::Acquire) != IDLE
+            || word_phase(self.state.load(Ordering::Acquire)) != IDLE
         {
             return Err(SpectrumContinuousCaptureError::Busy);
         }
@@ -638,7 +747,7 @@ impl SpectrumCapture {
         replace_one_shot: bool,
     ) -> Result<(), SpectrumContinuousCaptureError> {
         if self.mode.load(Ordering::Acquire) != ONE_SHOT_MODE
-            || (!replace_one_shot && self.state.load(Ordering::Acquire) != IDLE)
+            || (!replace_one_shot && word_phase(self.state.load(Ordering::Acquire)) != IDLE)
         {
             return Err(SpectrumContinuousCaptureError::Busy);
         }
@@ -688,7 +797,7 @@ impl SpectrumCapture {
                 break;
             }
         }
-        self.state.store(IDLE, Ordering::Release);
+        self.park_idle();
         self.shared.epoch.store(epoch, Ordering::Release);
         self.shared
             .sample_rate_hz
@@ -730,7 +839,7 @@ impl SpectrumCapture {
                     break;
                 }
             }
-            self.state.store(IDLE, Ordering::Release);
+            self.park_idle();
             self.seen_failures = 0;
             self.seen_drops = 0;
             self.recovery_pending = false;
@@ -1380,13 +1489,21 @@ struct SpectrumContinuousSharedAllocation {
 }
 
 struct SpectrumOneShotState {
-    state: Arc<AtomicU8>,
+    state: Arc<StateWord>,
     filled: usize,
     first_sample: u64,
     next_sample: u64,
+    /// A window is in progress: render latched `latched` and has not completed or abandoned it.
     armed: bool,
     source_underrun: bool,
-    completed_sample: Option<u64>,
+    /// The word render moved to `(g, CAPTURING)` at the start of the current window. Every later
+    /// render transition is one compare-and-swap from it, so a cancel or a re-arm in between
+    /// makes the transition fail and the window is abandoned.
+    latched: u64,
+    /// A completed window waits in the observer's own buffers for [`one_shot_block_end`]: it is
+    /// pushed and moved to `COMPLETE` only after the block that completed it rendered without
+    /// failure, and again on each later block end while the queue is full (issue #1609).
+    held: bool,
 }
 
 struct SpectrumContinuousState {
@@ -1435,7 +1552,7 @@ fn prepare_capture_with_handle(
         QueueGeneration(0x5350_4543),
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
-    let state = Arc::new(AtomicU8::new(IDLE));
+    let state = new_state_word(IDLE);
     let mode = Arc::new(AtomicU8::new(ONE_SHOT_MODE));
     let shared = SpectrumContinuousShared::new();
     let capture = SpectrumCapture {
@@ -1540,7 +1657,7 @@ impl SpectrumCaptureObserver {
     #[cfg(test)]
     fn new_one_shot_for_test(
         producer: Producer<SpectrumCapturedRecord>,
-        state: Arc<AtomicU8>,
+        state: Arc<StateWord>,
         channels: SpectrumChannels,
     ) -> Self {
         Self::new(
@@ -1554,7 +1671,7 @@ impl SpectrumCaptureObserver {
 
     fn new(
         producer: Producer<SpectrumCapturedRecord>,
-        state: Arc<AtomicU8>,
+        state: Arc<StateWord>,
         mode: Arc<AtomicU8>,
         shared: Arc<SpectrumContinuousShared>,
         channels: SpectrumChannels,
@@ -1572,7 +1689,8 @@ impl SpectrumCaptureObserver {
                 next_sample: 0,
                 armed: false,
                 source_underrun: false,
-                completed_sample: None,
+                latched: 0,
+                held: false,
             },
             continuous: SpectrumContinuousState {
                 shared,
@@ -1648,9 +1766,27 @@ impl SpectrumCaptureObserver {
             one_shot_invalidate(&mut self.one_shot);
         }
     }
+
+    /// Publish the window a block completed, now that the block rendered without failure.
+    fn block_end(&mut self) {
+        if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
+            // Continuous mode shares the capture buffers: a window held from one-shot mode is
+            // gone, and `cancel` already moved the word that held it.
+            self.one_shot.held = false;
+            return;
+        }
+        let mut buffers = SpectrumCaptureBuffers {
+            producer: &mut self.producer,
+            left: &mut self.left,
+            right: &mut self.right,
+            channels: self.channels,
+        };
+        one_shot_block_end(&mut self.one_shot, &mut buffers);
+    }
     // REALTIME_POLICY_END
 }
 
+// REALTIME_POLICY_BEGIN
 fn one_shot_begin(
     state: &mut SpectrumOneShotState,
     first_sample: u64,
@@ -1658,29 +1794,44 @@ fn one_shot_begin(
     validity: GraphObservationValidity,
 ) -> Option<usize> {
     let current = state.state.load(Ordering::Acquire);
-    if current == ARMED {
-        if state
-            .state
-            .compare_exchange(ARMED, CAPTURING, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+    match word_phase(current) {
+        ARMED => {
+            // A new arm. A window held for an earlier generation is gone with it.
+            state.held = false;
+            state.armed = false;
+            let latched = word_with_phase(current, CAPTURING);
+            if state
+                .state
+                .compare_exchange(current, latched, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return None;
+            }
+            state.latched = latched;
+            state.filled = 0;
+            state.first_sample = first_sample;
+            state.next_sample = first_sample;
+            state.armed = true;
+            state.source_underrun = validity.source_underrun;
+        }
+        CAPTURING => {
+            if !state.armed || current != state.latched {
+                // Either the window completed and waits in `held`, or control moved the word.
+                state.armed = false;
+                return None;
+            }
+            if validity.source_generation_changed {
+                one_shot_invalidate(state);
+                return None;
+            }
+            state.source_underrun |= validity.source_underrun;
+        }
+        _ => {
+            // Idle, complete or invalid: a cancel, a read or a failure ended the window.
+            state.armed = false;
+            state.held = false;
             return None;
         }
-        state.filled = 0;
-        state.first_sample = first_sample;
-        state.next_sample = first_sample;
-        state.armed = true;
-        state.source_underrun = validity.source_underrun;
-        state.completed_sample = None;
-    } else if current == CAPTURING {
-        if validity.source_generation_changed {
-            one_shot_invalidate(state);
-            return None;
-        }
-        state.source_underrun |= validity.source_underrun;
-    }
-    if state.state.load(Ordering::Acquire) != CAPTURING || !state.armed {
-        return None;
     }
     if frames == 0 || first_sample != state.next_sample {
         one_shot_invalidate(state);
@@ -1702,45 +1853,67 @@ fn one_shot_begin(
         })
 }
 
-fn one_shot_finish(
-    state: &mut SpectrumOneShotState,
-    buffers: &mut SpectrumCaptureBuffers<'_>,
-    first_sample: u64,
-    count: usize,
-) {
+/// Count the samples a block added and, when the window is full, hold it for the block's end.
+///
+/// The window is not pushed here: this block may still fail after this observer ran, and a window
+/// from a failed block must never reach a reader (issue #1609, race 2).
+fn one_shot_finish(state: &mut SpectrumOneShotState, first_sample: u64, count: usize) {
     state.filled += count;
     state.next_sample = first_sample
         .checked_add(u64::try_from(count).unwrap_or(0))
         .unwrap_or(first_sample);
     if state.filled == SPECTRUM_WINDOW_FRAMES {
-        probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
-        probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
-        let window = SpectrumWindow {
-            left: *buffers.left,
-            right: *buffers.right,
-            first_sample: state.first_sample,
-            channels: buffers.channels,
-            source_underrun: state.source_underrun,
-        };
-        let record = SpectrumCapturedRecord {
-            window,
-            stream_epoch: 0,
-            sequence: 0,
-            dropped_captures: 0,
-        };
-        probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
-        probe_add(
-            PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
-            2 * SPECTRUM_WINDOW_FRAMES,
-        );
-        if buffers.producer.try_push(record).is_ok() {
-            state.completed_sample = Some(first_sample);
-            state.state.store(COMPLETE, Ordering::Release);
-        } else {
-            one_shot_invalidate(state);
-        }
         state.armed = false;
+        state.held = true;
     }
+}
+
+/// Publish the held window after a block that rendered without failure.
+///
+/// The push comes before the one `CAPTURING -> COMPLETE` compare-and-swap, so a reader that sees
+/// `COMPLETE` finds the record. A failed swap means control cancelled or re-armed: the window is
+/// abandoned, and a record already pushed is told from the next arm's by its generation. A full
+/// queue means a stale record holds the only slot; the window stays held and the word stays
+/// `CAPTURING`, and the next block end makes one more attempt (never a loop, never a failure).
+fn one_shot_block_end(state: &mut SpectrumOneShotState, buffers: &mut SpectrumCaptureBuffers<'_>) {
+    if !state.held {
+        return;
+    }
+    if state.state.load(Ordering::Acquire) != state.latched {
+        state.held = false;
+        return;
+    }
+    probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
+    probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
+    let window = SpectrumWindow {
+        left: *buffers.left,
+        right: *buffers.right,
+        first_sample: state.first_sample,
+        channels: buffers.channels,
+        source_underrun: state.source_underrun,
+    };
+    let record = SpectrumCapturedRecord {
+        window,
+        stream_epoch: 0,
+        sequence: 0,
+        dropped_captures: 0,
+        arm_generation: word_generation(state.latched),
+    };
+    probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
+    probe_add(
+        PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
+        2 * SPECTRUM_WINDOW_FRAMES,
+    );
+    if buffers.producer.try_push(record).is_err() {
+        return;
+    }
+    state.held = false;
+    let _ = state.state.compare_exchange(
+        state.latched,
+        word_with_phase(state.latched, COMPLETE),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
 }
 
 fn one_shot_capture(
@@ -1752,7 +1925,10 @@ fn one_shot_capture(
     validity: GraphObservationValidity,
 ) {
     if left.len() != right.len() {
-        if matches!(state.state.load(Ordering::Acquire), ARMED | CAPTURING) {
+        if matches!(
+            word_phase(state.state.load(Ordering::Acquire)),
+            ARMED | CAPTURING
+        ) {
             one_shot_invalidate(state);
         }
         return;
@@ -1775,7 +1951,7 @@ fn one_shot_capture(
         buffers.right[destination..destination + count].copy_from_slice(&right[..count]);
         probe_add(PROBE_STORAGE_WRITES, count);
     }
-    one_shot_finish(state, buffers, first_sample, count);
+    one_shot_finish(state, first_sample, count);
 }
 
 fn one_shot_capture_resident(
@@ -1783,7 +1959,7 @@ fn one_shot_capture_resident(
     buffers: &mut SpectrumCaptureBuffers<'_>,
     block: GraphResidentObservationBlock<'_>,
 ) {
-    let current = state.state.load(Ordering::Acquire);
+    let current = word_phase(state.state.load(Ordering::Acquire));
     if current != ARMED && current != CAPTURING {
         return;
     }
@@ -1844,25 +2020,34 @@ fn one_shot_capture_resident(
             probe_add(PROBE_STORAGE_WRITES, 1);
         }
     }
-    one_shot_finish(state, buffers, block.first_sample, count);
+    one_shot_finish(state, block.first_sample, count);
 }
 
+/// End the window without a result: drop a held window and move the word to `INVALID`.
+///
+/// One compare-and-swap from the word just loaded, and only from `ARMED` or `CAPTURING`. A failed
+/// swap means control moved the word (a cancel or a read), which already ended the window.
 fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
-    if matches!(state.state.load(Ordering::Acquire), ARMED | CAPTURING) {
-        state.armed = false;
-        state.state.store(INVALID, Ordering::Release);
+    state.armed = false;
+    state.held = false;
+    let word = state.state.load(Ordering::Acquire);
+    if matches!(word_phase(word), ARMED | CAPTURING) {
+        let _ = state.state.compare_exchange(
+            word,
+            word_with_phase(word, INVALID),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
-fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState, failed_sample: u64) {
-    let current = state.state.load(Ordering::Acquire);
-    if matches!(current, ARMED | CAPTURING) {
-        one_shot_invalidate(state);
-    } else if current == COMPLETE && state.completed_sample == Some(failed_sample) {
-        state.armed = false;
-        state.state.store(INVALID, Ordering::Release);
-    }
+/// A block failed. A window it completed is held, never pushed, so it is dropped here with the
+/// rest of the window; a result an earlier good block published (`COMPLETE`) is left for the
+/// reader.
+fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState) {
+    one_shot_invalidate(state);
 }
+// REALTIME_POLICY_END
 
 fn continuous_begin(
     state: &mut SpectrumContinuousState,
@@ -2060,6 +2245,7 @@ fn continuous_publish(
         stream_epoch,
         sequence,
         dropped_captures: state.shared.drops.load(Ordering::Acquire),
+        arm_generation: 0,
     };
     probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
     probe_add(
@@ -2326,12 +2512,22 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
         self.invalidate();
     }
 
-    fn invalidate_after_failure(&mut self, failed_sample: u64) {
+    fn invalidate_after_failure(&mut self, _failed_sample: u64) {
         if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
             continuous_fail(&mut self.continuous);
         } else {
-            one_shot_invalidate_after_failure(&mut self.one_shot, failed_sample);
+            one_shot_invalidate_after_failure(&mut self.one_shot);
         }
+    }
+
+    fn accepts_block_end(&self) -> bool {
+        // Read once at bind, when the mode is not yet known to stay: the observer takes the call
+        // in both modes and the continuous branch returns at once.
+        true
+    }
+
+    fn block_end(&mut self) {
+        SpectrumCaptureObserver::block_end(self);
     }
 }
 
@@ -2853,7 +3049,7 @@ pub enum SpectrumAnalysisError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARMED, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
+        ARMED, COMPLETE, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES,
         SpectrumAnalysisError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
         SpectrumCadenceError, SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureObserver,
         SpectrumCaptureReadError, SpectrumChannels, SpectrumContinuousReadError,
@@ -2899,7 +3095,7 @@ mod tests {
             QueueGeneration(0x4353_5045),
         )
         .expect("capture queue");
-        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::IDLE));
+        let state = super::new_state_word(super::IDLE);
         let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE));
         let shared = super::SpectrumContinuousShared::new();
         let observer = SpectrumCaptureObserver::new(
@@ -3162,7 +3358,7 @@ mod tests {
             QueueGeneration(0x5350_4543),
         )
         .expect("capture queue");
-        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
+        let state = super::new_state_word(ARMED);
         let mut observer = SpectrumCaptureObserver::new_one_shot_for_test(
             producer,
             std::sync::Arc::clone(&state),
@@ -3177,6 +3373,7 @@ mod tests {
             first_sample,
             super::GraphObservationValidity::CLEAR,
         );
+        observer.block_end();
         let window = consumer.try_pop().expect("large-sample capture").window;
         assert_eq!(window.first_sample, first_sample);
         assert_eq!(
@@ -3234,7 +3431,7 @@ mod tests {
         .expect("capture queue");
         let capture = SpectrumCapture {
             consumer,
-            state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::IDLE)),
+            state: super::new_state_word(super::IDLE),
             mode: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE)),
             shared: super::SpectrumContinuousShared::new(),
             seen_failures: 0,
@@ -3248,6 +3445,7 @@ mod tests {
             stream_epoch: 0,
             sequence: 0,
             dropped_captures: 0,
+            arm_generation: 0,
         };
         (producer, capture, record)
     }
@@ -3278,9 +3476,10 @@ mod tests {
         }
 
         let (_producer, mut capture) = queued_pair();
-        capture
-            .state
-            .store(ARMED, std::sync::atomic::Ordering::Release);
+        capture.state.store(
+            super::state_word(0, ARMED),
+            std::sync::atomic::Ordering::Release,
+        );
         capture.cancel();
         assert_eq!(capture.consumer.available_at_entry(), 1, "cancel");
 
@@ -3420,9 +3619,10 @@ mod tests {
             record,
             |capture| {
                 // An armed one-shot capture, which `cancel` returns to idle.
-                capture
-                    .state
-                    .store(ARMED, std::sync::atomic::Ordering::Release);
+                capture.state.store(
+                    super::state_word(0, ARMED),
+                    std::sync::atomic::Ordering::Release,
+                );
             },
             SpectrumCapture::cancel,
         );
@@ -3489,10 +3689,7 @@ mod tests {
                 QueueGeneration(0x5350_4543),
             )
             .expect("capture queue");
-            (
-                producer,
-                std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED)),
-            )
+            (producer, super::new_state_word(ARMED))
         };
         let mut observer = SpectrumCaptureObserver::new_one_shot_for_test(
             producer,
@@ -3502,6 +3699,7 @@ mod tests {
         let left = vec![0.25_f32; SPECTRUM_WINDOW_FRAMES * 2];
         let right = vec![-0.5_f32; SPECTRUM_WINDOW_FRAMES * 2];
         observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        observer.block_end();
         assert_eq!(
             super::test_only_spectrum_operation_counts(),
             super::SpectrumOperationCounts {
@@ -3532,74 +3730,256 @@ mod tests {
         );
     }
 
+    /// One-shot capture pair: an observer, the control handle, the shared state word.
+    fn one_shot_pair(channels: SpectrumChannels) -> (SpectrumCaptureObserver, SpectrumCapture) {
+        continuous_pair(channels)
+    }
+
+    /// Feed one full window to `observer` as `blocks` equal blocks starting at `first_sample`.
+    /// `block_end` is the caller's, because only a block that rendered without failure runs it.
+    fn feed_window(observer: &mut SpectrumCaptureObserver, first_sample: u64, blocks: usize) {
+        let frames = SPECTRUM_WINDOW_FRAMES / blocks;
+        let left = vec![0.25_f32; frames];
+        let right = vec![-0.5_f32; frames];
+        for block in 0..blocks {
+            observer.capture(
+                &left,
+                &right,
+                first_sample + (block * frames) as u64,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+    }
+
+    /// Gate 2 (issue #1609, race 2). The block that completes a window fails after the observer
+    /// ran: the window is held, never pushed, so no read can take it.
     #[test]
-    fn failed_block_invalidates_its_window_and_drains_the_queued_result() {
-        const BLOCK_FRAMES: usize = 128;
-        let make_observer = || {
-            let (producer, consumer) = bounded_spsc(
-                core::num::NonZeroUsize::new(1).expect("one capture slot"),
-                QueueGeneration(0x5350_4543),
-            )
-            .expect("capture queue");
-            let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ARMED));
-            let observer = SpectrumCaptureObserver::new_one_shot_for_test(
-                producer,
-                std::sync::Arc::clone(&state),
-                SpectrumChannels::Left,
-            );
-            (observer, consumer, state)
-        };
-
-        let (mut older, mut older_consumer, older_state) = make_observer();
-        let left = [0.25_f32; BLOCK_FRAMES];
-        let right = [-0.5_f32; BLOCK_FRAMES];
-        for block in 0..(SPECTRUM_WINDOW_FRAMES / BLOCK_FRAMES) {
-            older.capture(
-                &left,
-                &right,
-                (block * BLOCK_FRAMES) as u64,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        older.invalidate_after_failure(128);
+    fn a_window_completed_by_a_failed_block_is_never_returned() {
+        let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+        capture.arm().expect("arm");
+        feed_window(&mut observer, 0, 16);
+        // The window is complete in the observer, but its block has not ended: nothing is
+        // readable yet, so a reader on another thread would see `Pending`, not the window.
         assert_eq!(
-            older_state.load(std::sync::atomic::Ordering::Acquire),
-            COMPLETE,
-            "a later failed block preserves an older completed window"
+            capture.try_read().expect_err("held until the block ends"),
+            SpectrumCaptureReadError::Pending
         );
-        assert!(older_consumer.try_pop().is_ok());
-
-        let (mut current, consumer, state) = make_observer();
-        for block in 0..(SPECTRUM_WINDOW_FRAMES / BLOCK_FRAMES) {
-            current.capture(
-                &left,
-                &right,
-                2_048 + (block * BLOCK_FRAMES) as u64,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        let completing_sample = 2_048 + (SPECTRUM_WINDOW_FRAMES - BLOCK_FRAMES) as u64;
-        assert_eq!(current.one_shot.completed_sample, Some(completing_sample));
-        current.invalidate_after_failure(completing_sample);
         assert_eq!(
-            state.load(std::sync::atomic::Ordering::Acquire),
-            INVALID,
-            "a failed block cannot publish its completed window"
+            capture.consumer.available_at_entry(),
+            0,
+            "nothing was pushed"
         );
-        let mut capture = super::SpectrumCapture::new_one_shot_for_test(
-            consumer,
-            state,
-            SpectrumTarget::Output("main-out".into()),
-        );
+        // The graph fails the block at its first sample and never calls `block_end`.
+        observer.invalidate_after_failure(1_920);
         assert_eq!(
             capture
                 .try_read()
                 .expect_err("failed block reports invalid"),
             SpectrumCaptureReadError::Invalid
         );
-        capture
-            .arm()
-            .expect("draining the invalid result frees the slot");
+        assert_eq!(
+            capture
+                .try_read()
+                .expect_err("the invalid result is consumed"),
+            SpectrumCaptureReadError::NotArmed
+        );
+
+        // A second window that completes cleanly and calls `block_end` is the result.
+        capture.arm().expect("the invalid read freed the capture");
+        feed_window(&mut observer, 4_096, 16);
+        observer.block_end();
+        let window = capture.try_read().expect("clean block publishes");
+        assert_eq!(window.first_sample, 4_096);
+    }
+
+    /// A later failed block keeps an older result a good block already published.
+    #[test]
+    fn a_later_failed_block_preserves_an_older_published_window() {
+        let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+        capture.arm().expect("arm");
+        feed_window(&mut observer, 0, 16);
+        observer.block_end();
+        assert_eq!(
+            super::word_phase(capture.state.load(std::sync::atomic::Ordering::Acquire)),
+            COMPLETE
+        );
+        observer.invalidate_after_failure(2_048);
+        assert_eq!(
+            super::word_phase(capture.state.load(std::sync::atomic::Ordering::Acquire)),
+            COMPLETE,
+            "a later failed block preserves an older completed window"
+        );
+        assert_eq!(capture.try_read().expect("older window").first_sample, 0);
+    }
+
+    /// A completed window waits while a stale record holds the only slot, and is published by the
+    /// first block end after the reader freed it: a stale record never fails the next window.
+    #[test]
+    fn a_stale_record_delays_but_never_fails_the_next_window() {
+        let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+        capture.arm().expect("first arm");
+        capture.cancel();
+        capture.arm().expect("an arm after a cancel is never Busy");
+        // The cancelled window's record lands in the slot after the cancel drained it.
+        let stale = super::SpectrumCapturedRecord {
+            window: window(0.25),
+            stream_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+            arm_generation: 1,
+        };
+        assert!(observer.producer.try_push(stale).is_ok());
+        feed_window(&mut observer, 8_192, 16);
+        observer.block_end();
+        assert_eq!(
+            capture
+                .try_read()
+                .expect_err("the stale record held the slot, so the window is still held"),
+            SpectrumCaptureReadError::Pending,
+            "the read discarded the stale record and did not return it"
+        );
+        observer.block_end();
+        let window = capture.try_read().expect("the next block end publishes");
+        assert_eq!(window.first_sample, 8_192);
+    }
+
+    /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.
+    ///
+    /// Per seed, a render thread drives the real observer through whole-window blocks, calling
+    /// `block_end` after each as the graph does, while the control thread arms, spins a seeded
+    /// count, cancels, re-arms and reads. The render thread logs which `first_sample` each arm
+    /// generation began at, so the control thread can tell a cancelled arm's window from the
+    /// re-arm's. The schedule varies by the seed's spin counts, never by sleeps.
+    ///
+    /// Red if a render transition is still an unconditional store (the cancelled window comes
+    /// back, or the re-arm is `Busy`), if a cancel leaves no generation a stale record can be
+    /// told by, or if a stale record fails the re-armed window.
+    #[test]
+    fn a_cancel_racing_completion_never_returns_the_cancelled_window_over_1000_seeds() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        const SEEDS: u64 = 1_000;
+        const NEVER: u64 = u64::MAX;
+        let started = std::time::Instant::now();
+        for seed in 0..SEEDS {
+            let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            // Log-uniform spin counts, 0 to 1,023: a block lasts a few hundred of them, so the
+            // cancel lands before the block, inside it, and after it.
+            let spin_before_cancel = next() % (1 << (next() % 11));
+            let spin_after_cancel = next() % (1 << (next() % 9));
+            let read_before_cancel = next() % 4 == 0;
+            let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let progress = std::sync::Arc::new(AtomicU64::new(0));
+            let begun: std::sync::Arc<[AtomicU64; 4]> =
+                std::sync::Arc::new([NEVER; 4].map(AtomicU64::new));
+            let render = {
+                let (stop, progress, begun) = (stop.clone(), progress.clone(), begun.clone());
+                std::thread::spawn(move || {
+                    let left = vec![0.25_f32; SPECTRUM_WINDOW_FRAMES];
+                    let right = vec![-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+                    let mut first_sample = 0_u64;
+                    let mut last_latched = 0_u64;
+                    while !stop.load(Ordering::Acquire) {
+                        observer.capture(
+                            &left,
+                            &right,
+                            first_sample,
+                            super::GraphObservationValidity::CLEAR,
+                        );
+                        let latched = observer.one_shot.latched;
+                        if latched != last_latched {
+                            last_latched = latched;
+                            begun[super::word_generation(latched) as usize]
+                                .store(observer.one_shot.first_sample, Ordering::Release);
+                        }
+                        observer.block_end();
+                        first_sample += SPECTRUM_WINDOW_FRAMES as u64;
+                        progress.fetch_add(1, Ordering::Release);
+                    }
+                })
+            };
+            let generation = |capture: &SpectrumCapture| {
+                super::word_generation(capture.state.load(Ordering::Acquire)) as usize
+            };
+
+            // Let the render thread run before the race starts, so its blocks overlap the arm.
+            while progress.load(Ordering::Acquire) < 2 {
+                std::hint::spin_loop();
+            }
+            capture.arm().expect("first arm");
+            let cancelled = generation(&capture);
+            for _ in 0..spin_before_cancel {
+                std::hint::spin_loop();
+            }
+            // A read before the cancel may legitimately return the first window.
+            if let Some(window) = read_before_cancel
+                .then(|| capture.try_read().ok())
+                .flatten()
+            {
+                assert_eq!(
+                    window.first_sample,
+                    begun[cancelled].load(Ordering::Acquire),
+                    "seed {seed}: a read before the cancel returns the armed window"
+                );
+            }
+            capture.cancel();
+            for _ in 0..spin_after_cancel {
+                // No read after a cancel returns the cancelled arm's window.
+                assert!(
+                    matches!(capture.try_read(), Err(SpectrumCaptureReadError::NotArmed)),
+                    "seed {seed}: a read after the cancel must find nothing armed"
+                );
+            }
+            capture
+                .arm()
+                .unwrap_or_else(|error| panic!("seed {seed}: the re-arm was refused: {error:?}"));
+            // Read after the arm: a thread preempted between a read and the arm would let any
+            // number of blocks pass, but never fewer than the blocks done when the arm landed.
+            let blocks_after_rearm = progress.load(Ordering::Acquire);
+            let rearmed = generation(&capture);
+            assert_eq!(rearmed, cancelled + 1);
+            let mut spins = 0_u64;
+            let window = loop {
+                match capture.try_read() {
+                    Ok(window) => break window,
+                    Err(SpectrumCaptureReadError::Pending) => {
+                        spins += 1;
+                        assert!(
+                            spins < 200_000_000,
+                            "seed {seed}: the re-armed window never arrived"
+                        );
+                        std::hint::spin_loop();
+                    }
+                    Err(error) => panic!("seed {seed}: the re-armed read was {error:?}"),
+                }
+            };
+            assert_eq!(
+                window.first_sample,
+                begun[rearmed].load(Ordering::Acquire),
+                "seed {seed}: the result is the re-armed window"
+            );
+            assert_ne!(
+                window.first_sample,
+                begun[cancelled].load(Ordering::Acquire),
+                "seed {seed}: the result is not the cancelled window"
+            );
+            // The window begins in the block in progress at the re-arm or the next one, so no
+            // later than one block past the count read after the arm.
+            let began_block = window.first_sample / SPECTRUM_WINDOW_FRAMES as u64;
+            assert!(
+                began_block <= blocks_after_rearm + 1,
+                "seed {seed}: the re-armed window began in block {began_block}, past block {blocks_after_rearm} + 1"
+            );
+            stop.store(true, Ordering::Release);
+            render.join().expect("render thread");
+        }
+        eprintln!("cancel-race seeds {SEEDS}: {:?}", started.elapsed());
     }
 
     #[test]
@@ -4242,6 +4622,7 @@ mod tests {
         let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
         capture.arm().expect("one-shot arm");
         observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        observer.block_end();
         assert_eq!(capture.try_read().expect("one-shot result").first_sample, 0);
 
         let cadence = capture
@@ -4268,6 +4649,7 @@ mod tests {
         capture.stop_continuous();
         capture.arm().expect("one-shot arm after continuous stop");
         observer.capture(&left, &right, 4_096, super::GraphObservationValidity::CLEAR);
+        observer.block_end();
         assert_eq!(
             capture
                 .try_read()
@@ -5021,5 +5403,109 @@ mod tests {
         assert_eq!(left[0], 2.0);
         assert_eq!(right[0], 3.0);
         let _ = SpectrumCaptureReadError::Pending;
+    }
+
+    /// Issue #1609 gate 3: the cancel/re-arm/read handoff under `loom`.
+    ///
+    /// The real [`SpectrumCaptureObserver`] and [`SpectrumCapture`], the real state word (loom's
+    /// `AtomicU64` under `--cfg loom`) and the real `engine` SPSC (built under `--cfg loom`) run on
+    /// two threads. Render completes and publishes windows over three blocks; control cancels
+    /// the armed window, re-arms and reads. Every interleaving must keep the invariants of the
+    /// two-thread race test: a read after the cancel never returns the cancelled arm's window, the
+    /// re-arm is never `Busy`, no read is `Invalid`, and a re-armed window that began is returned
+    /// after at most one more read and one more block end.
+    #[cfg(loom)]
+    mod spectrum_handoff_loom {
+        use super::{SpectrumCaptureReadError, SpectrumChannels, continuous_pair};
+        use crate::spectrum::{SPECTRUM_WINDOW_FRAMES, word_generation};
+        use loom::sync::atomic::Ordering;
+
+        /// Loom runs the model's own closure on a small default stack, and a spectrum window is
+        /// 16 KiB, so every thread that touches one is spawned with an explicit stack.
+        fn spawn_with_stack<T: Send + 'static>(
+            body: impl FnOnce() -> T + Send + 'static,
+        ) -> loom::thread::JoinHandle<T> {
+            loom::thread::Builder::new()
+                .stack_size(1 << 22)
+                .spawn(body)
+                .expect("loom thread")
+        }
+
+        #[test]
+        fn spectrum_handoff_loom() {
+            loom::model(|| spawn_with_stack(handoff).join().expect("handoff driver"));
+        }
+
+        fn handoff() {
+            {
+                let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+                capture.arm().expect("first arm");
+                let render = spawn_with_stack(move || {
+                    let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+                    let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+                    let mut begun: Vec<(u64, u64)> = Vec::new();
+                    let mut last_latched = 0_u64;
+                    for block in 0..3_u64 {
+                        observer.capture(
+                            &left,
+                            &right,
+                            block * SPECTRUM_WINDOW_FRAMES as u64,
+                            crate::spectrum::GraphObservationValidity::CLEAR,
+                        );
+                        let latched = observer.one_shot.latched;
+                        if latched != last_latched {
+                            last_latched = latched;
+                            begun.push((word_generation(latched), observer.one_shot.first_sample));
+                        }
+                        observer.block_end();
+                    }
+                    (observer, begun)
+                });
+
+                // Control: cancel, re-arm, read. Reads before the re-arm find nothing armed.
+                capture.cancel();
+                let mut results: Vec<u64> = Vec::new();
+                match capture.try_read() {
+                    Err(SpectrumCaptureReadError::NotArmed) => {}
+                    other => panic!(
+                        "a read after the cancel found {:?}",
+                        other.map(|window| window.first_sample)
+                    ),
+                }
+                capture.arm().expect("the re-arm is never Busy");
+                let rearmed = word_generation(capture.state.load(Ordering::Acquire));
+                match capture.try_read() {
+                    Ok(window) => results.push(window.first_sample),
+                    Err(SpectrumCaptureReadError::Pending) => {}
+                    Err(error) => panic!("the re-armed read was {error:?}"),
+                }
+
+                let (mut observer, begun) = render.join().expect("render thread");
+                // Only a window begun under the re-arm's generation may have been returned.
+                for first_sample in &results {
+                    assert!(
+                        begun.contains(&(rearmed, *first_sample)),
+                        "returned window {first_sample} was not begun under generation {rearmed}: {begun:?}"
+                    );
+                }
+                // A re-armed window that began is returned: perhaps already, else after at most
+                // one read (which discards a stale record) and one block end.
+                if begun.iter().any(|(generation, _)| *generation == rearmed) && results.is_empty()
+                {
+                    for _ in 0..2 {
+                        match capture.try_read() {
+                            Ok(window) => {
+                                assert!(begun.contains(&(rearmed, window.first_sample)));
+                                results.push(window.first_sample);
+                                break;
+                            }
+                            Err(SpectrumCaptureReadError::Pending) => observer.block_end(),
+                            Err(error) => panic!("the re-armed window read was {error:?}"),
+                        }
+                    }
+                    assert_eq!(results.len(), 1, "the re-armed window was lost: {begun:?}");
+                }
+            }
+        }
     }
 }

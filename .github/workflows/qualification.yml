@@ -733,6 +733,11 @@ jobs:
       # invalidate the shared release target dir's fingerprints for every step after it.
       - name: Realtime race model (engine SPSC loom leg)
         run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
+      # Issue #1609. host-core depends on `lane`, which refuses to compile without the pinned
+      # x86-64-v3 features, and a RUSTFLAGS value replaces `.cargo/config.toml`'s rustflags, so this
+      # leg names them. Its own target dir: the flags differ from the engine leg's.
+      - name: Realtime race model (spectrum handoff loom leg)
+        run: CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p host-core --lib spectrum_handoff_loom
       - name: Math M1 exhaustive sweep
         if: needs.route.outputs.math_closure == 'true'
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored

@@ -463,6 +463,10 @@ pub struct GraphRuntimeMetadataResourceEstimate {
     /// The executor's boxed table of the source claims its copy loop fills (one
     /// `(usize, u32)` row each), charged at one entry per emitted op (issue #936).
     pub source_input_table_bytes: u64,
+    /// The runtime's boxed table of the units that hold an observer accepting
+    /// [`GraphRuntimeObserver::block_end`] (one `u32` each), charged at one entry per emitted op
+    /// (issue #1609).
+    pub block_end_unit_table_bytes: u64,
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
@@ -504,13 +508,17 @@ impl GraphRuntimeMetadataResourceEstimate {
         let (active_unit_entry_bytes, source_input_entry_bytes) = executor_table_entry_bytes();
         let active_unit_table_bytes = active_unit_entry_bytes.checked_mul(emitted_op_count)?;
         let source_input_table_bytes = source_input_entry_bytes.checked_mul(emitted_op_count)?;
+        let block_end_unit_table_bytes = u64::try_from(core::mem::size_of::<u32>())
+            .expect("block-end unit entry fits u64")
+            .checked_mul(emitted_op_count)?;
         let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
         let total_bytes = total_bytes
             .checked_add(response_binding_table_bytes)?
             .checked_add(response_binding_string_bytes)?;
         let total_bytes = total_bytes
             .checked_add(active_unit_table_bytes)?
-            .checked_add(source_input_table_bytes)?;
+            .checked_add(source_input_table_bytes)?
+            .checked_add(block_end_unit_table_bytes)?;
         Some(Self {
             emitted_op_count,
             runtime_field_bytes,
@@ -526,6 +534,7 @@ impl GraphRuntimeMetadataResourceEstimate {
             largest_response_binding_string_bytes,
             active_unit_table_bytes,
             source_input_table_bytes,
+            block_end_unit_table_bytes,
             total_bytes,
             largest_allocation_bytes: runtime_owner_allocation_bytes
                 .max(runtime_op_containing_bytes)
@@ -533,7 +542,8 @@ impl GraphRuntimeMetadataResourceEstimate {
                 .max(response_binding_table_bytes)
                 .max(largest_response_binding_string_bytes)
                 .max(active_unit_table_bytes)
-                .max(source_input_table_bytes),
+                .max(source_input_table_bytes)
+                .max(block_end_unit_table_bytes),
         })
     }
 }
@@ -2851,19 +2861,41 @@ pub trait GraphRuntimeObserver: Send {
     fn invalidate_after_failure(&mut self, _failed_sample: u64) {
         self.invalidate();
     }
+
+    /// Whether this observer wants [`Self::block_end`] (issue #1609).
+    ///
+    /// Read once, when the binding is built, and never on the render path: the runtime keeps a
+    /// bind-time list of the units that hold an accepting observer and calls only those
+    /// observers. The default declines, so an observer that does not use the hook pays nothing.
+    fn accepts_block_end(&self) -> bool {
+        false
+    }
+
+    /// Called once after a block rendered without failure, on every observer that accepted it,
+    /// in binding order (issue #1609).
+    ///
+    /// An observer that completes a result in the middle of a block holds it until here, so a
+    /// reader on another thread never takes a result from a block that later fails: a failed
+    /// block calls [`Self::invalidate_after_failure`] and never this. It must be bounded and
+    /// allocation-free.
+    fn block_end(&mut self) {}
 }
 /// One immutable prepared observer binding, ordered by its stable meter handle.
 pub struct GraphNodeObserverBinding {
     pub node: GraphNodeId,
     pub handle: u64,
     observer: Box<dyn GraphRuntimeObserver>,
+    /// [`GraphRuntimeObserver::accepts_block_end`], read once here and never at render.
+    block_end: bool,
 }
 impl GraphNodeObserverBinding {
     pub fn new(node: GraphNodeId, handle: u64, observer: Box<dyn GraphRuntimeObserver>) -> Self {
+        let block_end = observer.accepts_block_end();
         Self {
             node,
             handle,
             observer,
+            block_end,
         }
     }
 }
@@ -3795,6 +3827,9 @@ impl PreparedPlanExecutor for GraphExecutor {
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_unit_dispatches(dispatched);
+        // Issue #1609: the block rendered without failure, so a result an observer held for it
+        // may now be published.
+        runtime.block_end_observers();
         #[cfg(any(test, feature = "test-support"))]
         if let Some(probe) = probe {
             probe.finish();
@@ -4233,9 +4268,16 @@ mod tests {
             u64::try_from(core::mem::size_of::<(usize, u32)>()).expect("entry") * emitted;
         assert_eq!(resource.active_unit_table_bytes, active_table);
         assert_eq!(resource.source_input_table_bytes, source_table);
+        // Issue #1609: the runtime's block-end unit table, one `u32` per emitted op.
+        let block_end_table = u64::try_from(core::mem::size_of::<u32>()).expect("entry") * emitted;
+        assert_eq!(resource.block_end_unit_table_bytes, block_end_table);
         assert_eq!(
             resource.total_bytes,
-            runtime_field + op_delta.max(unit_delta) * emitted + active_table + source_table
+            runtime_field
+                + op_delta.max(unit_delta) * emitted
+                + active_table
+                + source_table
+                + block_end_table
         );
         assert_eq!(
             resource.largest_allocation_bytes,
@@ -4244,6 +4286,7 @@ mod tests {
                 .max(unit_size * emitted)
                 .max(active_table)
                 .max(source_table)
+                .max(block_end_table)
         );
         // The executor's layout witness mirrors every field but the one it removes, the two #936
         // tables included: the owner-level delta is then exactly the runtime-level one, and a

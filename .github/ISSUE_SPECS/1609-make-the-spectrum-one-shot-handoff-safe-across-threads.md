@@ -164,3 +164,73 @@ Commands: `cargo test --locked -p host-core --all-features`, `cargo test --locke
 ## Size
 
 One implementer-day, one sonnet-high implementer.
+
+## Decision record: spectrum one-shot handoff (batch 8)
+
+**Shipped.** D1-D6 as frozen. The one-shot state is one `AtomicU64` (phase in bits 0-2, arm
+generation in bits 3-63); `arm` is the only generation change; every render transition is one
+strong compare-and-swap from the word render last loaded or latched; a window completed in a block
+is held in the observer's buffers and pushed and moved to `COMPLETE` only in that block's
+`block_end` (new `GraphRuntimeObserver::accepts_block_end` / `block_end`, default off; the runtime
+calls only the units found at bind to hold an accepting observer). The reader discards records of
+another generation. A queue-full push in `block_end` keeps the window held, one attempt per block.
+D7 untouched.
+
+**Gates and results.**
+- Gate 1, `spectrum::tests::a_cancel_racing_completion_never_returns_the_cancelled_window_over_1000_seeds`:
+  1,000 seeds, about 0.53 s debug and 0.14 s release; run eight times in a row green. Seeded spin
+  counts (log-uniform 0-2,047 before the cancel, 0-511 after), no sleeps, whole-window blocks so a
+  window begins and completes in one render call. It was red on a mutated `block_end` (unconditional
+  store, no word check).
+- Gate 2, `a_window_completed_by_a_failed_block_is_never_returned`, plus
+  `a_later_failed_block_preserves_an_older_published_window` and
+  `a_stale_record_delays_but_never_fails_the_next_window` (D5).
+- Gate 3, `spectrum::tests::spectrum_handoff_loom::spectrum_handoff_loom`: **host-core's library
+  builds under `--cfg loom`**, so the model runs the real observer, the real `SpectrumCapture`, the
+  real state word (loom's `AtomicU64`) and the real `engine` SPSC, not extracted functions. Render
+  runs three blocks; control cancels, reads, re-arms and reads. It passes in about 3 s. Loom found
+  one real defect while this was written: the reader treated every record read in `ARMED` as stale,
+  but render can latch and complete the window between the reader's word load and its pop (see
+  departure 3). It is also red on the mutated `block_end` above.
+- Gate 4: every existing spectrum test in host-core, capi and host-web is green; see departure 7
+  for the tests whose set-up changed.
+- Gate 5: `realtime_policy` ok (129 regions, one new, around the one-shot render functions);
+  `scripts/check-host-core-policy.sh` ok; the render allocation counters stay at zero (host-core and
+  graph suites green).
+- D4 in graph: `runtime::tests::block_end_runs_on_accepting_observers_in_binding_order_after_a_good_block_only`.
+
+**Departures and facts.**
+1. **Manifest edits outside the authorized list.** `crates/engine/Cargo.toml` gains
+   `[target.'cfg(loom)'.dependencies] loom = "=0.7.2"`, and `Cargo.lock` lists `loom` under
+   `host-core`. Without the first, `engine` does not build as a dependency under `--cfg loom` (its
+   `sync` shim names `loom`, which only its own tests see), so no crate that depends on it can run a
+   loom model. Nothing reaches it without `--cfg loom`; the engine loom leg is unchanged and green.
+2. **The CI command carries `-C target-feature=+avx2,+fma`.** `RUSTFLAGS` replaces
+   `.cargo/config.toml`'s rustflags and `lane` refuses to compile without them, so the spec's literal
+   command does not build. The step uses its own target dir (`target/ci/loom-host-core`).
+3. **Reader.** Because the word is loaded before the pop, a record of the loaded generation is the
+   result in `ARMED` as well as `CAPTURING` and `COMPLETE`. After the pop the reader reloads the
+   word and makes at most two compare-and-swaps (`CAPTURING`, then `COMPLETE`), not two from the
+   word it first loaded, since that word can still be `ARMED`.
+4. **Control writes the word with `swap`, not `store`** (cancel, `commit_continuous`,
+   `stop_continuous`, the `INVALID` read). Every write is then a read-modify-write in one total
+   modification order; loom's partial order for a plain store racing a compare-and-swap let a render
+   transition survive a cancel, which the C++ model forbids. Same bits, same cost.
+5. **`accepts_block_end` is `true` in both modes.** It is read once at bind and the capture mode
+   changes later, so continuous mode takes the call and returns at once.
+6. **Accounting.** The runtime's bind-time unit table is charged in
+   `GraphRuntimeMetadataResourceEstimate::block_end_unit_table_bytes` (one `u32` per emitted op, the
+   issue #936 table rule), `GraphNodeObserverBinding` records the flag read at construction, and
+   `fixtures/graph` is regenerated (`direct-route.resources.json` +36 bytes, `MANIFEST.tsv`).
+   `tools/realtime-policy/src/policy.rs` raises `marked_regions_floor` 128 -> 129 for the new region.
+7. **Tests changed mechanically.** Tests that built the word as `AtomicU8` use `new_state_word`;
+   the two single-thread tests that complete a window through `observer.capture` call `block_end`
+   (as the graph does); `failed_block_invalidates_its_window_and_drains_the_queued_result` is
+   replaced by the three tests above because D4 deletes `COMPLETE -> INVALID`;
+   `SpectrumCapture::new_one_shot_for_test` is removed with it.
+8. The race test's "two further blocks" bound is asserted as "began within one block of the arm"
+   (read after the arm). A bound on arrival time is not stable under scheduling; the stale-record
+   test covers the retry deterministically.
+
+**Successor candidates.** A mode switch (`commit_continuous`) racing a one-shot push can leave a
+one-shot record in the queue for the continuous reader (D7, pre-existing, unchanged).
