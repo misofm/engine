@@ -104,3 +104,33 @@ Commands: `cargo test --locked -p session -p protocol`, `cargo test --locked -p 
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record: S13a keys and wire IDs (batch 9)
+
+Shipped D1, D2 and D3 as written.
+
+- **D1.** `crates/session/src/visit.rs`: `key_module!` and `fields!` became one `key_modules!`
+  invocation. Every module and constant keeps its name and value; each module gains
+  `ALL: &[FieldKey]` and `keys::MODULES: &[(&str, &[FieldKey])]` (declaration order). The macro
+  adds no field the old one lacked, so canonical bytes and the walk do not change.
+- **D2.** `schema::tests::session_keys_and_wire_fields_have_equal_ids` in `crates/protocol/src/schema.rs`.
+  A 27-row table pairs each keys module with its wire spec and its wire-only IDs (`{1}` for
+  `matrix_or_pan`). It also checks that no retired track ID (`track::RETIRED`: 6, 8) has a key.
+- **D3.** The `keys` doc line now says the IDs are the wire schema's and names the test.
+- **Anchor moves.** The session specs are at `schema.rs:903` onward (not `:737`); the tests module is
+  at `:1719`. `visit.rs` anchors held.
+- **Departure: `control_smoothing`.** The spec lists it as a record pair, but the protocol has no
+  session wire message for it (it is written only by the `SET_CONTROL` row). Its table row is
+  `None`: it must still have a row (a new keys module with no row turns the test red), but no ID
+  comparison is possible.
+- **D4.** #1566 has not landed: the `target` row pairs with today's `automation_target::SPEC` and
+  carries a comment. #1566 updates that row when it lands.
+- **Gate 1.** Passes on `main`'s IDs.
+- **Gate 2 (scratch change, reverted).** `keys::route::FOLLOWS_MUTE` set to ID 8: red with
+  `keys::route field IDs differ from wire message Route  left: {1,2,3,4,5,6,8}  right: {1,2,3,4,5,6,7}`.
+  `EXTRA="extra":5` added to `keys::fader`: red with `keys::fader field IDs differ from wire
+  message DualMonoFader  left: {1,2,3,4,5}  right: {1,2,3,4}`.
+- **Gate 3.** `cargo test --locked -p session -p protocol` and `cargo test --locked -p conformance`
+  pass with no failure (`COMPLETE_SCHEMA_HASH` unmoved; no wire or schema file changed beyond the
+  test). `cargo clippy --locked -p session -p protocol --all-targets --all-features -- -D warnings`
+  and `cargo fmt --all --check` are clean.

@@ -77,49 +77,60 @@ pub trait VisitModel {
     fn visit<V: ModelVisitor>(&self, order: WalkOrder, visitor: &mut V) -> Result<(), V::Error>;
 }
 
-macro_rules! fields { ($($name:ident=$text:literal:$id:literal),+ $(,)?) => {$(#[doc=concat!("Schema key `",$text,"`.")] pub const $name: FieldKey=FieldKey{name:$text,id:$id};)+}; }
-macro_rules! key_module { ($name:ident,$doc:literal;$($field:tt)*) => {#[doc=$doc] pub mod $name {use super::*; fields!($($field)*);}}; }
+macro_rules! key_modules { ($(($name:ident,$doc:literal;$($field:ident=$text:literal:$id:literal),+ $(,)?))+) => {
+    $(#[doc=$doc] pub mod $name {
+        use super::*;
+        $(#[doc=concat!("Schema key `",$text,"`.")] pub const $field: FieldKey=FieldKey{name:$text,id:$id};)+
+        /// Every field of this record, in declaration order.
+        pub const ALL: &[FieldKey]=&[$($field),+];
+    })+
+    /// Every record module's name and fields, in declaration order.
+    pub const MODULES: &[(&str,&[FieldKey])]=&[$((stringify!($name),$name::ALL)),+];
+}; }
 
-/// Public field-key registry. IDs are transcribed from
-/// `protocol/src/schema.rs` session specs (lines 764–1076 at #107 §6.5).
+/// Public field-key registry. The IDs are the wire schema's: `protocol/src/schema.rs`'s session
+/// specs own the wire types, and `session_keys_and_wire_fields_have_equal_ids` in that file holds
+/// each record's key IDs equal to its wire field IDs.
 #[rustfmt::skip]
 pub mod keys {
  use super::FieldKey;
- key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,CONTROL_SMOOTHING="control_smoothing":17,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
- key_module!(console,"Session console fields (decision 12).";PRE_INSERT="pre_insert":1,POST_INSERT="post_insert":2);
- key_module!(console_slot,"Console slot declaration fields.";SLOT="slot":1,IDENTITY="identity":2,QUALITY="quality":3,LINK_MODE="link_mode":4);
- key_module!(console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,PARAMS="params":3);
- key_module!(render_profile,"Render-profile fields.";ID="id":1,MODE="mode":2);
- key_module!(output_profile,"Output-profile fields.";ID="id":1,CHANNELS="channels":2,SAMPLE_FORMAT="sample_format":3);
- key_module!(source,"Source fields.";ID="id":1,CONTENT="content":2,CHANNELS="channels":3,BIT_DEPTH="bit_depth":4,FRAMES="frames":5);
+ key_modules! {
+ (session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,CONTROL_SMOOTHING="control_smoothing":17,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14)
+ (console,"Session console fields (decision 12).";PRE_INSERT="pre_insert":1,POST_INSERT="post_insert":2)
+ (console_slot,"Console slot declaration fields.";SLOT="slot":1,IDENTITY="identity":2,QUALITY="quality":3,LINK_MODE="link_mode":4)
+ (console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,PARAMS="params":3)
+ (render_profile,"Render-profile fields.";ID="id":1,MODE="mode":2)
+ (output_profile,"Output-profile fields.";ID="id":1,CHANNELS="channels":2,SAMPLE_FORMAT="sample_format":3)
+ (source,"Source fields.";ID="id":1,CONTENT="content":2,CHANNELS="channels":3,BIT_DEPTH="bit_depth":4,FRAMES="frames":5)
  // Track fields 6 (`simd1`) and 8 (`simd2`) are retired by decision 12 and never reallocated;
  // `inserts` keeps the retired `dynamic` rack's field 7 and `console` is appended as 11.
- key_module!(track,"Track fields.";ID="id":1,SOURCE_ID="source_id":2,LEFT_SOURCE_CHANNEL="left_source_channel":3,RIGHT_SOURCE_CHANNEL="right_source_channel":4,BUILTINS="builtins":5,CONSOLE="console":11,INSERTS="inserts":7,FADER="fader":9,PAN="pan":10,MATRIX="matrix":10);
- key_module!(builtins,"Dual-mono builtins fields.";LEFT="left":1,RIGHT="right":2);
- key_module!(channel_builtins,"Channel-builtin fields.";POLARITY_INVERT="polarity_invert":1,TRIM_DB="trim_db":2,HPF_HZ="hpf_hz":3,LPF_HZ="lpf_hz":4,DELAY_SAMPLES="delay_samples":5);
- key_module!(rack,"Rack fields.";EFFECTS="effects":1);
- key_module!(effect,"Effect fields.";ID="id":1,IDENTITY="identity":2,QUALITY="quality":3,BYPASS="bypass":4,LINK_MODE="link_mode":5,PARAMS="params":6,SIDECHAIN="sidechain":7);
- key_module!(identity,"Effect-identity fields.";KIND="kind":1,EFFECT_ID="effect_id":2,CID="cid":2);
- key_module!(param,"Effect-parameter fields.";PARAMETER_ID="parameter_id":1,CHANNEL="channel":2,UNIT="unit":3,VALUE="value":4);
- key_module!(sidechain,"Sidechain fields.";KIND="kind":1,SOURCE="source":2,PORT_ID="port_id":3);
- key_module!(fader,"Fader fields.";LEFT_DB="left_db":1,RIGHT_DB="right_db":2,LEFT_MUTE="left_mute":3,RIGHT_MUTE="right_mute":4);
- key_module!(matrix_or_pan,"Matrix-or-pan fields.";LEFT="left":2,RIGHT="right":3,PAN_SMOOTHING="smoothing_samples":4,LL="ll":2,LR="lr":3,RL="rl":4,RR="rr":5,MATRIX_SMOOTHING="smoothing_samples":6);
+ (track,"Track fields.";ID="id":1,SOURCE_ID="source_id":2,LEFT_SOURCE_CHANNEL="left_source_channel":3,RIGHT_SOURCE_CHANNEL="right_source_channel":4,BUILTINS="builtins":5,CONSOLE="console":11,INSERTS="inserts":7,FADER="fader":9,PAN="pan":10,MATRIX="matrix":10)
+ (builtins,"Dual-mono builtins fields.";LEFT="left":1,RIGHT="right":2)
+ (channel_builtins,"Channel-builtin fields.";POLARITY_INVERT="polarity_invert":1,TRIM_DB="trim_db":2,HPF_HZ="hpf_hz":3,LPF_HZ="lpf_hz":4,DELAY_SAMPLES="delay_samples":5)
+ (rack,"Rack fields.";EFFECTS="effects":1)
+ (effect,"Effect fields.";ID="id":1,IDENTITY="identity":2,QUALITY="quality":3,BYPASS="bypass":4,LINK_MODE="link_mode":5,PARAMS="params":6,SIDECHAIN="sidechain":7)
+ (identity,"Effect-identity fields.";KIND="kind":1,EFFECT_ID="effect_id":2,CID="cid":2)
+ (param,"Effect-parameter fields.";PARAMETER_ID="parameter_id":1,CHANNEL="channel":2,UNIT="unit":3,VALUE="value":4)
+ (sidechain,"Sidechain fields.";KIND="kind":1,SOURCE="source":2,PORT_ID="port_id":3)
+ (fader,"Fader fields.";LEFT_DB="left_db":1,RIGHT_DB="right_db":2,LEFT_MUTE="left_mute":3,RIGHT_MUTE="right_mute":4)
+ (matrix_or_pan,"Matrix-or-pan fields.";LEFT="left":2,RIGHT="right":3,PAN_SMOOTHING="smoothing_samples":4,LL="ll":2,LR="lr":3,RL="rl":4,RR="rr":5,MATRIX_SMOOTHING="smoothing_samples":6)
  // Field 3 is `console`, the reserved field #1202 appends; pan and matrix share tagged field 6,
  // exactly as the track's field 10 (#1199 D1).
- key_module!(submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,CONSOLE="console":3,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6);
+ (submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,CONSOLE="console":3,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6)
  // Root field 8 was `limits` (removed in 04d291dd); it is retired and never reallocated. `vcas`
  // is appended as 16 (#1240).
- key_module!(vca,"VCA group fields (#1240).";ID="id":1,FADER="fader":2,MEMBERS="members":3);
+ (vca,"VCA group fields (#1240).";ID="id":1,FADER="fader":2,MEMBERS="members":3)
  // `control_smoothing` is appended as root field 17 (#1054); field 8 stays retired.
- key_module!(control_smoothing,"Control-smoothing fields (#1054).";KIND="kind":1,MUTE_MS="mute_ms":2,FADER_MS="fader_ms":3,PAN_MS="pan_ms":4);
- key_module!(output,"Output fields.";ID="id":1);
- key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5,MUTE="mute":6,FOLLOWS_MUTE="follows_mute":7);
- key_module!(route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3);
- key_module!(route_destination,"Route-destination fields.";KIND="kind":1,SUBMIX_ID="submix_id":2,OUTPUT_ID="output_id":2);
- key_module!(channel_matrix,"Channel-matrix fields.";LL="ll":1,LR="lr":2,RL="rl":3,RR="rr":4);
- key_module!(automation,"Automation fields.";ID="id":1,TARGET="target":2,SEGMENTS="segments":3);
- key_module!(target,"Automation-target fields.";ENTITY_ID="entity_id":1,RACK="rack":2,EFFECT_ID="effect_id":3,PARAMETER_ID="parameter_id":4,CHANNEL="channel":5);
- key_module!(segment,"Automation-segment fields.";SHAPE="shape":1,START_SAMPLE="start_sample":2,END_SAMPLE="end_sample":3,START_VALUE="start_value":4,END_VALUE="end_value":5,UNIT="unit":6);
+ (control_smoothing,"Control-smoothing fields (#1054).";KIND="kind":1,MUTE_MS="mute_ms":2,FADER_MS="fader_ms":3,PAN_MS="pan_ms":4)
+ (output,"Output fields.";ID="id":1)
+ (route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5,MUTE="mute":6,FOLLOWS_MUTE="follows_mute":7)
+ (route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3)
+ (route_destination,"Route-destination fields.";KIND="kind":1,SUBMIX_ID="submix_id":2,OUTPUT_ID="output_id":2)
+ (channel_matrix,"Channel-matrix fields.";LL="ll":1,LR="lr":2,RL="rl":3,RR="rr":4)
+ (automation,"Automation fields.";ID="id":1,TARGET="target":2,SEGMENTS="segments":3)
+ (target,"Automation-target fields.";ENTITY_ID="entity_id":1,RACK="rack":2,EFFECT_ID="effect_id":3,PARAMETER_ID="parameter_id":4,CHANNEL="channel":5)
+ (segment,"Automation-segment fields.";SHAPE="shape":1,START_SAMPLE="start_sample":2,END_SAMPLE="end_sample":3,START_VALUE="start_value":4,END_VALUE="end_value":5,UNIT="unit":6)
+ }
 }
 
 mod walk {

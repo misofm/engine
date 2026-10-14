@@ -1719,6 +1719,86 @@ pub(crate) mod session {
 mod tests {
     use super::*;
 
+    /// The session JSON keys and the session wire fields are one ID space (#1568).
+    #[test]
+    fn session_keys_and_wire_fields_have_equal_ids() {
+        use std::collections::BTreeSet;
+
+        use super::session::{
+            automation, automation_segment, automation_target, builtins, channel_builtins,
+            channel_matrix, console, console_entry, console_slot, effect, effect_identity, fader,
+            matrix_or_pan, output, output_profile, param, rack, render_profile, route,
+            route_destination, route_source, sidechain, source, submix, track, vca,
+        };
+
+        // (keys module, its wire message, IDs the wire carries with no key). `None` is a keys
+        // module with no wire message of its own: `control_smoothing` is written only by the
+        // `SET_CONTROL` row of the session control table and never framed as a session record.
+        // The `matrix_or_pan` tag (field 1) is wire-only: the walk emits it as `wire_tag`.
+        let table: [(&str, Option<&MessageSpec>, &[u16]); 27] = [
+            ("console", Some(&console::SPEC), &[]),
+            ("console_slot", Some(&console_slot::SPEC), &[]),
+            ("console_entry", Some(&console_entry::SPEC), &[]),
+            ("render_profile", Some(&render_profile::SPEC), &[]),
+            ("output_profile", Some(&output_profile::SPEC), &[]),
+            ("source", Some(&source::SPEC), &[]),
+            ("track", Some(&track::SPEC), &[]),
+            ("builtins", Some(&builtins::SPEC), &[]),
+            ("channel_builtins", Some(&channel_builtins::SPEC), &[]),
+            ("rack", Some(&rack::SPEC), &[]),
+            ("effect", Some(&effect::SPEC), &[]),
+            ("identity", Some(&effect_identity::SPEC), &[]),
+            ("param", Some(&param::SPEC), &[]),
+            ("sidechain", Some(&sidechain::KNOWN), &[]),
+            ("fader", Some(&fader::SPEC), &[]),
+            ("matrix_or_pan", Some(&matrix_or_pan::KNOWN), &[1]),
+            ("submix", Some(&submix::SPEC), &[]),
+            ("vca", Some(&vca::SPEC), &[]),
+            ("control_smoothing", None, &[]),
+            ("output", Some(&output::SPEC), &[]),
+            ("route", Some(&route::SPEC), &[]),
+            ("route_source", Some(&route_source::KNOWN), &[]),
+            ("route_destination", Some(&route_destination::SPEC), &[]),
+            ("channel_matrix", Some(&channel_matrix::SPEC), &[]),
+            ("automation", Some(&automation::SPEC), &[]),
+            // #1566 replaces this pairing with `control_address` when it lands.
+            ("target", Some(&automation_target::SPEC), &[]),
+            ("segment", Some(&automation_segment::SPEC), &[]),
+        ];
+
+        let modules = ::session::keys::MODULES;
+        for (name, spec, wire_only) in &table {
+            let (_, keys) = modules
+                .iter()
+                .find(|(module, _)| module == name)
+                .unwrap_or_else(|| panic!("table row `{name}` names no keys module"));
+            let Some(spec) = spec else { continue };
+            let from_keys: BTreeSet<u16> = keys
+                .iter()
+                .map(|key| key.id)
+                .chain(wire_only.iter().copied())
+                .collect();
+            let from_wire: BTreeSet<u16> = spec.fields.iter().map(|field| field.id).collect();
+            assert_eq!(
+                from_keys, from_wire,
+                "keys::{name} field IDs differ from wire message {}",
+                spec.name
+            );
+        }
+        // A retired track field ID is never given a key (#1094).
+        let (_, track_keys) = modules.iter().find(|(m, _)| *m == "track").unwrap();
+        for retired in track::RETIRED.fields {
+            assert!(track_keys.iter().all(|key| key.id != retired.id));
+        }
+        // The root `session` has no wire message: it is never sent whole.
+        for (module, _) in modules {
+            assert!(
+                *module == "session" || table.iter().any(|(name, ..)| name == module),
+                "keys::{module} has no row in the pairing table"
+            );
+        }
+    }
+
     #[test]
     fn migrated_specs_are_sorted_unique_and_structurally_consistent() {
         let specs = [
