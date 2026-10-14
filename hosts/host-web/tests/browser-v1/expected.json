@@ -114,7 +114,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
         "renderedQuanta": "10",
-        "memoryBytes": 3080192
+        "memoryBytes": 2949120
       },
       "pcmF32leSha256": "c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd"
     },

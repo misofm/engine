@@ -454,3 +454,40 @@ its session authors the hard switch, as the insert test beside it already does.
 
 No checked-in digest moved: `check-effect-runtime-fixtures.sh` and `check-console-fixtures.sh` pass
 unchanged (none of them toggles a live bypass).
+
+## Decision record: the browser qualification's live-bypass row (batch 9 fold)
+
+The row `sdk-live-bypass` (`hosts/host-web/qualification/run.mjs` `validateSdkLiveBypass`, rendered by
+`sdk-response-entry.ts` `runSdkLiveBypassQualification`) was written for a stepping bypass: it held
+each live render digest equal to the authored control's (`consoleOffLive === consoleOff`), and it
+went red on the browser build at this batch ("a live bypass toggle on the post_insert console slot did
+not render its authored bypass state"), because the live bypass now crossfades over the session's
+`mute_ms`. The row's own header said it would move to this issue.
+
+**New contract (strict, per quantum, four edits).** Each live render is compared with two controls
+the same browser renders: the starting one (`base` for a bypass, the authored bypass for a lift) and
+the target. Per 128-frame quantum: the render equals the starting control until the ramp reaches the
+output (found, not assumed, as `control_parity.rs` `a_live_bypass_crossfades_alike` finds `start`);
+then it differs from both controls for `ceil(ramp / quantum)` or one more quanta; from there it equals
+the target bit for bit to the end of the render. A step (at most one quantum), a no-op (never leaves
+the start), a render that falls back to its start inside the ramp, a ramp that does not settle, and a
+lift that does not land are each red. Nothing is "eventually similar".
+
+**The fixture states its ramp.** The session now declares `controlSmoothing: { muteMs: 10, faderMs:
+10, panMs: 10 }` (the fader and pan lengths are unused here) instead of leaning on the default, and
+the response carries `muteRampSamples` (`round(48000 * 10 / 1000)` = 480) and `quantumFrames` (128),
+from which the gate derives its block count (4). The render is 16 quanta (2,048 frames, was 8) so a
+settled stretch follows the ramp. The response carries a SHA-256 per quantum for the seven renders
+(`blocks`); the three whole-render digests that remain are the audible-and-distinct check.
+
+**Measured (chromium, firefox, webkit agree).** Console slot (`desk-hi`, after the insert, nothing
+audible follows it) bypass: quanta 0-3 between the controls, 4 on equal the bypassed control; lift:
+quanta 0-3 between, 4 on equal the document with none. Insert (`ins-mid`; the console EQ after it
+re-filters the changed input) bypass: quanta 0-4 between (5 = ramp + 1), 5 on equal the bypassed
+control; lift: 0-3 between, 4 on. Both directions settle exactly, so the strict settle holds on the
+insert row too, and the gate keeps no tolerance.
+
+**Self-test mutations (three new, two moved).** `sdk-live-bypass-console` and `-insert` now replace
+the live blocks with the wrong control; new `sdk-live-bypass-step` (one quantum of start then the
+target), `-unsettled` (the last quantum back at the start) and `-lift` (the lift left bypassed). All
+five are proven red in each browser by `--self-test-mutations`.

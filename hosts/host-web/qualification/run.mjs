@@ -34,6 +34,9 @@ const MUTATIONS = [
   "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
   // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
   "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
+  // Issues #1341a1 and #1341a2: a live bypass is a ramp over the session's mute length, so a step,
+  // a ramp that never settles and a lift that never lands are red too.
+  "sdk-live-bypass-step", "sdk-live-bypass-unsettled", "sdk-live-bypass-lift",
   // Issue #1333 D3: one render-locked allocator call on one instance, and a staging-read workload
   // whose spectrum read never completed a window.
   "render-allocations", "staging-reads",
@@ -299,30 +302,66 @@ function validate(browserName, result) {
 }
 
 /**
- * Issue #1097 gate 4, as #1563B restates it: a live bypass toggle on a console slot and on an
- * insert, through the SDK.
+ * Issue #1097 gate 4, as #1563B restates it and #1341a1/#1341a2 move it: a live bypass toggle on a
+ * console slot and on an insert, through the SDK.
  *
- * Bypassing lands on exactly the instance the same bypass authored in the document does, lifting
- * an authored bypass renders the document with none, all four edits are `SET_CONTROL` transactions
- * the core applies on its live path before the first quantum, and each names its instance by its
- * stable ID: the console slot `desk-hi` and the insert `ins-mid`, control `0` (bypass).
- *
- * The render equalities are the exact shunt of today's core; #1341 makes the live bypass a
- * crossfade, and this row moves to that issue's gates then.
+ * Each of the four edits is a `SET_CONTROL` transaction the core applies on its live path before
+ * the first quantum, naming its instance by its stable ID: the console slot `desk-hi` and the insert
+ * `ins-mid`, control `0` (bypass). A live bypass is a crossfade over the session's `mute_ms` ramp
+ * (the fixture declares 10 ms), so the render is a ramp between two controls, both rendered by the
+ * same browser: the starting one (never bypassed, or the document that authors the bypass) and the
+ * target (the other). Per quantum, strictly: the render equals the starting control until the ramp
+ * reaches the output; then it differs from BOTH controls for as many quanta as the ramp spans,
+ * `ceil(ramp / quantum)` or one more (a step spans at most one, a no-op none); and from there it
+ * equals the target bit for bit. The ramp's start is found, not assumed, because the chain's own
+ * delay (PDC) shifts it.
  */
 function validateSdkLiveBypass(browserName, live) {
   const digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-  gate(browserName, "sdk-live-bypass", ["base", "consoleOff", "insertOff", "consoleOffLive",
-    "insertOffLive", "consoleOnLive", "insertOnLive"].every((key) => digest(live?.[key]))
+  const rows = ["base", "consoleOff", "insertOff", "consoleOffLive", "insertOffLive",
+    "consoleOnLive", "insertOnLive"];
+  const frames = live?.blocks?.base?.length;
+  gate(browserName, "sdk-live-bypass", ["base", "consoleOff", "insertOff"].every((key) => digest(live?.[key]))
     && live.baseEnergy > 0
-    && new Set([live.base, live.consoleOff, live.insertOff]).size === 3,
+    && new Set([live.base, live.consoleOff, live.insertOff]).size === 3
+    && Number.isInteger(live.quantumFrames) && live.quantumFrames > 0
+    && Number.isInteger(live.muteRampSamples) && live.muteRampSamples > 0
+    && Number.isInteger(frames) && frames > 0
+    && rows.every((key) => Array.isArray(live.blocks[key]) && live.blocks[key].length === frames
+      && live.blocks[key].every(digest)),
   "the console and insert bypasses were not both audible and distinct renders");
-  gate(browserName, "sdk-live-bypass", live.consoleOffLive === live.consoleOff
-    && live.consoleOnLive === live.base,
-  "a live bypass toggle on the post_insert console slot did not render its authored bypass state");
-  gate(browserName, "sdk-live-bypass", live.insertOffLive === live.insertOff
-    && live.insertOnLive === live.base,
-  "a live bypass toggle on the insert did not render its authored bypass state");
+  const rampBlocks = Math.ceil(live.muteRampSamples / live.quantumFrames);
+  const blocks = live.blocks;
+  // Why `rows[index]` fails to be the crossfade from `from` to `to`, or null when it is one.
+  const crossfade = (rendered, from, to) => {
+    const same = (a, b, at) => a[at] === b[at];
+    const start = rendered.findIndex((_, at) => !same(rendered, from, at));
+    if (start < 0) return "it never left its starting control";
+    let ramp = 0;
+    while (start + ramp < rendered.length && !same(rendered, to, start + ramp)) ramp += 1;
+    for (let at = start; at < start + ramp; at += 1) {
+      if (same(rendered, from, at)) return `block ${at} fell back to its starting control inside the ramp`;
+    }
+    if (ramp < rampBlocks || ramp > rampBlocks + 1) {
+      return `${ramp} blocks sit between the controls, the ${live.muteRampSamples}-sample ramp spans ${rampBlocks} or ${rampBlocks + 1}`;
+    }
+    for (let at = start + ramp; at < rendered.length; at += 1) {
+      if (!same(rendered, to, at)) return `block ${at} left the target after the ramp`;
+    }
+    return null;
+  };
+  const rowGate = (key, from, to, detail) => {
+    const problem = crossfade(blocks[key], blocks[from], blocks[to]);
+    gate(browserName, "sdk-live-bypass", problem === null, `${detail} (${problem})`);
+  };
+  rowGate("consoleOffLive", "base", "consoleOff",
+    "a live bypass toggle on the post_insert console slot did not crossfade onto its authored bypass state");
+  rowGate("insertOffLive", "base", "insertOff",
+    "a live bypass toggle on the insert did not crossfade onto its authored bypass state");
+  rowGate("consoleOnLive", "consoleOff", "base",
+    "lifting the authored bypass of the post_insert console slot did not crossfade onto the document with none");
+  rowGate("insertOnLive", "insertOff", "base",
+    "lifting the authored bypass of the insert did not crossfade onto the document with none");
   gate(browserName, "sdk-live-bypass", live.consoleAddress === "console:desk-hi:0"
     && live.insertAddress === "inserts:ins-mid:0"
     && JSON.stringify(live.liftAddresses) === JSON.stringify(["console:desk-hi:0", "inserts:ins-mid:0"])
@@ -824,10 +863,23 @@ function mutate(result, mutation) {
   // A live console bypass that did nothing, an insert bypass that landed on another instance, and
   // a post_insert slot addressed by its index within its own section.
   if (mutation === "sdk-live-bypass-console") {
-    copy.sdkResponse.liveBypass.consoleOffLive = copy.sdkResponse.liveBypass.base;
+    copy.sdkResponse.liveBypass.blocks.consoleOffLive = copy.sdkResponse.liveBypass.blocks.base;
   }
   if (mutation === "sdk-live-bypass-insert") {
-    copy.sdkResponse.liveBypass.insertOffLive = copy.sdkResponse.liveBypass.consoleOff;
+    copy.sdkResponse.liveBypass.blocks.insertOffLive = copy.sdkResponse.liveBypass.blocks.consoleOff;
+  }
+  // A stepped bypass: one quantum of the starting control, then the target at once.
+  if (mutation === "sdk-live-bypass-step") {
+    const blocks = copy.sdkResponse.liveBypass.blocks;
+    blocks.insertOffLive = [blocks.base[0], ...blocks.insertOff.slice(1)];
+  }
+  // A ramp that never settles, and a lift that does not reach the document with none.
+  if (mutation === "sdk-live-bypass-unsettled") {
+    const blocks = copy.sdkResponse.liveBypass.blocks;
+    blocks.consoleOffLive = [...blocks.consoleOffLive.slice(0, -1), blocks.base.at(-1)];
+  }
+  if (mutation === "sdk-live-bypass-lift") {
+    copy.sdkResponse.liveBypass.blocks.consoleOnLive = copy.sdkResponse.liveBypass.blocks.consoleOff;
   }
   if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;

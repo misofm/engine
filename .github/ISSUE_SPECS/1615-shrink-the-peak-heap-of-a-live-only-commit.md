@@ -228,3 +228,15 @@ and the four policy scripts pass. Render-locked allocations: no render-path file
 tracks: peak 196,593, 256 tracks: 663,179, against 76,011 on one track), because it builds what the
 later calls keep. It is a one-time cost, outside this slice's gate (the steady call), and worth its
 own look if a browser session of hundreds of tracks must not grow the heap on its first edit.
+
+**Browser fixture pin (batch 9 fold).** The browser identity fixture
+(`hosts/host-web/tests/browser-v1/expected.json`, `directOracle.setControlTimeline.beforeDisposeStatus.memoryBytes`)
+is the one exact field this slice moves: 3,080,192 -> 2,949,120 bytes (47 pages -> 45 pages, 2 pages
+fewer), measured with the built `simd128` module through `direct-oracle.mjs`. Bisected by building and
+printing the oracle at each first-parent commit of batch 9: `1d6f91246` (#1341a, #1602), `d7fe0470d`
+(#1611) and `47676de09` (#1566, #1568, #1569) print 3,080,192; `af8bcad9b` (this slice) prints
+2,949,120, and the later merges (#1574, docs, folds) keep it. The other two `memoryBytes` fields (the `simd128` initial and before-dispose statuses) stay 2,883,584,
+every PCM digest, status
+snapshot and result transcript is unchanged, and only the `resourceCeilings`-budgeted rows move (all
+down). This is the live-transaction peak of the SET_CONTROL timeline's nine-edit commits falling by
+about 97 kB, as this record measures natively.

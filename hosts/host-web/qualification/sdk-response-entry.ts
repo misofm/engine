@@ -2159,7 +2159,17 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   }
 }
 
-const LIVE_BYPASS_FRAMES = 1_024;
+const LIVE_BYPASS_QUANTUM = 128;
+/**
+ * The fixture's mute ramp, written out: a live bypass crossfades over the session's `mute_ms`
+ * (#1341a1, #1341a2), so the row below measures the ramp it declares. The other two lengths are
+ * unused by this fixture.
+ */
+const LIVE_BYPASS_MUTE_MS = 10;
+const LIVE_BYPASS_SAMPLE_RATE_HZ = 48_000;
+/** The ramp's length in samples at the fixture's rate, as the core derives it (`rate * ms / 1000`). */
+const LIVE_BYPASS_RAMP_SAMPLES = Math.round(LIVE_BYPASS_SAMPLE_RATE_HZ * LIVE_BYPASS_MUTE_MS / 1_000);
+const LIVE_BYPASS_FRAMES = 16 * LIVE_BYPASS_QUANTUM;
 
 /** Deterministic broadband PCM, so each EQ band below is audible in the output. */
 function liveBypassPlanes(block: number): Float32Array[] {
@@ -2180,7 +2190,12 @@ function liveBypassSession(bypassed?: "desk-hi" | "ins-mid") {
   const band = (gain: number, frequency: number) => ({
     "band-1-enabled": true, "band-1-gain": gain, "band-1-frequency": frequency,
   });
-  return session({ id: "qualification.live-bypass", sampleRateHz: 48_000, revision: 1 })
+  return session({
+    id: "qualification.live-bypass",
+    sampleRateHz: LIVE_BYPASS_SAMPLE_RATE_HZ,
+    revision: 1,
+    controlSmoothing: { muteMs: LIVE_BYPASS_MUTE_MS, faderMs: 10, panMs: 10 },
+  })
     .source("live-control-source", {
       channels: 2, bitDepth: 24, frames: LIVE_BYPASS_FRAMES, content: `blake3:${"0".repeat(64)}`,
     })
@@ -2236,7 +2251,7 @@ function liveBypassWorkload(
 async function renderLiveBypass(
   bypassed: "desk-hi" | "ins-mid" | undefined,
   live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
-): Promise<{ digest: string; energy: number; section?: string; path?: string }> {
+): Promise<{ digest: string; blocks: string[]; energy: number; section?: string; path?: string }> {
   const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), {
     document: liveBypassSession(bypassed),
     policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: {} },
@@ -2295,8 +2310,13 @@ async function renderLiveBypass(
     const planes = [rendered.getChannelData(0), rendered.getChannelData(1)];
     const energy = planes.reduce((total, plane) =>
       total + plane.reduce((sum, value) => sum + value * value, 0), 0);
+    const blocks: string[] = [];
+    for (let at = 0; at < LIVE_BYPASS_FRAMES; at += LIVE_BYPASS_QUANTUM) {
+      blocks.push(await sha256Hex(planes.map((plane) => plane.subarray(at, at + LIVE_BYPASS_QUANTUM))));
+    }
     return {
       digest: await sha256Hex(planes),
+      blocks,
       energy,
       ...(section === undefined ? {} : { section }),
       ...(path === undefined ? {} : { path }),
@@ -2327,15 +2347,22 @@ async function runSdkLiveBypassQualification(): Promise<Record<string, unknown>>
     base: base.digest,
     consoleOff: consoleOff.digest,
     insertOff: insertOff.digest,
-    consoleOffLive: consoleOffLive.digest,
-    insertOffLive: insertOffLive.digest,
-    consoleOnLive: consoleOnLive.digest,
-    insertOnLive: insertOnLive.digest,
     consoleAddress: consoleOffLive.section,
     insertAddress: insertOffLive.section,
     liftAddresses: [consoleOnLive.section, insertOnLive.section],
     paths: [consoleOffLive, insertOffLive, consoleOnLive, insertOnLive].map((render) => render.path),
     baseEnergy: base.energy,
+    quantumFrames: LIVE_BYPASS_QUANTUM,
+    muteRampSamples: LIVE_BYPASS_RAMP_SAMPLES,
+    blocks: {
+      base: base.blocks,
+      consoleOff: consoleOff.blocks,
+      insertOff: insertOff.blocks,
+      consoleOffLive: consoleOffLive.blocks,
+      insertOffLive: insertOffLive.blocks,
+      consoleOnLive: consoleOnLive.blocks,
+      insertOnLive: insertOnLive.blocks,
+    },
   };
 }
 
