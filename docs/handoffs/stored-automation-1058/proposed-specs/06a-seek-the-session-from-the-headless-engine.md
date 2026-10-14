@@ -164,3 +164,15 @@ export in draft 06b.
   anchored export's rules and its mirrors.
 - Batch: R1. Draft 06b *Seek the timeline and every source from the browser SDK and the PCM feed*
   builds on it.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Single instance first** (#1562's decision 17 amendment). The control half is the worklet's
+  message handler (`single` mode); #1332 later deploys the same exports in the Worker with no other
+  logic. D1's "the Worker in `worker` mode" waits for #1332 and adds nothing here.
+- **Anchors.** `miso_engine_web_v1_source_seek` is `hosts/host-web/src/ffi.rs:3251`; the control
+  exports of #1562a are `:3308-3383`.
+- **Dependencies.** #1293 (open) for the anchored export's rules; #1381a has landed, #1381 and #1387
+  are open. Decision 17 C13 applies as in draft 05's amendment.

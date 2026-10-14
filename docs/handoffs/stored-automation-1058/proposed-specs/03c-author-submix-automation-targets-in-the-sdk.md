@@ -1,5 +1,7 @@
 # Author submix automation targets in the SDK and enginectl
 
+> **Obsolete (controls coordinator, 2026-10-14):** #1566 D8 already takes every automation target, a submix's included, as a control address. Kept as a record; do not file. See the amendment at the end.
+
 Proposed by *Research: render stored session automation in the engine, identically on every
 platform* (#1058), answer A3, under decision 15 D15-16
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`). A draft for root
@@ -96,3 +98,11 @@ and live aux sends* (#1196): today only hand-written JSON can name a submix targ
 - None. It may land before or after draft 03b *Mirror the stored automation rules in the SDK
   builder* (see Hazards).
 - Batch: R3.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Status: obsolete (#1566 D8).** The SDK and `enginectl` take an automation target as a
+  `ControlAddress` (`sdk/src/core/session.ts:863-899`, `:1377-1520`; `sdk/src/cli/session-request.ts:475-500`):
+  a submix target is `{ owner: strip, owner_id: <submix> }` like a track's. Do not file this draft.

@@ -145,3 +145,15 @@ Batch P1. Direct dependency:
 - Draft 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*.
 
 Draft 21c *Delete the protocol automation queue, its records and counters* depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The event test** is already `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`
+  (`crates/capi/src/runtime/tests.rs:2194`, renamed by #1315). D4's rename is done; its doc comment
+  (`:2187-2191`, "the sixth family returns with stored automation") is rewritten: the family is
+  retired (README F24).
+- **`a_live_edit_emits_the_commit_events_of_a_rebuild`** is `crates/capi/src/runtime/live_tests.rs:2324`;
+  it still decodes `AUTOMATION_CANCELED` (`:2308`).
+- **Anchors** in the inventory have moved; re-read at filing. Batch P1, ready.

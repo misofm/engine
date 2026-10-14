@@ -152,3 +152,16 @@ Batch P1. Direct dependency:
 
 - Draft 21c *Delete the protocol automation queue, its records and counters*: its record codec
   carries the span kind (`AutomationKind`, `crates/protocol/src/queue.rs:30-44`), so the protocol's last producer of the moving kinds leaves first.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The protocol half is done.** The protocol's `ParameterAutomationRate` left with
+  `PARAMETER_METADATA_GET` (decision 17 C4, #1551); drop its wire value from D-items, gates and paths.
+- **One more user:** `controls`' `parameter_class` maps `AutomationRate::Sample` to rebuild-only
+  with the reopen text "sample-accurate render-path delivery, a later protocol capability"
+  (`crates/controls/src/effect_rows.rs:146-160`). Retiring `Sample` deletes that arm and its text;
+  add `crates/controls/src/effect_rows.rs` to the authorized paths.
+- **Anchors.** `AutomationRate` is now `crates/effect-contract/src/lib.rs:415`; re-read the rest at
+  filing. Batch P1, ready.

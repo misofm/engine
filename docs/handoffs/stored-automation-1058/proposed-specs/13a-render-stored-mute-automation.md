@@ -165,3 +165,21 @@ Batch R2. Direct dependencies:
 
 Draft 08's `SetMute` and the cells of *Hold live values in latest-target cells on both hosts*
 (#1312) arrive through draft 10. Drafts 13b and 13c depend on this draft and land in the same push.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **OQ1 = C: a hand mute ORs.** The stage mute of an automated lane is `curve || terms`, and
+  `terms` now includes the lane's own static mute: `static_mute || any reaching VCA mute || solo
+  term`, the effective mute of `controls::effective` (C7) without the curve. So a `SET_CONTROL mute`
+  on an automated lane is a live `terms` write, path `live`, not `model_only`. D2's "A static mute
+  edit on an automated lane gives no record (draft 10 D3)" and the browser sentence are replaced by
+  this rule; gate 4 tests a hand mute that closes an open curve, and a hand unmute that leaves a
+  closed curve closed. When the entry is removed, the lane's mute is the static mute, as before.
+- **Solo is on both hosts** (C8, #1559): "On the C ABI the overlay is absent" is no longer true; the
+  code is the same on both hosts.
+- **Moved files.** `crates/host-core/src/solo.rs` is deleted; the composition is
+  `controls::effective` (`crates/controls/src/effective.rs`). Authorized paths change to
+  `crates/controls/src/effective.rs` (read) and `crates/host-core/src/live_delta.rs`.
+- **The jump length** is `LiveRamps::for_row(Mute)` (draft 07, amended).

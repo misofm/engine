@@ -288,3 +288,28 @@ admission path remains that could write a live record onto an automated lane.
   latency*, 10 *Classify fader automation edits as carried rebuilds* and 11 *Compose VCA offsets
   with stored fader automation*.
 
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The composition moved.** `effective_strip_faders` is gone; `controls::effective` (decision 17
+  C7, `crates/controls/src/effective.rs`) composes every effective fader, through
+  `session::vca_effective_db` and `session::VcaSum`, which still add the member first
+  (`crates/session/src/vca.rs:20-60`). D6 changes `VcaSum` and `vca_effective_db` and adds
+  `vca_offsets_sum` and `vca_compose_db` there; every caller follows.
+- **The pinned order test moved** to `crates/controls/tests/composition.rs:82-83` (and its
+  `reference_db`, `:37`); the browser oracles of D6 were deleted with the browser's own path
+  (#1565). The oracles to rewrite are `crates/controls/tests/composition.rs` and
+  `crates/host-core/tests/vca.rs:271`. Authorized paths change to these files.
+- **The hand offset joins `S`** (OQ1 = C, slice 11b D6): `S = offset + Σ reaching VCA offsets`.
+  This slice seeds `S` with the stored offset; 11b adds the field and the write.
+- **Live lanes on every plan** (C6): every strip already has its `FaderCells`
+  (`crates/builtins-compiler/src/lib.rs:298`); the offsets cell is an extra cell for automated lanes
+  only.
+- **Moved files.** `crates/capi/src/runtime/compile.rs` is now `crates/control-plane/src/compile.rs`.
+  #1312, #1054 and #1309 have landed; #1285 is open.
+- **The browser.** #1382 is closed; its role is #1562. #1562a (the browser commits through
+  `SessionState`) has landed; #1562b (the browser's rebuild path) is a dependency of batch R1,
+  because every fader automation edit is a rebuild after draft 10.
+- **Must-land group** is 09a, 09b, 10, 11 and 11b.

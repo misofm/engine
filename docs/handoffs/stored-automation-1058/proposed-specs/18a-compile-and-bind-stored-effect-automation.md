@@ -246,3 +246,20 @@ during playback* (#1285) and *Refuse automation on effect parameters that are no
 (#1335) arrive through drafts 03a, 10 and 17b. Draft 18b *Render stored effect parameter
 automation across seeks and on both hosts* and draft 19 *Classify and carry effect automation
 edits* depend on this draft and land in the same push.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **D4 is superseded by #1611 and #1621.** Every live effect window already holds the lane's
+  parameter cells (#1611 D3 for banks, `crates/rack/src/lib.rs:1248-1264`; #1621 D1 per node), and
+  every effect has its live lane on every plan (C6). So: no `capacity = live + stored`, no
+  channel-less lane, and no #1306 in this push (README F23). The must-land group is 18a, 18b and 19.
+- **Validation** is #1566's row rule (`controls::automation_diagnostics`) plus amended draft 02's
+  shape rule; #1335's `effect_automation_diagnostics` is deleted. A cell is addressed by
+  `ControlAddress` (owner strip, section `console(slot)` or `inserts(effect)`, control = parameter
+  ID, lane).
+- **The `Block` table** must be re-counted at filing: `Sample`-rate rows are rebuild-only, and
+  #1336 (gate-expander times) and #1337 (EQ enabled and kind) are open.
+- **The browser's S** derivation is now `hosts/host-web/src/lib.rs:4447-4455`; #1306 D3 deletes it,
+  outside this push.

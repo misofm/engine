@@ -230,3 +230,19 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   holds `SessionState`. It lands before batch P1.
 - Batch: R1. Draft 06a *Seek the timeline and every source from the browser module export and the
   headless SDK* calls the same wrapper.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **`SessionState`** is in `crates/control-plane/src/control.rs` (#1309 landed): `seek` `:2276`,
+  `seek_at` `:2301`, `newest_providers_mut` `:2185`.
+- **Feature bits.** The last bit is now `MISO_ENGINE_V1_FEATURE_SERVICE` (128), mask 255
+  (`crates/capi/include/miso_engine_v1.h:244-252`); D4 takes the next free bit at merge, as written.
+- **Decision 17 C13** says a feature reaches the C ABI as a protocol message through
+  `miso_engine_v1_submit_command`, with no new export. The session seek is source transport (the
+  host must refill every ring at the new generation; the protocol never carries PCM), the same
+  family as the existing `miso_engine_v1_source_seek` exports, so D4's two exports follow that
+  family. Root confirms this reading at filing; the alternative is a protocol command whose reply
+  carries the generation.
+- **Dependencies.** #1317, #1319 and #1323 are still open.

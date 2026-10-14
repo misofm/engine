@@ -228,3 +228,28 @@ Batch P1. Direct dependencies:
 
 No rendering slice is a dependency. Draft 21b *Retire the AUTOMATION_CANCELED event and the
 cancellation path* depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **#1315 landed as a switch.** `ProviderFeatures::automation` (`crates/protocol/src/controller.rs:108-150`)
+  is false in `crates/control-plane/src/compile.rs:938-943`, so both hosts refuse the command
+  `UNAVAILABLE` and the capability record already omits `0x0006` and flag bit 5
+  (`controller.rs:3160`, `:3727`, `:3762`). This slice also deletes the switch, its `ALL` and `NONE`
+  entries and arms, and the compile.rs comment that says to flip it (README F24). The #1315 rows of
+  the README's amendment table are moot.
+- **The provider hook** is `ControlProvider::control_row` (`controller.rs:602-609`), not
+  `parameter_descriptor`: its one caller is `validate_automation_domains` (`:3865-3872`). It leaves
+  with `MockProvider`'s implementation (`:840`) and host-core's
+  (`crates/host-core/src/control_provider.rs:1075-1094`, tests `:3239-3267`).
+- **Retired IDs.** `0x0006` joins `RETIRED_MESSAGE_IDS` (`crates/protocol/src/wire.rs:141`, with
+  `0x0004` and `0x0005`), the mechanism #1551 added.
+- **Gate 2** then tests only what changes: capability fields 9, 12, 19 and 20 leave; `0x0006` and
+  bit 5 are already absent.
+- **Both hosts.** The browser runs the same controller (`compile_children` in control-plane), so it
+  needs no browser gate.
+- **#1567** (parked) is obsolete: root closes it as superseded by 21a-21c before P1 merges.
+- **Anchors.** Every line in the inventory has moved; re-read them at filing. The C ABI tests are
+  in `crates/capi/src/runtime/tests.rs` and `live_tests.rs` (`a_live_edit_emits_the_commit_events_of_a_rebuild`,
+  `:2324`). Batch P1, ready (README "Batch P1 readiness").

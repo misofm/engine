@@ -206,3 +206,16 @@ Batch R3. Direct dependencies:
 
 It merges in batch R3 with its first user, draft 18a *Compile and bind stored effect parameter
 automation*.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Every effect has a live stage** (decision 17 C6, live lanes on every plan): every native effect
+  node binds `LiveControlEffect` or `LiveControlEffectBankStage` with a window of its lane's
+  parameter cells (#1611 D3; #1621 D1 for the per-node window). D6 is obsolete: there is no "no live
+  channel" case and no channel-less lane to add; the stage only gains the stored program.
+- **D5's bound** holds with the existing window: one slot per parameter cell, and an automated cell
+  takes no live record (A10, draft 19), so a piece stages each cell at most once. No #1306 term.
+- **D3 also keeps** the bypass crossfade step of #1341a per block.
+- **Dependencies.** #1345 has landed; #1611 and #1621 replace #1306 here.

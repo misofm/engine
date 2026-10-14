@@ -113,3 +113,9 @@ Batch Q. Direct dependencies:
 
 Draft 05 *Seek the timeline and every source in one C ABI call* and draft 07 *Compile stored
 automation into per-cell events in node time* arrive through draft 23a.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- No design change. It inherits 23a's added rows. #1019 is still open. Anchors re-read at filing.

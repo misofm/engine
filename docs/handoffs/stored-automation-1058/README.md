@@ -34,12 +34,52 @@ seven nits). Every finding of all three is folded in (section "Verification").
 
 **No benchmark ran.** The one quoted time comes from a recorded run (section "Costs").
 
+## Owner answers (2026-10-14)
+
+Recorded by the controls coordinator. The owner answered both questions of section "Owner
+questions" and confirmed A9.
+
+- **OQ1 = C (offset).** A hand move of an automated fader dB or input trim dB adds a stored dB
+  offset to the curve. A hand mute ORs with the automated mute. On every other row automation
+  wins. **A2 is decided.**
+- **OQ2 = yes.** A route into a submix gets `gain_db`, `mute` and `channel_matrix` as automation
+  targets. Routes into the output stay prepared.
+- **A9 stands.** `AUTOMATION_ENQUEUE` is retired by slices 21a-21c. *Address enqueued automation by
+  control address* (#1567, parked) is therefore obsolete; root closes it as superseded by 21a-21c.
+
+What changes in the design:
+
+- **A2's fallback rule becomes C.** Before the answer, "automation wins on every row" was the rule
+  that shipped first (option A): a static edit of an automated cell is stored, not heard, and
+  commits `model_only`. Now that rule holds only for the rows where automation wins: polarity, HPF,
+  LPF, pan, the matrix rows, effect parameters (the EQ included) and a send's gain and matrix.
+  - **Fader dB and input trim dB.** A `SET_CONTROL` on the row of an automated lane writes that
+    lane's stored offset, live, through the lane's offsets cell; render adds it to the curve at
+    each event. New slice **11b** (batch R1, in the 09a-09b-10-11 push) adds the field, the write
+    rule, the control list's `automated` flag and the fader render; draft 15 (amended) adds the trim
+    render.
+  - **Mute.** No new field: the strip's static mute stays a live value and ORs into the stage mute
+    with the curve, the VCA mutes and the solo term. Drafts 13a-13c are amended; a static mute edit
+    on an automated lane is a live cell write, not `model_only`.
+  - The A2 analysis below ("No answer undoes anything shipped") assumed a new edit for option C.
+    Under decision 17 the edit is `SET_CONTROL` on the same row, so option A must never ship for the
+    fader: 11b lands in the same push as 09a-11 (must-land group amended), and draft 15 flips trim
+    in the same change that renders it.
+- **Send rows render.** New slice **13d** (batch R2, after 13c) renders route rows 1-6 of a route
+  into a submix on draft 13b's route lane. A hand send gain or matrix edit on an automated send
+  commits `model_only` (automation wins); a hand send mute ORs (13d D5, a reading of OQ1 for root to
+  confirm). `follows_mute` (row 7) is automatable by decision 17's computed rule but is not in the
+  answer (finding F20).
+- **AUTOMATION_ENQUEUE.** #1315 has landed with a feature switch (`ProviderFeatures::automation`,
+  false in `crates/control-plane/src/compile.rs:938-943`), not a retirement. Slices 21a-21c delete
+  the switch with the command (amended 21a; section "Batch P1 readiness").
+
 ## The decisions in one line each
 
 | Answer | Decision |
 |---|---|
 | A1 | The control plane compiles each automated cell into an immutable segment table in the plan. Render evaluates it in node time (the timeline delayed by the node's arrival), at a fixed 64-sample grid and at exact jump samples, and feeds the existing strip ramps, effect `Point` spans (in pieces) and filter targets. Hosts move the timeline with one session seek. |
-| A2 | Owner question. Recommendation: an offset on level rows (fader, trim), OR on mute, automation wins elsewhere. Until the ruling, automation wins on every row by one permanent rule in the shared commit, the same on both hosts: a live edit of an automated cell commits as its fallback value, `model_only`. No host refuses it, and no host has its own admission path. |
+| A2 | **Decided 2026-10-14: OQ1 = C.** A hand move of an automated fader or input trim dB writes a stored dB offset that render adds to the curve (slice 11b, draft 15); a hand mute ORs with the automated mute (draft 13a); on every other row automation wins: a live edit of an automated cell commits as its fallback value, `model_only`. One rule set in the shared commit, the same on both hosts; no host refuses it, and no host has its own admission path. |
 | A3 | The table is enough. It gains rules, not shapes: the hold rule, one entry per lane, the pan or matrix form, 64 samples between jumps, the target's unit and domain, shape limits, the filter order, and jump ramps from `control_smoothing`. |
 | A4 | Memory per automated cell (one lane of one parameter) is `80 + 32·n` bytes, `n` its segment count, owned by the plan and independent of song length. CPU per block is at most `2⌈q/64⌉ + 3` events per cell times a per-row operation count. |
 | A5 | The same session and the same host operations give the same bits on every target. Scalar `f64` evaluation through `crates/math` at events only, the existing unfused kernels and a grid in node time make it so; after a session seek the automation is independent of when the seek landed and of the quantum. |
@@ -48,7 +88,7 @@ seven nits). Every finding of all three is folded in (section "Verification").
 | A8 | No. `AUTOMATION_ENQUEUE` never stages spans. #1306 drops its third term. |
 | A9 | The C ABI never serves `AUTOMATION_ENQUEUE`. The refusal is permanent, and the command, its event and its queue leave the protocol registry (slices 21a-21c in batch P1, which needs only slice 01; slice 26 retires the span vocabulary no producer uses; slice 22 reserves the C limit). No ack can precede a drop. |
 | A10 | The mask becomes per target row. Slice 10 removes the first row (fader) and slice 20 the last (EQ). An automation edit becomes a `rebuild` that carries every owner and completes `exact`; a static-value edit on an automated lane gives no record, on both hosts; a live edit of a group's other cell is a `live` group-cell write from the slice that renders the group. |
-| A11 | Forty-one slices in twenty-six steps (drafts in `proposed-specs/`), in seven batches. Every slice that renders stored automation lands after #1382, so its browser half acts on the shared commit. Slices 18a and 18b render stored effect automation; #1306 lands in their batch. |
+| A11 | Forty-one slices in twenty-six steps (drafts in `proposed-specs/`), in seven batches. Every slice that renders stored automation lands after #1382, so its browser half acts on the shared commit. Slices 18a and 18b render stored effect automation; #1306 lands in their batch. *2026-10-14: 43 drafts (11b and 13d added; 03a, 03b and 03c obsolete); #1306 leaves R3 (F23); #1382's role is #1562a and #1562b.* |
 
 ## What the design starts from
 
@@ -326,8 +366,12 @@ seven nits). Every finding of all three is folded in (section "Verification").
 
 ## A2. Live changes against automation
 
-**Decision: owner question OQ1** (section "Owner questions"). Recommendation: an offset on level rows
-(fader dB, input trim dB) and an OR on mute, and automation wins on every other row.
+**Decision: owner question OQ1, answered C on 2026-10-14** (section "Owner answers (2026-10-14)"):
+an offset on level rows (fader dB, input trim dB), an OR on mute, and automation wins on every other
+row. The text below was written before the answer; it stays as the record of the analysis. Where it
+says "option A ships first", read: option A is the rule for the rows where automation wins, and
+slice 11b and draft 13a (amended) give the fader, trim and mute rows answer C in the same pushes
+that render them.
 
 What ships before the ruling, and stays under every option. It is one permanent rule, written once
 in the shared commit of `crates/control-plane` (#1309), so both hosts apply it by construction:
@@ -715,9 +759,9 @@ Each row lists the slice's direct dependencies; a draft's own Dependencies secti
 |---|---|---|---|---|
 | 01 | `proposed-specs/01-validate-automation-lanes-in-the-session.md` | Validate stored automation lanes in the session crate and state the hold rule | — | P1 |
 | 02 | `proposed-specs/02-validate-builtin-automation-targets-at-preparation.md` | Validate builtin automation targets against their rows at preparation | 01, 07, #1335 | R1 |
-| 03a | `proposed-specs/03a-validate-effect-automation-units-domains-and-shapes.md` | Validate effect automation units, domains and shapes at preparation | 01, 02, #1335 | R3 |
-| 03b | `proposed-specs/03b-mirror-the-automation-rules-in-the-sdk-builder.md` | Mirror the stored automation rules in the SDK builder | 01, 02, 03a | R3 |
-| 03c | `proposed-specs/03c-author-submix-automation-targets-in-the-sdk.md` | Author submix automation targets in the SDK and enginectl | — | R3 |
+| 03a | `proposed-specs/03a-validate-effect-automation-units-domains-and-shapes.md` | **Obsolete 2026-10-14.** Validate effect automation units, domains and shapes at preparation | 01, 02, #1335 | R3 |
+| 03b | `proposed-specs/03b-mirror-the-automation-rules-in-the-sdk-builder.md` | **Obsolete 2026-10-14.** Mirror the stored automation rules in the SDK builder | 01, 02, 03a | R3 |
+| 03c | `proposed-specs/03c-author-submix-automation-targets-in-the-sdk.md` | **Obsolete 2026-10-14.** Author submix automation targets in the SDK and enginectl | — | R3 |
 | 04a | `proposed-specs/04a-build-the-timeline-consumer-and-producer.md` | Build the timeline consumer and producer in the source crate | ordering: #1316, #1318, #1320 | R1 |
 | 04b | `proposed-specs/04b-give-every-plan-a-timeline-that-carries-like-a-source.md` | Give every plan a timeline that carries like a source | 04a, #1285, #1316, #1320, #1323, #1396 | R1 |
 | 05 | `proposed-specs/05-seek-the-session-from-the-c-abi.md` | Seek the timeline and every source in one C ABI call | 04b, #1309, #1317, #1319, #1323 | R1 |
@@ -729,10 +773,12 @@ Each row lists the slice's direct dependencies; a draft's own Dependencies secti
 | 09b | `proposed-specs/09b-render-moving-stored-fader-automation.md` | Render moving stored fader automation, seeks and latency | 09a, 04b, 05, 06a; one push with 09a, 10, 11 | R1 |
 | 10 | `proposed-specs/10-classify-and-carry-fader-automation-edits.md` | Classify fader automation edits as carried rebuilds | 09b, #1277, #1313, #1314, #1335; one push with 09a, 09b, 11 | R1 |
 | 11 | `proposed-specs/11-compose-vca-offsets-with-stored-fader-automation.md` | Compose VCA offsets with stored fader automation | 09a, 10, 12, one push with 09a, 09b, 10 | R1 |
+| 11b | `proposed-specs/11b-offset-an-automated-fader-or-trim-by-a-hand-move.md` | Store a hand move on an automated fader or trim as a dB offset (added 2026-10-14, OQ1 = C) | 09a, 10, 11, #1566; one push with 09a, 09b, 10, 11 | R1 |
 | 12 | `proposed-specs/12-hold-the-automation-jump-lengths-in-a-cell.md` | Hold the automation jump lengths in a plan cell | #1054, #1312, #1365, #1382 | R1 |
 | 13a | `proposed-specs/13a-render-stored-mute-automation.md` | Render stored mute automation on the strip | 10, 12; one push with 13b and 13c | R2 |
 | 13b | `proposed-specs/13b-follow-an-automated-mute-on-following-sends-in-render.md` | Follow an automated mute on following sends in render | 13a, 12, #1284, #1347 | R2 |
 | 13c | `proposed-specs/13c-write-a-following-sends-route-cell-from-the-shared-commit.md` | Write a following send's route cell from the shared commit | 13b, #1342 | R2 |
+| 13d | `proposed-specs/13d-render-stored-send-gain-mute-and-matrix-automation.md` | Render stored send gain, mute and matrix automation (added 2026-10-14, OQ2 = yes) | 13c, 10, 11b, 02 | R2 |
 | 14a | `proposed-specs/14a-retarget-the-matrix-stage-inside-a-block.md` | Retarget the matrix stage inside a block | 08 | R2 |
 | 14b | `proposed-specs/14b-render-stored-pan-and-matrix-automation.md` | Render stored pan and matrix automation | 14a, 10, 12 | R2 |
 | 15 | `proposed-specs/15-render-stored-input-trim-and-polarity-automation.md` | Render stored input trim and polarity automation | 10, 12, #1261, #1346 | R2 |
@@ -771,6 +817,13 @@ so `main` never holds code that nothing calls):
 5. **R4:** 20.
 6. **P2:** 22, after R3 (#1306).
 7. **Q:** 23a, 23b, 24a and 24b, after R4.
+
+**Amended 2026-10-14** (controls coordinator; details in section "Check against the batch 9
+head"): R1 gains 11b, in the 09a-09b-10-11 push, and needs #1562b (the browser's rebuild path) as
+well as #1562a; R2 gains 13d after 13c; P1 is 01, 21a-21c, 25 and 26 as before, with 21a smaller
+(#1315 landed); 03a, 03b and 03c are obsolete (decision 17, #1566), and 03a's shape rule moves into
+02; #1306 leaves R3 (its window term is done by #1611 and #1621), so P2 (#1306's S removal, then 22)
+can follow P1 directly; the R3 must-land group is 18a, 18b and 19.
 
 **No placeholder and no cycle.**
 
@@ -830,13 +883,19 @@ so `main` never holds code that nothing calls):
 - **Must-land-together groups.** Each group below must reach `main` in one push: any proper subset
   on `main` leaves a state that is wrong for a user, so root files each group knowingly and never
   splits it across pushes. Each group is inside one batch, and each batch is one push.
-  - **09a, 09b, 10, 11** (R1). Without 09b, a moving curve holds its first value. Without 10, a live
+  - **09a, 09b, 10, 11, 11b** (R1; 11b added 2026-10-14: without it a hand fader move on an
+    automated lane commits `model_only`, option A, which OQ1 = C replaces). Without 09b, a moving
+    curve holds its first value. Without 10, a live
     fader edit on an automated lane retargets it until the next event, so the edit fights the curve
     (09b Hazards). Without 11, 10 D3 drops the `FaderDb` that a VCA ride gives an automated member,
     so an acknowledged ride is not heard.
   - **13a, 13b, 13c** (R2). Without 13b and 13c, an automated mute renders while a send that follows
     it keeps passing audio: the leak A6 exists to prevent.
-  - **#1306, 18a, 18b, 19** (R3). Without 18b, effect automation renders but a seek and the browser
+  - **#1306, 18a, 18b, 19** (R3). *Amended 2026-10-14: the group is 18a, 18b and 19.* #1611 D3 and
+    #1621 D1 size every live window by the lane's parameter cells, so a window already holds one
+    span per cell and #1306 adds nothing that stored automation needs (finding F23). The reason for
+    19 stays: a live record and a stored event on one cell in one piece would need two slots.
+    Without 18b, effect automation renders but a seek and the browser
     do not follow it. Without 19, a live effect record on an automated cell still reaches the lane,
     while amended #1306 sizes the window without that cell's live term (A7), and 17b D5 and 18a D4
     assume that no such record exists. A piece can then hold one span more than the window holds,
@@ -860,6 +919,8 @@ its edit (B: an override value and flag per automated lane; C: an offset per aut
 and a stored mute term). If the answer is D, one slice adds the touch cell and its overlay edit, as
 A2 requires. None of them is drafted here, because its fields depend on the answer. If the answer is
 A, nothing is added. If OQ2 is answered yes, one slice adds route targets after R2.
+**Ruled 2026-10-14:** OQ1 = C is slice 11b (R1) with drafts 13a and 15 amended; OQ2 = yes is slice
+13d (R2).
 
 ### Amendments to existing specs
 
@@ -917,6 +978,8 @@ of that question stay open and this answer does not decide them).
 recommended personal-mix overlay of #1057, matches the DAW trim modes, and costs one addition per
 event. A ships first; B, C or D each add one slice and change nothing already shipped (A2).
 
+**Owner answer (2026-10-14): C.** Slice 11b; drafts 13a and 15 amended.
+
 ### OQ2. Should send levels be automatable?
 
 **Background.** Stored automation can move a strip's fader, mute, pan, input and effects. It cannot
@@ -933,6 +996,11 @@ include sends. Decision 13 made sends live; nothing makes them automatable.
 **Recommendation: 2,** after the strip rows ship (batch R2). It completes the mix vocabulary at a
 small cost and keeps the output fold.
 
+**Owner answer (2026-10-14): yes (option 2).** Slice 13d. Decision 17 already made the rows
+targets: #1566 stores a send target as a control address, and the computed `automatable` flag is
+true on a route into a submix and false on a route into the output. 13d adds the render and the
+edit rules.
+
 ## Findings for the coordinator
 
 - **F1. Filter designs in render.** A1.6 and slices 16a, 16b and 20 design EQ and input-filter targets on
@@ -943,6 +1011,56 @@ small cost and keeps the output fold.
   #808 amendment governs live edits (`docs/rulings/builtins-input-liveness-d2.md:6-14`) and leaves
   stored rendering to #1058 (`:163-179`). Root confirms the amendment; the alternatives fail A4 or A5
   (A1.6).
+  - **F1 proposal (controls coordinator, 2026-10-14; read on `12d4a4f9d`).** Stored automation that
+    moves an input HPF or LPF cutoff (builtins rows 3, 4) or an EQ section value must change that
+    section's coefficients while the plan plays. Both filters are trapezoidal state-variable
+    sections: the input pair is a Butterworth design, `g = tan(π·fc/fs)`, `k = √2`
+    (`SvfSection::design`, `crates/builtins/src/lib.rs:837-875`); the EQ section gives the RBJ
+    cookbook responses (`design_svf_words_f64`, `crates/parametric-eq/src/lib.rs:818-863`). Live
+    edits design off render today, and decision 17 C6 keeps that for live edits ("strip input ...
+    through prepared filter targets designed off render").
+    - **A. Design in render, at events** (A1.6 as written). Render calls the same designer and the
+      same check the control plane calls (one `math::tan`, design arithmetic and the spectral-norm
+      check with two `sqrt` for an input section; plus one `math::pow` and up to three `f64::sqrt`
+      for an EQ section), at most `2⌈q/64⌉ + 3` times per moving cell and block, then starts the
+      existing 64-sample coefficient ramp. No allocation, lock or syscall. `crates/math` gives the
+      same bits on every target and render runs in the canonical FP environment, so the design
+      equals the control plane's bit for bit. Cost: one scalar design per 64 samples per moving
+      section and channel, small next to 64 samples of the section. Risk: it amends the "designed
+      off render" contract text (`docs/EFFECT_CONTRACT_V1.md:306-312`;
+      `crates/effect-contract/src/prepared_target.rs:6-8`, `:81`; the EQ's render-path comments,
+      `crates/parametric-eq/src/lib.rs:1522`, `:3822`; `docs/rulings/builtins-input-liveness-d2.md`)
+      and the C6 sentence, for stored automation only.
+    - **B. Prepare a design per grid point.** Same bits, but memory grows with the length of the
+      automated motion (one 48-byte target per section, channel and 64 samples: about 36 KB per
+      second of motion at 48 kHz). Fails A4 and the rule that memory does not depend on duration.
+    - **C. Stream designs from the control plane ahead of the playhead.** Bounded memory, but the
+      audio depends on when the host calls the service step (D15-17: the engine owns no thread), and
+      a late design is a wrong coefficient. Fails A5 and the no-shortcut rule.
+    - **D. Prepare designs at segment breakpoints and mix coefficients between them.** Bounded by
+      the authored segment count, but a linear mix of two distant designs is not the design of the
+      cutoff between them (a 20 Hz to 20 kHz sweep passes through wrong responses). #1407's mixture
+      rule is for two close designs over 64 samples. Fails A1.4's law.
+    - **E. Per-sample or vector design in the kernels.** Lane `tan` and `pow` diverge on AArch64
+      release builds (LANE-3, #1019), and a per-sample transcendental costs far more than A with
+      no audible gain over a 64-sample control grid ([S7], [S8]). Fails A5 and the cost rule.
+    - **F. Make these values not automatable.** Contradicts decision 14 rule 4 and decision 17's
+      computed `automatable` (the rows are live). Not available without an owner ruling.
+
+    **Recommendation: A**, with four conditions written into slices 16a and 20: (1) one designer
+    and one check per filter kind, called by preparation, the control plane and render, so no
+    second design code exists (16a gate 1, 20 D2); (2) the render call is in a realtime policy
+    region, allocates nothing, and its count per block is bounded and tested (16b D4, 20 D2);
+    (3) live edits keep designing off render, so C6 is unchanged for them; (4) the slice that first
+    designs in render (16a) carries the contract amendments above and a one-line note against
+    decision 17 C6, which the owner sees on review because C6 is root's application subject to
+    owner review. DSP grounds: A keeps the documented designs (RBJ cookbook responses, Butterworth
+    input sections) exact at every completion sample; the 64-sample linear coefficient ramp between
+    two successive designs is #1407's mixture of close designs, held stable by the existing
+    spectral-norm check; and the state-variable structure keeps its state meaningful when its
+    coefficients change, which is why both filters use it. No shortcut is involved: A is the only
+    option that keeps the law, the bits and the memory bound together. Slices 24a and 24b measure
+    its cost on the console row.
 - **F2. Ruling text that presumes `AUTOMATION_ENQUEUE` is wired.** D15-13 E4 says "until #1058 wires
   it", D15-5 says S "bounds only `AUTOMATION_ENQUEUE` density", and D15-2 keeps "Automation" records
   FIFO (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md:82`, `:139-143`,
@@ -1012,7 +1130,8 @@ small cost and keeps the output fold.
   `:48`), which slice 21c retires. Root amends #1351 (amendment table).
 - **F14. A checked-in fixture breaks the pan or matrix rule.** `fixtures/session/v1/builtins-automation.json`
   automates `matrix_ll` on a pan track; slice 01 moves that entry to a matrix track and updates the
-  SDK twin that compares it byte for byte.
+  SDK twin that compares it byte for byte. *Resolved by #1566 (2026-10-14 check): the fixture now
+  holds a `pan` ride on `vocal`, and also a route and a VCA ride.*
 
 - **F15. `main` moved during this attempt.** The note and its drafts are anchored on `6ee64f484`
   (code equal to `main` at `8be19c86e`). `main` is now `68ef86651`; #1335 has landed
@@ -1105,7 +1224,7 @@ small cost and keeps the output fold.
   GitHub closed #1306 at 2026-10-05T13:28Z for that reason; this attempt did not query GitHub.
   Its spec `.github/ISSUE_SPECS/1306-size-each-effects-automation-span-window-from-the-producers-its-plan-has.md`
   is still open, and this plan lands it in batch R3 (with the amendments above). Root reopens
-  GitHub #1306.
+  GitHub #1306. *2026-10-14: GitHub #1306 is open again; its scope changes (finding F23).*
 
 - **F18. Two dependency specs are not on this branch.** Draft 16a depends on *Retarget a live input
   filter only through its designs and their mixtures* (#1407), and drafts 08, 14a and 15 cite *Keep
@@ -1140,6 +1259,118 @@ small cost and keeps the output fold.
     `miso_engine_web_v1_render`, and draft 06a's export is a control export with its own list
     entry. So no slice can add a trap owner to the closure that the gate walks. Draft 20's hazard
     on trap owners is conservative and stays.
+
+## Check against the batch 9 head (controls coordinator, 2026-10-14)
+
+Every draft was read again on `12d4a4f9d` (batch 9 head; 876 commits after `6ee64f484`). Each
+draft that changes carries an "Amendment (controls coordinator, 2026-10-14)" section at its end;
+the drafts' own line anchors are still those of `6ee64f484` and are re-read at filing (F15). The
+check found what decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`) and the batches
+since changed:
+
+- **Targets are control addresses.** `Automation.target` is a `ControlAddress` (#1566;
+  `crates/session/src/model.rs:969-977`). `BUILTIN_AUTOMATION_TARGETS`, `AutomationTarget` and
+  `effect_automation_diagnostics` are deleted. One row rule, `controls::automation_diagnostics`
+  (`crates/controls/src/automation.rs:72`), refuses an unknown row, a row that is not
+  `automatable`, an inactive row (`control.inactive`: pan on a matrix strip and the reverse), a lane
+  the row lacks, and a segment whose unit or value the row refuses. Preparation, the classifier and
+  `session-validator` call it. So draft 01's strip-kind rule, draft 02's unit and domain rules and
+  draft 03a are done, and the SDK checks only structure (#1566 D8).
+- **One classifier.** `classify_live_delta` masks control values through `controls::mask_values`
+  and diffs rows through `controls::changed_controls`; the stored automation is masked whole
+  (`crates/host-core/src/live_delta.rs:359-361`), and an automation change is re-checked by the row
+  rule (`:372-376`). A10's per-row mask is now "per rendered row" over this structure, and its
+  predicate belongs in `controls` (C1).
+- **Live lanes on every plan** (C6). Every strip, route and effect has its live cells on every plan,
+  on both hosts. Drafts that attach a lane "only for stored automation" (13b D1, 17b D6, 18a D4,
+  19, 20 D7) no longer need to. #1611 D3 and #1621 D1 size every effect window by the lane's
+  parameter cells.
+- **The browser is a thin client** over the same `SessionState` (#1562a, single instance; the
+  Worker is #1332, later). Its own command kinds and admission are deleted (#1565). Until #1562b
+  it refuses every rebuild-path frame with `web.apply.rebuild_pending`
+  (`hosts/host-web/src/lib.rs:4802`), and every automation edit becomes a rebuild once its row
+  renders, so batch R1 needs #1562b.
+- **Solo is the core's monitor overlay on both hosts** (C8, #1559); the effective fader, mute and
+  send gate come from `controls::effective` (C7). Drafts that say "the C ABI has no overlay" or
+  name `host-core/src/solo.rs` are amended.
+- **#1315 landed as a switch**, not a retirement (`ProviderFeatures::automation`). Slices 21a-21c
+  delete it. #1567 is obsolete (A9 confirmed).
+- **Ramp rows.** Jump lengths follow decision 17's `LiveRampRow` (`crates/effect-contract/src/control.rs:70-102`):
+  polarity ramps over twice `mute_ms`, sends and VCAs have rows of their own. The three-word key of
+  drafts 07 and 12 becomes the row.
+- **Effect parameters** are live only at `Block` rate; `Sample`-rate rows are rebuild-only
+  (`crates/controls/src/effect_rows.rs:146-160`). The bypass crossfade (#1341a1, #1341a2) is a
+  per-block effect stage step.
+
+New findings:
+
+- **F20. Automatable rows that no slice renders.** Decision 17 computes `automatable` from the row,
+  so the row rule accepts stored automation on: a VCA's `offset_db` and `mute` (`fixtures/session/v1/builtins-automation.json`
+  holds `vca-ride`), a strip's `matrix_mode`, an effect's live `bypass` (#1341a), and a send's
+  `follows_mute`. A3 and draft 11 said VCA automation was out of scope by decision 13; decision 17
+  supersedes that. By A10 these entries stay inert after the program ends, which is the
+  "accepted, never heard" class #1315 refuses. Root decides per row: a rendering slice (VCA offset
+  and mute compose into draft 11's `S` and draft 13a's terms; bypass and `follows_mute` are
+  step-only rows on stages that already exist), or an owner change to the computed rule.
+  `matrix_mode` needs the owner: an automated switch makes the pan or matrix rows active and
+  inactive over time, which A3's "one authority per strip" does not cover.
+- **F21. A live `matrix_mode` switch can commit a model its own preparation refuses.** The switch is
+  live (C12) and flips which rows are active, but the classifier runs the row rule only when the
+  automation table changes (`live_delta.rs:372-376`). A strip with pan automation that switches to
+  matrix commits; its next rebuild refuses the pan entry with `control.inactive`. Found by reading,
+  not reproduced. Not a stored-automation slice: root files a small defect issue (run the row rule
+  when a row's `active` changes, or refuse the switch while an entry on the strip's pan or matrix
+  rows exists).
+- **F22. F12's amendment to #1054 D10 never landed.** #1054 is closed, and `set_fader_gain` still
+  retargets toward 0 on a muted lane (`crates/builtins/src/lib.rs:3083-3098`). Draft 08 (amended)
+  takes the live rule, so one rule serves both paths.
+- **F23. #1306 changes scope.** With every window sized by the lane's parameter cells (#1611 D3,
+  #1621 D1) and every effect carrying its live lane, a window holds one span per cell, automated or
+  not; A7's term adds nothing. #1306 keeps D3 (S leaves the preparation caps, the browser's S
+  derivation at `hosts/host-web/src/lib.rs:4447-4455` goes) and D6's docs; its D1 and the A7 rows of
+  the amendment table are moot. It leaves R3, and P2 (#1306, then 22) can follow P1.
+- **F24. Two comments contradict A9.** `crates/control-plane/src/compile.rs:938-940` ("Flip it in the
+  slice that wires the render-side drain (#1058, answer A9)") and `crates/capi/src/runtime/tests.rs:2187-2191`
+  ("the sixth family returns with stored automation (#1058)"). Slices 21a and 21b correct them.
+
+### Draft status on `12d4a4f9d`
+
+| Status | Drafts |
+|---|---|
+| New | 11b (OQ1 = C), 13d (OQ2 = yes) |
+| Current (no design change; anchors re-read at filing) | 14a, 23b, 24b |
+| Amended | 01, 02, 04a, 04b, 05, 06a, 06b, 07, 08, 09a, 09b, 10, 11, 12, 13a, 13b, 13c, 14b, 15, 16a, 16b, 17a, 17b, 18a, 18b, 19, 20, 21a, 21b, 21c, 22, 23a, 24a, 25, 26 |
+| Obsolete (kept, marked) | 03a (#1566's row rule; its shape rule moves to 02), 03b (decision 17 C1 and C13, #1566 D8: the SDK is a thin client), 03c (#1566 D8: SDK targets are control addresses) |
+
+### Batch P1 readiness
+
+**Slice 01 and slices 21a-21c can be filed and implemented now, as amended.** No code dependency is
+open: #1309 and #1315 have landed. The amended scope:
+
+- **01** keeps one entry per lane (keyed by address and lane), the 64-sample discontinuity spacing
+  and the hold rule's text in `docs/SESSION_SCHEMA_V1.md`. It drops its strip-kind rule and its
+  fixture move, both done by #1566.
+- **21a** retires the command as written and also deletes #1315's switch: `ProviderFeatures::automation`
+  and its arms (`crates/protocol/src/controller.rs:113-144`, `:3160`, `:3727`, `:3762`) and its use
+  and comment in `crates/control-plane/src/compile.rs:938-943`. The provider hook it deletes is
+  `ControlProvider::control_row` (`controller.rs:602-609`, its one caller `:3872`; `MockProvider`
+  `:840`; host-core `crates/host-core/src/control_provider.rs:1075-1094` and its tests `:3239-3267`),
+  not `parameter_descriptor`. `0x0006` joins `RETIRED_MESSAGE_IDS` (`crates/protocol/src/wire.rs:141`).
+  Today's capability record already omits `0x0006` and bit 5 (the switch is false), so gate 2's new
+  part is the removal of fields 9, 12, 19 and 20. Both hosts are covered, because the browser runs
+  the same controller (`compile_children` in control-plane).
+- **21b** as written; the C ABI event test is already `all_five_event_families_...`
+  (`crates/capi/src/runtime/tests.rs:2194`), so only its comment changes (F24).
+- **21c** as written; the queue configuration is `protocol_queue_config`
+  (`crates/control-plane/src/compile.rs:185-205`), which both hosts build (the browser passes S
+  through `control_limits`, `hosts/host-web/src/lib.rs:4494`), and the report row is
+  `crates/control-plane/src/control.rs:252-253`, `:929`. #1351 landed, so counter 12 is retired here.
+- **25** and **26** stay in P1 (26 is smaller: the protocol's `ParameterAutomationRate` left with
+  `PARAMETER_METADATA_GET`).
+
+No blocker. Two ordering points: root closes #1567 before P1 merges (it would edit the command P1
+deletes), and P1's `COMPLETE_SCHEMA_HASH` re-pins follow the corpus rule (each later merge
+recomputes from the earlier value).
 
 ## Verification
 

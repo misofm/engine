@@ -173,3 +173,16 @@ Batch P1. Direct dependency:
 
 *Extract the C ABI control plane into a portable crate both hosts call* (#1309) arrives through
 draft 21a. Draft 22 *Reserve the C ABI's automation span limit* follows this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Moved files.** The queue configuration is `protocol_queue_config`
+  (`crates/control-plane/src/compile.rs:185-205`), which both hosts build: the browser passes its S
+  through `control_limits` (`hosts/host-web/src/lib.rs:4494`). The report row is
+  `crates/control-plane/src/control.rs:252-253`, `:929`. D4 applies to both hosts.
+- **#1351 has landed** and serves `CANCELED_AUTOMATION`; this slice retires counter 12 as written.
+- **The record line** is `docs/CONTROL_PROTOCOL_REGISTRY.md:93` (not `:45`); draft 01 gives the hold
+  rule its new home first.
+- Batch P1, ready.

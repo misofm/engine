@@ -126,3 +126,11 @@ Draft 17b's piece loop, draft 07's events, the seek of draft 05 *Seek the timeli
 in one C ABI call* and draft 06a *Seek the timeline and every source from the browser module export
 and the headless SDK*, and *Size each effect's automation span window from the producers its plan
 has* (#1306) arrive through draft 18a.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **No #1306 in the push** (README F23): the must-land group is 18a, 18b and 19.
+- **The browser** runs the same `SessionState` and preparation (#1562a); D2 holds by construction,
+  and its gate goes through `hosts/host-web/tests/control_parity.rs`.

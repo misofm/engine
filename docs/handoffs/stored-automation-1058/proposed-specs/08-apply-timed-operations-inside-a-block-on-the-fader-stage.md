@@ -159,3 +159,17 @@ retarget while the lane is muted or a mute ramp is in flight. Nothing feeds oper
 - None.
 - Batch: R1, with drafts 09a *Prepare stored fader automation and render it flat* (which uses
   `SetGain`) and 09b *Render moving stored fader automation, seeks and latency*.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **F12 never landed.** #1054 is closed and its D10 was not amended: `set_fader_gain` still
+  retargets a muted lane toward 0 (`crates/builtins/src/lib.rs:3083-3098`). This slice takes the
+  live rule as well (README F22): while a lane is muted or a mute ramp toward 0 is in flight, a live
+  gain change only remembers the gain; during an unmute ramp it retargets as today. D2's sentence
+  "This slice does not change the live path" is replaced by this rule, and gate 2 gains the live
+  case. Authorized paths are unchanged (`crates/builtins/src/lib.rs`).
+- **Anchors moved.** `FaderRampStage`'s setters are now near `crates/builtins/src/lib.rs:3083-3140`,
+  `BuiltinFaderBank` `:4314`, `FaderMuteRampBuiltins` `:4732`; re-read at filing. #1408 has landed.
+- **Realtime policy** as in draft 07's amendment.

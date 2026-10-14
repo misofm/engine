@@ -241,3 +241,34 @@ that would cross a curve with the same code. Nothing renders the table yet.
 - *Refuse automation on effect parameters that are not block-rate* (#1335): D5 uses its
   `LiveRebuild::AutomationTarget` route, which is on `main` at `0c19119d0`.
 - Batch: R1.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Most of D1 is done by #1566.** `controls::automation_diagnostics` refuses a segment whose unit
+  is not the row's unit or whose value the row refuses (`control.domain`, through `controls::check`,
+  which applies the rate-keyed filter bound), for every row: builtin, effect, route and VCA. The
+  `builtin.automation.unit` and `.domain` codes are not added.
+- **What remains, in `controls`.** The shape rule (D1's third bullet) and the curve form of the
+  filter order rule (D2) move into `controls::automation_diagnostics`, the one row rule (#1566 D6),
+  not into `builtins-compiler`. The shape rule is one rule for every row, so it also takes draft
+  03a's: a `Toggle` or `Enumeration` row takes only `step`; `exponential` only on a continuous row
+  whose minimum is strictly positive and whose unit is not dB; on a row with a `disabled_value`
+  (HPF, LPF) a `linear` or `exponential` segment never touches it. New codes of the control set:
+  `control.automation.shape` and `control.automation.order` (at the LPF entry's segment, as D2
+  says). `controls` gains a normal dependency on draft 07's `automation` crate for `value_at`.
+- **D3 and D5 are done.** Preparation (`crates/host-core/src/prepare.rs:1890`), the classifier
+  (`crates/host-core/src/live_delta.rs:372-376`, `LiveRebuild::AutomationTarget`) and
+  `session-validator` (`tools/session-validator/src/lib.rs:396`) already call the row rule, so the
+  new checks reach every path with no new call site.
+- **Authorized paths** become `crates/controls/**`, `crates/host-core/tests/live_delta.rs`,
+  `crates/capi/src/runtime/live_tests.rs` (tests), `tools/session-validator/tests/validate.rs`, the
+  docs, `Cargo.lock`. Not `builtins-compiler` and not `scripts/check-builtins-policy.sh`.
+  `crates/builtins-compiler/tests/builtin_automation_targets.rs` is deleted (#1566); gates 1-2 go to
+  `crates/controls/tests/automation.rs`.
+- **Context anchors gone.** `validate_builtin_automation_target`, `BUILTIN_AUTOMATION_TARGETS`,
+  `effect_automation_diagnostics` and `crates/capi/src/runtime/control.rs` (now
+  `crates/control-plane/src/control.rs`).
+- **Dependencies.** 01, 07, #1566 (in place of #1335's route). Draft 03a is obsolete; this draft
+  carries its shape rule. Batch R1.
