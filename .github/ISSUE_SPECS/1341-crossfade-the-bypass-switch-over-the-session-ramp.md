@@ -305,7 +305,7 @@ a1 builds it.
   of the block peak, because the strip's gain stages follow the effect and round; gate 1 pins it
   exactly at the effect's output.
 
-## Decision record: #1341a1 (batch 8)
+## Decision record: #1341a1 (written in batch 8, lands in batch 9)
 
 The per-node crossfade (commit `b6bbc44e3`, built on a pre-flip base) was re-applied onto `main` at
 `32cee58d0`, after the batch 6-7 flip made the browser a thin client of the core's `SessionState`.
@@ -410,10 +410,15 @@ cohort of 4-7 inserts on a 4-lane target, a remainder insert) moves no rendered 
   pinned lane by lane without a processor in `effect-contract`
   `live_control::a_bank_kernel_crossfades_every_lane_exactly_as_the_node_kernel_does`: eight lane
   schedules (ramp, reversal, lift, step, never, session-bypassed, short ramps, a ramp ending
-  mid-block), wet words with `-0.0`, infinities and NaNs, at `Simd4` and `Simd8` against the per-node
-  `apply_bypass` at the host width. The scalar tail is the per-node kernel's (the bank has none: its
-  frame is exactly one vector). The 4-lane build itself runs the stage test under
-  `scripts/run-aarch64-tests.sh` and, as simd128, the SDK headless evals below.
+  mid-block), wet words with `-0.0`, infinities and NaNs, at `Simd4`, `Simd8` and the scalar lane
+  type `f32` (`WIDTH = 1`; a one-lane bank run once per schedule row, added in batch 9 on root's
+  requirement that gate 2 show all three widths) against the per-node `apply_bypass` at the host
+  width. The per-node kernel's own scalar tail is exercised by the stage test (ramps that end inside
+  a block); the bank has no tail (its frame is exactly one vector). The 4-lane build itself runs the stage test under
+  `scripts/run-aarch64-tests.sh` (its debug leg tests every product crate of `capi`'s closure with
+  `--all-targets`, which holds `effect-contract`, `graph-compiler`, `graph`, `rack`, `host-core` and
+  `capi`, so the NEON `Simd4` and scalar kernel rows and the stage test run there; `host-web` is not
+  in the closure) and, as simd128, the SDK headless evals below.
 - M1 (lift through the real runtime): `capi`
   `a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control` now runs,
   per effect (compressor with no latency, soft clip with 31), per `mute_ms` (10, and 0), a bypass and

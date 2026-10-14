@@ -467,20 +467,20 @@ fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
 /// width kernel and its scalar tail) of the same lane. Every lane has its own schedule: a ramp, a
 /// reversal mid-ramp, a lift, a step, a lane that never switches and one bypassed from the start.
 /// The wet words carry `-0.0`, infinities and NaNs, which a settled lane must pass or replace
-/// untouched. Run at every lane width the build has: four lanes, and eight on AVX2.
+/// untouched. Run at every lane width the build has: one lane (scalar), four lanes, and eight on AVX2.
 ///
 /// Test value: red if a lane reads a neighbour's `m` or position (lane-to-lane crosstalk), a
 /// settled lane goes through the formula (a `NaN` wet word would leak into the dry copy, and `-0.0`
 /// would turn `+0.0`), a reversal restarts from the endpoint, or the bank's `m(k)` differs from the
 /// node's by a frame (the index convention) or by a rounding (the operation order).
-fn bank_kernel_equals_node<L: lane::Lane>() {
+fn bank_kernel_equals_node<L: lane::Lane>(first_lane: usize) -> usize {
     use effect_contract::{BankCrossfade, BypassSwitch};
     const FRAMES: usize = 30;
     const BLOCKS: usize = 14;
     let width = L::WIDTH;
     // Per lane: starts bypassed; records as (block, bypassed, ramp).
     let schedule = |lane: usize| -> (bool, Vec<(usize, bool, u32)>) {
-        match lane % 8 {
+        match (first_lane + lane) % 8 {
             0 => (false, vec![]),
             1 => (false, vec![(2, true, 100)]),
             2 => (false, vec![(2, true, 100), (4, false, 100)]),
@@ -586,12 +586,22 @@ fn bank_kernel_equals_node<L: lane::Lane>() {
             }
         }
     }
-    assert!(ramped > 0, "the schedule ramps");
+    ramped
 }
 
+/// Four and eight lanes (the vector widths), and the scalar width: a one-lane bank (`f32`, the
+/// oracle backend) is run once per schedule row, so every row meets the scalar kernel as well.
 #[test]
 fn a_bank_kernel_crossfades_every_lane_exactly_as_the_node_kernel_does() {
-    bank_kernel_equals_node::<lane::Simd4>();
+    assert!(
+        bank_kernel_equals_node::<lane::Simd4>(0) > 0,
+        "four lanes ramp"
+    );
     #[cfg(target_feature = "avx2")]
-    bank_kernel_equals_node::<lane::Simd8>();
+    assert!(
+        bank_kernel_equals_node::<lane::Simd8>(0) > 0,
+        "eight lanes ramp"
+    );
+    let scalar: usize = (0..8).map(bank_kernel_equals_node::<f32>).sum();
+    assert!(scalar > 0, "the scalar rows ramp");
 }
