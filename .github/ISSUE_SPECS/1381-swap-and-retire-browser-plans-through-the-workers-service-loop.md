@@ -421,11 +421,16 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
 - Command kinds 1 to 6 and 9 to 17 (pan, matrix, fader, mute, effect parameter and bypass, solo,
   trim, polarity, input filters, route gain, mute and matrix, VCA fader and mute) are refused whole
   with `COMMAND_REASON_UNSUPPORTED_KIND`. Kinds 7 and 8 (observe) work.
-- The prepared commands (`prepared_command_submit`: EQ targets, builtin input filters), the EQ and
-  input-filter configuration copies (`eq_target_config_copy` answers `RESULT_UNSUPPORTED`), the live
-  route count and IDs (zero) and `live_values_superseded` writes from commands.
-- The live response capture (`track_response_capture`) answers `RESULT_UNSUPPORTED` for an effect
-  whose lane is live, which the control plane attaches to every effect with a live row.
+- The prepared commands (`prepared_command_submit`: EQ targets, builtin input filters) are refused
+  whole as unsupported, the EQ and input-filter configuration copies answer `RESULT_UNSUPPORTED`,
+  and the live route count and IDs read zero.
+- The live response capture (`track_response_capture`) answers `RESULT_UNSUPPORTED` on the
+  nine-track EQ fixture: the plan now carries the lanes the control plane chose (decision 17 C6)
+  where the boot words chose none. Not traced further; #1570b serves the response query.
+- A hazard for #1290: `SessionState::submit` and `seek` run the service step first, so the first
+  source feed after a published swap would reclaim the displaced plan inside the source export's
+  render-locked window (and inside the PCM-feed worklet's `process()`). Nothing publishes a plan
+  in the browser yet, so nothing triggers it today.
 - `check-browser-expected-resources.py` stops at the command timeline digest (the identity digest
   and the resource rows are checked first and hold); `check-sdk-headless.sh` fails 25 subtests, all
   of them command-driven; 113 host-web unit tests and the two `control_parity.rs` tests are
