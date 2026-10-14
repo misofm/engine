@@ -1,10 +1,9 @@
 /**
  * #1564 piece C (decision 17, C4; D5): the SDK takes its strip order from the core's control list.
  *
- * The strips of a session, tracks then submixes, were read from host-web's
- * `miso_engine_web_v1_live_control_{track,submix}_{count,id}` exports. They are the owner header
- * rows of the core's list now, so a module without those exports boots and meters and observes the
- * same session. The reference is `hosts/host-web/tests/fixtures/control-list.json`, the parity session
+ * The strips of a session, tracks then submixes, are the owner header rows of the core's list.
+ * (host-web's `live_control_{track,submix}_{count,id}` exports that once carried them are deleted,
+ * #1565B.) The reference is `hosts/host-web/tests/fixtures/control-list.json`, the parity session
  * of #1560 (three tracks and one submix).
  */
 
@@ -28,48 +27,12 @@ const SESSION = JSON.parse(FIXTURE.session);
 const TRACKS = SESSION.tracks.map((track) => track.id);
 const SUBMIXES = SESSION.submixes.map((submix) => submix.id);
 const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 1 } };
-const INDEX_EXPORTS = [
-  "miso_engine_web_v1_live_control_track_count",
-  "miso_engine_web_v1_live_control_track_id",
-  "miso_engine_web_v1_live_control_submix_count",
-  "miso_engine_web_v1_live_control_submix_id",
-];
 
 let asset;
 
 before(async () => {
   asset = await MisoEngineAsset.load(await moduleBytes());
 });
-
-/** The shipped module's asset, with the index exports removed from a copy of its export object. */
-function assetWithoutIndexExports() {
-  return {
-    ...asset,
-    asset: asset,
-    async instantiate() {
-      const instance = await asset.instantiate();
-      const exports = { ...instance.exports };
-      for (const name of INDEX_EXPORTS) delete exports[name];
-      return { exports };
-    },
-  };
-}
-
-/** The shipped module's asset, with every call of an index export counted. */
-function countingAsset(calls) {
-  return {
-    ...asset,
-    async instantiate() {
-      const instance = await asset.instantiate();
-      const exports = { ...instance.exports };
-      for (const name of INDEX_EXPORTS) {
-        const original = exports[name];
-        exports[name] = (...args) => { calls.push(name); return original(...args); };
-      }
-      return { exports };
-    },
-  };
-}
 
 function feed(engine, block) {
   const shape = engine.shape();
@@ -117,19 +80,9 @@ function useStripOrder(engine) {
   assert.equal(rows[0].trackId, first.trackId);
 }
 
-describe("#1564C gate 5 -- the SDK does not depend on host-web's index exports", () => {
-  test("a module without the live_control_* exports boots, meters and observes", async () => {
-    const engine = await createOfflineEngine(FIXTURE.session, { asset: assetWithoutIndexExports(), ...OPTIONS });
-    try {
-      useStripOrder(engine);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a module that has the exports never sees them called", async () => {
-    const calls = [];
-    const engine = await createOfflineEngine(FIXTURE.session, { asset: countingAsset(calls), ...OPTIONS });
+describe("#1564C gate 5 -- the strip order is the control list's", () => {
+  test("the shipped module boots, meters and observes the session in list order", async () => {
+    const engine = await createOfflineEngine(FIXTURE.session, { asset, ...OPTIONS });
     try {
       useStripOrder(engine);
       engine.loadSession(FIXTURE.session, OPTIONS);
@@ -137,7 +90,6 @@ describe("#1564C gate 5 -- the SDK does not depend on host-web's index exports",
     } finally {
       engine.dispose();
     }
-    assert.deepEqual(calls, [], "no index export is called");
   });
 });
 

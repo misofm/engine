@@ -497,8 +497,8 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       control: scriptedControl(),
       async sessionMap() {
         return {
-          tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"],
-          sources: [], metersAttached: false, submixes: [],
+          tag: "miso.sessionmap.v1", requestId: 1, result: 0,
+          sources: [], metersAttached: false,
         };
       },
       async command(request) {

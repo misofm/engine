@@ -440,7 +440,7 @@ for (const initialLiveControls of [undefined, {}, { observationTaps: 0 }, { obse
       createHost: async request => {
         assert.equal((request.options.liveControls?.observationTaps ?? 0) > 0, attached);
         return {
-          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] }; },
+          async sessionMap() { maps++; return { sources: [], metersAttached: false }; },
           control: scriptedControl({ frames }),
           async dispose() { closed.push("host"); },
         };
@@ -474,9 +474,8 @@ test("a browser engine's live controls address a submix by its strip index", asy
     createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
-      // The worklet's own tracks and submixes (its index exports) are wrong on purpose: the SDK
-      // takes the strip order from the core's list (#1564 D5) and must not read these.
-      async sessionMap() { return { tracks: ["wrong"], submixes: ["zzz"], sources: [], metersAttached: false }; },
+      // The worklet's map carries no strip order (#1565B); the SDK takes it from the core's list.
+      async sessionMap() { return { sources: [], metersAttached: false }; },
       control: scriptedControl({ frames, strips: { tracks: ["t"], submixes: ["aaa", "bus"] } }),
       async dispose() {},
     }),

@@ -2891,28 +2891,6 @@ impl AudioWorkletEngineHost {
             .is_some_and(|ready| ready.commands_enabled)
     }
 
-    /// Copy one canonical live-control track ID into ID staging; returns its byte length.
-    pub(crate) fn copy_live_control_track_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let Some(id) = ready.tracks.get(index as usize) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
-    }
-
-    /// Copy one canonical submix ID into ID staging; returns its byte length (issue #1210 D1).
-    pub(crate) fn copy_live_control_submix_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let Some(id) = ready.submixes.get(index as usize) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
-    }
-
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {

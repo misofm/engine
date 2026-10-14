@@ -287,10 +287,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_control_response_bytes \
   miso_engine_web_v1_control_response_ptr \
   miso_engine_web_v1_control_revision \
-  miso_engine_web_v1_live_control_submix_count \
-  miso_engine_web_v1_live_control_submix_id \
-  miso_engine_web_v1_live_control_track_count \
-  miso_engine_web_v1_live_control_track_id \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
   miso_engine_web_v1_meter_header_ptr \

@@ -158,7 +158,7 @@ export function engineHost(engine, { frames = [] } = {}) {
   const forward = onEndpointIds(engine.controlTransactions().requestIds, (frame) => engine.controlFrame(frame));
   return {
     async sessionMap() {
-      return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, ...engine.sessionMap() };
+      return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: engine.sessionMap().sources, metersAttached: engine.sessionMap().metersAttached };
     },
     async control(frame) {
       frames.push(frame.slice());

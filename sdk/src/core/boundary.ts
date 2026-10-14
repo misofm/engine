@@ -89,15 +89,6 @@ const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
   SPECTRUM_HOP_CAPABILITY,
   SPECTRUM_HOP_BOOT,
 ]);
-// Exports the SDK no longer calls (#1564 D5: the strip order is the core's control list). A module
-// that has them boots, and one that lacks them boots too. The host deletes them in #1565B, which also
-// drops these names from the generated layout and this set.
-const UNUSED_EXPORTS: ReadonlySet<string> = new Set([
-  "miso_engine_web_v1_live_control_submix_count",
-  "miso_engine_web_v1_live_control_submix_id",
-  "miso_engine_web_v1_live_control_track_count",
-  "miso_engine_web_v1_live_control_track_id",
-]);
 type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
 
@@ -106,7 +97,7 @@ function exportsOf(instance: WebAssembly.Instance): ExportTable {
   for (const name of ABI_LAYOUT.exports) {
     // These are additive spectrum-hop exports. An older asset remains valid for the legacy boot
     // path and is checked only when a caller explicitly requests the prepared spectrum hop.
-    if (OPTIONAL_ADDITIVE_EXPORTS.has(name) || UNUSED_EXPORTS.has(name)) continue;
+    if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
         phase: "asset",

@@ -229,13 +229,11 @@ async function testMainRealm() {
             tag: "miso.sessionmap.v1",
             requestId: received.requestId,
             result: 0,
-            tracks: ["kick", "snare"],
             sources: [
               { id: "bass", channels: 1, frames: 96000n },
               { id: "drums", channels: 2, frames: 2048n },
             ],
             metersAttached: true,
-            submixes: ["aaa-bus", "zzz-bus"],
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
@@ -1711,14 +1709,13 @@ async function testMainRealm() {
       await host.dispose();
     }
 
-    // Issue #1210 gate 3: the session map's submix list is part of the exact field set. A reply
-    // without it, or with an entry that is not a nonempty string, fails the whole host; the
-    // well-formed reply is delivered with its canonical order intact.
+    // The session map's field set is exact (#1210 gate 3, as #1565B restates it): a reply that
+    // lacks the source list, or still carries a strip list the core's control list replaced, fails
+    // the whole host.
     for (const [what, mutation] of [
-      ["no submix list", ({ submixes: _dropped, ...rest }) => rest],
-      ["a submix list that is not an array", (map) => ({ ...map, submixes: "aaa-bus" })],
-      ["a non-string submix", (map) => ({ ...map, submixes: ["aaa-bus", 7] })],
-      ["an empty submix ID", (map) => ({ ...map, submixes: ["aaa-bus", ""] })],
+      ["no source list", ({ sources: _dropped, ...rest }) => rest],
+      ["a retired track list", (map) => ({ ...map, tracks: ["kick"] })],
+      ["a retired submix list", (map) => ({ ...map, submixes: ["aaa-bus"] })],
       // Issue #1565: the route and VCA lists are deleted from the exact field set, so a reply
       // that still carries one fails the whole host.
       ["a deleted route list", (map) => ({ ...map, routes: ["zz-send"] })],
@@ -1868,7 +1865,11 @@ async function testMainRealm() {
       workletModuleUrl: "processor.js",
     });
     const map = await liveControlHost.sessionMap();
-    assert.deepEqual(map.tracks, ["kick", "snare"], "the canonical track order is the ABI");
+    // The strip order is the core's control list, not this map (#1565B); the fake's two tracks size
+    // the meter frame, and bus strips follow them.
+    assert.equal(Object.hasOwn(map, "tracks"), false);
+    assert.equal(Object.hasOwn(map, "submixes"), false);
+    const fakeTrackCount = 2;
     // Issue #241: the source list crosses the port with its `bigint` frame count intact, and the host's
     // acknowledgement validator accepted it -- a malformed row fails the whole host with 255, so
     // reaching this line is itself the assertion that the shape is the declared one.
@@ -1877,7 +1878,6 @@ async function testMainRealm() {
       { id: "drums", channels: 2, frames: 2048n },
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
-    assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
     assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: the route list is deleted");
     assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: the VCA list is deleted");
 
@@ -1943,7 +1943,16 @@ async function testMainRealm() {
     // semantic live-control submit. This is the collision reproducer that the host-owned ledger
     // fixes.
     const { createBrowserLiveControls } = await import(new URL("./sdk/src/browser/live-controls.ts", root));
-    const browserLiveControls = await createBrowserLiveControls(liveControlHost);
+    // The strip order is the core's control list (#1564 D5): the fake worklet does not run a core,
+    // so the list is scripted; every other call still goes through the real host.
+    const { scriptedControl } = await import(new URL("./sdk/test/control-support.mjs", root));
+    const browserLiveControls = await createBrowserLiveControls({
+      ...liveControlHost,
+      sessionMap: () => liveControlHost.sessionMap(),
+      meters: (request) => liveControlHost.meters(request),
+      command: (request) => liveControlHost.command(request),
+      control: scriptedControl({ strips: { tracks: ["kick", "snare"], submixes: ["aaa-bus", "zzz-bus"] } }),
+    });
     await liveControlHost.meters({ enabled: true, onFrame: null });
     // Issue #1565: the host's own command path carries observation records only, so the SDK edit
     // that rides it is an observation subscription; a value edit goes through `control()`.
@@ -2227,17 +2236,17 @@ async function testMainRealm() {
         ? frame.trackGrDb[frameSlot]
         : frame.submixGrDb[frameSlot - frame.trackCount];
       const busSubscription = {
-        trackIndex: map.tracks.length, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0,
+        trackIndex: fakeTrackCount, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0,
       };
       const busAck = await liveControlHost.observe({
         subscriptions: [{ ...busSubscription, armed: true }],
       });
       assert.equal(busAck.result, 0);
       const busBinding = busAck.bindings.find(
-        (binding) => binding.trackIndex === map.tracks.length,
+        (binding) => binding.trackIndex === fakeTrackCount,
       );
-      assert.equal(busBinding.frameSlot, map.tracks.length, "a bus's frameSlot is its strip index");
-      assert.equal(meterFrames[0].trackCount, map.tracks.length);
+      assert.equal(busBinding.frameSlot, fakeTrackCount, "a bus's frameSlot is its strip index");
+      assert.equal(meterFrames[0].trackCount, fakeTrackCount);
       assert.equal(frameReading(meterFrames[0], busBinding.frameSlot), meterFrames[0].submixGrDb[0],
         "the documented mapping lands on the bus's submixGrDb entry");
       assert.equal(frameReading(meterFrames[0], busAck.bindings[0].frameSlot),
@@ -2312,9 +2321,9 @@ async function testMainRealm() {
       assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
       assert.equal(laterCommand.admitted, 1);
       assert.deepEqual(
-        (await liveControlHost.sessionMap()).tracks,
-        ["kick", "snare"],
-        `${what}: the addressing authority still answers`,
+        (await liveControlHost.sessionMap()).sources.map((source) => source.id),
+        ["bass", "drums"],
+        `${what}: the session map still answers`,
       );
       const framesBefore = meterFrames.length;
       node.port.onmessage({
@@ -2462,7 +2471,7 @@ async function testMainRealm() {
 
     // The app reads the new addressing and re-arms. The host was never sticky, so this is a plain
     // second call rather than a rebuild.
-    assert.deepEqual((await afterEdit.sessionMap()).tracks, ["kick", "snare"]);
+    assert.equal((await afterEdit.sessionMap()).result, 0, "the session map still answers");
     const rearmed = await afterEdit.observe({
       subscriptions: [tap(0, 1, true), tap(1, 1, true)],
     });
@@ -2729,21 +2738,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       frame.fill(2.25, strips * 2 + 2 + tracks, strips * 3 + 2);
       frame[strips * 3 + 2] = 7.5;
       return 1;
-    },
-    miso_engine_web_v1_live_control_track_count: () => trackIds.length,
-    miso_engine_web_v1_live_control_track_id: (_handle, index) => {
-      const id = trackIds[index];
-      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
-      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
-      return id.length;
-    },
-    miso_engine_web_v1_live_control_submix_count: () => submixIds.length,
-    miso_engine_web_v1_live_control_submix_id: (_handle, index) => {
-      const id = submixIds[index];
-      if (id === undefined) return 0;
-      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
-      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
-      return id.length;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_source_id: (_handle, index) => {
@@ -4082,7 +4076,6 @@ async function testProcessor() {
       // Issue #137 D1: the worklet copies a staged batch into Wasm, admits it, and hands the
       // record block straight back with the typed report.
       const { processor, fake } = makeProcessor();
-      assert.deepEqual(processor.trackIds, fake.trackIds ?? ["kick", "snare"]);
       const records = new Uint8Array(2 * 48);
       const view = new DataView(records.buffer);
       records[0] = 2; // matrix
@@ -4271,10 +4264,10 @@ async function testProcessor() {
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       const map = processor.port.posts.at(-1).message;
       assert.equal(map.tag, "miso.sessionmap.v1");
-      assert.deepEqual(map.tracks, ["kick", "snare"]);
+      assert.equal(Object.hasOwn(map, "tracks"), false, "issue #1565: the strip order is the core's list");
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
-      assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
+      assert.equal(Object.hasOwn(map, "submixes"), false, "issue #1565: the strip order is the core's list");
       assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: no route list");
       assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: no VCA list");
       // The identities were read once at construction and the reads are not repeated per request:
@@ -4295,20 +4288,15 @@ async function testProcessor() {
         ["an empty source ID", (e) => { e.miso_engine_web_v1_source_id = () => 0; }],
         ["a source ID longer than staging",
           (e) => { e.miso_engine_web_v1_source_id = () => 65; }],
-        // Issue #1210 D3: the submix IDs are read under the track IDs' rules, and the meter
-        // header's submix count must be the enumerated count.
-        ["an empty submix ID", (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 0; }],
-        ["a submix ID longer than staging",
-          (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 65; }],
-        ["a submix count the meter header disagrees with",
-          (e) => {
-            const read = e.miso_engine_web_v1_live_control_submix_id;
-            e.miso_engine_web_v1_live_control_submix_count = () => 2;
-            e.miso_engine_web_v1_live_control_submix_id = (handle) => read(handle, 0);
-          }],
+        // The meter header's strip counts size the frame views, so a header whose counts do not
+        // match the frame the engine sized fails initialization instead of misplacing a view.
+        ["a meter header submix count the frame disagrees with",
+          (_e, fake) => { fake.meterHeader.setUint32(64, 2, true); }],
+        ["a meter header track count the frame disagrees with",
+          (_e, fake) => { fake.meterHeader.setUint32(8, 3, true); }],
       ]) {
         const fake = createFakeExports(64);
-        mutate(fake.exports);
+        mutate(fake.exports, fake);
         const processor = construct(fake);
         assert.equal(
           processor.port.posts[0].message.result,

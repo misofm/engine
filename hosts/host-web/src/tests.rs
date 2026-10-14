@@ -3445,91 +3445,6 @@ fn bus_meters_render_and_poll_without_allocating() {
     assert_eq!(deallocations, 0, "render/poll freed");
 }
 
-/// Issue #1210 gate 1: three tracks over the observation fixture, and with `buses` two unity
-/// submixes declared out of canonical order: a 63-byte `zz-` bus, longer than every source and
-/// track ID, fed by `t0` and `t1`, then `a-bus`, which sorts before every track ID, fed by `t2`.
-fn submix_name_document(quantum: u32, buses: bool) -> (String, [String; 2]) {
-    let mut model = parse_session_json(include_str!(
-        "../../../fixtures/session/v1/observation-frame-shape.json"
-    ))
-    .expect("accepted observation fixture");
-    let long = format!("zz-{}", "x".repeat(60));
-    let canonical = ["a-bus".to_owned(), long.clone()];
-    if buses {
-        for (bus, feeders) in [(long.as_str(), &[0_usize, 1][..]), ("a-bus", &[2][..])] {
-            let id = session::StableId::parse(bus).expect("bus id");
-            model
-                .submixes
-                .push(session::Submix::unity(id.clone(), &model.console));
-            let mut out = model.routes[feeders[0]].clone();
-            for &feeder in feeders {
-                model.routes[feeder].destination = session::RouteDestination::SubmixInput {
-                    submix_id: id.clone(),
-                };
-            }
-            out.id = session::StableId::parse(&format!("{bus}-main")).expect("route id");
-            out.source = session::RouteSource::Submix {
-                submix_id: id,
-                tap: session::SendTap::PostPan,
-            };
-            model.routes.push(out);
-        }
-    }
-    model.quantum_frames = quantum;
-    let document = canonical_session_json(&model).expect("canonical submix name session");
-    (document, canonical)
-}
-
-/// Issue #1210 gate 1: the submix enumeration exports report every submix ID byte for byte in
-/// canonical order, through ID staging sized for the longest submix ID.
-///
-/// Red if the staging capacity ignores submix IDs (the long ID's copy overruns the buffer and
-/// traps) or if the export orders submixes other than canonically (the frame's order, #1209 D3).
-#[test]
-fn submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them() {
-    const QUANTUM: u32 = 128;
-    let options = WebBootOptions {
-        source_ring_frames: QUANTUM * 4,
-        ..boot_options(QUANTUM)
-    };
-    let (document, canonical) = submix_name_document(QUANTUM, true);
-    let handle = crate::ffi::test_boot(document.as_bytes(), options);
-    assert_ne!(handle, 0, "the submix session boots");
-    let resources = crate::ffi::test_resources(handle).expect("resource report");
-    // A ceiling claim (#1210 NIT-4): staging holds at least the longest submix ID.
-    assert!(resources.id_staging_bytes >= canonical[1].len() as u64);
-
-    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 2);
-    assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 3);
-    for (index, expected) in canonical.iter().enumerate() {
-        let length = miso_engine_web_v1_live_control_submix_id(handle, index as u32);
-        assert_eq!(length, expected.len() as u32);
-        assert_eq!(
-            crate::ffi::test_read_source_id(handle, length).expect("staged submix ID"),
-            expected.as_bytes()
-        );
-    }
-    assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 2), 0);
-    assert_eq!(
-        miso_engine_web_v1_live_control_submix_id(handle, u32::MAX),
-        0
-    );
-    // An invalid handle answers zero, as the track queries do.
-    assert_eq!(
-        miso_engine_web_v1_live_control_submix_count(handle.wrapping_add(1)),
-        0
-    );
-    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
-
-    let (document, _) = submix_name_document(QUANTUM, false);
-    let handle = crate::ffi::test_boot(document.as_bytes(), options);
-    assert_ne!(handle, 0, "the submix-free session boots");
-    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
-    assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 0), 0);
-    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-}
-
 #[test]
 fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     const QUANTUM: u32 = 128;
@@ -4695,49 +4610,6 @@ fn three_source_session(quantum: u32) -> String {
     canonical_session_json(&model).expect("canonical three-source session")
 }
 
-/// Issue #292 IO-9: track discovery and source submission share one staging buffer, so its
-/// projection must cover both ID families rather than assuming source IDs are always longest.
-///
-/// Red mutation: project only `longest_source_id_bytes` again -> boot still publishes a handle,
-/// but `miso_engine_web_v1_live_control_track_id` silently returns zero for this valid track and
-/// the browser's live-control bind turns that document-dependent condition into `RESULT_INTERNAL`.
-#[test]
-fn live_control_track_id_longer_than_every_source_id_boots_and_round_trips() {
-    const QUANTUM: u32 = 128;
-    const SOURCE_ID: &str = "s";
-    const TRACK_ID: &str = "track-id-is-longer";
-
-    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
-        .expect("accepted identity fixture");
-    model.quantum_frames = QUANTUM;
-    model.sources[0].id = session::StableId::parse(SOURCE_ID).expect("source ID");
-    model.tracks[0].id = session::StableId::parse(TRACK_ID).expect("track ID");
-    model.tracks[0].source_id = session::StableId::parse(SOURCE_ID).expect("source reference");
-    let session::RouteSource::Track { track_id, .. } = &mut model.routes[0].source else {
-        panic!("the identity fixture routes a track");
-    };
-    *track_id = session::StableId::parse(TRACK_ID).expect("route track ID");
-    let document = canonical_session_json(&model).expect("canonical long-track-ID session");
-
-    let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(QUANTUM));
-    assert_ne!(
-        handle, 0,
-        "the valid session boots instead of refusing internally"
-    );
-    let resources = crate::ffi::test_resources(handle).expect("resource report");
-    assert_eq!(resources.id_staging_bytes, TRACK_ID.len() as u64);
-    assert!(resources.id_staging_bytes > SOURCE_ID.len() as u64);
-
-    let length = miso_engine_web_v1_live_control_track_id(handle, 0);
-    assert_eq!(length, TRACK_ID.len() as u32);
-    assert_eq!(
-        crate::ffi::test_read_source_id(handle, length).expect("staged track ID"),
-        TRACK_ID.as_bytes()
-    );
-    assert_eq!(miso_engine_web_v1_live_control_track_id(handle, 1), 0);
-    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-}
-
 /// Issue #207 D1: the compiled session answers what sources exist, in canonical order, with the
 /// shape a headless driver needs to feed them.
 ///
@@ -4855,8 +4727,8 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     assert_eq!(miso_engine_web_v1_source_frames(handle, 3), 0);
     assert_eq!(miso_engine_web_v1_source_id(handle, u32::MAX), 0);
 
-    // The queries survive a sticky failure, exactly as the track queries do: nothing here is
-    // dropped on the failure path, so a diagnosing consumer can still read the session map.
+    // The queries survive a sticky failure: nothing here is dropped on the failure path, so a
+    // diagnosing consumer can still read the session map.
     assert_eq!(
         miso_engine_web_v1_render(handle, QUANTUM.wrapping_add(1)),
         RESULT_REPREPARE_REQUIRED
@@ -4867,7 +4739,6 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     );
     assert_eq!(miso_engine_web_v1_source_count(handle), 3);
     assert_eq!(miso_engine_web_v1_source_channels(handle, 1), 2);
-    assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 1);
 
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);

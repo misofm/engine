@@ -984,7 +984,7 @@ class MisoAudioWorkletHost {
         : pending.response === "control"
           ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
+          ? ["tag", "requestId", "result", "sources", "metersAttached"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1047,8 +1047,7 @@ class MisoAudioWorkletHost {
       && validU64(message.revision)
     );
     const validSessionMap = pending.response !== "sessionMap" || (
-      message.result === RESULT_OK && Array.isArray(message.tracks)
-      && message.tracks.every((value) => typeof value === "string" && value.length > 0)
+      message.result === RESULT_OK
       // Issue #207: the source list is held to what a *compiled* session can produce -- a nonzero
       // channel count and a nonzero full-source frame count -- so a malformed list fails the host
       // loudly instead of reaching a consumer as plausible numbers.
@@ -1058,10 +1057,6 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
-      // Issue #1210 D3: the submix IDs in canonical order, the order of the meter frame's submix
-      // sections.
-      && Array.isArray(message.submixes)
-      && message.submixes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)

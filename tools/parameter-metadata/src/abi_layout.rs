@@ -125,7 +125,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 112] = [
+pub const EXPORTS: [&str; 108] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -145,10 +145,6 @@ pub const EXPORTS: [&str; 112] = [
     "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_live_control_submix_count",
-    "miso_engine_web_v1_live_control_submix_id",
-    "miso_engine_web_v1_live_control_track_count",
-    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
