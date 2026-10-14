@@ -5,11 +5,11 @@ use std::num::NonZeroUsize;
 use bench_support::alloc as bench_alloc;
 use protocol::{
     AutomationEnqueue, AutomationRecord, CommandPayload, ControlCommand, ControllerRequest,
-    CounterId, CounterSnapshot, CounterValue, DecodeScratch, DiagnosticsRequest, EventPayload,
-    ExpectedRevision, MessageId, MeterComponent, MeterRecord, MockProvider, NonOkResponse,
-    ProtocolCodec, ProtocolController, ProtocolQueueConfig, ProtocolQueues, ReplayCache,
-    ReplayCacheConfig, RequestId, SampleTime, SessionEdit, SessionRevision, SessionStore,
-    StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransactionApplied,
+    CounterId, CounterSnapshot, CounterValue, DecodeScratch, DiagnosticsRequest, EditPath,
+    EventPayload, ExpectedRevision, MessageId, MeterComponent, MeterRecord, MockProvider,
+    NonOkResponse, ProtocolCodec, ProtocolController, ProtocolQueueConfig, ProtocolQueues,
+    ReplayCache, ReplayCacheConfig, RequestId, SampleTime, SessionEdit, SessionRevision,
+    SessionStore, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransactionApplied,
     TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 use session::{CompileCaps, StableId, parse_session_json};
@@ -234,6 +234,7 @@ fn prepare_corpus() -> Corpus {
         revision: SessionRevision(7),
         payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
             applied_operations: 64,
+            edit_path: EditPath::Live,
         }),
     });
     corpus.push_event(TypedEventFrame {
@@ -382,6 +383,7 @@ fn run_audit(corpus: &mut Corpus, egress: &mut EgressCorpus) {
             revision: SessionRevision(7),
             payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
                 applied_operations: 64,
+                edit_path: EditPath::Live,
             }),
         };
         corpus.frame_output.fill(0xa5);

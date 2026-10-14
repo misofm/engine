@@ -2,11 +2,13 @@
 
 use super::*;
 
-/// One plan's live fader/mute and matrix/pan producers (#1256 D2), kept with its provider epoch.
+/// One plan's live fader/mute, matrix/pan, input and send producers (#1256 D2, #1557 D4), kept with
+/// its provider epoch.
 ///
-/// `controls` is in `HostLiveControlHandles::strips` order: the tracks, then the submixes. Each
-/// producer's `input` is `None`, because the C ABI attaches no input lane. `commit_live` pushes a
-/// value-only transaction's records through them (#1257). The rings are `Arc`s shared with the
+/// `controls` is in `HostLiveControlHandles::strips` order: the tracks, then the submixes. A
+/// producer's `input` is `Some` when the plan carries the input lane (#1556). `routes` is in
+/// canonical route-ID order, one producer per route into a submix when the plan carries the route
+/// lane (#1557). `commit_live` pushes a value-only transaction's records through them (#1257). The rings are `Arc`s shared with the
 /// plan's consumers, so they outlive whichever of the plan and the epoch drops first, and the last
 /// owner to drop frees them, on the control thread: `synchronize_plan_epochs` drops a reclaimed
 /// plan before its provider.
@@ -14,6 +16,9 @@ pub(crate) struct StripLanes {
     pub(crate) controls: Box<[host_core::TrackControlProducer]>,
     /// How many leading entries of `controls` are tracks.
     pub(crate) track_count: usize,
+    /// One producer per route into a submix, in canonical route-ID order; empty when the plan
+    /// carries no route lane.
+    pub(crate) routes: Box<[host_core::RouteControlProducer]>,
 }
 
 /// One epoch's worth of host-owned source producers, strip live-control producers and effect
@@ -271,6 +276,9 @@ pub struct TestTransactionSnapshot<Row> {
     /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
     /// matrix)`. A cell's count is its write sequence (#1312 D3).
     pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
+    /// How many writes every send producer's cell has taken, current epoch first, then each
+    /// pending candidate: `(epoch, route ID, writes)` (#1557).
+    pub route_cells: Vec<(u64, Box<str>, u64)>,
     /// How many writes every effect producer's bypass cell, parameter cells, then target cells,
     /// have taken, current epoch first, then each pending candidate: `(epoch, strip ID, effect
     /// instance ID, writes per cell)`. A cell's count is its write sequence (#1345 D1).
@@ -476,6 +484,7 @@ impl ObservedPreparedToken {
     pub(crate) fn commit(
         mut self,
         controller: &mut ObservedController,
+        path: protocol::EditPath,
     ) -> Result<protocol::CommittedCommandFrame, ()> {
         let prepared = self.inner.take().expect("observed token commits once");
         #[cfg(feature = "test-support")]
@@ -484,11 +493,11 @@ impl ObservedPreparedToken {
             Err(())
         } else {
             controller
-                .commit_prepared_structural(*prepared)
+                .commit_prepared_structural(*prepared, path)
                 .map_err(|_| ())
         };
         #[cfg(not(feature = "test-support"))]
-        let committed = controller.commit_prepared_structural(*prepared);
+        let committed = controller.commit_prepared_structural(*prepared, path);
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| {
             owners.token_disposed += 1;
@@ -832,6 +841,18 @@ where
                             producer.track_id.clone(),
                             producer.fader.test_only_write_counts(),
                             producer.producer.test_only_write_count(),
+                        )
+                    })
+                })
+                .collect(),
+            route_cells: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.strips.routes.iter().map(|producer| {
+                        (
+                            provider.epoch,
+                            Box::<str>::from(producer.route_id()),
+                            producer.test_only_write_count(),
                         )
                     })
                 })
@@ -1287,8 +1308,9 @@ where
                     drop(prepared);
                     return Err(CommandError::Internal);
                 }
+                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
                 let committed = prepared
-                    .commit(&mut self.controller)
+                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
                     .map_err(|_| CommandError::Internal)?;
                 // Issue #1273 D2: the protocol commit was the last fallible step, so the
                 // persisting producers move now and never move back. Infallible.
@@ -1341,7 +1363,8 @@ where
     /// changes, and a refusal after an owner was begun discards every begun owner (`OpenOwners`).
     ///
     /// Every live value is a latest-target cell (#1312, #1345): a strip's fader, mute and
-    /// matrix/pan values, an effect's parameter values, its bypass and an EQ's targets. A write
+    /// matrix/pan values, its input trim, polarity and filter targets (#1556), a send's folded
+    /// target and gate (#1557), an effect's parameter values, its bypass and an EQ's targets. A write
     /// needs no room, so nothing refuses a delta for room and nothing turns it into a rebuild
     /// because it outgrew a queue. After the predicate and the test fault hook, the commit takes
     /// its stamp from the newest epoch's gate as its last fallible step (D7). Only then does it
@@ -1357,7 +1380,8 @@ where
     /// It never reserves a plan or adds a report row. It builds the committed model's control
     /// catalog before the first write and publishes it after the commit, so the control list
     /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3), and its structure
-    /// epoch advances if a descriptor changed.
+    /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
+    /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
         let next = transaction.compiled().normalized_model();
@@ -1370,26 +1394,23 @@ where
             return LiveCommit::Rebuild(prepared);
         };
 
-        // 1. Admission (#1053 D8). Its refusal is the compile diagnostic a rebuild would give.
-        if let Err(error) = self.live_admission(&prepared) {
-            return LiveCommit::Done(Err(error));
-        }
-
-        // 1b. The catalog of the committed model, built before anything is written, so that the
-        // commit's last steps cannot fail for room (#1552 D3).
-        let catalog =
-            match host_core::ControlCatalog::build(next, transaction.compiled().sample_rate().0) {
-                Ok(catalog) => catalog,
-                Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
-            };
+        // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
+        // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
+        // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
+        let catalog = match self.live_admission(&prepared) {
+            Ok(catalog) => catalog,
+            Err(error) => return LiveCommit::Done(Err(error)),
+        };
 
         // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7), among all strips,
         // tracks then submixes (#1554 D6): a binary search per segment of the strip table, whose
         // IDs are sorted within each segment.
         let ProviderEpoch {
+            epoch: newest_epoch,
             strips,
             effects,
             revision_gate,
+            capi: newest_capi,
             ..
         } = match self.pending_providers.last_mut() {
             Some(provider) => provider,
@@ -1441,6 +1462,40 @@ where
                 return LiveCommit::Done(Err(CommandError::Internal));
             }
             resolved_effects.push(index);
+        }
+
+        // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
+        // route-ID order. A record for a route with no producer is an internal fault, found
+        // before the first write.
+        let route_lanes = &mut strips.routes;
+        let mut resolved_routes = Vec::new();
+        if resolved_routes
+            .try_reserve_exact(delta.routes.len())
+            .is_err()
+        {
+            return LiveCommit::Done(Err(CommandError::Internal));
+        }
+        for route in &delta.routes {
+            let Some(index) = host_core::route_producer_position(route_lanes, route.route_id)
+            else {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            };
+            resolved_routes.push(index);
+        }
+
+        // 2b. A strip with input records has an input writer, and every filter target passes the
+        // contract the writer assumes (#1556 D5). Both are checked before the first write: the
+        // cells' write cannot fail and panics on a target it was never validated for.
+        for (strip, &index) in delta.strips.iter().zip(&resolved) {
+            if strip.input.is_empty() {
+                continue;
+            }
+            if strip_lanes[index].input.is_none() {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
+            if !strip.input_records_valid() {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
         }
 
         // 3. Each EQ owner's transaction (#1265 D2): begin at its committed revision, apply the
@@ -1547,6 +1602,14 @@ where
             if let Some(record) = strip.matrix {
                 producer.producer.write(stamp, record);
             }
+            if let Some(input) = producer.input.as_mut() {
+                for &record in &strip.input {
+                    input.write(stamp, record);
+                }
+            }
+        }
+        for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
+            route_lanes[index].write(stamp, route.record);
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
             let producer = &mut owners.effects[index];
@@ -1576,13 +1639,20 @@ where
                 }
             }
         }
+        // #1313 D2: the path is the classifier's result. A delta with no record of any kind is a
+        // commit render has nothing to do for.
+        let path = if delta.is_empty() {
+            protocol::EditPath::ModelOnly
+        } else {
+            protocol::EditPath::Live
+        };
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
         // 7. Commit, then each EQ owner; the catalog's values follow (#1264 D4, #1265 D3);
         // 8. respond.
         let committed = prepared
-            .commit(&mut self.controller)
+            .commit(&mut self.controller, path)
             .expect("the commit predicate was checked under this borrow");
         debug_assert_eq!(
             revision,
@@ -1599,9 +1669,34 @@ where
         // values are read back through the same pass a rebuild uses, so a derived row follows its
         // inputs, and the structure epoch advances if any descriptor changed (a `matrix_mode`
         // switch flips `active`). Nothing here allocates or fails.
+        let previous_catalog = self.controller.provider().catalog_resources();
+        let committed_catalog = catalog.resources();
         self.controller
             .provider_mut()
             .replace_session_catalog(catalog, revision);
+        // The newest epoch's rows follow the committed catalog (#1558 D6): it holds the catalog
+        // once in its retained bytes and once in the prepared-protocol stand-in, which later
+        // admissions charge, and `plan_resources` reports the retained bytes. An older epoch's row
+        // keeps the catalog it was prepared with until its plan is gone. Nothing here fails.
+        newest_capi.follow_catalog(previous_catalog, committed_catalog);
+        {
+            let mut reports = self
+                .shared
+                .reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((_, row)) = reports.iter_mut().find(|(epoch, _)| epoch == newest_epoch) {
+                let mut resources = PlanResources::from(*row);
+                resources.control_retained_bytes = resources
+                    .control_retained_bytes
+                    .saturating_sub(previous_catalog.retained_bytes)
+                    .saturating_add(committed_catalog.retained_bytes);
+                resources.largest_named_allocation_bytes = resources
+                    .largest_named_allocation_bytes
+                    .max(committed_catalog.largest_allocation_bytes);
+                *row = A::Row::from(resources);
+            }
+        }
         // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
         // that carries its content, the newest epoch's (#1502 D6), which is the routing the
         // producers were chosen by, so the cells a commit writes and the gate that reveals them
@@ -1615,13 +1710,40 @@ where
         )))
     }
 
-    /// The live admission's inputs, read from the report table and the epochs (#1053 D8).
-    fn live_admission(&self, prepared: &ObservedPreparedToken) -> Result<(), CommandError> {
+    /// The live admission's inputs, read from the report table and the epochs (#1053 D8). It
+    /// returns the catalog of the committed model, which it built to charge (#1558 D6).
+    fn live_admission(
+        &self,
+        prepared: &ObservedPreparedToken,
+    ) -> Result<host_core::ControlCatalog, CommandError> {
+        // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
+        // function, the same diagnostic, and nothing is committed on a refusal.
+        host_core::check_counts(
+            prepared
+                .get()
+                .prospective_session()
+                .compiled()
+                .normalized_model(),
+            &prepare_caps(self.limits),
+        )
+        .map_err(|diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)))?;
         let models = compiled_model_admission(
             self.controller.session().compiled(),
             prepared.get().prospective_session().compiled(),
         )
         .map_err(CommandError::CompileRejected)?;
+        // The new catalog, before anything is written. A VCA added live adds rows to it, so it
+        // can outgrow the catalog the epochs were prepared with.
+        let prospective = prepared.get().prospective_session().compiled();
+        let catalog = host_core::ControlCatalog::build(
+            prospective.normalized_model(),
+            prospective.sample_rate().0,
+        )
+        .map_err(|_| CommandError::Internal)?;
+        let catalog_admission = LiveCatalogAdmission::between(
+            self.controller.provider().catalog_resources(),
+            catalog.resources(),
+        );
         let (current, pending) = {
             let reports = self
                 .shared
@@ -1642,8 +1764,9 @@ where
             let pending = self.pending_providers.last().map(row).transpose()?;
             (current, pending)
         };
-        validate_live_peak(current, pending, models, self.limits)
-            .map_err(CommandError::CompileRejected)
+        validate_live_peak(current, pending, models, catalog_admission, self.limits)
+            .map_err(CommandError::CompileRejected)?;
+        Ok(catalog)
     }
 
     /// The response bytes of the last successful command.

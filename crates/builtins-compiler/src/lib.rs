@@ -1047,6 +1047,11 @@ pub struct PreparedBuiltinsSession {
     tails: Vec<(Box<str>, NodeTailBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
+    /// Every route's effective follow gate per source lane, in `model.routes` order, as the
+    /// preparation was given it (decision 17, C7; `controls::Effective::routes`). Control-side data
+    /// like `tails`: graph lowering reads it for the routes' follow gates, so the gate is composed
+    /// in one place and nowhere else.
+    route_follow: Box<[[bool; 2]]>,
 }
 
 /// The witness of a stage that is **seam-side by design**: fader, mute, pan and matrix.
@@ -3211,18 +3216,13 @@ impl PreparedBuiltinsSession {
         self.track_controls.len()
     }
 
-    /// Every strip's effective mute, `[left, right]`, by strip ID, as it was prepared with
-    /// (decision 17, C7): the VCA-composed and solo-composed value baked into the strip's fader.
-    /// Control-side data like [`Self::tails`]: graph lowering reads it for the follow gates and
-    /// nothing render owns carries it. It is read from the retained strip parameters, so it is
-    /// the baked value by construction.
-    pub fn effective_strip_mutes(&self) -> impl Iterator<Item = (&str, [bool; 2])> {
-        self.strips.iter().map(|strip| {
-            (
-                strip.track_id.as_ref(),
-                [strip.parameters.left.muted, strip.parameters.right.muted],
-            )
-        })
+    /// Every route's effective follow gate, `[left, right]` per source lane, in `model.routes`
+    /// order, as it was prepared with (decision 17, C7): `follows_mute` on a muted lane of the
+    /// route's source strip, composed once by `controls::effective`. Control-side data like
+    /// [`Self::tails`]: graph lowering reads it for each route's gate and composes nothing.
+    #[must_use]
+    pub fn effective_route_follow(&self) -> &[[bool; 2]] {
+        &self.route_follow
     }
 
     /// Read-only builtin tails used by graph lowering: each strip's `T_decay` (#1329 G1).
@@ -4416,9 +4416,9 @@ pub fn prepare_session_builtins(
 ///
 /// `effective` is every effective value of the session (decision 17, C7): preparation bakes
 /// `effective.strips` as each strip's fader and mute instead of composing the VCAs itself, and
-/// keeps the mutes for the graph compiler's follow gates. It must be `controls::effective` of the
-/// session's normalized model (under whatever monitor overlay the host holds); a value of another
-/// strip count is a preparation diagnostic. Every entry below takes it the same way.
+/// keeps `effective.routes`' follow gates for the graph compiler. It must be `controls::effective`
+/// of the session's normalized model (under whatever monitor overlay the host holds); a value of
+/// another strip or route count is a preparation diagnostic. Every entry below takes it the same way.
 ///
 /// `controls` requests one bounded control channel per named track; the consumer half is bound
 /// into that track's matrix processor and the producer half is returned in the prepared session
@@ -4596,7 +4596,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
         }
     }
-    if effective.strips.len() != session.normalized_model().strips().count() {
+    if effective.strips.len() != session.normalized_model().strips().count()
+        || effective.routes.len() != session.normalized_model().routes.len()
+    {
         diagnostics.push(diag("builtin.effective.shape", "$.effective"));
     }
     let known_strips: BTreeSet<_> = session
@@ -4871,6 +4873,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         tails,
         requests: request_seals,
         resources,
+        route_follow: effective.routes.iter().map(|route| route.follow).collect(),
     })
 }
 
@@ -4904,6 +4907,8 @@ fn resource_plan(
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, sealed_stage_count)?;
     add_vector_layout::<(Box<str>, NodeTailBound)>(&mut processor, track_count)?;
+    // The routes' effective follow gates, retained for graph lowering (decision 17, C7).
+    add_vector_layout::<[bool; 2]>(&mut processor, session.normalized_model().routes.len())?;
     for strip in session.normalized_model().strips() {
         let bytes = strip.id.as_str().len();
         // Nine independently retained copies of the track's ID: the strip's own ID and its graph
@@ -15267,15 +15272,14 @@ mod tests {
 
     /// Decision 17, C7: preparation bakes the `Effective` it is given, not a composition of its
     /// own. A solo overlay mutes the vocal in the baked fader and the stored mutes, and an
-    /// `Effective` of another strip count is refused at `$.effective`.
+    /// `Effective` of another strip or route count is refused at `$.effective`.
     ///
     /// Red if preparation recomputes the fader from the model (the solo would be lost), if
-    /// `effective_strip_mutes` is not the baked value, or if a mismatched shape is truncated by
-    /// the zip instead of refused.
+    /// `effective_route_follow` is not the follow gate it was given, or if a mismatched shape is truncated
+    /// by the zip instead of refused.
     #[test]
     fn preparation_bakes_the_effective_value_it_is_given() {
         let compiled = session();
-        let vocal = compiled.normalized_model().tracks[0].id.clone();
         let soloed_elsewhere =
             controls::MonitorOverlay::with_soloed([
                 session::StableId::parse("not-a-strip").expect("stable ID")
@@ -15284,6 +15288,8 @@ mod tests {
         let mut effective = controls::effective(compiled.normalized_model(), &soloed_elsewhere);
         effective.strips[0].mute = [true, false];
         effective.strips[0].fader_db = [-12.5, -3.0];
+        assert!(!effective.routes.is_empty(), "the fixture declares a route");
+        effective.routes[0].follow = [true, false];
         let prepared = prepare_session_builtins_with_live_controls(
             &compiled,
             &effective,
@@ -15294,8 +15300,12 @@ mod tests {
         )
         .expect("prepare");
         assert_eq!(
-            prepared.effective_strip_mutes().collect::<Vec<_>>(),
-            vec![(vocal.as_str(), [true, false])]
+            prepared.effective_route_follow(),
+            effective
+                .routes
+                .iter()
+                .map(|route| route.follow)
+                .collect::<Vec<_>>()
         );
         let parameters = prepared.strips[0].parameters;
         assert_eq!(
@@ -15303,17 +15313,26 @@ mod tests {
             (-12.5, -3.0)
         );
 
-        let wrong = controls::Effective::with_shape(2, 0);
-        let refused =
-            prepare_session_builtins_with_live_controls(&compiled, &wrong, &[], &[], caps(), None)
-                .err()
-                .expect("refused");
-        assert!(
-            refused
-                .0
-                .iter()
-                .any(|value| value.code == "builtin.effective.shape" && value.path == "$.effective")
-        );
+        let strips = effective.strips.len();
+        let routes = effective.routes.len();
+        for wrong in [
+            controls::Effective::with_shape(strips + 1, routes),
+            controls::Effective::with_shape(strips, routes + 1),
+        ] {
+            let refused = prepare_session_builtins_with_live_controls(
+                &compiled,
+                &wrong,
+                &[],
+                &[],
+                caps(),
+                None,
+            )
+            .err()
+            .expect("refused");
+            assert!(refused.0.iter().any(
+                |value| value.code == "builtin.effective.shape" && value.path == "$.effective"
+            ));
+        }
     }
 
     /// #1242 gate 7: a member fader outside the fader domain still refuses at its own path. Track

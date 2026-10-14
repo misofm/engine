@@ -481,9 +481,9 @@ pub struct HostLiveControlHandles {
     ///
     /// A browser session that opted in to live commands prepares with [`HostLiveLanes::ALL`] and
     /// gets these; one that did not prepares with [`HostLiveLanes::FADER_AND_MATRIX`] (#1326 D3)
-    /// and gets none. C ABI plans prepare with the fader, matrix and effect lanes and no route
-    /// lane (#1053 D5, #1256, #1263) and get none; their route lanes arrive with the slice that
-    /// pushes to them (#1225). A settled record's bits are a static route's by construction,
+    /// and gets none. A C ABI plan prepares with the lanes [`controls::live_lanes`] chooses from
+    /// the session's live rows (decision 17, C6): a session with a route into a submix gets these
+    /// (#1557). A settled record's bits are a static route's by construction,
     /// because [`RouteControlProducer::record`] takes its target from
     /// `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
     /// route's constants with.
@@ -1515,22 +1515,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // the handles hand back. Made before any observed allocation of the preparation.
     let live_superseded = superseded.cloned().unwrap_or_default();
     let model = compiled.normalized_model();
-    // Source semantics: tracks only.
+    check_counts(model, caps)?;
+    // The counts the report carries; `check_counts` has proved them inside the caps.
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let submix_count = u64::try_from(model.submixes.len()).map_err(|_| platform("host.count"))?;
     let vca_count = u64::try_from(model.vcas.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
-    if track_count > caps.maximum_tracks
-        || submix_count > caps.maximum_submixes
-        || vca_count > caps.maximum_vcas
-        || source_count > caps.maximum_sources
-        || route_count > caps.maximum_routes
-        || effect_count > caps.maximum_effects
-    {
-        return Err(resource("host.resource.count"));
-    }
     caps.validate_shape(compiled)?;
 
     let source_id_bytes = model.sources.iter().try_fold(0_usize, |total, source| {
@@ -2550,14 +2542,16 @@ fn strip_stage_row<'a>(
         .map(|index| &rows[index])
 }
 
-/// The per-edit ramp lengths of one strip's three record rows, looked up once from the
-/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)` and
-/// `(Strip, Matrix)` entries. `None` is "the edit gave no length": the session's applies.
+/// The per-edit ramp lengths of one strip's four record rows, looked up once from the
+/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)`,
+/// `(Strip, Matrix)` and `(Strip, Input)` entries. `None` is "the edit gave no length": the session's applies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StripEditRamps {
     fader: Option<u32>,
     mute: Option<u32>,
     matrix: Option<u32>,
+    /// The input trim and polarity (#1556 D3).
+    pub(crate) input: Option<u32>,
 }
 
 impl StripEditRamps {
@@ -2572,6 +2566,7 @@ impl StripEditRamps {
             fader: edit_ramps.get(&target, EditRampRow::Fader),
             mute: edit_ramps.get(&target, EditRampRow::Mute),
             matrix: edit_ramps.get(&target, EditRampRow::Matrix),
+            input: edit_ramps.get(&target, EditRampRow::Input),
         }
     }
 }
@@ -2580,16 +2575,29 @@ impl StripEditRamps {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutOfDomain;
 
+/// The ramp length of each record of a strip's fader/mute stage, per lane (decision 17, C6 step 4,
+/// #1558 D7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LevelLengths {
+    /// The `FaderDb` record of each lane.
+    pub(crate) fader: [u32; 2],
+    /// The `Mute` record of each lane.
+    pub(crate) mute: [u32; 2],
+}
+
 /// The fader and mute records that bring a strip's fader/mute stage from `before`'s values to
 /// `after`'s, in push order: `FaderDb` records first, then `Mute` records, each left before
 /// right; `None` after the last (#1053 D1).
 ///
-/// The per-owner function of #1277 D5: the classifier derives a live delta's records with it, and
-/// a successor's preparation derives its carry retargets with it, so the two cannot disagree. A
-/// record is emitted only when the value the render plane holds changes: a `FaderDb` per lane
-/// whose gain bits change (one `Both` when both change to the same dB bits) and a `Mute` per lane
-/// whose mute changes (one `Both` when both change to the same value). A fader move on a lane
-/// that stays muted still gets its record, so the stage remembers the gain for a later unmute.
+/// `before` and `after` are the strip's *effective* values ([`effective_fader`]), never its own
+/// (#1558 D1): the stage holds what render sees, so a VCA's move, a membership change and an own
+/// edit are one difference. The per-owner function of #1277 D5: the classifier derives a live
+/// delta's records with it, and a successor's preparation derives its carry retargets with it, so
+/// the two cannot disagree. A record is emitted only when the value the render plane holds changes:
+/// a `FaderDb` per lane whose gain bits change (one `Both` when both change to the same dB bits
+/// and the same length) and a `Mute` per lane whose mute changes (one `Both` when both change to
+/// the same value and the same length). A fader move on a lane that stays muted still gets its
+/// record, so the stage remembers the gain for a later unmute.
 ///
 /// # Errors
 ///
@@ -2597,8 +2605,7 @@ pub(crate) struct OutOfDomain;
 pub(crate) fn fader_records(
     before: &session::DualMonoFader,
     after: &session::DualMonoFader,
-    ramps: LiveRamps,
-    edit: StripEditRamps,
+    lengths: LevelLengths,
 ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
     let gain = |db| {
         checked_fader_gain(db)
@@ -2617,50 +2624,238 @@ pub(crate) fn fader_records(
     };
     let db_after = [after.left_db, after.right_db];
     let gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
-    for (lanes, lane) in lane_records(gain_changed, db_after[0].to_bits() == db_after[1].to_bits())
-    {
+    for (lanes, lane) in lane_records(
+        gain_changed,
+        db_after[0].to_bits() == db_after[1].to_bits() && lengths.fader[0] == lengths.fader[1],
+    ) {
         push(TrackFaderRecord::FaderDb {
             lanes,
             db: db_after[lane],
-            smoothing_samples: ramps.resolve(LiveRampRow::Fader, edit.fader),
+            smoothing_samples: lengths.fader[lane],
         });
     }
     let mute_changed = [0, 1].map(|lane| mutes_before[lane] != mutes_after[lane]);
-    for (lanes, lane) in lane_records(mute_changed, mutes_after[0] == mutes_after[1]) {
+    for (lanes, lane) in lane_records(
+        mute_changed,
+        mutes_after[0] == mutes_after[1] && lengths.mute[0] == lengths.mute[1],
+    ) {
         push(TrackFaderRecord::Mute {
             lanes,
             muted: mutes_after[lane],
-            smoothing_samples: ramps.resolve(LiveRampRow::Mute, edit.mute),
+            smoothing_samples: lengths.mute[lane],
         });
     }
     Ok(fader)
 }
 
-/// Whether the strip `track_id`'s (a track's or a submix's) mute changes from `before` to `after`
-/// while a `follows_mute` route in `model` sends from the strip (#1053 G2, #1554 D5).
+/// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
+/// records are derived from.
+pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::DualMonoFader {
+    session::DualMonoFader {
+        left_db: effective.fader_db[0],
+        right_db: effective.fader_db[1],
+        left_mute: effective.mute[0],
+        right_mute: effective.mute[1],
+    }
+}
+
+/// The effective values of two models and the ramp rules that go with them (decision 17, C6 step 3
+/// and 4, C7; #1558 D1, D7): the one place a strip's level records, and the length of a route's
+/// gate record, are decided. The classifier asks it for the live path and `join_strips` asks it
+/// for a successor's carry, so a VCA move, a membership change, an own edit, a followed mute and a
+/// following send cannot be composed two ways.
 ///
-/// The classifier refuses such a delta (`LiveRebuild::FollowedMute`): the route's own mute must
-/// step with the source's, and a live mute record ramps only the source's stage (#1054). A
-/// successor's join asks the same predicate (#1277 D3), so a strip whose
-/// followed mute changes is prepared, not carried. `model` is the post-change model.
-pub(crate) fn followed_mute_changes(
-    before: &session::DualMonoFader,
-    after: &session::DualMonoFader,
-    model: &SessionModel,
-    track_id: &str,
-) -> bool {
-    [before.left_mute, before.right_mute] != [after.left_mute, after.right_mute]
-        && model.routes.iter().any(|route| {
-            route.follows_mute
-                && match &route.source {
-                    session::RouteSource::Track {
-                        track_id: source, ..
-                    }
-                    | session::RouteSource::Submix {
-                        submix_id: source, ..
-                    } => source.as_str() == track_id,
-                }
-        })
+/// It owns both [`controls::Effective`] values, computed once, on the control thread. Strip
+/// indices count [`SessionModel::strips`] of the model they name and route indices count
+/// `model.routes`.
+pub(crate) struct EffectiveDiff<'a> {
+    current: &'a SessionModel,
+    next: &'a SessionModel,
+    before: controls::Effective,
+    after: controls::Effective,
+    before_strips: Vec<StripRef<'a>>,
+    after_strips: Vec<StripRef<'a>>,
+    /// [`SessionModel::vca_reach`] of `next`: per strip, the reaching VCAs' indices in ascending
+    /// VCA-ID order.
+    reach: Vec<Vec<usize>>,
+    ramps: LiveRamps,
+    edit_ramps: &'a EditRamps,
+}
+
+impl<'a> EffectiveDiff<'a> {
+    /// The effective values of `current` and `next`. No monitor overlay exists on this path yet
+    /// (solo on the C ABI is #1559): nothing is soloed.
+    pub(crate) fn new(
+        current: &'a SessionModel,
+        next: &'a SessionModel,
+        ramps: LiveRamps,
+        edit_ramps: &'a EditRamps,
+    ) -> Self {
+        let overlay = controls::MonitorOverlay::default();
+        Self {
+            current,
+            next,
+            before: controls::effective(current, &overlay),
+            after: controls::effective(next, &overlay),
+            before_strips: current.strips().collect(),
+            after_strips: next.strips().collect(),
+            reach: next.vca_reach(),
+            ramps,
+            edit_ramps,
+        }
+    }
+
+    #[cfg(feature = "control-provider")]
+    /// Whether the strip's effective fader or mute differs, as bits, between the two models.
+    pub(crate) fn level_changed(&self, before: usize, after: usize) -> bool {
+        let (before, after) = (&self.before.strips[before], &self.after.strips[after]);
+        before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
+            || before.mute != after.mute
+    }
+
+    /// The level records of one strip: its effective values in the two models, with the lengths
+    /// [`Self::lengths`] gives.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfDomain`] as [`fader_records`].
+    pub(crate) fn level_records(
+        &self,
+        before: usize,
+        after: usize,
+    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+        fader_records(
+            &effective_fader(&self.before.strips[before]),
+            &effective_fader(&self.after.strips[after]),
+            self.lengths(before, after),
+        )
+    }
+
+    /// The ramp length of each lane's `FaderDb` and `Mute` record of one strip (#1558 D7).
+    ///
+    /// A lane's fader length is that of the strip's own `fader_db` edit when the strip's own value
+    /// on the lane changed (row `Fader`, the edit's length); else that of the first reaching VCA,
+    /// in ascending VCA-ID order, whose offset on the lane changed (row `VcaOffset`, the VCA's
+    /// edit's length); else row `VcaOffset` with no edit length (a membership change, or a VCA
+    /// added or removed). The mute is the same with rows `Mute` and `VcaMute`.
+    pub(crate) fn lengths(&self, before: usize, after: usize) -> LevelLengths {
+        let (own_before, own_after) = (
+            self.before_strips[before].fader,
+            self.after_strips[after].fader,
+        );
+        let edit = StripEditRamps::of(self.edit_ramps, self.after_strips[after].id);
+        let reaching = |lane: usize, mute: bool| {
+            self.reach[after]
+                .iter()
+                .map(|&vca| &self.next.vcas[vca])
+                .find(|vca| self.vca_changed(vca, lane, mute))
+                .and_then(|vca| {
+                    let row = if mute {
+                        EditRampRow::VcaMute
+                    } else {
+                        EditRampRow::VcaFader
+                    };
+                    (!self.edit_ramps.is_empty())
+                        .then(|| {
+                            self.edit_ramps
+                                .get(&EditRampTarget::Vca(vca.id.clone()), row)
+                        })
+                        .flatten()
+                })
+        };
+        let fader = [0, 1].map(|lane| {
+            let db = |fader: &session::DualMonoFader| [fader.left_db, fader.right_db][lane];
+            if db(own_before).to_bits() != db(own_after).to_bits() {
+                self.ramps.resolve(LiveRampRow::Fader, edit.fader)
+            } else {
+                self.ramps
+                    .resolve(LiveRampRow::VcaOffset, reaching(lane, false))
+            }
+        });
+        let mute = [0, 1].map(|lane| {
+            let muted = |fader: &session::DualMonoFader| [fader.left_mute, fader.right_mute][lane];
+            if muted(own_before) != muted(own_after) {
+                self.ramps.resolve(LiveRampRow::Mute, edit.mute)
+            } else {
+                self.ramps
+                    .resolve(LiveRampRow::VcaMute, reaching(lane, true))
+            }
+        });
+        LevelLengths { fader, mute }
+    }
+
+    /// Whether `vca`'s offset (or its mute) on `lane` differs from the committed model's, or the
+    /// committed model has no such VCA.
+    fn vca_changed(&self, vca: &session::Vca, lane: usize, mute: bool) -> bool {
+        let Some(prior) = self.current.vcas.iter().find(|prior| prior.id == vca.id) else {
+            return true;
+        };
+        if mute {
+            [prior.fader.left_mute, prior.fader.right_mute][lane]
+                != [vca.fader.left_mute, vca.fader.right_mute][lane]
+        } else {
+            [prior.fader.left_db, prior.fader.right_db][lane].to_bits()
+                != [vca.fader.left_db, vca.fader.right_db][lane].to_bits()
+        }
+    }
+
+    #[cfg(feature = "control-provider")]
+    /// The effective gate of route `index`, per source lane, in `[current, next]`.
+    pub(crate) fn gates(&self, index: usize) -> [[bool; 2]; 2] {
+        [
+            self.before.routes[index].gate,
+            self.after.routes[index].gate,
+        ]
+    }
+
+    #[cfg(feature = "control-provider")]
+    /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
+    /// `follows_mute` edit when one of them changed (rows `SendMute`, `SendFollowsMute`, with
+    /// `own_edit` the route's `RouteMute` length), else the length that its source strip's `Mute`
+    /// record took, the longest of the lanes whose gate changed, so a strip and its following
+    /// sends ramp together.
+    pub(crate) fn gate_length(
+        &self,
+        before: &session::Route,
+        after: &session::Route,
+        own_edit: Option<u32>,
+        source: (usize, usize),
+        gates: [[bool; 2]; 2],
+    ) -> u32 {
+        if before.mute != after.mute {
+            return self.ramps.resolve(LiveRampRow::SendMute, own_edit);
+        }
+        if before.follows_mute != after.follows_mute {
+            return self.ramps.resolve(LiveRampRow::SendFollowsMute, own_edit);
+        }
+        let lengths = self.lengths(source.0, source.1);
+        (0..2)
+            .filter(|&lane| gates[0][lane] != gates[1][lane])
+            .map(|lane| lengths.mute[lane])
+            .max()
+            .unwrap_or_else(|| self.ramps.resolve(LiveRampRow::SendMute, own_edit))
+    }
+
+    #[cfg(feature = "control-provider")]
+    /// The strip index of a route's source in the two models, or `None` if it names no strip in
+    /// one of them.
+    pub(crate) fn source_strips(
+        &self,
+        before: &session::Route,
+        after: &session::Route,
+    ) -> Option<(usize, usize)> {
+        let position = |strips: &[StripRef<'_>], route: &session::Route| {
+            let id = match &route.source {
+                session::RouteSource::Track { track_id, .. } => track_id,
+                session::RouteSource::Submix { submix_id, .. } => submix_id,
+            };
+            strips.iter().position(|strip| strip.id == id)
+        };
+        Some((
+            position(&self.before_strips, before)?,
+            position(&self.after_strips, after)?,
+        ))
+    }
 }
 
 /// The matrix record that brings a strip's matrix/pan stage from `before`'s value to `after`'s,
@@ -2705,7 +2900,7 @@ pub(crate) fn matrix_record(
 /// The lane records for one per-lane change mask: one `Both` when both lanes change and
 /// `same_value`, else one record per changed lane, left first. Each entry names the lane whose
 /// post-commit value the record carries.
-fn lane_records(
+pub(crate) fn lane_records(
     changed: [bool; 2],
     same_value: bool,
 ) -> impl Iterator<Item = (BuiltinLaneSelector, usize)> {
@@ -2799,55 +2994,35 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
             .is_ok()
 }
 
-/// A strip's fader as its stage holds it: the VCA-effective values when VCAs are in play (#1242
-/// D2), else the strip's own.
-fn effective_fader(
-    own: &session::DualMonoFader,
-    effective: Option<&controls::EffectiveStrip>,
-) -> session::DualMonoFader {
-    match effective {
-        None => own.clone(),
-        Some(effective) => session::DualMonoFader {
-            left_db: effective.fader_db[0],
-            right_db: effective.fader_db[1],
-            left_mute: effective.mute[0],
-            right_mute: effective.mute[1],
-        },
-    }
-}
-
 /// The model half of the strip join (#1277 D3, D4): for every strip of `model` that `committed`
 /// also has, how its fader/mute and matrix values differ.
 ///
 /// A family's difference is live when the classifier would emit a record for it on a plan that
-/// attaches the control kind (`live`): the strip is a track or a submix (#1554), no VCA is in either model (until
-/// #1247 `LiveRebuild::Vca` keeps them prepared), the strip's values are in domain and its mute
-/// does not change under a `follows_mute` route (`LiveRebuild::FollowedMute`, one predicate with
-/// the classifier). Each family is judged on its own values (D4 decides per stage): a followed
-/// mute or an out-of-domain fader makes only the fader/mute family prepared, and the matrix
-/// family of the same strip still carries and retargets. Every other difference is prepared.
+/// attaches the control kind (`live`): the strip is a track or a submix (#1554) and its values are
+/// in domain. The fader/mute family is judged on the strip's *effective* values in the two models
+/// ([`EffectiveDiff`], decision 17 C7, #1558 D4), exactly as the classifier judges them: a VCA
+/// move, a membership change and a followed mute are live differences like an own edit, and a
+/// strip whose effective values do not change is `Same`. Each family is judged on its own values
+/// (D4 decides per stage): an out-of-domain fader makes only the fader/mute family prepared, and
+/// the matrix family of the same strip still carries and retargets. Every other difference is
+/// prepared.
 ///
 /// A change of the matrix's smoothing window alone is `Same` (as on the live path, whose
 /// classifier emits no record for it): a carried matrix stage keeps the predecessor's window,
 /// and every retarget passes its own. A strip whose kind changed has no counterpart and both
 /// families are prepared.
 fn join_strips<'a>(
-    committed: &SessionModel,
+    committed: &'a SessionModel,
     model: &'a SessionModel,
     live: bool,
-    edit_ramps: &EditRamps,
+    edit_ramps: &'a EditRamps,
 ) -> Vec<StripJoin<'a>> {
-    let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
-    // No monitor overlay exists on this path yet: nothing is soloed.
-    let overlay = controls::MonitorOverlay::default();
-    let committed_effective = vca_in_play.then(|| controls::effective(committed, &overlay));
-    let next_effective = vca_in_play.then(|| controls::effective(model, &overlay));
     let ramps = LiveRamps::for_session(model);
+    let diff = EffectiveDiff::new(committed, model, ramps, edit_ramps);
     let mut joins = Vec::new();
     for (index, strip) in model.strips().enumerate() {
         let id = strip.id.as_str();
-        let Some((position, before_fader, before_matrix)) = committed_strip(committed, &strip)
-        else {
+        let Some((position, _, before_matrix)) = committed_strip(committed, &strip) else {
             if committed_has_strip(committed, id) {
                 joins.push(StripJoin {
                     id,
@@ -2857,31 +3032,16 @@ fn join_strips<'a>(
             }
             continue;
         };
-        let live_family = live && !vca_in_play;
-        let before = effective_fader(
-            before_fader,
-            committed_effective
-                .as_ref()
-                .map(|effective| &effective.strips[position]),
-        );
-        let after = effective_fader(
-            strip.fader,
-            next_effective
-                .as_ref()
-                .map(|effective| &effective.strips[index]),
-        );
         // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
         // family prepared. The classifier refuses a whole delta, but that does not turn the other
         // stage's own live change into a prepared one.
         // A retarget is the record of the same edit, so it carries the length that edit gave its
         // row (#1394 D6), else the session's.
         let edit = StripEditRamps::of(edit_ramps, strip.id);
-        let fader_records = fader_records(&before, &after, ramps, edit);
+        let fader_records = diff.level_records(position, index);
         let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
-        let fader_live = live_family
-            && fader_records.is_ok()
-            && !followed_mute_changes(before_fader, strip.fader, model, id);
-        let matrix_live = live_family && matrix_record.is_ok();
+        let fader_live = live && fader_records.is_ok();
+        let matrix_live = live && matrix_record.is_ok();
         let fader = match fader_records {
             Err(_) => FamilyJoin::Prepared,
             Ok(records) if records[0].is_none() => FamilyJoin::Same,
@@ -3215,6 +3375,40 @@ fn resolve_effect_carry(
         }
     }
     carry
+}
+
+/// Whether `model` is inside the count caps `caps` states: tracks, submixes, VCAs, sources, routes
+/// and effects (`host.resource.count`).
+///
+/// The one count check (decision 17, #1558 D6). Preparation runs it on every plan, and a host that
+/// commits a live delta runs it on the prospective model, so a VCA added live is refused as a
+/// rebuild would refuse it and a committed model never exceeds what its own rebuild accepts.
+///
+/// # Errors
+///
+/// `host.resource.count` when a count exceeds its cap, or `host.count` when one does not fit a
+/// `u64`.
+pub fn check_counts(
+    model: &SessionModel,
+    caps: &HostPrepareCaps,
+) -> Result<(), PrepareDiagnostics> {
+    let count = |len: usize| u64::try_from(len).map_err(|_| platform("host.count"));
+    let track_count = count(model.tracks.len())?;
+    let submix_count = count(model.submixes.len())?;
+    let vca_count = count(model.vcas.len())?;
+    let source_count = count(model.sources.len())?;
+    let route_count = count(model.routes.len())?;
+    let effect_count = count_effects(model)?;
+    if track_count > caps.maximum_tracks
+        || submix_count > caps.maximum_submixes
+        || vca_count > caps.maximum_vcas
+        || source_count > caps.maximum_sources
+        || route_count > caps.maximum_routes
+        || effect_count > caps.maximum_effects
+    {
+        return Err(resource("host.resource.count"));
+    }
+    Ok(())
 }
 
 /// Total effect instances across every strip: one per console entry, since each lowers to one

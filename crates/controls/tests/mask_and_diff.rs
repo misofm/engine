@@ -142,3 +142,48 @@ fn the_diff_is_value_bits() {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].address.lane, Lane::Left);
 }
+
+/// #1558 D1, D5. Red if a VCA added or removed, or a member changed, is structure: the mask copies
+/// the whole VCA list, the diff of two models with different VCA sets lists the same other rows
+/// and no VCA row, and two models with the same VCAs report a VCA row's change like any other.
+#[test]
+fn the_vca_set_and_its_members_are_values() {
+    let base = effects_fixture();
+    assert!(!base.vcas.is_empty(), "the fixture has a VCA");
+
+    let mut added = base.clone();
+    let mut extra = added.vcas[0].clone();
+    extra.id = id("zz-extra");
+    extra.members.clear();
+    added.vcas.push(extra);
+    let mut regrouped = base.clone();
+    regrouped.vcas[0].members.clear();
+    let mut removed = base.clone();
+    removed.vcas.clear();
+    for (name, edited) in [
+        ("added", added),
+        ("regrouped", regrouped),
+        ("removed", removed),
+    ] {
+        let mut masked = edited.clone();
+        mask_values(&mut masked, &base);
+        assert_eq!(masked, base, "{name}: the mask makes the models equal");
+        let mut masked = base.clone();
+        mask_values(&mut masked, &edited);
+        assert_eq!(masked, edited, "{name}: and the other way");
+    }
+    let mut added = base.clone();
+    let mut extra = added.vcas[0].clone();
+    extra.id = id("zz-extra");
+    added.vcas.push(extra);
+    let changes = changed_controls(&base, &added, RATE).expect("the same strips and routes");
+    assert!(
+        changes.is_empty(),
+        "a VCA added has no row in the diff: {changes:?}"
+    );
+    let mut moved = base.clone();
+    moved.vcas[0].fader.left_db = -9.0;
+    let changes = changed_controls(&base, &moved, RATE).expect("same addresses");
+    assert_eq!(changes.len(), 1);
+    assert!(matches!(changes[0].address.owner, controls::Owner::Vca(_)));
+}

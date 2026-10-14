@@ -8,7 +8,11 @@
 
 use controls::RebuildReason;
 
-use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
+use builtins::{
+    BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, PreparedInputFilterTarget,
+    pan_matrix,
+};
+use builtins_compiler::TrackInputRecord;
 use dsp_reference::randomized::Draw;
 use effect_contract::{
     BankWidth, EffectControlRecord, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel as Lane,
@@ -17,10 +21,10 @@ use effect_contract::{
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     BuiltinLaneSelector, EQ_TARGET_CAPACITY, EqTargetEdit, EqTargetPreparer,
-    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta, LiveEffectAddress,
-    LiveRampRow, LiveRamps, LiveRebuild, PreparedHost, SourceSubmission, TrackControlRecord,
-    TrackFaderRecord, classify_live_delta, compile_host_session, prepare_host_runtime,
-    prepare_host_runtime_with_live_controls,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterPreparer,
+    LiveDelta, LiveEffectAddress, LiveRampRow, LiveRamps, LiveRebuild, PreparedHost,
+    SourceSubmission, TrackControlRecord, TrackFaderRecord, classify_live_delta,
+    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_live_controls,
 };
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
@@ -198,8 +202,8 @@ fn mute(lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) -> Trac
     }
 }
 
-/// The builtin IDs the control rows use (`BUILTIN_PARAMETER_DESCRIPTORS`).
-const TRIM_DB: u32 = 2;
+/// The builtin ID the control rows use for the input delay (`BUILTIN_PARAMETER_DESCRIPTORS`).
+const DELAY_SAMPLES: u32 = 11;
 
 /// The reason the control row of builtin `control` gives for being rebuild-only.
 fn builtin_reason(control: u32) -> RebuildReason {
@@ -407,14 +411,17 @@ fn values_outside_the_setter_domain_need_a_rebuild() {
 }
 
 /// Gate 1(g). Red if the mask comparison uses `PartialEq` and misses a sign-of-zero edit of a
-/// field that is not live.
+/// field that is not live: the delay is the one builtin still rebuild-only.
 #[test]
-fn a_sign_of_zero_trim_edit_is_a_rebuild_by_its_row() {
+fn a_sign_of_zero_delay_edit_is_a_rebuild_by_its_row() {
     let current = two_tracks();
-    assert_eq!(current.tracks[0].builtins.left.trim_db.to_bits(), 0);
+    assert_eq!(current.tracks[0].builtins.left.delay_samples, 0);
     assert_eq!(
-        classify(&current, |next| next.tracks[0].builtins.left.trim_db = -0.0),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
+        classify(&current, |next| next.tracks[0]
+            .builtins
+            .left
+            .delay_samples = 1),
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
 }
 
@@ -456,10 +463,40 @@ fn a_submix_strip_fader_mute_and_pan_are_live() {
     assert!(panned[0].1.is_empty() && panned[0].2.is_some());
 }
 
-/// #1554 D5. Red if the followed-mute guard covers only a track source: a submix whose mute
-/// changes while a `follows_mute` route sends from it has the same ramp problem.
+/// A delta's strip records and its route records, owned.
+type Both = (Vec<Strip>, Vec<RouteRecordRow>);
+
+/// Classify with the session ramps `ramps` and the transaction's `edit_ramps`, and return both
+/// kinds of record.
+fn classify_both(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+) -> Result<Both, LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, ramps, edit_ramps).map(|delta| {
+        let routes = delta
+            .routes
+            .iter()
+            .map(|route| {
+                (
+                    route.route_id.to_owned(),
+                    route.record.target(),
+                    route.record.mute(),
+                    route.record.length(),
+                )
+            })
+            .collect();
+        (flatten(&delta), routes)
+    })
+}
+
+/// #1558 D1 (was #1554 D5's guard). Red if a submix whose mute a `follows_mute` route reads is
+/// refused, or its follower is not gated by the same transaction: the bus mutes in the same delta
+/// as the send from it, and the other submix, which nothing follows, gives no route record.
 #[test]
-fn a_followed_submix_mute_change_needs_a_rebuild() {
+fn a_followed_submix_mute_change_is_live_and_gates_the_follower() {
     let mut model = with_bus(false);
     let bus = id("bus");
     let bus2 = id("bus2");
@@ -488,60 +525,159 @@ fn a_followed_submix_mute_change_needs_a_rebuild() {
     let console = model.console.clone();
     model.submixes.push(Submix::unity(bus2, &console));
     let current = normalized(&model);
-    assert_eq!(
-        classify(&current, |next| {
+    let (strips, routes) = classify_both(
+        &current,
+        |next| {
             let submix = next.submixes.iter_mut().find(|s| s.id == bus).expect("bus");
             submix.fader.left_mute = true;
-        }),
-        Err(LiveRebuild::FollowedMute)
+        },
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("a followed submix mute is live");
+    assert_eq!(
+        strips,
+        vec![(
+            "bus".to_owned(),
+            vec![mute(BuiltinLaneSelector::Left, true, 0)],
+            None
+        )]
     );
-    // The same change on the other submix, which nothing follows, is live.
-    assert!(
-        classify(&current, |next| {
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].0, "bus-bus2");
+    // Only the left column is zeroed: the right source lane still sends.
+    let route = current
+        .routes
+        .iter()
+        .find(|route| route.id == id("bus-bus2"))
+        .expect("the follower");
+    assert_eq!(
+        routes[0].1,
+        folded(route.gain_db, matrix_of(route), false, [true, false])
+    );
+    // The same change on the other submix, which nothing follows, moves no route.
+    let (strips, routes) = classify_both(
+        &current,
+        |next| {
             let submix = next
                 .submixes
                 .iter_mut()
                 .find(|s| s.id == id("bus2"))
                 .expect("bus2");
             submix.fader.left_mute = true;
-        })
-        .is_ok()
-    );
+        },
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert_eq!(strips.len(), 1);
+    assert!(routes.is_empty());
 }
 
-/// Gate 1(i), G2. Red if a mute change of a `follows_mute` source is classified live.
+/// Gate 1(i), #1558 gates 2 and 3 (was G2). Red if a mute change of a `follows_mute` source is
+/// still a rebuild, if it is not gated in the same delta, or if a redundant route record is
+/// emitted: a source that is muted again, a follow toggled on an unmuted source, a mute of a
+/// track no route follows.
 #[test]
-fn a_followed_mute_change_needs_a_rebuild() {
+fn a_followed_mute_change_is_live_and_gates_the_send_once() {
     let current = with_bus(true);
+    let send = send_index(&current);
     let source = current
         .tracks
         .iter()
         .position(|track| {
-            current.routes.iter().any(|route| {
-                route.follows_mute
-                    && matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == track.id)
-            })
+            matches!(&current.routes[send].source, RouteSource::Track { track_id, .. } if *track_id == track.id)
         })
         .expect("followed track");
+    let send_id = current.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&current.routes[send]);
+    let gain = current.routes[send].gain_db;
+    let run = |current: &SessionModel, edit: fn(&mut SessionModel, usize)| {
+        classify_both(current, |next| edit(next, source), STEP, &EditRamps::new()).expect("live")
+    };
+    // The right lane mutes: one strip record and one route record whose right column is zeroed.
+    let (strips, routes) = run(&current, |next, source| {
+        next.tracks[source].fader.right_mute = true;
+    });
     assert_eq!(
-        classify(&current, |next| next.tracks[source].fader.right_mute = true),
-        Err(LiveRebuild::FollowedMute)
-    );
-    assert_eq!(
-        classify(&current, |next| next.tracks[source].fader.left_db = -6.0),
-        Ok(vec![(
+        strips,
+        vec![(
             track_id(&current, source),
-            vec![fader_db(BuiltinLaneSelector::Left, -6.0, 0)],
+            vec![mute(BuiltinLaneSelector::Right, true, 0)],
             None
-        )])
+        )]
     );
-    // The same mute change is live when the route does not follow.
-    assert!(
-        classify(&with_bus(false), |next| next.tracks[source]
-            .fader
-            .right_mute = true)
-        .is_ok()
+    assert_eq!(
+        routes,
+        vec![(
+            send_id.clone(),
+            folded(gain, matrix, false, [false, true]),
+            false,
+            0
+        )]
     );
+    // Both lanes: the send is silenced by its source.
+    let (_, routes) = run(&current, |next, source| {
+        next.tracks[source].fader.left_mute = true;
+        next.tracks[source].fader.right_mute = true;
+    });
+    assert_eq!(routes, vec![(send_id.clone(), [0.0; 4], true, 0)]);
+    // Re-muting a muted source gives no record at all; unmuting it gives the open send back.
+    let muted = edited(&current, |model| {
+        model.tracks[source].fader.right_mute = true
+    });
+    let (strips, routes) = run(&muted, |next, source| {
+        next.tracks[source].fader.right_mute = true;
+    });
+    assert!(strips.is_empty() && routes.is_empty());
+    let (_, routes) = run(&muted, |next, source| {
+        next.tracks[source].fader.right_mute = false;
+    });
+    assert_eq!(
+        routes,
+        vec![(
+            send_id.clone(),
+            folded(gain, matrix, false, [false; 2]),
+            false,
+            0
+        )]
+    );
+    // A fader move on the followed source moves no send.
+    let (strips, routes) = run(&current, |next, source| {
+        next.tracks[source].fader.left_db = -6.0;
+    });
+    assert_eq!(strips.len(), 1);
+    assert!(routes.is_empty());
+    // Toggling `follows_mute` on an unmuted source gives no record; on a muted one it does.
+    let toggled = classify_both(
+        &current,
+        |next| next.routes[send].follows_mute = false,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert!(toggled.0.is_empty() && toggled.1.is_empty());
+    let (_, routes) = classify_both(
+        &muted,
+        |next| next.routes[send].follows_mute = false,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert_eq!(
+        routes,
+        vec![(send_id, folded(gain, matrix, false, [false; 2]), false, 0)]
+    );
+    // The same mute on a track nothing follows gives its strip record and no route record.
+    let (strips, routes) = classify_both(
+        &with_bus(false),
+        |next| next.tracks[source].fader.right_mute = true,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert_eq!(strips.len(), 1);
+    assert!(routes.is_empty());
 }
 
 fn vca() -> Vca {
@@ -557,26 +693,383 @@ fn vca() -> Vca {
     }
 }
 
-/// Gate 1(j), G3. Red if a VCA in either model no longer forces a rebuild.
+/// `two_tracks` with VCA `vca` holding the first track, at `left_db`/`right_db` and `muted`.
+fn with_vca(left_db: f32, right_db: f32, muted: [bool; 2]) -> SessionModel {
+    let mut model = two_tracks();
+    let mut group = vca();
+    group.fader = DualMonoFader {
+        left_db,
+        right_db,
+        left_mute: muted[0],
+        right_mute: muted[1],
+    };
+    group.members = vec![model.tracks[0].id.clone()];
+    model.vcas.push(group);
+    normalized(&model)
+}
+
+/// #1558 gates 1 and 3. Red if a VCA's move, a member change or a VCA added or removed still
+/// forces a rebuild, if the record carries a raw value instead of the member's effective one, or if
+/// a VCA move that leaves the member where it was is not silent: a member at +24 dB stays clamped.
 #[test]
-fn any_vca_needs_a_rebuild() {
-    let plain = two_tracks();
-    let fader_move = |next: &mut SessionModel| next.tracks[0].fader.left_db = -6.0;
-    let mut with_vca = plain.clone();
-    with_vca.vcas.push(vca());
+fn a_vca_move_is_the_members_effective_record() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let current = with_vca(0.0, 0.0, [false; 2]);
+    let first = track_id(&current, 0);
     assert_eq!(
-        classify(&with_vca, |next| {
-            next.vcas.clear();
-            fader_move(next);
+        classify(&current, |next| next.vcas[0].fader.left_db = -6.0),
+        Ok(vec![(first.clone(), vec![fader_db(Left, -6.0, 0)], None)])
+    );
+    // Both lanes to one value merge into one record; the other track is not in the group.
+    assert_eq!(
+        classify(&current, |next| {
+            next.vcas[0].fader.left_db = -3.0;
+            next.vcas[0].fader.right_db = -3.0;
         }),
-        Err(LiveRebuild::Vca)
+        Ok(vec![(first.clone(), vec![fader_db(Both, -3.0, 0)], None)])
+    );
+    // The VCA offset adds to the member's own fader.
+    let own = edited(&current, |model| model.tracks[0].fader.right_db = -2.0);
+    assert_eq!(
+        classify(&own, |next| next.vcas[0].fader.right_db = -6.0),
+        Ok(vec![(first.clone(), vec![fader_db(Right, -8.0, 0)], None)])
+    );
+    // A VCA mute is the member's mute, lane by lane.
+    assert_eq!(
+        classify(&current, |next| next.vcas[0].fader.right_mute = true),
+        Ok(vec![(first.clone(), vec![mute(Right, true, 0)], None)])
+    );
+    // A member at +24 dB stays at +24 dB under a positive offset: no record.
+    let loud = edited(&current, |model| {
+        model.tracks[0].fader.left_db = 24.0;
+        model.tracks[0].fader.right_db = 24.0;
+    });
+    assert_eq!(
+        classify(&loud, |next| {
+            next.vcas[0].fader.left_db = 6.0;
+            next.vcas[0].fader.right_db = 6.0;
+        }),
+        Ok(Vec::new())
+    );
+    // An exact replay writes nothing.
+    assert_eq!(classify(&current, |_| {}), Ok(Vec::new()));
+}
+
+/// #1558 D5. Red if a membership change or a VCA added or removed is a rebuild, or does not move
+/// exactly the members it reaches: a second member joins, a nested VCA passes its offset down, a VCA
+/// is added over a member and removed again.
+#[test]
+fn vca_membership_and_the_vca_set_are_live() {
+    use BuiltinLaneSelector::{Both, Left};
+    let current = with_vca(-6.0, -6.0, [false; 2]);
+    let (first, second) = (track_id(&current, 0), track_id(&current, 1));
+    // The second track joins the group: it takes the offset.
+    assert_eq!(
+        classify(&current, |next| {
+            let member = next.tracks[1].id.clone();
+            next.vcas[0].members.push(member);
+        }),
+        Ok(vec![(second.clone(), vec![fader_db(Both, -6.0, 0)], None)])
+    );
+    // The first track leaves: it returns to its own fader.
+    assert_eq!(
+        classify(&current, |next| next.vcas[0].members.clear()),
+        Ok(vec![(first.clone(), vec![fader_db(Both, 0.0, 0)], None)])
+    );
+    // A VCA added over the second track, and a VCA that holds the first VCA (nesting).
+    assert_eq!(
+        classify(&current, |next| {
+            let mut group = vca();
+            group.id = id("outer");
+            group.fader.left_db = -3.0;
+            group.members = vec![next.vcas[0].id.clone()];
+            next.vcas.push(group);
+        }),
+        Ok(vec![(first.clone(), vec![fader_db(Left, -9.0, 0)], None)])
+    );
+    // The VCA removed: its member returns to 0 dB.
+    assert_eq!(
+        classify(&current, |next| next.vcas.clear()),
+        Ok(vec![(first, vec![fader_db(Both, 0.0, 0)], None)])
+    );
+    // A VCA added over nothing changes nothing.
+    assert_eq!(
+        classify(&with_vca(0.0, 0.0, [false; 2]), |next| {
+            let mut group = vca();
+            group.id = id("empty");
+            next.vcas.push(group);
+        }),
+        Ok(Vec::new())
+    );
+}
+
+/// #1558 gate 2. Red if the records diff raw mutes: a track muted by its VCA that is also muted by
+/// its own fader changes no effective value, so toggling its own mute gives no strip record and no
+/// route record, with a following send in the session.
+#[test]
+fn records_follow_effective_values_not_raw_ones() {
+    let mut model = with_bus(true);
+    let source = model
+        .tracks
+        .iter()
+        .position(|track| {
+            matches!(&model.routes[send_index(&model)].source, RouteSource::Track { track_id, .. } if *track_id == track.id)
+        })
+        .expect("the send's source");
+    let mut group = vca();
+    group.fader.left_mute = true;
+    group.members = vec![model.tracks[source].id.clone()];
+    model.vcas.push(group);
+    let current = normalized(&model);
+    let (strips, routes) = classify_both(
+        &current,
+        |next| next.tracks[source].fader.left_mute = true,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert!(strips.is_empty() && routes.is_empty());
+    // Unmuting the VCA while the track's own mute holds is silent too.
+    let held = edited(&current, |model| {
+        model.tracks[source].fader.left_mute = true
+    });
+    let (strips, routes) = classify_both(
+        &held,
+        |next| next.vcas[0].fader.left_mute = false,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert!(strips.is_empty() && routes.is_empty());
+    // The same VCA mute lifted with no own mute reopens the left column of the send.
+    let (strips, routes) = classify_both(
+        &current,
+        |next| next.vcas[0].fader.left_mute = false,
+        STEP,
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert_eq!(strips.len(), 1);
+    assert_eq!(routes.len(), 1);
+}
+
+/// #1558 gate 5, D7. Red if a record takes the wrong row's length: a VCA offset edit's own length
+/// moves the member, the session's `fader_ms` length applies without one, a membership change takes
+/// the `VcaOffset` row's session length, the strip's own `fader_db` edit wins over the VCA's on a
+/// lane it moved, and a gate change from the source's mute takes the source's `Mute` length.
+#[test]
+fn vca_and_follow_records_take_the_ramp_of_the_edit_that_moved_them() {
+    use BuiltinLaneSelector::{Both, Left};
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = with_vca(0.0, 0.0, [false; 2]);
+    let vca_target = EditRampTarget::Vca(current.vcas[0].id.clone());
+    let first = track_id(&current, 0);
+    let strips = |current: &SessionModel,
+                  edit: fn(&mut SessionModel),
+                  ramps: &EditRamps|
+     -> Vec<TrackFaderRecord> {
+        let (strips, _) = classify_both(current, edit, session_ramps, ramps).expect("live");
+        assert_eq!(strips.len(), 1);
+        assert_eq!(strips[0].0, first);
+        strips[0].1.clone()
+    };
+    let mut ramp = EditRamps::new();
+    ramp.set(&vca_target, EditRampRow::VcaFader, Some(480));
+    assert_eq!(
+        strips(&current, |next| next.vcas[0].fader.left_db = -6.0, &ramp),
+        vec![fader_db(Left, -6.0, 480)]
+    );
+    // No edit length: `fader_ms`.
+    assert_eq!(
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_db = -6.0,
+            &EditRamps::new()
+        ),
+        vec![fader_db(Left, -6.0, 100)]
+    );
+    // A mute takes the VCA mute's edit, else `mute_ms`.
+    let mut mute_ramp = EditRamps::new();
+    mute_ramp.set(&vca_target, EditRampRow::VcaMute, Some(48));
+    assert_eq!(
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_mute = true,
+            &mute_ramp
+        ),
+        vec![mute(Left, true, 48)]
     );
     assert_eq!(
-        classify(&plain, |next| {
-            next.vcas.push(vca());
-            fader_move(next);
-        }),
-        Err(LiveRebuild::Vca)
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_mute = true,
+            &EditRamps::new()
+        ),
+        vec![mute(Left, true, 300)]
+    );
+    // The strip's own edit first: own length 0 steps the lane the strip moved, and the VCA's 480
+    // applies to the lane only it moved; the two lanes are two records.
+    let mut both = EditRamps::new();
+    both.set(&vca_target, EditRampRow::VcaFader, Some(480));
+    both.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Fader,
+        Some(0),
+    );
+    assert_eq!(
+        strips(
+            &current,
+            |next| {
+                next.tracks[0].fader.left_db = -2.0;
+                next.vcas[0].fader.right_db = -6.0;
+            },
+            &both
+        ),
+        vec![
+            fader_db(Left, -2.0, 0),
+            fader_db(BuiltinLaneSelector::Right, -6.0, 480)
+        ]
+    );
+    // One value, one length: both lanes merge.
+    assert_eq!(
+        strips(
+            &current,
+            |next| {
+                next.vcas[0].fader.left_db = -6.0;
+                next.vcas[0].fader.right_db = -6.0;
+            },
+            &ramp
+        ),
+        vec![fader_db(Both, -6.0, 480)]
+    );
+    // A membership change has no edit length: the `VcaOffset` row's session length.
+    let loud = with_vca(-6.0, -6.0, [false; 2]);
+    let (changed, _) = classify_both(
+        &loud,
+        |next| next.vcas[0].members.clear(),
+        session_ramps,
+        &ramp,
+    )
+    .expect("live");
+    assert_eq!(changed[0].1, vec![fader_db(Both, 0.0, 100)]);
+}
+
+/// #1558 gate 5. Red if a gate change from the source's mute ramps on its own: the send takes the
+/// length of the source strip's `Mute` record of the same transaction, so a strip and the sends that
+/// follow it ramp together; a gate change that the send's own `follows_mute` or `mute` edit caused
+/// takes that edit's length.
+#[test]
+fn a_followed_gate_ramps_with_its_source_strips_mute() {
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = with_bus(true);
+    let send = send_index(&current);
+    let source = 0;
+    assert!(matches!(
+        &current.routes[send].source,
+        RouteSource::Track { track_id, .. } if *track_id == current.tracks[source].id
+    ));
+    let lengths = |current: &SessionModel, edit: fn(&mut SessionModel), edit_ramps: &EditRamps| {
+        let (strips, routes) =
+            classify_both(current, edit, session_ramps, edit_ramps).expect("live");
+        (
+            strips
+                .iter()
+                .flat_map(|strip| strip.1.clone())
+                .collect::<Vec<_>>(),
+            routes.iter().map(|route| route.3).collect::<Vec<_>>(),
+        )
+    };
+    // The source's own mute edit, 96 samples: the send follows at 96.
+    let mut ramp = EditRamps::new();
+    ramp.set(
+        &EditRampTarget::Strip(current.tracks[source].id.clone()),
+        EditRampRow::Mute,
+        Some(96),
+    );
+    let (records, routes) = lengths(
+        &current,
+        |next| next.tracks[0].fader.left_mute = true,
+        &ramp,
+    );
+    assert_eq!(records, vec![mute(BuiltinLaneSelector::Left, true, 96)]);
+    assert_eq!(routes, vec![96]);
+    // No edit length: `mute_ms` for both.
+    let (_, routes) = lengths(
+        &current,
+        |next| next.tracks[0].fader.left_mute = true,
+        &EditRamps::new(),
+    );
+    assert_eq!(routes, vec![300]);
+    // The send's own `follows_mute` edit on a muted source takes its edit's length.
+    let muted = edited(&current, |model| model.tracks[0].fader.left_mute = true);
+    let mut route_ramp = EditRamps::new();
+    route_ramp.set(
+        &EditRampTarget::Route(current.routes[send].id.clone()),
+        EditRampRow::RouteMute,
+        Some(7),
+    );
+    let (records, routes) = lengths(
+        &muted,
+        |next| {
+            let send = send_index(next);
+            next.routes[send].follows_mute = false;
+        },
+        &route_ramp,
+    );
+    assert!(records.is_empty());
+    assert_eq!(routes, vec![7]);
+}
+
+/// #1558 D7 (decision record, batch 3 fold). A route whose gain also changes in the transaction
+/// that its source's mute gated it takes the source's `Mute` length, not the `SendGain` row's and
+/// not the route's own `RouteGain` edit: the gate governs the record, so the send follows its source's
+/// ramp. Red if a record that carries a gain change and a source-caused gate change takes the gain's
+/// length, so the send would ramp apart from the strip that gates it.
+#[test]
+fn a_gain_change_with_a_source_caused_gate_change_takes_the_sources_mute_length() {
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = with_bus(true);
+    let send = send_index(&current);
+    let mut ramp = EditRamps::new();
+    ramp.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Mute,
+        Some(96),
+    );
+    ramp.set(
+        &EditRampTarget::Route(current.routes[send].id.clone()),
+        EditRampRow::RouteGain,
+        Some(7),
+    );
+    let (_, routes) = classify_both(
+        &current,
+        |next| {
+            next.tracks[0].fader.left_mute = true;
+            let send = send_index(next);
+            next.routes[send].gain_db = -3.0;
+        },
+        session_ramps,
+        &ramp,
+    )
+    .expect("live");
+    assert_eq!(
+        routes.iter().map(|route| route.3).collect::<Vec<_>>(),
+        vec![96]
     );
 }
 
@@ -1260,8 +1753,503 @@ fn push_delta(
             if let Some(record) = strip.matrix {
                 control.producer.write(stamp, record);
             }
+            let input = control.input.as_mut().expect("the input lane");
+            for &record in &strip.input {
+                input.write(stamp, record);
+            }
+        }
+        for route in &delta.routes {
+            let index = host_core::route_producer_position(&handles.route_controls, route.route_id)
+                .expect("route lane");
+            handles.route_controls[index].write(stamp, route.record);
         }
     });
+}
+
+// Issue #1556: the strip input family (trim, polarity, input filters).
+
+type InputStrip = (String, Vec<TrackInputRecord>);
+
+fn classify_input(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<Vec<InputStrip>, LiveRebuild> {
+    classify_input_with(current, edit, STEP, &EditRamps::new())
+}
+
+fn classify_input_with(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+) -> Result<Vec<InputStrip>, LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, ramps, edit_ramps).map(|delta| {
+        delta
+            .strips
+            .iter()
+            .filter(|strip| !strip.input.is_empty())
+            .map(|strip| (strip.strip_id.to_owned(), strip.input.clone()))
+            .collect()
+    })
+}
+
+fn trim(lanes: BuiltinLaneSelector, db: f32, smoothing_samples: u32) -> TrackInputRecord {
+    TrackInputRecord::TrimDb {
+        lanes,
+        db,
+        smoothing_samples,
+    }
+}
+
+fn polarity(
+    lanes: BuiltinLaneSelector,
+    inverted: bool,
+    smoothing_samples: u32,
+) -> TrackInputRecord {
+    TrackInputRecord::PolarityInvert {
+        lanes,
+        inverted,
+        smoothing_samples,
+    }
+}
+
+/// The filter records [`InputFilterPreparer`] designs for `edits` from `seeds` (left HPF, left LPF,
+/// right HPF, right LPF), called directly: the records a classifier must emit are exactly these.
+fn designed_filters(
+    rate: u32,
+    seeds: [f32; 4],
+    edits: &[InputFilterEdit],
+) -> Vec<TrackInputRecord> {
+    let mut out = [PreparedInputFilterTarget {
+        lanes: BuiltinLaneSelector::Both,
+        section: 0,
+        pair: [0.0; 2],
+        coefficients: [0.0; 6],
+    }; host_core::INPUT_FILTER_TARGET_CAPACITY];
+    let (_, count) = InputFilterPreparer
+        .prepare(rate, &seeds, edits, &mut out)
+        .expect("the edits design");
+    out[..count]
+        .iter()
+        .map(|&target| TrackInputRecord::PreparedFilter { target })
+        .collect()
+}
+
+fn filter_edit(parameter_id: u32, channel: Lane, value0: f32, value1: f32) -> InputFilterEdit {
+    InputFilterEdit {
+        parameter_id,
+        channel,
+        value0,
+        value1,
+    }
+}
+
+/// `two_tracks` with the first track's lanes set to `left` and `right` `(hpf_hz, lpf_hz)`.
+fn with_filters(left: (f32, f32), right: (f32, f32)) -> SessionModel {
+    let mut model = two_tracks();
+    set_filters(&mut model, left, right);
+    normalized(&model)
+}
+
+fn set_filters(model: &mut SessionModel, left: (f32, f32), right: (f32, f32)) {
+    let builtins = &mut model.tracks[0].builtins;
+    (builtins.left.hpf_hz, builtins.left.lpf_hz) = left;
+    (builtins.right.hpf_hz, builtins.right.lpf_hz) = right;
+}
+
+/// #1556 D3. Red if a trim record lands on the wrong lane, is not merged into one `Both` when both
+/// lanes move to the same dB, is emitted for a move that keeps the gain (`0.0` to `-0.0`), or if
+/// the gain domain is not the setter's.
+#[test]
+fn trim_records_address_exactly_the_changed_lanes() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let one = |records: Vec<TrackInputRecord>| Ok(vec![(first.clone(), records)]);
+    assert_eq!(
+        classify_input(&current, |next| next.tracks[0].builtins.left.trim_db = -6.0),
+        one(vec![trim(Left, -6.0, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -3.0;
+            next.tracks[0].builtins.right.trim_db = -3.0;
+        }),
+        one(vec![trim(Both, -3.0, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -2.0;
+            next.tracks[0].builtins.right.trim_db = -4.0;
+        }),
+        one(vec![trim(Left, -2.0, 0), trim(Right, -4.0, 0)])
+    );
+    // Only the lane that moved gets a record, whatever the other holds.
+    let split = edited(&current, |model| {
+        model.tracks[0].builtins.left.trim_db = -2.0
+    });
+    assert_eq!(
+        classify_input(&split, |next| next.tracks[0].builtins.right.trim_db = -2.0),
+        one(vec![trim(Right, -2.0, 0)])
+    );
+    // `0.0` to `-0.0` keeps the gain: the model's bits change and the plan does not.
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.trim_db = -0.0;
+            next.tracks[0].builtins.right.trim_db = -0.0;
+        }),
+        Ok(Vec::new())
+    );
+    for db in [24.0_f32, -144.0] {
+        assert!(classify_input(&current, |next| next.tracks[0].builtins.left.trim_db = db).is_ok());
+    }
+    for db in [24.0_f32.next_up(), (-144.0_f32).next_down(), f32::NAN] {
+        assert_eq!(
+            classify_input(&current, |next| next.tracks[0].builtins.right.trim_db = db),
+            Err(LiveRebuild::Domain),
+            "{db}"
+        );
+    }
+}
+
+/// #1556 D3. Red if a polarity record goes to the wrong lane, or splits two lanes that flip to
+/// one value.
+#[test]
+fn polarity_records_address_exactly_the_changed_lanes() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let one = |records: Vec<TrackInputRecord>| Ok(vec![(first.clone(), records)]);
+    assert_eq!(
+        classify_input(&current, |next| next.tracks[0]
+            .builtins
+            .left
+            .polarity_invert = true),
+        one(vec![polarity(Left, true, 0)])
+    );
+    assert_eq!(
+        classify_input(&current, |next| {
+            next.tracks[0].builtins.left.polarity_invert = true;
+            next.tracks[0].builtins.right.polarity_invert = true;
+        }),
+        one(vec![polarity(Both, true, 0)])
+    );
+    // Two lanes that change to different values stay two records.
+    let split = edited(&current, |model| {
+        model.tracks[0].builtins.left.polarity_invert = true;
+    });
+    assert_eq!(
+        classify_input(&split, |next| {
+            next.tracks[0].builtins.left.polarity_invert = false;
+            next.tracks[0].builtins.right.polarity_invert = true;
+        }),
+        one(vec![polarity(Left, false, 0), polarity(Right, true, 0)])
+    );
+    // A lane that keeps its value gets no record.
+    assert_eq!(
+        classify_input(&split, |next| next.tracks[0]
+            .builtins
+            .right
+            .polarity_invert = true),
+        one(vec![polarity(Right, true, 0)])
+    );
+}
+
+/// #1556 D3. Red if a trim or polarity record reads another row's ramp: a trim takes the fader's
+/// length, a polarity flip twice the mute's, and an edit's own length (an explicit 0 included) is
+/// kept as given, not doubled.
+#[test]
+fn input_records_carry_their_rows_ramps() {
+    use BuiltinLaneSelector::Both;
+    let current = two_tracks();
+    let first = track_id(&current, 0);
+    let flip_and_ride = |next: &mut SessionModel| {
+        let builtins = &mut next.tracks[0].builtins;
+        for lane in [&mut builtins.left, &mut builtins.right] {
+            lane.trim_db = -6.0;
+            lane.polarity_invert = true;
+        }
+    };
+    let table = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    let current = with_smoothing(&current, table);
+    let next = edited(&current, flip_and_ride);
+    let ramps = LiveRamps::for_session(&next);
+    // At 48 kHz: fader 15 ms is 720 samples, mute 5 ms is 240, a flip twice that.
+    assert_eq!(
+        classify_input_with(&current, flip_and_ride, ramps, &EditRamps::new()),
+        Ok(vec![(
+            first.clone(),
+            vec![trim(Both, -6.0, 720), polarity(Both, true, 480)]
+        )])
+    );
+    for explicit in [0, 37] {
+        let mut edit_ramps = EditRamps::new();
+        edit_ramps.set(
+            &EditRampTarget::Strip(current.tracks[0].id.clone()),
+            EditRampRow::Input,
+            Some(explicit),
+        );
+        assert_eq!(
+            classify_input_with(&current, flip_and_ride, ramps, &edit_ramps),
+            Ok(vec![(
+                first.clone(),
+                vec![trim(Both, -6.0, explicit), polarity(Both, true, explicit)]
+            )])
+        );
+    }
+    // The other strip's entry changes nothing.
+    let mut other = EditRamps::new();
+    other.set(
+        &EditRampTarget::Strip(current.tracks[1].id.clone()),
+        EditRampRow::Input,
+        Some(37),
+    );
+    assert_eq!(
+        classify_input_with(&current, flip_and_ride, ramps, &other),
+        Ok(vec![(
+            first,
+            vec![trim(Both, -6.0, 720), polarity(Both, true, 480)]
+        )])
+    );
+}
+
+/// #1556 D4. Red if a filter target is designed from the wrong seeds, a one-sided change is sent
+/// as a pair or the reverse, two equal lanes are not merged into one `Both` target, or a
+/// `-0.0` cutoff is a change.
+#[test]
+fn filter_records_are_the_preparers_targets_for_the_changed_values() {
+    let rate = two_tracks().sample_rate_hz;
+    let case = |before: ((f32, f32), (f32, f32)), after: ((f32, f32), (f32, f32))| {
+        let current = with_filters(before.0, before.1);
+        classify_input(&current, |next| set_filters(next, after.0, after.1)).map(|strips| {
+            strips
+                .into_iter()
+                .map(|(_, records)| records)
+                .collect::<Vec<_>>()
+        })
+    };
+    let seeds = |before: ((f32, f32), (f32, f32))| [before.0.0, before.0.1, before.1.0, before.1.1];
+    let steady = ((200.0, 2_000.0), (0.0, 0.0));
+
+    // One lane, one side: the left HPF moves; the right lane and the left LPF are untouched.
+    let moved = ((300.0, 2_000.0), (0.0, 0.0));
+    assert_eq!(
+        case(steady, moved),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(3, Lane::Left, 300.0, 0.0)]
+        )])
+    );
+    // The left LPF disables.
+    let disabled = ((200.0, 0.0), (0.0, 0.0));
+    assert_eq!(
+        case(steady, disabled),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(4, Lane::Left, 0.0, 0.0)]
+        )])
+    );
+    // The same one-sided change on both lanes is one `Both` edit; two lanes with the same final
+    // pair design equal targets, which merge into one `Both` target.
+    let matching = ((200.0, 2_000.0), (0.0, 2_000.0));
+    let records = case(matching, ((50.0, 2_000.0), (50.0, 2_000.0))).expect("live");
+    assert_eq!(
+        records,
+        vec![designed_filters(
+            rate,
+            seeds(matching),
+            &[filter_edit(3, Lane::Both, 50.0, 0.0)]
+        )]
+    );
+    assert!(
+        matches!(
+            records[0][..],
+            [TrackInputRecord::PreparedFilter { target }] if target.lanes == BuiltinLaneSelector::Both
+        ),
+        "{records:?}"
+    );
+    // Lanes whose final pairs differ keep one target each, though the edit is one `Both` edit.
+    let records = case(steady, ((50.0, 2_000.0), (50.0, 0.0))).expect("live");
+    assert_eq!(
+        records,
+        vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(3, Lane::Both, 50.0, 0.0)]
+        )]
+    );
+    assert_eq!(records[0].len(), 2);
+    // Different sides on the two lanes: one edit each; the preparer returns the HPF section first.
+    let sides = ((300.0, 2_000.0), (0.0, 4_000.0));
+    assert_eq!(
+        case(steady, sides),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[
+                filter_edit(3, Lane::Left, 300.0, 0.0),
+                filter_edit(4, Lane::Right, 4_000.0, 0.0)
+            ]
+        )])
+    );
+    // Both of a lane's values moving is one atomic pair edit, which a pair of one-sided edits
+    // would refuse: the HPF passes the old LPF.
+    let crossing = ((3_000.0, 6_000.0), (0.0, 0.0));
+    assert!(
+        InputFilterPreparer
+            .prepare(
+                rate,
+                &seeds(steady),
+                &[filter_edit(3, Lane::Left, 3_000.0, 0.0)],
+                &mut [PreparedInputFilterTarget {
+                    lanes: BuiltinLaneSelector::Both,
+                    section: 0,
+                    pair: [0.0; 2],
+                    coefficients: [0.0; 6],
+                }; 4],
+            )
+            .is_err(),
+        "the HPF alone crosses the LPF"
+    );
+    assert_eq!(
+        case(steady, crossing),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(0, Lane::Left, 3_000.0, 6_000.0)]
+        )])
+    );
+    // The same pair on both lanes is one `Both` pair edit.
+    let both_pairs = ((3_000.0, 6_000.0), (3_000.0, 6_000.0));
+    assert_eq!(
+        case(steady, both_pairs),
+        Ok(vec![designed_filters(
+            rate,
+            seeds(steady),
+            &[filter_edit(0, Lane::Both, 3_000.0, 6_000.0)]
+        )])
+    );
+    // A filter-off value is `+0.0` only: `validate_input_filter_pair` refuses `-0.0` as it refuses
+    // a rebuild's preparation, so the rebuild reports it and no live commit acks it.
+    assert_eq!(
+        case(steady, ((200.0, 2_000.0), (-0.0, -0.0))),
+        Err(LiveRebuild::Domain)
+    );
+    // Rewriting the same values is no record.
+    assert_eq!(case(steady, steady), Ok(Vec::new()));
+}
+
+/// #1556 D4. Red if a cutoff the filter domain refuses is acked live: above Nyquist, non-finite,
+/// below the rate-keyed minimum, or an HPF at or above the LPF.
+#[test]
+fn filter_values_the_domain_refuses_need_a_rebuild() {
+    let current = with_filters((0.0, 0.0), (0.0, 0.0));
+    let nyquist = current.sample_rate_hz as f32 / 2.0;
+    for (hpf, lpf) in [
+        (nyquist, 0.0),
+        (f32::NAN, 0.0),
+        (0.0, f32::INFINITY),
+        (5.0, 0.0),
+        (-1.0, 0.0),
+        (1_000.0, 1_000.0),
+        (2_000.0, 1_000.0),
+    ] {
+        assert_eq!(
+            classify_input(&current, |next| set_filters(next, (hpf, lpf), (0.0, 0.0))),
+            Err(LiveRebuild::Domain),
+            "{hpf} {lpf}"
+        );
+    }
+    assert!(
+        classify_input(&current, |next| set_filters(
+            next,
+            (80.0, 8_000.0),
+            (10.0, 0.0)
+        ))
+        .is_ok()
+    );
+}
+
+/// #1556 D2. Red if the records of one strip are not trims, then polarities, then filter targets,
+/// each left before right, or if a track's input values reach another strip.
+#[test]
+fn a_strips_input_records_are_trims_then_polarities_then_targets() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let rate = two_tracks().sample_rate_hz;
+    let current = with_filters((0.0, 0.0), (0.0, 0.0));
+    let strips = classify_input(&current, |next| {
+        let builtins = &mut next.tracks[0].builtins;
+        builtins.right.hpf_hz = 100.0;
+        builtins.left.lpf_hz = 8_000.0;
+        builtins.right.polarity_invert = true;
+        builtins.left.polarity_invert = true;
+        builtins.left.trim_db = -3.0;
+        builtins.right.trim_db = -4.0;
+        // The second track's values do not move.
+        next.tracks[1].fader.left_db = -6.0;
+    })
+    .expect("live");
+    assert_eq!(strips.len(), 1, "one strip has input records");
+    let (id, records) = &strips[0];
+    assert_eq!(*id, track_id(&current, 0));
+    let filters = designed_filters(
+        rate,
+        [0.0; 4],
+        &[
+            filter_edit(4, Lane::Left, 8_000.0, 0.0),
+            filter_edit(3, Lane::Right, 100.0, 0.0),
+        ],
+    );
+    assert_eq!(filters.len(), 2);
+    let mut expected = vec![
+        trim(Left, -3.0, 0),
+        trim(Right, -4.0, 0),
+        polarity(Both, true, 0),
+    ];
+    expected.extend(filters);
+    assert_eq!(*records, expected);
+}
+
+/// #1556 D5. Red if a submix strip's input section stays structural or its records are addressed
+/// to a track.
+#[test]
+fn a_submix_strip_input_section_is_live() {
+    use BuiltinLaneSelector::{Both, Left};
+    let rate = with_bus(false).sample_rate_hz;
+    let current = with_bus(false);
+    let strips = classify_input(&current, |next| {
+        let builtins = &mut next.submixes[0].builtins;
+        builtins.left.trim_db = -6.0;
+        builtins.left.polarity_invert = true;
+        builtins.right.polarity_invert = true;
+        builtins.left.hpf_hz = 80.0;
+    })
+    .expect("a submix input section is live");
+    assert_eq!(strips.len(), 1);
+    assert_eq!(strips[0].0, "bus");
+    let seeds = {
+        let builtins = &current.submixes[0].builtins;
+        [
+            builtins.left.hpf_hz,
+            builtins.left.lpf_hz,
+            builtins.right.hpf_hz,
+            builtins.right.lpf_hz,
+        ]
+    };
+    let mut expected = vec![trim(Left, -6.0, 0), polarity(Both, true, 0)];
+    expected.extend(designed_filters(
+        rate,
+        seeds,
+        &[filter_edit(3, Lane::Left, 80.0, 0.0)],
+    ));
+    assert_eq!(strips[0].1, expected);
 }
 
 // Issue #1264: effect parameter records.
@@ -2096,7 +3084,7 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
             .builtins
             .right
             .delay_samples = 64),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(11)))
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
     // The limiter's lookahead, beside a live threshold edit of the same instance.
     let limiter = with_limiter();
@@ -2127,19 +3115,23 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
         .iter()
         .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
         .expect("the send into the bus");
+    // The send into the bus is live (#1557), and what it follows is live too (#1558).
     assert_eq!(
         classify(&bus, |next| next.routes[send].gain_db = -1.0),
-        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-            issue: 1557
-        }))
+        Ok(Vec::new())
+    );
+    assert!(
+        classify(&with_bus(true), |next| next.routes[send].follows_mute =
+            false)
+        .is_ok()
     );
     // A live fader edit does not hide a rebuild-only edit, or a structural one.
     assert_eq!(
         classify(&current, |next| {
             next.tracks[0].fader.left_db = -6.0;
-            next.tracks[1].builtins.left.trim_db = 3.0;
+            next.tracks[1].builtins.left.delay_samples = 64;
         }),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(TRIM_DB)))
+        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
     let effects = with_effects();
     assert_eq!(
@@ -2312,4 +3304,536 @@ fn one_edit_lowers_one_owner() {
         }),
         (2, 1)
     );
+}
+
+// Issue #1557: the route family (a send's gain, mute and matrix).
+
+/// One route record, owned: the route's ID, its target, whether it silences, its ramp length.
+type RouteRecordRow = (String, [f32; 4], bool, u32);
+
+fn classify_routes_with(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+) -> Result<Vec<RouteRecordRow>, LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, ramps, edit_ramps).map(|delta| {
+        assert!(
+            delta.strips.is_empty() && delta.effects.is_empty(),
+            "a send edit moves no strip and no effect"
+        );
+        delta
+            .routes
+            .iter()
+            .map(|route| {
+                (
+                    route.route_id.to_owned(),
+                    route.record.target(),
+                    route.record.mute(),
+                    route.record.length(),
+                )
+            })
+            .collect()
+    })
+}
+
+fn classify_routes(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<Vec<RouteRecordRow>, LiveRebuild> {
+    classify_routes_with(current, edit, STEP, &EditRamps::new())
+}
+
+/// The index of the send into the bus of [`with_bus`].
+fn send_index(model: &SessionModel) -> usize {
+    model
+        .routes
+        .iter()
+        .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .expect("the send into the bus")
+}
+
+fn matrix_of(route: &session::Route) -> [f32; 4] {
+    let matrix = &route.channel_matrix;
+    [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
+}
+
+fn folded(gain_db: f32, matrix: [f32; 4], mute: bool, source_lane_muted: [bool; 2]) -> [f32; 4] {
+    graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)
+        .expect("in the route domain")
+}
+
+/// Gate 1. Red if a send record carries other bits than the coefficients preparation folds from the
+/// post-commit values, or is emitted for a send whose held target does not change: a gain edit on a
+/// muted send (the silenced `+0.0` target stays as it was) or a sign-of-zero rewrite. The unmute
+/// then carries the gain the muted edit set.
+#[test]
+fn send_records_are_the_folded_target_of_the_post_commit_values() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let id = current.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&current.routes[send]);
+    let gain = current.routes[send].gain_db;
+
+    assert_eq!(classify_routes(&current, |_| {}), Ok(Vec::new()));
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = -6.0),
+        Ok(vec![(
+            id.clone(),
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    let swapped = [0.0, 1.0, 1.0, 0.0];
+    assert_eq!(
+        classify_routes(&current, |next| {
+            let m = &mut next.routes[send].channel_matrix;
+            (m.ll, m.lr, m.rl, m.rr) = (0.0, 1.0, 1.0, 0.0);
+        }),
+        Ok(vec![(
+            id.clone(),
+            folded(gain, swapped, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].mute = true),
+        Ok(vec![(id.clone(), [0.0; 4], true, 0)])
+    );
+
+    // A gain edit on a muted send gives no record, and the later unmute carries the new gain.
+    let muted = edited(&current, |model| model.routes[send].mute = true);
+    assert_eq!(
+        classify_routes(&muted, |next| next.routes[send].gain_db = -6.0),
+        Ok(Vec::new())
+    );
+    let edited_while_muted = edited(&muted, |model| model.routes[send].gain_db = -6.0);
+    assert_eq!(
+        classify_routes(&edited_while_muted, |next| next.routes[send].mute = false),
+        Ok(vec![(
+            id,
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+}
+
+/// Gate 1. Red if a following send's record ignores the source lane mutes (the rebuilt plan would
+/// zero a column the record leaves), or zeroes them for a send that does not follow.
+#[test]
+fn a_following_send_record_zeroes_the_muted_source_lane() {
+    let base = with_bus(true);
+    let send = send_index(&base);
+    let source = base
+        .tracks
+        .iter()
+        .position(|track| {
+            matches!(&base.routes[send].source, RouteSource::Track { track_id, .. } if *track_id == track.id)
+        })
+        .expect("the send's source track");
+    let id = base.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&base.routes[send]);
+    let current = edited(&base, |model| model.tracks[source].fader.left_mute = true);
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = -3.0),
+        Ok(vec![(
+            id.clone(),
+            folded(-3.0, matrix, false, [true, false]),
+            false,
+            0
+        )])
+    );
+    // Both lanes muted: the send is silenced by its source, and a gain edit changes nothing.
+    let both = edited(&current, |model| {
+        model.tracks[source].fader.right_mute = true
+    });
+    assert_eq!(
+        classify_routes(&both, |next| next.routes[send].gain_db = -3.0),
+        Ok(Vec::new())
+    );
+    // The same edit on a send that does not follow keeps both columns.
+    let plain = edited(&with_bus(false), |model| {
+        model.tracks[source].fader.left_mute = true
+    });
+    assert_eq!(
+        classify_routes(&plain, |next| next.routes[send].gain_db = -3.0),
+        Ok(vec![(
+            id,
+            folded(-3.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+}
+
+/// Gate 3. Red if a changed field moves faster than its own row's ramp, or a mute toggle takes a
+/// gain's length.
+#[test]
+fn send_records_carry_the_longest_changed_rows_ramp_and_a_mute_takes_its_own() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let target = EditRampTarget::Route(current.routes[send].id.clone());
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let length = |edit: &EditRamps, change: fn(&mut SessionModel, usize)| {
+        let records =
+            classify_routes_with(&current, |next| change(next, send), session_ramps, edit)
+                .expect("a live send edit");
+        assert_eq!(records.len(), 1);
+        records[0].3
+    };
+    let gain_and_matrix = |next: &mut SessionModel, send: usize| {
+        next.routes[send].gain_db = -6.0;
+        next.routes[send].channel_matrix.lr = 0.5;
+    };
+    // Session lengths: the gain's 100 and the matrix's 200 give 200.
+    assert_eq!(length(&EditRamps::new(), gain_and_matrix), 200);
+    // The edits' own lengths, 240 and 480: one record of 480.
+    let mut edits = EditRamps::new();
+    edits.set(&target, EditRampRow::RouteGain, Some(240));
+    edits.set(&target, EditRampRow::RouteMatrix, Some(480));
+    assert_eq!(length(&edits, gain_and_matrix), 480);
+    // A row that did not change does not lengthen the ramp.
+    assert_eq!(
+        length(&edits, |next, send| next.routes[send].gain_db = -6.0),
+        240
+    );
+    // The gate changes: the mute row governs, whatever else moved.
+    let mut edits = EditRamps::new();
+    edits.set(&target, EditRampRow::RouteMute, Some(7));
+    edits.set(&target, EditRampRow::RouteGain, Some(900));
+    let mute_and_gain = |next: &mut SessionModel, send: usize| {
+        next.routes[send].mute = true;
+        next.routes[send].gain_db = -6.0;
+    };
+    assert_eq!(length(&edits, mute_and_gain), 7);
+    assert_eq!(length(&EditRamps::new(), mute_and_gain), 300);
+    // An explicit zero is a step.
+    let mut step = EditRamps::new();
+    step.set(&target, EditRampRow::RouteGain, Some(0));
+    assert_eq!(
+        length(&step, |next, send| next.routes[send].gain_db = -6.0),
+        0
+    );
+}
+
+/// Gate 4 (classifier half). Red if a send value the route domain refuses, or a ramp the cell
+/// cannot hold, is acked live: the rebuild's preparation refuses it with its own diagnostic.
+#[test]
+fn send_values_outside_the_route_domain_need_a_rebuild() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = f32::NAN),
+        Err(LiveRebuild::Domain)
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = 1.0e6),
+        Err(LiveRebuild::Domain)
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].channel_matrix.ll = 1.0e6),
+        Err(LiveRebuild::Domain)
+    );
+    // The value is checked whether or not the send is muted.
+    let muted = edited(&current, |model| model.routes[send].mute = true);
+    assert_eq!(
+        classify_routes(&muted, |next| next.routes[send].gain_db = f32::INFINITY),
+        Err(LiveRebuild::Domain)
+    );
+    let mut too_long = EditRamps::new();
+    too_long.set(
+        &EditRampTarget::Route(current.routes[send].id.clone()),
+        EditRampRow::RouteGain,
+        Some((1 << 22) + 1),
+    );
+    assert_eq!(
+        classify_routes_with(
+            &current,
+            |next| next.routes[send].gain_db = -6.0,
+            STEP,
+            &too_long
+        ),
+        Err(LiveRebuild::Domain)
+    );
+}
+
+/// Gate 2. Red if a route into the output loses its fold through a live edit: its gain, mute and
+/// matrix are rebuilds for the optimisation reason, at any tap.
+#[test]
+fn output_route_values_stay_rebuilds() {
+    let mut model = two_tracks();
+    model.routes[0].source = RouteSource::Track {
+        track_id: model.tracks[0].id.clone(),
+        tap: SendTap::PreFader,
+    };
+    let current = normalized(&model);
+    assert!(matches!(
+        current.routes[0].destination,
+        RouteDestination::OutputInput { .. }
+    ));
+    for edit in [
+        (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
+        |next| next.routes[0].mute = true,
+        |next| next.routes[0].channel_matrix.lr = 0.5,
+    ] {
+        assert_eq!(
+            classify_routes(&current, edit),
+            Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation))
+        );
+    }
+}
+
+/// Gate 1, Gate 5. Red if a pushed send record renders other bits than a plan prepared from the
+/// post-commit model: gain, matrix and mute on one send, and the later unmute of a send whose gain
+/// moved while it was muted. The live plan has the route lane, so its send loses its fold.
+#[test]
+fn pushed_send_records_render_the_rebuilt_plan() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let next = normalized(&edited(&current, |next| {
+        next.routes[send].gain_db = -6.0;
+        let m = &mut next.routes[send].channel_matrix;
+        (m.ll, m.lr, m.rl, m.rr) = (0.25, 0.75, -0.5, 1.0);
+    }));
+    let delta = classify_live_delta(&current, &next, STEP, &EditRamps::new()).expect("live");
+    assert_eq!(delta.routes.len(), 1);
+
+    let current_compiled = compile(&current);
+    let request = HostLiveControlRequest::default();
+    let (mut live, mut handles) =
+        prepare_host_runtime_with_live_controls(&current_compiled, &caps(), &request)
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+    assert_eq!(handles.route_controls.len(), 1);
+    let mut gate = live
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    push_delta(&mut handles, &mut gate, &delta);
+    let prepare = |compiled: &session::CompiledSession| {
+        prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+    };
+    let planes = feed(4_096);
+    let expected = render(&mut prepare(&compile(&next)), &planes);
+    assert_ne!(
+        expected,
+        render(&mut prepare(&current_compiled), &planes),
+        "the edit changes the output"
+    );
+    assert_eq!(render(&mut live, &planes), expected);
+
+    // Mute, then a gain move while muted (no record), then the unmute.
+    let muted = normalized(&edited(&next, |model| model.routes[send].mute = true));
+    let mute = classify_live_delta(&next, &muted, STEP, &EditRamps::new()).expect("live");
+    push_delta(&mut handles, &mut gate, &mute);
+    let moved = normalized(&edited(&muted, |model| model.routes[send].gain_db = -12.0));
+    let held = classify_live_delta(&muted, &moved, STEP, &EditRamps::new()).expect("live");
+    assert!(held.routes.is_empty());
+    let unmuted = normalized(&edited(&moved, |model| model.routes[send].mute = false));
+    let unmute = classify_live_delta(&moved, &unmuted, STEP, &EditRamps::new()).expect("live");
+    assert_eq!(unmute.routes.len(), 1);
+    push_delta(&mut handles, &mut gate, &unmute);
+    let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
+    let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
+    assert!(
+        second_half.iter().any(|bits| f32::from_bits(*bits) != 0.0),
+        "the reference window is not silent"
+    );
+    assert_eq!(
+        render_blocks(&mut live, &planes, BLOCKS..2 * BLOCKS),
+        second_half
+    );
+}
+
+/// #1558 gate 1 (host-core half). Red if a pushed VCA, membership, follow or followed-mute record
+/// renders other bits than a plan prepared from the committed model: a VCA nested in another, an
+/// own fader edit under a VCA, a lane mute under a following send, `follows_mute` turned off while
+/// the source is muted and on again, a member added, a VCA added over the bus and one removed. Every
+/// step is a step (ramps of 0) on the one live plan, and each is compared to a fresh plan.
+#[test]
+fn pushed_vca_and_follow_records_render_the_rebuilt_plan() {
+    let mut base = with_bus(true);
+    let send = send_index(&base);
+    let source = base.routes[send].source.clone();
+    let RouteSource::Track { track_id, .. } = source else {
+        panic!("a track send");
+    };
+    // A second send, pre-fader, from the second track into the bus, following its mute: it keeps
+    // sending when its source mutes unless it follows, so the follow is audible.
+    let second = base
+        .tracks
+        .iter()
+        .find(|track| track.id != track_id)
+        .expect("a second track")
+        .id
+        .clone();
+    let mut extra = base.routes[send].clone();
+    extra.id = id("zz-pre");
+    extra.source = RouteSource::Track {
+        track_id: second,
+        tap: SendTap::PreFader,
+    };
+    extra.follows_mute = true;
+    base.routes.push(extra);
+    let mut inner = vca();
+    inner.id = id("inner");
+    inner.members = vec![track_id.clone()];
+    let mut outer = vca();
+    outer.id = id("outer");
+    outer.members = vec![inner.id.clone()];
+    base.vcas = vec![inner, outer];
+    let current = normalized(&base);
+    assert_eq!(
+        current.tracks[0].id, track_id,
+        "the edits address the first track"
+    );
+    let steps: [(&str, Edit); 11] = [
+        ("inner offset", |m| {
+            let v = m.vcas.iter_mut().find(|v| v.id == id("inner")).unwrap();
+            v.fader.left_db = -6.0;
+            v.fader.right_db = -6.0;
+        }),
+        ("outer mute left", |m| {
+            m.vcas
+                .iter_mut()
+                .find(|v| v.id == id("outer"))
+                .unwrap()
+                .fader
+                .left_mute = true;
+        }),
+        ("outer unmute", |m| {
+            m.vcas
+                .iter_mut()
+                .find(|v| v.id == id("outer"))
+                .unwrap()
+                .fader
+                .left_mute = false;
+        }),
+        ("own fader", |m| m.tracks[0].fader.left_db = -3.0),
+        ("own mute left", |m| m.tracks[0].fader.left_mute = true),
+        ("own mute both", |m| m.tracks[0].fader.right_mute = true),
+        ("second track mutes", |m| {
+            m.tracks[1].fader.left_mute = true;
+            m.tracks[1].fader.right_mute = true;
+        }),
+        ("follows off", |m| {
+            let i = m.routes.iter().position(|r| r.id == id("zz-pre")).unwrap();
+            m.routes[i].follows_mute = false;
+        }),
+        ("follows on, unmute", |m| {
+            let i = m.routes.iter().position(|r| r.id == id("zz-pre")).unwrap();
+            m.routes[i].follows_mute = true;
+            for track in &mut m.tracks[..2] {
+                track.fader.left_mute = false;
+                track.fader.right_mute = false;
+            }
+        }),
+        ("member added", |m| {
+            let member = m.tracks[1].id.clone();
+            m.vcas
+                .iter_mut()
+                .find(|v| v.id == id("inner"))
+                .unwrap()
+                .members
+                .push(member);
+        }),
+        ("vca over the bus, outer removed", |m| {
+            let mut over = vca();
+            over.id = id("over-bus");
+            over.fader.left_db = -4.0;
+            over.members = vec![id("bus")];
+            m.vcas.push(over);
+            m.vcas.retain(|v| v.id != id("outer"));
+        }),
+    ];
+    let current_compiled = compile(&current);
+    let (mut live, mut handles) = prepare_host_runtime_with_live_controls(
+        &current_compiled,
+        &caps(),
+        &HostLiveControlRequest::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
+    let mut gate = live
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    let window = 2;
+    let quantum = live.report.quantum_frames as usize;
+    let planes = feed(quantum * window * (steps.len() + 1));
+    let mut committed = current;
+    let mut rendered = render_blocks(&mut live, &planes, 0..window);
+    let fresh = |model: &SessionModel| {
+        prepare_host_runtime(&compile(model), &caps()).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+    };
+    assert_eq!(
+        rendered,
+        render_blocks(&mut fresh(&committed), &planes, 0..window)
+    );
+    for (index, (name, step)) in steps.iter().enumerate() {
+        let next = normalized(&edited(&committed, step));
+        let delta = classify_live_delta(&committed, &next, STEP, &EditRamps::new())
+            .unwrap_or_else(|reason| panic!("{name}: {reason:?}"));
+        push_delta(&mut handles, &mut gate, &delta);
+        let blocks = (index + 1) * window..(index + 2) * window;
+        rendered = render_blocks(&mut live, &planes, blocks.clone());
+        let expected = render_blocks(&mut fresh(&next), &planes, 0..blocks.end);
+        let expected = expected[expected.len() * blocks.start / blocks.end..].to_vec();
+        assert!(rendered == expected, "{name}");
+        // Not vacuous: the step is audible, so a record that was never pushed would differ.
+        let before = render_blocks(&mut fresh(&committed), &planes, 0..blocks.end);
+        assert!(
+            expected != before[before.len() * blocks.start / blocks.end..],
+            "{name}: the step changes the output"
+        );
+        committed = next;
+    }
+    // Not vacuous: the last state renders something, and differs from the first.
+    assert!(rendered.iter().any(|bits| f32::from_bits(*bits) != 0.0));
+}
+
+/// Gate 1. Red if the classifier lowers other routes than the one that changed, or emits its
+/// records out of canonical route-ID order, or the producer lookup is not by route ID.
+#[cfg(feature = "test-support")]
+#[test]
+fn one_send_edit_lowers_one_route_and_records_are_in_route_id_order() {
+    let current = many_strips();
+    let sends: Vec<usize> = current
+        .routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sends.len(), 4);
+    host_core::take_lowered_owner_count();
+    let records = classify_routes(&current, |next| next.routes[sends[2]].gain_db = -6.0)
+        .expect("a live edit");
+    assert_eq!(host_core::take_lowered_owner_count(), 1);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].0, current.routes[sends[2]].id.as_str());
+    let all = classify_routes(&current, |next| {
+        for &send in &sends {
+            next.routes[send].gain_db = -6.0;
+        }
+    })
+    .expect("a live edit");
+    let ids: Vec<&str> = all.iter().map(|row| row.0.as_str()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted);
+    assert_eq!(ids.len(), 4);
 }

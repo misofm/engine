@@ -105,6 +105,57 @@ pub(crate) fn compiled_model_admission(
     })
 }
 
+/// What the committed model's control catalog adds to a live commit's peak (#1558 D6).
+///
+/// A live commit replaces the provider's catalog by the committed model's, and a VCA added live
+/// adds rows to it (and a VCA replaced by one with a longer ID, longer strings), so the new
+/// catalog can be larger than the one the plans were prepared with. The epochs' retained rows hold
+/// the current catalog once, and the prepared-protocol row once more as the stand-in for a
+/// successor's; this charges the growth beyond the current catalog, and the new catalog's largest
+/// single allocation, which no row holds yet.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct LiveCatalogAdmission {
+    /// The new catalog's retained bytes less the current catalog's, at least zero.
+    pub growth_bytes: u64,
+    /// The new catalog's largest single allocation.
+    pub largest_allocation_bytes: u64,
+}
+
+impl CapiResources {
+    /// This epoch's rows after a live commit replaced the provider's catalog of `previous`'s
+    /// figures by `committed`'s: both rows that hold a catalog follow it, and the largest
+    /// allocation only grows. Infallible, as the commit's last steps are.
+    pub(crate) fn follow_catalog(
+        &mut self,
+        previous: host_core::CatalogResources,
+        committed: host_core::CatalogResources,
+    ) {
+        let follow = |row: u64| {
+            row.saturating_sub(previous.retained_bytes)
+                .saturating_add(committed.retained_bytes)
+        };
+        self.active_retained = follow(self.active_retained);
+        self.prepared_protocol_retained = follow(self.prepared_protocol_retained);
+        self.largest = self.largest.max(committed.largest_allocation_bytes);
+    }
+}
+
+impl LiveCatalogAdmission {
+    /// The charge of replacing the catalog whose figures are `current` by the one of `new`.
+    pub(crate) fn between(
+        current: host_core::CatalogResources,
+        new: host_core::CatalogResources,
+    ) -> Self {
+        Self {
+            growth_bytes: new.retained_bytes.saturating_sub(current.retained_bytes),
+            largest_allocation_bytes: new.largest_allocation_bytes,
+        }
+    }
+}
+
 #[repr(C)]
 pub(crate) struct SharedArcAllocation<T> {
     pub(crate) strong: core::sync::atomic::AtomicUsize,
@@ -161,6 +212,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
     effect_controls: host_core::EffectControlResources,
+    route_controls: host_core::RouteControlResources,
     bound_seed_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
@@ -213,6 +265,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let effect_row = effect_controls
         .total_bytes()
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    // The send producers (#1557 D5): `graph::route_control_resources` of the attached lanes, the
+    // producer table, the route IDs, the cells and the render-side owners. As the effect row
+    // above, a conservative upper bound: host-core's preparation admission adds the same total to
+    // the graph row, and the plan-side parts are charged here too. Zero without a route lane.
+    let route_row = route_controls.total_bytes;
     let control_table_row = host_core::control_table_bytes(source_count)
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let source_id_row = host_core::source_id_arena_bytes(source_id_bytes)
@@ -224,6 +281,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         inventory_bytes,
         strip_table_bytes,
         effect_row,
+        route_row,
         // #1471 Amendment 2 D4: each epoch keeps the design bounds its plan's preparation used,
         // one exact-size boxed slice, for its successor's preparation to read.
         bound_seed_bytes,
@@ -283,7 +341,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // The effect row is several allocations; its own largest one stands for it.
     let largest = [control_table_row, source_id_row, strip_table_bytes]
         .into_iter()
-        .chain([effect_controls.largest_allocation_bytes(), bound_seed_bytes])
+        .chain([
+            effect_controls.largest_allocation_bytes(),
+            route_controls.largest_allocation_bytes,
+            bound_seed_bytes,
+        ])
         .chain(fixed_allocation_rows)
         .chain(adapter_allocation_rows.iter().copied())
         .chain(prepared_protocol_allocation_rows)
@@ -308,6 +370,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
+    route_controls: host_core::RouteControlResources,
     bound_seed_bytes: u64,
     limits: ControlLimits,
 ) -> Result<CapiResources, CompileFailure> {
@@ -347,6 +410,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         provider,
         inventory.retained_bytes(),
         effect_controls,
+        route_controls,
         bound_seed_bytes,
     )
 }
@@ -467,11 +531,13 @@ pub struct LiveEpochResources {
 ///   `retained_bytes`;
 /// - **capi:** the newest plan's `control_retained_bytes`, plus the current epoch's `epoch_retained`
 ///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
-///   term includes a provider catalog (`catalog_retained_bytes`) that the live arm never builds,
-///   because it never replaces the catalog: a conservative overcount, kept so that the term is the
-///   same one a rebuild charges;
+///   term includes a provider catalog (`catalog_retained_bytes`), which a live commit replaces by
+///   the committed model's (#1552 D3), so the term is the same one a rebuild charges;
+/// - **catalog growth:** the new catalog's retained bytes beyond the current catalog's are added to
+///   the capi term, and its largest single allocation joins the largest-allocation term, so a VCA
+///   added live that grows the catalog meets the ceiling a rebuild would (#1558 D6);
 /// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
-///   newest epoch's capi `largest` and the compiled models' largest allocation.
+///   newest epoch's capi `largest`, the compiled models' largest allocation and the new catalog's.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -479,6 +545,7 @@ pub fn validate_live_peak(
     current: LiveEpochResources,
     pending: Option<LiveEpochResources>,
     compiled_models: CompiledModelAdmission,
+    catalog: LiveCatalogAdmission,
     limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
@@ -497,6 +564,7 @@ pub fn validate_live_peak(
         .control_retained_bytes
         .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
         .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
+        .and_then(|value| value.checked_add(catalog.growth_bytes))
         .ok_or_else(arithmetic)?;
     if capi > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -507,6 +575,7 @@ pub fn validate_live_peak(
         .max(pending.map_or(0, |pending| pending.report.largest_named_allocation_bytes))
         .max(newest.capi.largest)
         .max(compiled_models.largest_allocation_bytes)
+        .max(catalog.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
         return Err(failure(ResourceFault::Limit));
@@ -625,11 +694,14 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strip_controls,
         track_count,
         effect_controls,
+        route_controls,
         ..
     } = handles;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,
+        // #1557 D4: the send producers, at exactly one entry per route lane the plan attached.
+        routes: route_controls.into_boxed_slice(),
     };
     // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
     // boxed slice is the allocation host-core walked for `effect_control_resources`.
@@ -639,6 +711,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         &prepared.control_catalog,
         &prepared.inventory,
         prepared.report.effect_control_resources,
+        prepared.report.route_control_resources,
         bound_seed.retained_bytes(),
         limits,
     )?;

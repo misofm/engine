@@ -520,26 +520,18 @@ fn scratch_session() -> String {
     session::canonical_session_json(&model).expect("oracle canonical fixture")
 }
 
-/// The nine-track fixture with three distinct enabled input designs: the tracks take three HPF
-/// cutoffs in turn, so a plan's design-bound seed (#1471) holds more than one entry.
-fn three_design_session() -> String {
+/// The nine-track fixture with three distinct HPF cutoffs, taken by the tracks in turn. Since
+/// #1556 no C ABI strip designs an input bound (its input lane is live), so the plan's design-bound
+/// seed (#1471) stays empty whatever the cutoffs; the document still gives the oracle three
+/// different input sections.
+fn three_cutoff_session() -> String {
     let mut model = session::parse_session_json(SESSION).expect("oracle fixture");
     for (index, track) in model.tracks.iter_mut().enumerate() {
         for lane in [&mut track.builtins.left, &mut track.builtins.right] {
             lane.hpf_hz = 40.0 + 30.0 * (index % 3) as f32;
         }
     }
-    let document = session::canonical_session_json(&model).expect("three-design canonical fixture");
-    // The bounds a preparation computes, counted by the builtins' own counter: three distinct
-    // designs, not read back from the seed whose charge the document tests.
-    let computed = builtins::test_support::fixed_input_bounds_computed();
-    drop(host_half(&document, &limits()));
-    assert_eq!(
-        builtins::test_support::fixed_input_bounds_computed() - computed,
-        3,
-        "vacuous: the document does not use three designs"
-    );
-    document
+    session::canonical_session_json(&model).expect("three-cutoff canonical fixture")
 }
 
 // --- #1060: budgets plus one allocator-observed completeness oracle ----------------------------
@@ -607,6 +599,8 @@ struct HostHalf {
     /// One producer per prepared effect instance, with each EQ's owner, kept as capi keeps them
     /// (#1263 D2).
     effects: Box<[host_core::EffectControlProducer]>,
+    /// One producer per route into a submix, kept as capi keeps them (#1557 D4).
+    routes: Box<[host_core::RouteControlProducer]>,
 }
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
@@ -633,8 +627,9 @@ fn host_half_counting(
         .unwrap_or_else(|_| panic!("the reference session's compile caps"));
     let store = protocol::SessionStore::new(model, compile_caps)
         .unwrap_or_else(|_| panic!("the reference session compiles"));
-    // The same request capi makes (#1256 D1, #1263 D1: fader/mute, matrix/pan and effect lanes,
-    // no input or route lane), spelled here independently, and inside the caller's observed
+    // The same request capi makes (#1256 D1, #1263 D1, #1556, #1557: fader/mute, matrix/pan, input,
+    // effect and route lanes; the route lane has a producer only for a route into a submix),
+    // spelled here independently, and inside the caller's observed
     // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
     // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
     // count bytes capi does not keep.
@@ -643,9 +638,9 @@ fn host_half_counting(
         &caps,
         &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
-            strip_input: false,
+            strip_input: true,
             effects: true,
-            routes: false,
+            routes: true,
         },
         None,
         superseded,
@@ -654,6 +649,7 @@ fn host_half_counting(
     let host_core::HostLiveControlHandles {
         strip_controls,
         effect_controls,
+        route_controls,
         ..
     } = handles;
     HostHalf {
@@ -661,6 +657,7 @@ fn host_half_counting(
         prepared,
         strips: strip_controls.into_boxed_slice(),
         effects: effect_controls.into_boxed_slice(),
+        routes: route_controls.into_boxed_slice(),
     }
 }
 
@@ -699,9 +696,9 @@ impl HostHalf {
             &host_caps(compile_limits),
             &host_core::HostLiveControlRequest::default(),
             host_core::HostLiveLanes {
-                strip_input: false,
+                strip_input: true,
                 effects: true,
-                routes: false,
+                routes: true,
             },
             Some(&mut cache),
             &host_core::LiveValuesSuperseded::default(),
@@ -716,7 +713,8 @@ impl HostHalf {
     /// The session's canonical JSON is charged once, with its model in the graph row. The epoch
     /// term is the source producers' control table and ID arena, the strip producers' table
     /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
-    /// owned payload (#1263), from host-core's walk over them, the plan state inventory the
+    /// owned payload (#1263), from host-core's walk over them, the send producers' graph charge
+    /// (#1557, `route_control_resources`), the plan state inventory the
     /// epoch keeps for its successor (#1273 D5), and the design-bound seed (#1471,
     /// [`Self::bound_seed_bytes`]). The prepared-protocol term is the
     /// response buffer, the affine token, the replay cache and the parameter catalog.
@@ -747,6 +745,7 @@ impl HostHalf {
         let epoch = self.prepared.report.control_retained_bytes
             + strips
             + effects
+            + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             + self.bound_seed_bytes(compile_limits);
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
@@ -779,6 +778,7 @@ fn freed_by_drop<T>(value: T) -> u64 {
 /// the producers share with the plan is freed -- and counted -- with the plan that renders from
 /// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
 struct HostOwners {
+    routes: u64,
     effects: u64,
     strips: u64,
     sources: u64,
@@ -826,6 +826,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         prepared,
         strips,
         effects,
+        routes,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -844,6 +845,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_catalog,
     } = prepared;
     let owners = HostOwners {
+        routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
@@ -853,7 +855,8 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         inventory: freed_by_drop(inventory),
     };
     assert_eq!(
-        owners.effects
+        owners.routes
+            + owners.effects
             + owners.strips
             + owners.sources
             + owners.catalog
@@ -861,7 +864,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.store
             + owners.inventory,
         host_live,
-        "the seven owners hold every byte the host-core half retains"
+        "the eight owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -878,10 +881,10 @@ impl CompileObservation {
     /// The completeness claim for capi's own row, to the byte, from observations only.
     ///
     /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left live
-    /// beyond its host-core half -- plus the five host-allocated owners capi keeps: the effect and
-    /// strip live-control producers (#1263, #1256), the source control table and ID arena, the
-    /// parameter catalog, and the plan state inventory (#1273 D5). Each of the six terms on the
-    /// left is observed. An owner row dropped from capi's accounting
+    /// beyond its host-core half -- plus the host-allocated owners capi keeps: the effect, strip
+    /// and send live-control producers (#1263, #1256, #1557), the source control table and ID
+    /// arena, the parameter catalog, and the plan state inventory (#1273 D5). Each term on the
+    /// left is observed, but the send producers', which is the graph function's total. An owner row dropped from capi's accounting
     /// (the verifier's `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi
     /// allocates but does not charge, or spare capacity in a charged one (the catalog's enum-choice
     /// vectors before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a
@@ -902,8 +905,13 @@ impl CompileObservation {
             });
         let decode_field_rounding =
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
+        // The send producers' row is `graph::route_control_resources`' total (#1557 D5): the
+        // producer table and IDs, which `assert_host_owners_are_charged` observes exactly, and the
+        // cells and render-side owners the plan holds, which only this upper bound charges.
+        let route_charge = self.host_report.route_control_resources.total_bytes;
         assert_eq!(
             capi_allocated
+                + route_charge
                 + self.owners.effects
                 + self.owners.strips
                 + self.owners.sources
@@ -913,8 +921,8 @@ impl CompileObservation {
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
-             decode-field rounding, all observed (left), against \
-             `capi_retained_bytes` (right)"
+             decode-field rounding, all observed (left; the send producers' row is the graph \
+             function's total), against `capi_retained_bytes` (right)"
         );
     }
 
@@ -949,6 +957,19 @@ impl CompileObservation {
                 .total_bytes()
                 .expect("the effect producers' charge"),
             "{label}: effect producer table, its IDs and the EQ owners"
+        );
+        // The send producers: a table of `GraphRouteControlProducer`s and one copy of each route
+        // ID, which is the part of `route_control_resources` this owner holds. The rest of its
+        // total (cells, lanes, render-side owners, the binding's ID copy) is the plan's.
+        let routes = self.host_report.route_control_resources;
+        assert_eq!(
+            owners.routes,
+            routes.producer_table_bytes + routes.route_id_bytes / 2,
+            "{label}: send producer table and its route IDs"
+        );
+        assert!(
+            owners.routes <= routes.total_bytes,
+            "{label}: the send producers' charge covers what they retain"
         );
         assert_eq!(
             owners.strips, self.strip_table_charge,
@@ -1008,7 +1029,7 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         ("routed submix", two_track_routed_submix_session()),
         // #1471 Amendment 2: three distinct enabled input designs, so the design-bound seed is
         // charged per design and not at one design's size.
-        ("three input designs", three_design_session()),
+        ("three input cutoffs", three_cutoff_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -1170,6 +1191,13 @@ impl Budget {
 /// preparation and declared as 0. Nine EQs at a 128-frame quantum declare 9 x 128 x 8 = 9,216 at
 /// both widths, since the declaration is per prepared lane; the ceiling is that plus 10 %, rounded
 /// up to 64.
+///
+/// #1556 raised the two builtin payload rows, a structural move: every C ABI strip now carries the
+/// live input lane (its trim, polarity and filter cells, shared by the strip's producer and the
+/// plan, `builtin_retained_payload_bytes`), 31,424 -> 36,153 on x86-64 for the nine strips. The
+/// lane's cells are lane-width independent, so the four-lane ceiling moves with it (not measured
+/// on AArch64, which runs only in CI). The ceilings are the new value plus 10 %, rounded up to 64:
+/// 39,768.3 -> 39,808.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1258,8 +1286,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_processor_payload_bytes",
         value: |report| report.builtin_processor_payload_bytes,
-        eight_lanes: 31_424,
-        four_lanes: 31_424,
+        eight_lanes: 39_808,
+        four_lanes: 39_808,
     },
     Budget {
         row: "builtin_meter_payload_bytes",
@@ -1270,8 +1298,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 31_424,
-        four_lanes: 31_424,
+        eight_lanes: 39_808,
+        four_lanes: 39_808,
     },
     Budget {
         row: "capi_retained_bytes",
@@ -1452,240 +1480,6 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
         // SAFETY: The helper verifies atomic rejection without published children.
         unsafe { compile_rejected_c(SESSION, &one_below) };
     }
-}
-
-/// The engine's design-bound cache ceiling (#1471 Amendment 2 D5), as `miso_engine_v1.h` and
-/// `docs/C_ABI_V1_QUALIFICATION.md` state it: at most 4,300,720 bytes of requested heap on a
-/// 64-bit target, derived (not measured) from `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries of 236
-/// bytes (a 124-byte key and a 112-byte value) in the map's nodes. A node of the standard
-/// `BTreeMap` holds 5 to 11 entries, so 8,192 entries need at most 1,639 nodes; a leaf is 2,608
-/// bytes and an internal node 2,704, and at most 273 of the 1,639 are internal. A literal on
-/// purpose: it is the figure the header gives app developers, so a change to the entry, the cap or
-/// the journal must move it there too.
-const ENGINE_CACHE_CEILING_BYTES: u64 = 4_300_720;
-
-/// The nodes a map of `INPUT_BOUND_CACHE_ENTRIES` entries needs at most: every node but the root
-/// holds at least 5 entries.
-const WORST_CASE_NODES: u64 = 1 + (builtins::INPUT_BOUND_CACHE_ENTRIES as u64 - 1) / 5;
-
-/// The internal nodes among `WORST_CASE_NODES`: every internal node but the root has at least 6
-/// children and the root at least 2.
-const WORST_CASE_INTERNAL_NODES: u64 = (WORST_CASE_NODES - 3) / 6 + 1;
-
-/// Limits far above every document the engine-cache tests compile.
-fn roomy_limits() -> CompileLimits {
-    CompileLimits {
-        maximum_document_bytes: 1 << 30,
-        maximum_tracks: 4_096,
-        maximum_sources: 4_096,
-        maximum_routes: 8_192,
-        maximum_effects: 8_192,
-        maximum_graph_session_plus_plan_bytes: 1 << 32,
-        maximum_source_total_bytes: 1 << 30,
-        maximum_source_overhead_bytes: 1 << 30,
-        maximum_effect_state_bytes: 1 << 32,
-        maximum_effect_scratch_bytes: 1 << 32,
-        maximum_builtin_retained_bytes: 1 << 32,
-        maximum_capi_retained_bytes: 1 << 30,
-        maximum_named_allocation_bytes: 1 << 32,
-        ..limits()
-    }
-}
-
-fn create_engine() -> *mut Engine {
-    let config = EngineConfig {
-        struct_size: ENGINE_CONFIG_SIZE,
-        abi_version: ABI_VERSION,
-        reserved: [0; 4],
-    };
-    let mut engine = ptr::null_mut();
-    // SAFETY: A valid config and output pointer.
-    let code = unsafe { miso_engine_v1_engine_create(&config, &mut engine) };
-    assert_eq!(code, RESULT_OK);
-    engine
-}
-
-/// Compiles `document` on `engine` at roomy limits, destroys the session and plan, and returns
-/// how many input designs the compile computed (the engine keeps them in its cache).
-fn compile_on(engine: *mut Engine, document: &str) -> u64 {
-    use builtins::test_support::fixed_input_bounds_computed;
-
-    let computed = fixed_input_bounds_computed();
-    let mut diagnostics = [0_u8; 4_096];
-    let mut out = BytesOut {
-        struct_size: BYTES_OUT_SIZE,
-        reserved0: 0,
-        data: diagnostics.as_mut_ptr(),
-        capacity_bytes: diagnostics.len() as u64,
-        required_bytes: 0,
-    };
-    let (mut session, mut plan) = (ptr::null_mut(), ptr::null_mut());
-    // SAFETY: Every descriptor and output location is live for the call; the children are
-    // destroyed once below.
-    unsafe {
-        assert_eq!(
-            miso_engine_v1_compile_session(
-                engine,
-                document.as_ptr(),
-                document.len() as u64,
-                &roomy_limits(),
-                &mut out,
-                &mut session,
-                &mut plan,
-            ),
-            RESULT_OK
-        );
-        miso_engine_v1_session_destroy(session);
-        miso_engine_v1_plan_destroy(plan);
-    }
-    fixed_input_bounds_computed() - computed
-}
-
-/// A session of `count` tracks whose enabled input designs all differ from each other and from
-/// every other `offset`'s (each track's cutoffs come from its global index), built from the
-/// nine-track fixture's track, route and source, with cutoffs quick to bound: 800 of them fit one
-/// preparation's design-bound budget, so each is computed and cached.
-fn distinct_design_session(offset: usize, count: usize) -> String {
-    let mut model = session::parse_session_json(SESSION).expect("fixture");
-    let track = model.tracks[0].clone();
-    let route = model.routes[0].clone();
-    model.tracks.clear();
-    model.routes.clear();
-    for index in offset..offset + count {
-        let mut track = track.clone();
-        let id = format!("f{index}");
-        track.id = StableId::parse(&id).expect("track ID");
-        let hpf = 1_500.0 + 0.173 * index as f32;
-        let lpf = 4_000.0 + 0.311 * index as f32;
-        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
-            lane.hpf_hz = hpf;
-            lane.lpf_hz = lpf;
-        }
-        let mut route = route.clone();
-        route.id = StableId::parse(&format!("{id}-main")).expect("route ID");
-        if let session::RouteSource::Track { track_id, .. } = &mut route.source {
-            *track_id = track.id.clone();
-        }
-        model.tracks.push(track);
-        model.routes.push(route);
-    }
-    session::canonical_session_json(&model).expect("canonical document")
-}
-
-/// The bytes `miso_engine_v1_engine_destroy` frees for `engine`, observed by this file's allocator.
-///
-/// # Safety
-///
-/// `engine` must be a live engine handle; it is destroyed.
-unsafe fn engine_destroy_freed(engine: *mut Engine) -> u64 {
-    begin();
-    // SAFETY: The caller passes a live engine, destroyed exactly once, here.
-    unsafe { miso_engine_v1_engine_destroy(engine) };
-    let window = finish();
-    assert_eq!(window.allocated_bytes, 0, "destroy allocates nothing");
-    window.deallocated_bytes
-}
-
-/// Amendment 2 D5 (gate 6): an engine's lifetime memory after compiles is its design-bound cache
-/// and nothing a compile leaves open. Engine A compiles a 200-design document; engine B compiles
-/// the same document and then a document with no input filter. B's cache holds the same designs
-/// as A's, so the bytes engine destroy frees are equal. A journal that `take_journal` leaves open
-/// holds a record of the designs a compile used beside the cache's own entries, which the
-/// header's ceiling does not count; B's second compile restarts the journal with nothing to
-/// record, so A keeps its 200-design record and frees more than B.
-///
-/// Defect it turns red: a journal that stays open on the engine's cache after a compile, so the
-/// engine keeps a second copy of the designs the ceiling counts once. (The ceiling test below also
-/// turns red under it, by the doubled node it measures, but with a message about the node. This
-/// one is the exact before-and-after, and holds the 200-design size the second compile must not
-/// restart away.)
-#[test]
-fn a_compile_leaves_nothing_open_on_the_engine_cache() {
-    let designs = distinct_design_session(0, 200);
-    let mut memoryless = session::parse_session_json(SESSION).expect("fixture");
-    for track in &mut memoryless.tracks {
-        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
-            lane.hpf_hz = 0.0;
-            lane.lpf_hz = 0.0;
-        }
-    }
-    let memoryless = session::canonical_session_json(&memoryless).expect("canonical document");
-
-    let once = create_engine();
-    assert_eq!(compile_on(once, &designs), 200, "vacuous: 200 new designs");
-    // SAFETY: The engine is live and destroyed once.
-    let once = unsafe { engine_destroy_freed(once) };
-
-    let twice = create_engine();
-    assert_eq!(compile_on(twice, &designs), 200, "vacuous: 200 new designs");
-    compile_on(twice, &memoryless);
-    // SAFETY: The engine is live and destroyed once.
-    let twice = unsafe { engine_destroy_freed(twice) };
-
-    println!("an engine frees {once} bytes after one compile, {twice} after a second");
-    assert_eq!(
-        once, twice,
-        "the engine keeps more than its cache after a compile"
-    );
-}
-
-/// Amendment 2 D5 (gate 6): one engine's design-bound cache, filled past its cap, frees at engine
-/// destroy no more than the ceiling the header states, over an empty engine's, and the header's
-/// figure follows from the measured node size. Twice the cap's distinct designs are compiled, so
-/// the cache fills, clears at the 8,193rd and fills again.
-///
-/// Defects it turns red: a cap that no longer applies (the fill holds 16,384 entries, and a
-/// raised constant raises the derived worst case); and an entry whose key or value grew, even by
-/// 8 bytes, because the worst case is derived here from the node size a one-design compile
-/// measures (a fresh engine frees exactly one leaf) with the header's own formula, and must still
-/// be at most the figure the header gives. The old fill-only check stayed green for an 8-byte
-/// growth (the fill's 3.6 MB sits 0.7 MB under the ceiling).
-#[test]
-fn the_engine_cache_stays_within_its_stated_ceiling() {
-    use builtins::INPUT_BOUND_CACHE_ENTRIES;
-
-    // SAFETY: The engines are live and destroyed once.
-    let empty = unsafe { engine_destroy_freed(create_engine()) };
-
-    // The node size, measured: a fresh engine's cache holds one design, one leaf node.
-    let one = create_engine();
-    assert_eq!(compile_on(one, SESSION), 1, "vacuous: one design");
-    // SAFETY: The engine is live and destroyed once.
-    let leaf = unsafe { engine_destroy_freed(one) } - empty;
-    // An internal node adds the 12 child pointers of a node of B = 6 (2 x B edges).
-    let internal_extra = 12 * size_of::<usize>() as u64;
-    let derived = WORST_CASE_NODES * leaf + WORST_CASE_INTERNAL_NODES * internal_extra;
-    println!("a leaf node is {leaf} bytes; the derived worst case is {derived}");
-    assert!(
-        derived <= ENGINE_CACHE_CEILING_BYTES,
-        "the node is {leaf} bytes, so the worst case is {derived}, above the stated \
-         {ENGINE_CACHE_CEILING_BYTES}"
-    );
-
-    let engine = create_engine();
-    let designs = 2 * INPUT_BOUND_CACHE_ENTRIES;
-    let mut offset = 0;
-    while offset < designs {
-        let count = (designs - offset).min(800);
-        let document = distinct_design_session(offset, count);
-        assert_eq!(
-            compile_on(engine, &document),
-            count as u64,
-            "vacuous: the designs at {offset} were not all new to the cache"
-        );
-        offset += count;
-    }
-    // SAFETY: The engine is live and destroyed once.
-    let cache = unsafe { engine_destroy_freed(engine) } - empty;
-    println!("the full engine cache frees {cache} bytes (ceiling {ENGINE_CACHE_CEILING_BYTES})");
-    assert!(
-        cache > ENGINE_CACHE_CEILING_BYTES / 4,
-        "vacuous: the cache is not full ({cache} bytes)"
-    );
-    assert!(
-        cache <= ENGINE_CACHE_CEILING_BYTES,
-        "the engine's cache frees {cache} bytes, above its stated ceiling"
-    );
 }
 
 unsafe fn compile_c(
@@ -1980,9 +1774,9 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         &host_caps(&limits()),
         &host_core::HostLiveControlRequest::default(),
         host_core::HostLiveLanes {
-            strip_input: false,
+            strip_input: true,
             effects: true,
-            routes: false,
+            routes: true,
         },
         host_core::SuccessorBase {
             inventory: &current_host.prepared.inventory,
@@ -2031,11 +1825,12 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
         + successor.inventory_retained_bytes;
-    // The prospective epoch keeps the design bounds its preparation used (#1471 Amendment 2 D4),
-    // so the term above is not the seedless one: the oracle's replacement peak charges it.
-    assert!(
-        prospective_host.bound_seed_bytes(&limits()) > 0,
-        "vacuous: the prospective plan's preparation used no design"
+    // The prospective epoch keeps the design bounds its preparation used (#1471 Amendment 2 D4):
+    // none since #1556, because every strip's input lane is live and designs no bound.
+    assert_eq!(
+        prospective_host.bound_seed_bytes(&limits()),
+        0,
+        "a C ABI plan's preparation designs no input bound"
     );
 
     let rows: [(&str, u64); 8] = [
@@ -2826,6 +2621,47 @@ fn race_session() -> String {
             lane.delay_samples = 0;
         }
     }
+    // #1558: two nested VCAs over the first tracks, and a pre-fader send from the last track into a
+    // bus, following that track's mute.
+    let ids: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    let vca = |name: &str, members: Vec<StableId>| session::Vca {
+        id: StableId::parse(name).expect("stable id"),
+        fader: session::DualMonoFader {
+            left_db: 0.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+        members,
+    };
+    let inner = vca("rv0", ids[..2].to_vec());
+    let outer = vca("rv1", vec![inner.id.clone(), ids[3].clone()]);
+    model.vcas = vec![inner, outer];
+    let bus = StableId::parse("race-bus").expect("stable id");
+    model
+        .submixes
+        .push(session::Submix::unity(bus.clone(), &model.console));
+    let last = ids.last().expect("a track").clone();
+    let send = model
+        .routes
+        .iter_mut()
+        .find(|route| matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == last))
+        .expect("the last track's route");
+    let mut out = send.clone();
+    send.id = StableId::parse("race-send").expect("stable id");
+    send.destination = session::RouteDestination::SubmixInput {
+        submix_id: bus.clone(),
+    };
+    send.follows_mute = true;
+    if let session::RouteSource::Track { tap, .. } = &mut send.source {
+        *tap = session::SendTap::PreFader;
+    }
+    out.id = StableId::parse("race-bus-main").expect("stable id");
+    out.source = session::RouteSource::Submix {
+        submix_id: bus,
+        tap: session::SendTap::PostPan,
+    };
+    model.routes.push(out);
     session::canonical_session_json(&model).expect("canonical race session")
 }
 
@@ -2854,6 +2690,11 @@ struct RaceEdits {
     tracks: Vec<StableId>,
     faders: Vec<session::DualMonoFader>,
     source: session::Source,
+    /// The two VCAs of [`race_session`], as the committed model holds them (#1558).
+    vcas: Vec<session::Vca>,
+    /// Whether the race send follows its source's mute, and whether VCA `rv-extra` exists.
+    follows: bool,
+    extra: bool,
 }
 
 impl RaceEdits {
@@ -2867,6 +2708,73 @@ impl RaceEdits {
                 .map(|track| track.fader.clone())
                 .collect(),
             source: model.sources[0].clone(),
+            vcas: model.vcas.clone(),
+            follows: true,
+            extra: false,
+        }
+    }
+
+    /// The live VCA, membership and follow edit of round `round` (#1558): an offset, a left-lane
+    /// mute, a member joining or leaving, the send's `follows_mute` toggled, and a VCA added and
+    /// removed again. The right lane of every VCA stays unmuted, so the final mix carries signal.
+    fn vca_edit(&mut self, round: u64) -> SessionEdit {
+        match round % 5 {
+            0 => {
+                let vca = &mut self.vcas[0];
+                vca.fader.left_db = -1.0 - 0.25 * (round % 7) as f32;
+                vca.fader.right_db = vca.fader.left_db - 0.5;
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            1 => {
+                let vca = &mut self.vcas[1];
+                vca.fader.left_mute = !vca.fader.left_mute;
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            2 => {
+                let vca = &mut self.vcas[0];
+                if vca.members.len() == 2 {
+                    vca.members.push(self.tracks[2].clone());
+                } else {
+                    vca.members.pop();
+                }
+                SessionEdit::UpsertVca { vca: vca.clone() }
+            }
+            3 => {
+                self.follows = !self.follows;
+                SessionEdit::SetControl {
+                    address: protocol::control_core::ControlAddress {
+                        owner: protocol::control_core::Owner::Route(
+                            StableId::parse("race-send").expect("stable id"),
+                        ),
+                        section: protocol::control_core::Section::Own,
+                        control: 7,
+                        lane: protocol::control_core::Lane::Both,
+                    },
+                    value: f32::from(u8::from(self.follows)),
+                    ramp_samples: None,
+                }
+            }
+            _ => {
+                self.extra = !self.extra;
+                if self.extra {
+                    SessionEdit::UpsertVca {
+                        vca: session::Vca {
+                            id: StableId::parse("rv-extra").expect("stable id"),
+                            fader: session::DualMonoFader {
+                                left_db: -3.0,
+                                right_db: -3.0,
+                                left_mute: false,
+                                right_mute: false,
+                            },
+                            members: vec![self.tracks[5].clone()],
+                        },
+                    }
+                } else {
+                    SessionEdit::RemoveVca {
+                        vca_id: StableId::parse("rv-extra").expect("stable id"),
+                    }
+                }
+            }
         }
     }
 
@@ -2890,6 +2798,10 @@ impl RaceEdits {
                     frames: self.source.frames,
                 },
             );
+        }
+        // Every fourth live edit is a VCA, membership or follow edit (#1558).
+        if index % 8 == 3 {
+            return (true, self.vca_edit(index / 8));
         }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
@@ -2952,8 +2864,9 @@ struct RaceCounts {
 /// The last structural edit is edit 151, so the run ends with four live edits that commit while
 /// its candidate is pending or just swapped in, and no later rebuild re-prepares their values
 /// from the committed model: a live edit lost to the retiring plan stays lost in the final block.
-/// They are a pan (152) and three mutes (153-155), of which 153 and 155 flip a value and push a
-/// record; 154 repeats its track's value and commits with no record.
+/// They are a pan (152), two mutes (153, 154) and a VCA edit (155: `rv-extra` added), of which 153
+/// flips a value and pushes a record; 154 repeats its track's value and commits with no record.
+/// Every eighth edit from 3 on is a VCA, membership or follow edit (#1558).
 const RACE_EDITS: u64 = 156;
 const RACE_EDITS_PER_BLOCK: u64 = 3;
 /// Render blocks after an edit's first refusal beyond which another refusal fails the run, as
@@ -3360,7 +3273,9 @@ fn paused_bursts(
 }
 
 /// #1258 gate 1: live fader, mute and pan edits, several per render period, and a structural edit
-/// every eighth, against a plan rendering on another thread, twenty times.
+/// every eighth, against a plan rendering on another thread, twenty times. #1558 adds VCA offsets
+/// and mutes, VCA membership, VCAs added and removed, and a send's `follows_mute` to the live
+/// edits: none rebuilds, none allocates or frees on render, and the final block equals a fresh plan.
 ///
 /// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from

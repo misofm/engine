@@ -138,6 +138,48 @@ pub enum RouteControlError {
     Length,
 }
 
+/// Validates a send's values and builds their record, without a producer (#1557 D2). Pure: writes
+/// nothing. This is the one builder: [`RouteControlProducer::record`] calls it, and the live-delta
+/// classifier calls it for a route it has no producer for.
+///
+/// # Errors
+///
+/// [`RouteControlError::Domain`] when `route_coefficients` refuses, then
+/// [`RouteControlError::Length`] when `length > ROUTE_RAMP_LENGTH_MAXIMUM`.
+pub fn route_record(
+    gain_db: f32,
+    matrix: [f32; 4],
+    mute: bool,
+    source_lane_muted: [bool; 2],
+    length: u32,
+) -> Result<RouteControlRecord, RouteControlError> {
+    let target = route_coefficients(gain_db, matrix, mute, source_lane_muted)
+        .map_err(|_| RouteControlError::Domain)?;
+    if length > ROUTE_RAMP_LENGTH_MAXIMUM {
+        return Err(RouteControlError::Length);
+    }
+    let silenced = RouteGate {
+        mute,
+        follow_zeroed: source_lane_muted,
+    }
+    .silences();
+    // A silencing gate's coefficients are the four `+0.0` the record requires, so with the length
+    // in bounds `new` cannot refuse; the arm is the domain rule's, never a drop.
+    graph::RouteControlRecord::new(target, silenced, length)
+        .map(RouteControlRecord)
+        .ok_or(RouteControlError::Domain)
+}
+
+/// The position of the producer of route `id` in `producers`, which are in canonical route-ID order
+/// (`HostLiveControlHandles::route_controls`; preparation sorts them): a binary search, so a commit
+/// that resolves a producer per changed route allocates nothing (#1557 D4).
+#[must_use]
+pub fn route_producer_position(producers: &[RouteControlProducer], id: &str) -> Option<usize> {
+    producers
+        .binary_search_by(|producer| producer.route_id().cmp(id))
+        .ok()
+}
+
 /// The control-plane half of one live send's latest-target cell.
 ///
 /// A transparent wrapper over the graph's producer, so the producer table host-core retains is
@@ -174,7 +216,8 @@ impl RouteControlProducer {
     /// Validates the values and builds their record. Pure: writes nothing.
     ///
     /// Refused with [`RouteControlError::Domain`] when `route_coefficients` refuses, then with
-    /// [`RouteControlError::Length`] when `length > ROUTE_RAMP_LENGTH_MAXIMUM`.
+    /// [`RouteControlError::Length`] when `length > ROUTE_RAMP_LENGTH_MAXIMUM`. It is
+    /// [`route_record`]: the producer is not read.
     pub fn record(
         &self,
         gain_db: f32,
@@ -183,21 +226,7 @@ impl RouteControlProducer {
         source_lane_muted: [bool; 2],
         length: u32,
     ) -> Result<RouteControlRecord, RouteControlError> {
-        let target = route_coefficients(gain_db, matrix, mute, source_lane_muted)
-            .map_err(|_| RouteControlError::Domain)?;
-        if length > ROUTE_RAMP_LENGTH_MAXIMUM {
-            return Err(RouteControlError::Length);
-        }
-        let silenced = RouteGate {
-            mute,
-            follow_zeroed: source_lane_muted,
-        }
-        .silences();
-        // A silencing gate's coefficients are the four `+0.0` the record requires, so with the
-        // length in bounds `new` cannot refuse; the arm is the domain rule's, never a drop.
-        graph::RouteControlRecord::new(target, silenced, length)
-            .map(RouteControlRecord)
-            .ok_or(RouteControlError::Domain)
+        route_record(gain_db, matrix, mute, source_lane_muted, length)
     }
 
     /// Write a record [`Self::record`] built as the route's newest target, stamped with the

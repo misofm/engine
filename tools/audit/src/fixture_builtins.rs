@@ -336,6 +336,9 @@ const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
 // `stall`; `CompositionBound` 32 -> 40, `NodeTailBound` 88 -> 96; the entry was 104).
 const BOXED_TAIL_ENTRY_BYTES: u64 = 112;
 const BOXED_STR_BYTES: u64 = 16;
+/// The routes' effective follow gates, `Box<[[bool; 2]]>`, one `[bool; 2]` per route (#1558). The
+/// fixture session declares exactly one route at every track count.
+const ROUTE_FOLLOW_BYTES: u64 = 2;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
 /// (four `f32` words per channel), its `[[u32; 8]; 2]` countdown and the `ramping` off gate.
@@ -3367,6 +3370,7 @@ fn derive_resource_record(tracks: u64, meters: u64) -> Result<ResourceRecord, St
         resource_product(tracks, BOXED_STR_BYTES)?,
         resource_product(processor_count, BOXED_STAGE_ENTRY_BYTES)?,
         resource_product(tracks, BOXED_TAIL_ENTRY_BYTES)?,
+        ROUTE_FOLLOW_BYTES,
     ])?;
     // Nothing is boxed at preparation. The input, fader and matrix sections are still exactly
     // `InputBuiltins`, `FaderMuteBuiltins` and `MatrixBuiltins`, but all three now sit inline
@@ -3387,9 +3391,10 @@ fn derive_resource_record(tracks: u64, meters: u64) -> Result<ResourceRecord, St
     .into_iter()
     .max()
     .ok_or_else(|| "empty processor resource projection".to_owned())?;
-    // Six vectors (the binding vector left), and nine allocations per track: the nine
-    // independently retained copies of the track's ID, and no boxed processor at all.
-    let processor_allocations = resource_sum(&[6, resource_product(tracks, 9)?])?;
+    // Seven vectors (the binding vector left, the routes' follow gates added by #1558), and nine
+    // allocations per track: the nine independently retained copies of the track's ID, and no
+    // boxed processor at all.
+    let processor_allocations = resource_sum(&[7, resource_product(tracks, 9)?])?;
 
     let queue_capacity = if meters == 7 { 4 } else { 1 };
     let slot_count = queue_capacity + 1;
@@ -5357,7 +5362,13 @@ mod tests {
             // `canonical.json` and the two `prepare_256_tracks` workloads naming it move, by the
             // `session_template_sha256` of `canonical.json`. No PCM, meter, response or resource
             // fixture moved.
-            "3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108",
+            //
+            // Re-pinned by issue #1558: `resources.jsonl` alone moves, by +2 bytes in every
+            // processor payload count and +1 retained allocation per row (the routes' effective
+            // follow gates, `Box<[[bool; 2]]>`, one `[bool; 2]` per route, kept for graph
+            // lowering; the fixture session declares one route at every track count). The largest
+            // allocation does not move. No PCM, meter, response or benchmark fixture moved.
+            "4432d2bfe744d480def089049d8e26e31d0db726093f545086e400a9321a581c",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

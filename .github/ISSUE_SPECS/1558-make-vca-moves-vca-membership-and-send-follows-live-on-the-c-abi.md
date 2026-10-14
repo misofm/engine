@@ -229,3 +229,67 @@ Commands: `cargo test --locked -p controls -p host-core --all-features`,
 - Supersedes *Deliver value-only VCA edits to the running C ABI plan* (#1247).
 - Shrinks *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
   the live console lanes* (#1053): guards G2 and G3 are lifted by this slice.
+
+## Decision record (implementation)
+
+- **One composition of the follow gate (batch-1 review carry-forward).** The graph compiler no
+  longer spells `follows_mute ? strip_mutes[source] : [false; 2]`. `controls::effective` computes
+  each route's follow part (`EffectiveRoute::follow`, from the new building block
+  `effective_follow`) beside its gate (`effective_gate` is the route's mute OR that follow).
+  Builtins preparation, which already receives the `Effective`, keeps `follow` in
+  `PreparedBuiltinsSession::effective_route_follow` (charged in the builtin resource estimate), and
+  `graph-compiler` reads it for `RouteGate::follow_zeroed`; `effective_strip_mutes` is deleted. The
+  live classifier reads `Effective.routes[r].gate` of both models. The follow part is kept apart
+  from the gate only so that the sealed graph text of a muted route (one `route-mute` row) does not
+  move (#1216 D5).
+- **`EffectiveDiff` (`crates/host-core/src/prepare.rs`) is the one place a strip's level records and
+  a gate record's length are decided.** The classifier and `join_strips` both call it, so a
+  successor's carry retarget and a live record cannot differ. `fader_records` takes the effective
+  values and per-lane lengths (`LevelLengths`); two lanes merge into one `Both` record only when
+  their value and their length agree.
+- **Mask and diff.** `mask_values` copies the whole `vcas` list. `changed_controls` compares the VCA
+  rows apart: with equal VCA addresses their changes are listed (last), with a different VCA set it
+  lists none and does not return `None`; the classifier turns any VCA row, strip-level row or route
+  row change, or a different VCA list, into "compute the effective values of both models".
+- **D6.** `host_core::check_counts` is the count check of preparation; `live_admission` calls it
+  with `prepare_caps(limits)` and maps the diagnostic to `COMPILE_REJECTED`.
+- **Successor path (known residual, #1284).** `join_strips` now carries and retargets a strip whose
+  followed mute changes, as D4 says. The sends of the successor are prepared from its model, so they
+  are gated at the swap block without the source's ramp. The live path ramps a send's gate with its
+  source's mute (D7); the successor path cannot until a send's ramp is carried across a swap.
+- **Catalog growth (batch 3 review fold, replaces the first reading).** A live VCA add (or a
+  remove and add with a longer ID) replaces the catalog by a larger one (four rows and a header per
+  VCA, and the ID in each). The first reading charged only the catalog the plans were prepared
+  with, and said the growth was bounded by `maximum_vcas`; that bounds the row count, not the
+  bytes, and no ceiling saw them. Now `live_admission` builds the committed model's catalog before
+  admission and `validate_live_peak` takes a `LiveCatalogAdmission`: the new catalog's retained bytes
+  less the current catalog's (saturating at zero) join the capi term, and the new catalog's largest
+  single allocation joins the largest-allocation term. A refusal is the compile diagnostic a
+  rebuild gives (`ResourceFault::Limit`), before any write. After the commit the newest epoch's
+  retained rows (`CapiResources` and the report row `plan_resources` reads) follow the committed
+  catalog, so the next admission and the report see its bytes; an older pending-swap epoch keeps the
+  catalog it was prepared with until its plan is gone, and the largest-allocation figure only
+  grows. The peak therefore holds the committed catalog twice (the retained row and the
+  prepared-protocol stand-in), as the first reading's did for the old one.
+- **A route record with a gain or matrix change and a source-caused gate change takes the
+  source's `Mute` length (batch 3 review fold).** D7's last clause names #1557 D3's rule for such a
+  record, which would give the `SendGain` or `SendMatrix` row's length. The code does the other
+  thing: once the gate changes the gate's length governs the whole record (`route_records`), and a
+  gate change that no route edit caused takes the source's `Mute` length. Decision: keep the code.
+  A send that follows its source's mute must ramp with it; a second, independent length on the same
+  record would make the cell ramp one way for its gate and another for its gain, and a record
+  has one length. The gain moves with the gate's ramp in that block. One test pins it
+  (`a_gain_change_with_a_source_caused_gate_change_takes_the_sources_mute_length`).
+- **Tests.** Inverted: `a_followed_mute_change_needs_a_rebuild`, `any_vca_needs_a_rebuild`,
+  `a_followed_submix_mute_change_needs_a_rebuild` (host-core classifier);
+  `deltas_outside_the_live_set_rebuild_...` (capi); the four followed-mute / VCA restart tests of
+  `successor_swap.rs`, which used a VCA or a followed mute as their "prepared difference" (no valid
+  session has a prepared fader family left, so the restart-count test became a carried-lane count
+  test; the restarting-input-lane test remains).
+- **Builtins resource grid re-pinned (batch 3 review fold).** The retained follow gates are a new
+  processor vector (`Box<[[bool; 2]]>`, one `[bool; 2]` per route), so `fixtures/builtins/v1/resources.jsonl`
+  moves by +2 bytes in `engine_owned_processor_payload_bytes` (and the retained total) and +1 in
+  `retained_allocation_count` on all nine rows (the fixture session has one route at every track
+  count): for example tracks=1, meters=0: 2205 -> 2207 bytes, 15 -> 16 allocations. The largest
+  allocation does not move. The manifest digest moves `3e151a3c...` -> `4432d2bf...`. Expected: the
+  estimate charges what preparation now retains; no PCM, meter, response or benchmark fixture moved.

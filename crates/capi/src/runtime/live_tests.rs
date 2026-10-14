@@ -5,9 +5,9 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    SESSION, automation_status, automation_target, boxed_c_children_with_limits, command_bytes,
-    command_bytes_at_revision, command_c, control_list_all_c, control_list_c, control_state_all_c,
-    control_state_c, event_c, generated_parity_session, limits, submit_c,
+    SESSION, add_muted_track, automation_status, automation_target, boxed_c_children_with_limits,
+    command_bytes, command_bytes_at_revision, command_c, control_list_all_c, control_list_c,
+    control_state_all_c, control_state_c, event_c, generated_parity_session, limits, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -39,6 +39,38 @@ fn source_chunk(start: u64, frames: usize) -> [Vec<f32>; 2] {
             .map(|offset| source_sample(lane, start + offset))
             .collect()
     })
+}
+
+/// A source with stretches of `-0.0` samples (#1556: the input filters and the sign of a zero),
+/// and, where it is not quiet, either the usual wobbling lanes or one constant.
+struct Feed {
+    quiet: Vec<core::ops::Range<u64>>,
+    constant: Option<f32>,
+}
+
+impl Feed {
+    /// `-0.0` before frame `end`, the usual source after it.
+    fn quiet_until(end: u64) -> Self {
+        Self {
+            quiet: core::iter::once(0..end).collect(),
+            constant: None,
+        }
+    }
+
+    fn chunk(&self, start: u64, frames: usize) -> [Vec<f32>; 2] {
+        [0, 1].map(|lane| {
+            (0..frames as u64)
+                .map(|offset| {
+                    let frame = start + offset;
+                    if self.quiet.iter().any(|range| range.contains(&frame)) {
+                        -0.0
+                    } else {
+                        self.constant.unwrap_or_else(|| source_sample(lane, frame))
+                    }
+                })
+                .collect()
+        })
+    }
 }
 
 /// The parity session with a source long enough for a whole run, under the default
@@ -266,6 +298,17 @@ impl Rig {
             .expect("track producer")
     }
 
+    /// Every send's cell write count in the current epoch, in route-ID order (#1557).
+    fn current_route_cells(&self) -> Vec<u64> {
+        let snapshot = crate::ffi::test_transaction_snapshot(self.session);
+        snapshot
+            .route_cells
+            .iter()
+            .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+            .map(|&(_, _, writes)| writes)
+            .collect()
+    }
+
     /// Every strip's cell write counts in the current epoch, per cell: `([fader left, fader
     /// right, mute left, mute right], matrix)`.
     fn current_cells(&self) -> Vec<([u64; 4], u64)> {
@@ -317,8 +360,16 @@ impl Reference {
     }
 
     fn step(&mut self) -> Vec<f32> {
+        self.step_feed(&Feed {
+            quiet: Vec::new(),
+            constant: None,
+        })
+    }
+
+    /// One block fed from `feed`.
+    fn step_feed(&mut self, feed: &Feed) -> Vec<f32> {
         let start = self.block * self.quantum as u64;
-        let [left, right] = source_chunk(start, self.quantum);
+        let [left, right] = feed.chunk(start, self.quantum);
         self.sources
             .submit(
                 SOURCE,
@@ -350,6 +401,12 @@ impl Reference {
     fn run(document: &str, blocks: u64) -> Vec<Vec<f32>> {
         let mut reference = Self::new(document);
         (0..blocks).map(|_| reference.step()).collect()
+    }
+
+    /// [`Reference::run`] fed from `feed`.
+    fn run_feed(document: &str, blocks: u64, feed: &Feed) -> Vec<Vec<f32>> {
+        let mut reference = Self::new(document);
+        (0..blocks).map(|_| reference.step_feed(feed)).collect()
     }
 }
 
@@ -720,6 +777,23 @@ fn with_ramp(edits: Vec<SessionEdit>, ramp: Option<u32>) -> Vec<SessionEdit> {
 }
 
 impl Rig {
+    /// One block fed from `feed`, with the calling thread's allocator events inside the `render`
+    /// call.
+    fn step_feed(&mut self, feed: &Feed) -> (Vec<f32>, bench_support::alloc::Counters) {
+        let [left, right] = feed.chunk(self.fed, self.quantum);
+        submit_c(
+            self.session,
+            self.generation,
+            self.fed,
+            self.rate,
+            &left,
+            &right,
+            false,
+        );
+        self.fed += self.quantum as u64;
+        self.render_counted()
+    }
+
     /// [`Rig::step`] with the calling thread's allocator events inside the `render` call.
     fn step_counted(&mut self) -> (Vec<f32>, bench_support::alloc::Counters) {
         let [left, right] = source_chunk(self.fed, self.quantum);
@@ -1638,7 +1712,8 @@ fn submix_session(follows_mute: bool) -> String {
     })
 }
 
-/// Gate 4: every delta outside the live set rebuilds, and a domain failure writes no cell.
+/// Gate 4: every delta outside the live set rebuilds, and a domain failure writes no cell. (A VCA
+/// and a followed mute left the set in #1558.)
 #[test]
 fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
     let base = long_session(10, 48_000);
@@ -1649,6 +1724,7 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
         right_mute: false,
     };
 
+    // A VCA in the session no longer forces a rebuild (#1558), nor does a mute that a send follows.
     let vca = with_model(&base, |model| {
         model.vcas.push(Vca {
             id: StableId::parse("vca").expect("vca"),
@@ -1661,8 +1737,6 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
             members: vec![StableId::parse("eq5").expect("member")],
         });
     });
-    assert_rebuilds(&vca, &[fader_edit("eq0", quiet.clone())], "a VCA (G3)");
-
     let followed = submix_session(true);
     let muted = DualMonoFader {
         left_mute: true,
@@ -1670,18 +1744,25 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
             .fader
             .clone()
     };
-    assert_rebuilds(
-        &followed,
-        &[fader_edit("eq0", muted.clone())],
-        "a followed mute (G2)",
-    );
-    // The same mute without `follows_mute` is live, so the guard above is what rebuilt.
+    for (document, edit, label) in [
+        (&vca, fader_edit("eq0", quiet.clone()), "a VCA"),
+        (
+            &followed,
+            fader_edit("eq0", muted.clone()),
+            "a followed mute",
+        ),
+        (
+            &submix_session(false),
+            fader_edit("eq0", muted.clone()),
+            "an unfollowed mute",
+        ),
+    ] {
+        let mut rig = Rig::new(document);
+        rig.step();
+        assert_eq!(rig.apply(&[edit]), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.summary().3, 0, "{label} is live");
+    }
     let unfollowed = submix_session(false);
-    let mut rig = Rig::new(&unfollowed);
-    rig.step();
-    assert_eq!(rig.apply(&[fader_edit("eq0", muted)]), crate::RESULT_OK);
-    assert_eq!(rig.summary().3, 0, "an unfollowed mute is live");
-    drop(rig);
 
     // A submix strip's fader is live since #1554; `set_control::submix_strips_take_live_edits`.
     assert_rebuilds(
@@ -2245,7 +2326,13 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
         let (revision, _, epoch, pending) = rig.summary();
         assert_eq!(pending, 0, "{name}");
         let bytes = rig.transaction(core::slice::from_ref(&edit));
-        assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK, "{name}");
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK, "{name}");
+        assert_eq!(
+            edit_path_of(&response),
+            protocol::EditPath::ModelOnly,
+            "{name}: a delta with no record is reported as model-only"
+        );
         let (after, _, after_epoch, after_pending) = rig.summary();
         assert_eq!(
             (after, after_epoch, after_pending),
@@ -2271,6 +2358,82 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
     }
     assert_eq!(rig.generation, 1, "the host never seeked");
     assert_eq!(rig.summary().2, 0, "the first epoch still renders");
+}
+
+/// The edit path a `SESSION_TRANSACTION_APPLY` success response carries (#1313).
+fn edit_path_of(response: &[u8]) -> protocol::EditPath {
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+        .expect("transaction response")
+    else {
+        panic!("expected a transaction success")
+    };
+    applied.edit_path
+}
+
+/// #1313 gates 1 and 2: the response names how the engine applied the transaction. A fader change
+/// is `live`, a session ID change is `model_only`, an added track is `rebuild`, and a fader change
+/// beside a source content edit is the `rebuild` it takes. An exact replay of the live
+/// request returns the same bytes, path included.
+///
+/// Test value: red if the path is derived from anything but the classifier's result (for example
+/// "a record was pushed", which calls the mixed transaction live; or `live` for an empty delta),
+/// or if the commit forgets to overwrite the replay entry, so a retry reports the placeholder
+/// the prepared frame carried.
+#[test]
+fn each_transactions_response_names_its_edit_path() {
+    let document = effect_session(10, 48_000);
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let live = rig.transaction(&[left_db_edit("eq2", -4.5)]);
+    let (result, first) = rig.send(&live);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&first), protocol::EditPath::Live);
+    assert_eq!(rig.summary().3, 0, "live prepares no candidate");
+    let (result, replay) = rig.send(&live);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        replay, first,
+        "the replay is the first response, byte for byte"
+    );
+    assert_eq!(edit_path_of(&replay), protocol::EditPath::Live);
+
+    let session_id = rig.transaction(&[SessionEdit::SetSessionId {
+        session_id: StableId::parse("path-session").expect("session ID"),
+    }]);
+    let (result, response) = rig.send(&session_id);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::ModelOnly);
+    assert_eq!(rig.summary().3, 0, "model-only prepares no candidate");
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let model = parse_session_json(&document).expect("model");
+    let added = rig.transaction(&add_muted_track(&model, "added"));
+    let (result, response) = rig.send(&added);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    assert_eq!(rig.summary().3, 1, "rebuild prepares a candidate");
+
+    let mut rig = Rig::new(&document);
+    rig.step();
+    // No native effect prepares at a quality other than `normal` today, so a quality edit would be
+    // refused at preparation; a source content edit is the structure change that beside a fader
+    // value is still the rebuild it takes (`LiveRebuild::Structure`).
+    let mixed = rig.transaction(&[left_db_edit("eq2", -4.5), content_edit(&model)]);
+    let (result, response) = rig.send(&mixed);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        edit_path_of(&response),
+        protocol::EditPath::Rebuild,
+        "a transaction that also has live records is the rebuild it takes"
+    );
+    assert_eq!(rig.summary().3, 1);
 }
 
 /// `SetControlSmoothing` with the given `mute_ms` and the default table's other two lengths.
@@ -2825,13 +2988,13 @@ fn eq_session(sample_rate_hz: u32) -> String {
 }
 
 /// #1555 gate 2: the lanes the core chooses for a session with a console slot on every track and
-/// one insert are the lanes the C ABI always carried: an effect producer per console slot and
-/// insert, a fader/matrix producer per strip, and no input cells (no input row is live).
+/// one insert are the lanes the C ABI carries: an effect producer per console slot and insert, and
+/// a fader/matrix and an input producer per strip (#1556: the input rows are live).
 ///
-/// Test value: red if choosing the lanes from the rows changes the C ABI's lane set before a row
-/// flips, which would hand a live edit no cell, or an input lane whose tail turns infinite.
+/// Test value: red if choosing the lanes from the rows leaves a strip without its input cells,
+/// which would hand a live trim, polarity or filter edit no cell.
 #[test]
-fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_lanes_and_no_input_cells() {
+fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_and_input_lanes() {
     let document = eq_session(48_000);
     let children = compile_children(&document, limits(), None).expect("EQ session");
     let providers = children.session.test_providers();
@@ -2842,8 +3005,8 @@ fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_lanes_and_no_i
         providers
             .test_strip_controls()
             .iter()
-            .all(|strip| strip.input.is_none()),
-        "no strip carries an input lane"
+            .all(|strip| strip.input.is_some()),
+        "every strip carries an input lane"
     );
     let slots = model.console.pre_insert.len() + model.console.post_insert.len();
     let inserts: usize = model
@@ -4359,7 +4522,10 @@ mod set_control {
     use session::{ParameterChannel, ParameterUnit, RackName};
 
     /// The builtin IDs the addresses name (`BUILTIN_PARAMETER_DESCRIPTORS`).
+    const POLARITY_INVERT: u32 = 1;
     const TRIM_DB: u32 = 2;
+    const HPF_HZ: u32 = 3;
+    const LPF_HZ: u32 = 4;
     const DELAY_SAMPLES: u32 = 11;
     const FADER_DB: u32 = 5;
     const MUTE: u32 = 6;
@@ -4635,29 +4801,18 @@ mod set_control {
                 ramp_samples: None,
             }
         };
-        for (label, by_address, per_kind) in [
-            (
-                "trim",
-                set(builtin(name, TRIM_DB, Lane::Both), 3.0, None),
-                builtins(&|lane| lane.trim_db = 3.0),
-            ),
-            (
-                "delay",
-                set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None),
-                builtins(&|lane| lane.delay_samples = 64),
-            ),
-        ] {
-            assert_rebuilds(
-                &document,
-                core::slice::from_ref(&by_address),
-                &format!("{label} by address"),
-            );
-            assert_rebuilds(
-                &document,
-                core::slice::from_ref(&per_kind),
-                &format!("{label} per kind"),
-            );
-        }
+        let by_address = set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None);
+        let per_kind = builtins(&|lane| lane.delay_samples = 64);
+        assert_rebuilds(
+            &document,
+            core::slice::from_ref(&by_address),
+            "delay by address",
+        );
+        assert_rebuilds(
+            &document,
+            core::slice::from_ref(&per_kind),
+            "delay per kind",
+        );
         let route_id = model.routes[0].id.clone();
         assert_rebuilds(
             &document,
@@ -4712,6 +4867,346 @@ mod set_control {
             renders[0] != renders[1] && renders[1] != renders[2] && renders[0] != renders[2],
             "the session default, a step and 480 samples render differently"
         );
+    }
+
+    /// The stateless session of three tracks, centred so both lanes carry signal, with a bus fed
+    /// by `eq0` and the other tracks into the output. Nothing in it keeps state while its input
+    /// filters are off, so a live edit renders like a plan prepared with it once its ramp has
+    /// passed and the filter memories started from the same silence.
+    fn input_document(sample_rate_hz: u32, with_bus: bool) -> String {
+        let mut model = crate::runtime::tests::stateless_session(sample_rate_hz);
+        model.sources[0].frames = SOURCE_FRAMES;
+        for track in &mut model.tracks {
+            track.matrix_or_pan = MatrixOrPan::Pan {
+                left: 0.0,
+                right: 0.0,
+                smoothing_samples: 0,
+            };
+        }
+        let document = session::canonical_session_json(&model).expect("canonical input session");
+        if !with_bus {
+            return document;
+        }
+        with_bus_strip(&document, |model, submix| {
+            let track = model.tracks[0].clone();
+            submix.builtins = track.builtins.clone();
+            submix.fader = track.fader.clone();
+            submix.matrix_or_pan = track.matrix_or_pan.clone();
+        })
+    }
+
+    /// The longest ramp an input edit leaves behind: a trim (fader), a flip (twice the mute) or a
+    /// filter (64 coefficient updates).
+    fn input_ramp(document: &str) -> u32 {
+        let ramps = parse_session_json(document)
+            .expect("model")
+            .control_smoothing_samples();
+        ramps.fader.max(ramps.mute * 2).max(64)
+    }
+
+    /// Gate 1 (#1556): a trim, a polarity flip, an HPF and an LPF, on a track and on a submix
+    /// strip, per lane and on both, commit one revision with the plan epoch unchanged, and from the
+    /// block their ramp leaves behind render the bits of a plan prepared from the committed
+    /// session, at 44.1 and 96 kHz. The source is `-0.0` until the ramp has passed, so the
+    /// filters, which keep memory, start from one silence in both plans. No render block after the
+    /// commit allocates or frees.
+    ///
+    /// Red if a record lands on the wrong lane, strip or rate, a submix strip stays structural, a
+    /// filter target is designed from the wrong seeds, or the input lane adds render work that
+    /// allocates.
+    #[test]
+    fn input_values_are_live_and_render_the_prepared_plan_bits() {
+        bench_support::alloc::assert_installed();
+        for rate in [44_100, 96_000] {
+            let document = input_document(rate, true);
+            let ramp = input_ramp(&document);
+            for strip in ["bus", "eq0"] {
+                let cases: [(&str, Vec<SessionEdit>); 9] = [
+                    (
+                        "trim, left",
+                        vec![set(builtin(strip, TRIM_DB, Lane::Left), -6.0, None)],
+                    ),
+                    (
+                        "trim, both",
+                        vec![set(builtin(strip, TRIM_DB, Lane::Both), -3.0, None)],
+                    ),
+                    (
+                        "trim, split",
+                        vec![
+                            set(builtin(strip, TRIM_DB, Lane::Left), -2.0, None),
+                            set(builtin(strip, TRIM_DB, Lane::Right), -4.0, None),
+                        ],
+                    ),
+                    (
+                        "polarity, both",
+                        vec![set(builtin(strip, POLARITY_INVERT, Lane::Both), 1.0, None)],
+                    ),
+                    (
+                        "polarity, right",
+                        vec![set(builtin(strip, POLARITY_INVERT, Lane::Right), 1.0, None)],
+                    ),
+                    (
+                        "hpf, both",
+                        vec![set(builtin(strip, HPF_HZ, Lane::Both), 80.0, None)],
+                    ),
+                    (
+                        "lpf, both",
+                        vec![set(builtin(strip, LPF_HZ, Lane::Both), 8_000.0, None)],
+                    ),
+                    (
+                        "hpf left and lpf right",
+                        vec![
+                            set(builtin(strip, HPF_HZ, Lane::Left), 80.0, None),
+                            set(builtin(strip, LPF_HZ, Lane::Right), 6_000.0, None),
+                        ],
+                    ),
+                    (
+                        "hpf and lpf together",
+                        vec![
+                            set(builtin(strip, HPF_HZ, Lane::Both), 80.0, None),
+                            set(builtin(strip, LPF_HZ, Lane::Both), 8_000.0, None),
+                        ],
+                    ),
+                ];
+                for (case, edits) in cases {
+                    let label = format!("{rate} Hz, {strip}, {case}");
+                    let mut rig = Rig::new(&document);
+                    let edit_block = 4;
+                    let settled = edit_block + window(rig.latency(), ramp, rig.quantum) + 1;
+                    let feed = Feed::quiet_until(settled * rig.quantum as u64);
+                    let total = settled + 4;
+                    let mut live = Vec::new();
+                    for _ in 0..edit_block {
+                        live.push(rig.step_feed(&feed).0);
+                    }
+                    let (revision, _, epoch, pending) = rig.summary();
+                    assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+                    assert_eq!(
+                        (rig.summary().0, rig.summary().2, rig.summary().3),
+                        (revision + 1, epoch, pending),
+                        "{label}: one revision, the same plan, no candidate"
+                    );
+                    let committed = rig.snapshot();
+                    for block in edit_block..total {
+                        let (pcm, used) = rig.step_feed(&feed);
+                        assert_eq!(
+                            (used.allocations, used.deallocations),
+                            (0, 0),
+                            "{label}: block {block} allocated or freed"
+                        );
+                        live.push(pcm);
+                    }
+                    let reference = Reference::run_feed(&committed, total, &feed);
+                    let untouched = Reference::run_feed(&document, total, &feed);
+                    let mut heard = false;
+                    for block in settled as usize..total as usize {
+                        assert!(
+                            reference[block].iter().any(|sample| *sample != 0.0),
+                            "{label}: block {block} carries signal"
+                        );
+                        assert_eq!(
+                            bits(&live[block]),
+                            bits(&reference[block]),
+                            "{label}: block {block}"
+                        );
+                        heard |= bits(&live[block]) != bits(&untouched[block]);
+                    }
+                    assert!(heard, "{label}: the edit changes the output");
+                    assert_eq!(rig.summary().2, epoch, "{label}: the first epoch renders");
+                }
+            }
+        }
+    }
+
+    /// Gate 2 (#1556): an HPF enabled from off, and disabled again, with `-0.0` samples in the
+    /// source, ends on the bits of the plan prepared with the filter off; while it is on the
+    /// output has the bits of the plan prepared with it on.
+    ///
+    /// Red if a disabled filter section changes a sample (a `-0.0` turned into `+0.0`, a stale
+    /// coefficient left behind), or the enable and disable targets are designed from the wrong
+    /// seeds.
+    #[test]
+    fn an_enabled_and_disabled_hpf_ends_on_the_prepared_plan() {
+        for strip in ["bus", "eq0"] {
+            let document = input_document(48_000, true);
+            let mut rig = Rig::new(&document);
+            let q = rig.quantum as u64;
+            let ramp = input_ramp(&document);
+            let k = window(rig.latency(), ramp, rig.quantum);
+            let enable_block = 4;
+            let loud = enable_block + k + 1;
+            let disable_block = loud + 8;
+            let quiet_again = disable_block + k + 1;
+            let total = quiet_again + 4;
+            let feed = Feed {
+                quiet: Vec::from([0..loud * q, quiet_again * q..total * q]),
+                constant: None,
+            };
+            let mut live = Vec::new();
+            for _ in 0..enable_block {
+                live.push(rig.step_feed(&feed).0);
+            }
+            assert_eq!(
+                rig.apply(&[set(builtin(strip, HPF_HZ, Lane::Both), 80.0, None)]),
+                crate::RESULT_OK
+            );
+            let enabled = rig.snapshot();
+            for _ in enable_block..disable_block {
+                live.push(rig.step_feed(&feed).0);
+            }
+            assert_eq!(
+                rig.apply(&[set(builtin(strip, HPF_HZ, Lane::Both), 0.0, None)]),
+                crate::RESULT_OK
+            );
+            let disabled = rig.snapshot();
+            assert_eq!(disabled, rig.snapshot());
+            for _ in disable_block..total {
+                live.push(rig.step_feed(&feed).0);
+            }
+            assert_eq!(rig.summary().3, 0, "{strip}: no rebuild");
+            assert_eq!(rig.summary().2, 0, "{strip}: the first epoch renders");
+
+            let with_filter = Reference::run_feed(&enabled, total, &feed);
+            for block in loud..disable_block {
+                assert_eq!(
+                    bits(&live[block as usize]),
+                    bits(&with_filter[block as usize]),
+                    "{strip}: filter on, block {block}"
+                );
+            }
+            let without = Reference::run_feed(&disabled, total, &feed);
+            assert!(
+                (loud..disable_block)
+                    .any(|block| bits(&live[block as usize]) != bits(&without[block as usize])),
+                "{strip}: the filter is heard while it is on"
+            );
+            let mut quiet_blocks = 0;
+            for block in quiet_again - 2..total {
+                let expected = &without[block as usize];
+                assert_eq!(
+                    bits(&live[block as usize]),
+                    bits(expected),
+                    "{strip}: filter off again, block {block}"
+                );
+                quiet_blocks += usize::from(block >= quiet_again);
+            }
+            assert_eq!(quiet_blocks, 4);
+            assert!(
+                without[quiet_again as usize]
+                    .iter()
+                    .all(|sample| *sample == 0.0),
+                "the compared window includes silent blocks"
+            );
+        }
+    }
+
+    /// Gate 2 (#1556): a pair change on one lane (the HPF passes the old LPF while the LPF rises)
+    /// commits live, in one transaction, where two one-sided edits applied in turn would cross.
+    ///
+    /// Red if a filter pair is split into one-sided edits, which the preparer refuses, so the
+    /// transaction rebuilds.
+    #[test]
+    fn a_filter_pair_that_crosses_the_old_cutoff_is_live() {
+        let mut model = parse_session_json(&input_document(48_000, false)).expect("model");
+        let builtins = &mut model.tracks[0].builtins;
+        for lane in [&mut builtins.left, &mut builtins.right] {
+            lane.hpf_hz = 1_000.0;
+            lane.lpf_hz = 2_000.0;
+        }
+        let document = session::canonical_session_json(&model).expect("canonical");
+        let mut rig = Rig::new(&document);
+        rig.step();
+        let (revision, _, epoch, pending) = rig.summary();
+        assert_eq!(
+            rig.apply(&[
+                set(builtin("eq0", HPF_HZ, Lane::Left), 3_000.0, None),
+                set(builtin("eq0", LPF_HZ, Lane::Left), 6_000.0, None),
+            ]),
+            crate::RESULT_OK
+        );
+        assert_eq!(
+            (rig.summary().0, rig.summary().2, rig.summary().3),
+            (revision + 1, epoch, pending),
+            "the pair change is one live revision"
+        );
+        let committed = rig.model().tracks[0].builtins.left.clone();
+        assert_eq!((committed.hpf_hz, committed.lpf_hz), (3_000.0, 6_000.0));
+    }
+
+    /// Gate 3 (#1556): a polarity flip with `ramp_samples` 480 on a constant source is a linear
+    /// ramp from `+g` to `-g` over 480 samples, with no step, and the plan reports a finite tail.
+    ///
+    /// Red if a flip steps, ramps over another length, or does not pass through zero.
+    #[test]
+    fn a_polarity_flip_ramps_linearly_through_zero() {
+        let document = input_document(48_000, false);
+        let model = parse_session_json(&document).expect("model");
+        let mut rig = Rig::new(&document);
+        assert_eq!(
+            crate::ffi::test_plan_snapshot(rig.plan).1.tail_kind,
+            crate::TAIL_FINITE,
+            "the input lane's bound is finite"
+        );
+        let feed = Feed {
+            quiet: Vec::new(),
+            constant: Some(0.25),
+        };
+        let q = rig.quantum;
+        for _ in 0..4 {
+            rig.step_feed(&feed);
+        }
+        let before = rig.step_feed(&feed).0;
+        let level = before[0];
+        assert!(level > 0.0);
+        assert!(
+            before[..q]
+                .iter()
+                .all(|sample| sample.to_bits() == level.to_bits()),
+            "the constant source gives a constant output"
+        );
+        let flips: Vec<_> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                set(
+                    builtin(track.id.as_str(), POLARITY_INVERT, Lane::Both),
+                    1.0,
+                    Some(480),
+                )
+            })
+            .collect();
+        assert_eq!(rig.apply(&flips), crate::RESULT_OK);
+        assert_eq!(rig.summary().3, 0, "the flip is live");
+        // The sample before the flip is the ramp's start.
+        let mut ratio = vec![1.0_f64];
+        for _ in 0..8 {
+            let (pcm, used) = rig.step_feed(&feed);
+            assert_eq!((used.allocations, used.deallocations), (0, 0));
+            ratio.extend(pcm[..q].iter().map(|sample| f64::from(*sample / level)));
+        }
+        // The ramp runs for 480 samples: no sample jumps by more than one step of 2/480, the last
+        // sample is -1, and the middle passes through zero.
+        let step = 2.0 / 480.0;
+        let first_moved = ratio
+            .iter()
+            .position(|r| (r - 1.0).abs() > 1e-6)
+            .expect("moves");
+        let landed = ratio
+            .iter()
+            .position(|r| (r + 1.0).abs() < 1e-6)
+            .expect("lands on -1");
+        assert_eq!(landed - first_moved, 479, "{first_moved} {landed}");
+        for pair in ratio[first_moved - 1..=landed].windows(2) {
+            assert!(
+                (pair[0] - pair[1] - step).abs() < 1e-5,
+                "a linear step of {step}: {pair:?}"
+            );
+        }
+        assert!(
+            ratio[first_moved..landed].iter().any(|r| r.abs() < step),
+            "the ramp passes through zero"
+        );
+        assert!(ratio[landed..].iter().all(|r| (r + 1.0).abs() < 1e-6));
     }
 
     /// Gate 3, measured: an address edit's explicit 480-sample ramp takes 480 samples. Every block
@@ -4973,21 +5468,29 @@ mod set_control {
     /// track fully right (`pan` 1.0 and 1.0), so a send from it carries nothing on the bus's left
     /// lane; eq0 is centred to feed both lanes.
     fn stateless_bus_document() -> String {
-        with_bus_strip(&long_session(10, 48_000), |model, submix| {
-            model.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-                left: 0.0,
-                right: 0.0,
-                smoothing_samples: 16,
-            };
-            let track = model.tracks[0].clone();
-            submix.builtins = track.builtins.clone();
-            for lane in [&mut submix.builtins.left, &mut submix.builtins.right] {
-                lane.hpf_hz = 0.0;
-                lane.lpf_hz = 0.0;
-            }
-            submix.fader = track.fader.clone();
-            submix.matrix_or_pan = track.matrix_or_pan.clone();
-        })
+        stateless_bus_document_with(10, 48_000)
+    }
+
+    /// [`stateless_bus_document`] with `track_count` tracks at `sample_rate_hz`.
+    fn stateless_bus_document_with(track_count: usize, sample_rate_hz: u32) -> String {
+        with_bus_strip(
+            &long_session(track_count, sample_rate_hz),
+            |model, submix| {
+                model.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
+                    left: 0.0,
+                    right: 0.0,
+                    smoothing_samples: 16,
+                };
+                let track = model.tracks[0].clone();
+                submix.builtins = track.builtins.clone();
+                for lane in [&mut submix.builtins.left, &mut submix.builtins.right] {
+                    lane.hpf_hz = 0.0;
+                    lane.lpf_hz = 0.0;
+                }
+                submix.fader = track.fader.clone();
+                submix.matrix_or_pan = track.matrix_or_pan.clone();
+            },
+        )
     }
 
     /// Gate 1, builtin families: a fader, a mute, a pan and a matrix, on a track and on a submix
@@ -5057,6 +5560,240 @@ mod set_control {
                 assert_eq!(rig.summary().2, epoch, "{label}: the first epoch renders");
             }
         }
+    }
+
+    /// The own-row IDs of a route (`crates/controls/src/route.rs`).
+    const ROUTE_GAIN_DB: u32 = 1;
+    const ROUTE_MUTE: u32 = 2;
+    const ROUTE_MATRIX_LL: u32 = 3;
+    const ROUTE_MATRIX_LR: u32 = 4;
+    const ROUTE_MATRIX_RL: u32 = 5;
+
+    fn route(route: &str, control: u32) -> ControlAddress {
+        address(Owner::Route(id(route)), Section::Own, control, Lane::Both)
+    }
+
+    /// Gate 1 (#1557): a send's gain, mute and matrix cells commit one revision with the plan epoch
+    /// unchanged, and from the block their ramp leaves behind render the bits of a plan prepared
+    /// from the committed session. No render block after the commit allocates or frees, and a
+    /// gain edit on a muted send writes no cell, so the later unmute carries the new gain.
+    ///
+    /// Red if a send edit rebuilds, lowers other coefficients than preparation folds, re-ramps a
+    /// muted send, or the route lane adds render work that allocates.
+    #[test]
+    fn send_values_are_live_and_render_the_prepared_plan_bits() {
+        bench_support::alloc::assert_installed();
+        let document = stateless_bus_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let untouched = Reference::run(&document, 48);
+        type Case = (&'static str, Vec<SessionEdit>);
+        let cases: [Case; 6] = [
+            (
+                "gain",
+                vec![set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)],
+            ),
+            ("mute", vec![set(route("eq0-bus", ROUTE_MUTE), 1.0, None)]),
+            (
+                "matrix, one coefficient",
+                vec![set(route("eq0-bus", ROUTE_MATRIX_LR), 0.5, None)],
+            ),
+            (
+                "matrix, four coefficients",
+                vec![
+                    set(route("eq0-bus", ROUTE_MATRIX_LL), 0.5, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LR), 0.25, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_RL), -0.5, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LL + 3), 0.75, None),
+                ],
+            ),
+            (
+                "gain, mute and matrix together",
+                vec![
+                    set(route("eq0-bus", ROUTE_GAIN_DB), -3.0, None),
+                    set(route("eq0-bus", ROUTE_MUTE), 1.0, None),
+                    set(route("eq0-bus", ROUTE_MATRIX_LR), 0.5, None),
+                ],
+            ),
+            (
+                "gain with an explicit step",
+                vec![set(route("eq0-bus", ROUTE_GAIN_DB), -9.0, Some(0))],
+            ),
+        ];
+        for (case, edits) in cases {
+            let label = format!("send {case}");
+            let mut rig = Rig::new(&document);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            assert_eq!(rig.current_route_cells(), vec![0], "{label}: one send lane");
+            assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            assert_eq!(
+                rig.current_route_cells(),
+                vec![1],
+                "{label}: one write to the send's cell"
+            );
+            let committed = rig.snapshot();
+            let k = window(rig.latency(), ramp, rig.quantum);
+            let edit_block = rig.block;
+            let mut live = Vec::new();
+            for _ in 0..k + 4 {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                live.push(pcm);
+            }
+            let reference = Reference::run(&committed, rig.block);
+            let mut heard = false;
+            for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                let block = edit_block as usize + offset;
+                assert!(pcm.iter().any(|sample| *sample != 0.0), "{label}: signal");
+                assert_eq!(bits(pcm), bits(&reference[block]), "{label}: block {block}");
+                heard |= bits(pcm) != bits(&untouched[block]);
+            }
+            assert!(heard, "{label}: the edit changes the output");
+            assert_eq!(rig.summary().2, epoch, "{label}: the first epoch renders");
+        }
+
+        // A gain edit on a muted send writes no cell; the unmute carries the new gain.
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_MUTE), 1.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.current_route_cells(), vec![1]);
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(
+            rig.current_route_cells(),
+            vec![1],
+            "a gain edit on a muted send writes no cell"
+        );
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_MUTE), 0.0, None)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.current_route_cells(), vec![2]);
+        assert_eq!(rig.summary().3, 0, "no edit built a candidate");
+        let committed = rig.snapshot();
+        assert_eq!(
+            parse_session_json(&committed)
+                .expect("model")
+                .routes
+                .iter()
+                .find(|route| route.id == id("eq0-bus"))
+                .expect("send")
+                .gain_db,
+            -6.0
+        );
+        let k = window(rig.latency(), ramp, rig.quantum);
+        let blocks = settle(&mut rig, k, 4);
+        let reference = Reference::run(&committed, rig.block);
+        for (block, live) in blocks {
+            assert_eq!(
+                bits(&live),
+                bits(&reference[block as usize]),
+                "unmuted send, block {block}"
+            );
+        }
+    }
+
+    /// Gate 2 (#1557): a route into the output keeps its fold, so its gain, mute and matrix are
+    /// rebuilds on a post-fader and a pre-fader route, and a send into a submix beside it is live.
+    ///
+    /// Red if an output route loses its fold through a live edit (a candidate not prepared).
+    #[test]
+    fn output_route_values_are_rebuilds() {
+        let post_fader = with_model(&long_session(10, 48_000), |model| {
+            model.routes[0].source = RouteSource::Track {
+                track_id: model.tracks[0].id.clone(),
+                tap: session::SendTap::PostFader,
+            };
+        });
+        let pre_fader = with_model(&long_session(10, 48_000), |model| {
+            model.routes[0].source = RouteSource::Track {
+                track_id: model.tracks[0].id.clone(),
+                tap: session::SendTap::PreFader,
+            };
+        });
+        let first = parse_session_json(&post_fader).expect("model").routes[0]
+            .id
+            .as_str()
+            .to_owned();
+        assert_rebuilds(
+            &post_fader,
+            &[set(route(&first, ROUTE_GAIN_DB), -6.0, None)],
+            "post-fader output route, gain",
+        );
+        assert_rebuilds(
+            &pre_fader,
+            &[set(route(&first, ROUTE_MUTE), 1.0, None)],
+            "pre-fader output route, mute",
+        );
+        assert_rebuilds(
+            &pre_fader,
+            &[set(route(&first, ROUTE_MATRIX_LR), 0.5, None)],
+            "pre-fader output route, matrix",
+        );
+    }
+
+    /// Gate 4 (#1557): a transaction of a valid send gain and an out-of-domain matrix value is
+    /// refused whole: no send cell is written and the revision does not move.
+    ///
+    /// Red if the gain is written before the matrix value is refused.
+    #[test]
+    fn a_send_transaction_with_an_out_of_domain_value_writes_no_cell() {
+        let document = stateless_bus_document();
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, _, epoch, pending) = rig.summary();
+        let (status, diagnostics) = refusal(
+            &mut rig,
+            &[
+                set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None),
+                set(route("eq0-bus", ROUTE_MATRIX_LR), 100.0, None),
+            ],
+        );
+        assert_ne!(
+            status,
+            protocol::StatusCode::Ok,
+            "the out-of-domain value is refused"
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].1, 1, "the matrix edit, the second");
+        assert_eq!(
+            (rig.summary().0, rig.summary().2, rig.summary().3),
+            (revision, epoch, pending),
+            "no revision, no candidate"
+        );
+        assert_eq!(
+            rig.current_route_cells(),
+            vec![0],
+            "no send cell was written"
+        );
+        assert_eq!(
+            rig.apply(&[set(route("eq0-bus", ROUTE_GAIN_DB), -6.0, None)]),
+            crate::RESULT_OK,
+            "the valid half applies alone"
+        );
+        assert_eq!(rig.current_route_cells(), vec![1]);
     }
 
     /// Gate 1, effect family on a submix strip: a console slot's parameter, an insert's
@@ -5304,5 +6041,528 @@ mod set_control {
             assert!(swap.is_some(), "{label}: the successor swapped in");
             assert!(mid_ramp, "{label}: the swap landed inside the ramp");
         }
+    }
+
+    // Issue #1558: VCA moves, VCA membership and send follows.
+
+    /// The own-row IDs of a VCA and the follow row of a route.
+    const VCA_OFFSET_DB: u32 = 1;
+    const VCA_MUTE: u32 = 2;
+    const ROUTE_FOLLOWS_MUTE: u32 = 7;
+
+    fn vca_row(vca: &str, control: u32, lane: Lane) -> ControlAddress {
+        address(Owner::Vca(id(vca)), Section::Own, control, lane)
+    }
+
+    fn vca_of(name: &str, members: &[&str]) -> session::Vca {
+        session::Vca {
+            id: id(name),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: members.iter().map(|member| id(member)).collect(),
+        }
+    }
+
+    /// [`stateless_bus_document`] with a pre-fader send `eq0-bus` that follows `eq0`'s mute, and
+    /// VCA `outer` holding VCA `inner` holding `eq0`.
+    fn vca_document() -> String {
+        vca_document_with(10, 48_000)
+    }
+
+    /// [`vca_document`] with `track_count` tracks at `sample_rate_hz`.
+    fn vca_document_with(track_count: usize, sample_rate_hz: u32) -> String {
+        with_model(
+            &stateless_bus_document_with(track_count, sample_rate_hz),
+            |model| {
+                let send = model
+                    .routes
+                    .iter_mut()
+                    .find(|route| route.id == id("eq0-bus"))
+                    .expect("the send");
+                send.follows_mute = true;
+                if let RouteSource::Track { tap, .. } = &mut send.source {
+                    *tap = session::SendTap::PreFader;
+                }
+                model.vcas.push(vca_of("inner", &["eq0"]));
+                model.vcas.push(vca_of("outer", &["inner"]));
+            },
+        )
+    }
+
+    /// Gate 1 (#1558): a VCA's offset and mute, a strip's own fader and mute under a VCA, a send's
+    /// `follows_mute`, a member added, a VCA added and a VCA removed each commit one revision with
+    /// the plan epoch unchanged and no candidate, and from the block their ramp leaves behind
+    /// render the bits of a plan prepared from the committed session. No render block allocates.
+    ///
+    /// Red if a VCA, membership or follow edit rebuilds, or if the live composition differs from
+    /// preparation's (sum order, clamp, mute OR, follow column).
+    #[test]
+    fn vca_membership_and_follow_values_are_live_and_render_the_prepared_plan_bits() {
+        bench_support::alloc::assert_installed();
+        for rate in [44_100, 48_000, 88_200, 96_000] {
+            for tracks in [1, 10] {
+                live_vca_sequence(tracks, rate);
+            }
+        }
+    }
+
+    /// The sequence of the test above, on a session of `tracks` tracks at `rate`.
+    fn live_vca_sequence(tracks: usize, rate: u32) {
+        let document = vca_document_with(tracks, rate);
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let upsert = |vca: session::Vca| SessionEdit::UpsertVca { vca };
+        let mut inner_two = vca_of("inner", &["eq0", "eq1"]);
+        inner_two.fader.left_db = -6.0;
+        inner_two.fader.right_db = -6.0;
+        // `(label, edits, audible)`: a step is audible when the output differs from the previous
+        // committed session's.
+        let steps: Vec<(&str, Vec<SessionEdit>, bool)> = vec![
+            (
+                "inner offset, both lanes",
+                vec![set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -6.0, None)],
+                true,
+            ),
+            (
+                "outer mute, left lane",
+                vec![set(vca_row("outer", VCA_MUTE, Lane::Left), 1.0, None)],
+                true,
+            ),
+            (
+                "own fader",
+                vec![set(builtin("eq0", FADER_DB, Lane::Both), -3.0, None)],
+                true,
+            ),
+            // The left lane is muted by the VCA already: no effective value moves.
+            (
+                "own mute, left lane under a VCA mute",
+                vec![set(builtin("eq0", MUTE, Lane::Left), 1.0, None)],
+                false,
+            ),
+            (
+                "own mute, both lanes",
+                vec![set(builtin("eq0", MUTE, Lane::Both), 1.0, None)],
+                true,
+            ),
+            (
+                "own unmute",
+                vec![set(builtin("eq0", MUTE, Lane::Both), 0.0, None)],
+                true,
+            ),
+            (
+                "follows_mute off while the source is muted",
+                vec![set(route("eq0-bus", ROUTE_FOLLOWS_MUTE), 0.0, None)],
+                true,
+            ),
+            (
+                "follows_mute on",
+                vec![set(route("eq0-bus", ROUTE_FOLLOWS_MUTE), 1.0, None)],
+                true,
+            ),
+            ("a member added", vec![upsert(inner_two)], true),
+            (
+                "a VCA added over the bus",
+                vec![upsert({
+                    let mut over = vca_of("over-bus", &["bus"]);
+                    // The left lane of the bus is silent here (eq0 is muted on the left): the right moves.
+                    over.fader.right_db = -4.0;
+                    over
+                })],
+                true,
+            ),
+            (
+                "a VCA removed",
+                vec![SessionEdit::RemoveVca {
+                    vca_id: id("outer"),
+                }],
+                true,
+            ),
+        ];
+        let mut previous = document.clone();
+        // The source is finite: a rig serves a few steps, then the next starts from the committed
+        // session of the last.
+        let mut rig = Rig::new(&document);
+        // A second track exists only in the ten-track session.
+        let steps = steps
+            .into_iter()
+            .filter(|(label, ..)| tracks == 10 || *label != "a member added");
+        for (served, (label, edits, audible)) in steps.enumerate() {
+            let label = format!("{label} ({tracks} tracks, {rate} Hz)");
+            if served % 3 == 0 {
+                rig = Rig::new(&previous);
+                for _ in 0..4 {
+                    rig.step();
+                }
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            let bytes = rig.transaction(&edits);
+            let (result, response) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            // #1313 D2: a delta with a record is `live`; one that moves no effective value has
+            // none, and is `model_only`.
+            assert_eq!(
+                edit_path_of(&response),
+                if audible {
+                    protocol::EditPath::Live
+                } else {
+                    protocol::EditPath::ModelOnly
+                },
+                "{label}: the response names the path the classifier took"
+            );
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            let committed = rig.snapshot();
+            let k = window(rig.latency(), ramp, rig.quantum);
+            let edit_block = rig.block;
+            let mut live = Vec::new();
+            for _ in 0..k + 4 {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                live.push(pcm);
+            }
+            let reference = Reference::run(&committed, rig.block);
+            let before = Reference::run(&previous, rig.block);
+            let mut heard = false;
+            for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                let block = edit_block as usize + offset;
+                // The one-track session is silent while its track is muted.
+                assert!(
+                    tracks == 1 || pcm.iter().any(|sample| *sample != 0.0),
+                    "{label}: signal"
+                );
+                assert_eq!(bits(pcm), bits(&reference[block]), "{label}: block {block}");
+                heard |= bits(pcm) != bits(&before[block]);
+            }
+            assert_eq!(
+                heard, audible,
+                "{label}: the edit is heard exactly when it moves a value"
+            );
+            previous = committed;
+        }
+    }
+
+    /// Gate 4 (#1558): with `maximum_vcas` equal to the current count, a VCA added live is refused
+    /// like a compile, with the compile's own diagnostic, and the model, the revision and every
+    /// cell are as they were. A VCA that stays inside the cap is live.
+    ///
+    /// Red if a live edit commits a model that its own rebuild refuses.
+    #[test]
+    fn a_vca_added_over_the_cap_is_refused_like_a_compile() {
+        let document = vca_document();
+        let capped = CompileLimits {
+            maximum_vcas: 2,
+            ..limits()
+        };
+        let mut rig = Rig::with_limits(&document, capped);
+        rig.step();
+        let before = refusal_state(&rig);
+        let cells = rig.current_cells();
+        let routes = rig.current_route_cells();
+        let third = SessionEdit::UpsertVca {
+            vca: vca_of("third", &["eq1"]),
+        };
+        assert_eq!(rig.apply(&[third]), crate::RESULT_COMPILE_REJECTED);
+        let over = with_model(&document, |model| {
+            model.vcas.push(vca_of("third", &["eq1"]))
+        });
+        let Err(failure) = compile_children(&over, capped, None) else {
+            panic!("a third VCA does not prepare under a cap of two")
+        };
+        assert_eq!(rig.last_error(), failure.diagnostics);
+        assert!(
+            String::from_utf8_lossy(&rig.last_error()).contains("host.resource.count"),
+            "{}",
+            String::from_utf8_lossy(&rig.last_error())
+        );
+        assert_eq!(refusal_state(&rig), before);
+        assert_eq!(rig.current_cells(), cells);
+        assert_eq!(rig.current_route_cells(), routes);
+        assert_eq!(rig.summary().3, 0, "no candidate");
+        // Replacing a VCA keeps the count: live.
+        assert_eq!(
+            rig.apply(&[SessionEdit::UpsertVca {
+                vca: vca_of("inner", &["eq0", "eq1"]),
+            }]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.summary().3, 0, "a member change is live");
+    }
+
+    /// Gate 5 (#1558): the ramp of a record is the ramp of the edit that moved it. Each case is a
+    /// VCA edit against the per-kind edit of the same effective value on a twin rig, and the two
+    /// render the same bits from the block after the commit on.
+    ///
+    /// Red if a record takes the wrong row's length, drops a per-edit length, or ramps a follow
+    /// independently of its source's mute.
+    #[test]
+    fn vca_and_follow_records_take_the_ramp_of_the_edit_that_moved_them() {
+        let document = vca_document();
+        let model = parse_session_json(&document).expect("model");
+        let own = model.tracks[0].fader.clone();
+        let effective = |db: f32| session::vca_effective_db(own.left_db, [db]);
+        assert_eq!(own.left_db, own.right_db, "the fixture's lanes agree");
+        // The VCA's offset ramps over its edit's 480 samples.
+        live_twin(
+            &document,
+            &[set(
+                vca_row("inner", VCA_OFFSET_DB, Lane::Both),
+                -6.0,
+                Some(480),
+            )],
+            &[set(
+                builtin("eq0", FADER_DB, Lane::Both),
+                effective(-6.0),
+                Some(480),
+            )],
+            "a VCA offset with its own ramp",
+        );
+        // Without a length the offset ramps over `fader_ms`, as the strip's own edit does.
+        live_twin(
+            &document,
+            &[set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -6.0, None)],
+            &[set(
+                builtin("eq0", FADER_DB, Lane::Both),
+                effective(-6.0),
+                None,
+            )],
+            "a VCA offset with no ramp",
+        );
+        // The strip's own edit first: its 0 steps the lane it moved, and the VCA's 480 is the
+        // length of nothing else, so the sum steps.
+        live_twin(
+            &document,
+            &[
+                set(
+                    builtin("eq0", FADER_DB, Lane::Both),
+                    own.left_db - 2.0,
+                    Some(0),
+                ),
+                set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -6.0, Some(480)),
+            ],
+            &[set(
+                builtin("eq0", FADER_DB, Lane::Both),
+                session::vca_effective_db(own.left_db - 2.0, [-6.0]),
+                Some(0),
+            )],
+            "an own edit beside a VCA edit",
+        );
+        // A VCA mute ramps over its edit's length, and the following send ramps with it: the same
+        // mute and the send's own mute edit, both 96, give the same output.
+        live_twin(
+            &document,
+            &[set(vca_row("inner", VCA_MUTE, Lane::Both), 1.0, Some(96))],
+            &[
+                set(builtin("eq0", MUTE, Lane::Both), 1.0, Some(96)),
+                set(route("eq0-bus", ROUTE_MUTE), 1.0, Some(96)),
+            ],
+            "a VCA mute and its following send",
+        );
+    }
+
+    /// Gate 6 (#1558, D5): a VCA added live adds its rows, so the old structure epoch is stale and
+    /// a fresh listing has the new VCA's four rows live and automatable; an offset edit keeps the
+    /// epoch, so a client that holds it still pages.
+    ///
+    /// Red if a live VCA add keeps stale handles or lists the VCA rows with a stale class.
+    #[test]
+    fn a_vca_added_live_advances_the_epoch_and_lists_its_rows_live() {
+        let document = vca_document();
+        let mut rig = Rig::new(&document);
+        rig.step();
+        let (before, epoch, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+        let vca_rows = |list: &[protocol::ControlEntry], vca: &str| {
+            list.iter()
+                .filter(|entry| entry.address.owner_id.as_deref() == Some(vca))
+                .filter_map(|entry| control_of(entry).cloned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vca_rows(&before, "inner").len(), 4);
+        assert!(
+            vca_rows(&before, "inner")
+                .iter()
+                .all(|row| { row.class == protocol::ControlClass::Live && row.automatable })
+        );
+        assert!(vca_rows(&before, "extra").is_empty());
+
+        let page = |rig: &mut Rig, epoch: u64| {
+            let request = rig.next_request();
+            control_list_c(
+                rig.session,
+                request,
+                &protocol::ControlListRequest {
+                    structure_epoch: epoch,
+                    after_handle: 0,
+                    limit: 1,
+                    owner: None,
+                },
+            )
+        };
+        // An offset edit keeps the epoch: the old one still pages.
+        assert_eq!(
+            rig.apply(&[set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -3.0, None)]),
+            crate::RESULT_OK
+        );
+        assert!(page(&mut rig, epoch).is_ok());
+        // A member change keeps it too.
+        assert_eq!(
+            rig.apply(&[SessionEdit::UpsertVca {
+                vca: vca_of("inner", &["eq0", "eq1"]),
+            }]),
+            crate::RESULT_OK
+        );
+        assert!(page(&mut rig, epoch).is_ok());
+        // A VCA added changes the rows.
+        assert_eq!(
+            rig.apply(&[SessionEdit::UpsertVca {
+                vca: vca_of("extra", &["eq2"]),
+            }]),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.summary().3, 0, "the add is live");
+        assert_eq!(
+            page(&mut rig, epoch).err().map(|(status, _)| status),
+            Some(protocol::StatusCode::RevisionConflict),
+            "the old epoch is stale"
+        );
+        let (after, fresh, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+        assert_eq!(fresh, epoch + 1);
+        let rows = vca_rows(&after, "extra");
+        assert_eq!(rows.len(), 4, "offset_db and mute, left and right");
+        assert!(
+            rows.iter()
+                .all(|row| { row.class == protocol::ControlClass::Live && row.automatable })
+        );
+        // And the removal is a second advance.
+        assert_eq!(
+            rig.apply(&[SessionEdit::RemoveVca {
+                vca_id: id("extra")
+            }]),
+            crate::RESULT_OK
+        );
+        let (gone, last, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+        assert_eq!(last, fresh + 1);
+        assert!(vca_rows(&gone, "extra").is_empty());
+    }
+
+    /// Gate 7 (#1558 D6, batch 3 fold): VCAs added live replace the control catalog by a larger one,
+    /// and the live admission charges the growth. With the capi ceiling set to the smallest one
+    /// that admits a live edit that adds no catalog bytes, plus the growth less one byte, the add
+    /// is refused as a rebuild would, and the model, the revision and every cell are as they were;
+    /// at the growth it commits, and the plan reports the committed catalog's bytes, which is what
+    /// a rebuild of the same session reports.
+    ///
+    /// Red if the live admission charges the catalog the plans were prepared with and not the one
+    /// the commit publishes.
+    #[test]
+    fn a_vca_added_live_is_charged_for_the_catalog_it_adds() {
+        let document = vca_document();
+        let long = |tag: &str| format!("{tag}-{}", "v".repeat(48));
+        let names = [long("one"), long("two"), long("three")];
+        let grown = with_model(&document, |model| {
+            for name in &names {
+                model.vcas.push(vca_of(name, &["eq1"]));
+            }
+        });
+        let adds: Vec<SessionEdit> = names
+            .iter()
+            .map(|name| SessionEdit::UpsertVca {
+                vca: vca_of(name, &["eq1"]),
+            })
+            .collect();
+        let same_size = [set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -3.0, None)];
+        let catalog_bytes = |document: &str| {
+            let model = parse_session_json(document).expect("model");
+            host_core::ControlCatalog::build(&model, model.sample_rate_hz)
+                .expect("catalog")
+                .resources()
+                .retained_bytes
+        };
+        let growth = catalog_bytes(&grown) - catalog_bytes(&document);
+        assert!(growth > 0, "the added VCAs add catalog bytes");
+
+        // Whether the edits commit under `ceiling`; a refusal changes nothing.
+        let commits = |ceiling: u64, edits: &[SessionEdit]| {
+            let tight = CompileLimits {
+                maximum_capi_retained_bytes: ceiling,
+                ..limits()
+            };
+            let mut rig = Rig::with_limits(&document, tight);
+            rig.step();
+            let before = refusal_state(&rig);
+            let cells = rig.current_cells();
+            let result = rig.apply(edits);
+            if result == crate::RESULT_OK {
+                return true;
+            }
+            assert_eq!(result, crate::RESULT_COMPILE_REJECTED);
+            assert_eq!(refusal_state(&rig), before, "a refusal writes nothing");
+            assert_eq!(rig.current_cells(), cells);
+            assert_eq!(rig.summary().3, 0, "no candidate");
+            false
+        };
+        // The smallest ceiling that admits an edit that leaves the catalog's size as it is.
+        let active = crate::ffi::test_plan_snapshot(Rig::new(&document).plan)
+            .1
+            .capi_retained_bytes;
+        let (mut low, mut high) = (active, limits().maximum_capi_retained_bytes);
+        assert!(commits(high, &same_size));
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if commits(middle, &same_size) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let floor = low;
+        assert!(floor > active, "the live peak holds the catalog twice");
+
+        assert!(!commits(floor + growth - 1, &adds), "one byte short");
+        assert!(commits(floor + growth, &adds), "at the growth");
+
+        let tight = CompileLimits {
+            maximum_capi_retained_bytes: floor + growth,
+            ..limits()
+        };
+        let mut rig = Rig::with_limits(&document, tight);
+        rig.step();
+        let retained = |rig: &Rig| {
+            crate::ffi::test_plan_snapshot(rig.plan)
+                .1
+                .capi_retained_bytes
+        };
+        let before = retained(&rig);
+        assert_eq!(rig.apply(&adds), crate::RESULT_OK);
+        assert_eq!(rig.summary().3, 0, "the adds are live");
+        assert_eq!(retained(&rig), before + growth);
+        let rebuilt = compile_children(&grown, tight, None)
+            .unwrap_or_else(|_| panic!("the grown session compiles"))
+            .plan
+            .resources()
+            .capi_retained_bytes;
+        assert_eq!(retained(&rig), rebuilt, "what a rebuild reports");
+        // The next live edit meets the committed catalog's bytes: the peak holds it twice, so at
+        // this ceiling it is refused, and with the second copy's room it commits.
+        assert_eq!(rig.apply(&same_size), crate::RESULT_COMPILE_REJECTED);
+        let roomy = CompileLimits {
+            maximum_capi_retained_bytes: floor + 2 * growth,
+            ..limits()
+        };
+        let mut rig = Rig::with_limits(&document, roomy);
+        rig.step();
+        assert_eq!(rig.apply(&adds), crate::RESULT_OK);
+        assert_eq!(rig.apply(&same_size), crate::RESULT_OK);
     }
 }

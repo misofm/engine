@@ -32,8 +32,12 @@ struct Target<'a> {
 /// Copy, for every owner present in both models with the same ID and kind, the model fields that
 /// hold control values from `from` into `into`: each strip's `builtins`, `fader` and
 /// `matrix_or_pan`, and each console entry's and insert's `params`, `bypass` and (an insert's)
-/// `link_mode`; each route's `gain_db`, `mute`, `channel_matrix` and `follows_mute`; each VCA's
-/// `fader`; and the session's `control_smoothing`.
+/// `link_mode`; each route's `gain_db`, `mute`, `channel_matrix` and `follows_mute`; the session's
+/// whole `vcas` list (decision 17, C6, #1558 D1); and the session's `control_smoothing`.
+///
+/// The VCA list is wholly the inputs of the effective values: the set, the IDs, every offset and
+/// mute and every member list. A VCA added or removed, or a member changed, is a value change that
+/// reaches render through the members' effective fader and mute, never structure.
 ///
 /// It copies representations, not resolved values: an effect's `both` entry and the equal
 /// per-lane entries it could be rewritten as are different fields, so a rewrite of one as the other
@@ -98,11 +102,7 @@ pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
             route.follows_mute = source.follows_mute;
         }
     }
-    for (index, vca) in into.vcas.iter_mut().enumerate() {
-        if let Some(source) = pair(&from.vcas, index, |candidate| candidate.id == vca.id) {
-            vca.fader = source.fader.clone();
-        }
-    }
+    into.vcas.clone_from(&from.vcas);
 }
 
 /// The item of `items` that `matches`, trying position `index` first: two models of one session

@@ -309,36 +309,22 @@ impl GraphCompiler {
                 TailSamples::Finite(0),
             );
         }
-        // #1218 D2: a following route reads its source strip's lane mutes. The map is built only
-        // when some route follows; IDs are unique across tracks and submixes. #1242 D2, decision
-        // 17 C7: the mutes are the strip's effective ones (its own, any reaching VCA's or the
-        // solo term), exactly the values the builtins compiler baked into the strip's fader, read
-        // back from the prepared builtins.
-        let strip_mutes: BTreeMap<&str, [bool; 2]> = if model.routes.iter().any(|r| r.follows_mute)
-        {
-            builtins.effective_strip_mutes().collect()
-        } else {
-            BTreeMap::new()
-        };
-        for route in &model.routes {
+        // Decision 17, C7: each route's follow gate is the effective one the builtins were prepared
+        // with (`follows_mute` on a muted lane of its source strip, composed by
+        // `controls::effective` and nowhere else), in `model.routes` order.
+        let route_follow = builtins.effective_route_follow();
+        if route_follow.len() != model.routes.len() {
+            diagnostics.push(diag("graph.builtins.route_follow", "$.routes"));
+        }
+        for (index, route) in model.routes.iter().enumerate() {
             let matrix = &route.channel_matrix;
             let matrix = [matrix.ll, matrix.lr, matrix.rl, matrix.rr];
             // The domain check is the live producer's own (issue #1215 D1): a value it would
             // refuse never compiles, and the plan keeps the unfolded transform it hashes. The
-            // session's mute rides the gate (issue #1216 D2); it is not structural. A following
-            // route's source lane mutes ride it too (issue #1218 D2): they zero the coefficient
-            // columns through `gated_route_coefficients`, never the gain.
-            let follow_zeroed = if route.follows_mute {
-                let source = match &route.source {
-                    RouteSource::Track { track_id, .. } => track_id.as_str(),
-                    RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
-                };
-                *strip_mutes
-                    .get(source)
-                    .expect("a validated route source names a strip")
-            } else {
-                [false; 2]
-            };
+            // session's mute rides the gate (issue #1216 D2); it is not structural. The effective
+            // follow gate's lanes zero the coefficient columns through `gated_route_coefficients`
+            // (issue #1218 D2), never the gain.
+            let follow_zeroed = route_follow.get(index).copied().unwrap_or([false; 2]);
             let gate = RouteGate {
                 mute: route.mute,
                 follow_zeroed,

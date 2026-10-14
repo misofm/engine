@@ -301,9 +301,10 @@ pub(crate) mod snapshot {
 pub(crate) mod transaction_applied {
     use super::*;
     pub(crate) const APPLIED_OPERATIONS: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const EDIT_PATH: FieldSpec = FieldSpec::req(2, Wire::U8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransactionApplied",
-        fields: &[APPLIED_OPERATIONS],
+        fields: &[APPLIED_OPERATIONS, EDIT_PATH],
     };
 }
 

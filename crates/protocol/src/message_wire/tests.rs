@@ -395,13 +395,14 @@ fn b1b_success_schemas_round_trip_and_truncate() {
     assert_eq!(codec.decode_snapshot(&snapshot_bytes, 4), Ok(snapshot));
     let applied = TransactionApplied {
         applied_operations: 3,
+        edit_path: EditPath::Rebuild,
     };
-    let mut applied_bytes = [0_u8; 16];
+    let mut applied_bytes = [0_u8; 32];
     codec
         .encode_transaction_applied(applied, &mut applied_bytes)
         .expect("applied");
     assert_eq!(
-        codec.decode_transaction_applied(&applied_bytes, 1),
+        codec.decode_transaction_applied(&applied_bytes, 2),
         Ok(applied)
     );
     let event = SessionCommitted {
@@ -462,16 +463,20 @@ fn b1b_fixed_goldens_and_every_byte_truncation() {
 
     let applied = TransactionApplied {
         applied_operations: 3,
+        edit_path: EditPath::Live,
     };
-    let mut applied_bytes = [0_u8; 16];
+    let mut applied_bytes = [0_u8; 32];
     codec
         .encode_transaction_applied(applied, &mut applied_bytes)
         .expect("applied");
-    assert_eq!(hex(&applied_bytes), "01000301040000000300000000000000");
+    assert_eq!(
+        hex(&applied_bytes),
+        "0100030104000000030000000000000002000101010000000100000000000000"
+    );
     for end in 0..applied_bytes.len() {
         assert!(
             codec
-                .decode_transaction_applied(&applied_bytes[..end], 1)
+                .decode_transaction_applied(&applied_bytes[..end], 2)
                 .is_err()
         );
     }
@@ -2755,4 +2760,49 @@ fn the_control_core_and_the_wire_tables_agree_on_every_code() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
+    let codec = codec();
+    for (path, code) in [
+        (EditPath::Live, 1_u8),
+        (EditPath::ModelOnly, 2),
+        (EditPath::Rebuild, 3),
+    ] {
+        let value = TransactionApplied {
+            applied_operations: 5,
+            edit_path: path,
+        };
+        let mut bytes = [0_u8; 32];
+        let written = codec
+            .encode_transaction_applied(value, &mut bytes)
+            .expect("encode");
+        assert_eq!(
+            bytes[written - 8],
+            code,
+            "the code is the field's first byte"
+        );
+        assert_eq!(
+            codec.decode_transaction_applied(&bytes[..written], 2),
+            Ok(value)
+        );
+        // Zero and every value above the last allocated code are refused.
+        for bad in [0_u8, 4, 5, 255] {
+            let mut corrupt = bytes;
+            corrupt[written - 8] = bad;
+            assert!(
+                codec
+                    .decode_transaction_applied(&corrupt[..written], 2)
+                    .is_err(),
+                "edit path {bad} must be refused"
+            );
+        }
+    }
+    // Field 2 is required: the one-field payload of the earlier schema is refused.
+    let mut old = [0_u8; 16];
+    old[..4].copy_from_slice(&[1, 0, 3, 1]);
+    old[4..8].copy_from_slice(&4_u32.to_le_bytes());
+    old[8..12].copy_from_slice(&3_u32.to_le_bytes());
+    assert!(codec.decode_transaction_applied(&old, 1).is_err());
 }

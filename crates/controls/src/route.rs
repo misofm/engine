@@ -1,8 +1,8 @@
 //! A route's rows (decision 17, C3).
 //!
 //! The class of a route's value depends on the route's shape, by a rule in the row: a send into a
-//! submix is ruled live and its issue (S6) has not landed, and a route into the output is
-//! rebuild-only for decision 14's fold reason.
+//! submix is live (#1557) and carries a lane, and a route into the output is rebuild-only for
+//! decision 14's fold reason.
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
@@ -11,9 +11,7 @@ use session::{
 };
 
 use crate::address::{Owner, Section};
-use crate::descriptor::{
-    BASE, ControlDescriptor, EFFECTIVE_SLICE, Lanes, Motion, ROUTE_SLICE, ruled_live_not_built,
-};
+use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control};
@@ -28,11 +26,6 @@ const MATRIX_RR: u32 = 6;
 const FOLLOWS_MUTE: u32 = 7;
 /// The own-row ID of `effective_gate`.
 const EFFECTIVE_GATE: u32 = 64;
-
-const SEND_REOPEN: &str =
-    "The route slice (decision 17, S6) builds the live path and flips this row to live.";
-const FOLLOW_REOPEN: &str = "The effective-value slice (decision 17, S7a) builds the live path \
-     and flips this row to live.";
 
 /// A route into the output keeps the single-master route fold, and a live route never folds
 /// (decision 14, rule 3, optimisation; decision 13 O9).
@@ -92,13 +85,12 @@ pub(crate) struct RouteRow {
     pub(crate) value: RouteValue,
 }
 
-/// What every route row starts from: a shared, ruled-live send value in `[-1, 1]` on the route
-/// family.
+/// What every route row starts from: a shared, live send value in `[-1, 1]` on the route family.
 const ROUTE_BASE: ControlDescriptor = ControlDescriptor {
     minimum: -ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
     maximum: ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
     motion: Motion::Ramp(LiveRampRow::SendMatrix),
-    class: ruled_live_not_built(ROUTE_SLICE, SEND_REOPEN),
+    class: ControlClass::Live,
     family: Family::Route,
     ..BASE
 };
@@ -185,7 +177,6 @@ pub(crate) static ROWS: [RouteRow; 8] = [
             taper: Taper::Stepped,
             lattice: ParameterLattice::indices(),
             motion: Motion::Ramp(LiveRampRow::SendFollowsMute),
-            class: ruled_live_not_built(EFFECTIVE_SLICE, FOLLOW_REOPEN),
             ..ROUTE_BASE
         },
         // A route into the output carries `false` (#1218): the row does not apply.

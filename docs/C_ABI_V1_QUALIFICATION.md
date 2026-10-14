@@ -77,8 +77,8 @@ capi's epoch row charges the state inventory each epoch keeps.
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
-structural, compiling and swapping a replacement plan, until *Deliver value-only send and
-submix-strip edits to the running C ABI plan* (#1225) lands.
+structural, compiling and swapping a replacement plan, except the live values of a strip (#1554,
+#1556) and of a send into a submix (#1557, section "Live sends" below).
 
 A caller bounds submix strips through `miso_engine_v1_compile_limits.maximum_submixes` (#1206), an
 in-place V1 amendment: the word is the former `reserved[0]`, at offset 176, followed by
@@ -339,9 +339,141 @@ reference session the
 two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
 must raise both. #1256 attached no input, effect or route lane, so rendering, `latency_samples`,
-`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the C ABI still
-attaches no input lane (#1261) and no route lane (#1225). #1257 delivers fader, mute and pan edits
-through them (next section).
+`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the input lane
+(#1556, section "Live strip input" below) and the route lane (#1557, section "Live sends" below)
+are attached later. #1257
+delivers fader, mute and pan edits through them (next section).
+
+## Live strip input: trim, polarity and the input filters (#1556)
+
+The strip input section's `trim_db`, `polarity_invert`, `hpf_hz` and `lpf_hz` are live rows of the
+control list (decision 17, S5). `miso_engine_v1_submit_command` commits a change of them as a live
+revision, on tracks and submixes, per lane and on both, through `SET_CONTROL` or the per-kind
+edits; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
+needs new memory). The core chooses the lanes from the rows (`controls::live_lanes`), so **every C
+ABI plan carries an input lane per strip**: the trim, polarity and filter cells of
+`TrackControlProducer::input`, charged in `builtin_retained_payload_bytes` (31,424 -> 36,153 on the
+nine-track EQ reference session) and, for the producers' table, in `capi_retained_bytes`.
+
+- **Records.** Per strip, in write order: `TrimDb` (one per lane whose gain changes, or one `Both`
+  when both lanes change to the same `trim_db`; `0.0` to `-0.0` is no record), `PolarityInvert`
+  (the same rule), then the filter targets that host-core's `InputFilterPreparer` designs on the
+  control thread from the strip's pre-commit values: a one-sided edit per lane, one atomic pair
+  edit when both of a lane's cutoffs change (so a pair that two one-sided edits would refuse, an
+  HPF passing the old LPF, is live), one `Both` edit when both lanes change the same way. A cutoff
+  the filter domain refuses (above the rate-keyed maximum, non-finite, an HPF at or above the LPF,
+  `-0.0`) is the same refusal a rebuild gives. The designed targets are validated before the first
+  cell write, and a write cannot fail, so no acked edit is dropped.
+- **Ramps.** A trim ramps over `fader_ms`, a polarity flip over twice `mute_ms` (the coefficient
+  passes through zero on the trim ramp, so a flip is a linear ramp from `+g` to `-g`), both
+  replaceable by the edit's own `ramp_samples`; a filter target is applied over a fixed 64
+  coefficient updates, and its edit takes no length.
+- **Rendering, latency and tail.** An input lane adds no latency. A strip with the lane reports the
+  rate's live input bound (finite for every history of live trim and filter targets) in place of
+  its prepared design's bound, so a plan with no infinite-tail effect reports `TAIL_FINITE`
+  (checked on the one-, ten- and nine-track parity sessions at the four launch rates). After the
+  ramp, a live edit renders the bits of a plan prepared from the committed session (the filters
+  from a common silence, `-0.0` samples included); gated at 44.1 and 96 kHz, with zero render
+  allocations and frees.
+- **Tail on every strip.** Every C ABI plan carries an input lane per strip, so every strip reports
+  the rate's live input bound even with both filters off (before #1556 such a strip reported its
+  prepared design's bound, zero without a filter). The bound is a function of the rate alone
+  (`builtins::input_section_live_bound_table`); `tail_samples` of a plan with no infinite-tail
+  effect is that figure, and measured so on the bare parity sessions at one and ten tracks:
+
+  | Rate | `tail_samples` (`T`) | Seconds | Exact rest, peak up to +24 dBFS | Exact rest, any sanitized input |
+  | --- | --- | --- | --- | --- |
+  | 44.1 kHz | 704,010 | 15.97 | 1,067,207 | 2,384,997 |
+  | 48 kHz | 699,952 | 14.58 | 1,061,497 | 2,372,008 |
+  | 88.2 kHz | 704,018 | 7.98 | 1,071,057 | 2,388,800 |
+  | 96 kHz | 699,960 | 7.29 | 1,065,688 | 2,376,147 |
+
+  A strip's figures add along a path as PDC composes tails (`graph-compiler/src/pdc.rs`: a node's
+  tail is added to the largest tail that reaches it), so a track routed through a submix reports
+  the sum of both strips' and the effects' tails on its path. The graph tail cap is not limited by
+  host preparation (`u64::MAX`), so no session is refused for it. **Host impact:** a host that waits
+  `tail_samples` after its last source ends before it stops rendering, to let the output ring
+  out, now waits that long on every plan, about 7 to 16 seconds, where a plan whose filters were
+  all off waited none. The bound is an upper bound: `T` is the time after which the output is below
+  -144 dB of the input peak for every history of live values, not a prediction for the session at
+  hand, so a host that wants to stop sooner ends on its own silence test. The reason is browser
+  parity (decision 17, C6): the core attaches the live lanes to every plan on both hosts, so the
+  browser and the C ABI report the same tail for the same session, and the live bound is the one
+  that holds for every history of live trim and filter targets. No render path reads these
+  values: silence skipping inside the effects is driven by each lane's own count of zero input
+  samples (`lane::silence_frames`, 3,764 to 8,192 samples), not by the tail or the exact-rest
+  bounds, and `PreparedBuiltinsSession::input_bounds` (the exact-rest figures above) has no reader
+  outside tests, so a larger bound costs no render work. The tail feeds only the PDC composition
+  and the reported `tail_samples`.
+
+## Live sends: gain, mute and matrix (#1557)
+
+A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
+the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
+live revision through `SET_CONTROL` or the per-kind route edits; no plan is prepared and the plan
+epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
+for decision 14's fold reason, at any tap. **A
+route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
+(`controls::live_lanes`), so a C ABI plan with a route into a submix attaches one latest-target
+cell per such route (`graph::route_control_resources`, charged in `capi_retained_bytes` and
+admitted against the graph cap) and the route's constants are no longer folded into the epilogue.
+A plan with no route into a submix attaches none and renders as before.
+
+- **Record.** One per changed route, in canonical route-ID order: the four coefficients
+  `graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)` returns, and
+  whether the route is silenced. These are the constants preparation folds into a route, so a
+  settled send renders the bits of a plan prepared from the committed session. A record is emitted
+  only when the folded target or the gate changes: a gain or matrix edit on a muted send gives
+  none, and the later unmute carries the new values. A gain or matrix outside the route domain, or
+  an edit ramp above 4,194,304 samples, is the rebuild's refusal.
+- **Ramps.** If the gate changes, the record ramps over `mute_ms` (or the edit's own length for the
+  route's mute). Otherwise it ramps over the longest of the changed rows' lengths: `gain_db` over
+  `fader_ms`, the matrix over `pan_ms`, each replaceable by the edit's own `ramp_samples` (an
+  explicit `0` is a step). A transaction that changes the gain with length 240 and the matrix with
+  length 480 gives one record of 480. A gate that its source strip's mute moved, and not an edit of
+  the route, takes the source's `Mute` length instead, and that length governs the whole record,
+  also when the gain or the matrix moved with it: see the ramps of "Live VCAs and follows" (#1558)
+  below.
+- **Resources.** The route cells, lanes and render-side owners are charged in
+  `capi_retained_bytes` and in the replacement peak as `route_control_resources.total_bytes`, an
+  upper bound; the producer table and route IDs are observed exactly by `resource_lifecycle`.
+- **Rendering.** The route lane adds no latency or tail, and no render block allocates or frees
+  (gated by `send_values_are_live_and_render_the_prepared_plan_bits`).
+
+
+## Live VCAs and follows (#1558)
+
+A VCA's offset and mute, a VCA's members, a VCA added or removed, a mute that a send follows, and a
+send's `follows_mute` are value-only (decision 17, S7a). `miso_engine_v1_submit_command` commits a
+change of them as a live revision through `SET_CONTROL` or the per-kind edits (`UpsertVca`,
+`RemoveVca`, `SetTrackFader`, ...); no plan is prepared and the plan epoch does not move. A VCA has
+no render cell: a change reaches render as its members' effective fader and mute records, and a
+follow as the route's record, because the classifier diffs the effective values of the committed
+and the prospective model (`controls::effective`, the function preparation reads), never the raw
+fader, mute or VCA fields. A strip muted by its VCA whose own mute then toggles moves nothing, and a
+VCA move that leaves every member clamped at +24 dB writes nothing.
+
+- **Ramps.** A level record of a lane the strip's own value moved takes the strip's own edit and
+  row (`fader_db`, `mute`); else the first reaching VCA, in ascending VCA-ID order, whose offset or
+  mute moved on the lane, with that VCA's edit length; else the `VcaOffset` or `VcaMute` row's
+  session length (a membership change, a VCA added or removed). A send whose gate moved takes the
+  send's own `mute` or `follows_mute` edit when one of them moved, else the length of its source
+  strip's `Mute` record, so a strip and the sends that follow it ramp together.
+- **Row set.** A VCA added or removed adds or removes its four rows (`offset_db` and `mute`, left
+  and right), so the commit advances the control list's `structure_epoch`; a member change, an
+  offset or a mute keeps it.
+- **Counts.** A live edit over `maximum_vcas` (or any other count cap) is refused like a compile:
+  `COMPILE_REJECTED` with `host.resource.count`, and the model, the revision and every cell are
+  unchanged.
+- **Successors.** A rebuild that also changes a VCA or a followed mute carries each strip's fader
+  and mute stage and retargets it to its effective value (#1277 D5). The sends it prepares start at
+  their gate, so a following send can step at the swap while its source strip ramps; carrying a
+  send's ramp across a plan swap is #1284.
+- **Rendering.** After the ramp, a live edit renders the bits of a plan prepared from the
+  committed session; gated at four rates in `live_tests` and under 20 races of
+  `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`, which add VCA
+  offsets, mutes, membership, VCAs added and removed and `follows_mute` toggles to its live edits,
+  with zero render allocations and frees.
 
 ## Value-only track edits on the running plan (#1257)
 
@@ -381,10 +513,9 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
   bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
   bypass edits" below.
-- **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
-  edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
-  reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
-  `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
+- **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
+  `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
+  preparation diagnostic a rebuild gives), and every other field.
 - **Timing (#1053 D2, #1312).** A committed fader, mute or pan/matrix value reaches render no
   later than the first block whose render call begins after the submit returns or, while a
   replacement plan is pending, at that plan's adoption, which the watermark reports. Every such
@@ -413,16 +544,24 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   changes until the last of them passes. The cell writes and the commit then cannot
   fail, and render applies every value it reads, because the classifier refuses every value the
   setters would refuse. A refused transaction writes no cell and uses no revision.
-- **Same response and events.** A live edit returns `TransactionApplied` and emits one
-  `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
-  The reliable event lane holds two events, so a host drains it after each edit either way.
-- **No rebuild signal.** Since #1273 a host needs none. After a live edit or a replacement alike
-  it goes on submitting every source the transaction left unchanged, with no seek; after a
-  replacement it acts only on a source the transaction added, changed or removed (see the #1273
-  paragraph under "Linux artifact and consumer boundary", and `miso_engine_v1_source_seek_at`
-  (#1275) to start an added one in time). The ABI gives no way to tell the two apart: the response and the events are
-  the same, and `miso_engine_v1_plan_resources` describes whichever plan is active, which a
-  replacement may leave unchanged. No new symbol, opcode, field, result code or event is added.
+- **Same events.** A live edit emits one `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per
+  queued batch), exactly as a replacement does. The reliable event lane holds two events, so a
+  host drains it after each edit either way.
+- **Edit path in the response (#1313).** The `TransactionApplied` response carries a required
+  field `2:edit-path U8`: `live` 1 (records on the running plan's live lanes, no plan prepared),
+  `model_only` 2 (committed; the classifier's delta holds no record of any kind) and `rebuild` 3
+  (a successor plan was prepared and published, whatever live records the transaction also
+  held). The path is known at submit and written by the commit into the response frame and its
+  replay entry, so an exact replay of the request returns the same bytes. Zero and every other
+  value are refused on decode. This reverses #1053 Q3 ("not now"). A fallback after submit and a
+  supersession are reported by the watermark's outcome flags (#1314). After a live edit or a
+  replacement alike a host goes on submitting every source the transaction left unchanged, with
+  no seek; after a replacement it acts only on a source the transaction added, changed or removed
+  (see the #1273 paragraph under "Linux artifact and consumer boundary", and
+  `miso_engine_v1_source_seek_at` (#1275) to start an added one in time).
+  `miso_engine_v1_plan_resources` describes whichever plan is active, which a replacement may
+  leave unchanged. No new symbol, opcode, result code or event is added; the field travels inside
+  the response bytes.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the
@@ -444,8 +583,8 @@ per shared `Block`-rate automatable parameter, and for a parametric EQ one per t
 channel in place of the parameters; the render-side staging window is raised to hold every
 parameter cell. capi keeps the producers with the plan's provider epoch;
 each EQ's producer owns its prepared-target owner. #1264 writes live effect parameter edits to
-their cells, and #1265 publishes live EQ targets through the owners (below). No input or route
-lane is attached.
+their cells, and #1265 publishes live EQ targets through the owners (below). The input lane is
+#1556's and the route lane is #1557's (both below).
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
@@ -604,6 +743,13 @@ the rack's latency-preserving bypass shunt (decision 14).
 
 ## Design-bound caches (#1471)
 
+**Since #1556 no C ABI compile or rebuild fills these caches.** Every strip carries the live input
+lane, which reports the rate's live bound and designs none, so a compile and a rebuild bound no
+input design and walk no frame (`design_bound_cache`'s `a_c_abi_plan_bounds_no_input_design`), and
+the engine's cache and every epoch's seed stay empty. The rest of this section describes the
+machinery as it stands; it is dead on the C ABI until a successor removes it or a lane-free plan
+returns.
+
 The engine owns one control-thread cache of input-section design bounds (`builtins::
 InputBoundCache`, #1457), read and filled by every `miso_engine_v1_compile_session` on it. A
 session keeps none of it: each provider epoch owns the designs the preparation that made its plan
@@ -641,13 +787,6 @@ here from the cap, the entry layout and the ordered map's worst-case node occupa
   journal on every path and frees it before it returns; the record it becomes is the plan
   epoch's seed, charged to `maximum_capi_retained_bytes`, not the engine's cache.
 
-`resource_lifecycle`'s `the_engine_cache_stays_within_its_stated_ceiling` measures the leaf node (a
-one-design compile on a fresh engine frees exactly one), derives the worst case with the formula
-above and asserts it is at most the stated figure, so a larger key or value turns it red. It then
-compiles twice the cap's distinct designs on one engine (the cache fills, clears at the 8,193rd
-and fills again) and asserts that engine destroy frees at most that ceiling over an empty
-engine's. One fill order measured 3,602,112 bytes; that figure is not the ceiling.
-`a_compile_leaves_nothing_open_on_the_engine_cache` compiles a 200-design document on two
-engines, a no-filter document on the second as well, and asserts engine destroy frees the same
-bytes for both (84,208 each), so a journal left open turns it red. The C header states the
+The two tests that measured the ceiling against a filled cache were removed with #1556: no C ABI
+compile reaches the cache any more. The C header states the
 ceiling in its "Engine memory" paragraph.

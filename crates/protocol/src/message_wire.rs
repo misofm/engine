@@ -160,11 +160,49 @@ pub struct SessionSnapshot<'a> {
     pub eof: bool,
 }
 
+/// How the host applied a committed transaction (#1313, decision 15 D15-3 and D15-17).
+///
+/// The code is known at submit and travels in the same response as the new revision. A fallback
+/// (the transition) and a supersession are known only after submit; the watermark's outcome flags
+/// report them. Zero and every unallocated code are refused on decode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EditPath {
+    /// The records went to the running plan's live lanes; no plan was prepared.
+    Live = 1,
+    /// The transaction committed and render has nothing to do: the delta holds no record of any
+    /// kind (a session or profile ID, the stored automation, identical values), or the
+    /// controller owns no render plan.
+    ModelOnly = 2,
+    /// A successor plan was prepared and published.
+    Rebuild = 3,
+}
+
+impl EditPath {
+    /// The wire code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The path for a wire code; `None` for zero and every unallocated value.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Live),
+            2 => Some(Self::ModelOnly),
+            3 => Some(Self::Rebuild),
+            _ => None,
+        }
+    }
+}
+
 /// Typed successful transaction response payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)] // Exact one-field wire schema.
+#[allow(missing_docs)] // Exact two-field wire schema.
 pub struct TransactionApplied {
     pub applied_operations: u32,
+    pub edit_path: EditPath,
 }
 
 /// Typed reliable `SESSION_COMMITTED` payload.
@@ -1406,7 +1444,7 @@ impl ProtocolCodec {
         Ok(result)
     }
 
-    /// Encode/decode helpers for the one-field transaction success payload.
+    /// Encode/decode helpers for the two-field transaction success payload.
     pub fn encode_transaction_applied(
         &self,
         value: TransactionApplied,
@@ -1423,7 +1461,7 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode the one-field transaction success payload.
+    /// Strictly decode the two-field transaction success payload.
     pub fn decode_transaction_applied(
         &self,
         payload: &[u8],
@@ -1436,6 +1474,11 @@ impl ProtocolCodec {
                 message,
                 schema::transaction_applied::APPLIED_OPERATIONS
             )?)?,
+            edit_path: EditPath::from_code(read_u8(one_spec!(
+                message,
+                schema::transaction_applied::EDIT_PATH
+            )?)?)
+            .ok_or(DecodeError::InvalidTlv)?,
         })
     }
 
@@ -2681,6 +2724,11 @@ pub(crate) fn write_transaction_applied(
         sink,
         schema::transaction_applied::APPLIED_OPERATIONS,
         &value.applied_operations.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::transaction_applied::EDIT_PATH,
+        &[value.edit_path.code()]
     )
 }
 

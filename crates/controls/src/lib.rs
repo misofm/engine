@@ -42,10 +42,7 @@ mod tables;
 mod vca;
 
 pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
-pub use descriptor::{
-    Choice, ControlDescriptor, ControlScope, DomainRule, EFFECTIVE_SLICE, Lanes, Motion,
-    ROUTE_SLICE, check,
-};
+pub use descriptor::{Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check};
 pub use diff::{ChangedControl, changed_controls};
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
@@ -53,8 +50,8 @@ pub use effect_contract::control::{
 pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
-    EffectiveStrip, ModelInputs, MonitorOverlay, any_solo, effective, effective_gate,
-    effective_into, effective_strip,
+    EffectiveStrip, ModelInputs, MonitorOverlay, any_solo, effective, effective_follow,
+    effective_gate, effective_into, effective_strip,
 };
 pub use error::ControlError;
 pub use live_lanes::{LiveLanes, live_lanes};

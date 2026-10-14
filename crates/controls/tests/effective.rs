@@ -136,6 +136,10 @@ fn the_follow_gate_is_per_source_lane() {
     assert_eq!(result.routes[0].gate, [true, false], "follows");
     assert_eq!(result.routes[1].gate, BOTH_OFF, "does not follow");
     assert_eq!(result.routes[2].gate, BOTH_ON, "its own mute");
+    // The follow part is what the source causes, apart from the route's own mute.
+    assert_eq!(result.routes[0].follow, [true, false]);
+    assert_eq!(result.routes[1].follow, BOTH_OFF);
+    assert_eq!(result.routes[2].follow, BOTH_OFF, "a mute is not a follow");
 
     // A solo-muted source gates a following route on both lanes.
     let soloed = effective(&model, &soloing(&["vocal"]));
