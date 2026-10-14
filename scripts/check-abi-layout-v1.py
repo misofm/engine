@@ -20,8 +20,9 @@ they are the rules here:
   structure exactly** -- the sum of the widths equals `bytes`, so a field cannot be added, dropped
   or silently resized without the total moving;
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
-  `require_*` words and the four `liveControl*` words present under those exact spellings, because
-  the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them;
+  `require_*` words and the three `liveControl*` words present under those exact spellings, because
+  the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them.
+  The word at offset 32 is `reserved1` (slice #1565A: the command-queue word is deleted);
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -75,15 +76,14 @@ BUFFER_KINDS = [
     (6, "command"),
     (7, "meterFrame"),
 ]
-COMMAND_KINDS = [
-    "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
-]
+# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 are
+# retired -- refused `malformed` and never reallocated -- so the vocabulary is explicit about its
+# values instead of positional from 1.
+COMMAND_KINDS = [(7, "observeSubscribe"), (8, "observeUnsubscribe")]
+RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable", "unknownRoute", "unknownVca",
 ]
 RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
@@ -135,28 +135,10 @@ EXPORTS = [
     "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_eq_target_close",
-    "miso_engine_web_v1_eq_target_config_copy",
-    "miso_engine_web_v1_eq_target_config_ptr",
-    "miso_engine_web_v1_eq_target_open",
-    "miso_engine_web_v1_eq_target_prepare",
-    "miso_engine_web_v1_eq_target_rejected_edit_index",
-    "miso_engine_web_v1_eq_target_rejected_reason",
-    "miso_engine_web_v1_eq_target_request_capacity",
-    "miso_engine_web_v1_eq_target_request_ptr",
-    "miso_engine_web_v1_eq_target_result_bytes",
-    "miso_engine_web_v1_eq_target_result_capacity",
-    "miso_engine_web_v1_eq_target_result_ptr",
-    "miso_engine_web_v1_input_filters_config_copy",
-    "miso_engine_web_v1_input_filters_prepare",
-    "miso_engine_web_v1_live_control_route_count",
-    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
-    "miso_engine_web_v1_live_control_vca_count",
-    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -176,9 +158,6 @@ EXPORTS = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
-    "miso_engine_web_v1_prepared_command_submit",
-    "miso_engine_web_v1_prepared_companion_capacity",
-    "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -277,26 +256,17 @@ STRUCTURES = {
     "liveResponseOwner": 64,
     "liveResponseSection": 44,
     "liveResponseResult": 104,
-    "eqTargetRequest": 32,
-    "eqTargetEdit": 12,
-    "preparedEffectTarget": 56,
-    "eqTargetResult": 32,
-    "preparedEffectCompanionHeader": 24,
-    "preparedEffectCompanionRecord": 80,
-    "eqTargetConfig": 272,
-    "inputFilterEdit": 16,
-    "builtinInputConfig": 48,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
     "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
-    "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "sourceRingFrames", "maximumMemoryBytes",
     "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
@@ -429,12 +399,11 @@ def check_named(document: dict, group: str, expected: list[tuple[int, str]]) -> 
 
 
 def check_positional(document: dict, group: str, names: list[str]) -> None:
-    """A vocabulary whose row position stands for its value, contiguous from 1."""
+    """A vocabulary whose row position stands for its value, contiguous from 0."""
     rows = document["constants"].get(group)
     require(isinstance(rows, list), f"constants.{group} is a list")
     actual = [(row["value"], row["name"]) for row in rows]
-    require(actual == list(enumerate(names, start=1) if group == "wireCommandKinds"
-                           else enumerate(names)),
+    require(actual == list(enumerate(names)),
             f"constants.{group} is not the contiguous vocabulary {names}")
 
 
@@ -521,7 +490,7 @@ def validate(document: object) -> None:
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes",
-        "diagnosticBytes", "defaultCommandQueueRecords", "defaultMeterBlocks",
+        "diagnosticBytes", "defaultMeterBlocks",
         "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
         "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
         "responseGrids", "responseChannels", "responseFields", "observationChannels",
@@ -540,7 +509,9 @@ def validate(document: object) -> None:
     check_named(document, "states", STATES)
     check_named(document, "backends", BACKENDS)
     check_named(document, "bufferKinds", BUFFER_KINDS)
-    check_positional(document, "wireCommandKinds", COMMAND_KINDS)
+    check_named(document, "wireCommandKinds", COMMAND_KINDS)
+    require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
+            "constants.wireCommandKinds reallocates a retired value-command number")
     check_positional(document, "commandReasons", COMMAND_REASONS)
     check_named(document, "responseTargets", RESPONSE_TARGETS)
     check_named(document, "responseGrids", RESPONSE_GRIDS)
@@ -579,7 +550,6 @@ def validate(document: object) -> None:
         ("maximumCommandRecords", 256),
         ("maximumDocumentBytes", 1 << 20),
         ("diagnosticBytes", 1 << 14),
-        ("defaultCommandQueueRecords", 64),
         ("defaultMeterBlocks", 12),
         ("maximumObservationTaps", 16),
         ("maximumResponseEffectIdBytes", 127),
@@ -679,6 +649,17 @@ def self_test() -> int:
     def move_record_field(document: dict) -> None:
         document["commandRecord"]["fields"][6]["offset"] = 16
 
+    def retired_command_kind_returns(document: dict) -> None:
+        document["constants"]["wireCommandKinds"].insert(0, {"value": 4, "name": "mute"})
+
+    def retired_queue_word_returns(document: dict) -> None:
+        document["structures"]["bootOptions"]["fields"][7]["name"] = (
+            "liveControlCommandQueueRecords"
+        )
+
+    def retired_export_returns(document: dict) -> None:
+        document["exports"].append("miso_engine_web_v1_prepared_command_submit")
+
     def drop_ring_input(document: dict) -> None:
         del document["constants"]["sourceRing"]["reserveQuanta"]
 
@@ -731,6 +712,9 @@ def self_test() -> int:
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
         ("a command-record field moves", move_record_field),
+        ("a retired value-command kind returns", retired_command_kind_returns),
+        ("the retired command-queue boot word returns", retired_queue_word_returns),
+        ("a retired prepared-command export returns", retired_export_returns),
         ("a source-ring input is dropped", drop_ring_input),
         ("the source-ring reserve is wrong", wrong_ring_reserve),
         ("the 192-byte prepare config returns", prepare_config_returns),

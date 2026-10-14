@@ -4,12 +4,8 @@
   "exports": [
     {"name": "render", "callers": [{"worklet": "engine", "handler": "process"}], "wrapped": true},
     {"name": "command_submit", "callers": [{"worklet": "engine", "handler": "receiveCommand"}], "wrapped": true},
-    {"name": "prepared_command_submit", "callers": [{"worklet": "engine", "handler": "receivePreparedCommand"}], "wrapped": true},
     {"name": "meter_lease", "callers": [{"worklet": "engine", "handler": "receiveMeterLease"}], "wrapped": true},
     {"name": "meter_poll", "callers": [{"worklet": "engine", "handler": "postMeterFrame"}], "wrapped": true},
-    {"name": "eq_target_config_copy", "callers": [{"worklet": "engine", "handler": "receiveEqTargetConfig"}], "wrapped": true},
-    {"name": "eq_target_config_ptr", "callers": [{"worklet": "engine", "handler": "receiveEqTargetConfig"}], "wrapped": true},
-    {"name": "input_filters_config_copy", "callers": [{"worklet": "engine", "handler": "receiveEqTargetConfig"}], "wrapped": true},
     {"name": "source_submit", "callers": [{"worklet": "engine", "handler": "receiveSource"}, {"worklet": "feed", "handler": "drainSharedRing"}], "wrapped": true},
     {"name": "source_seek", "callers": [{"worklet": "engine", "handler": "receiveSeek"}, {"worklet": "feed", "handler": "applySharedSeek"}], "wrapped": true},
     {"name": "observation_read", "callers": [{"worklet": "engine", "handler": "receiveObservationRead"}], "wrapped": true},

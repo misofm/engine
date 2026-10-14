@@ -17,13 +17,10 @@
 //!   base names on the same values.
 //! * the **document's own structure**, so a schema key cannot be dropped silently.
 
-use effect_compiler::launch_native_effect_registry;
 use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
-    AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
-    default_source_ring_frames,
+    AudioWorkletEngineHost, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES,
+    RESULT_OK, WebBootOptions, default_source_ring_frames,
 };
 use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
@@ -127,66 +124,16 @@ fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
         .expect("scalar is an integer")
 }
 
-/// A one-track session whose inserts hold one launch effect, so an `effectParam` record has
-/// a real address to resolve against.
-fn one_effect_session(effect_id: &str) -> String {
-    format!(
-        r#"{{
-  "schema_version": 1,
-  "session_id": "abi-layout",
-  "revision": "1",
-  "sample_rate_hz": 48000,
-  "quantum_frames": 128,
-  "render_profile": {{ "id": "native", "mode": "single_thread" }},
-  "output_profile": {{ "id": "main", "channels": 2, "sample_format": "f32_planar" }},
-  "sources": [{{ "id": "s", "content": "blake3:{}", "channels": 2, "bit_depth": 24, "frames": "48000" }}],
-  "console": {{ "pre_insert": [], "post_insert": [] }},
-  "tracks": [{{
-    "id": "t",
-    "source_id": "s",
-    "left_source_channel": 0,
-    "right_source_channel": 1,
-    "builtins": {{
-      "left": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }},
-      "right": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }}
-    }},
-    "console": [],
-    "inserts": {{ "effects": [{{
-      "id": "e",
-      "identity": {{ "kind": "native", "effect_id": "{effect_id}" }},
-      "quality": "normal",
-      "bypass": false,
-      "link_mode": "dual_mono",
-      "params": [],
-      "sidechain": {{ "kind": "none" }}
-    }}] }},
-    "fader": {{ "left_db": 0.0, "right_db": 0.0, "left_mute": false, "right_mute": false }},
-    "pan": {{ "left": -1.0, "right": 1.0, "smoothing_samples": 0 }}
-  }}],
-  "submixes": [],
-  "vcas": [],
-  "control_smoothing": {{ "kind": "default" }},
-  "outputs": [{{ "id": "out" }}],
-  "routes": [{{
-    "id": "r",
-    "source": {{ "kind": "track", "track_id": "t", "tap": "post_pan" }},
-    "destination": {{ "kind": "output_input", "output_id": "out" }},
-    "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }},
-    "gain_db": 0.0,
-    "mute": false,
-    "follows_mute": false
-  }}],
-  "automation": []
-}}"#,
-        "0".repeat(64)
-    )
-}
-
 /// The emitted command-record offsets decode, on the live engine, to exactly the values written.
 ///
-/// Red mutation: move any row in `command_record_fields` — say `parameterId` to 16 — and the
-/// engine reads the smoothing word as the parameter ID; the acknowledgement stops being
-/// `UNSUPPORTED_KIND` (address resolved, no write path) and becomes `UNKNOWN_PARAMETER`.
+/// The record is an `observeSubscribe` (kind 7), the one kind with a field at every address the
+/// document publishes that the engine reads: `kind`, `rack`, `channel`, `trackIndex`,
+/// `effectIndex`, `parameterId` (the tap ID) and `smoothingSamples`. The fixture is the observed
+/// compressor insert, whose tap 1 is resident.
+///
+/// Red mutation: move any row in `command_record_fields` -- say `parameterId` to 16 -- and the
+/// engine reads the smoothing word as the tap ID (or the tap ID as zero); the acknowledgement stops
+/// being `RESULT_OK` and becomes `UNKNOWN_TAP`.
 #[test]
 fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let document = render();
@@ -197,22 +144,20 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
         "the command record's published size is the engine's"
     );
 
-    let registry = launch_native_effect_registry().expect("launch effect registry");
-    let first = registry
-        .descriptors()
-        .next()
-        .expect("the launch registry is non-empty")
-        .id
-        .as_str();
+    let fixture = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/session/v1/observation-frame-shape.json"),
+    )
+    .expect("the observation fixture exists");
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        live_control_command_queue_records: 64,
+        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
-    let mut host = AudioWorkletEngineHost::boot(one_effect_session(first).as_bytes(), options)
-        .expect("the fixture session boots");
+    let mut host = AudioWorkletEngineHost::boot(fixture.as_bytes(), options)
+        .expect("the observation fixture boots");
 
     let kind = field_offset(&document, "commandRecord", "kind");
     let rack = field_offset(&document, "commandRecord", "rack");
@@ -221,43 +166,29 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let effect_index = field_offset(&document, "commandRecord", "effectIndex");
     let parameter_id = field_offset(&document, "commandRecord", "parameterId");
     let smoothing = field_offset(&document, "commandRecord", "smoothingSamples");
-    let values = field_offset(&document, "commandRecord", "values");
 
     let staging = host
         .command_staging_mut()
-        .expect("live-control staging exists");
+        .expect("observation staging exists");
     staging[..COMMAND_RECORD_BYTES as usize].fill(0);
-    staging[kind] = u8::try_from(COMMAND_EFFECT_PARAM).expect("kind is a byte");
-    // Rack 1 is the inserts (the lowered `dynamic` rack), where the fixture put its one effect.
+    staging[kind] = u8::try_from(COMMAND_OBSERVE_SUBSCRIBE).expect("kind is a byte");
+    // Rack 1 is the inserts, where the fixture put its compressor.
     staging[rack] = 1;
-    staging[channel] = 2;
+    staging[channel] = 255;
     staging[track_index..track_index + 4].copy_from_slice(&0_u32.to_le_bytes());
     staging[effect_index..effect_index + 4].copy_from_slice(&0_u32.to_le_bytes());
-    // Parameter ID 1 is the first declared parameter of every launch descriptor.
+    // Tap 1 is the compressor's resident gain-reduction tap.
     staging[parameter_id..parameter_id + 4].copy_from_slice(&1_u32.to_le_bytes());
-    staging[smoothing..smoothing + 4].copy_from_slice(&0_u32.to_le_bytes());
-    staging[values..values + 4].copy_from_slice(&0.0_f32.to_le_bytes());
+    staging[smoothing..smoothing + 4].copy_from_slice(&2_u32.to_le_bytes());
 
     let result = host.submit_commands(1);
-    let reason = host.command_report().reason;
-    // The address resolving is the whole assertion. `RESULT_OK` means the engine also had a write
-    // path; `RESULT_UNSUPPORTED`/`unsupportedKind` means it resolved and deliberately has none.
-    // Either proves the offsets; an `unknown*` reason proves they are wrong.
-    assert!(
-        result == RESULT_OK || result == RESULT_UNSUPPORTED,
-        "a record written at the published offsets was answered {result} (reason {reason})"
+    let report = *host.command_report();
+    assert_eq!(
+        (result, report.reason, report.admitted),
+        (RESULT_OK, COMMAND_REASON_NONE, 1),
+        "a record written at the published offsets was refused (reason {})",
+        report.reason
     );
-    for (unknown, label) in [
-        (COMMAND_REASON_UNKNOWN_TRACK, "track"),
-        (COMMAND_REASON_UNKNOWN_RACK, "rack"),
-        (COMMAND_REASON_UNKNOWN_EFFECT, "effect"),
-        (COMMAND_REASON_UNKNOWN_PARAMETER, "parameter"),
-    ] {
-        assert_ne!(
-            reason, unknown,
-            "the published offsets addressed no {label}: the record's {label} word is misplaced"
-        );
-    }
 }
 
 /// The published source-ring rule reproduces the engine's derivation at every launch shape.
@@ -362,10 +293,7 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         field_offset(&document, "bootOptions", "maximumMemoryBytes"),
         24
     );
-    assert_eq!(
-        field_offset(&document, "bootOptions", "liveControlCommandQueueRecords"),
-        32
-    );
+    assert_eq!(field_offset(&document, "bootOptions", "reserved1"), 32);
     assert_eq!(
         field_offset(&document, "bootOptions", "liveControlMasterTrackPlusOne"),
         56
@@ -379,10 +307,6 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
     assert_eq!(
         scalar_after(&document, "\"constants\": {", "defaultMaximumMemoryBytes"),
         host_web::DEFAULT_MAXIMUM_MEMORY_BYTES
-    );
-    assert_eq!(
-        scalar_after(&document, "\"constants\": {", "defaultCommandQueueRecords"),
-        u64::from(host_web::DEFAULT_COMMAND_QUEUE_RECORDS)
     );
 }
 

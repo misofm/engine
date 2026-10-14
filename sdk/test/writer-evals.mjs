@@ -24,7 +24,6 @@ import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
-const QUEUE_RECORDS = ABI_LAYOUT.constants.defaultCommandQueueRecords;
 
 const EQ_PARAMS = [
   { id: 1, unit: "linear", value: 1.0 },
@@ -116,17 +115,14 @@ before(async () => {
 });
 
 async function pausedEngine(instances = 1) {
-  return createOfflineEngine(liveControlDocument(instances), {
-    asset,
-    liveControls: { commandQueueRecords: QUEUE_RECORDS },
-  });
+  return createOfflineEngine(liveControlDocument(instances), { asset });
 }
 
 /** A paused engine whose compressors each declare one tap, so each has a one-slot queue. */
 async function observedEngine(count = 1) {
   return createOfflineEngine(compressorsDocument(count), {
     asset,
-    liveControls: { commandQueueRecords: QUEUE_RECORDS, observationTaps: 4 },
+    liveControls: { observationTaps: 4 },
   });
 }
 

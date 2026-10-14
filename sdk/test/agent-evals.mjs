@@ -32,7 +32,6 @@ import { fixedHalfEven, parseExactDecimal, compareExactDecimal } from "../src/co
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -261,10 +260,7 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
    * immune to a formatting bug that happened to be consistent on both sides.
    */
   async function renderBlocks(document, edit, blocks = 8) {
-    const engine = await createOfflineEngine(document, {
-      asset,
-      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
-    });
+    const engine = await createOfflineEngine(document, { asset });
     try {
       if (edit) {
         const controls = engine.liveControls();

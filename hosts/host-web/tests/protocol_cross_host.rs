@@ -64,7 +64,6 @@ fn options() -> WebBootOptions {
         require_sample_rate_hz: RATE,
         require_quantum_frames: QUANTUM,
         source_ring_frames: QUANTUM * 2,
-        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     }
 }

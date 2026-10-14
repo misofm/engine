@@ -96,7 +96,6 @@ pub mod control_provider;
 pub mod diagnostics;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
-pub mod live_route_state;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -108,12 +107,9 @@ pub mod render_session;
 pub mod response;
 pub mod route_controls;
 pub mod shape;
-pub mod solo;
 pub mod source;
 pub mod spectrum;
 pub mod spectrum_service;
-pub mod strip_values;
-pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
 // `tests/` files now use, and stays a unit test on the `#[cfg(test)]` backend seam in `prepare`.
@@ -142,7 +138,6 @@ pub use live_delta::{
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
-pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps, MonitorBase,
@@ -177,7 +172,6 @@ pub use route_controls::{
     route_producer_position, route_record,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
-pub use solo::{LiveControlMuteDelta, LiveControlSoloState, StripMuteSeed};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,
@@ -204,11 +198,6 @@ pub use spectrum_service::{
     SpectrumServiceError, SpectrumSnapshot, spectrum_channels_from_raw, spectrum_target_kind,
     spectrum_target_ref,
 };
-pub use strip_values::{
-    LiveStripValues, LiveStripValuesError, StripValues, changed_lane_records, covers_lane,
-    fader_gain_bits, trim_gain_bits,
-};
-pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///

@@ -98,10 +98,7 @@ fn a_thousand_control_frames_between_renders_never_allocate_in_a_render_call() {
         }
         let strip = model.tracks[0].id.as_str().to_owned();
         let document = canonical_session_json(&model).expect("canonical");
-        let options = WebBootOptions {
-            live_control_command_queue_records: 64,
-            ..WebBootOptions::explicit_defaults()
-        };
+        let options = WebBootOptions::explicit_defaults();
         let length =
             native_staging::boot(options, document.as_bytes()).expect("the fixture stages");
         let handle = host_web::miso_engine_web_v1_boot(length);

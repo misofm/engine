@@ -544,7 +544,7 @@ async function createContinuousSpectrumBrowser(
     spectrum: query,
     policy: {
       sourceRingFrames: frames,
-      liveControls: { commandQueueRecords: 64, meterBlocks: 16 },
+      liveControls: { meterBlocks: 16 },
       ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
     },
     scratchBoot: async () => ({
@@ -1305,7 +1305,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   const browser = await createSdkEngine("track-response-subscription", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -1342,7 +1342,7 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   )).arrayBuffer());
   const headless = await WasmBoundary.boot(asset, document, {
     sourceRingFrames: OBSERVATION_FRAMES,
-    liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    liveControls: { observationTaps: 4 },
   });
   const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
     queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
@@ -1606,7 +1606,7 @@ async function createResidentObservationBrowser(
     ...(residentOptions.requestDeadlineMs === undefined
       ? {} : { requestDeadlineMs: residentOptions.requestDeadlineMs }),
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -1956,7 +1956,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   const browser = await createSdkEngine("sdk-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -2196,7 +2196,7 @@ async function renderLiveBypass(
 ): Promise<{ digest: string; energy: number; section?: string; path?: string }> {
   const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), {
     document: liveBypassSession(bypassed),
-    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: { commandQueueRecords: 16 } },
+    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: {} },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,

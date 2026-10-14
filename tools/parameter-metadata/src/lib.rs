@@ -28,26 +28,18 @@
 //!
 //! # `commandKinds` is the whole vocabulary, and `plane` says what each kind moves
 //!
-//! Every kind the wire decodes is a row here -- all twelve of them. Before the kind-vocabulary
-//! gate this table stopped at `effectBypass` while the Rust constants, the host JS `COMMAND_KINDS`
-//! set and the `.d.ts` enum all carried eight, and nothing noticed: an app reading its vocabulary
-//! from this file could not learn that `observeSubscribe`/`observeUnsubscribe` exist.
+//! Every kind the wire decodes is a row here. Since slice #1565A the browser's command record
+//! carries only the two observation kinds (`observeSubscribe` 7, `observeUnsubscribe` 8); every
+//! value goes through the control transaction (`SET_CONTROL`), and the retired value kinds 1-6 and
+//! 9-17 are refused `malformed` and never reallocated. Before the kind-vocabulary gate this table
+//! stopped short while the Rust constants, the host JS `COMMAND_KINDS` set and the `.d.ts` enum
+//! disagreed, and nothing noticed.
 //!
-//! The two observation kinds are not DSP kinds, so each row carries `plane`. `applied` keeps its
-//! issue #140 meaning -- the ABI applies this kind rather than declaring and refusing it, which is
-//! true of all twelve -- and `plane` distinguishes the ten that move state the render thread reads
-//! (`"render"`) from the two that bind or unbind an entry in the `miso.observe.v1` subscription
-//! map and change nothing rendered (`"observation"`).
-//!
-//! `solo` (issue #210 phase 1) is a `"render"` kind with no row in `builtins`, and deliberately:
-//! it moves what the render thread reads -- it composes into the fader section's mute -- but it is
-//! live-control/monitor state rather than a strip DSP parameter, so it has no parameter descriptor,
-//! no domain table and no session key to be automated from.
-//!
-//! `trimDb`, `polarityInvert` and `inputFilters` are the opposite case and the ordinary one:
-//! all are `"render"` kinds *and* strip DSP parameters, so each has a `builtins` row. The filter
-//! rows use the fixed `"linear64CoefficientUpdates"` policy because the command carries prepared
-//! coefficient targets; their `liveUpdatable` flag is derived from `"blockTarget"`.
+//! Each row carries `plane`. `applied` keeps its issue #140 meaning -- the ABI applies this kind
+//! rather than declaring and refusing it -- and `plane` says what is applied: `"observation"`
+//! binds or unbinds an entry in the `miso.observe.v1` subscription map and changes nothing
+//! rendered. `"render"` stays a declared plane (DSP state the render thread reads) that no kind
+//! uses today.
 //!
 //! # Decision 17, slice S2b (`controls`)
 //!
@@ -115,16 +107,12 @@ use effect_contract::{
     SmoothingRule, StepSize, StepUnit,
 };
 use host_web::{
-    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB,
-    COMMAND_INPUT_FILTERS, COMMAND_MATRIX, COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE,
-    COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_PAN, COMMAND_POLARITY_INVERT, COMMAND_REASON_BACKPRESSURE,
-    COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE,
-    COMMAND_REASON_NOT_SOLOABLE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_ROUTE,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNKNOWN_VCA,
-    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES,
-    COMMAND_ROUTE_GAIN_DB, COMMAND_ROUTE_MATRIX, COMMAND_ROUTE_MUTE, COMMAND_SOLO, COMMAND_TRIM_DB,
-    COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE, MAXIMUM_COMMAND_RECORDS,
+    ABI_VERSION, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE,
+    COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED,
+    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
+    COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -169,12 +157,6 @@ pub fn render() -> String {
     );
     out.push_str("  \"commandKinds\": [\n");
     let kinds = [
-        (COMMAND_PAN, "pan", true, PLANE_RENDER),
-        (COMMAND_MATRIX, "matrix", true, PLANE_RENDER),
-        (COMMAND_FADER_DB, "faderDb", true, PLANE_RENDER),
-        (COMMAND_MUTE, "mute", true, PLANE_RENDER),
-        (COMMAND_EFFECT_PARAM, "effectParam", true, PLANE_RENDER),
-        (COMMAND_EFFECT_BYPASS, "effectBypass", true, PLANE_RENDER),
         (
             COMMAND_OBSERVE_SUBSCRIBE,
             "observeSubscribe",
@@ -187,20 +169,6 @@ pub fn render() -> String {
             true,
             PLANE_OBSERVATION,
         ),
-        (COMMAND_SOLO, "solo", true, PLANE_RENDER),
-        (COMMAND_TRIM_DB, "trimDb", true, PLANE_RENDER),
-        (
-            COMMAND_POLARITY_INVERT,
-            "polarityInvert",
-            true,
-            PLANE_RENDER,
-        ),
-        (COMMAND_INPUT_FILTERS, "inputFilters", true, PLANE_RENDER),
-        (COMMAND_ROUTE_GAIN_DB, "routeGainDb", true, PLANE_RENDER),
-        (COMMAND_ROUTE_MUTE, "routeMute", true, PLANE_RENDER),
-        (COMMAND_ROUTE_MATRIX, "routeMatrix", true, PLANE_RENDER),
-        (COMMAND_VCA_FADER_DB, "vcaFaderDb", true, PLANE_RENDER),
-        (COMMAND_VCA_MUTE, "vcaMute", true, PLANE_RENDER),
     ];
     for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
         append!(
@@ -230,9 +198,6 @@ pub fn render() -> String {
         // the host JS bound, the `.d.ts` enum and the schema gate's list to one another.
         (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
-        (COMMAND_REASON_NOT_SOLOABLE, "notSoloable"),
-        (COMMAND_REASON_UNKNOWN_ROUTE, "unknownRoute"),
-        (COMMAND_REASON_UNKNOWN_VCA, "unknownVca"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
         append!(

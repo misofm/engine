@@ -31,11 +31,12 @@ RATES = {1: "sample", 2: "block", 3: "none"}
 POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
-COMMAND_KINDS = [
-    "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
-]
+# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 were
+# value kinds, deleted because every value goes through a control transaction; their numbers are
+# retired and never reallocated, so the first declared value is 7 and the run is contiguous from it.
+COMMAND_KIND_FIRST = 7
+COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]
+RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
 # The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
 # tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
 # not anything the render thread reads. `plane` is what tells the render kinds apart from these
@@ -54,8 +55,10 @@ PLANE_OBSERVATION = "observation"
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable", "unknownRoute", "unknownVca",
 ]
+# Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the deleted value kinds and
+# are retired with them, never reallocated.
+RETIRED_COMMAND_REASONS = {12, 13, 14}
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
 BUILTIN_MAPPINGS = {"boolean", "decibelAmplitude", "hertz", "linear"}
@@ -211,21 +214,26 @@ def validate(document: dict) -> None:
     kinds = document["commandKinds"]
     require(all(set(kind) == COMMAND_KIND_KEYS for kind in kinds), "command kind keys")
     require([kind["name"] for kind in kinds] == COMMAND_KINDS, "command kinds")
-    # Derived, never a literal: this list used to read `range(1, 7)` while the wire decoded eight
-    # kinds, which is precisely the drift that went unnoticed for two releases.
+    # Derived, never a literal bound: this list used to read `range(1, 7)` while the wire decoded
+    # eight kinds, which is precisely the drift that went unnoticed for two releases. The run is
+    # contiguous from the first declared kind, and no retired number may come back.
     require(
-        [kind["value"] for kind in kinds] == list(range(1, len(COMMAND_KINDS) + 1)),
+        [kind["value"] for kind in kinds]
+        == list(range(COMMAND_KIND_FIRST, COMMAND_KIND_FIRST + len(COMMAND_KINDS))),
         "command kind values",
+    )
+    require(
+        not RETIRED_COMMAND_KINDS & {kind["value"] for kind in kinds},
+        "a retired value-command number is reallocated",
     )
     applied = {kind["name"] for kind in kinds if kind["applied"]}
     # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
     # more, so a kind that reports `applied: false` is a regression, not a documented gap.
     require(applied == set(COMMAND_KINDS), "applied command kinds")
-    # What "applied" means splits by plane, and the split is exact in both directions: the six DSP
-    # kinds move state the render thread reads, the two observation kinds move the
-    # `miso.observe.v1` subscription map and nothing else. A DSP kind that reports the observation
-    # plane would be claiming it renders nothing; an observation kind that reports the render plane
-    # would put a subscribe on the applied-DSP list the #140 rule above stands on.
+    # What "applied" means splits by plane, and the split is exact in both directions. Today every
+    # kind is on the observation plane: they move the `miso.observe.v1` subscription map and nothing
+    # else, and the render plane is declared but empty. A kind that reports the render plane would
+    # claim it moves state the render thread reads, which no command record does any more.
     require(
         all(kind["plane"] in (PLANE_RENDER, PLANE_OBSERVATION) for kind in kinds),
         "command kind planes",
@@ -242,6 +250,10 @@ def validate(document: dict) -> None:
     require(
         [reason["value"] for reason in reasons] == list(range(len(COMMAND_REASONS))),
         "command reason values",
+    )
+    require(
+        not RETIRED_COMMAND_REASONS & {reason["value"] for reason in reasons},
+        "a retired command reason number is reallocated",
     )
 
     vocabularies = document["observationVocabularies"]
@@ -621,23 +633,28 @@ def self_test() -> int:
         ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v" + "2")),
         ("abi", lambda d: d.update(abiVersion=1)),
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
-        ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
+        ("kind not applied", lambda d: d["commandKinds"][0].update(applied=False)),
         # The 6-vs-8 split the kind-vocabulary gate exists to close: the shipped document stopped
         # at `effectBypass` while the wire decoded eight kinds. Its shape is red here now, and so
         # is every way the plane column can lie about what a kind applies to.
         (
-            "kind vocabulary truncated at effectBypass",
-            lambda d: d["commandKinds"].__delitem__(slice(6, None)),
+            "kind vocabulary truncated at observeSubscribe",
+            lambda d: d["commandKinds"].__delitem__(slice(1, None)),
         ),
-        ("kind renamed", lambda d: d["commandKinds"][6].update(name="observeArm")),
-        ("kind value renumbered", lambda d: d["commandKinds"][7].update(value=9)),
+        ("kind renamed", lambda d: d["commandKinds"][0].update(name="observeArm")),
+        (
+            "kind value renumbered onto a retired number",
+            lambda d: d["commandKinds"][1].update(value=9),
+        ),
+        (
+            "a retired value kind returns",
+            lambda d: d["commandKinds"].insert(
+                0, {"value": 4, "name": "mute", "applied": True, "plane": "render"}
+            ),
+        ),
         (
             "an observation kind claims the render plane",
-            lambda d: d["commandKinds"][6].update(plane="render"),
-        ),
-        (
-            "a DSP kind claims the observation plane",
-            lambda d: d["commandKinds"][0].update(plane="observation"),
+            lambda d: d["commandKinds"][0].update(plane="render"),
         ),
         ("a kind row drops its plane", lambda d: d["commandKinds"][0].pop("plane")),
         ("a kind row invents a plane", lambda d: d["commandKinds"][0].update(plane="control")),
@@ -648,7 +665,11 @@ def self_test() -> int:
             slice(10, None)
         )),
         ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
-        ("reason value renumbered", lambda d: d["commandReasons"][14].update(value=15)),
+        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=15)),
+        (
+            "a retired reason returns",
+            lambda d: d["commandReasons"].append({"value": 12, "name": "notSoloable"}),
+        ),
         (
             "builtin live disagrees with update rate",
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),

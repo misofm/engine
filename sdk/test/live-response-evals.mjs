@@ -332,7 +332,7 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
       inserts: [effectEntry("comp", "miso.compressor")],
       postInsert: [],
     },
-  }), { asset, liveControls: { commandQueueRecords: 64 } });
+  }), { asset });
   const request = {
     trackId: "t",
     grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },

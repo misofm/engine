@@ -107,8 +107,8 @@ export interface ControlSubmitter {
 
 interface WriterLimits {
   /**
-   * The largest batch to attempt. Defaults to the engine's default command-record count
-   * (`defaultCommandQueueRecords`), the host's own bound on commands in flight.
+   * The largest batch to attempt. Defaults to the engine's maximum command-record count
+   * (`maximumCommandRecords`), the host's own bound on commands in flight.
    */
   readonly maximumBatch?: number;
 }
@@ -286,7 +286,7 @@ export class LiveControlWriter {
         return { kind: "flow", reason: report.reasonName };
       };
     }
-    this.#maximumBatch = options.maximumBatch ?? ABI_LAYOUT.constants.defaultCommandQueueRecords;
+    this.#maximumBatch = options.maximumBatch ?? ABI_LAYOUT.constants.maximumCommandRecords;
     if (!Number.isInteger(this.#maximumBatch) || this.#maximumBatch < 1) {
       throw new MisoUsageError(`maximumBatch must be a positive integer`);
     }

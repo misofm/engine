@@ -6,7 +6,6 @@ import { before, describe, test } from "node:test";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
 import { LiveControlWriter } from "../src/core/writer.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
@@ -164,7 +163,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // cannot read the count that the browser host and the C ABI report (#1399 verdict m1).
     const engine = await createOfflineEngine(sessionDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 16, meterBlocks: 0, observationTaps: 0 },
+      liveControls: { meterBlocks: 0, observationTaps: 0 },
     });
     try {
       assert.equal(engine.status().liveValuesSuperseded, 0n);
@@ -223,7 +222,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
       liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
         meterBlocks,
         observationTaps: 1,
         masterTrackPlusOne: 1,
@@ -289,7 +287,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     const engine = await createOfflineEngine(busDocument(), {
       asset,
       liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
         meterBlocks,
         observationTaps: 0,
         masterTrackPlusOne: 0,
@@ -342,7 +339,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     const engine = await createOfflineEngine(namedBusDocument(), {
       asset,
       liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
         meterBlocks,
         observationTaps: 0,
         masterTrackPlusOne: 0,
@@ -381,10 +377,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // `sdk.observation.map` and every read, the track's own included, fails with it.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
-        observationTaps: 2,
-      },
+      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.observationMap();
@@ -414,10 +407,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // The arm is kind 7 at the bus's strip index through the shipped module.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
-        observationTaps: 2,
-      },
+      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.sessionMap();
@@ -466,10 +456,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // "no track 'bus'" before anything is submitted.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: {
-        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
-        observationTaps: 2,
-      },
+      liveControls: { observationTaps: 2 },
     });
     try {
       const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");
@@ -499,10 +486,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // Issue #1213 D5a, as #1563B restates it: the address names a strip by ID, so a submix is a
     // strip like a track. Red if the core's address lookup skips submix strips (the bus's own
     // fader would then be unknown), or answers a missing insert on the bus with another code.
-    const engine = await createOfflineEngine(busObservationDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
-    });
+    const engine = await createOfflineEngine(busObservationDocument(), { asset });
     try {
       const controls = engine.liveControls();
       const code = (set) => controls.submit(set).then(() => "applied", (error) => error.code);
@@ -522,10 +506,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // Issue #1213 D4 (and #1212 NIT-2), as #1563B restates it: a bus is solo-safe, and the core
     // refuses a solo at a submix from the real address table rather than a mocked reply. Red if a
     // bus can be soloed.
-    const engine = await createOfflineEngine(busObservationDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
-    });
+    const engine = await createOfflineEngine(busObservationDocument(), { asset });
     try {
       const controls = engine.liveControls();
       // `track()` does not check the ID, so it can name the bus; `submix()` has no `solo` at all.

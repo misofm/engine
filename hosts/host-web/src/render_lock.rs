@@ -20,12 +20,10 @@
 //!   collection accessors (`spectrum_request_*`, `spectrum_collection_*`) and `document_ptr`.
 //!   None of them is wrapped, and neither is the `boot` export: there the collection staging is
 //!   sized and allocated by design.
-//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 28:
+//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 22:
 //!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `command_report_ptr`,
-//!   `prepared_companion_ptr`, `prepared_companion_capacity`, `live_control_track_count`,
-//!   `live_control_track_id`, `live_control_submix_count`, `live_control_submix_id`,
-//!   `live_control_route_count`, `live_control_route_id`, `live_control_vca_count`,
-//!   `live_control_vca_id`, `source_count`, `source_id`, `source_channels`, `source_frames`,
+//!   `live_control_track_count`, `live_control_track_id`, `live_control_submix_count`,
+//!   `live_control_submix_id`, `source_count`, `source_id`, `source_channels`, `source_frames`,
 //!   `observation_count`, `observation_track_index`, `observation_rack`,
 //!   `observation_effect_index`, `observation_effect_slot_id`, `observation_native_effect_id`,
 //!   `observation_tap_count`, `observation_tap_id` and `meter_header_ptr`.

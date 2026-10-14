@@ -75,10 +75,7 @@ fn control_command_timing_line() {
                 model.routes.push(route);
             }
             let document = canonical_session_json(&model).expect("canonical");
-            let options = WebBootOptions {
-                live_control_command_queue_records: 64,
-                ..WebBootOptions::explicit_defaults()
-            };
+            let options = WebBootOptions::explicit_defaults();
             let length =
                 native_staging::boot(options, document.as_bytes()).expect("the session stages");
             let handle = host_web::miso_engine_web_v1_boot(length);
@@ -92,7 +89,17 @@ fn control_command_timing_line() {
                     native_staging::control_command(handle, &bytes).expect("a live handle");
                 spent += start.elapsed();
                 assert_eq!(result, RESULT_OK, "call {call}");
-                native_staging::drain_reliable_events(handle);
+                // The reliable lane holds two commit events; an undrained third commit would be
+                // refused with backpressure, so drain the way the worklet does.
+                for lane in [host_web::EVENT_LANE_RELIABLE, host_web::EVENT_LANE_LOSSY] {
+                    loop {
+                        let (result, event) = native_staging::control_event(handle, lane);
+                        assert_eq!(result, RESULT_OK, "event lane {lane}");
+                        if event.is_empty() {
+                            break;
+                        }
+                    }
+                }
             }
             println!(
                 "control_command fader edit, {tracks} tracks: {:?} per call",

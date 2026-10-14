@@ -50,28 +50,10 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_eq_target_close",
-    "miso_engine_web_v1_eq_target_config_copy",
-    "miso_engine_web_v1_eq_target_config_ptr",
-    "miso_engine_web_v1_eq_target_open",
-    "miso_engine_web_v1_eq_target_prepare",
-    "miso_engine_web_v1_eq_target_rejected_edit_index",
-    "miso_engine_web_v1_eq_target_rejected_reason",
-    "miso_engine_web_v1_eq_target_request_capacity",
-    "miso_engine_web_v1_eq_target_request_ptr",
-    "miso_engine_web_v1_eq_target_result_bytes",
-    "miso_engine_web_v1_eq_target_result_capacity",
-    "miso_engine_web_v1_eq_target_result_ptr",
-    "miso_engine_web_v1_input_filters_config_copy",
-    "miso_engine_web_v1_input_filters_prepare",
-    "miso_engine_web_v1_live_control_route_count",
-    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
-    "miso_engine_web_v1_live_control_vca_count",
-    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -91,9 +73,6 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
-    "miso_engine_web_v1_prepared_command_submit",
-    "miso_engine_web_v1_prepared_companion_capacity",
-    "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -205,7 +184,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "liveControlCommandQueueRecords",
+          "name": "reserved1",
           "offset": 32,
           "type": "u64"
         },
@@ -1690,296 +1669,6 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u32[2]"
         }
       ]
-    },
-    "eqTargetRequest": {
-      "bytes": 32,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "sampleRateHz",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "seedCount",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "editCount",
-          "offset": 16,
-          "type": "u32"
-        },
-        {
-          "name": "reserved",
-          "offset": 20,
-          "type": "u32[3]"
-        }
-      ]
-    },
-    "eqTargetEdit": {
-      "bytes": 12,
-      "fields": [
-        {
-          "name": "parameterId",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "channel",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "value",
-          "offset": 8,
-          "type": "f32"
-        }
-      ]
-    },
-    "inputFilterEdit": {
-      "bytes": 16,
-      "fields": [
-        {
-          "name": "parameterId",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "channel",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "value0",
-          "offset": 8,
-          "type": "f32"
-        },
-        {
-          "name": "value1",
-          "offset": 12,
-          "type": "f32"
-        }
-      ]
-    },
-    "preparedEffectTarget": {
-      "bytes": 56,
-      "fields": [
-        {
-          "name": "slot",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "channel",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "words",
-          "offset": 8,
-          "type": "u32[12]"
-        }
-      ]
-    },
-    "eqTargetResult": {
-      "bytes": 32,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "valueCount",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "targetCount",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "workspaceRetainedBytes",
-          "offset": 16,
-          "type": "u64"
-        },
-        {
-          "name": "workspaceLargestAllocationBytes",
-          "offset": 24,
-          "type": "u64"
-        }
-      ]
-    },
-    "preparedEffectCompanionHeader": {
-      "bytes": 24,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "hostGeneration",
-          "offset": 8,
-          "type": "u64"
-        },
-        {
-          "name": "targetCount",
-          "offset": 16,
-          "type": "u32"
-        },
-        {
-          "name": "reserved",
-          "offset": 20,
-          "type": "u32"
-        }
-      ]
-    },
-    "preparedEffectCompanionRecord": {
-      "bytes": 80,
-      "fields": [
-        {
-          "name": "trackIndex",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "rack",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "effectIndex",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "reserved",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "baseRevision",
-          "offset": 16,
-          "type": "u64"
-        },
-        {
-          "name": "slot",
-          "offset": 24,
-          "type": "u32"
-        },
-        {
-          "name": "channel",
-          "offset": 28,
-          "type": "u32"
-        },
-        {
-          "name": "words",
-          "offset": 32,
-          "type": "u32[12]"
-        }
-      ]
-    },
-    "eqTargetConfig": {
-      "bytes": 272,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "sampleRateHz",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "valueCount",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "hostGeneration",
-          "offset": 16,
-          "type": "u64"
-        },
-        {
-          "name": "ownerRevision",
-          "offset": 24,
-          "type": "u64"
-        },
-        {
-          "name": "values",
-          "offset": 32,
-          "type": "f32[60]"
-        }
-      ]
-    },
-    "builtinInputConfig": {
-      "bytes": 48,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "sampleRateHz",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "valueCount",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "hostGeneration",
-          "offset": 16,
-          "type": "u64"
-        },
-        {
-          "name": "ownerRevision",
-          "offset": 24,
-          "type": "u64"
-        },
-        {
-          "name": "values",
-          "offset": 32,
-          "type": "f32[4]"
-        }
-      ]
     }
   },
   "commandRecord": {
@@ -2160,72 +1849,12 @@ export const ABI_LAYOUT = deepFreeze(
     ],
     "wireCommandKinds": [
       {
-        "value": 1,
-        "name": "pan"
-      },
-      {
-        "value": 2,
-        "name": "matrix"
-      },
-      {
-        "value": 3,
-        "name": "faderDb"
-      },
-      {
-        "value": 4,
-        "name": "mute"
-      },
-      {
-        "value": 5,
-        "name": "effectParam"
-      },
-      {
-        "value": 6,
-        "name": "effectBypass"
-      },
-      {
         "value": 7,
         "name": "observeSubscribe"
       },
       {
         "value": 8,
         "name": "observeUnsubscribe"
-      },
-      {
-        "value": 9,
-        "name": "solo"
-      },
-      {
-        "value": 10,
-        "name": "trimDb"
-      },
-      {
-        "value": 11,
-        "name": "polarityInvert"
-      },
-      {
-        "value": 12,
-        "name": "inputFilters"
-      },
-      {
-        "value": 13,
-        "name": "routeGainDb"
-      },
-      {
-        "value": 14,
-        "name": "routeMute"
-      },
-      {
-        "value": 15,
-        "name": "routeMatrix"
-      },
-      {
-        "value": 16,
-        "name": "vcaFaderDb"
-      },
-      {
-        "value": 17,
-        "name": "vcaMute"
       }
     ],
     "commandReasons": [
@@ -2276,18 +1905,6 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
-      },
-      {
-        "value": 12,
-        "name": "notSoloable"
-      },
-      {
-        "value": 13,
-        "name": "unknownRoute"
-      },
-      {
-        "value": 14,
-        "name": "unknownVca"
       }
     ],
     "racks": [
@@ -2463,7 +2080,6 @@ export const ABI_LAYOUT = deepFreeze(
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "diagnosticBytes": 16384,
-    "defaultCommandQueueRecords": 64,
     "defaultMeterBlocks": 12,
     "maximumObservationTaps": 16,
     "maximumResponseEffectIdBytes": 127,

@@ -313,7 +313,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   });
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode(sessionDocument({ effects: { preInsert: effects.slice(0, 2), inserts: effects.slice(2) }, frames: 16384 }));
-  const options = { liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 } };
+  const options = { liveControls: { meterBlocks: 2, observationTaps: 1 } };
   let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
   WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };
   WasmBoundary.prototype.dispose = function () { disposals++; return dispose.call(this); };
@@ -420,24 +420,27 @@ test("preparation admits several independent mono and stereo sources", async () 
 });
 
 
-for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { commandQueueRecords: 64 }]) {
-  test(`live-control attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
-    const attached = (initialLiveControls?.commandQueueRecords ?? 0) > 0;
+for (const initialLiveControls of [undefined, {}, { observationTaps: 0 }, { observationTaps: 4 }]) {
+  test(`observation attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
+    // The value controls need no boot word (every edit is a SET_CONTROL transaction); only the
+    // observation records need taps, and that word is read from the policy captured before the
+    // scratch boot, not from the caller's object as it is when the host boots.
+    const attached = (initialLiveControls?.observationTaps ?? 0) > 0;
     const policy = initialLiveControls === undefined ? {} : { liveControls: { ...initialLiveControls } };
     let maps = 0; const frames = []; const closed = [];
     const engine = await createEngine({
       document: new Uint8Array([1]), policy,
       scratchBoot: async () => {
         policy.liveControls ??= {};
-        policy.liveControls.commandQueueRecords = attached ? 0 : 64;
+        policy.liveControls.observationTaps = attached ? 0 : 4;
         return shape;
       },
       createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
         audioWorklet: { async addModule() {} }, async close() { closed.push("context"); } }),
       createHost: async request => {
-        assert.equal((request.options.liveControls?.commandQueueRecords ?? 0) > 0, attached);
+        assert.equal((request.options.liveControls?.observationTaps ?? 0) > 0, attached);
         return {
-          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }; },
+          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] }; },
           control: scriptedControl({ frames }),
           async dispose() { closed.push("host"); },
         };
@@ -447,16 +450,10 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
     assert.doesNotThrow(() => { pending = engine.liveControls(); });
     assert.ok(pending instanceof Promise);
     assert.equal(engine.liveControls(), pending, "live-control Promise is cached");
-    if (attached) {
-      const controls = await pending;
-      assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
-      // The probe that reads the core's revision, then the one transaction.
-      assert.equal(maps, 1); assert.equal(frames.length, 2);
-    } else {
-      await assert.rejects(pending, error => error instanceof MisoUsageError &&
-        error.message.includes("no live controls attached") && error.message.includes("policy.liveControls.commandQueueRecords"));
-      assert.equal(maps, 0); assert.equal(frames.length, 0);
-    }
+    const controls = await pending;
+    assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
+    // The probe that reads the core's revision, then the one transaction.
+    assert.equal(maps, 1); assert.equal(frames.length, 2);
     assert.equal(engine.context.state, "running");
     await engine.close(); await engine.close();
     assert.deepEqual(closed, ["host", "context"]);
@@ -472,12 +469,11 @@ test("a browser engine's live controls address a submix by its strip index", asy
   // names the strip by ID, and the frame holds that ID.
   const frames = [];
   const engine = await createEngine({
-    document: new Uint8Array([1]), policy: { liveControls: { commandQueueRecords: 64 } },
-    scratchBoot: async () => shape,
+    document: new Uint8Array([1]), scratchBoot: async () => shape,
     createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
-      async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false, routes: [], vcas: [] }; },
+      async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false }; },
       control: scriptedControl({ frames }),
       async dispose() {},
     }),

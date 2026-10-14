@@ -79,7 +79,7 @@ function browserContext(onClose = () => {}) {
 
 function openBrowser(
   host,
-  policy = { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } },
+  policy = { liveControls: { meterBlocks: 1 } },
   submixes = [],
 ) {
   return createEngine({
@@ -228,7 +228,7 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
     },
   });
   const engine = await openBrowser(host, {
-    liveControls: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
+    liveControls: { meterBlocks: 1, observationTaps: 1 },
   }, ["bus"]);
   try {
     const map = await engine.observationMap();
@@ -392,7 +392,7 @@ test("browser live controls retain the managed observation conflict hook", async
     async sessionMap() {
       return {
         tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,
-        submixes: [], routes: [], vcas: [],
+        submixes: [],
       };
     },
     async command(request) {
@@ -419,7 +419,7 @@ test("browser live controls retain the managed observation conflict hook", async
     },
   });
   const engine = await openBrowser(host, {
-    liveControls: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
+    liveControls: { meterBlocks: 1, observationTaps: 1 },
   });
   try {
     const managed = await engine.subscribeObservations({

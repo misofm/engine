@@ -160,7 +160,7 @@ export async function startMix(
 ) {
   const engine = await createEngine({
     document,
-    policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 12 } },
+    policy: { liveControls: { meterBlocks: 12 } },
   });
   try {
     await prepareSources(engine);
@@ -272,9 +272,8 @@ agent-facing controls.
 
 Observation subscriptions (`effect(...).observe(...)`) are the one edit that is still a 48-byte
 command record: they resolve with a `CommandReport` and need a positive
-`liveControls.commandQueueRecords` and `liveControls.observationTaps` at boot, passed to
-`createOfflineEngine` directly or under `policy` to `createEngine`. A browser engine needs
-`commandQueueRecords` for `liveControls()` at all.
+`liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
+`policy` to `createEngine`. Value edits are `SET_CONTROL` transactions and need no boot word.
 
 ## Observe the rendered mix
 
@@ -357,8 +356,8 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
-artifacts, including Wasm, host, processor, metadata, ABI layout, and prepared-control helper.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the six engine
+artifacts, including Wasm, host, processor, host declaration, metadata, and ABI layout.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;

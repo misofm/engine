@@ -148,6 +148,13 @@ request.
 
 ## Solo in place (issue #210 phase 1)
 
+> **Superseded for the browser (#1565A).** The browser no longer has command kinds, mirrors or a
+> composition pass of its own: `host_core::LiveControlSoloState`, `LiveVcaState`, `LiveRouteState`
+> and `LiveRouteMuteFollow`, and the command kinds 9 to 17 that drove them, are deleted. Solo, VCA
+> moves and send follows reach the browser's cells through `SET_CONTROL` and the core's
+> `controls::effective`, the one composition both hosts share (decision 17, C1). The text below
+> records the design those mirrors implemented and the rules the core now holds.
+
 Solo is **live-control state, composed at command admission, with no render-plane code at all**. The
 strip already carries a per-lane declicked gate whose target is `0.0` or the lane's fader gain, fed
 by a bounded per-track queue of mute records. Solo-in-place adds a state machine above that queue —
@@ -213,6 +220,13 @@ A VCA's offset is baked into each member's prepared fader gain.
 
 ### Live VCA groups (issue #1245)
 
+> **Superseded for the browser (#1565A).** The browser no longer has command kinds, mirrors or a
+> composition pass of its own: `host_core::LiveControlSoloState`, `LiveVcaState`, `LiveRouteState`
+> and `LiveRouteMuteFollow`, and the command kinds 9 to 17 that drove them, are deleted. Solo, VCA
+> moves and send follows reach the browser's cells through `SET_CONTROL` and the core's
+> `controls::effective`, the one composition both hosts share (decision 17, C1). The text below
+> records the design those mirrors implemented and the rules the core now holds.
+
 The browser rides and mutes a VCA live with two command kinds, 16 `vcaFaderDb` and 17 `vcaMute`.
 Their index word is a **VCA index** (the VCA's position in the session's `vcas`, canonical VCA-ID
 order), refused `unknownVca` (reason 14) at or past the VCA count; their shape is `faderDb`'s and
@@ -255,6 +269,13 @@ preparation bakes, into the records the members already take.
   module under V8, against a 2.67 ms quantum.
 
 ### Sends follow mute (issue #1224)
+
+> **Superseded for the browser (#1565A).** The browser no longer has command kinds, mirrors or a
+> composition pass of its own: `host_core::LiveControlSoloState`, `LiveVcaState`, `LiveRouteState`
+> and `LiveRouteMuteFollow`, and the command kinds 9 to 17 that drove them, are deleted. Solo, VCA
+> moves and send follows reach the browser's cells through `SET_CONTROL` and the core's
+> `controls::effective`, the one composition both hosts share (decision 17, C1). The text below
+> records the design those mirrors implemented and the rules the core now holds.
 
 A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, VCA
 mute, or solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own

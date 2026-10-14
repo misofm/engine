@@ -252,7 +252,7 @@ function vcaDocument() {
 }
 
 
-const OPTIONS = { liveControls: { commandQueueRecords: 64, observationTaps: 1 } };
+const OPTIONS = { liveControls: { observationTaps: 1 } };
 
 async function boot(document, extra = {}) {
   return createOfflineEngine(document, { asset, ...OPTIONS, ...extra });
@@ -278,7 +278,7 @@ function plain(set) {
 }
 
 const MAP = {
-  tracks: ["t"], sources: [], metersAttached: false, submixes: ["s"], routes: ["r"], vcas: ["v"],
+  tracks: ["t"], sources: [], metersAttached: false, submixes: ["s"],
 };
 
 describe("#1563B -- a builder is a set of SET_CONTROL edits at the core's address", () => {
@@ -846,7 +846,7 @@ describe("#1563B -- console slots and inserts resolve by ID on a bus of an SDK-b
 
       // The layout is held to the compiled strips.
       assert.throws(
-        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }, built),
+        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [] }, built),
         /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
       );
     } finally {
@@ -859,7 +859,7 @@ describe("#1563B -- a torn acknowledgement is rejected after, never before, the 
   test("whole-batch admission is checked on the observation report", async () => {
     let answered = false;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [] },
       {
         queue: undefined,
         observe: async () => {

@@ -1,21 +1,16 @@
 //! Issue #137 E7: the emitted metadata is complete, and every ID in it resolves on a live session.
 //!
-//! "Round-trips through a command ack" is the only statement worth making about an addressing
-//! scheme: it is not enough that the numbers exist, they must reach the thing they name. For every
-//! effect parameter in the metadata the acknowledgement must be `UNSUPPORTED_KIND` -- meaning the
-//! address resolved and the engine has no write path -- and never `UNKNOWN_EFFECT`,
-//! `UNKNOWN_PARAMETER`, `UNKNOWN_RACK` or `UNKNOWN_TRACK`, which would mean the metadata described
-//! something that does not exist. For every live builtin parameter the acknowledgement must be
-//! `RESULT_OK`.
+//! The question worth asking of an addressing scheme is whether the numbers reach the thing they
+//! name. Since slice #1565A the only command records are the two observation kinds, so the
+//! observation taps still round-trip through an acknowledgement; every parameter ID goes through
+//! the control catalog (`controls`), and its round trip is the comparison of the document's rows
+//! with the catalog's rows.
 
 use builtins::{BUILTIN_PARAMETER_DESCRIPTORS, builtin_parameter_unit};
 use effect_compiler::launch_native_effect_registry;
-use effect_contract::{ParameterChannel, ParameterUnit, PreparedEffectTarget};
-use host_core::{EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer};
+use effect_contract::ParameterUnit;
 use host_web::{
-    ABI_VERSION, AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM,
-    COMMAND_MATRIX, COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES,
-    RESULT_OK, RESULT_UNSUPPORTED, WebBootOptions,
+    AudioWorkletEngineHost, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES, RESULT_OK, WebBootOptions,
 };
 
 fn builtin_rows(document: &str) -> Vec<&str> {
@@ -317,193 +312,65 @@ fn stage(
     record[24..28].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Stage the opaque target companion for one prepared EQ command. The native metadata gate uses
-/// the same bounded preparation route as the browser SDK, so its live-parameter acknowledgement
-/// proof does not accidentally exercise the now-refused raw EQ designer path.
-fn stage_prepared_eq(
-    host: &mut AudioWorkletEngineHost,
-    preparer: &EqTargetPreparer,
-    effect_index: u32,
-    parameter_id: u32,
-    value: f32,
-) -> u32 {
-    let copy_result = host.copy_eq_target_config(0, 1, effect_index);
-    assert_eq!(copy_result, RESULT_OK);
-    let config = host.eq_target_config().expect("EQ target config");
-    let generation = u64::from_le_bytes(config[16..24].try_into().expect("generation"));
-    let base_revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
-    let mut seeds = [0.0_f32; EQ_VALUE_COUNT];
-    for (index, seed) in seeds.iter_mut().enumerate() {
-        let offset = 32 + index * 4;
-        *seed = f32::from_bits(u32::from_le_bytes(
-            config[offset..offset + 4].try_into().expect("seed"),
-        ));
-    }
-    let mut targets = [PreparedEffectTarget {
-        slot: 0,
-        channel: ParameterChannel::Both,
-        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-    }; EQ_TARGET_CAPACITY];
-    let (_, target_count) = preparer
-        .prepare(
-            48_000,
-            &seeds,
-            &[EqTargetEdit {
-                parameter_id,
-                channel: ParameterChannel::Both,
-                value,
-            }],
-            &mut targets,
-        )
-        .expect("prepared EQ target");
-    assert_eq!(target_count, 1, "one metadata edit touches one EQ section");
-
-    let companion = host.prepared_companion_mut().expect("prepared companion");
-    companion.fill(0);
-    companion[0..4].copy_from_slice(&(24_u32).to_le_bytes());
-    companion[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
-    companion[8..16].copy_from_slice(&generation.to_le_bytes());
-    companion[16..20].copy_from_slice(&(target_count as u32).to_le_bytes());
-    let record = &mut companion[24..104];
-    record[0..4].copy_from_slice(&0_u32.to_le_bytes());
-    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
-    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
-    record[16..24].copy_from_slice(&base_revision.to_le_bytes());
-    record[24..28].copy_from_slice(&targets[0].slot.to_le_bytes());
-    let channel = match targets[0].channel {
-        ParameterChannel::Left => 0_u32,
-        ParameterChannel::Right => 1_u32,
-        ParameterChannel::Both => 2_u32,
-    };
-    record[28..32].copy_from_slice(&channel.to_le_bytes());
-    for (index, word) in targets[0].words.iter().enumerate() {
-        let offset = 32 + index * 4;
-        record[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    host.submit_prepared_commands(1, 104)
-}
-
-/// Red mutation: drop the index bound from `LiveEffectAddress::lower` and the table-length check
-/// from `effect_slot` -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the
-/// completeness assertion below stops distinguishing "resolved" from "did not resolve", and the
-/// negative case fails.
+/// Issue #137 E7, rebuilt for the control plane (#1565A): every ID the metadata declares for an
+/// effect parameter is a row of the control catalog the engine serves, with the same liveness.
+///
+/// The old test sent each ID through a value command and read the acknowledgement. The value
+/// commands are gone, and `SET_CONTROL` reaches the engine through `controls::ControlAddress`, whose
+/// effect rows are `controls::effect_table_rows`. So the claim "an ID in the document reaches the
+/// engine" is the claim that the document's row and the catalog's row agree on the ID and on
+/// whether the control is automatable, and that the document's `liveUpdatable` is that flag. The
+/// host half (a `SET_CONTROL` on an insert row commits, renders and matches a fresh plan; a
+/// rebuild-class row is refused before commit) is held by `hosts/host-web/tests/control_admission.rs`
+/// and `crates/controls/tests/effect_rows.rs`.
+///
+/// Red mutation: renumber a parameter in the generator's `effects` block (or give it a different
+/// `automatable` flag) without the catalog -> the catalog lookup or the flag comparison fails; an
+/// effect the catalog does not carry fails the lookup.
 #[test]
-fn every_metadata_id_resolves_through_a_command_acknowledgement() {
+fn every_metadata_effect_parameter_is_a_control_row_with_the_same_liveness() {
     let document = parameter_metadata::render();
     let registry = launch_native_effect_registry().expect("launch registry");
-    let ids: Vec<&'static str> = registry
-        .descriptors()
-        .map(|descriptor| descriptor.id.as_str())
-        .collect();
-    assert_eq!(ids.len(), registry.len());
-    for id in &ids {
+    assert!(!registry.is_empty());
+    for descriptor in registry.descriptors() {
+        let effect = descriptor.id.as_str();
         assert!(
-            document.contains(&format!("\"id\": \"{id}\"")),
-            "every registered effect is in the metadata: {id}"
+            document.contains(&format!("\"id\": \"{effect}\"")),
+            "every registered effect is in the metadata: {effect}"
         );
-    }
-
-    let json = session_with_every_effect(&ids);
-    let options = WebBootOptions {
-        require_sample_rate_hz: 48_000,
-        require_quantum_frames: 128,
-        source_ring_frames: 128,
-        live_control_command_queue_records: 64,
-        ..WebBootOptions::explicit_defaults()
-    };
-    let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
-    let eq_preparer = EqTargetPreparer::new(
-        effect_compiler::parametric_eq_target_preparation_factory().expect("EQ capability"),
-    )
-    .expect("EQ target preparer");
-
-    // Issue #140 A: every declared effect parameter resolves *and applies*, except the ones whose
-    // own descriptor says they cannot be automated -- which are exactly the ones the metadata
-    // marks `liveUpdatable: false`. The two statements are checked against each other here, so a
-    // metadata flag and the ABI cannot drift apart.
-    for (effect_index, descriptor) in registry.descriptors().enumerate() {
-        let index = u32::try_from(effect_index).expect("effect index");
-        for parameter in descriptor.parameters {
-            stage(
-                &mut host,
-                COMMAND_EFFECT_PARAM,
-                1,
-                2,
-                index,
-                parameter.id.0,
-                parameter.default_value,
-            );
-            let result = if descriptor.id.as_str() == "miso.parametric-eq" && parameter.automatable
-            {
-                stage_prepared_eq(
-                    &mut host,
-                    &eq_preparer,
-                    index,
-                    parameter.id.0,
-                    parameter.default_value,
-                )
-            } else {
-                host.submit_commands(1)
-            };
-            let reason = host.command_report().reason;
-            if parameter.automatable {
-                assert_eq!(
-                    result,
-                    RESULT_OK,
-                    "{}#{} is automatable and must apply (reason {reason})",
-                    descriptor.id.as_str(),
-                    parameter.id.0
-                );
-                assert_eq!(reason, COMMAND_REASON_NONE);
-                assert_eq!(host.command_report().admitted, 1);
-            } else {
-                assert_eq!(
-                    result,
-                    RESULT_UNSUPPORTED,
-                    "{}#{} is not automatable and must be refused",
-                    descriptor.id.as_str(),
-                    parameter.id.0
-                );
-                assert_eq!(
-                    reason,
-                    COMMAND_REASON_UNSUPPORTED_KIND,
-                    "{}#{} resolved to a real target",
-                    descriptor.id.as_str(),
-                    parameter.id.0
-                );
-            }
-        }
-        stage(&mut host, COMMAND_EFFECT_BYPASS, 1, 255, index, 0, 1.0);
+        let catalog = controls::effect_table_rows(effect)
+            .unwrap_or_else(|| panic!("the control catalog carries {effect}"));
+        let rows = effect_parameter_rows(&document, effect);
         assert_eq!(
-            host.submit_commands(1),
-            RESULT_OK,
-            "{} bypass",
-            descriptor.id.as_str()
+            rows.len(),
+            descriptor.parameters.len(),
+            "{effect}: the document lists every declared parameter"
         );
-        assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
-        // Drain every queue this effect just filled, so the next effect starts with full room.
-        assert_eq!(host.render_next(), RESULT_OK);
+        assert_eq!(catalog.parameters.len(), descriptor.parameters.len());
+        for (row, parameter) in rows.iter().zip(descriptor.parameters) {
+            assert_eq!(raw_field(row, "id"), parameter.id.0.to_string());
+            let control = catalog
+                .parameters
+                .iter()
+                .find(|control| control.control == parameter.id.0)
+                .unwrap_or_else(|| panic!("{effect}#{} is a control row", parameter.id.0));
+            let automatable = control.descriptor.automatable();
+            assert_eq!(
+                raw_field(row, "automatable"),
+                automatable.to_string(),
+                "{effect}#{}: the document and the catalog disagree on automation",
+                parameter.id.0
+            );
+            assert_eq!(
+                raw_field(row, "liveUpdatable"),
+                automatable.to_string(),
+                "{effect}#{}: liveUpdatable is the automation flag",
+                parameter.id.0
+            );
+        }
     }
-
-    // The negative case: one past the last effect does not resolve, and says so differently.
-    let past = u32::try_from(ids.len()).expect("effect count");
-    stage(&mut host, COMMAND_EFFECT_PARAM, 1, 2, past, 1, 0.0);
-    assert_eq!(host.submit_commands(1), host_web::RESULT_INVALID_ARGUMENT);
-    assert_eq!(
-        host.command_report().reason,
-        host_web::COMMAND_REASON_UNKNOWN_EFFECT
-    );
-
-    // Every builtin parameter the metadata calls live is applied by the command path.
-    stage(&mut host, COMMAND_MATRIX, 255, 255, 0, 0, 1.0);
-    let staging = host
-        .command_staging_mut()
-        .expect("prepared command staging");
-    staging[24..28].copy_from_slice(&0.5_f32.to_le_bytes());
-    staging[36..40].copy_from_slice(&1.0_f32.to_le_bytes());
-    assert_eq!(host.submit_commands(1), RESULT_OK);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
-    assert_eq!(host.command_report().admitted, 1);
+    // The negative case: an effect the registry does not carry has no rows.
+    assert!(controls::effect_table_rows("miso.no-such-effect").is_none());
 }
 
 /// Issue #143 E9: every declared observation tap in the document resolves on a live session.
@@ -563,7 +430,6 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        live_control_command_queue_records: 64,
         live_control_meter_blocks: 4,
         live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
@@ -706,7 +572,6 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(json.as_bytes(), options).is_ok()

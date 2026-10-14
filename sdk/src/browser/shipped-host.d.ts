@@ -12,76 +12,52 @@
 //   3. `miso.telemetry.v1`, windowed render-time telemetry on a lease, measured in JavaScript
 //      around the render export.
 //
-// ## What the control path can and cannot move, and why
+// ## What the command path carries, and what it does not
 //
-// **This is the most important thing to know before writing an app against it.** Issue #140 made
-// every declared kind live, so the honest summary is now short: `MisoCommandKind.Pan`,
-// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
-// `.PolarityInvert`, `.InputFilters`, `.RouteGainDb`, `.RouteMute`, `.RouteMatrix`,
-// `.VcaFaderDb` and `.VcaMute` are all **applied**. So are `.ObserveSubscribe` and
-// `.ObserveUnsubscribe` (issue 143), on the observation plane rather than the render one -- they
-// move the `miso.observe.v1` subscription map, not anything rendered. All seventeen are in the
-// metadata JSON's `commandKinds`, each with the `plane` it applies on.
+// **This is the most important thing to know before writing an app against it.** The browser has
+// no value command of its own (issue #1565). Every live value -- a fader, a mute, a pan or matrix,
+// an input trim, polarity or filter, a send, a VCA, a solo, an effect parameter or bypass -- moves
+// through `control()`: a `SESSION_TRANSACTION_APPLY` carrying `SET_CONTROL` edits, the same command
+// frame the C ABI's `miso_engine_v1_submit_command` takes, decoded and classified once by the
+// engine's control plane. `command()` carries exactly two kinds, `MisoCommandKind.ObserveSubscribe`
+// and `.ObserveUnsubscribe` (issue 143), on the observation plane rather than the render one: they
+// move the `miso.observe.v1` subscription map, not anything rendered. A record of any other kind --
+// including the deleted kinds 1-6 and 9-17, whose numbers are never reallocated -- is refused
+// `MisoCommandReason.Malformed` at its index.
 //
-// * `matrix_ll/lr/rl/rr`, `fader_db`, `mute` and -- since issue 210 phase 3 -- `trim_db` and
-//   `polarity_invert` declare `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing
-//   policy. `hpf_hz` and `lpf_hz` use prepared filter targets and are live through `.InputFilters`;
-//   `delay_samples` remains prepared-only (issue #210 phase 2, the track's input-side time
-//   alignment) and has no command kind.
-// * A parameter is live when its generated descriptor says `liveUpdatable`. Parametric EQ uses
-//   off-audio-thread Rust preparation for its numeric rows and dedicated cut enable/frequency/Q;
-//   this host submits the resulting opaque targets together with the original semantic batch.
-//   Other effects retain their `PreparedAutomationSpan` route. Callers provide semantic values,
-//   never coefficients, and a refused batch commits none of its edits.
-// * `.EffectBypass` is applied *outside* the effect, by a latency-preserving shunt: the wet path
-//   keeps running, so state stays continuous and un-bypassing does not click, and the dry signal
-//   is delayed by exactly the effect's declared latency, so every compiled PDC route timing stays
-//   correct.
-//
-// `MisoCommandReason.UnsupportedKind` (`result: 7`) has **not** gone away, and it still means
-// exactly what it said: the target is real and the value is legal, and *this session* has no write
-// path for it. A host compiled with `liveControlCommandQueueRecords === 0n` is that session --
-// there is no control channel and no staging buffer -- and so is a future effect parameter that
-// declares `AutomationRate::None`. It stays distinguishable from `Malformed` and from the
-// `Unknown*` reasons for that reason.
+// `MisoCommandReason.UnsupportedKind` (`result: 7`) means the target is real and the value is
+// legal, and *this session* has no path for it. A host booted with
+// `liveControlObservationTaps === 0n` is that session: it has no command staging, so `command()`
+// acknowledges every batch `UnsupportedKind`.
 //
 // ## Addressing is session-stable and string-free
 //
 // A command names a strip by its strip index -- the compiled session's canonical normalized tracks
 // first, then its submixes in canonical order (issue 1213), both of which `sessionMap()` returns --
-// plus a rack, an effect index and a numeric parameter ID. No string crosses the command path. The
+// plus a rack, an effect index and a numeric tap ID. No string crosses the command path. The
 // identity mapping is `sessionMap()` for the session and the build-time metadata JSON for the
 // effect vocabulary.
 //
 // ## One batch is one transaction
 //
-// The worklet validates a whole submission -- shape, addressing, domain, and free queue room on the
-// lanes that keep a queue -- before it pushes or writes a single record. A refused batch admits
-// nothing, so a half-applied fader move cannot exist. A strip's fader, mute and pan or matrix
-// values, an input's trim, polarity and filter values, a live send's gain, matrix and mute, and an
-// effect's parameter, bypass and prepared-target values are held in latest-target cells, not queues
-// (issues 1312, 1346, 1347, 1345): a flood of those edits is never refused for room, and a later
-// value for the same cell replaces the earlier one. Only an observation subscription is a queue
-// record: each effect keeps one bounded queue, one slot per declared tap, so it stays in order, and
-// a submission that outruns it is refused before it reaches the queue. A submission names each
-// observation tap at most once: a second `ObserveSubscribe` or `ObserveUnsubscribe` for the same
-// tap is `Malformed`. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host locally when its
-// own in-flight bound is reached, and by the engine when an effect's observation queue has no room
-// because earlier submissions are not yet drained; a render clears it.
+// The worklet validates a whole submission -- shape, addressing and free queue room -- before it
+// pushes a single record. A refused batch admits nothing. Each effect keeps one bounded
+// observation queue, one slot per declared tap, so subscriptions stay in order, and a submission
+// that outruns it is refused before it reaches the queue. A submission names each observation tap
+// at most once: a second `ObserveSubscribe` or `ObserveUnsubscribe` for the same tap is
+// `Malformed`. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host locally when its own
+// in-flight bound (256 records, `maximumCommandRecords`) is reached, and by the engine when an
+// effect's observation queue has no room because earlier submissions are not yet drained; a render
+// clears it.
 //
 // ## Application timing is exact
 //
-// Every live-control stage -- input, matrix/pan, fader/mute, send, and each driven effect -- takes
-// its pending control at the top of the block, before it touches a sample: the input, fader, mute,
-// pan or matrix, send and effect stages read their cells under the block's one snapshot, and an
-// effect stage also drains its observation queue. `appliedAtSample` on the
-// acknowledgement is the first sample of the next rendered block, when the target is applied.
-// Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
-// target at A+64; a response captured after A reports the accepted target, not an in-ramp curve.
+// An effect stage drains its observation queue at the top of the block, before it touches a
+// sample. `appliedAtSample` on the acknowledgement is the first sample of the next rendered block,
+// when the subscription takes effect.
 //
-// A batch may address several kinds at once. It is still one transaction: the free-room check is
-// per observation queue, and one full queue refuses the whole batch, including the records bound
-// for queues that had room and the cell values it carries.
+// A batch may address several taps at once. It is still one transaction: the free-room check is
+// per observation queue, and one full queue refuses the whole batch.
 //
 // ## What metering costs
 //
@@ -200,32 +176,13 @@ export interface MisoUnsupportedBrowser {
 
 /// Frozen live-control command kinds (issue 137 D1).
 ///
-/// All twelve are one vocabulary, proved across every file that spells it -- this enum, the Rust
-/// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
-/// metadata generator and the shipped `commandKinds` rows -- by
-/// `scripts/check-command-kind-vocabulary.py`. Every one of them is *applied*: nothing here is
-/// declared and refused (issue 140). Nine of them move state the render thread reads; the two
-/// observation kinds move the `miso.observe.v1` subscription map and nothing rendered, which is
-/// what the metadata JSON's per-kind `plane` field reports.
+/// Only the two observation kinds remain (issue #1565). They are one vocabulary, proved across
+/// every file that spells it -- this enum, the Rust `COMMAND_*` constants, the wire's decode
+/// whitelist, the host JS `COMMAND_KINDS` set, the metadata generator and the shipped
+/// `commandKinds` rows -- by `scripts/check-command-kind-vocabulary.py`. Kinds 1-6 and 9-17 were
+/// value kinds and are deleted: every value goes through `control()`. Their numbers are never
+/// reallocated, and a record that carries one is refused `MisoCommandReason.Malformed`.
 export const enum MisoCommandKind {
-  /// Retarget the track's pan pair over an explicit ramp window. Applied.
-  Pan = 1,
-  /// Retarget the track's full 2x2 matrix over an explicit ramp window. Applied.
-  Matrix = 2,
-  /// Retarget a lane fader in decibels over an explicit ramp window. Applied (issue #140 B).
-  FaderDb = 3,
-  /// Set a lane mute, as a fader endpoint over the same window. Applied (issue #140 B).
-  Mute = 4,
-  /// Set an effect parameter, delivered as a prepared automation span. Applied (issue #140 A).
-  EffectParam = 5,
-  /// Set an effect bypass, through the latency-preserving shunt. Applied (issue #140 A).
-  ///
-  /// It can lift a session `bypass` too (issue #1087), except on the two effects that keep
-  /// their session bypass as a prepared one: the delay and the multiband compressor (issues
-  /// #1087 and #1100). Their lane is seeded bypassed; lifting it is admitted and renders nothing
-  /// different, because the processor itself was prepared bypassed. Both are inserts: neither can
-  /// be a console slot.
-  EffectBypass = 6,
   /// Arm one declared observation tap of one effect instance. Applied (issue #143).
   ///
   /// `parameterId` carries the effect-local **tap id** from the metadata JSON's per-effect
@@ -241,94 +198,6 @@ export const enum MisoCommandKind {
   /// Applied on the `miso.observe.v1` plane: it clears an entry from the subscription map. The
   /// metadata JSON reports it as `"plane": "observation"`.
   ObserveUnsubscribe = 8,
-  /// Engage or clear one track's solo-in-place bit. Applied (issue 210 phase 1).
-  ///
-  /// Live-control state, not a strip DSP parameter -- which is why solo has no row in the metadata
-  /// JSON's `builtins` table while it does have a `commandKinds` row. `rack` and `channel` are
-  /// both `255`: solo addresses a strip, not a lane. `values[0]` is exactly `0` or `1`, and
-  /// `smoothingSamples` is the engage/disengage fade -- the same declick window `Mute` takes, and
-  /// worth giving the same value the app uses for a mute.
-  ///
-  /// Solo is composed, not stored twice: the engine keeps your per-lane mute intent and your solo
-  /// bits as separate states and gates each strip on
-  /// `userMute || (anySoloEngaged && !thisTrackSoloed)`. So muting a soloed track silences it,
-  /// clearing solo restores exactly the mutes you had -- per lane -- and the whole gesture rides
-  /// the same declicked fader endpoint a `Mute` rides.
-  ///
-  /// Solo is **monitoring state and is never persisted in a session** (issue 210 decision D1): an
-  /// offline or stem render of a session can never come out soloed, and reloading a session
-  /// starts with every solo bit clear.
-  ///
-  /// Metering is console-correct across a solo, and the code for it is unchanged: the gate sits at
-  /// the fader, so a session's pre-fader send taps (`input`, `post_input`, `insert_send`,
-  /// `insert_return`, `pre_fader`) keep reading the un-gated signal, while
-  /// `post_fader`, `post_pan`, the submixes, the output and this host's own meter frame --
-  /// including `masterGrDb` -- read the gated mix. A gain-reduction reading on a strip that solo
-  /// has silenced falls toward zero reduction, because that is the true state of its signal path
-  /// and not an artifact.
-  Solo = 9,
-  /// Retarget a lane's input trim in decibels over an explicit ramp window. Applied (issue 210
-  /// phase 3).
-  ///
-  /// The gain-riding control a fader cannot substitute for: trim sits at the head of the strip,
-  /// **before** the racks, so riding it changes what the compressor hears. `rack` is `255`;
-  /// `channel` is `0` left, `1` right or `2` both; `values[0]` is the new `trim_db` and must lie
-  /// in `[-144, 24]`, the domain the metadata JSON's `builtins` row declares; `smoothingSamples`
-  /// is the ramp window in sample updates, read under the same linear-N law `FaderDb` uses.
-  ///
-  /// A `channel: 2` command is one record and moves both lanes together, over one window, at one
-  /// block boundary. That is not only an economy: the engine collapses a mono-sourced strip to one
-  /// plane when its two channels are doing identical work, and a both-channel trim ride keeps that
-  /// true, while a single-lane ride correctly ends it for the life of the plan.
-  ///
-  /// A trim ride does **not** clear a polarity flip: the two are separate parameters that share
-  /// one coefficient.
-  TrimDb = 10,
-  /// Set or clear a lane's input polarity inversion. Applied (issue 210 phase 3).
-  ///
-  /// `rack` is `255`; `channel` is `0` left, `1` right or `2` both; `values[0]` is exactly `0` or
-  /// `1`; `smoothingSamples` is the flip's declick window.
-  ///
-  /// The flip is declicked, and it costs nothing to be: polarity is folded into the sign of the
-  /// same trim coefficient `TrimDb` rides, so a flip is a retarget of that coefficient to its own
-  /// negation and the linear ramp carries it through zero. Send a `smoothingSamples` you would be
-  /// happy with on a fader move -- a few milliseconds -- and the flip is inaudible; send `0` and
-  /// it is a hard switch, which is occasionally what a phase-alignment check wants.
-  ///
-  /// A flip does **not** change the lane's trim magnitude.
-  PolarityInvert = 11,
-  /// Retarget a builtin input HPF/LPF pair through one prepared target transaction.
-  InputFilters = 12,
-  /// Retarget one live send's gain in decibels over `smoothingSamples`. Applied (issue 1222).
-  ///
-  /// `trackIndex` is the send's **live-route index**: its position among the routes into
-  /// submixes, in canonical route-ID order, which is `sessionMap().routes` (issue 1223). `rack`
-  /// and `channel` are `255`, `effectIndex` and `parameterId` are `0`, `values[0]` is the gain
-  /// and `values[1..]` are `0`. The gain and the matrix share the prepared route's domain; a value
-  /// it refuses is `Domain`.
-  RouteGainDb = 13,
-  /// Switch one live send on (`values[0]` exactly `0`) or off (exactly `1`) over
-  /// `smoothingSamples`. Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
-  RouteMute = 14,
-  /// Retarget one live send's 2x2 matrix over `smoothingSamples`: `values` are `ll, lr, rl, rr`.
-  /// Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
-  RouteMatrix = 15,
-  /// Ride one VCA's per-lane dB offset over `smoothingSamples`. Applied (issue 1245).
-  ///
-  /// `trackIndex` is a **VCA index**: the VCA's position in the session's `vcas`, in canonical
-  /// VCA-ID order, which is `sessionMap().vcas` (issue 1246), refused
-  /// `MisoCommandReason.UnknownVca` at or past the VCA count. `rack` is `255`, `channel` is `0`
-  /// left, `1` right or `2` both, `effectIndex` and `parameterId` are `0`, `values[0]` is the
-  /// offset in `[-144, 24]` dB and `values[1..]` are `0`. Every member's effective fader -- its
-  /// own value plus every reaching VCA's offset, clamped to the fader domain -- follows through
-  /// its own declicked fader ramp; a member keeps its own balance, and its own `FaderDb` moves
-  /// still land on top of the VCA.
-  VcaFaderDb = 16,
-  /// Mute (`values[0]` exactly `1`) or un-mute (exactly `0`) one VCA's lanes over
-  /// `smoothingSamples`. Applied (issue 1245). Addressed and shaped as `VcaFaderDb`. A VCA mute
-  /// mutes every member, a submix included; solo never clears it, un-muting the VCA never clears a
-  /// member's own mute, and a member's `follows_mute` sends follow it.
-  VcaMute = 17,
 }
 
 /// Frozen typed reasons a live-control submission was refused (issue 137 D1).
@@ -358,10 +227,7 @@ export const enum MisoCommandReason {
   /// `ObserveUnsubscribe` records the submission queues because earlier submissions are not yet
   /// drained; nothing was admitted, and a render clears it. The reason is also returned with the internal result
   /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
-  /// revision past the gate's ceiling); that batch wrote nothing. Fader, mute, pan or matrix,
-  /// input trim, polarity and filter, live-send, and effect parameter, bypass and prepared-target
-  /// values are cells, and so are the member values a `VcaFaderDb` or `VcaMute` writes: none of
-  /// them returns it for want of room.
+  /// revision past the gate's ceiling); that batch wrote nothing.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
@@ -375,54 +241,34 @@ export const enum MisoCommandReason {
   /// Prepare with `liveControlObservationTaps` set. Retrying will not help, which is why this is
   /// its own reason and not `Backpressure`.
   ObservationUnbound = 11,
-  /// The addressed strip is solo-safe: a submix is never soloed.
-  NotSoloable = 12,
-  /// A send kind's `trackIndex` is not a live route of this plan: it is at or past the number of
-  /// routes into submixes, `sessionMap().routes.length`.
-  UnknownRoute = 13,
-  /// A VCA kind's `trackIndex` is not a VCA of this session: it is at or past the number of VCAs,
-  /// `sessionMap().vcas.length` (every index, in a session without VCAs).
-  UnknownVca = 14,
+  // Reasons 12-14 (`NotSoloable`, `UnknownRoute`, `UnknownVca`) were deleted with the value kinds
+  // (issue #1565); their numbers are never reused.
 }
 
-/// One live-control command. `255` means "not applicable to this kind".
+/// One live-control command record. `255` means "not applicable to this kind".
 ///
-/// An effect is addressed in the session's terms (decision 12, issue #1096): a console slot as
-/// `rack` `3` with `effectIndex` the slot's index in the session's slot order (`pre_insert`, then
-/// `post_insert`, which is its index in the track's `console` entries), and an insert as `rack`
-/// `1` with `effectIndex` its index in the track's `inserts`. The retired `simd1` (`0`) and `simd2`
-/// (`2`) codes are refused and never reallocated; the layout JSON's `racks` table is the
-/// vocabulary.
+/// Only the two observation kinds are carried (issue #1565). An effect is addressed in the
+/// session's terms (decision 12, issue #1096): a console slot as `rack` `3` with `effectIndex` the
+/// slot's index in the session's slot order (`pre_insert`, then `post_insert`, which is its index in
+/// the track's `console` entries), and an insert as `rack` `1` with `effectIndex` its index in the
+/// track's `inserts`. The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
+/// reallocated; the layout JSON's `racks` table is the vocabulary.
 export interface MisoCommand {
   kind: MisoCommandKind;
-  /// `1` inserts, `3` console, `255` for a builtin-addressed kind.
+  /// `1` inserts, `3` console.
   rack: number;
-  /// `0` left, `1` right, `2` both, `255` for a kind with no lane.
+  /// `0` left, `1` right, `2` both, `255` for a kind with no lane (both observation kinds).
   channel: number;
   /// Strip index: `i < tracks.length` is `sessionMap().tracks[i]`, and from there submix
-  /// `sessionMap().submixes[i - tracks.length]` (issue 1213). `Solo` addresses tracks only; at a
-  /// submix it is refused `MisoCommandReason.NotSoloable`. For `RouteGainDb`, `RouteMute` and
-  /// `RouteMatrix` it is a live-route index instead (issue 1222), refused
-  /// `MisoCommandReason.UnknownRoute` past the last live route; for `VcaFaderDb` and `VcaMute` a
-  /// VCA index (issue 1245), refused `MisoCommandReason.UnknownVca` past the last VCA.
+  /// `sessionMap().submixes[i - tracks.length]` (issue 1213).
   trackIndex: number;
   /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
+  /// The effect-local observation tap id.
   parameterId: number;
-  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb`,
-  /// `PolarityInvert`, the three route kinds and the two VCA kinds; the observation kinds read it
-  /// as a window length in render blocks, and it is ignored by the rest.
-  ///
-  /// For the ramped kinds, `4294967295` (`0xFFFFFFFF`, `SESSION_DEFAULT_RAMP`) means no length was
-  /// given: admission replaces it with the session's own length for the kind (its
-  /// `controlSmoothing`, or the default table, at the session's sample rate; a strip's own pan or
-  /// matrix window first for `Pan` and `Matrix`). Any other value, `0` (a hard step) included, is
-  /// the length itself. The input filters and the bypass carry no ramp and refuse the marker as
-  /// `Malformed`, as they refuse any non-zero word.
+  /// The observation window length in render blocks, or `0` for the plan's default.
   smoothingSamples: number;
-  /// `Pan`: `[left, right, 0, 0]`. `Matrix` and `RouteMatrix`: `[ll, lr, rl, rr]`. `Mute`,
-  /// `Solo`, `PolarityInvert`, `RouteMute` and `VcaMute`: `[0|1, 0, 0, 0]` exactly. Everything
-  /// else: `[value, 0, 0, 0]`.
+  /// Every word `0` for the observation kinds.
   values: [number, number, number, number];
 }
 
@@ -483,13 +329,6 @@ export interface MisoSessionMap {
   /// Canonical normalized submix order (issue 1210): submix `j` is strip `tracks.length + j`, and
   /// the meter frame's submix sections (`submixPeaks`, `submixGrDb`) follow this order.
   readonly submixes: readonly string[];
-  /// The live routes (issue 1223): the routes into submixes, in canonical route-ID order. A send
-  /// kind's (`RouteGainDb`, `RouteMute`, `RouteMatrix`) `trackIndex` `i` addresses `routes[i]`.
-  /// A route into the output is not live and is not listed.
-  readonly routes: readonly string[];
-  /// The VCAs (issue 1246), in canonical VCA-ID order. A VCA kind's (`VcaFaderDb`, `VcaMute`)
-  /// `trackIndex` `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
-  readonly vcas: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
@@ -831,19 +670,18 @@ export interface MisoWebBootOptions {
   maximumMemoryBytes: bigint;
   /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
   spectrumHopFrames: number;
-  /// Nonzero accepts live commands, `0n` attaches no control channel (issue 137). The number sizes
-  /// no plan queue: every strip, send and effect value is a latest-target cell, and an effect's
-  /// observation queue holds one subscription per declared tap. It is the main-realm host's bound
-  /// on commands in flight, past which `command()` returns `RESULT_BACKPRESSURE` locally.
-  liveControlCommandQueueRecords: bigint;
+  /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
+  /// size; the command staging now exists exactly when `liveControlObservationTaps !== 0n`, and the
+  /// main-realm host's bound on commands in flight is `maximumCommandRecords` (issue #1565).
+  reserved1: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
   liveControlMeterBlocks: bigint;
   /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`: a
-  /// subscription is a live command, and a session with no control channel accepts none.
+  /// `MisoCommandReason.ObservationUnbound`. A nonzero value also allocates the command staging
+  /// that carries the subscription records; without it `command()` is refused `UnsupportedKind`.
   liveControlObservationTaps: bigint;
   /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
   /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
@@ -901,12 +739,8 @@ export interface MisoStatus {
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
   /// The session's count of live values that a later committed value replaced before a block
-  /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). For one script of
-  /// strip fader, mute and pan edits that stages at most one write per cell in a submission it
-  /// equals the C ABI's count. It does not for a script the two hosts stage differently: the
-  /// browser also counts the extra writes one submission makes to one cell (send edits in wire
-  /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
-  /// writing no cell, for input, route, VCA and submix edits.
+  /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). Every value reaches
+  /// the engine through `control()` (issue #1565), the one path the C ABI takes.
   readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
   /// The allocator calls the instance made outside its render-locked windows (issue 1381a, issue
@@ -1004,7 +838,8 @@ export interface MisoAudioWorkletHost {
   /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
   /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port.
   control(frame: Uint8Array): Promise<MisoControlReply>;
-  /// Submit one live-control batch as a single transaction (issue 137 D1).
+  /// Submit one batch of observation records (kinds 7 and 8) as a single transaction (issue 137
+  /// D1). Values go through `control()`.
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;
   /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).
   ///
@@ -1046,12 +881,10 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track, submix, live route, VCA and source order (issues
-  /// 137 D1, 207, 1210, 1223, 1246).
+  /// Read the compiled session's canonical track, submix and source order (issues 137 D1, 207,
+  /// 1210).
   ///
-  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, `routes` the live-route
-  /// order a send kind's `trackIndex` addresses and `vcas` the VCA order a VCA kind's addresses;
-  /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
+  /// `tracks` then `submixes` is the strip order `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
   /// submission has to agree with.
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).

@@ -11,8 +11,10 @@
 //! owner (`PlanState`), which adopts a published successor at a block boundary with its
 //! [`RenderCompanions`], and the service step (`miso_engine_web_v1_service`) reclaims the displaced
 //! plan and its attachment on the control side, in the worklet's message handler, never in
-//! `process()`. The retained live-command path holds no cell producer: only the observation kinds
-//! still reach the control plane, until `SET_CONTROL` serves the rest (#1562a, #1565A).
+//! `process()`. Every value reaches the cells through `SET_CONTROL` and the core
+//! (`control_command`, #1562a); the browser keeps no value admission of its own (#1565A). What
+//! remains of the retained command record is the monitor operation that arms an observation tap
+//! (kinds 7 and 8), which reaches the effect's observation queue through the control plane.
 //!
 //! # What is here and what is not
 //!
@@ -27,36 +29,24 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use builtins::{
-    BuiltinLaneSelector, Matrix2x2, MeterMetricSet, MeterSnapshot, MeterTap,
-    PreparedInputFilterTarget, pan_matrix, validate_prepared_input_filter_target,
-};
-use builtins_compiler::{
-    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
-};
+use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
+use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, PlanQueries, PlanResources, PlanState,
     SessionState, SourceFailure,
 };
-use controls::{ControlDescriptor, ControlError, Lane, OwnerKind, SectionKind};
-use effect_contract::{
-    EffectControlRecord, ObservationCost, ObservationDescriptor, ParameterChannel,
-    ParameterChannelPolicy, parameter_value_valid,
-};
+use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut};
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    InputFilterEdit, InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps,
-    LiveRouteMuteFollow, LiveRouteState, LiveStripValues, LiveVcaState, PrepareDiagnostics,
-    PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
-    SourceControlError, SourceSubmission, StripMuteSeed, SuccessorBase, apply_input_filter_edit,
-    changed_lane_records, compile_host_model, compiled_session_shape, control_table_bytes,
-    covers_lane, fader_gain_bits, parse_host_session,
-    prepare_host_runtime_with_live_controls_and_spectrum, source_id_arena_bytes, trim_gain_bits,
+    PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError, SourceSubmission,
+    SuccessorBase, compile_host_model, compiled_session_shape, control_table_bytes,
+    parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
+    source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
@@ -67,8 +57,6 @@ use host_core::{
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
 use session::CompileCaps;
-
-use control_targets::{PREPARED_EFFECT_COMPANION_CAPACITY, PreparedControlWorkspace};
 
 use host_core::EffectRack;
 /// Live effect addressing in the session's own terms (decision 12, issue #1096).
@@ -104,34 +92,6 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
 pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 25;
-
-/// The most VCAs a browser session may declare (issue #1245 amendment A1).
-///
-/// A planner decision, subject to owner review. A VCA command runs on the AudioWorklet thread, and
-/// its cost grows with the (strip, reaching VCA) pairs it recomposes, so the browser bounds both
-/// the VCA count and the pair count ([`MAXIMUM_BROWSER_VCA_REACH_PAIRS`]) at boot, before any VCA
-/// table is built. 256 is far more VCAs than a mix uses, and it is the width of the boot-time reach
-/// count's ancestor bitsets.
-pub const MAXIMUM_BROWSER_VCAS: usize = 256;
-
-/// The most (strip, reaching VCA) pairs a browser session may declare (issue #1245 amendment A1).
-///
-/// A planner decision, subject to owner review. A batch's VCA work is bounded by about three
-/// passes over the pairs (the VCA fader pass over both lanes, and one VCA-mute refresh), plus 256
-/// member moves of at most [`MAXIMUM_BROWSER_VCAS`] reaching VCAs each; at this bound that is a
-/// small fraction of one 128-frame quantum (the measurement is in the #1245 record). 16,384 pairs
-/// hold, for example, 1,024 strips in 16 VCAs each. A session past either bound is refused at boot
-/// with `web.vca.maximum_vcas` or `web.vca.reach_pairs` (`RESULT_REFUSED_BUDGET`).
-pub const MAXIMUM_BROWSER_VCA_REACH_PAIRS: u64 = 16_384;
-
-/// Words of one boot-time VCA ancestor bitset.
-const VCA_REACH_WORDS: usize = MAXIMUM_BROWSER_VCAS / 64;
-
-/// A conservative bound on the transient bytes `session::SessionModel::vca_reach` holds per
-/// membership entry: its `BTreeMap<&str, Vec<usize>>` parent index at minimum node occupancy
-/// (about 90 bytes per key and value with the node's edge share) plus the value `Vec`'s doubled
-/// capacity, rounded up (issue #1245 amendment A1).
-const VCA_PARENT_ENTRY_BYTES: u64 = 128;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
@@ -636,22 +596,11 @@ pub const RESPONSE_RESULT_BYTES: u32 = size_of::<WebResponseResult>() as u32;
 
 /// Exact byte size of one staged `miso.command.v1` record.
 pub const COMMAND_RECORD_BYTES: u32 = 48;
-/// The `smoothing_samples` word that means "no length given" (issue #1364 D1; decision 15 D15-1).
-///
-/// A ramped record whose word is this value is admitted with the session's own length for its
-/// row: the `control_smoothing` keys, or the researched default table, rounded at the session's
-/// sample rate (`host_core::LiveRamps`). Every other value, `0` (a step) included, is the length
-/// itself. The sentinel is not a length: it never reaches the render plane, and a kind that
-/// carries no ramp (input filters, bypass) refuses it as `MALFORMED`, as it refuses any non-zero
-/// word.
-pub const SESSION_DEFAULT_RAMP: u32 = u32::MAX;
 /// Largest number of records one `miso.command.v1` submission may stage.
 ///
 /// The staging buffer is allocated at preparation for exactly this many records, so a submission
 /// can never grow the module's memory and the render path never sees an allocation.
 pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
-/// Per-track control-queue depth used when the configuration asks for the default.
-pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
 /// Largest `live_control_observation_taps` the browser configuration accepts.
 ///
 /// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
@@ -875,29 +824,6 @@ pub struct ObservationReadValues {
     pub right: Option<f32>,
 }
 
-/// Retarget the track's pan pair (`left`, `right`) over an explicit ramp window.
-pub const COMMAND_PAN: u32 = 1;
-/// Retarget the track's full 2x2 matrix over an explicit ramp window.
-pub const COMMAND_MATRIX: u32 = 2;
-/// Retarget a lane fader in decibels over an explicit ramp window (live since issue #140 B).
-pub const COMMAND_FADER_DB: u32 = 3;
-/// Set a lane mute, as a fader endpoint over the same ramp window (live since issue #140 B).
-///
-/// `values[0]` is exactly `0.0` or `1.0`: the core's boolean rule (`controls::check`), which
-/// refuses `-0.0` as the session grammar and the C ABI do, for this kind and for polarity, send
-/// mute, VCA mute and solo alike (decision 17, slice S7c D3).
-pub const COMMAND_MUTE: u32 = 4;
-/// Set an effect parameter (live since issue #140 A).
-pub const COMMAND_EFFECT_PARAM: u32 = 5;
-/// Set an effect bypass (live since issue #140 A).
-///
-/// A live bypass engages or lifts the latency-preserving shunt of the addressed console slot or
-/// insert, and it can lift a session `bypass` too (issue #1087), with two exceptions. The delay
-/// and the multiband compressor keep their session bypass as a *prepared* bypass
-/// (`effect_compiler::lowers_session_bypass`; issues #1087 and #1100): their live-control lane is
-/// seeded bypassed, and lifting it is admitted but renders nothing different, because the
-/// processor itself was prepared bypassed. Neither can be a console slot, so both are inserts.
-pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 /// Arm one declared observation tap of one effect instance (issue #143 D3).
 ///
 /// `parameter_id` carries the effect-local `tap_id`, `smoothing_samples` carries the window length
@@ -907,93 +833,6 @@ pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;
 /// Disarm one declared observation tap of one effect instance (issue #143 D3).
 pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
-/// Engage or clear one track's solo-in-place bit (issue #210 phase 1). Only a track index is
-/// soloable: a submix's strip index refuses with [`COMMAND_REASON_NOT_SOLOABLE`] (issue #1213 D4).
-///
-/// The shape mirrors [`COMMAND_MUTE`] because solo *is* a mute composition: `rack = 255`,
-/// `channel = 255` (solo is a strip gesture, not a lane one), `values[0]` exactly `0.0` or `1.0`,
-/// and `smoothing_samples` the engage/disengage fade -- the same declick window a mute takes.
-///
-/// It moves no state of its own on the render thread. Admission composes
-/// `effective_mute = user_mute || vca_mute || (any_solo && !solo_safe && !my_solo)` over the live
-/// controls' [`host_core::LiveControlSoloState`] and emits the *existing*
-/// `TrackFaderRecord::Mute` records into the *existing* per-strip fader queues, so this kind is
-/// on the `render` plane (it moves what the render thread reads) while adding nothing below
-/// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
-/// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
-/// `unknownTrack`, `backpressure` and `wrongState`, plus `notSoloable` for a submix.
-pub const COMMAND_SOLO: u32 = 9;
-/// Retarget a lane's input trim in decibels over an explicit ramp window (#210 phase 3).
-///
-/// `channel` is `0` left, `1` right or `2` both; `values[0]` is the new `trim_db` and must lie in
-/// `trim_db`'s own declared domain, `[-144, 24]`; `values[1..]` must be `0.0`; `rack` is `255`.
-/// `smoothing_samples` is the ramp window, in sample updates, exactly as it is for `faderDb`.
-///
-/// A `channel = 2` command is **one** record carrying `BuiltinLaneSelector::Both`, not two
-/// per-lane records: the input stage is upstream of the fader/matrix seam, and a both-channel
-/// retarget must be admitted as one symmetry-preserving event or it would retire the track's mono
-/// collapse. `builtins_compiler::TrackInputRecord` carries the argument in full.
-///
-/// The lane's polarity is preserved: a trim ride does not clear a flip.
-pub const COMMAND_TRIM_DB: u32 = 10;
-/// Set or clear a lane's input polarity inversion (#210 phase 3).
-///
-/// `channel` is `0` left, `1` right or `2` both; `values[0]` must be exactly `0.0` or `1.0`;
-/// `values[1..]` must be `0.0`; `rack` is `255`. `smoothing_samples` is the ramp window.
-///
-/// A flip is a retarget of the **same** coefficient the trim rides to its own negation, so it
-/// declicks through the trim ramp -- the linear ramp carries the coefficient through zero -- and
-/// costs no DSP of its own. The lane's trim magnitude is preserved.
-pub const COMMAND_POLARITY_INVERT: u32 = 11;
-/// Retarget a builtin input HPF/LPF pair through prepared filter targets.
-pub const COMMAND_INPUT_FILTERS: u32 = 12;
-/// Retarget one live send's gain in decibels over an explicit ramp window (issue #1222 D1).
-///
-/// The index word is a **live-route index**: the send's position among the routes into submixes,
-/// in canonical route-ID order -- not a strip index. An index past the last live route refuses
-/// with [`COMMAND_REASON_UNKNOWN_ROUTE`]. `values[0]` is the gain; `values[1..]` must be `0.0`,
-/// `rack` and `channel` must be `255`, and `effect_index` and `parameter_id` must be `0`, or the
-/// record is `MALFORMED`. `smoothing_samples` is the ramp length.
-///
-/// Admission keeps a mirror of every live send's gain, matrix and mute
-/// ([`host_core::LiveRouteState`]): a send record carries all of them folded into four
-/// coefficients, so the record is built from the mirror with this one field replaced, through
-/// [`host_core::RouteControlProducer::record`] -- the prepared route's own coefficient function.
-/// A value that function refuses, or a ramp past its bound, is `DOMAIN`.
-pub const COMMAND_ROUTE_GAIN_DB: u32 = 13;
-/// Switch one live send on or off over an explicit ramp window (issue #1222 D1).
-///
-/// Addressed and shaped as [`COMMAND_ROUTE_GAIN_DB`]; `values[0]` must be exactly `0.0` (on) or
-/// `1.0` (muted), anything else is `DOMAIN`, exactly as `mute` requires.
-pub const COMMAND_ROUTE_MUTE: u32 = 14;
-/// Retarget one live send's 2x2 matrix over an explicit ramp window (issue #1222 D1).
-///
-/// Addressed and shaped as [`COMMAND_ROUTE_GAIN_DB`]; `values[0..4]` are `ll, lr, rl, rr`.
-pub const COMMAND_ROUTE_MATRIX: u32 = 15;
-/// Ride one VCA's per-lane dB offset over an explicit ramp window (issue #1245 D1).
-///
-/// The index word is a **VCA index**: the VCA's position in the session's `vcas`, in canonical
-/// VCA-ID order -- not a strip index. An index at or past the VCA count (every index, in a
-/// session without VCAs) refuses with [`COMMAND_REASON_UNKNOWN_VCA`]. The shape is
-/// [`COMMAND_FADER_DB`]'s -- `rack` `255`, `channel` `0`/`1`/`2`, `values[0]` the offset in
-/// `[-144, 24]` dB (else `DOMAIN`), `values[1..]` `0.0`, `smoothing_samples` the ramp -- plus
-/// `effect_index` and `parameter_id` `0`, as the route kinds rule; anything else is `MALFORMED`.
-///
-/// A VCA has no audio path. Admission composes the move through [`host_core::LiveVcaState`] --
-/// `clamp(own + sum of the reaching VCAs' offsets)`, the one composition preparation bakes -- and
-/// stages each reached member's changed fader lanes as the *existing* `TrackFaderRecord::FaderDb`
-/// records on the member's fader queue, with this record's ramp. A member lane whose effective
-/// value does not change gets no record.
-pub const COMMAND_VCA_FADER_DB: u32 = 16;
-/// Set or clear one VCA's per-lane mute over an explicit ramp window (issue #1245 D1).
-///
-/// Addressed and shaped as [`COMMAND_VCA_FADER_DB`]; `values[0]` must be exactly `0.0` or `1.0`,
-/// anything else is `DOMAIN`, exactly as `mute` requires. The VCA mute term joins every reached
-/// member's effective mute (`user_mute || vca_mute || solo term`, so mute wins over solo and a
-/// solo-safe submix is muted too), and the *existing* strip mute records and, for `follows_mute`
-/// sends, follow records carry the change.
-pub const COMMAND_VCA_MUTE: u32 = 17;
-
 /// The `rack` of an effect-addressed record: one of the track's inserts (decision 12, #1096).
 ///
 /// It keeps the code the retired `dynamic` rack had. `effect_index` is the insert's position in
@@ -1084,21 +923,19 @@ pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
 pub const COMMAND_REASON_UNKNOWN_RACK: u32 = 3;
 /// `effect_index` is not an effect of the addressed rack.
 pub const COMMAND_REASON_UNKNOWN_EFFECT: u32 = 4;
-/// `parameter_id` is not a parameter of the addressed effect.
+/// `parameter_id` is not a parameter of the addressed effect. No record raises it since #1565A
+/// deleted the value kinds; the number stays declared and is never reallocated.
 pub const COMMAND_REASON_UNKNOWN_PARAMETER: u32 = 5;
-/// A value is outside the addressed parameter's declared domain.
+/// A value is outside the addressed parameter's declared domain. No record raises it since
+/// #1565A deleted the value kinds (the core's `control.domain` is the one value check now); the
+/// number stays declared and is never reallocated.
 pub const COMMAND_REASON_DOMAIN: u32 = 6;
-/// The record is well formed and correctly addressed, but this session cannot apply its kind.
+/// The submission cannot be applied by this host: a record on a host with no observation taps
+/// attached (`live_control_observation_taps == 0`, so no command staging), or an observation tap
+/// whose cost class is not resident.
 ///
-/// This is not "malformed" and it is not "unknown target": the parameter exists and the value is
-/// legal, and this session has no post-preparation write path for it. The parameter-metadata JSON
-/// (deliverable 4) marks every such parameter, so a caller never has to discover this at runtime.
-///
-/// Issue #140 emptied this of everything the ABI *declares*: pan, matrix, fader, mute, effect
-/// parameter and effect bypass are all live, and `liveUpdatable` is `true` for each. It remains
-/// reachable for the states that are genuinely not addressable -- a host with no live controls
-/// attached at all, and an effect whose parameter declares `AutomationRate::None`, which no launch
-/// effect does but which a future one may.
+/// This is not "malformed" and it is not "unknown target": the record is well formed and the tap
+/// exists, and this session has no post-preparation write path for it.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 /// A bounded control queue had no room for the submission; nothing was admitted.
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
@@ -1115,23 +952,6 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 /// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
 /// none. A caller fixes it by preparing with `live_control_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
-/// The addressed strip is solo-safe: a submix is never soloed (issue #1212).
-///
-/// Its own reason, not `MALFORMED` or `UNKNOWN_TRACK`: the record is well formed and the strip
-/// exists, and a caller that solos a bus learns that it addressed the wrong kind of strip.
-pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;
-/// A send kind's index word is not a live route of this plan (issue #1222 D2).
-///
-/// Its own reason, not `UNKNOWN_TRACK`: a send is addressed by its live-route index, not a strip
-/// index, and a caller that names a send that does not exist learns which address was wrong.
-pub const COMMAND_REASON_UNKNOWN_ROUTE: u32 = 13;
-/// A VCA kind's index word is not a VCA of this session (issue #1245 D2).
-///
-/// Its own reason, not `UNKNOWN_TRACK` or `UNKNOWN_ROUTE`: a VCA is addressed by its VCA index, in
-/// canonical VCA-ID order, and a caller that names a VCA that does not exist learns which address
-/// was wrong.
-pub const COMMAND_REASON_UNKNOWN_VCA: u32 = 14;
-
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
 
@@ -1288,16 +1108,10 @@ pub struct WebBootOptions {
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     pub maximum_memory_bytes: u64,
-    /// Whether the plan accepts live commands: nonzero allocates the command staging and accepts
-    /// them, `0` accepts none and allocates no command staging (issue #137 D1). The number sizes
-    /// nothing in the plan: every fader, mute, matrix, input, send and effect value is a
-    /// latest-target cell (issues #1312, #1345, #1346, #1347), and an effect's observation queue
-    /// holds one subscription per declared tap (#1345 D2). Only the JS port's in-flight bound
-    /// reads it as a count. The word keeps its frozen name and offset in the boot options.
-    ///
-    /// Zero still leaves every strip's cells on the plan: the engine ramps a strip's mute for its
-    /// own transitions, and no command can reach them (issues #1326, #1312).
-    pub live_control_command_queue_records: u64,
+    /// Must be zero. This was the live-command queue word until #1565 deleted the browser's own
+    /// value commands; the offset keeps its place and the word is refused when nonzero
+    /// (`web.options.reserved1`).
+    pub reserved1: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
     /// Zero is the honest form of "metering off costs nothing": no observer is bound, so the
@@ -1308,8 +1122,9 @@ pub struct WebBootOptions {
     /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
     /// at all (issue #143 D3, level 1).
     ///
-    /// Requires `live_control_command_queue_records != 0`: a subscription rides the effect's own
-    /// observation queue, so observation without live controls has no delivery path.
+    /// A nonzero value allocates the command staging, which is what accepts the observation
+    /// records (kinds 7 and 8): a subscription rides the effect's own observation queue. With zero,
+    /// a command submission is `RESULT_UNSUPPORTED` with `COMMAND_REASON_UNSUPPORTED_KIND`.
     pub live_control_observation_taps: u64,
     /// The designated master strip index (tracks first, then submixes) **plus one**, or `0` for
     /// none (issue #143 D6). `T + j + 1` designates submix `j` (issue #1213 D5), so a mix bus
@@ -1332,18 +1147,17 @@ impl WebBootOptions {
             source_ring_frames: 0,
             reserved0: 0,
             maximum_memory_bytes: 0,
-            live_control_command_queue_records: 0,
+            reserved1: 0,
             live_control_meter_blocks: 0,
             live_control_observation_taps: 0,
             live_control_master_track_plus_one: 0,
         }
     }
 
-    /// Explicit defaults with the live web controls attached.
+    /// Explicit defaults with the default meter window attached.
     #[must_use]
     pub const fn live_control_defaults() -> Self {
         Self {
-            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
             live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
             ..Self::explicit_defaults()
         }
@@ -1491,14 +1305,13 @@ struct PreparedBuffers {
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
     output_pcm: Box<[f32]>,
-    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-control staging (issue #137 D1).
+    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` observation-command staging (issue
+    /// #137 D1); empty unless the boot asked for observation taps.
     command: Box<[u8]>,
     /// One control frame (issue #1562a D1): [`CONTROL_FRAME_BYTES`], the boot's
     /// `maximum_control_frame_bytes`. Staged by the page, read by the control plane in place.
     control_request: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
-    /// One fixed workspace for the trusted prepared-control companion and addressed EQ config.
-    prepared_control: Option<Box<PreparedControlWorkspace>>,
 }
 
 type FfiSourceStaging<'a> = (
@@ -1510,264 +1323,6 @@ type FfiSourceStaging<'a> = (
 /// Spectrum observer preparation requested by the browser staging boundary: the core's
 /// [`host_core::SpectrumPreparation`], under its earlier name.
 pub use host_core::SpectrumPreparation as SpectrumPreparationRequest;
-
-/// The ramp lengths an absent per-edit length resolves to (issue #1364 D2).
-///
-/// Computed once, on the control thread, from the session this host prepared: the
-/// `control_smoothing` table ([`LiveRamps::for_session`]) and, for each strip, the window a pan or
-/// matrix record takes (#1054 D5). Admission reads it to replace [`SESSION_DEFAULT_RAMP`]; the
-/// render path never sees it.
-struct SessionRamps {
-    live: LiveRamps,
-    /// One entry per strip, the tracks then the submixes: the strip's own `smoothing_samples` when
-    /// the prepared session gives its pan or matrix a non-zero window, else `live.pan_samples`.
-    strip_pan: Box<[u32]>,
-}
-
-impl SessionRamps {
-    /// `None` when the table cannot be reserved.
-    fn try_new(model: &session::SessionModel) -> Option<Self> {
-        let live = LiveRamps::for_session(model);
-        let mut strip_pan = Vec::new();
-        strip_pan
-            .try_reserve_exact(model.tracks.len() + model.submixes.len())
-            .ok()?;
-        for matrix_or_pan in model
-            .tracks
-            .iter()
-            .map(|track| &track.matrix_or_pan)
-            .chain(model.submixes.iter().map(|submix| &submix.matrix_or_pan))
-        {
-            let window = match matrix_or_pan {
-                session::MatrixOrPan::Pan {
-                    smoothing_samples, ..
-                }
-                | session::MatrixOrPan::Matrix {
-                    smoothing_samples, ..
-                } => *smoothing_samples,
-            };
-            strip_pan.push(if window != 0 {
-                window
-            } else {
-                live.pan_samples
-            });
-        }
-        Some(Self {
-            live,
-            strip_pan: strip_pan.into_boxed_slice(),
-        })
-    }
-
-    /// Bytes this table retains beyond the struct itself.
-    fn retained_bytes(&self) -> u64 {
-        (self.strip_pan.len() * size_of::<u32>()) as u64
-    }
-
-    /// The length a record of `row` carries for `word`: the session's own for the sentinel, else
-    /// the word. The core's resolver does it (decision 17, slice S7c D4).
-    const fn resolve(&self, row: LiveRampRow, word: u32) -> u32 {
-        self.live.resolve(
-            row,
-            if word == SESSION_DEFAULT_RAMP {
-                None
-            } else {
-                Some(word)
-            },
-        )
-    }
-
-    /// [`Self::resolve`] for a strip's pan or matrix record (#1054 D5): the sentinel becomes the
-    /// strip's own window when its prepared pan or matrix has one, else the `pan_ms` length. A
-    /// strip index past the table is the `pan_ms` length; admission refuses such a record next.
-    fn resolve_strip_pan(&self, strip: usize, word: u32) -> u32 {
-        // The strip's own window comes first; `strip_pan` already holds the `pan_ms` length for a
-        // strip whose pan or matrix has none.
-        let edit = if word == SESSION_DEFAULT_RAMP {
-            self.strip_pan.get(strip).copied()
-        } else {
-            Some(word)
-        };
-        self.live.resolve(LiveRampRow::Pan, edit)
-    }
-}
-
-/// The core's descriptors of the rows the browser's live kinds write (decision 17, slice S7c D1).
-///
-/// Resolved once at boot, where the host already allocates, from `controls::row_descriptor`; every
-/// value check of an admitted record is `controls::check` against one of these, so the browser
-/// states no range or boolean rule of its own. `ReadyOwnership` holds the table; #S10 replaces it
-/// with the core's own list.
-#[derive(Clone, Copy)]
-struct WebControlRows {
-    /// A strip's builtin `fader_db`, `mute`, `trim_db`, `polarity_invert` and `pan`.
-    fader_db: ControlDescriptor,
-    mute: ControlDescriptor,
-    trim_db: ControlDescriptor,
-    polarity_invert: ControlDescriptor,
-    pan: ControlDescriptor,
-    /// A strip's builtin `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr`.
-    matrix: [ControlDescriptor; 4],
-    /// A strip's own `solo`.
-    solo: ControlDescriptor,
-    /// A route's own `gain_db` and `mute`, on a route into a submix.
-    route_gain_db: ControlDescriptor,
-    route_mute: ControlDescriptor,
-    /// A route's own `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr`.
-    route_matrix: [ControlDescriptor; 4],
-    /// A VCA's own `offset_db` and `mute`.
-    vca_offset_db: ControlDescriptor,
-    vca_mute: ControlDescriptor,
-}
-
-impl WebControlRows {
-    /// The descriptors at `sample_rate`; `None` if a table row is not the row named here (a drift
-    /// the boot refuses rather than admits).
-    fn new(sample_rate: u32) -> Option<Self> {
-        let row = |owner, section, control: u32, name: &str| {
-            controls::row_descriptor(owner, section, control, sample_rate)
-                .filter(|descriptor| descriptor.name == name)
-        };
-        let builtin = |control, name| row(OwnerKind::Strip, SectionKind::Builtins, control, name);
-        let route = |control, name| row(OwnerKind::Route, SectionKind::Own, control, name);
-        Some(Self {
-            polarity_invert: builtin(1, "polarity_invert")?,
-            trim_db: builtin(2, "trim_db")?,
-            fader_db: builtin(5, "fader_db")?,
-            mute: builtin(6, "mute")?,
-            matrix: [
-                builtin(7, "matrix_ll")?,
-                builtin(8, "matrix_lr")?,
-                builtin(9, "matrix_rl")?,
-                builtin(10, "matrix_rr")?,
-            ],
-            pan: builtin(12, "pan")?,
-            solo: row(OwnerKind::Strip, SectionKind::Own, 2, "solo")?,
-            route_gain_db: route(1, "gain_db")?,
-            route_mute: route(2, "mute")?,
-            route_matrix: [
-                route(3, "matrix_ll")?,
-                route(4, "matrix_lr")?,
-                route(5, "matrix_rl")?,
-                route(6, "matrix_rr")?,
-            ],
-            vca_offset_db: row(OwnerKind::Vca, SectionKind::Own, 1, "offset_db")?,
-            vca_mute: row(OwnerKind::Vca, SectionKind::Own, 2, "mute")?,
-        })
-    }
-}
-
-/// The browser's reason for a refusal of the core's validator: `control.domain` is `DOMAIN`, and
-/// `control.lane` and `control.ramp.fixed` are the `MALFORMED` a wrong channel or a stray word
-/// always was (decision 17, slice S7c D2).
-const fn control_reason(error: ControlError) -> u32 {
-    match error {
-        ControlError::Domain => COMMAND_REASON_DOMAIN,
-        _ => COMMAND_REASON_MALFORMED,
-    }
-}
-
-/// `controls::check` of one wire value against one row of the table, on `lane`, with no explicit
-/// ramp (the ramp word is resolved and bounded apart from the value).
-fn check_value(descriptor: &ControlDescriptor, lane: Lane, value: f32) -> Result<(), u32> {
-    controls::check(descriptor, lane, value, None).map_err(control_reason)
-}
-
-/// The core's lane for a builtin lane selector.
-const fn control_lane(lanes: BuiltinLaneSelector) -> Lane {
-    match lanes {
-        BuiltinLaneSelector::Left => Lane::Left,
-        BuiltinLaneSelector::Right => Lane::Right,
-        BuiltinLaneSelector::Both => Lane::Both,
-    }
-}
-
-/// The live mirrors as the core's effective-value inputs (decision 17, slice S7c D5): the
-/// browser's one temporary view, deleted by #S10 with the mirrors.
-///
-/// Reads only; every read is a checked access and nothing allocates, because `command_submit`
-/// runs render-locked. Strips are in the strip order the mirrors use.
-///
-/// A live send reports its follow term alone (`mute: false`): the route mirror keeps a send's own
-/// mute apart from the source lanes it follows, because a record carries both, so
-/// `controls::effective_gate` over this view is exactly the follow-zeroed lanes (the record's
-/// silenced flag adds the send's own mute).
-#[derive(Clone, Copy)]
-struct WebEffectiveView<'a> {
-    vcas: &'a LiveVcaState,
-    solo: &'a LiveControlSoloState,
-    routes: &'a LiveRouteState,
-}
-
-impl<'a> WebEffectiveView<'a> {
-    const fn new(
-        vcas: &'a LiveVcaState,
-        solo: &'a LiveControlSoloState,
-        routes: &'a LiveRouteState,
-    ) -> Self {
-        Self { vcas, solo, routes }
-    }
-
-    /// Whether some soloable strip is soloed, computed once per admitted batch: `cache` holds the
-    /// answer until a solo record moves a solo bit (it is then cleared). Allocation-free.
-    fn any_solo(&self, cache: &mut Option<bool>) -> bool {
-        *cache.get_or_insert_with(|| controls::any_solo(self))
-    }
-
-    /// One strip's effective values.
-    fn strip(&self, strip: usize, any_solo: bool) -> controls::EffectiveStrip {
-        controls::effective_strip(self, strip, any_solo)
-    }
-
-    /// One live send's follow gate, per source lane.
-    fn follow_gate(&self, route: usize, any_solo: bool) -> [bool; 2] {
-        let Some(entry) = self.routes.get(route) else {
-            return [false; 2];
-        };
-        controls::effective_gate(self, route, &self.strip(entry.source_strip, any_solo))
-    }
-}
-
-impl controls::EffectiveInputs for WebEffectiveView<'_> {
-    fn strip_count(&self) -> usize {
-        self.solo.strip_count()
-    }
-
-    fn own_fader(&self, strip: usize) -> ([f32; 2], [bool; 2]) {
-        (
-            self.vcas.own_db(strip).unwrap_or([0.0; 2]),
-            [0, 1].map(|lane| self.solo.user_mute(strip, lane)),
-        )
-    }
-
-    fn soloed(&self, strip: usize) -> bool {
-        self.solo.solo(strip)
-    }
-
-    fn solo_safe(&self, strip: usize) -> bool {
-        self.solo.solo_safe(strip)
-    }
-
-    fn reach(&self, strip: usize) -> &[usize] {
-        self.vcas.reach_of(strip)
-    }
-
-    fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]) {
-        self.vcas.vca_values(vca).unwrap_or(([0.0; 2], [false; 2]))
-    }
-
-    fn route_count(&self) -> usize {
-        self.routes.len()
-    }
-
-    fn route(&self, route: usize) -> controls::EffectiveRouteInput {
-        let entry = self.routes.get(route);
-        controls::EffectiveRouteInput {
-            mute: false,
-            follows_mute: entry.is_some_and(|entry| entry.follows_mute),
-            source_strip: entry.map_or(usize::MAX, |entry| entry.source_strip),
-        }
-    }
-}
 
 /// What the browser knows of one effect instance of the plan, in the dense `effect_slot` order
 /// (#1381a): where its producer is in the control plane's list, what the instance declares, and,
@@ -1801,7 +1356,7 @@ struct EffectInstance {
 struct ReadyOwnership {
     /// The control plane (#1381a D1): the committed model at its boot revision, the source, strip
     /// and effect producers, the plan's revision gate, the plan publisher and the retirer. It is
-    /// the one owner of the producers; the retained command path below holds none.
+    /// the one owner of the producers; the browser holds none of its own.
     control: WebSession,
     /// The preparer's rebuild switch (#1562a D9), for the test-support republish.
     #[cfg(feature = "test-support")]
@@ -1812,48 +1367,24 @@ struct ReadyOwnership {
     /// The any-thread projection of the plan: its resource row and the applied-revision watermark
     /// (#1381a D5).
     queries: PlanQueries<WebAdapter>,
-    /// Whether the app opted in to live commands (`live_control_command_queue_records != 0`,
-    /// issue #1326 D4). The command gate reads this, never the producers: every plan carries each
-    /// strip's fader/mute and matrix/pan lanes for the engine's own transitions, and only an app
-    /// that opted in may drive them.
+    /// Whether the boot asked for observation taps (`live_control_observation_taps != 0`): the
+    /// command staging exists and the observation records (kinds 7 and 8) are accepted only then.
     commands_enabled: bool,
-    /// Issue #137 D1 / #140 B: per-strip control-side producers -- matrix/pan and fader/mute.
-    /// Empty since #1381a: the control plane owns them, and the retained command path refuses
-    /// every kind that would write through them until it is deleted (#1565A).
-    controls: Vec<TrackControlProducer>,
     /// A handle on the session's `live_values_superseded` count (#1312 D2): the one count the
     /// control plane made, which every cell reader of every plan the session prepares adds to,
     /// and which the status reports (#1399).
     live_values_superseded: host_core::LiveValuesSuperseded,
-    /// The plan's gate handle (#1502 D1, #1312 D7). `None` since #1381a: the control plane's
-    /// provider epoch holds the plan's one handle, and the retained command path, which would
-    /// stamp from a second one, refuses every kind that writes a cell.
-    plan_gate: Option<engine::realtime::PlanRevisionGate>,
-    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense slot
-    /// order [`ReadyOwnership::effect_slot`] computes. Empty since #1381a: the control plane owns
-    /// the producers, and the retained command path reaches an effect's observation queue through
-    /// [`ReadyOwnership::effect_producer_index`] instead.
-    effect_controls: Box<[Option<EffectControlProducer>]>,
     /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
-    /// number of instances ([`ReadyOwnership::effect_controls`] had it before the producers
-    /// moved). It is how an observe record (kinds 7 and 8, ruling C9) reaches its effect's
-    /// observation queue, and how the reads reach its readers.
+    /// number of instances. It is how an observe record (kinds 7 and 8, ruling C9) reaches its
+    /// effect's observation queue, and how the reads reach its readers.
     effect_instances: Box<[Option<EffectInstance>]>,
-    /// Issue #1222: one live send producer per route into a submix, in canonical route-ID order
-    /// (`HostLiveControlHandles::route_controls`), so a send command's live-route index reaches
-    /// its queue with one index and no search. Declared before the plan that owns their lanes.
-    route_controls: Vec<RouteControlProducer>,
-    /// Issue #1222 D3: every live send's gain, matrix and mute, parallel to `route_controls`. A
-    /// send record folds all of them, so a command that moves one rebuilds the record from this
-    /// mirror. It carries its own transaction shadow, committed or rolled back with `solo`.
-    routes: LiveRouteState,
     /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
     /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
     /// or without submixes.
     effect_base: Box<[u32]>,
-    /// Room needed per destination queue by the submission being validated: the observation
-    /// subscriptions it queues on each effect (every other record is a cell write and wants none).
-    /// Allocated at compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
+    /// Room needed per effect's observation queue by the submission being validated: the
+    /// subscriptions it queues on each effect. Allocated at compilation, one entry per effect
+    /// instance.
     command_wanted: Box<[u32]>,
     /// The observation taps the submission being validated has named, one bit per tap, one word per
     /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
@@ -1861,31 +1392,8 @@ struct ReadyOwnership {
     /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
     /// `command_wanted` at the top of every submission.
     observe_named: Box<[u32]>,
-    /// Decoded submission staging. Two entries per staged record, because one wire record
-    /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
-    /// plus `2 * strip_count` for the coalesced solo emission (issue #210 phase 1, per strip
-    /// since issue #1213), plus one per live send for the follow pass (issue #1224 D4).
-    command_decoded: Box<[StagedCommand]>,
-    /// Issue #210 phase 1: the live controls' solo bits and their mirrors of user mute and of what
-    /// the render plane was last told. Solo composes into the *existing* mute records at admission
-    /// and adds nothing below it, so this is the whole of solo-in-place on the host side.
-    solo: LiveControlSoloState,
-    /// Issue #1245 D3: every VCA's offset and mute, every reached member's own fader value and the
-    /// effective fader value the render plane was last told. A VCA move composes into the
-    /// *existing* member fader records here, and its mute term into `solo`. It carries its own
-    /// transaction shadow, committed or rolled back with `solo` and `routes`. Empty -- and
-    /// allocated nothing -- for a session without VCAs or without live controls.
-    vcas: LiveVcaState,
-    /// Issue #1560: what the render plane was last told about each strip's own fader (for a strip
-    /// no VCA reaches), matrix, trim and polarity, so a command that repeats the committed value
-    /// stages no record, as the core's classifier writes none for it. It carries its own
-    /// transaction shadow, committed or rolled back with `solo`.
-    strip_values: LiveStripValues,
-    /// Issue #1364 D2: what an absent ramp length resolves to, computed once at preparation.
-    ramps: SessionRamps,
-    /// The core's descriptors of the rows the live kinds write, resolved once at preparation
-    /// (decision 17, slice S7c D1).
-    rows: WebControlRows,
+    /// Decoded submission staging: one entry per staged record, [`MAXIMUM_COMMAND_RECORDS`] long.
+    command_decoded: Box<[StagedObserve]>,
     /// Observation subscriptions admitted per effect queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every live-control
@@ -1898,12 +1406,6 @@ struct ReadyOwnership {
     /// This keeps command-free blocks from walking every destination counter. It is set at each
     /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
     has_in_flight_commands: bool,
-    /// Per-strip semantic input-filter shadows (tracks, then submixes; issue #1213 D1), retained
-    /// only when commands are enabled. They stay the control-side authority for the designed
-    /// pair (#1346 D6); the strip's input cells hold the prepared targets.
-    input_filter_shadows: Box<[BuiltinInputShadow]>,
-    /// The compiled session rate used by input-filter semantic validation.
-    sample_rate_hz: u32,
     /// Canonical normalized track order: the leading segment of the strip order that
     /// `track_index` addresses (issue #1213 D1).
     tracks: Vec<Box<str>>,
@@ -2065,37 +1567,18 @@ impl ReadyOwnership {
         value
     }
 
-    /// Strips these live controls address: the tracks, then the submixes (issue #1213 D1). Every
-    /// queue band and per-strip table is sized by it, so a bus is addressed exactly as a track is.
+    /// Strips these controls address: the tracks, then the submixes (issue #1213 D1). An
+    /// observation record's `track_index` is a strip index, so a bus is addressed as a track is.
     fn strip_count(&self) -> usize {
         self.tracks.len() + self.submixes.len()
     }
 
-    /// The dense destination-queue index of one addressed live-control channel.
-    ///
-    /// The layout is frozen here and nowhere else, with `strips = T + S` (issue #1213 D1: the
-    /// bands are per strip, tracks first, so with `S = 0` every index is where it always was):
-    ///
-    /// | range | queue |
-    /// |---|---|
-    /// | `0 .. strips` | strip `s`'s matrix/pan cell (#1312: no queue, no room) |
-    /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
-    /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity/filter cells (#1346: no queue, no room) |
-    /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)`; their values are cells (#1345), their subscriptions the only queue |
-    /// | `3 * strips + E ..` | live send `r`'s cell, by live-route index (issue #1222 D4; #1347: no queue, no room) |
-    ///
-    /// One index therefore serves both the free-room pre-check and the push, and neither pass has
-    /// to search. `None` means the address names no channel this session prepared.
-    ///
-    /// The input band was **appended** to the per-track prefix rather than inserted, so the two
-    /// existing bands keep their indices and the only arithmetic that moved is the effect base's
-    /// `2 * tracks` -> `3 * tracks`. Every site that spells that constant is below and in
-    /// [`Self::queue_available`], [`Self::push`] and the `queue_count` allocation; there is no
-    /// fourth spelling.
+    /// The dense index of one addressed effect instance in `effect_instances`.
     ///
     /// An effect is addressed in the session's terms, a console slot by its slot index or an
     /// insert by its index (issue #1096); [`LiveEffectAddress::lower`] is the one translation to
-    /// the lowered rack that orders the band.
+    /// the lowered rack that orders the band. `None` means the address names no instance this
+    /// session prepared.
     fn effect_slot(&self, track: usize, address: LiveEffectAddress) -> Option<usize> {
         let slot = dense_effect_slot(
             *self.effect_base.get(track)?,
@@ -2106,7 +1589,7 @@ impl ReadyOwnership {
     }
 
     /// The control plane's producer of the effect at dense slot `effect` (#1381a): the one way the
-    /// retained command path reaches an effect's observation queue (ruling C9).
+    /// observation records reach an effect's observation queue (ruling C9).
     fn effect_producer_mut(&mut self, effect: usize) -> Option<&mut EffectControlProducer> {
         let position = self.effect_instances.get(effect)?.as_ref()?.producer;
         self.control
@@ -2114,198 +1597,54 @@ impl ReadyOwnership {
             .get_mut(position as usize)
     }
 
-    /// The free room of one destination queue. The matrix, fader, input and send bands are
-    /// latest-target cells (#1312, #1346, #1347), which have no room to want and are never asked:
-    /// they answer `None`, as an unaddressable queue does. An effect's values are cells too
-    /// (#1345); its queue is its observation queue, one slot per declared tap.
-    fn queue_available(&mut self, slot: usize) -> Option<u32> {
-        let tracks = self.strip_count();
-        if slot < tracks * 3 {
-            return None;
-        }
-        let producer = self.effect_producer_mut(slot - tracks * 3)?;
+    /// The free room of one effect's observation queue (one slot per declared tap, #1345 D2).
+    fn queue_available(&mut self, effect: usize) -> Option<u32> {
+        let producer = self.effect_producer_mut(effect)?;
         u32::try_from(producer.observe_available_capacity()).ok()
     }
 
-    /// The dense destination-queue index of live send `route` (issue #1222 D4): the band after
-    /// the effects. `None` for an index past the last live route.
-    fn route_slot(&self, route: usize) -> Option<usize> {
-        (route < self.route_controls.len())
-            .then(|| self.strip_count() * 3 + self.effect_instances.len() + route)
-    }
-
     /// Queue one admitted observation subscription on its effect. `Err` only on a full queue,
-    /// which the free-room pass has already ruled out, or on a cell record (a strip's, a send's or
-    /// an effect's parameter or bypass), which is never queued.
-    fn push(
-        &mut self,
-        slot: usize,
-        record: AdmittedCommand,
-        applied_at_sample: u64,
-    ) -> Result<(), ()> {
-        let tracks = self.strip_count();
-        match record {
-            // The strips' fader, mute, matrix and input values and the sends' targets are cells,
-            // written under the batch's stamp by the admission itself (`write_strip_cells`),
-            // never pushed.
-            AdmittedCommand::Matrix(_)
-            | AdmittedCommand::Fader(_)
-            | AdmittedCommand::Input(_)
-            | AdmittedCommand::Route(_) => Err(()),
-            AdmittedCommand::Effect(
-                EffectControlRecord::Parameter { .. }
-                | EffectControlRecord::PreparedTarget(_)
-                | EffectControlRecord::Bypass(_),
-            ) => Err(()),
-            AdmittedCommand::Effect(EffectControlRecord::Observe {
-                tap_index,
-                armed,
-                window_blocks,
-            }) => {
-                let effect = slot - tracks * 3;
-                // Issue #143: the armed set is control-plane state and is updated here, where the
-                // record is admitted, so it can never disagree with what the render side was told.
-                self.effect_producer_mut(effect)
-                    .ok_or(())?
-                    .try_push_observe(tap_index, armed, window_blocks)
-                    .map_err(|_| ())?;
-                if let Some(mask) = self.observation_armed.get_mut(effect)
-                    && tap_index < u32::BITS
-                {
-                    let bit = 1_u32 << tap_index;
-                    *mask = if armed { *mask | bit } else { *mask & !bit };
-                    if let Some(samples) = self.observation_arm_samples.get_mut(effect)
-                        && let Some(sample) = samples.get_mut(tap_index as usize)
-                    {
-                        *sample = applied_at_sample;
-                    }
-                }
-                Ok(())
+    /// which the free-room pass has already ruled out.
+    fn push_observe(&mut self, staged: StagedObserve, applied_at_sample: u64) -> Result<(), ()> {
+        let effect = staged.effect as usize;
+        // Issue #143: the armed set is control-plane state and is updated here, where the record
+        // is admitted, so it can never disagree with what the render side was told.
+        self.effect_producer_mut(effect)
+            .ok_or(())?
+            .try_push_observe(staged.tap_index, staged.armed, staged.window_blocks)
+            .map_err(|_| ())?;
+        if let Some(mask) = self.observation_armed.get_mut(effect)
+            && staged.tap_index < u32::BITS
+        {
+            let bit = 1_u32 << staged.tap_index;
+            *mask = if staged.armed {
+                *mask | bit
+            } else {
+                *mask & !bit
+            };
+            if let Some(samples) = self.observation_arm_samples.get_mut(effect)
+                && let Some(sample) = samples.get_mut(staged.tap_index as usize)
+            {
+                *sample = applied_at_sample;
             }
         }
-    }
-
-    /// Preflight one effect record before any cell write or observation mutation.
-    ///
-    /// The host admission pass owns the original wire index, so this check belongs beside
-    /// lowering rather than in [`Self::push`].  A prepared-capable owner must reject an
-    /// unlowered semantic parameter before a mixed batch can mutate another destination.  The
-    /// checked producer still runs the same check at the write as an invariant guard; this pass
-    /// is what preserves the original wire index and whole-batch refusal contract. An
-    /// observation subscription is not a cell and is room-checked, not preflighted.
-    fn preflight_effect(&self, slot: usize, record: EffectControlRecord) -> Result<(), ()> {
-        if matches!(record, EffectControlRecord::Observe { .. }) {
-            return Ok(());
-        }
-        let effect_base = self.strip_count().checked_mul(3).ok_or(())?;
-        let effect = slot.checked_sub(effect_base).ok_or(())?;
-        let producer = self
-            .effect_controls
-            .get(effect)
-            .and_then(Option::as_ref)
-            .ok_or(())?;
-        producer.preflight(record).map_err(|_| ())
-    }
-}
-
-/// The one field a send command moves (issue #1222 D1).
-#[derive(Clone, Copy)]
-enum RouteEdit {
-    GainDb(f32),
-    Mute(bool),
-    /// `[ll, lr, rl, rr]`.
-    Matrix([f32; 4]),
-}
-
-/// The one VCA field a VCA command moves, on the lanes it covers (issue #1245 D1).
-#[derive(Clone, Copy)]
-enum VcaEdit {
-    FaderDb(BuiltinLaneSelector, f32),
-    Mute(BuiltinLaneSelector, bool),
-}
-
-/// One decoded record and the payload its destination queue takes (issue #140 C).
-#[derive(Clone, Copy)]
-enum AdmittedCommand {
-    /// The matrix/pan channel #137 D1 shipped.
-    Matrix(TrackControlRecord),
-    /// The fader/mute channel (#140 B).
-    Fader(TrackFaderRecord),
-    /// The input trim/polarity channel (#210 phase 3).
-    Input(TrackInputRecord),
-    /// One effect instance's channel (#140 A).
-    Effect(EffectControlRecord),
-    /// One live send's channel (issue #1222 D4).
-    Route(RouteControlRecord),
-}
-
-#[derive(Clone, Copy)]
-struct BuiltinInputShadow {
-    committed: [f32; 4],
-    candidate: [f32; 4],
-    dirty: [bool; 4],
-    revision: u64,
-}
-
-impl BuiltinInputShadow {
-    fn begin(&mut self) {
-        self.candidate = self.committed;
-        self.dirty = [false; 4];
-    }
-
-    fn apply(&mut self, sample_rate_hz: u32, edit: InputFilterEdit) -> Result<(), u32> {
-        apply_input_filter_edit(sample_rate_hz, &mut self.candidate, &mut self.dirty, edit).map_err(
-            |error| match error {
-                InputFilterEditErrorKind::Parameter => COMMAND_REASON_MALFORMED,
-                InputFilterEditErrorKind::Domain => COMMAND_REASON_DOMAIN,
-                InputFilterEditErrorKind::Shape => COMMAND_REASON_MALFORMED,
-            },
-        )
-    }
-
-    fn rollback(&mut self) {
-        self.candidate = self.committed;
-        self.dirty = [false; 4];
-    }
-
-    fn commit(&mut self, base_revision: u64) -> Result<(), ()> {
-        let next_revision = self.revision.checked_add(1).ok_or(())?;
-        if self.revision != base_revision {
-            return Err(());
-        }
-        self.committed = self.candidate;
-        self.dirty = [false; 4];
-        self.revision = next_revision;
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum PreparedOwnerKind {
-    Eq,
-    BuiltinInput,
-}
-
+/// One decoded and validated observation record (kinds 7 and 8), in the order of its submission.
 #[derive(Clone, Copy)]
-struct PreparedOwner {
-    kind: PreparedOwnerKind,
-    queue_slot: u32,
-    base_revision: u64,
-    first_wire_index: u32,
-    target_count: u32,
-}
-
-#[derive(Clone, Copy)]
-enum StagedCommandKind {
-    Command(AdmittedCommand),
-    PreparedOwner(PreparedOwner),
-}
-
-#[derive(Clone, Copy)]
-struct StagedCommand {
-    queue_slot: u32,
+struct StagedObserve {
+    /// The dense effect index the record addresses.
+    effect: u32,
+    /// The wire index of the record, which names it in a refusal.
     original_wire_index: u32,
-    kind: StagedCommandKind,
+    /// The effect-local tap index the render side arms.
+    tap_index: u32,
+    /// Whether the record arms (kind 7) or disarms (kind 8) the tap.
+    armed: bool,
+    /// The window length in render blocks (`0` = the plan's default).
+    window_blocks: u32,
 }
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
@@ -2341,9 +1680,6 @@ pub struct AudioWorkletEngineHost {
     /// readers. It is the render side of the single instance, beside the control half in `ready`,
     /// so the two borrow apart. Dropped, with `ready`, only by [`Self::dispose`].
     plan: Option<WebPlan>,
-    /// Checked host-scoped generation for prepared companion ownership. This token is distinct
-    /// from the wrapping Wasm handle and changes on every successfully published host.
-    host_generation: u64,
     /// Optional prepared cadence for the ordinary spectrum capture.
     spectrum_hop: Option<SpectrumHop>,
     diagnostic_len: usize,
@@ -2360,16 +1696,6 @@ enum ControlResponse {
     Frame(usize),
     /// The refusal's diagnostic, `diagnostic_len` bytes of the diagnostic buffer.
     Diagnostic,
-}
-
-static NEXT_HOST_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-fn next_host_generation() -> Option<u64> {
-    NEXT_HOST_GENERATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .ok()
 }
 
 impl AudioWorkletEngineHost {
@@ -2473,9 +1799,7 @@ impl AudioWorkletEngineHost {
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes)
-                .max(shape.longest_vca_id_bytes),
+                .max(shape.longest_submix_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2494,23 +1818,6 @@ impl AudioWorkletEngineHost {
             return Err(BootFailure::projected_budget(
                 "host.budget.retained_projection",
                 retained_projection,
-                memory_budget,
-            ));
-        }
-        // Issue #1245 amendment A1: the live VCA state's retained bytes and the transient its
-        // construction holds, on top of everything retained before it, fit the budget; the bounds
-        // above keep both small. Checked before preparation builds a single reach table.
-        let vca_shape = browser_vca_shape(session.normalized_model())?;
-        let vca_peak = vca_shape
-            .retained_bytes()
-            .zip(vca_shape.transient_bytes())
-            .and_then(|(retained, transient)| retained.checked_add(transient))
-            .and_then(|vca| vca.checked_add(retained_projection))
-            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
-        if vca_peak > memory_budget {
-            return Err(BootFailure::projected_budget(
-                "host.budget.vca_projection",
-                vca_peak,
                 memory_budget,
             ));
         }
@@ -2537,8 +1844,6 @@ impl AudioWorkletEngineHost {
             ));
         }
         let buffers = allocate_buffers(projection)?;
-        let host_generation = next_host_generation()
-            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.host.generation"))?;
         let backend = selected_backend();
         Ok(Self {
             options,
@@ -2567,7 +1872,6 @@ impl AudioWorkletEngineHost {
             buffers: Some(buffers),
             ready: Some(ready),
             plan: Some(plan),
-            host_generation,
             spectrum_hop: spectrum_request.as_ref().and(spectrum_hop),
             diagnostic_len: 0,
             control_response: ControlResponse::None,
@@ -2890,27 +2194,6 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn live_control_submixes(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.submixes)
-    }
-
-    /// Number of live routes (issue #1223 D1): exactly the plan's live send producers, the routes
-    /// into submixes in canonical route-ID order, which is the order a send kind's index word
-    /// reads. Zero before compilation and without live controls.
-    #[must_use]
-    pub fn live_control_route_count(&self) -> usize {
-        self.ready
-            .as_ref()
-            .map_or(0, |ready| ready.route_controls.len())
-    }
-
-    /// Number of live VCAs (issue #1246 D1): the session's VCAs in canonical VCA-ID order, which
-    /// is the order a VCA kind's (`16`, `17`) index word reads. It is the live VCA state's own
-    /// count, the bound admission refuses an index against, so it is zero before compilation,
-    /// without VCAs and without live controls.
-    #[must_use]
-    pub fn live_control_vca_count(&self) -> usize {
-        self.ready
-            .as_ref()
-            .map_or(0, |ready| ready.vcas.vca_count())
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -3570,131 +2853,8 @@ impl AudioWorkletEngineHost {
             .map_or(0, |value| value.command.len() as u64)
     }
 
-    /// Mutable opaque prepared-control companion staging. The caller must provide the exact
-    /// little-endian frame before [`Self::submit_prepared_commands`].
-    pub fn prepared_companion_mut(&mut self) -> Option<&mut [u8]> {
-        self.buffers
-            .as_mut()
-            .and_then(|buffers| buffers.prepared_control.as_mut())
-            .map(|workspace| &mut workspace.companion[..])
-    }
-
-    /// Exact fixed companion capacity in bytes.
-    #[must_use]
-    pub fn prepared_companion_capacity(&self) -> u32 {
-        self.buffers
-            .as_ref()
-            .and_then(|buffers| buffers.prepared_control.as_ref())
-            .map_or(0, |_| PREPARED_EFFECT_COMPANION_CAPACITY as u32)
-    }
-
-    /// Read-only addressed EQ configuration copy, or `None` when this host has no prepared owner
-    /// for the requested effect. The output is retained in the one fixed workspace until the
-    /// next successful copy.
-    pub fn copy_eq_target_config(&mut self, track_index: u32, rack: u32, effect_index: u32) -> u32 {
-        if self.status.state != STATE_READY {
-            return self.record(RESULT_WRONG_STATE);
-        }
-        // The retired `simd1`/`simd2` codes decode to nothing (issue #1096).
-        let Some(address) = live_effect_address(rack, effect_index) else {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        };
-        let Some(ready) = self.ready.as_ref() else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
-        };
-        let Some(effect) = ready.effect_slot(track_index as usize, address) else {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        };
-        let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
-            return self.record(RESULT_UNSUPPORTED);
-        };
-        if producer.descriptor.id.as_str() != "miso.parametric-eq" {
-            return self.record(RESULT_UNSUPPORTED);
-        }
-        let Some(owner) = producer.owner() else {
-            return self.record(RESULT_UNSUPPORTED);
-        };
-        if owner.committed().len() != host_core::EQ_VALUE_COUNT {
-            return self.record(RESULT_UNSUPPORTED);
-        }
-        let sample_rate = owner.sample_rate();
-        let owner_revision = owner.committed_revision();
-        let values = owner.committed();
-        let Some(buffers) = self.buffers.as_mut() else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
-        };
-        let Some(workspace) = buffers.prepared_control.as_mut() else {
-            return self.record(RESULT_UNSUPPORTED);
-        };
-        let output = &mut workspace.config;
-        output.fill(0);
-        output[0..4].copy_from_slice(&(size_of::<WebEqTargetConfig>() as u32).to_le_bytes());
-        output[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
-        output[8..12].copy_from_slice(&sample_rate.to_le_bytes());
-        output[12..16].copy_from_slice(&(host_core::EQ_VALUE_COUNT as u32).to_le_bytes());
-        output[16..24].copy_from_slice(&self.host_generation.to_le_bytes());
-        output[24..32].copy_from_slice(&owner_revision.to_le_bytes());
-        for (index, value) in values.iter().enumerate() {
-            let offset = 32 + index * 4;
-            output[offset..offset + 4].copy_from_slice(&value.value.to_bits().to_le_bytes());
-        }
-        self.record(RESULT_OK)
-    }
-
-    /// Fixed address of the most recent addressed EQ configuration copy.
-    #[must_use]
-    pub fn eq_target_config(&self) -> Option<&[u8]> {
-        self.buffers
-            .as_ref()
-            .and_then(|buffers| buffers.prepared_control.as_ref())
-            .map(|workspace| workspace.config.as_slice())
-    }
-
-    /// Copy one accepted builtin input-filter configuration into the shared config workspace.
-    pub fn copy_input_filter_config(&mut self, track_index: u32) -> u32 {
-        if self.status.state != STATE_READY {
-            return self.record(RESULT_WRONG_STATE);
-        }
-        let Some(ready) = self.ready.as_ref() else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
-        };
-        let Some(shadow) = ready.input_filter_shadows.get(track_index as usize) else {
-            return self.record(RESULT_UNSUPPORTED);
-        };
-        let values = shadow.committed;
-        let revision = shadow.revision;
-        let sample_rate = ready.sample_rate_hz;
-        let Some(buffers) = self.buffers.as_mut() else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
-        };
-        let Some(workspace) = buffers.prepared_control.as_mut() else {
-            return self.record(RESULT_UNSUPPORTED);
-        };
-        let output = &mut workspace.config;
-        output.fill(0);
-        output[0..4].copy_from_slice(&(size_of::<WebBuiltinInputConfig>() as u32).to_le_bytes());
-        output[4..8].copy_from_slice(&ABI_VERSION.to_le_bytes());
-        output[8..12].copy_from_slice(&sample_rate.to_le_bytes());
-        output[12..16].copy_from_slice(&4_u32.to_le_bytes());
-        output[16..24].copy_from_slice(&self.host_generation.to_le_bytes());
-        output[24..32].copy_from_slice(&revision.to_le_bytes());
-        for (index, value) in values.into_iter().enumerate() {
-            let offset = 32 + index * 4;
-            output[offset..offset + 4].copy_from_slice(&value.to_bits().to_le_bytes());
-        }
-        self.record(RESULT_OK)
-    }
-
-    /// Submit a prepared companion alongside the existing semantic command staging. This private
-    /// trusted-host route shares the ordinary lowering and report, but requires every touched
-    /// prepared owner to publish its supplied target prefix before any shadow or solo commit.
-    pub fn submit_prepared_commands(&mut self, count: u32, companion_bytes: u32) -> u32 {
-        self.submit_commands_inner(count, Some(companion_bytes))
-    }
-
-    /// Whether the app opted in to live commands (issue #137 D1). Every plan carries each strip's
-    /// fader/mute and matrix/pan lanes whatever this says (issue #1326), so it keys on the boot
-    /// option, not on the lanes.
+    /// Whether the boot asked for observation taps, so the command staging exists and the
+    /// observation records (kinds 7 and 8) are accepted (issue #137 D1; #1565).
     #[must_use]
     pub fn live_controls_attached(&self) -> bool {
         self.ready
@@ -3722,36 +2882,6 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
-    }
-
-    /// Copy one live route ID into ID staging; returns its byte length (issue #1223 D1). The
-    /// index is the live-route index, read from the producer the send kinds address.
-    pub(crate) fn copy_live_control_route_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let Some(producer) = ready.route_controls.get(index as usize) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), producer.route_id().as_bytes())
-    }
-
-    /// Copy one VCA ID into ID staging; returns its byte length (issue #1246 D1). VCA `index` is
-    /// the normalized model's `vcas[index]`, the model the live VCA state was built from, and an
-    /// index at or past [`Self::live_control_vca_count`] -- every index without live controls --
-    /// copies nothing.
-    pub(crate) fn copy_live_control_vca_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let index = index as usize;
-        if index >= ready.vcas.vca_count() {
-            return 0;
-        }
-        let Some(vca) = ready.session().normalized_model().vcas.get(index) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), vca.id.as_str().as_bytes())
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
@@ -3993,28 +3123,29 @@ impl AudioWorkletEngineHost {
     }
     // REALTIME_POLICY_END
 
-    /// Admit one staged `miso.command.v1` submission as a single transaction (issue #137 D1).
+    /// Admit one staged `miso.command.v1` submission of observation records (kinds 7 and 8) as a
+    /// single transaction (issue #137 D1; #1565A).
+    ///
+    /// The browser's value kinds are gone: every value goes through the core
+    /// ([`Self::control_command`]). What stays is the monitor operation that arms or disarms an
+    /// effect's observation tap. A record of any other kind is `MALFORMED` at its index, as an
+    /// unknown kind always was.
     ///
     /// # The two-pass shape is the contract, not an optimisation
     ///
-    /// Pass one validates every record -- shape, addressing, domain, and free queue room -- and
-    /// pushes nothing. Pass two pushes (and writes the strip cells, which have no room to check,
-    /// #1312). A submission is therefore all-or-nothing: eval E4's "engine state untouched" is a
-    /// property of the code, not of a lucky ordering, and eval E3's flood of queued records is
-    /// refused before a single one reaches a queue.
+    /// Pass one validates every record -- shape, addressing, tap, and free queue room -- and
+    /// pushes nothing. Pass two pushes. A submission is therefore all-or-nothing: eval E4's "engine
+    /// state untouched" is a property of the code, not of a lucky ordering, and eval E3's flood of
+    /// queued records is refused before a single one reaches a queue.
     ///
     /// # Why this is not on the render thread's critical path
     ///
     /// This runs from `port.onmessage`, which the user agent dispatches between render quanta on
     /// the same thread as `process()`. It performs no allocation, no compilation and no plan
-    /// replacement: both staging arrays were allocated at compilation, and the call moves at most
-    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues and strip cells.
-    /// The block that follows drains the queues and reads the cells.
+    /// replacement: the staging arrays were allocated at compilation, and the call moves at most
+    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into the bounded observation queues. The block
+    /// that follows drains the queues.
     pub fn submit_commands(&mut self, count: u32) -> u32 {
-        self.submit_commands_inner(count, None)
-    }
-
-    fn submit_commands_inner(&mut self, count: u32, companion_bytes: Option<u32>) -> u32 {
         self.command_report = empty_command_report();
         if self.status.state != STATE_READY {
             return self.finish_commands(RESULT_WRONG_STATE, COMMAND_REASON_WRONG_STATE, 0, 0);
@@ -4040,41 +3171,7 @@ impl AudioWorkletEngineHost {
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
-        let (prepared, companion) = match companion_bytes {
-            None => (false, None),
-            Some(bytes_len) => {
-                let Ok(bytes_len) = usize::try_from(bytes_len) else {
-                    return self.finish_commands(
-                        RESULT_INVALID_ARGUMENT,
-                        COMMAND_REASON_MALFORMED,
-                        0,
-                        0,
-                    );
-                };
-                let Some(companion) = buffers
-                    .prepared_control
-                    .as_ref()
-                    .and_then(|workspace| workspace.companion.get(..bytes_len))
-                else {
-                    return self.finish_commands(
-                        RESULT_INVALID_ARGUMENT,
-                        COMMAND_REASON_MALFORMED,
-                        0,
-                        0,
-                    );
-                };
-                (true, Some(companion))
-            }
-        };
-        match admit_commands(
-            ready,
-            bytes,
-            count as usize,
-            applied_at_sample,
-            self.host_generation,
-            prepared,
-            companion,
-        ) {
+        match admit_commands(ready, bytes, count as usize, applied_at_sample) {
             Ok(()) => {
                 self.command_report.applied_at_sample = applied_at_sample;
                 self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
@@ -4095,21 +3192,6 @@ impl AudioWorkletEngineHost {
         }
     }
 
-    /// Entries in the decode staging array, for the issue #210 phase 1 sizing pin.
-    #[cfg(test)]
-    pub(crate) fn command_staging_entries(&self) -> Option<usize> {
-        self.ready.as_ref().map(|ready| ready.command_decoded.len())
-    }
-
-    /// The live controls' solo state, for the issue #210 phase 1 evals.
-    ///
-    /// The ABI has no readback of it on purpose -- solo is control-plane state and the app is the
-    /// one that issued every gesture that moved it -- so this exists only for the tests that have
-    /// to prove the mirror agrees with the session it was prepared from.
-    #[cfg(test)]
-    pub(crate) fn live_control_solo(&self) -> Option<&LiveControlSoloState> {
-        self.ready.as_ref().map(|ready| &ready.solo)
-    }
     // REALTIME_POLICY_BEGIN
     /// Drain every finished meter window into the frame buffer (issue #137 D2).
     ///
@@ -4559,297 +3641,29 @@ struct CommandRejection {
     index: u32,
 }
 
-fn owner_command_reason(error: host_core::EffectControlOwnerError) -> u32 {
-    use host_core::EffectControlOwnerError;
-    match error {
-        EffectControlOwnerError::Domain => COMMAND_REASON_DOMAIN,
-        EffectControlOwnerError::Parameter => COMMAND_REASON_UNKNOWN_PARAMETER,
-        EffectControlOwnerError::Unsupported | EffectControlOwnerError::NotAutomatable => {
-            COMMAND_REASON_UNSUPPORTED_KIND
-        }
-        EffectControlOwnerError::Revision | EffectControlOwnerError::Invariant => {
-            COMMAND_REASON_WRONG_STATE
-        }
-        EffectControlOwnerError::Rate
-        | EffectControlOwnerError::Shape
-        | EffectControlOwnerError::Target(_) => COMMAND_REASON_MALFORMED,
-    }
-}
-
-struct PreparedCompanion<'a> {
-    bytes: &'a [u8],
-    target_count: usize,
-}
-
-#[derive(Clone, Copy)]
-struct CompanionTarget {
-    track_index: u32,
-    rack: u8,
-    effect_index: u32,
-    base_revision: u64,
-    target: effect_contract::PreparedEffectTarget,
-}
-
-fn builtin_input_slot(strip_count: usize, strip: usize) -> Option<usize> {
-    strip_count
-        .checked_mul(2)
-        .and_then(|base| base.checked_add(strip))
-}
-
-fn prepared_queue_address(
-    ready: &ReadyOwnership,
-    track: usize,
-    rack: u8,
-    effect: u32,
-) -> Option<(usize, PreparedOwnerKind)> {
-    if rack == RACK_NOT_APPLICABLE {
-        if effect != 0 || ready.input_filter_shadows.get(track).is_none() {
-            return None;
-        }
-        return Some((
-            builtin_input_slot(ready.strip_count(), track)?,
-            PreparedOwnerKind::BuiltinInput,
-        ));
-    }
-    let effect_slot = ready.effect_slot(track, live_effect_address(u32::from(rack), effect)?)?;
-    Some((
-        ready
-            .strip_count()
-            .checked_mul(3)?
-            .checked_add(effect_slot)?,
-        PreparedOwnerKind::Eq,
-    ))
-}
-
-fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset + 4)?.try_into().ok()?,
-    ))
-}
-
-fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        bytes.get(offset..offset + 8)?.try_into().ok()?,
-    ))
-}
-
-fn parse_prepared_companion<'a>(
-    bytes: &'a [u8],
-    host_generation: u64,
-) -> Result<PreparedCompanion<'a>, ()> {
-    let header = size_of::<WebPreparedEffectCompanionHeader>();
-    if bytes.len() < header {
-        return Err(());
-    }
-    let struct_size = read_u32_le(bytes, 0).ok_or(())?;
-    let abi_version = read_u32_le(bytes, 4).ok_or(())?;
-    let generation = read_u64_le(bytes, 8).ok_or(())?;
-    let target_count = usize::try_from(read_u32_le(bytes, 16).ok_or(())?).map_err(|_| ())?;
-    let reserved = read_u32_le(bytes, 20).ok_or(())?;
-    if struct_size as usize != header
-        || abi_version != ABI_VERSION
-        || generation != host_generation
-        || reserved != 0
-        || target_count > 2 * MAXIMUM_COMMAND_RECORDS as usize
-    {
-        return Err(());
-    }
-    let expected = header
-        .checked_add(
-            target_count
-                .checked_mul(size_of::<WebPreparedEffectCompanionRecord>())
-                .ok_or(())?,
-        )
-        .ok_or(())?;
-    if bytes.len() != expected {
-        return Err(());
-    }
-    Ok(PreparedCompanion {
-        bytes,
-        target_count,
-    })
-}
-
-fn companion_wire_index(
-    ready: &ReadyOwnership,
-    lowered: usize,
-    companion: &PreparedCompanion<'_>,
-    index: usize,
-) -> usize {
-    let start = size_of::<WebPreparedEffectCompanionHeader>()
-        + index * size_of::<WebPreparedEffectCompanionRecord>();
-    let address = (|| {
-        let track = read_u32_le(companion.bytes, start)? as usize;
-        let rack = u8::try_from(read_u32_le(companion.bytes, start + 4)?).ok()?;
-        let effect = read_u32_le(companion.bytes, start + 8)?;
-        prepared_queue_address(ready, track, rack, effect)
-    })();
-    let Some((queue_slot, kind)) = address else {
-        return 0;
-    };
-    ready.command_decoded[..lowered]
-        .iter()
-        .find_map(|entry| match entry.kind {
-            StagedCommandKind::PreparedOwner(owner)
-                if owner.queue_slot as usize == queue_slot && owner.kind == kind =>
-            {
-                Some(owner.first_wire_index as usize)
-            }
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-fn companion_target(
-    companion: &PreparedCompanion<'_>,
-    index: usize,
-) -> Result<CompanionTarget, ()> {
-    let start = size_of::<WebPreparedEffectCompanionHeader>()
-        .checked_add(
-            index
-                .checked_mul(size_of::<WebPreparedEffectCompanionRecord>())
-                .ok_or(())?,
-        )
-        .ok_or(())?;
-    let bytes = companion
-        .bytes
-        .get(start..start + size_of::<WebPreparedEffectCompanionRecord>())
-        .ok_or(())?;
-    let track_index = read_u32_le(bytes, 0).ok_or(())?;
-    let rack = u8::try_from(read_u32_le(bytes, 4).ok_or(())?).map_err(|_| ())?;
-    let effect_index = read_u32_le(bytes, 8).ok_or(())?;
-    if read_u32_le(bytes, 12).ok_or(())? != 0 {
-        return Err(());
-    }
-    let base_revision = read_u64_le(bytes, 16).ok_or(())?;
-    let slot = read_u32_le(bytes, 24).ok_or(())?;
-    let channel_raw = read_u32_le(bytes, 28).ok_or(())?;
-    let channel = match channel_raw {
-        0 => effect_contract::ParameterChannel::Left,
-        1 => effect_contract::ParameterChannel::Right,
-        2 => effect_contract::ParameterChannel::Both,
-        _ => return Err(()),
-    };
-    let mut words = [0_u32; effect_contract::PREPARED_EFFECT_TARGET_WORDS];
-    for (word, value) in words.iter_mut().enumerate() {
-        *value = read_u32_le(bytes, 32 + word * 4).ok_or(())?;
-    }
-    Ok(CompanionTarget {
-        track_index,
-        rack,
-        effect_index,
-        base_revision,
-        target: effect_contract::PreparedEffectTarget {
-            slot,
-            channel,
-            words,
-        },
-    })
-}
-
-fn companion_builtin_target(target: CompanionTarget) -> Result<PreparedInputFilterTarget, ()> {
-    if target.target.slot > 1 || target.target.words[2..6].iter().any(|word| *word != 0) {
-        return Err(());
-    }
-    let lanes = match target.target.channel {
-        ParameterChannel::Left => BuiltinLaneSelector::Left,
-        ParameterChannel::Right => BuiltinLaneSelector::Right,
-        ParameterChannel::Both => BuiltinLaneSelector::Both,
-    };
-    let prepared = PreparedInputFilterTarget {
-        lanes,
-        section: target.target.slot,
-        pair: [
-            f32::from_bits(target.target.words[0]),
-            f32::from_bits(target.target.words[1]),
-        ],
-        coefficients: core::array::from_fn(|index| f32::from_bits(target.target.words[6 + index])),
-    };
-    validate_prepared_input_filter_target(&prepared).map_err(|_| ())?;
-    Ok(prepared)
-}
-
-fn validate_builtin_target_set(
-    shadow: &BuiltinInputShadow,
-    targets: &[PreparedInputFilterTarget],
-) -> Result<(), ()> {
-    if targets.len() > 4 {
-        return Err(());
-    }
-    let mut seen = [[false; 2]; 2];
-    for target in targets {
-        let section = usize::try_from(target.section).map_err(|_| ())?;
-        if section > 1 {
-            return Err(());
-        }
-        let pairs = match target.lanes {
-            BuiltinLaneSelector::Left => {
-                if target.pair[0].to_bits() != shadow.candidate[0].to_bits()
-                    || target.pair[1].to_bits() != shadow.candidate[1].to_bits()
-                {
-                    return Err(());
-                }
-                [true, false]
-            }
-            BuiltinLaneSelector::Right => {
-                if target.pair[0].to_bits() != shadow.candidate[2].to_bits()
-                    || target.pair[1].to_bits() != shadow.candidate[3].to_bits()
-                {
-                    return Err(());
-                }
-                [false, true]
-            }
-            BuiltinLaneSelector::Both => {
-                if shadow.candidate[0].to_bits() != shadow.candidate[2].to_bits()
-                    || shadow.candidate[1].to_bits() != shadow.candidate[3].to_bits()
-                    || target.pair[0].to_bits() != shadow.candidate[0].to_bits()
-                    || target.pair[1].to_bits() != shadow.candidate[1].to_bits()
-                {
-                    return Err(());
-                }
-                [true, true]
-            }
-        };
-        for (lane, selected) in pairs.into_iter().enumerate() {
-            if selected {
-                if !shadow.dirty[lane * 2 + section] || seen[section][lane] {
-                    return Err(());
-                }
-                seen[section][lane] = true;
-            }
-        }
-    }
-    for (section, section_seen) in seen.iter().enumerate() {
-        for (lane, present) in section_seen.iter().enumerate() {
-            if shadow.dirty[lane * 2 + section] != *present {
-                return Err(());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// One decoded, still-unapplied `miso.command.v1` record (issue #137 D1).
 ///
 /// # The frozen 48-byte little-endian layout
 ///
 /// | offset | width | field |
 /// |---|---|---|
-/// | 0 | u8 | `kind`, one of the `COMMAND_*` values |
-/// | 1 | u8 | `rack`: `1` inserts, `3` console, `255` not applicable; `0` and `2` retired |
-/// | 2 | u8 | `channel`: `0` left, `1` right, `2` both, `255` not applicable |
+/// | 0 | u8 | `kind`: [`COMMAND_OBSERVE_SUBSCRIBE`] or [`COMMAND_OBSERVE_UNSUBSCRIBE`] |
+/// | 1 | u8 | `rack`: `1` inserts, `3` console; `0` and `2` retired |
+/// | 2 | u8 | `channel`: `255` (not applicable) |
 /// | 3 | u8 | required zero |
-/// | 4 | u32 | `track_index` into the canonical normalized track order |
+/// | 4 | u32 | `track_index` into the canonical normalized strip order |
 /// | 8 | u32 | `effect_index`: a console slot's index in slot order, or an insert's index |
-/// | 12 | u32 | `parameter_id` from the effect contract |
-/// | 16 | u32 | `smoothing_samples`, the ramp window for a retarget, or [`SESSION_DEFAULT_RAMP`] (`0xFFFF_FFFF`) for the session's own length |
+/// | 12 | u32 | `parameter_id`: the effect-local `tap_id` |
+/// | 16 | u32 | `smoothing_samples`: the window length in render blocks (`0` = the plan's default) |
 /// | 20 | u32 | required zero |
-/// | 24..40 | 4 x f32 | `value0..value3` |
+/// | 24..40 | 4 x f32 | `value0..value3`, all `0.0` |
 /// | 40 | u64 | required zero |
 ///
-/// There is no string on this path. The identity mapping a caller needs -- track index to track
-/// ID, effect index to effect ID, parameter ID to name and domain -- is deliverable 4's build-time
-/// metadata plus the session map the ready message carries, never a per-command lookup.
+/// The record keeps the 48-byte layout the value kinds shared (kinds 1-6 and 9-17 are deleted,
+/// #1565A, and their numbers are never reallocated), so the staging, the report and the ABI
+/// version did not move. There is no string on this path. The identity mapping a caller needs --
+/// strip index to ID, effect index to effect ID, tap ID to descriptor -- is the session map the
+/// ready message carries and the build-time metadata, never a per-command lookup.
 #[derive(Clone, Copy)]
 struct CommandRecord {
     kind: u32,
@@ -4881,23 +3695,7 @@ impl CommandRecord {
         let kind = u32::from(bytes[0]);
         if !matches!(
             kind,
-            COMMAND_PAN
-                | COMMAND_MATRIX
-                | COMMAND_FADER_DB
-                | COMMAND_MUTE
-                | COMMAND_EFFECT_PARAM
-                | COMMAND_EFFECT_BYPASS
-                | COMMAND_OBSERVE_SUBSCRIBE
-                | COMMAND_OBSERVE_UNSUBSCRIBE
-                | COMMAND_SOLO
-                | COMMAND_TRIM_DB
-                | COMMAND_POLARITY_INVERT
-                | COMMAND_INPUT_FILTERS
-                | COMMAND_ROUTE_GAIN_DB
-                | COMMAND_ROUTE_MUTE
-                | COMMAND_ROUTE_MATRIX
-                | COMMAND_VCA_FADER_DB
-                | COMMAND_VCA_MUTE
+            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -4925,278 +3723,18 @@ impl CommandRecord {
         })
     }
 
-    /// Replace an absent ramp length with the session's own (issue #1364 D2), before any check of
-    /// the record. Only the twelve ramped kinds read the word as a length; every other kind keeps
-    /// it, so a sentinel on input filters or bypass is the non-zero word they refuse as
-    /// `MALFORMED`, exactly as before. A finite length, `0` included, is kept.
-    ///
-    /// The row each kind reads is #1054 D3's: fader, trim, send gain and VCA offset the fader
-    /// key; mute, solo, send mute and VCA mute the mute key; polarity twice the mute key; pan,
-    /// matrix and send matrix the pan key, with a strip's own pan or matrix window first. A
-    /// `follows_mute` send record takes the ramp of the strip mute record that moved it, which
-    /// this resolves, so it follows the mute key too.
-    fn with_session_ramp(mut self, ramps: &SessionRamps) -> Self {
-        let row = match self.kind {
-            COMMAND_PAN | COMMAND_MATRIX => {
-                self.smoothing_samples =
-                    ramps.resolve_strip_pan(self.track_index as usize, self.smoothing_samples);
-                return self;
-            }
-            COMMAND_FADER_DB => LiveRampRow::Fader,
-            COMMAND_TRIM_DB => LiveRampRow::InputTrim,
-            COMMAND_MUTE => LiveRampRow::Mute,
-            COMMAND_SOLO => LiveRampRow::Solo,
-            COMMAND_POLARITY_INVERT => LiveRampRow::PolarityInvert,
-            COMMAND_ROUTE_GAIN_DB => LiveRampRow::SendGain,
-            COMMAND_ROUTE_MUTE => LiveRampRow::SendMute,
-            COMMAND_ROUTE_MATRIX => LiveRampRow::SendMatrix,
-            COMMAND_VCA_FADER_DB => LiveRampRow::VcaOffset,
-            COMMAND_VCA_MUTE => LiveRampRow::VcaMute,
-            _ => return self,
-        };
-        self.smoothing_samples = ramps.resolve(row, self.smoothing_samples);
-        self
-    }
-
-    fn into_input_filter_edit(self) -> Result<InputFilterEdit, u32> {
-        if self.rack != RACK_NOT_APPLICABLE
-            || self.effect_index != 0
-            || self.smoothing_samples != 0
-            || self.values[2..].iter().any(|value| value.to_bits() != 0)
-        {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        if !matches!(self.parameter_id, 0 | 3 | 4) {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        if self.parameter_id != 0 && self.values[1].to_bits() != 0 {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        let channel = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-        let channel = match channel {
-            BuiltinLaneSelector::Left => ParameterChannel::Left,
-            BuiltinLaneSelector::Right => ParameterChannel::Right,
-            BuiltinLaneSelector::Both => ParameterChannel::Both,
-        };
-        Ok(InputFilterEdit {
-            parameter_id: self.parameter_id,
-            channel,
-            value0: self.values[0],
-            value1: self.values[1],
-        })
-    }
-
-    /// Lower one addressed track-builtin record, or say why it cannot be.
-    ///
-    /// Issue #140 C: `fader_db` and `mute` are no longer refused here. They lower onto the live
-    /// ramped fader section (`FaderMuteRampBuiltins`), which a live-control-attached track binds in
-    /// place of the prepared `FaderMuteBuiltins`. A track with no live controls still refuses them
-    /// -- with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is
-    /// legal and this *session* has no write path -- which is exactly what the reason means.
-    fn into_track_record(self, rows: &WebControlRows) -> Result<AdmittedCommand, u32> {
-        match self.kind {
-            COMMAND_PAN => {
-                if self.rack != RACK_NOT_APPLICABLE
-                    || self.channel != 255
-                    || self.values[2] != 0.0
-                    || self.values[3] != 0.0
-                {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                check_value(&rows.pan, Lane::Left, self.values[0])?;
-                check_value(&rows.pan, Lane::Right, self.values[1])?;
-                let matrix = pan_matrix(self.values[0], self.values[1])
-                    .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecord {
-                    matrix,
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            COMMAND_MATRIX => {
-                if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                for (row, value) in rows.matrix.iter().zip(self.values) {
-                    check_value(row, Lane::Both, value)?;
-                }
-                let matrix = Matrix2x2 {
-                    ll: self.values[0],
-                    lr: self.values[1],
-                    rl: self.values[2],
-                    rr: self.values[3],
-                }
-                .checked()
-                .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecord {
-                    matrix,
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            COMMAND_FADER_DB => {
-                if self.rack != RACK_NOT_APPLICABLE
-                    || self.values[1..].iter().any(|value| *value != 0.0)
-                {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                check_value(&rows.fader_db, control_lane(lanes), self.values[0])?;
-                Ok(AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                    lanes,
-                    db: self.values[0],
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            COMMAND_MUTE => {
-                if self.rack != RACK_NOT_APPLICABLE
-                    || self.values[1..].iter().any(|value| *value != 0.0)
-                {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                check_value(&rows.mute, control_lane(lanes), self.values[0])?;
-                Ok(AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                    lanes,
-                    muted: self.values[0] == 1.0,
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            // #210 phase 3. The shape rules are `faderDb`'s, because the two parameters share a
-            // domain and a smoothing law; the destination is the strip's input cells (#1346)
-            // rather than the fader ones, which `admit_commands_staged` decides from the lowered
-            // variant exactly as it already decides between the matrix and fader bands.
-            COMMAND_TRIM_DB => {
-                if self.rack != RACK_NOT_APPLICABLE
-                    || self.values[1..].iter().any(|value| *value != 0.0)
-                {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                check_value(&rows.trim_db, control_lane(lanes), self.values[0])?;
-                Ok(AdmittedCommand::Input(TrackInputRecord::TrimDb {
-                    lanes,
-                    db: self.values[0],
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            // The shape rules are `mute`'s: a boolean-exact domain on `values[0]`.
-            COMMAND_POLARITY_INVERT => {
-                if self.rack != RACK_NOT_APPLICABLE
-                    || self.values[1..].iter().any(|value| *value != 0.0)
-                {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                check_value(&rows.polarity_invert, control_lane(lanes), self.values[0])?;
-                Ok(AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
-                    lanes,
-                    inverted: self.values[0] == 1.0,
-                    smoothing_samples: self.smoothing_samples,
-                }))
-            }
-            _ => Err(COMMAND_REASON_MALFORMED),
-        }
-    }
-
-    /// Check one send record's fixed shape and read its value (issue #1222 D1).
-    ///
-    /// `rack` and `channel` are `255`, `effect_index` and `parameter_id` are `0`, and every value
-    /// word past the kind's own is `0.0`; anything else is `MALFORMED`, as the fader kinds rule.
-    /// The value is checked against the send's own rows by the core (`DOMAIN`); the prepared
-    /// route's coefficient function checks it again when the record is built.
-    fn into_route_edit(self, rows: &WebControlRows) -> Result<RouteEdit, u32> {
-        let own = match self.kind {
-            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE => 1,
-            COMMAND_ROUTE_MATRIX => 4,
-            _ => return Err(COMMAND_REASON_MALFORMED),
-        };
-        if self.rack != RACK_NOT_APPLICABLE
-            || self.channel != 255
-            || self.effect_index != 0
-            || self.parameter_id != 0
-            || self.values[own..].iter().any(|value| *value != 0.0)
-        {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        match self.kind {
-            COMMAND_ROUTE_GAIN_DB => {
-                check_value(&rows.route_gain_db, Lane::Both, self.values[0])?;
-                Ok(RouteEdit::GainDb(self.values[0]))
-            }
-            COMMAND_ROUTE_MUTE => {
-                check_value(&rows.route_mute, Lane::Both, self.values[0])?;
-                Ok(RouteEdit::Mute(self.values[0] == 1.0))
-            }
-            _ => {
-                for (row, value) in rows.route_matrix.iter().zip(self.values) {
-                    check_value(row, Lane::Both, value)?;
-                }
-                Ok(RouteEdit::Matrix(self.values))
-            }
-        }
-    }
-
-    /// Check one VCA record's fixed shape and read its edit (issue #1245 D1).
-    ///
-    /// Kind 3's and kind 4's rules -- `rack` `255`, `channel` a lane selector, `values[1..]` `0.0`
-    /// (else `MALFORMED`), an offset in `[-144, 24]` dB or a mute of exactly `0.0` or `1.0` (else
-    /// `DOMAIN`) -- plus the route kinds' `effect_index` and `parameter_id` of `0` (else
-    /// `MALFORMED`), which kinds 3 and 4 do not check.
-    fn into_vca_edit(self, rows: &WebControlRows) -> Result<VcaEdit, u32> {
-        if !matches!(self.kind, COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE)
-            || self.rack != RACK_NOT_APPLICABLE
-            || self.effect_index != 0
-            || self.parameter_id != 0
-            || self.values[1..].iter().any(|value| *value != 0.0)
-        {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-        let lane = control_lane(lanes);
-        if self.kind == COMMAND_VCA_FADER_DB {
-            check_value(&rows.vca_offset_db, lane, self.values[0])?;
-            return Ok(VcaEdit::FaderDb(lanes, self.values[0]));
-        }
-        check_value(&rows.vca_mute, lane, self.values[0])?;
-        Ok(VcaEdit::Mute(lanes, self.values[0] == 1.0))
-    }
-
-    /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
-    ///
-    /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
-    /// of its own. It moves live-control state, and the mute records that state composes to are
-    /// staged once, coalesced, at the end of the submission's first pass. The shape rules are
-    /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
-    /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
-    fn into_solo_request(self, rows: &WebControlRows) -> Result<bool, u32> {
-        if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        if self.values[1] != 0.0 || self.values[2] != 0.0 || self.values[3] != 0.0 {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        check_value(&rows.solo, Lane::Both, self.values[0])?;
-        Ok(self.values[0] == 1.0)
-    }
-
-    /// Lower one effect-addressed record against the addressed effect's own descriptor.
-    ///
-    /// Writes one or two records into `out` and returns how many: a `channel = both` command on a
-    /// parameter whose policy is `PerLane` lowers to **one record per lane**, because every launch
-    /// effect counts a policy-violating span as `invalid_spans` rather than applying it. Doing the
-    /// expansion here -- on the control plane, once per submission -- is what keeps the render
-    /// side's drain a pure one-record-one-span map.
     /// Lower one observation subscribe/unsubscribe against the addressed effect's declared menu.
     ///
     /// `parameter_id` carries the effect-local `tap_id` and is translated to the `tap_index` the
-    /// render side arms — an admission-time lookup, off the render thread, exactly as a parameter
-    /// id is. A tap the descriptor does not declare is [`COMMAND_REASON_UNKNOWN_TAP`] and never
+    /// render side arms — an admission-time lookup, off the render thread. A tap the descriptor
+    /// does not declare is [`COMMAND_REASON_UNKNOWN_TAP`] and never
     /// [`COMMAND_REASON_UNKNOWN_PARAMETER`]: they are different namespaces on one effect, and a
     /// caller that confuses them learns which one it got wrong.
     fn into_observe_record(
         self,
         descriptor: &'static effect_contract::EffectDescriptor,
         observed: bool,
-    ) -> Result<AdmittedCommand, u32> {
+    ) -> Result<(u32, bool, u32), u32> {
         if self.channel != 255 || self.values.iter().any(|value| *value != 0.0) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -5221,448 +3759,31 @@ impl CommandRecord {
             return Err(COMMAND_REASON_OBSERVATION_UNBOUND);
         }
         let tap_index = u32::try_from(tap_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
-        Ok(AdmittedCommand::Effect(EffectControlRecord::Observe {
+        Ok((
             tap_index,
-            armed: self.kind == COMMAND_OBSERVE_SUBSCRIBE,
-            window_blocks: self.smoothing_samples,
-        }))
-    }
-
-    fn into_effect_records(
-        self,
-        descriptor: &'static effect_contract::EffectDescriptor,
-        out: &mut [AdmittedCommand; 2],
-    ) -> Result<usize, u32> {
-        if self.kind == COMMAND_EFFECT_BYPASS {
-            if self.channel != 255
-                || self.parameter_id != 0
-                || self.smoothing_samples != 0
-                || self.values[1..].iter().any(|value| *value != 0.0)
-            {
-                return Err(COMMAND_REASON_MALFORMED);
-            }
-            if self.values[0] != 0.0 && self.values[0] != 1.0 {
-                return Err(COMMAND_REASON_DOMAIN);
-            }
-            out[0] = AdmittedCommand::Effect(EffectControlRecord::Bypass(self.values[0] == 1.0));
-            return Ok(1);
-        }
-        if self.channel > 2 || self.values[1..].iter().any(|value| *value != 0.0) {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        if self.parameter_id == 0 {
-            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
-        }
-        let Some((parameter_index, parameter)) = descriptor
-            .parameters
-            .iter()
-            .enumerate()
-            .find(|(_, parameter)| parameter.id.0 == self.parameter_id)
-        else {
-            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
-        };
-        // A parameter the descriptor says cannot be automated at the block rate has no live cell
-        // (#1345 D1: one cell per `Block`-rate parameter), so it has no write path at all. No
-        // launch effect declares one, which is why this is `UNSUPPORTED_KIND` and not `DOMAIN`.
-        if !parameter.automatable
-            || parameter.automation_rate != effect_contract::AutomationRate::Block
-        {
-            return Err(COMMAND_REASON_UNSUPPORTED_KIND);
-        }
-        if !parameter_value_valid(parameter, self.values[0]) {
-            return Err(COMMAND_REASON_DOMAIN);
-        }
-        let parameter_index =
-            u32::try_from(parameter_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
-        let record = |channel: ParameterChannel| {
-            AdmittedCommand::Effect(EffectControlRecord::Parameter {
-                parameter_index,
-                channel,
-                value: self.values[0],
-            })
-        };
-        match (parameter.channel_policy, self.channel) {
-            // A shared parameter is addressed as "both" and by nothing else.
-            (ParameterChannelPolicy::Shared, 2) => {
-                out[0] = record(ParameterChannel::Both);
-                Ok(1)
-            }
-            (ParameterChannelPolicy::Shared, _) => Err(COMMAND_REASON_MALFORMED),
-            (ParameterChannelPolicy::PerLane, 0) => {
-                out[0] = record(ParameterChannel::Left);
-                Ok(1)
-            }
-            (ParameterChannelPolicy::PerLane, 1) => {
-                out[0] = record(ParameterChannel::Right);
-                Ok(1)
-            }
-            (ParameterChannelPolicy::PerLane, _) => {
-                out[0] = record(ParameterChannel::Left);
-                out[1] = record(ParameterChannel::Right);
-                Ok(2)
-            }
-        }
-    }
-}
-
-/// The wire `channel` byte as a builtin lane selector; `None` for a byte the ABI does not define.
-const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
-    match channel {
-        0 => Some(BuiltinLaneSelector::Left),
-        1 => Some(BuiltinLaneSelector::Right),
-        2 => Some(BuiltinLaneSelector::Both),
-        _ => None,
+            self.kind == COMMAND_OBSERVE_SUBSCRIBE,
+            self.smoothing_samples,
+        ))
     }
 }
 
 /// Validate a whole staged submission, then admit it. Nothing is pushed unless everything passes.
 ///
-/// # The three passes are the contract, not an optimisation (#137 D1, extended by #140 C)
+/// # The two passes are the contract, not an optimisation (#137 D1, #1565A)
 ///
-/// Pass one decodes and lowers every record and counts the room each *destination queue* needs.
-/// Pass two checks that room against every one of those queues. Pass three pushes. A submission is
-/// therefore all-or-nothing across every kind in it: a batch that moves a matrix, a fader and two
-/// effect parameters is admitted whole or refused whole, and the refusal names the first record
-/// that broke a rule.
-///
-/// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
-/// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
-/// phase 1; per strip since issue #1213), and one that changes a strip's effective mute owes one
-/// more per live send that follows it (issue #1224), and one that rides a VCA owes up to two more
-/// per strip a VCA reaches (issue #1245), which is why `command_decoded` is
-/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count + route_count + 2 * vca_reached_strips` long and
-/// why the room counted is per lowered record rather than per wire record.
-///
-/// # The solo transaction (issue #210 phase 1)
-///
-/// Pass one now also mutates live-control solo state -- the solo bits, the user-mute mirror, the
-/// emitted-mute mirror -- while it is still deciding whether the submission is admissible at all.
-/// So the state carries its own shadow and this wrapper is where it is closed: `commit` once pass
-/// three has actually pushed, `rollback` on every refusal. A refused submission leaves host state
-/// exactly as it was, which is the same all-or-nothing contract the queues keep. The live-send
-/// mirror (issue #1222) and the live VCA state (issue #1245) are closed the same way, together.
+/// Pass one decodes and lowers every record and counts the room each effect's observation queue
+/// needs, then checks that room against every queue the submission touches. Pass two pushes. A
+/// submission is therefore all-or-nothing: the refusal names the first record that broke a rule,
+/// and a refused submission leaves the armed set, the arm samples and every queue as they were.
 fn admit_commands(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
     count: usize,
     applied_at_sample: u64,
-    host_generation: u64,
-    prepared_submission: bool,
-    companion: Option<&[u8]>,
-) -> Result<(), CommandRejection> {
-    for shadow in &mut ready.input_filter_shadows {
-        shadow.begin();
-    }
-    match admit_commands_staged(
-        ready,
-        bytes,
-        count,
-        applied_at_sample,
-        host_generation,
-        prepared_submission,
-        companion,
-    ) {
-        Ok(()) => {
-            ready.solo.commit();
-            ready.routes.commit();
-            ready.vcas.commit();
-            ready.strip_values.commit();
-            Ok(())
-        }
-        Err(rejection) => {
-            ready.solo.rollback();
-            ready.routes.rollback();
-            ready.vcas.rollback();
-            ready.strip_values.rollback();
-            for shadow in &mut ready.input_filter_shadows {
-                shadow.rollback();
-            }
-            if rejection.result != RESULT_INTERNAL {
-                for producer in ready.effect_controls.iter_mut().flatten() {
-                    let _ = producer.discard_owner();
-                }
-            }
-            Err(rejection)
-        }
-    }
-}
-
-/// Whether `staged` writes a cell: a fader, mute, matrix/pan, input trim or polarity record, a
-/// send's target, an effect's parameter or bypass value, a prepared builtin input-filter marker
-/// with at least one target, or an EQ owner's marker (its targets are cells).
-fn writes_strip_cells(staged: &StagedCommand) -> bool {
-    match staged.kind {
-        StagedCommandKind::Command(
-            AdmittedCommand::Matrix(_)
-            | AdmittedCommand::Fader(_)
-            | AdmittedCommand::Input(_)
-            | AdmittedCommand::Route(_),
-        ) => true,
-        StagedCommandKind::Command(AdmittedCommand::Effect(record)) => {
-            !matches!(record, EffectControlRecord::Observe { .. })
-        }
-        StagedCommandKind::PreparedOwner(marker) => {
-            marker.kind == PreparedOwnerKind::Eq || marker.target_count != 0
-        }
-    }
-}
-
-/// Write the admitted fader, mute, matrix/pan, input trim, polarity, prepared-filter, send and
-/// effect values of one batch into the strips', sends' and effects' cells as one transaction
-/// (#1312 D7, #1345 D5, #1346 D6, #1347 D4), then publish its revision on the plan's gate.
-///
-/// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
-/// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
-/// internal refusal. After the stamp nothing can fail: each step is an `expect` on an invariant the
-/// staging pass checked (root's D7 ruling), so a refused batch's values can never be published
-/// and an open stamp never outlives the batch.
-fn write_strip_cells(
-    ready: &mut ReadyOwnership,
-    lowered: usize,
-    strip_count: usize,
-    companion: Option<&PreparedCompanion<'_>>,
-) -> Result<(), CommandRejection> {
-    let Some(first_wire_index) = ready.command_decoded[..lowered]
-        .iter()
-        .find(|staged| writes_strip_cells(staged))
-        .map(|staged| staged.original_wire_index)
-    else {
-        return Ok(());
-    };
-    // #1381a: the control plane holds the plan's one gate handle, so there is none to stamp from
-    // here. The front door of the admission refuses every kind that reaches this point first; this
-    // is the same refusal, as an invariant, for a path that would write without a gate.
-    let Some(gate) = ready.plan_gate.as_mut() else {
-        return Err(CommandRejection {
-            result: RESULT_UNSUPPORTED,
-            reason: COMMAND_REASON_UNSUPPORTED_KIND,
-            index: first_wire_index,
-        });
-    };
-    let revision = gate.last_published().saturating_add(1);
-    let Ok(stamp) = gate.stamp(revision) else {
-        return Err(CommandRejection {
-            result: RESULT_INTERNAL,
-            reason: COMMAND_REASON_BACKPRESSURE,
-            index: first_wire_index,
-        });
-    };
-    // Every step from here to the publication cannot fail (root's D7 ruling): the staging pass
-    // gave each cell record a strip index below `strip_count`, and `controls` holds one producer
-    // set per strip. A violation is a bug, not a refusal: it must not leave a stamp open or
-    // publish a half-written batch under a refusal.
-    for entry in 0..lowered {
-        let staged = ready.command_decoded[entry];
-        let slot = staged.queue_slot as usize;
-        match staged.kind {
-            StagedCommandKind::Command(AdmittedCommand::Matrix(record)) => {
-                ready
-                    .controls
-                    .get_mut(slot)
-                    .expect("a staged matrix record addresses a strip with a cell producer")
-                    .producer
-                    .write(stamp, record);
-            }
-            StagedCommandKind::Command(AdmittedCommand::Fader(record)) => {
-                ready
-                    .controls
-                    .get_mut(
-                        slot.checked_sub(strip_count)
-                            .expect("a staged fader record sits in the fader band"),
-                    )
-                    .expect("a staged fader record addresses a strip with a cell producer")
-                    .fader
-                    .write(stamp, record);
-            }
-            StagedCommandKind::Command(AdmittedCommand::Route(record)) => {
-                // The send band follows the effects; the staging pass resolved the route index.
-                ready
-                    .route_controls
-                    .get_mut(
-                        slot.checked_sub(strip_count * 3 + ready.effect_instances.len())
-                            .expect("a staged send record sits in the send band"),
-                    )
-                    .expect("a staged send record addresses a live route's cell producer")
-                    .write(stamp, record);
-            }
-            StagedCommandKind::Command(AdmittedCommand::Input(record)) => {
-                ready
-                    .controls
-                    .get_mut(
-                        slot.checked_sub(strip_count * 2)
-                            .expect("a staged input record sits in the input band"),
-                    )
-                    .and_then(|control| control.input.as_mut())
-                    .expect("the room pass checked this strip's input cells")
-                    .write(stamp, record);
-            }
-            StagedCommandKind::Command(AdmittedCommand::Effect(
-                record @ (EffectControlRecord::Parameter { .. } | EffectControlRecord::Bypass(_)),
-            )) => {
-                ready
-                    .effect_controls
-                    .get_mut(
-                        slot.checked_sub(strip_count * 3)
-                            .expect("a staged effect record sits in the effect band"),
-                    )
-                    .and_then(Option::as_mut)
-                    .expect("a staged effect record addresses a prepared effect producer")
-                    .write(stamp, record)
-                    .expect("the staging pass preflighted this effect record");
-            }
-            StagedCommandKind::PreparedOwner(marker) if marker.kind == PreparedOwnerKind::Eq => {
-                let effect = slot
-                    .checked_sub(strip_count * 3)
-                    .expect("an Eq owner marker sits in the effect band");
-                let mut targets = [effect_contract::PreparedEffectTarget {
-                    slot: 0,
-                    channel: effect_contract::ParameterChannel::Both,
-                    words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-                }; host_core::EQ_TARGET_CAPACITY];
-                let mut target_count = 0_usize;
-                if let Some(companion) = companion {
-                    for index in 0..companion.target_count {
-                        let target = companion_target(companion, index)
-                            .expect("the companion's targets were decoded while staging");
-                        // `prepared_queue_address` for an EQ target: the effect band slot, which
-                        // is this marker's exactly when the address resolves to it. Spelled out
-                        // because the open stamp borrows the plan's gate, and that function
-                        // borrows all of `ready`.
-                        let addressed = target.rack != RACK_NOT_APPLICABLE
-                            && live_effect_address(u32::from(target.rack), target.effect_index)
-                                .and_then(|address| {
-                                    let track = target.track_index as usize;
-                                    let addressed = dense_effect_slot(
-                                        *ready.effect_base.get(track)?,
-                                        *ready.rack_effects.get(track)?,
-                                        address,
-                                    )?;
-                                    (addressed < ready.effect_instances.len()).then_some(addressed)
-                                })
-                                .is_some_and(|addressed| strip_count * 3 + addressed == slot);
-                        if addressed {
-                            targets[target_count] = target.target;
-                            target_count += 1;
-                        }
-                    }
-                }
-                assert_eq!(
-                    target_count, marker.target_count as usize,
-                    "the targets written are the targets staged"
-                );
-                ready
-                    .effect_controls
-                    .get_mut(effect)
-                    .and_then(Option::as_mut)
-                    .expect("an Eq owner marker addresses a prepared effect producer")
-                    .publish_candidate_targets(
-                        stamp,
-                        marker.base_revision,
-                        &targets[..target_count],
-                    )
-                    .expect("the owner's targets were preflighted");
-            }
-            StagedCommandKind::PreparedOwner(marker)
-                if marker.kind == PreparedOwnerKind::BuiltinInput =>
-            {
-                let track = slot
-                    .checked_sub(strip_count * 2)
-                    .expect("a builtin input owner marker sits in the input band");
-                let mut written = 0_usize;
-                if let Some(companion) = companion {
-                    for index in 0..companion.target_count {
-                        let target = companion_target(companion, index)
-                            .expect("the companion's targets were decoded while staging");
-                        // `prepared_queue_address` for a builtin input target: the strip's input
-                        // band slot, which is this marker's exactly when the strip index is. It is
-                        // spelled out because the open stamp borrows the plan's gate, and that
-                        // function borrows all of `ready`.
-                        let addressed = target.rack == RACK_NOT_APPLICABLE
-                            && target.effect_index == 0
-                            && target.track_index as usize == track;
-                        if addressed {
-                            let target = companion_builtin_target(target)
-                                .expect("the builtin target was validated while staging");
-                            ready
-                                .controls
-                                .get_mut(track)
-                                .and_then(|control| control.input.as_mut())
-                                .expect("the room pass checked this strip's input cells")
-                                .write(stamp, TrackInputRecord::PreparedFilter { target });
-                            written += 1;
-                        }
-                    }
-                }
-                assert_eq!(
-                    written, marker.target_count as usize,
-                    "the targets written are the targets staged"
-                );
-            }
-            _ => {}
-        }
-    }
-    gate.publish(revision);
-    Ok(())
-}
-
-/// The lanes of `slot`'s cell that an earlier command of this batch already staged a record for
-/// (#1560). `select` names the lanes one staged record covers, `None` for a record of another
-/// kind.
-///
-/// A command that repeats the committed value stages nothing, but a repeat that follows an earlier
-/// command of the same batch on the same cell still stages its record: the cell keeps the last
-/// record, so the repeat's ramp length replaces the earlier one's, as it does for the core, whose
-/// transaction takes the last edit's length. Only the first write of a cell in a batch can be a
-/// no-op.
-fn staged_lanes(
-    ready: &ReadyOwnership,
-    lowered: usize,
-    slot: usize,
-    select: impl Fn(&AdmittedCommand) -> Option<BuiltinLaneSelector>,
-) -> [bool; 2] {
-    let mut lanes = [false; 2];
-    for staged in &ready.command_decoded[..lowered] {
-        if staged.queue_slot as usize != slot {
-            continue;
-        }
-        if let StagedCommandKind::Command(record) = &staged.kind
-            && let Some(selector) = select(record)
-        {
-            for (lane, seen) in lanes.iter_mut().enumerate() {
-                *seen |= covers_lane(selector, lane);
-            }
-        }
-    }
-    lanes
-}
-
-/// The three passes themselves. Every exit from here is a transaction boundary for its caller.
-fn admit_commands_staged(
-    ready: &mut ReadyOwnership,
-    bytes: &[u8],
-    count: usize,
-    applied_at_sample: u64,
-    host_generation: u64,
-    prepared_submission: bool,
-    companion: Option<&[u8]>,
 ) -> Result<(), CommandRejection> {
     let record_bytes = COMMAND_RECORD_BYTES as usize;
-    // Issue #1213 D1: the index word is a strip index, tracks first, then submixes, and every band
-    // below is per strip. With `S = 0` this is the track count, so every slot is unmoved.
+    // The index word is a strip index, tracks first, then submixes (issue #1213 D1).
     let strip_count = ready.strip_count();
-    let companion = match companion {
-        Some(bytes) => match parse_prepared_companion(bytes, host_generation) {
-            Ok(companion) => Some(companion),
-            Err(()) => {
-                return Err(CommandRejection {
-                    result: RESULT_INVALID_ARGUMENT,
-                    reason: COMMAND_REASON_MALFORMED,
-                    index: 0,
-                });
-            }
-        },
-        None => None,
-    };
     ready.command_wanted.fill(0);
     ready.observe_named.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
@@ -5678,1186 +3799,95 @@ fn admit_commands_staged(
         reason,
         index: index as u32,
     };
-    let mut lowered = 0_usize;
-    // Issue #210 phase 1: solo state changes are applied as they are read, but the mute records
-    // they compose to are staged once, after the whole batch, by the coalescing pass below.
-    let mut solo_seen = false;
-    // Issue #1245 D3: a VCA mute (kind 17) moves the same composition, so it runs the same pass.
-    let mut vca_mute_seen = false;
-    // The coalesced mute records answer to the batch's first kind 9 or 17 record and take the
-    // last one's ramp.
-    let mut coalesce_first_wire_index = 0_u32;
-    let mut coalesce_smoothing = 0_u32;
-    // Issue #1224 D3: whether any strip mute record was staged, so the follow pass below runs.
-    let mut mute_seen = false;
-    // Decision 17 C7 (batch 1 review MINOR 1): `controls::any_solo` walks every strip, so it runs
-    // once per batch, on first use, and again only after a kind 9 record moved a solo bit.
-    let mut any_solo_cache: Option<bool> = None;
-    // Issue #1245 D3: a VCA ride (kind 16) stages nothing itself; the VCA fader pass below stages
-    // every reached member's changed lanes once, at the first kind 16 record's wire index, with
-    // the last one's ramp.
-    let mut vca_fader_seen = false;
-    let mut vca_fader_first_wire_index = 0_u32;
-    let mut vca_fader_smoothing = 0_u32;
+    let mut staged_count = 0_usize;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
-        let command = CommandRecord::decode(record)
-            .map_err(|reason| refuse(reason, index))?
-            .with_session_ramp(&ready.ramps);
-        // #1381a: the control plane owns the plan's gate and the cell producers, so the retained
-        // command path serves the observation kinds only (the effect producers' observation
-        // queues, through the control plane's accessor, ruling C9). Every other kind needs a
-        // producer this path no longer holds; it is refused whole, before anything is staged, until
-        // `SET_CONTROL` serves it through the core (#1562a) and the path is deleted (#1565A).
-        if !matches!(
-            command.kind,
-            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
-        ) {
-            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-        }
+        let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
         let track = command.track_index as usize;
-        // Issue #1222 D2: the index word is read by kind. A send kind's is a live-route index,
-        // checked against the live routes in its own arm below, and a VCA kind's a VCA index
-        // (issue #1245 D1), checked against the VCAs in its own arm; every other kind's is a
-        // strip index, checked here against the strip count. One generic check ahead of the
-        // dispatch would refuse a valid send or VCA at or past the strip count, and pass an
-        // invalid one below it.
-        let strip_addressed = !matches!(
-            command.kind,
-            COMMAND_ROUTE_GAIN_DB
-                | COMMAND_ROUTE_MUTE
-                | COMMAND_ROUTE_MATRIX
-                | COMMAND_VCA_FADER_DB
-                | COMMAND_VCA_MUTE
-        );
-        if strip_addressed && track >= strip_count {
+        if track >= strip_count {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
-        let mut staged = [AdmittedCommand::Effect(EffectControlRecord::Bypass(false)); 2];
-        let (slot, produced) = match command.kind {
-            // The three kinds that lower to one record on one of the three per-track bands. The
-            // band is read off the lowered variant rather than off the kind, so a kind added to
-            // this arm cannot land in the wrong queue by forgetting a second table.
-            COMMAND_PAN
-            | COMMAND_MATRIX
-            | COMMAND_FADER_DB
-            | COMMAND_TRIM_DB
-            | COMMAND_POLARITY_INVERT => {
-                staged[0] = command
-                    .into_track_record(&ready.rows)
-                    .map_err(|reason| refuse(reason, index))?;
-                let slot = match staged[0] {
-                    AdmittedCommand::Fader(_) => strip_count + track,
-                    AdmittedCommand::Input(_) => strip_count * 2 + track,
-                    _ => track,
-                };
-                if ready.controls.get(track).is_none() {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                // Issue #1560: a command that repeats the value the render plane holds stages no
-                // record, as the core's classifier writes none for an equal value: the record
-                // would restart the cell's ramp over its own length, so a ramp still in flight
-                // would render other bits. The comparison is the core's, by the bits it compares
-                // (`LiveStripValues`), and the mirror moves with each record staged.
-                match staged[0] {
-                    AdmittedCommand::Matrix(record) => {
-                        let matrix = record.matrix;
-                        let bits = [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits);
-                        let held = ready.strip_values.get(track).map(|held| held.matrix);
-                        let staged_before = staged_lanes(ready, lowered, slot, |record| {
-                            matches!(record, AdmittedCommand::Matrix(_))
-                                .then_some(BuiltinLaneSelector::Both)
-                        });
-                        if held == Some(bits) && !staged_before[0] {
-                            (slot, 0)
-                        } else {
-                            ready.strip_values.set_matrix(track, bits);
-                            (slot, 1)
-                        }
-                    }
-                    // Issue #1245 D3: a fader move on a strip some VCA reaches moves the member's
-                    // own value, and what reaches the queue is its effective value -- the own
-                    // value plus every reaching VCA's offset, clamped -- for the covered lanes. Two
-                    // different lane values split a `Both` command into one `Left` and one `Right`
-                    // record. A strip no VCA reaches (`set_member_db` refuses it) lowers its own
-                    // value as is.
-                    //
-                    // Decision 17 C7, slice S7c D5: the effective value is
-                    // `controls::effective_strip`'s. The fader does not read the solo term, so the
-                    // `any_solo` it is given is moot.
-                    AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                        lanes,
-                        db,
-                        smoothing_samples,
-                    }) => {
-                        let member = ready.vcas.set_member_db(track, lanes, db);
-                        let target = if member {
-                            WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-                                .strip(track, false)
-                                .fader_db
-                        } else {
-                            [db, db]
-                        };
-                        // What the render plane holds: a reached strip's effective value is the
-                        // VCA state's, any other strip's is the own value kept in the mirror.
-                        let held = match ready.vcas.emitted_db(track) {
-                            Some(emitted) => Some(emitted.map(fader_gain_bits)),
-                            None => ready.strip_values.get(track).map(|held| held.fader_gain),
-                        };
-                        let staged_before =
-                            staged_lanes(ready, lowered, slot, |record| match record {
-                                AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                                    lanes, ..
-                                }) => Some(*lanes),
-                                _ => None,
-                            });
-                        let changed = [0, 1].map(|lane| {
-                            covers_lane(lanes, lane)
-                                && (staged_before[lane]
-                                    || held.is_none_or(|held| {
-                                        fader_gain_bits(target[lane]) != held[lane]
-                                    }))
-                        });
-                        let mut produced = 0;
-                        for (lane_selector, lane) in changed_lane_records(
-                            changed,
-                            target[0].to_bits() == target[1].to_bits(),
-                        ) {
-                            let db = target[lane];
-                            if member {
-                                ready.vcas.record_emitted_db(track, lane_selector, db);
-                            } else {
-                                ready.strip_values.set_fader_gain(
-                                    track,
-                                    lane_selector,
-                                    fader_gain_bits(db),
-                                );
-                            }
-                            staged[produced] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                                lanes: lane_selector,
-                                db,
-                                smoothing_samples,
-                            });
-                            produced += 1;
-                        }
-                        (slot, produced)
-                    }
-                    // The input cells are the strip's, whatever the value: a strip without them
-                    // refuses a trim or a polarity whether or not it would change anything.
-                    AdmittedCommand::Input(record) => {
-                        if ready
-                            .controls
-                            .get(track)
-                            .and_then(|control| control.input.as_ref())
-                            .is_none()
-                        {
-                            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                        }
-                        let held = ready.strip_values.get(track).copied();
-                        let mut produced = 0;
-                        match record {
-                            TrackInputRecord::TrimDb {
-                                lanes,
-                                db,
-                                smoothing_samples,
-                            } => {
-                                let bits = trim_gain_bits(db);
-                                let staged_before =
-                                    staged_lanes(ready, lowered, slot, |record| match record {
-                                        AdmittedCommand::Input(TrackInputRecord::TrimDb {
-                                            lanes,
-                                            ..
-                                        }) => Some(*lanes),
-                                        _ => None,
-                                    });
-                                let changed = [0, 1].map(|lane| {
-                                    covers_lane(lanes, lane)
-                                        && (staged_before[lane]
-                                            || held.is_none_or(|held| held.trim_gain[lane] != bits))
-                                });
-                                for (lane_selector, _) in changed_lane_records(changed, true) {
-                                    ready.strip_values.set_trim_gain(track, lane_selector, bits);
-                                    staged[produced] =
-                                        AdmittedCommand::Input(TrackInputRecord::TrimDb {
-                                            lanes: lane_selector,
-                                            db,
-                                            smoothing_samples,
-                                        });
-                                    produced += 1;
-                                }
-                            }
-                            TrackInputRecord::PolarityInvert {
-                                lanes,
-                                inverted,
-                                smoothing_samples,
-                            } => {
-                                let staged_before =
-                                    staged_lanes(ready, lowered, slot, |record| match record {
-                                        AdmittedCommand::Input(
-                                            TrackInputRecord::PolarityInvert { lanes, .. },
-                                        ) => Some(*lanes),
-                                        _ => None,
-                                    });
-                                let changed = [0, 1].map(|lane| {
-                                    covers_lane(lanes, lane)
-                                        && (staged_before[lane]
-                                            || held
-                                                .is_none_or(|held| held.polarity[lane] != inverted))
-                                });
-                                for (lane_selector, _) in changed_lane_records(changed, true) {
-                                    ready
-                                        .strip_values
-                                        .set_polarity(track, lane_selector, inverted);
-                                    staged[produced] =
-                                        AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
-                                            lanes: lane_selector,
-                                            inverted,
-                                            smoothing_samples,
-                                        });
-                                    produced += 1;
-                                }
-                            }
-                            TrackInputRecord::PreparedFilter { .. } => {
-                                return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                            }
-                        }
-                        (slot, produced)
-                    }
-                    _ => (slot, 1),
-                }
-            }
-            // A mute command carries the user's *intent*; what reaches the queue is the composed
-            // effective mute. With no solo engaged the two are the same value and this stages
-            // byte-for-byte what it staged before solo existed. Every lane a selector covers
-            // shares one strip-scoped solo term; only a one-lane VCA mute splits a `Both` command
-            // into two per-lane records (below).
-            //
-            // Issue #1213 D3 (VERIFY-2 M4): the effective value is read from the core's one
-            // composition (`controls::effective_strip`), which knows a submix is solo-safe; it is
-            // never spelled again here. An
-            // inline `muted || (any_solo && !solo)` would stage `muted: true` for a bus *unmute*
-            // under any track solo.
-            COMMAND_MUTE => {
-                let lowered_record = command
-                    .into_track_record(&ready.rows)
-                    .map_err(|reason| refuse(reason, index))?;
-                if ready.controls.get(track).is_none() {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                let AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                    lanes,
-                    muted,
-                    smoothing_samples,
-                }) = lowered_record
-                else {
-                    return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                };
-                if !ready.solo.set_user_mute(track, lanes, muted) {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
-                }
-                // After `set_user_mute` every covered lane holds `muted` and the solo term is per
-                // strip, but a VCA mute (issue #1242 D3) is per lane: a `Both` command on a strip
-                // whose VCA mutes one lane composes to two different lane values. Then it stages
-                // one `Left` and one `Right` record, each with its own lane's effective mute, and
-                // mirrors each lane separately. When the covered lanes agree -- always, for a
-                // session without VCAs -- it stages the one record it staged before.
-                mute_seen = true;
-                //
-                // Decision 17 C7, slice S7c D5: the effective mute is `controls::effective_strip`'s,
-                // read over the mirrors as they stand now, so an earlier kind 17 or kind 9 in this
-                // batch is already in it.
-                let [left, right] = {
-                    let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
-                    view.strip(track, view.any_solo(&mut any_solo_cache)).mute
-                };
-                // Issue #1560: only a covered lane whose effective mute differs from what the render
-                // plane was last told stages a record, as the core's classifier does: re-muting a
-                // settled lane restarts its ramp. A `Both` command whose lanes both change to one
-                // value stages the one record it always did; one lane changing stages that lane's.
-                let effective = [left, right];
-                let staged_before =
-                    staged_lanes(ready, lowered, strip_count + track, |record| match record {
-                        AdmittedCommand::Fader(TrackFaderRecord::Mute { lanes, .. }) => {
-                            Some(*lanes)
-                        }
-                        _ => None,
-                    });
-                let changed = [0, 1].map(|lane| {
-                    covers_lane(lanes, lane)
-                        && (staged_before[lane]
-                            || effective[lane] != ready.solo.emitted_mute(track, lane))
-                });
-                let mut produced = 0;
-                for (lane_selector, lane) in changed_lane_records(changed, left == right) {
-                    ready
-                        .solo
-                        .record_emitted(track, lane_selector, effective[lane]);
-                    staged[produced] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                        lanes: lane_selector,
-                        muted: effective[lane],
-                        smoothing_samples,
-                    });
-                    produced += 1;
-                }
-                (strip_count + track, produced)
-            }
-            // Solo lowers to nothing here. It moves one live-control bit; the records that bit
-            // composes to are the coalescing pass's business, because a batch of alternating
-            // toggles would otherwise fan out up to `2 * strip_count` records *per transition*.
-            COMMAND_SOLO => {
-                let engaged = command
-                    .into_solo_request(&ready.rows)
-                    .map_err(|reason| refuse(reason, index))?;
-                if ready.controls.get(track).is_none() {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                // Issue #1213 D4: solo addresses tracks only. A submix is solo-safe, so a solo at
-                // its strip index is refused, at this record's wire index, before any state moves.
-                if ready.solo.solo_safe(track) {
-                    return Err(refuse(COMMAND_REASON_NOT_SOLOABLE, index));
-                }
-                if !ready.solo.set_solo(track, engaged) {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
-                }
-                any_solo_cache = None;
-                if !solo_seen && !vca_mute_seen {
-                    coalesce_first_wire_index = index as u32;
-                }
-                solo_seen = true;
-                coalesce_smoothing = command.smoothing_samples;
-                (strip_count + track, 0)
-            }
-            // Issue #1245 D3: a VCA kind moves the VCA state and stages nothing itself. A ride's
-            // member fader records are the VCA fader pass's business, and a mute's member mute
-            // records the coalescing pass's, so a batch of several moves stages each member's net
-            // change once. The mute term reaches the strip-mute owner at once, so a later kind 4
-            // in the same batch composes with it.
-            COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE => {
-                // No live commands: the app did not opt in, so the session has no write path for
-                // any member.
-                if !ready.commands_enabled {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                if track >= ready.vcas.vca_count() {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
-                }
-                match command
-                    .into_vca_edit(&ready.rows)
-                    .map_err(|reason| refuse(reason, index))?
-                {
-                    VcaEdit::FaderDb(lanes, db) => {
-                        if !ready.vcas.set_vca_db(track, lanes, db) {
-                            return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
-                        }
-                        if !vca_fader_seen {
-                            vca_fader_first_wire_index = index as u32;
-                        }
-                        vca_fader_seen = true;
-                        vca_fader_smoothing = command.smoothing_samples;
-                    }
-                    VcaEdit::Mute(lanes, muted) => {
-                        if !ready.vcas.set_vca_mute(track, lanes, muted) {
-                            return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
-                        }
-                        // The strip-mute owner's VCA term is refreshed lazily (amendment A1): for
-                        // the strip a later kind 4 addresses, before it composes, and for every
-                        // reached strip once after the loop. Refreshing every reached member here
-                        // would cost one pass over the reach pairs per record.
-                        if !solo_seen && !vca_mute_seen {
-                            coalesce_first_wire_index = index as u32;
-                        }
-                        vca_mute_seen = true;
-                        coalesce_smoothing = command.smoothing_samples;
-                    }
-                }
-                (0, 0)
-            }
-            // Issue #1222 D4: a send kind moves one field of its mirror and stages one record
-            // built from the whole mirror, through the prepared route's own coefficient function.
-            // The mirror is touched only once the record is built, and every later record in the
-            // batch reads it, so several edits of one send stage one record each, in wire order;
-            // the send's cell holds the last, and render applies only that one and counts the
-            // others as superseded.
-            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX => {
-                // No live commands: the app did not opt in, so the session has no write path for
-                // any send.
-                if !ready.commands_enabled {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                let (Some(slot), Some(producer), Some(&current)) = (
-                    ready.route_slot(track),
-                    ready.route_controls.get(track),
-                    ready.routes.get(track),
-                ) else {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
-                };
-                let edit = command
-                    .into_route_edit(&ready.rows)
-                    .map_err(|reason| refuse(reason, index))?;
-                let mut next = current;
-                match edit {
-                    RouteEdit::GainDb(gain_db) => next.gain_db = gain_db,
-                    RouteEdit::Mute(mute) => next.mute = mute,
-                    RouteEdit::Matrix(matrix) => next.matrix = matrix,
-                }
-                let record = producer
-                    .record(
-                        next.gain_db,
-                        next.matrix,
-                        next.mute,
-                        next.source_lane_muted,
-                        command.smoothing_samples,
-                    )
-                    .map_err(|error| match error {
-                        RouteControlError::Domain | RouteControlError::Length => {
-                            refuse(COMMAND_REASON_DOMAIN, index)
-                        }
-                    })?;
-                // Issue #1560: the mirror holds the committed values, so it moves whether or not a
-                // record follows. A record is staged only when the target the render plane holds
-                // changes -- the folded coefficients or the silenced flag, the core's comparison
-                // (`route_records`): a repeated value, or a gain or matrix edit on a send that stays
-                // silenced, stages nothing, because the record would restart the send's ramp.
-                let held = producer
-                    .record(
-                        current.gain_db,
-                        current.matrix,
-                        current.mute,
-                        current.source_lane_muted,
-                        command.smoothing_samples,
-                    )
-                    .map_err(|_| refuse(COMMAND_REASON_DOMAIN, index))?;
-                let moved = match edit {
-                    RouteEdit::GainDb(gain_db) => ready.routes.set_gain_db(track, gain_db),
-                    RouteEdit::Mute(mute) => ready.routes.set_mute(track, mute),
-                    RouteEdit::Matrix(matrix) => ready.routes.set_matrix(track, matrix),
-                };
-                if !moved {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
-                }
-                let bits = |record: &RouteControlRecord| record.target().map(f32::to_bits);
-                let staged_before = staged_lanes(ready, lowered, slot, |record| {
-                    matches!(record, AdmittedCommand::Route(_)).then_some(BuiltinLaneSelector::Both)
-                })[0];
-                if !staged_before && held.mute() == record.mute() && bits(&held) == bits(&record) {
-                    (slot, 0)
-                } else {
-                    staged[0] = AdmittedCommand::Route(record);
-                    (slot, 1)
-                }
-            }
-            COMMAND_INPUT_FILTERS => {
-                if !prepared_submission {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                let edit = command
-                    .into_input_filter_edit()
-                    .map_err(|reason| refuse(reason, index))?;
-                let Some(shadow) = ready.input_filter_shadows.get_mut(track) else {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                };
-                shadow
-                    .apply(ready.sample_rate_hz, edit)
-                    .map_err(|reason| refuse(reason, index))?;
-                let slot = builtin_input_slot(strip_count, track)
-                    .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?;
-                let owner_seen = ready.command_decoded[..lowered].iter().any(|entry| {
-                    matches!(
-                        entry.kind,
-                        StagedCommandKind::PreparedOwner(owner)
-                            if owner.kind == PreparedOwnerKind::BuiltinInput
-                                && owner.queue_slot as usize == slot
-                    )
-                });
-                if !owner_seen {
-                    let base_revision = shadow.revision;
-                    let marker = PreparedOwner {
-                        kind: PreparedOwnerKind::BuiltinInput,
-                        queue_slot: slot as u32,
-                        base_revision,
-                        first_wire_index: index as u32,
-                        target_count: 0,
-                    };
-                    let Some(entry) = ready.command_decoded.get_mut(lowered) else {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                    };
-                    *entry = StagedCommand {
-                        queue_slot: marker.queue_slot,
-                        original_wire_index: index as u32,
-                        kind: StagedCommandKind::PreparedOwner(marker),
-                    };
-                    lowered += 1;
-                }
-                (slot, 0)
-            }
-            COMMAND_EFFECT_PARAM
-            | COMMAND_EFFECT_BYPASS
-            | COMMAND_OBSERVE_SUBSCRIBE
-            | COMMAND_OBSERVE_UNSUBSCRIBE => {
-                // `inserts` (1) and `console` (3); the retired `simd1` (0) and `simd2` (2) are
-                // refused here and never reinterpreted (decision 12, issue #1096).
-                let Some(address) =
-                    live_effect_address(u32::from(command.rack), command.effect_index)
-                else {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
-                };
-                if ready.rack_effects.get(track).is_none() {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
-                }
-                let Some(effect) = ready.effect_slot(track, address) else {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
-                };
-                let (descriptor, is_eq, has_owner) = {
-                    let Some(descriptor) = ready
-                        .effect_instances
-                        .get(effect)
-                        .and_then(Option::as_ref)
-                        .map(|instance| instance.descriptor)
-                    else {
-                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                    };
-                    let Some(has_owner) = ready
-                        .effect_producer_mut(effect)
-                        .map(|producer| producer.has_owner())
-                    else {
-                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                    };
-                    (
-                        descriptor,
-                        descriptor.id.as_str() == "miso.parametric-eq",
-                        has_owner,
-                    )
-                };
-                let produced = if matches!(
-                    command.kind,
-                    COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
-                ) {
-                    let observed = ready
-                        .effect_instances
-                        .get(effect)
-                        .and_then(Option::as_ref)
-                        .is_some_and(|instance| instance.reader.is_some());
-                    staged[0] = command
-                        .into_observe_record(descriptor, observed)
-                        .map_err(|reason| refuse(reason, index))?;
-                    // One submission names each tap once: a record overwrites its tap's whole
-                    // state and the submission drains in one block, so the second record would
-                    // be a supersession the engine must not make (D15-2: Observe records are
-                    // never superseded) and would not fit the tap's queue slot. Refused here,
-                    // at this record's wire index, before the room pass, any write or the stamp.
-                    let AdmittedCommand::Effect(EffectControlRecord::Observe { tap_index, .. }) =
-                        staged[0]
-                    else {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                    };
-                    let bit = 1_u32
-                        .checked_shl(tap_index)
-                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
-                    let named = ready
-                        .observe_named
-                        .get_mut(effect)
-                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
-                    if *named & bit != 0 {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                    }
-                    *named |= bit;
-                    1
-                } else {
-                    command
-                        .into_effect_records(descriptor, &mut staged)
-                        .map_err(|reason| refuse(reason, index))?
-                };
-                let mut produced = produced;
-                if is_eq
-                    && has_owner
-                    && matches!(command.kind, COMMAND_EFFECT_PARAM)
-                    && !prepared_submission
-                {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                }
-                if prepared_submission && matches!(command.kind, COMMAND_EFFECT_PARAM) && is_eq {
-                    if !has_owner {
-                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                    }
-                    let owner_seen = ready.command_decoded[..lowered].iter().any(|entry| {
-                        matches!(
-                            entry.kind,
-                            StagedCommandKind::PreparedOwner(owner)
-                                if owner.queue_slot as usize == strip_count * 3 + effect
-                        )
-                    });
-                    if !owner_seen {
-                        let base_revision = ready
-                            .effect_controls
-                            .get(effect)
-                            .and_then(Option::as_ref)
-                            .and_then(|producer| {
-                                producer.owner().map(|owner| owner.committed_revision())
-                            })
-                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?;
-                        ready
-                            .effect_controls
-                            .get_mut(effect)
-                            .and_then(Option::as_mut)
-                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?
-                            .begin_owner(base_revision)
-                            .map_err(|error| refuse(owner_command_reason(error), index))?;
-                        let marker = PreparedOwner {
-                            kind: PreparedOwnerKind::Eq,
-                            queue_slot: (strip_count * 3 + effect) as u32,
-                            base_revision,
-                            first_wire_index: index as u32,
-                            target_count: 0,
-                        };
-                        let Some(entry) = ready.command_decoded.get_mut(lowered) else {
-                            return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                        };
-                        *entry = StagedCommand {
-                            queue_slot: marker.queue_slot,
-                            original_wire_index: index as u32,
-                            kind: StagedCommandKind::PreparedOwner(marker),
-                        };
-                        lowered += 1;
-                    }
-                    for record in staged.iter().copied().take(produced) {
-                        let AdmittedCommand::Effect(EffectControlRecord::Parameter {
-                            parameter_index,
-                            channel,
-                            value,
-                        }) = record
-                        else {
-                            return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                        };
-                        ready
-                            .effect_controls
-                            .get_mut(effect)
-                            .and_then(Option::as_mut)
-                            .ok_or_else(|| refuse(COMMAND_REASON_UNSUPPORTED_KIND, index))?
-                            .edit_owner(parameter_index, channel, value)
-                            .map_err(|error| refuse(owner_command_reason(error), index))?;
-                    }
-                    produced = 0;
-                }
-                // Every original effect command is checked before the publication pass can
-                // mutate a queue or the observation mirror.  Keep this tied to `index`: a
-                // per-lane lowering may produce two records, but a refusal still names the
-                // original wire command that caused it.
-                let slot = strip_count * 3 + effect;
-                for record in staged.iter().copied().take(produced) {
-                    let AdmittedCommand::Effect(record) = record else {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
-                    };
-                    if ready.preflight_effect(slot, record).is_err() {
-                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-                    }
-                }
-                (slot, produced)
-            }
-            _ => return Err(refuse(COMMAND_REASON_MALFORMED, index)),
+        // `inserts` (1) and `console` (3); the retired `simd1` (0) and `simd2` (2) are refused here
+        // and never reinterpreted (decision 12, issue #1096).
+        let Some(address) = live_effect_address(u32::from(command.rack), command.effect_index)
+        else {
+            return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
         };
-        let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+        if ready.rack_effects.get(track).is_none() {
+            return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+        }
+        let Some(effect) = ready.effect_slot(track, address) else {
+            return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
+        };
+        let Some((descriptor, observed)) = ready
+            .effect_instances
+            .get(effect)
+            .and_then(Option::as_ref)
+            .map(|instance| (instance.descriptor, instance.reader.is_some()))
+        else {
             return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
         };
-        // Only an observation subscription is a queue record; every other record is a cell
-        // write and wants no room (#1345 D2).
-        let queued = staged
-            .iter()
-            .take(produced)
-            .filter(|record| {
-                matches!(
-                    record,
-                    AdmittedCommand::Effect(EffectControlRecord::Observe { .. })
-                )
-            })
-            .count();
-        *wanted = wanted.saturating_add(queued as u32);
-        for record in staged.into_iter().take(produced) {
-            let Some(entry) = ready.command_decoded.get_mut(lowered) else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, index));
-            };
-            *entry = StagedCommand {
-                queue_slot: slot as u32,
-                original_wire_index: index as u32,
-                kind: StagedCommandKind::Command(record),
-            };
-            lowered += 1;
+        let (tap_index, armed, window_blocks) = command
+            .into_observe_record(descriptor, observed)
+            .map_err(|reason| refuse(reason, index))?;
+        // One submission names each tap once: a record overwrites its tap's whole state and the
+        // submission drains in one block, so the second record would be a supersession the engine
+        // must not make (D15-2: Observe records are never superseded) and would not fit the tap's
+        // queue slot. Refused here, at this record's wire index, before the room pass or any
+        // write.
+        let bit = 1_u32
+            .checked_shl(tap_index)
+            .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+        let named = ready
+            .observe_named
+            .get_mut(effect)
+            .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+        if *named & bit != 0 {
+            return Err(refuse(COMMAND_REASON_MALFORMED, index));
         }
-    }
-    // Issue #1245 D3: the VCA fader pass. Every kind 16 and kind 3 in the batch has moved the VCA
-    // state; what each reached member still owes the render plane is the difference between its
-    // effective fader value and what the render plane was last told -- at most two records per
-    // reached strip, and never a redundant one (a settled lane's retarget moves bits). It stages
-    // them on each member's existing fader queue with the last kind 16 record's ramp, at the first
-    // one's wire index, ahead of the mute records below.
-    if vca_fader_seen {
-        for strip in 0..strip_count {
-            let slot = strip_count + strip;
-            if !ready.vcas.reaches(strip) {
-                continue;
-            }
-            let fader_db = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-                .strip(strip, false)
-                .fader_db;
-            for (lanes, db) in ready
-                .vcas
-                .fader_delta(strip, fader_db)
-                .into_iter()
-                .flatten()
-            {
-                let Some(entry) = ready.command_decoded.get_mut(lowered) else {
-                    return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-                };
-                *entry = StagedCommand {
-                    queue_slot: slot as u32,
-                    original_wire_index: vca_fader_first_wire_index,
-                    kind: StagedCommandKind::Command(AdmittedCommand::Fader(
-                        TrackFaderRecord::FaderDb {
-                            lanes,
-                            db,
-                            smoothing_samples: vca_fader_smoothing,
-                        },
-                    )),
-                };
-                lowered += 1;
-                ready.vcas.record_emitted_db(strip, lanes, db);
-            }
-        }
-    }
-    // The coalesced net emission (issue #210 phase 1, correction 1). Every solo and mute change in
-    // the batch has been applied; what the live controls owe the render plane is now the difference
-    // between the composed effective mute and what the render plane was last told -- at most two
-    // records per strip, and **never** a redundant one. That last clause is load-bearing for bit
-    // identity, not an optimisation: re-muting an already-settled-muted lane with a nonzero
-    // smoothing window re-enters the ramp kernel and turns an exact `+0.0` into `-0.0` for a
-    // negative input. It runs only for a batch that actually moved a solo bit; without one, every
-    // mute command already staged its own record and the difference is empty by construction.
-    //
-    // The fade is the last solo record's `smoothing_samples`: a batch is one gesture, and the
-    // gesture that moved the solo state is the one whose declick window the live controls asked
-    // for. A VCA mute (kind 17, issue #1245 D3) moves the same composition and runs the same pass:
-    // the ramp is the last kind 9 or 17 record's, and the records answer to the first one's wire
-    // index.
-    if solo_seen || vca_mute_seen {
-        // Decision 17 C7, slice S7c D5: every strip's effective mute is the core's, read over the
-        // mirrors as the batch left them (a kind 17 already moved the VCA state), with the solo
-        // term computed once for the pass. The pass writes only the emitted mirror, which neither
-        // the solo term nor the VCA mute reads.
-        let any_solo = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-            .any_solo(&mut any_solo_cache);
-        for strip in 0..strip_count {
-            let slot = strip_count + strip;
-            let mute = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-                .strip(strip, any_solo)
-                .mute;
-            for (lanes, muted) in ready.solo.strip_delta(strip, mute).into_iter().flatten() {
-                let Some(entry) = ready.command_decoded.get_mut(lowered) else {
-                    return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-                };
-                *entry = StagedCommand {
-                    queue_slot: slot as u32,
-                    original_wire_index: coalesce_first_wire_index,
-                    kind: StagedCommandKind::Command(AdmittedCommand::Fader(
-                        TrackFaderRecord::Mute {
-                            lanes,
-                            muted,
-                            smoothing_samples: coalesce_smoothing,
-                        },
-                    )),
-                };
-                lowered += 1;
-                ready.solo.record_emitted(strip, lanes, muted);
-            }
-        }
-    }
-    // Issue #1224 D3: the follow pass. It runs after every kind 4 record and the coalescing pass
-    // above, so it reads the batch's final effective mutes: a send with `follows_mute` whose
-    // source strip's effective lane mutes moved gets one record, built from its mirror through
-    // the prepared route's coefficient function, with the new source lanes. `delta` yields only a
-    // change, so a settled send is never retargeted.
-    //
-    // The ramp is the last strip-mute record staged for the source strip in this batch that
-    // covers a lane whose effective mute changed, in staging order (kind 4 records in wire order,
-    // then the coalescing pass's), and the follow record answers to that record's wire index.
-    // Every effective-mute change stages a strip mute record covering its lane, so one always
-    // exists; a follow without one is refused rather than guessed.
-    //
-    // Nothing is written here: the records join the batch's one cell write below with every
-    // other staged entry, and the mirror's lanes move under its shadow, after every record is
-    // built.
-    if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
-        let follow_start = lowered;
-        let route_base = strip_count * 3 + ready.effect_instances.len();
-        // Decision 17 C7, slice S7c D5: each send's follow gate is `controls::effective_gate`'s.
-        let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
-        let any_solo = view.any_solo(&mut any_solo_cache);
-        let follow_gate = |route: usize| view.follow_gate(route, any_solo);
-        for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &follow_gate) {
-            let (Some(entry), Some(producer)) =
-                (ready.routes.get(route), ready.route_controls.get(route))
-            else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-            };
-            let fader_slot = (strip_count + entry.source_strip) as u32;
-            // Only a record covering a lane whose effective mute changed sets the ramp: a no-op
-            // record on the other lane must not (#1224 verdict MINOR-1). The scan stops at the
-            // follow records, which are never strip mutes (MINOR-2).
-            let changed = [
-                source_lane_muted[0] != entry.source_lane_muted[0],
-                source_lane_muted[1] != entry.source_lane_muted[1],
-            ];
-            let Some((smoothing_samples, wire_index)) = ready.command_decoded[..follow_start]
-                .iter()
-                .rev()
-                .find_map(|staged| match staged.kind {
-                    StagedCommandKind::Command(AdmittedCommand::Fader(
-                        TrackFaderRecord::Mute {
-                            lanes,
-                            smoothing_samples,
-                            ..
-                        },
-                    )) if staged.queue_slot == fader_slot
-                        && match lanes {
-                            BuiltinLaneSelector::Left => changed[0],
-                            BuiltinLaneSelector::Right => changed[1],
-                            BuiltinLaneSelector::Both => changed[0] || changed[1],
-                        } =>
-                    {
-                        Some((smoothing_samples, staged.original_wire_index))
-                    }
-                    _ => None,
-                })
-            else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-            };
-            // A ramp past `ROUTE_RAMP_LENGTH_MAXIMUM` cannot be followed at the strip's length, so
-            // the strip mute that asked for it is refused whole, never clamped.
-            let record = producer
-                .record(
-                    entry.gain_db,
-                    entry.matrix,
-                    entry.mute,
-                    source_lane_muted,
-                    smoothing_samples,
-                )
-                .map_err(|_| refuse(COMMAND_REASON_DOMAIN, wire_index as usize))?;
-            let slot = route_base + route;
-            let Some(staged) = ready.command_decoded.get_mut(lowered) else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-            };
-            *staged = StagedCommand {
-                queue_slot: slot as u32,
-                original_wire_index: wire_index,
-                kind: StagedCommandKind::Command(AdmittedCommand::Route(record)),
-            };
-            lowered += 1;
-        }
-        for staged in follow_start..lowered {
-            let route = ready.command_decoded[staged].queue_slot as usize - route_base;
-            let lanes = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-                .follow_gate(route, any_solo);
-            if !ready.routes.follow(route, lanes) {
-                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
-            }
-        }
-    }
-    // Decode and validate every companion record before any target publication. An address with
-    // no first semantic marker is an orphan, while a prepared-capable owner with no companion
-    // records is rejected by its exact target validator below.
-    if let Some(companion) = companion.as_ref() {
-        for index in 0..companion.target_count {
-            let target = companion_target(companion, index).map_err(|_| {
-                refuse(
-                    COMMAND_REASON_MALFORMED,
-                    companion_wire_index(ready, lowered, companion, index),
-                )
-            })?;
-            let Some((queue_slot, kind)) = prepared_queue_address(
-                ready,
-                target.track_index as usize,
-                target.rack,
-                target.effect_index,
-            ) else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-            };
-            if kind == PreparedOwnerKind::Eq {
-                let effect = queue_slot
-                    .checked_sub(strip_count * 3)
-                    .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, 0))?;
-                let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref)
-                else {
-                    return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-                };
-                if !producer.has_owner() {
-                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, 0));
-                }
-            }
-        }
-    }
-    // Gather each owner's <=12 supplied targets on the stack and run its exact candidate
-    // validator. This performs no coefficient design and retains no target cache.
-    for entry in 0..lowered {
-        let StagedCommandKind::PreparedOwner(mut marker) = ready.command_decoded[entry].kind else {
-            continue;
+        *named |= bit;
+        let Some(wanted) = ready.command_wanted.get_mut(effect) else {
+            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
         };
-        let mut target_count = 0_usize;
-        if marker.kind == PreparedOwnerKind::Eq {
-            let mut targets = [effect_contract::PreparedEffectTarget {
-                slot: 0,
-                channel: effect_contract::ParameterChannel::Both,
-                words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-            }; host_core::EQ_TARGET_CAPACITY];
-            if let Some(companion) = companion.as_ref() {
-                for index in 0..companion.target_count {
-                    let target = companion_target(companion, index).map_err(|_| {
-                        refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize)
-                    })?;
-                    let Some((queue_slot, kind)) = prepared_queue_address(
-                        ready,
-                        target.track_index as usize,
-                        target.rack,
-                        target.effect_index,
-                    ) else {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-                    };
-                    if kind != PreparedOwnerKind::Eq || queue_slot != marker.queue_slot as usize {
-                        continue;
-                    }
-                    if target.base_revision != marker.base_revision || target_count == targets.len()
-                    {
-                        return Err(refuse(
-                            COMMAND_REASON_MALFORMED,
-                            marker.first_wire_index as usize,
-                        ));
-                    }
-                    targets[target_count] = target.target;
-                    target_count += 1;
-                }
-            }
-            let effect = marker
-                .queue_slot
-                .checked_sub((strip_count * 3) as u32)
-                .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?
-                as usize;
-            let producer = ready
-                .effect_controls
-                .get_mut(effect)
-                .and_then(Option::as_mut)
-                .ok_or_else(|| {
-                    refuse(
-                        COMMAND_REASON_UNSUPPORTED_KIND,
-                        marker.first_wire_index as usize,
-                    )
-                })?;
-            if let Err(error) =
-                producer.preflight_candidate_targets(marker.base_revision, &targets[..target_count])
-            {
-                return Err(refuse(
-                    owner_command_reason(error),
-                    marker.first_wire_index as usize,
-                ));
-            }
-        } else {
-            let track = marker
-                .queue_slot
-                .checked_sub((strip_count * 2) as u32)
-                .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?
-                as usize;
-            let mut targets = [PreparedInputFilterTarget {
-                lanes: BuiltinLaneSelector::Both,
-                section: 0,
-                pair: [0.0; 2],
-                coefficients: [0.0; 6],
-            }; 4];
-            if let Some(companion) = companion.as_ref() {
-                for index in 0..companion.target_count {
-                    let target = companion_target(companion, index).map_err(|_| {
-                        refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize)
-                    })?;
-                    let Some((queue_slot, kind)) = prepared_queue_address(
-                        ready,
-                        target.track_index as usize,
-                        target.rack,
-                        target.effect_index,
-                    ) else {
-                        return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-                    };
-                    if kind != PreparedOwnerKind::BuiltinInput
-                        || queue_slot != marker.queue_slot as usize
-                    {
-                        continue;
-                    }
-                    if target.base_revision != marker.base_revision || target_count == targets.len()
-                    {
-                        return Err(refuse(
-                            COMMAND_REASON_MALFORMED,
-                            marker.first_wire_index as usize,
-                        ));
-                    }
-                    targets[target_count] = companion_builtin_target(target).map_err(|_| {
-                        refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize)
-                    })?;
-                    target_count += 1;
-                }
-            }
-            let shadow = ready.input_filter_shadows.get(track).ok_or_else(|| {
-                refuse(
-                    COMMAND_REASON_UNSUPPORTED_KIND,
-                    marker.first_wire_index as usize,
-                )
-            })?;
-            if shadow.revision.checked_add(1).is_none() {
-                return Err(refuse(
-                    COMMAND_REASON_MALFORMED,
-                    marker.first_wire_index as usize,
-                ));
-            }
-            validate_builtin_target_set(shadow, &targets[..target_count])
-                .map_err(|_| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?;
-        }
-        // An owner's targets are cells (#1345, #1346): they want no room.
-        marker.target_count = target_count as u32;
-        if let Some(staged) = ready.command_decoded.get_mut(entry) {
-            staged.kind = StagedCommandKind::PreparedOwner(marker);
-        }
+        *wanted = wanted.saturating_add(1);
+        let Some(entry) = ready.command_decoded.get_mut(staged_count) else {
+            return Err(refuse(COMMAND_REASON_MALFORMED, index));
+        };
+        *entry = StagedObserve {
+            effect: effect as u32,
+            original_wire_index: index as u32,
+            tap_index,
+            armed,
+            window_blocks,
+        };
+        staged_count += 1;
     }
-    if let Some(companion) = companion.as_ref() {
-        for index in 0..companion.target_count {
-            let target = companion_target(companion, index).map_err(|_| {
-                refuse(
-                    COMMAND_REASON_MALFORMED,
-                    companion_wire_index(ready, lowered, companion, index),
-                )
-            })?;
-            let Some((queue_slot, kind)) = prepared_queue_address(
-                ready,
-                target.track_index as usize,
-                target.rack,
-                target.effect_index,
-            ) else {
-                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-            };
-            let matched = ready.command_decoded[..lowered].iter().any(|entry| {
-                matches!(entry.kind, StagedCommandKind::PreparedOwner(marker)
-                    if marker.queue_slot as usize == queue_slot
-                        && marker.kind == kind
-                        && marker.base_revision == target.base_revision)
-            });
-            if !matched {
-                return Err(refuse(COMMAND_REASON_MALFORMED, 0));
-            }
-        }
-    }
-    for entry in 0..lowered {
+    // The room pass: an effect's observation queue holds one subscription per declared tap, and
+    // the subscriptions this submission queues must fit it.
+    for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
-        let slot = staged.queue_slot as usize;
-        // The matrix and fader bands are cells (#1312): a write needs no room.
-        if slot < strip_count * 2 {
-            continue;
-        }
-        // So is the input band (#1346): no room to want, but the strip must hold the cells. A
-        // strip prepared without its input lane is unaddressable here, like an absent effect lane
-        // (#1254 D4); a plan that takes commands always has it and an option-0 plan takes none
-        // (it refuses every command first), so this never fires.
-        if slot < strip_count * 3 {
-            if ready
-                .controls
-                .get(slot - strip_count * 2)
-                .and_then(|control| control.input.as_ref())
-                .is_none()
-            {
-                return Err(refuse(
-                    COMMAND_REASON_UNSUPPORTED_KIND,
-                    staged.original_wire_index as usize,
-                ));
-            }
-            continue;
-        }
-        // The send band follows the effects (#1347): a send's target is a cell, which has no room
-        // to want. Its route index was resolved while staging.
-        if slot >= strip_count * 3 + ready.effect_instances.len() {
-            continue;
-        }
-        // An effect's queue is its observation queue (#1345 D2): the subscriptions this
-        // submission queues must fit it. Its parameter, bypass and target values are cells and
-        // want none.
-        let needed = ready.command_wanted[slot];
-        if needed == 0 {
-            continue;
-        }
-        let Some(available) = ready.queue_available(slot) else {
+        let effect = staged.effect as usize;
+        let needed = ready.command_wanted[effect];
+        let Some(available) = ready.queue_available(effect) else {
             return Err(refuse(
                 COMMAND_REASON_UNSUPPORTED_KIND,
                 staged.original_wire_index as usize,
             ));
         };
-        if needed > available || ready.in_flight[slot].checked_add(needed).is_none() {
+        if needed > available || ready.in_flight[effect].checked_add(needed).is_none() {
             return Err(refuse(
                 COMMAND_REASON_BACKPRESSURE,
                 staged.original_wire_index as usize,
             ));
         }
     }
-    // The strips' cells, under one stamp (#1312 D7). Every check of the batch has passed, so the
-    // stamp is the last fallible step: a refused batch above stamped and wrote nothing, and used
-    // no revision. The revision is host-local, the next above the gate's last published one, and
-    // is published as soon as the batch's cells are written, whatever the later passes do: the
-    // writes are made, so the revision that reveals them must follow, or a later batch would
-    // reveal them under its own.
-    write_strip_cells(ready, lowered, strip_count, companion.as_ref())?;
-    for entry in 0..lowered {
+    for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
-        let slot = staged.queue_slot as usize;
-        match staged.kind {
-            // Cells were written above: the strips', the sends' and the effects' values, and the
-            // owners' targets.
-            StagedCommandKind::Command(
-                AdmittedCommand::Matrix(_)
-                | AdmittedCommand::Fader(_)
-                | AdmittedCommand::Input(_)
-                | AdmittedCommand::Route(_)
-                | AdmittedCommand::Effect(
-                    EffectControlRecord::Parameter { .. } | EffectControlRecord::Bypass(_),
-                ),
-            )
-            | StagedCommandKind::PreparedOwner(_) => {}
-            // A prepared target reaches a lane only through its owner's transaction, and
-            // `preflight_effect` refuses a raw one while staging.
-            StagedCommandKind::Command(AdmittedCommand::Effect(
-                EffectControlRecord::PreparedTarget(_),
-            )) => unreachable!("a raw prepared target was refused while staging"),
-            // The only queue record: an observation subscription, in order (#1345 D2).
-            StagedCommandKind::Command(record) => {
-                ready
-                    .push(slot, record, applied_at_sample)
-                    .expect("the free-room pass checked this record's room");
-                ready.in_flight[slot] += 1;
-                ready.has_in_flight_commands = true;
-            }
-        }
-    }
-    for entry in 0..lowered {
-        let staged = ready.command_decoded[entry];
-        let StagedCommandKind::PreparedOwner(marker) = staged.kind else {
-            continue;
-        };
-        if marker.kind == PreparedOwnerKind::Eq {
-            let effect = marker.queue_slot as usize - strip_count * 3;
-            ready
-                .effect_controls
-                .get_mut(effect)
-                .and_then(Option::as_mut)
-                .expect("an Eq owner marker addresses a prepared effect producer")
-                .commit_owner()
-                .expect("the owner's targets were published");
-        } else {
-            let track = marker.queue_slot as usize - strip_count * 2;
-            ready
-                .input_filter_shadows
-                .get_mut(track)
-                .expect("a builtin input owner marker addresses a track's shadow")
-                .commit(marker.base_revision)
-                .expect("the shadow's base revision was checked while staging");
-        }
+        ready
+            .push_observe(staged, applied_at_sample)
+            .expect("the free-room pass checked this record's room");
+        ready.in_flight[staged.effect as usize] += 1;
+        ready.has_in_flight_commands = true;
     }
     Ok(())
 }
@@ -7266,7 +4296,9 @@ fn project_buffers(
     let output_pcm_bytes = u64::from(quantum_frames)
         .checked_mul(8)
         .ok_or_else(arithmetic)?;
-    let command_records = if options.live_control_command_queue_records == 0 {
+    // The command staging exists exactly when the boot asked for observation taps (#1565): kinds 7
+    // and 8 are the only records it holds.
+    let command_records = if options.live_control_observation_taps == 0 {
         0
     } else {
         MAXIMUM_COMMAND_RECORDS
@@ -7277,19 +4309,13 @@ fn project_buffers(
     let plane_reference_bytes = u64::from(maximum_source_channels)
         .checked_mul(size_of::<&[f32]>() as u64)
         .ok_or_else(arithmetic)?;
-    let prepared_control_bytes = if command_records == 0 {
-        0
-    } else {
-        u64::try_from(size_of::<PreparedControlWorkspace>()).map_err(|_| arithmetic())?
-    };
     let host_shell_bytes =
         u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| arithmetic())?;
     let fixed_metadata = host_shell_bytes
         .checked_sub(u64::from(BOOT_OPTIONS_BYTES) + u64::from(STATUS_BYTES))
         .ok_or_else(arithmetic)?;
     let bridge_metadata = fixed_metadata
-        .checked_add(prepared_control_bytes)
-        .and_then(|bytes| bytes.checked_add(plane_reference_bytes))
+        .checked_add(plane_reference_bytes)
         .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .and_then(|bytes| bytes.checked_add(crate::ffi::live_response_staging_retained_bytes()))
         .and_then(|bytes| {
@@ -7330,7 +4356,6 @@ fn project_buffers(
         .unwrap_or(0)
         .max(host_shell_bytes)
         .max(plane_reference_bytes)
-        .max(prepared_control_bytes)
         .max(crate::ffi::observation_staging_largest_allocation_bytes())
         .max(crate::ffi::live_response_staging_largest_allocation_bytes())
         .max(crate::ffi::spectrum_staging_largest_allocation_bytes(
@@ -7380,7 +4405,6 @@ fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuff
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
         )
         .map_err(allocation)?,
-        prepared_control: (projection.command_records != 0).then(PreparedControlWorkspace::zeroed),
     })
 }
 
@@ -7399,22 +4423,26 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.abi_version",
         ));
     }
-    // Issue #143: observation capacity requires a control channel to carry the subscription, and a
-    // master designation must be a plausible track index. The session-level range check is the
-    // facade's; this one only refuses what cannot be a track index at all.
+    // Issue #143: a master designation must be a plausible track index. The session-level range
+    // check is the facade's; this one only refuses what cannot be a track index at all.
     if options.reserved0 != 0 {
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
             "web.options.reserved0",
         ));
     }
+    // #1565: the word at offset 32 was the live-command queue word. It is reserved now, and a
+    // writer that still sets it is refused rather than ignored.
+    if options.reserved1 != 0 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.reserved1",
+        ));
+    }
     if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || (options.live_control_observation_taps != 0
-            && options.live_control_command_queue_records == 0)
         || options.live_control_master_track_plus_one > u64::from(u32::MAX)
         || (options.live_control_master_track_plus_one != 0
             && options.live_control_observation_taps == 0)
-        || options.live_control_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
         || options.live_control_meter_blocks > u64::from(u32::MAX)
     {
         return Err(BootFailure::fixed(
@@ -7432,182 +4460,6 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
 /// word. Bridge storage is the exact layout projection above. Preparation's graph/effect/builtin
 /// subcompilers receive this same total budget and retain their existing checked pre-allocation
 /// estimators, so no structural count ceiling is introduced here.
-/// The VCA shape the browser bounds at boot (issue #1245 amendment A1).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct BrowserVcaShape {
-    strips: u64,
-    vcas: u64,
-    /// (strip, reaching VCA) pairs: the entries of `vca_reach()`.
-    pairs: u64,
-    /// Membership entries over every VCA.
-    members: u64,
-}
-
-impl BrowserVcaShape {
-    /// Exactly the bytes [`LiveVcaState::try_new`] keeps for this shape: per VCA its offset and
-    /// mute, per strip its own and emitted dB, the two flattened reach tables with their starts,
-    /// and the shadow of the four mutable arrays. Zero without a VCA.
-    fn retained_bytes(self) -> Option<u64> {
-        if self.vcas == 0 {
-            return Some(0);
-        }
-        let word = size_of::<usize>() as u64;
-        let vca = (size_of::<[f32; 2]>() + size_of::<[bool; 2]>()) as u64;
-        let strip = 2 * size_of::<[f32; 2]>() as u64;
-        let mirrors = self
-            .vcas
-            .checked_mul(vca)?
-            .checked_add(self.strips.checked_mul(strip)?)?;
-        let tables = (self.strips + 1)
-            .checked_add(self.vcas + 1)?
-            .checked_add(self.pairs.checked_mul(2)?)?
-            .checked_mul(word)?;
-        mirrors.checked_mul(2)?.checked_add(tables)
-    }
-
-    /// A conservative bound on the transient bytes [`LiveVcaState::try_new`] holds beyond what it
-    /// keeps. `try_new` holds one `vca_reach()` result (a per-strip list with up to doubled
-    /// capacity, plus its parent index) and the inverse table's cursor, and drops the reach lists
-    /// before it seeds the emitted mirror from the flattened tables. This charges two reach
-    /// results and the effective faders, so it over-counts. At the browser's bounds (256 VCAs,
-    /// 16,384 pairs) it is never the binding refusal: the exact retained-budget check, or
-    /// preparation's own resource limit, refuses a smaller budget first (the #1245 verdict's
-    /// NIT-2); it stays as a defensive pre-check before any per-pair table is built.
-    fn transient_bytes(self) -> Option<u64> {
-        if self.vcas == 0 {
-            return Some(0);
-        }
-        let word = size_of::<usize>() as u64;
-        let reach = self
-            .strips
-            .checked_mul(size_of::<Vec<usize>>() as u64)?
-            .checked_add(self.pairs.checked_mul(2 * word)?)?
-            .checked_add(self.members.checked_mul(VCA_PARENT_ENTRY_BYTES)?)?
-            .checked_add(self.vcas.checked_mul(word + 1)?)?;
-        reach
-            .checked_mul(2)?
-            .checked_add(
-                self.strips
-                    .checked_mul(size_of::<controls::EffectiveStrip>() as u64)?,
-            )?
-            .checked_add(self.vcas.checked_mul(word)?)
-    }
-}
-
-/// Count a normalized model's VCAs and (strip, reaching VCA) pairs, refusing a session past the
-/// browser's bounds before any per-pair table exists (issue #1245 amendment A1).
-///
-/// Each VCA's ancestors -- the VCAs that reach it -- are one fixed-width bitset, filled in an order
-/// where every VCA follows the VCAs that list it; a strip's reach is the union, over the VCAs that
-/// list it, of each one's ancestors and itself. The work is linear in the membership entries, and
-/// it allocates nothing proportional to the pair count it is bounding.
-fn browser_vca_shape(model: &session::SessionModel) -> Result<BrowserVcaShape, BootFailure> {
-    let refused = |code: &str| BootFailure::fixed(RESULT_REFUSED_BUDGET, code);
-    let allocation = || refused("web.resource.allocation");
-    let strips = (model.tracks.len() + model.submixes.len()) as u64;
-    let vcas = &model.vcas;
-    if vcas.is_empty() {
-        return Ok(BrowserVcaShape {
-            strips,
-            ..BrowserVcaShape::default()
-        });
-    }
-    if vcas.len() > MAXIMUM_BROWSER_VCAS {
-        return Err(refused("web.vca.maximum_vcas"));
-    }
-    // VCA IDs, sorted, for member lookup.
-    let mut ids: Vec<(&str, usize)> = Vec::new();
-    ids.try_reserve_exact(vcas.len())
-        .map_err(|_| allocation())?;
-    ids.extend(
-        vcas.iter()
-            .enumerate()
-            .map(|(index, vca)| (vca.id.as_str(), index)),
-    );
-    ids.sort_unstable();
-    let vca_of = |id: &str| {
-        ids.binary_search_by(|(candidate, _)| (*candidate).cmp(id))
-            .ok()
-            .map(|position| ids[position].1)
-    };
-    let members: usize = vcas.iter().map(|vca| vca.members.len()).sum();
-    // Kahn's order over the VCA-to-VCA membership edges.
-    let mut listed_by = vec_zeroed::<u32>(vcas.len()).ok_or_else(allocation)?;
-    for vca in vcas {
-        for member in &vca.members {
-            if let Some(child) = vca_of(member.as_str()) {
-                listed_by[child] += 1;
-            }
-        }
-    }
-    let mut ancestors = vec_zeroed::<[u64; VCA_REACH_WORDS]>(vcas.len()).ok_or_else(allocation)?;
-    let mut ready: Vec<usize> = Vec::new();
-    ready
-        .try_reserve_exact(vcas.len())
-        .map_err(|_| allocation())?;
-    ready.extend((0..vcas.len()).filter(|index| listed_by[*index] == 0));
-    // Every membership entry naming a strip, with the reach it contributes.
-    let mut strip_entries: Vec<(&str, [u64; VCA_REACH_WORDS])> = Vec::new();
-    strip_entries
-        .try_reserve_exact(members)
-        .map_err(|_| allocation())?;
-    let mut ordered = 0_usize;
-    while let Some(index) = ready.pop() {
-        ordered += 1;
-        let mut reach = ancestors[index];
-        reach[index / 64] |= 1 << (index % 64);
-        for member in &vcas[index].members {
-            match vca_of(member.as_str()) {
-                Some(child) => {
-                    for (word, bits) in ancestors[child].iter_mut().zip(reach) {
-                        *word |= bits;
-                    }
-                    listed_by[child] -= 1;
-                    if listed_by[child] == 0 {
-                        ready.push(child);
-                    }
-                }
-                None => strip_entries.push((member.as_str(), reach)),
-            }
-        }
-    }
-    // Validation refuses a membership cycle; an order that misses a VCA cannot be counted.
-    if ordered != vcas.len() {
-        return Err(refused("web.vca.reach_pairs"));
-    }
-    strip_entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    let mut pairs = 0_u64;
-    for run in strip_entries.chunk_by(|left, right| left.0 == right.0) {
-        let mut reach = [0_u64; VCA_REACH_WORDS];
-        for (_, bits) in run {
-            for (word, bit) in reach.iter_mut().zip(bits) {
-                *word |= bit;
-            }
-        }
-        pairs += reach
-            .iter()
-            .map(|word| u64::from(word.count_ones()))
-            .sum::<u64>();
-    }
-    if pairs > MAXIMUM_BROWSER_VCA_REACH_PAIRS {
-        return Err(refused("web.vca.reach_pairs"));
-    }
-    Ok(BrowserVcaShape {
-        strips,
-        vcas: vcas.len() as u64,
-        pairs,
-        members: members as u64,
-    })
-}
-
-/// `count` zeroed values in an exactly reserved `Vec`, or `None` when it cannot be reserved.
-fn vec_zeroed<T: Copy + Default>(count: usize) -> Option<Vec<T>> {
-    let mut values = Vec::new();
-    values.try_reserve_exact(count).ok()?;
-    values.resize(count, T::default());
-    Some(values)
-}
-
 fn projected_retained_bytes(
     compiled: &CompiledSession,
     source_ring_frames: u32,
@@ -8241,7 +5093,9 @@ fn compile_ready(
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
 ) -> Result<(ReadyOwnership, WebPlan, WebResourceReport), BootFailure> {
-    let commands_enabled = options_enable_commands(options);
+    // The command staging, and with it the observation records, exist exactly when the boot asked
+    // for observation taps (#1565).
+    let commands_enabled = options.live_control_observation_taps != 0;
     // #1312 D2, #1399: the session's `live_values_superseded` count is the control plane's, made
     // once before any plan is prepared; the preparer leaves a handle on it in the record, which the
     // status reads. #1400 D5: the three boot shapes are `prepare_web_host`'s.
@@ -8302,90 +5156,20 @@ fn compile_ready(
     // the bridge reads.
     let ready_metadata =
         checked_sum_prepare([resources.control_retained_bytes, engine.session_model_bytes])?;
-    let mut bridge_metadata = report
+    let bridge_metadata = report
         .bridge_metadata_bytes
         .checked_add(ready_metadata)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let mut bridge_retained = report
+    let bridge_retained = report
         .bridge_retained_bytes
         .checked_add(ready_metadata)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let mut bridge_largest = report
+    let bridge_largest = report
         .largest_bridge_allocation_bytes
         .max(control_table)
         .max(id_arena)
         .max(control.catalog_resources().largest_allocation_bytes)
         .max(engine.session_largest_allocation_bytes);
-    // One input-filter shadow per strip, the tracks then the submixes (issue #1213 D1): the order
-    // of `handles.strips`, so a bus's prepared input-filter owner is its strip index.
-    let mut input_filter_shadows = Vec::new();
-    if commands_enabled {
-        let model = session.normalized_model();
-        input_filter_shadows
-            .try_reserve_exact(model.tracks.len() + model.submixes.len())
-            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-        let strip_builtins = model
-            .tracks
-            .iter()
-            .map(|track| &track.builtins)
-            .chain(model.submixes.iter().map(|submix| &submix.builtins));
-        for builtins in strip_builtins {
-            let candidate = [
-                if builtins.left.hpf_hz == 0.0 {
-                    0.0
-                } else {
-                    builtins.left.hpf_hz
-                },
-                if builtins.left.lpf_hz == 0.0 {
-                    0.0
-                } else {
-                    builtins.left.lpf_hz
-                },
-                if builtins.right.hpf_hz == 0.0 {
-                    0.0
-                } else {
-                    builtins.right.hpf_hz
-                },
-                if builtins.right.lpf_hz == 0.0 {
-                    0.0
-                } else {
-                    builtins.right.lpf_hz
-                },
-            ];
-            builtins::validate_input_filter_pair(
-                session_sample_rate_hz,
-                candidate[0],
-                candidate[1],
-            )
-            .map_err(|_| fixed_diagnostic("web.live_controls.input_filter"))?;
-            builtins::validate_input_filter_pair(
-                session_sample_rate_hz,
-                candidate[2],
-                candidate[3],
-            )
-            .map_err(|_| fixed_diagnostic("web.live_controls.input_filter"))?;
-            input_filter_shadows.push(BuiltinInputShadow {
-                committed: candidate,
-                candidate,
-                dirty: [false; 4],
-                revision: 0,
-            });
-        }
-    }
-    let input_shadow_bytes = u64::try_from(
-        input_filter_shadows
-            .len()
-            .checked_mul(size_of::<BuiltinInputShadow>())
-            .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?,
-    )
-    .map_err(|_| fixed_diagnostic("web.resource.arithmetic"))?;
-    bridge_metadata = bridge_metadata
-        .checked_add(input_shadow_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    bridge_retained = bridge_retained
-        .checked_add(input_shadow_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    bridge_largest = bridge_largest.max(input_shadow_bytes);
     let largest_named = bridge_largest.max(engine.largest_engine_allocation_bytes);
     report.bridge_metadata_bytes = bridge_metadata;
     report.bridge_retained_bytes = bridge_retained;
@@ -8436,20 +5220,6 @@ fn compile_ready(
     rack_effects
         .try_reserve_exact(strip_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    // Issue #210 phase 1: the solo state's user-mute mirror starts from the *session's* baked
-    // fader mutes -- the same `left_mute`/`right_mute` words `track_parameters` compiles into the
-    // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
-    // because that order is the addressing authority for every queue, meter and command index.
-    // One seed per strip (issue #1213 D3): the tracks, soloable, then the submixes, solo-safe, each
-    // seeded from its own session fader mutes. Issue #1242 D3, decision 17 C7: each also carries
-    // its effective mute from the same composition the compilers baked (`controls::effective`, in
-    // strip order), which is what the render plane has been told, before the solo state and the
-    // live-send mirror are built from it.
-    let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
-    prepared_mutes
-        .try_reserve_exact(strip_count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let effective_faders = controls::effective(model, &controls::MonitorOverlay::default());
     let count = |effects: usize| -> Result<u32, Vec<u8>> {
         u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
     };
@@ -8463,11 +5233,6 @@ fn compile_ready(
             count(track.inserts.effects.len())?,
             count(model.console.post_insert.len())?,
         ]);
-        prepared_mutes.push(StripMuteSeed {
-            mutes: [track.fader.left_mute, track.fader.right_mute],
-            solo_safe: false,
-            effective_mute: effective_faders.strips[prepared_mutes.len()].mute,
-        });
     }
     for submix in &model.submixes {
         rack_effects.push([
@@ -8475,11 +5240,6 @@ fn compile_ready(
             count(submix.inserts.effects.len())?,
             count(model.console.post_insert.len())?,
         ]);
-        prepared_mutes.push(StripMuteSeed {
-            mutes: [submix.fader.left_mute, submix.fader.right_mute],
-            solo_safe: true,
-            effective_mute: effective_faders.strips[prepared_mutes.len()].mute,
-        });
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
     // instances declared by every earlier strip, so `effect_slot` is arithmetic rather than a
@@ -8529,63 +5289,6 @@ fn compile_ready(
             descriptor,
         });
     }
-    // #1381a: the send producers are the control plane's too, so the retained command path holds
-    // no live send and its mirror is empty.
-    let route_controls: Vec<RouteControlProducer> = Vec::new();
-    let solo = LiveControlSoloState::try_new(&prepared_mutes)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let routes = LiveRouteState::empty();
-    // Issue #1245 D3/D4: the live VCA state, built after the solo state from the same normalized
-    // model, and charged beside the route mirror -- every byte it reserved, its shadow included.
-    // A session without VCAs, or a host without live controls (which refuses every VCA kind),
-    // keeps the empty state and adds nothing to any row.
-    let vcas = if !commands_enabled {
-        LiveVcaState::empty()
-    } else {
-        LiveVcaState::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?
-    };
-    // Issue #1560: the strips' mirrored values, seeded from the same model and charged beside the
-    // VCA state, its shadow included.
-    let strip_values =
-        LiveStripValues::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    // Issue #1364 D2: the session's ramp table and the per-strip pan windows, computed here, once,
-    // on the control thread, and charged like the other retained tables.
-    let ramps =
-        SessionRamps::try_new(model).ok_or_else(|| fixed_diagnostic("web.resource.allocation"))?;
-    // Decision 17, slice S7c D1: the core's descriptor of every row the live kinds write.
-    let rows = WebControlRows::new(session_sample_rate_hz)
-        .ok_or_else(|| fixed_diagnostic("web.live_controls.rows"))?;
-    let live_state_retained = vcas
-        .retained_bytes()
-        .checked_add(ramps.retained_bytes())
-        .and_then(|bytes| bytes.checked_add(strip_values.retained_bytes()))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let live_state_largest = vcas
-        .largest_allocation_bytes()
-        .max(ramps.retained_bytes())
-        .max(strip_values.largest_allocation_bytes());
-    report.bridge_metadata_bytes = report
-        .bridge_metadata_bytes
-        .checked_add(live_state_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_retained_bytes = report
-        .bridge_retained_bytes
-        .checked_add(live_state_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.largest_bridge_allocation_bytes = report
-        .largest_bridge_allocation_bytes
-        .max(live_state_largest);
-    report.largest_named_allocation_bytes = report
-        .largest_named_allocation_bytes
-        .max(live_state_largest);
-    // Three per-strip bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity, each
-    // `T + S` long since issue #1213 D1; the effect band follows and covers every strip, and the
-    // live send band follows it (issue #1222 D4).
-    let queue_count = strip_count
-        .checked_mul(3)
-        .and_then(|value| value.checked_add(total_effects as usize))
-        .and_then(|value| value.checked_add(route_controls.len()))
-        .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
     // Issue #143: the observation handles stay in the plan's attachment, in host-core's order; the
     // browser keeps, in the same dense `effect_slot` order the command addressing uses, which
     // reader each slot's handle is and what the handle declares, so one index serves both the
@@ -8727,14 +5430,16 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
-    // The decoded command array carries the enlarged internal EffectControlRecord enum. Its
-    // typed backing is a separate retained allocation from the public 48-byte wire staging row;
-    // charge the full actual array before the final aggregate budget check.
-    let decoded_count =
-        command_staging_count(strip_count, routes.len(), vcas.reached_strip_count())?;
+    // The decoded observation staging is a separate retained allocation from the public 48-byte
+    // wire staging row; charge the full actual array before the final aggregate budget check.
+    let decoded_count = if commands_enabled {
+        MAXIMUM_COMMAND_RECORDS as usize
+    } else {
+        0
+    };
     let decoded_bytes = u64::try_from(decoded_count)
         .ok()
-        .and_then(|count| count.checked_mul(size_of::<StagedCommand>() as u64))
+        .and_then(|count| count.checked_mul(size_of::<StagedObserve>() as u64))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -8757,12 +5462,7 @@ fn compile_ready(
         #[cfg(feature = "test-support")]
         limits,
         commands_enabled,
-        // #1381a: the control plane owns the plan's gate and every producer of its cells. The
-        // retained command path keeps empty slots where it held them, and refuses what needs them.
-        controls: Vec::new(),
         live_values_superseded,
-        plan_gate: None,
-        effect_controls: Vec::new().into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
         observation_present: observation_present.into_boxed_slice(),
@@ -8771,24 +5471,11 @@ fn compile_ready(
         master_track,
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
-        command_wanted: boxed_zero_u32(queue_count)?,
+        command_wanted: boxed_zero_u32(total_effects as usize)?,
         observe_named: boxed_zero_u32(total_effects as usize)?,
-        command_decoded: boxed_command_staging(
-            strip_count,
-            routes.len(),
-            vcas.reached_strip_count(),
-        )?,
-        solo,
-        vcas,
-        strip_values,
-        ramps,
-        rows,
-        route_controls,
-        routes,
-        in_flight: boxed_zero_u32(queue_count)?,
+        command_decoded: boxed_observe_staging(decoded_count)?,
+        in_flight: boxed_zero_u32(total_effects as usize)?,
         has_in_flight_commands: false,
-        input_filter_shadows: input_filter_shadows.into_boxed_slice(),
-        sample_rate_hz: session_sample_rate_hz,
         tracks,
         submixes,
         rack_effects: rack_effects.into_boxed_slice(),
@@ -8853,25 +5540,6 @@ fn live_control_request(
     })
 }
 
-/// Whether the app opted in to live commands (issue #1326 D4): the one word the public command
-/// gate, the input-filter shadows and the live VCA state read. The lanes do not say, because every
-/// plan carries them.
-fn options_enable_commands(options: WebBootOptions) -> bool {
-    options.live_control_command_queue_records != 0
-}
-
-/// The live lanes a browser plan attaches (issue #1326 D3): every lane for an app that opted in to
-/// live commands, and only each strip's fader/mute and matrix/pan lanes otherwise, so no strip's
-/// builtin tail turns infinite and no route loses its fold.
-#[cfg(test)]
-fn live_lanes(options: WebBootOptions) -> HostLiveLanes {
-    if options_enable_commands(options) {
-        HostLiveLanes::ALL
-    } else {
-        HostLiveLanes::FADER_AND_MATRIX
-    }
-}
-
 fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {
     let mut value = Vec::new();
     value
@@ -8896,35 +5564,15 @@ fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging(
-    strip_count: usize,
-    route_count: usize,
-    vca_reached_strips: usize,
-) -> Result<Box<[StagedCommand]>, Vec<u8>> {
-    // Two entries per staged wire record: one `channel = both` command on a per-lane effect
-    // parameter lowers to one record per lane (#140 C).
-    //
-    // Plus `2 * strip_count` for issue #210 phase 1's coalesced solo emission (per strip since
-    // issue #1213 D1, whose coalescing pass walks every strip). A submission that moves a solo
-    // bit owes the live controls the difference between the composed effective mute and what the
-    // render plane was last told; that is at most two records per strip, because
-    // `TrackFaderRecord::Mute` carries one `muted` bool and a strip whose user mute is asymmetric
-    // needs one record per lane to restore. The two terms add rather than max: a batch may carry
-    // 256 effect-parameter records *and* a solo toggle.
-    //
-    // Plus `route_count` for issue #1224's follow pass: at most one record per live send per
-    // batch, because `delta` yields each send once, after the batch's last strip mute.
-    //
-    // Plus `2 * vca_reached_strips` for issue #1245's VCA fader pass: at most one `FaderDb` per
-    // lane of each strip some VCA reaches, per batch. A VCA mute adds nothing here: its member
-    // records are the coalescing pass's, already bounded by `2 * strip_count`.
-    let count = command_staging_count(strip_count, route_count, vca_reached_strips)?;
-    let empty = StagedCommand {
-        queue_slot: 0,
+/// The decode staging of the observation records: `count` entries, none when the boot asked for no
+/// observation taps.
+fn boxed_observe_staging(count: usize) -> Result<Box<[StagedObserve]>, Vec<u8>> {
+    let empty = StagedObserve {
+        effect: 0,
         original_wire_index: 0,
-        kind: StagedCommandKind::Command(AdmittedCommand::Effect(EffectControlRecord::Bypass(
-            false,
-        ))),
+        tap_index: 0,
+        armed: false,
+        window_blocks: 0,
     };
     let mut value = Vec::new();
     value
@@ -8932,22 +5580,6 @@ fn boxed_command_staging(
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     value.resize(count, empty);
     Ok(value.into_boxed_slice())
-}
-
-fn command_staging_count(
-    strip_count: usize,
-    route_count: usize,
-    vca_reached_strips: usize,
-) -> Result<usize, Vec<u8>> {
-    (MAXIMUM_COMMAND_RECORDS as usize * 2)
-        .checked_add(strip_count.checked_mul(2).ok_or_else(arithmetic)?)
-        .and_then(|count| count.checked_add(route_count))
-        .and_then(|count| count.checked_add(vca_reached_strips.checked_mul(2)?))
-        .ok_or_else(arithmetic)
-}
-
-fn arithmetic() -> Vec<u8> {
-    fixed_diagnostic("web.resource.arithmetic")
 }
 
 /// One `code\t$\n` diagnostic line for a rule that names no session path.
@@ -9020,12 +5652,6 @@ fn record_admission_counter_clear(elements: usize) {
     });
 }
 
-pub mod control_targets;
-pub use control_targets::{
-    WebBuiltinInputConfig, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest,
-    WebEqTargetResult, WebInputFilterEdit, WebPreparedEffectCompanionHeader,
-    WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
-};
 mod ffi;
 mod render_lock;
 

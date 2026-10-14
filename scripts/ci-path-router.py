@@ -62,9 +62,8 @@ SELF_TEST_INPUTS = {
         "scripts/test-conformance-boundaries.sh",
     },
     "console-benchmark": {
-        # The rebuild harness (web-mixing-automation-benchmark.mjs) imports the SDK's
-        # prepared-control owner and reads the ABI layout, so either one alone selects the suite.
-        "hosts/host-web/web/prepared-control.js",
+        # The rebuild harness (web-mixing-automation-benchmark.mjs) reads the ABI layout, so the
+        # layout alone selects the suite.
         "scripts/build-web-audioworklet.sh",
         "scripts/check-bench-preconditions.sh",
         "scripts/console-benchmark-record-lib.jq",

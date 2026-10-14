@@ -751,7 +751,7 @@ function feed(engine, block) {
 }
 
 async function renderBlocks(document, edit, blocks = 6) {
-  const engine = await createOfflineEngine(document, { asset, liveControls: { commandQueueRecords: 64 } });
+  const engine = await createOfflineEngine(document, { asset });
   try {
     if (edit !== undefined) {
       const controls = engine.liveControls();
@@ -832,7 +832,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
     // its insert ID, whichever way the caller addressed it. An index resolves against the strip's
     // own chain. Red mutation: resolve an index against the first track's chain -> `b`'s index 0
     // names `a`'s `echo`.
-    const engine = await createOfflineEngine(addressedStrip(), { asset, liveControls: { commandQueueRecords: 8 } });
+    const engine = await createOfflineEngine(addressedStrip(), { asset });
     try {
       const track = engine.liveControls().edit.track("b");
       const section = (set) => set.edits[0].address.section;
@@ -870,7 +870,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
     // refuses a wrong one), and an index has nothing to resolve against. Red mutation: fall back to
     // an empty layout -> `console('pre-eq')` answers "no console slot" instead of building the edit.
     const builder = addressedStrip();
-    const engine = await createOfflineEngine(builder.toJson(), { asset, liveControls: { commandQueueRecords: 8 } });
+    const engine = await createOfflineEngine(builder.toJson(), { asset });
     try {
       const controls = engine.liveControls();
       const section = (set) => set.edits[0].address.section;
@@ -903,7 +903,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
     // console reordered, `pre-comp` resolves to slot 0 (the EQ); with the slot renamed, nothing
     // resolves `pre-eq`; with `b`'s chain reversed, `ins-eq` resolves to insert 1 (the delay).
     // Red mutation: drop assertBootedSession from withSession() -> every variant is accepted.
-    const engine = await createOfflineEngine(addressedStrip().toJson(), { asset, liveControls: { commandQueueRecords: 8 } });
+    const engine = await createOfflineEngine(addressedStrip().toJson(), { asset });
     try {
       const controls = engine.liveControls();
       for (const variant of ["reordered console", "renamed slot", "another insert chain"]) {
@@ -913,9 +913,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
       }
       // The booted text is held byte for byte, so the same session booted from non-canonical text
       // cannot be matched without a parser, and is refused rather than trusted.
-      const spaced = await createOfflineEngine(`${addressedStrip().toJson().trimEnd()} \n`, {
-        asset, liveControls: { commandQueueRecords: 8 },
-      });
+      const spaced = await createOfflineEngine(`${addressedStrip().toJson().trimEnd()} \n`, { asset });
       try {
         assert.throws(() => spaced.liveControls().withSession(addressedStrip()), NOT_BOOTED);
       } finally {
@@ -929,10 +927,10 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
   test("loadSession() moves the document withSession() holds a builder to", async () => {
     // Red mutation: keep the first boot's bytes across loadSession() -> the new session's builder
     // is refused and the replaced one is accepted.
-    const engine = await createOfflineEngine(addressedStrip(), { asset, liveControls: { commandQueueRecords: 8 } });
+    const engine = await createOfflineEngine(addressedStrip(), { asset });
     try {
       const next = addressedStrip(undefined, "another insert chain");
-      engine.loadSession(next.toJson(), { liveControls: { commandQueueRecords: 8 } });
+      engine.loadSession(next.toJson(), {});
       const controls = engine.liveControls();
       assert.throws(() => controls.withSession(addressedStrip()), NOT_BOOTED);
       const edit = controls.withSession(next).edit.track("b").effect("inserts", 1, "miso.parametric-eq").bypass(true);
@@ -945,7 +943,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
   test("withSession() on live controls built without the booted document refuses rather than trusts", () => {
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
-      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
+      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [] },
       { queue: undefined, observe: () => assert.fail("nothing is submitted") },
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);

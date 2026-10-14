@@ -10,7 +10,7 @@ function bootOptions() {
     // Issue #137: zero in both live-control words is the frozen pre-live-control shape -- no
     // control channel, no meter observers -- which is what this fixture's digest was pinned
     // against.
-    liveControlCommandQueueRecords: 0n,
+    reserved1: 0n,
     liveControlMeterBlocks: 0n,
     // Issue #143 D3/D6: the remaining two policy words. The worklet's exact-field guard means
     // these are not optional -- an `options` object missing them is refused with

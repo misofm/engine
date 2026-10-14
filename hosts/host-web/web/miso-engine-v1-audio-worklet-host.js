@@ -1,5 +1,3 @@
-import { createPreparedControl } from "./prepared-control.js";
-
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
@@ -71,7 +69,7 @@ const OPTION_FIELDS = [
   "workletModuleUrl",
 ];
 const BOOT_OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
   "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
@@ -238,9 +236,6 @@ const COMMAND_REASONS = Object.freeze([
   "wrongState",
   "unknownTap",
   "observationUnbound",
-  "notSoloable",
-  "unknownRoute",
-  "unknownVca",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.
@@ -255,15 +250,14 @@ const COMMAND_FIELDS = [
   "kind", "rack", "channel", "trackIndex", "effectIndex", "parameterId", "smoothingSamples",
   "values",
 ];
-// Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #210
-// phase 1 added kind 9, solo-in-place; phase 3 added kinds 10 and 11, the live input trim and
-// polarity invert; issue #808 adds kind 12, a live prepared input-filter pair. Issue #1222 added
-// kinds 13-15, the live send kinds, and issue #1245 kinds 16 and 17, the VCA ride and mute.
+// Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #1565a
+// deleted every value kind (1-6 and 9-17): a value goes through the `control` message, and a record
+// of a deleted kind is refused here as an unknown kind is. Kind numbers are never reallocated.
 //
-// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 12`. It is one of
+// This set is the bound: `validCommand` asks it, never a hand-written range. It is one of
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+const COMMAND_KINDS = new Set([7, 8]);
 const NOT_APPLICABLE = 255;
 
 function validCommand(command) {
@@ -499,7 +493,7 @@ function snapshotBootOptions(value) {
   const snapshot = {
     sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
-    liveControlCommandQueueRecords: captured.descriptors.get("liveControlCommandQueueRecords").value,
+    reserved1: captured.descriptors.get("reserved1").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
     liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
     liveControlMasterTrackPlusOne: captured.descriptors.get("liveControlMasterTrackPlusOne").value,
@@ -617,13 +611,11 @@ function validBootOptions(options) {
     && SPECTRUM_HOP_FRAMES.has(options.spectrumHopFrames)
     && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
-    && validU64(options.liveControlCommandQueueRecords)
-    && options.liveControlCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
+    && options.reserved1 === 0n
     && validU64(options.liveControlMeterBlocks)
     && options.liveControlMeterBlocks <= 0xffffffffn
     && validU64(options.liveControlObservationTaps)
     && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && (options.liveControlObservationTaps === 0n || options.liveControlCommandQueueRecords !== 0n)
     && validU64(options.liveControlMasterTrackPlusOne)
     && options.liveControlMasterTrackPlusOne <= 0xffffffffn
     && (options.liveControlMasterTrackPlusOne === 0n || options.liveControlObservationTaps !== 0n)
@@ -741,7 +733,6 @@ class MisoAudioWorkletHost {
   #inFlightTrackResponses = 0;
   #inFlightSpectrum = 0;
   #inFlightLease = new Set();
-  #commandQueueRecords;
   #liveControlMeterBlocks;
   /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
   /// It is what `trackGrDb`'s positional array structurally cannot express.
@@ -760,9 +751,6 @@ class MisoAudioWorkletHost {
   #numericBackend;
   #sampleRateHz;
   #quantumFrames;
-  #preparedControl;
-  #preparedModule;
-  #preparedAbiLayout;
 
   constructor(
     node,
@@ -772,10 +760,7 @@ class MisoAudioWorkletHost {
     resources,
     memoryBytes,
     ringBlocks,
-    commandQueueRecords,
     liveControlMeterBlocks,
-    preparedModule,
-    preparedAbiLayout,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -787,14 +772,7 @@ class MisoAudioWorkletHost {
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
-    this.#commandQueueRecords = commandQueueRecords;
     this.#liveControlMeterBlocks = liveControlMeterBlocks;
-    // The prepared path is private and dormant until the production cutover. Keeping the
-    // verified module here lets that path instantiate one main-realm preparation workspace lazily;
-    // ordinary command() therefore has exactly its existing transport and no speculative ABI load.
-    this.#preparedControl = null;
-    this.#preparedModule = preparedModule;
-    this.#preparedAbiLayout = preparedAbiLayout;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
@@ -833,74 +811,12 @@ class MisoAudioWorkletHost {
     this.#serviceTick = null;
   }
 
-  #ensurePreparedControl() {
-    if (this.#preparedControl !== null) return this.#preparedControl;
-    if (this.#preparedAbiLayout === undefined) throw webError(255);
-    this.#preparedControl = createPreparedControl({
-      module: this.#preparedModule,
-      abiLayout: this.#preparedAbiLayout,
-      sampleRateHz: this.#sampleRateHz,
-      configCopy: (address) => this.#request(
-        {
-          tag: "miso.eq-target-config.v1",
-          trackIndex: address.trackIndex,
-          rack: address.rack,
-          effectIndex: address.effectIndex,
-        },
-        [],
-        "eqConfig",
-      ),
-      ordinarySubmit: (records, count) => this.#submitOrdinaryRecords(records, count),
-      preparedSubmit: (records, companion, count) =>
-        this.#submitPreparedRecords(records, companion, count),
-      preparedRefusal: (records, count, reason, rejectedIndex, result) =>
-        this.#preparedRefusal(records, count, reason, rejectedIndex, result),
-    });
-    return this.#preparedControl;
-  }
-
-  #preparedRefusal(records, count, reason, rejectedIndex, result = RESULT_INVALID_ARGUMENT) {
-    const requestId = this.#allocateRequestId();
-    if (requestId === null) return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    return Promise.resolve(Object.freeze({
-      tag: "miso.ack.v1",
-      requestId,
-      result,
-      reason: Number.isSafeInteger(reason) ? reason : 1,
-      rejectedIndex: Number.isSafeInteger(rejectedIndex) ? rejectedIndex : 0,
-      admitted: 0,
-      appliedAtSample: 0n,
-      records,
-    }));
-  }
-
   #submitOrdinaryRecords(records, count) {
     return this.#request(
       { tag: "miso.command.v1", count, records },
       [records.buffer],
       "command",
     );
-  }
-
-  #submitPreparedRecords(records, companion, count) {
-    return this.#request(
-      {
-        tag: "miso.prepared-command.v1",
-        count,
-        records,
-        companion,
-      },
-      [records.buffer, companion.buffer],
-      "preparedCommand",
-    );
-  }
-
-  // Refuse lifecycle failures before a new preparation workspace can be allocated.
-  #submitPrepared(records, count) {
-    if (this.#disposed) return Promise.reject(webError(3));
-    if (this.#stickyError !== null) return Promise.reject(this.#stickyError);
-    const control = this.#ensurePreparedControl();
-    return control.submit(records, count);
   }
 
   // Request IDs are strictly monotonic and the worklet handles messages in arrival order, so the
@@ -932,8 +848,6 @@ class MisoAudioWorkletHost {
     } else if (pending.response === "renderAllocations") {
       this.#inFlightRenderAllocations -= 1;
     } else if (pending.response === "command") {
-      this.#inFlightCommands -= 1;
-    } else if (pending.response === "preparedCommand") {
       this.#inFlightCommands -= 1;
     } else if (pending.response === "control") {
       this.#inFlightControl -= 1;
@@ -1067,17 +981,10 @@ class MisoAudioWorkletHost {
           "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
           "records",
         ]
-        : pending.response === "preparedCommand"
-          ? [
-            "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
-            "records",
-          ]
         : pending.response === "control"
           ? ["tag", "requestId", "result", "response", "revision"]
-        : pending.response === "eqConfig"
-          ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes", "vcas"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1109,10 +1016,6 @@ class MisoAudioWorkletHost {
       ? "miso.status.v1"
       : pending.response === "renderAllocations"
         ? "miso.renderallocations.v1"
-      : pending.response === "eqConfig"
-        ? "miso.eq-target-config.v1"
-        : pending.response === "preparedCommand"
-          ? "miso.ack.v1"
       : pending.response === "control"
         ? "miso.control.v1"
       : pending.response === "sessionMap"
@@ -1128,7 +1031,7 @@ class MisoAudioWorkletHost {
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
-    const validCommandAck = pending.response !== "command" && pending.response !== "preparedCommand" || (
+    const validCommandAck = pending.response !== "command" || (
       validCommandReason(message.reason)
       && validU32(message.rejectedIndex) && message.rejectedIndex < MAXIMUM_COMMAND_RECORDS
       && validU32(message.admitted) && message.admitted <= pending.commandCount
@@ -1143,12 +1046,6 @@ class MisoAudioWorkletHost {
       && message.response.byteLength <= MAXIMUM_CONTROL_FRAME_BYTES
       && validU64(message.revision)
     );
-    const validConfig = pending.response !== "eqConfig"
-      || (validCommandReason(message.reason)
-        && message.config instanceof Uint8Array
-        && message.config.buffer instanceof ArrayBuffer
-        && ((message.result === RESULT_OK && message.config.byteLength === pending.configBytes)
-          || (message.result !== RESULT_OK && message.config.byteLength === 0)));
     const validSessionMap = pending.response !== "sessionMap" || (
       message.result === RESULT_OK && Array.isArray(message.tracks)
       && message.tracks.every((value) => typeof value === "string" && value.length > 0)
@@ -1165,12 +1062,6 @@ class MisoAudioWorkletHost {
       // sections.
       && Array.isArray(message.submixes)
       && message.submixes.every((value) => typeof value === "string" && value.length > 0)
-      // Issue #1223 D3: the live route IDs, in the live-route index order the send kinds address.
-      && Array.isArray(message.routes)
-      && message.routes.every((value) => typeof value === "string" && value.length > 0)
-      // Issue #1246 D3: the VCA IDs, in the canonical VCA-ID order the VCA kinds address.
-      && Array.isArray(message.vcas)
-      && message.vcas.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
@@ -1231,7 +1122,7 @@ class MisoAudioWorkletHost {
       || (message.result === RESULT_OK && validU32(message.count));
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validConfig || !validSessionMap
+        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
         || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum) {
       this.#fail(webError(255, message.requestId));
       return;
@@ -1249,7 +1140,6 @@ class MisoAudioWorkletHost {
   #fail(error) {
     this.#stickyError = error;
     this.#stopServiceTick();
-    this.#preparedControl?.invalidate();
     const unsettled = [...this.#pending.values()];
     this.#pending.clear();
     this.#inFlightSources.clear();
@@ -1277,8 +1167,8 @@ class MisoAudioWorkletHost {
     // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
     // authority; this one only avoids paying a message round trip to be told so.
-    if (response === "command" || response === "preparedCommand") {
-      return this.#inFlightCommands >= this.#commandQueueRecords;
+    if (response === "command") {
+      return this.#inFlightCommands >= MAXIMUM_COMMAND_RECORDS;
     }
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
@@ -1297,7 +1187,7 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.set(sourceId, true);
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
-    } else if (response === "command" || response === "preparedCommand") {
+    } else if (response === "command") {
       this.#inFlightCommands += 1;
     } else if (response === "control") {
       this.#inFlightControl += 1;
@@ -1338,7 +1228,6 @@ class MisoAudioWorkletHost {
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
-        configBytes: stamped.rack === 255 && stamped.effectIndex === 0 ? 48 : 272,
         spectrumOperation: stamped.operation,
         spectrumBuffer: stamped.buffer,
         spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,
@@ -1468,7 +1357,7 @@ class MisoAudioWorkletHost {
         || !request.commands.every(validCommand)) {
       return Promise.reject(webError(1));
     }
-    return this.#submitPrepared(encodeCommands(request.commands), request.commands.length);
+    return this.#submitOrdinaryRecords(encodeCommands(request.commands), request.commands.length);
   }
 
   /// Send one command frame to the engine's control plane and resolve with its reply (issue
@@ -1810,8 +1699,6 @@ class MisoAudioWorkletHost {
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();
-    this.#preparedControl?.close();
-    this.#preparedControl = null;
     this.#port.onmessage = null;
     this.#port.onmessageerror = null;
     this.node.onprocessorerror = null;
@@ -1922,12 +1809,6 @@ export async function createMisoAudioWorkletHost(options) {
       node.port.onmessageerror = () => finish(reject, webError(255));
       node.onprocessorerror = () => finish(reject, webError(255));
     });
-    // The generated ABI is loaded once on the control side before the host becomes visible. The
-    // prepared route then has no initialization await between its synchronous reservation and the
-    // first config-copy request; the verified Wasm module itself remains lazy until that route is used.
-    const abiResponse = await fetch(new URL("./miso-engine-v1-abi-layout.json", import.meta.url));
-    if (!abiResponse.ok) throw webError(255);
-    const preparedAbiLayout = await abiResponse.json();
     return new MisoAudioWorkletHost(
       node,
       selected.backend,
@@ -1940,12 +1821,9 @@ export async function createMisoAudioWorkletHost(options) {
       (bootOptions.sourceRingFrames === 0
         ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
         : bootOptions.sourceRingFrames / quantumFrames),
-      Number(bootOptions.liveControlCommandQueueRecords) || 1,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
       Number(bootOptions.liveControlMeterBlocks),
-      selected.module,
-      preparedAbiLayout,
     );
   } catch (error) {
     cleanupNode(node);

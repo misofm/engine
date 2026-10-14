@@ -359,16 +359,11 @@ the stereo arm does not, and uncommanded they agree.
 
 ## Issue #1211 — one mute owner and live-control producers per strip
 
-Driver: `cargo test -p host-core --lib solo`, `cargo test -p host-core --test strip_controls
---test strip_handles` and `cargo test -p host-core --test randomized`, one mutation at a time, tree
+Driver: `cargo test -p host-core --test strip_controls --test strip_handles` and `cargo test -p host-core --test randomized`, one mutation at a time, tree
 restored between rows. Delivery host: x86_64 AVX2+FMA.
 
 | Row | Mutation | Red |
 | --- | --- | --- |
-| 1211-M1 | delete the solo-safe guard in `LiveControlSoloState::set_solo` | `a_solo_safe_strip_cannot_be_soloed` (a bus accepts a solo) and `rollback_restores_every_strip_including_the_solo_safe_ones` (the bus solo is no longer refused) |
-| 1211-M2 | drop `!self.solo_safe(strip)` from `effective_mute` | `a_solo_safe_strip_keeps_its_user_mute_through_every_solo_transition` (the bus is solo-muted) |
-| 1211-M3 | `rollback` restores `user_mute` only for entries that are not solo-safe | `rollback_restores_every_strip_including_the_solo_safe_ones` |
-| 1211-M4 | the guard bumps `solo_count` for a refused bus solo before returning | `a_solo_safe_strip_cannot_be_soloed` (`any_solo` counts a solo-safe entry) |
 | 1211-M5 | build the control requests from `live_control_tracks` (the track prefix) again | `a_bus_fader_record_renders_as_the_session_with_that_fader` (three producers) and `handles_list_tracks_then_submixes_and_file_bus_effects` (`left: ["t0", "t1", "t2"]`) |
 | 1211-M6 | sort `strip_controls` by ID instead of by `canonical_index` | `a_bus_fader_record_renders_as_the_session_with_that_fader` (the bus producer is no longer at strip index 3) |
 | 1211-M7 | `live_records` draws over `handles.track_count` instead of `strip_controls.len()` | `randomized_consoles_render_the_same_bits_armed_dual_and_serialized` (`bus_live_records: 0`) |
@@ -400,68 +395,11 @@ mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. 
 Gate 4's base behaviour was replayed by removing the attach call entirely: the test stays green
 (64 folds with `None` and with `Some(64)`), so the fallback did not apply.
 
-## Issue #1222 — `LiveRouteState`
-
-Unit tests in `crates/host-core/src/live_route_state.rs`. Each row was applied, run red and
-reverted.
-
-| row | mutation | observed red |
-|---|---|---|
-| 1222-H1 | seed `source_lane_muted` from the session's fader mutes, not the `effective_mute` it is handed | `construction_seeds_every_field_…`: live route 3 (`zz-send`) starts `[false, false]` |
-| 1222-H2 | resolve a submix source without the track offset | the same test: live route 2's `source_strip` is 1, not 4 |
-| 1222-H3 | take the shadow once, at construction, not per transaction | `a_rollback_restores_every_field_…`: rolled back to the seeds, not the committed values |
-| 1222-H4 | keep routes into the output in the mirror | both tests: the mirror has seven entries, not four |
-
-## Issue #1224 — `LiveRouteMuteFollow::delta` and `LiveRouteState::follow`
-
-Unit tests in `crates/host-core/src/live_route_state.rs` (gate 7). Each row was applied, run red
-and reverted.
-
-| row | mutation | observed red |
-|---|---|---|
-| 1224-H1 | `delta` yields every following route, changed or not | all three `delta` tests: `seeded: nothing changed` yields four routes |
-| 1224-H2 | `delta` drops its `follows_mute` check | `delta_follows_one_lane_at_a_time` and `a_send_without_follow_never_follows_…`: `b-send` is yielded |
-| 1224-H3 | `delta` stops after its first yield (`.take(1)`) | `delta_yields_every_following_send_…`: only `a-send`, not `b-send`; `a_send_without_follow_…`: only route 0 |
-| 1224-H4 | `follow` drops its `follows_mute` check | `a_send_without_follow_…`: `b-send does not follow` |
-| 1224-H5 | `follow` writes the lanes without the transaction shadow | `a_send_without_follow_…`: `state.transaction_open()` is false |
-
-The host-web rows of the same issue, `followed_lanes` swapping or duplicating a lane among them,
-are in `hosts/host-web/MUTATIONS.md`.
-
 ## Issue #1223 — the session shape's route IDs
 
 | row | mutation | observed red |
 |---|---|---|
 | 1223-H1 | `longest_route_id_bytes` measures only the routes into submixes | `the_session_shape_measures_every_route_id`: 7, not 39 |
-
-## Issue #1244 — `LiveVcaState` and the strip-mute owner's VCA term
-
-Driver: `cargo test -p host-core --features host-core/test-support --test vca_live --lib`, one
-mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. Rows H1-H6 and
-H9-H15 mutate `src/vca.rs`; H7 and H8 mutate `src/solo.rs`.
-
-| row | mutation | observed red |
-|---|---|---|
-| 1244-H1 | `effective_db` sums in `f32` and clamps in `f32` instead of calling `session::vca_effective_db` | `a_live_recompute_equals_preparation` (seed 4, edit 31), `a_composition_never_owes_a_redundant_record` (seed 0: seeded), `live_vca_moves_render_as_a_fresh_plan` |
-| 1244-H2 | `effective_db` reads the reach's offsets in descending VCA-ID order | `a_live_recompute_equals_preparation` (seed 4), `a_composition_never_owes_a_redundant_record` |
-| 1244-H3 | the inverse table records a strip under its first reaching VCA only | `a_live_recompute_equals_preparation` (`reached_by`, seed 0, vca 3), `live_vca_moves_render_as_a_fresh_plan` (seed 2, block 1) |
-| 1244-H4 | `record_emitted_db` also writes the effective value into the member's own value | `a_clamped_member_returns_to_its_own_value`, `an_unchanged_effective_value_…`, `a_composition_never_owes_…`, `live_vca_moves_render_as_a_fresh_plan` |
-| 1244-H5 | `fader_delta` owes both lanes whenever either moved | `an_unchanged_effective_value_…`, `a_composition_never_owes_a_redundant_record` (seed 0, edit 3, strip 5) |
-| 1244-H6 | `rollback` leaves the emitted mirror as the transaction left it | `rollback_restores_every_mirror_and_commit_keeps_them` |
-| 1244-H7 | the strip-mute owner's `rollback` leaves `vca_mute` as the transaction left it | `rollback_restores_every_mirror_and_commit_keeps_them` |
-| 1244-H8 | the strip-mute owner's `set_vca_mute` refuses a solo-safe strip | `a_vca_mute_wins_over_solo_and_reaches_the_following_sends`, `live_vca_moves_render_as_a_fresh_plan` |
-| 1244-H9 | `vca_mute` reads the left lane's mute for the right lane | `a_live_recompute_equals_preparation`, `a_vca_mute_wins_over_solo_…`, `live_vca_moves_render_as_a_fresh_plan` |
-| 1244-H10 | `try_new` builds tables for a model with no VCA instead of returning `empty()` | `the_command_path_allocates_nothing_and_the_retained_bytes_are_measured` |
-| 1244-H11 | `retained_bytes` leaves out the emitted mirror's shadow | `the_command_path_allocates_nothing_and_the_retained_bytes_are_measured` (`retained_bytes` != net bytes) |
-| 1244-H12 | `effective_db` collects the reach's offsets into a `Vec` before composing | `the_command_path_allocates_nothing_…` ("the command path allocated or freed") |
-| 1244-H13 | the emitted mirror is seeded from the members' own values, not the prepared effective ones | `an_unchanged_effective_value_…`, `a_composition_never_owes_a_redundant_record` (seed 0: seeded) |
-| 1244-H14 | `fader_delta` folds two disagreeing lanes into one `Both` carrying the left value | `an_unchanged_effective_value_…`, `a_composition_never_owes_…` (seed 0, edit 34, strip 3), `live_vca_moves_render_as_a_fresh_plan` |
-| 1244-H15 | `rollback` leaves the VCA values as the transaction left them | `rollback_restores_every_mirror_and_commit_keeps_them`, `live_vca_moves_render_as_a_fresh_plan` (seed 1, block 2) |
-
-`live_vca_moves_render_as_a_fresh_plan` is a randomized differential and is judged by what its
-generator reaches rather than by a unique catch (AGENTS.md): over its 12 seeds it pushes 82 fader,
-40 mute and 25 route records, with 15 one-lane VCA mutes, 100 VCA-muted submix observations, 14
-follow records of VCA-muted sources, 33 solos and 19 refused, rolled-back batches.
 
 ## Issue #1246 — the session shape's VCA IDs
 

@@ -252,11 +252,10 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet-host.js \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
-  miso-engine-v1-parameter-metadata.json \
-  prepared-control.js)
+  miso-engine-v1-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact seven frozen outputs" >&2
+  echo "artifact directory does not contain the exact six frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -288,30 +287,12 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_control_response_bytes \
   miso_engine_web_v1_control_response_ptr \
   miso_engine_web_v1_control_revision \
-  miso_engine_web_v1_live_control_route_count \
-  miso_engine_web_v1_live_control_route_id \
   miso_engine_web_v1_live_control_submix_count \
   miso_engine_web_v1_live_control_submix_id \
   miso_engine_web_v1_live_control_track_count \
   miso_engine_web_v1_live_control_track_id \
-  miso_engine_web_v1_live_control_vca_count \
-  miso_engine_web_v1_live_control_vca_id \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
-  miso_engine_web_v1_eq_target_close \
-  miso_engine_web_v1_eq_target_config_copy \
-  miso_engine_web_v1_eq_target_config_ptr \
-  miso_engine_web_v1_eq_target_open \
-  miso_engine_web_v1_eq_target_prepare \
-  miso_engine_web_v1_eq_target_rejected_edit_index \
-  miso_engine_web_v1_eq_target_rejected_reason \
-  miso_engine_web_v1_eq_target_request_capacity \
-  miso_engine_web_v1_eq_target_request_ptr \
-  miso_engine_web_v1_eq_target_result_bytes \
-  miso_engine_web_v1_eq_target_result_capacity \
-  miso_engine_web_v1_eq_target_result_ptr \
-  miso_engine_web_v1_input_filters_config_copy \
-  miso_engine_web_v1_input_filters_prepare \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
@@ -331,9 +312,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_observation_tap_count \
   miso_engine_web_v1_observation_tap_id \
   miso_engine_web_v1_observation_track_index \
-  miso_engine_web_v1_prepared_command_submit \
-  miso_engine_web_v1_prepared_companion_capacity \
-  miso_engine_web_v1_prepared_companion_ptr \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_response_close \
@@ -587,10 +565,11 @@ printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
     --trap-owner 22AudioWorkletEngineHost11poll_meters --render-thread || exit 1
-# `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
-# reaches `math`'s vendored argument reduction, which is full of checked indices. The
-# engine's rule for the control path is "never allocate on the render thread", so the allocation
-# half is what this export is held to -- and it is held to it absolutely.
+# `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
+# the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
+# through `control_command`). The engine's rule for the control path is "never allocate on the
+# render thread", so the allocation half is what this export is held to -- and it is held to it
+# absolutely.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only \

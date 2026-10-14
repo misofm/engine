@@ -11,7 +11,6 @@ const REQUESTED_STALL_MS = 120;
 // and a two-block meter window makes the decimated cadence observable inside it.
 const LIVE_CONTROL_BLOCKS = 130;
 const LIVE_CONTROL_FRAMES = LIVE_CONTROL_BLOCKS * QUANTUM_FRAMES;
-const LIVE_CONTROL_COMMAND_QUEUE_RECORDS = 64n;
 const LIVE_CONTROL_METER_BLOCKS = 2n;
 // Issue #143 E12: the observation row. Sixteen blocks is eight two-block windows -- enough for the
 // compressor's 10 ms attack to settle and for `firstSample` monotonicity to be a real sequence
@@ -54,7 +53,6 @@ const SIMD128_PROBE = new Uint8Array([
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
 function bootOptions(
   sourceRingFrames,
-  liveControlCommandQueueRecords = 0n,
   liveControlMeterBlocks = 0n,
   liveControlObservationTaps = 0n,
   liveControlMasterTrackPlusOne = 0n,
@@ -64,7 +62,8 @@ function bootOptions(
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
     // same one the direct oracle writes at boot-options offset 24.
     maximumMemoryBytes: 0n,
-    liveControlCommandQueueRecords,
+    // Issue #1565: offset 32 is reserved and must be zero.
+    reserved1: 0n,
     liveControlMeterBlocks,
     // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
     // the pre-#143 shape, which is what every row but the observation one keeps using.
@@ -307,7 +306,6 @@ async function runLiveControlQualification(createHost, sessionDocument) {
     document: sessionDocument,
     options: bootOptions(
       LIVE_CONTROL_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -414,7 +412,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     document: sessionDocument,
     options: bootOptions(
       OBSERVATION_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
       OBSERVATION_TAPS,
       OBSERVATION_MASTER_TRACK_PLUS_ONE,
@@ -544,7 +541,6 @@ async function runStallQualification(createHost, sessionDocument) {
     // imposes -- and the frozen exact-output requirement is unchanged.
     options: bootOptions(
       DEFAULT_RING_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -639,8 +635,7 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
     options: {
       ...bootOptions(
         STAGING_READ_FRAMES,
-        LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
-        LIVE_CONTROL_METER_BLOCKS,
+          LIVE_CONTROL_METER_BLOCKS,
         OBSERVATION_TAPS,
         OBSERVATION_MASTER_TRACK_PLUS_ONE,
       ),

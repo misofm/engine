@@ -75,8 +75,6 @@ export async function createBrowserLiveControls(
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
     submixes: Object.freeze([...remoteMap.submixes]),
-    routes: Object.freeze([...remoteMap.routes]),
-    vcas: Object.freeze([...remoteMap.vcas]),
   });
   const queue = await createBrowserControlQueue(host);
   return new EngineLiveControls(map, {

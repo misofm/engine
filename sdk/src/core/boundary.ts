@@ -196,13 +196,11 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
   }
   const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
     const {
-      commandQueueRecords,
       meterBlocks,
       observationTaps,
       masterTrackPlusOne,
     } = options.liveControls!;
     return Object.freeze({
-      ...(commandQueueRecords === undefined ? {} : { commandQueueRecords }),
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
       ...(observationTaps === undefined ? {} : { observationTaps }),
       ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
@@ -254,17 +252,6 @@ export interface SessionMap {
    * sections. Submix `j` is strip `tracks.length + j`.
    */
   readonly submixes: readonly string[];
-  /**
-   * The live routes (issue #1223 D3): the routes into submixes, in canonical route-ID order, as
-   * the engine enumerates them. A send edit's index word `i` addresses `routes[i]`. A route into
-   * the output is not live and is not listed.
-   */
-  readonly routes: readonly string[];
-  /**
-   * The VCA IDs (issue #1246 D3), in canonical VCA-ID order, as the engine enumerates them. A VCA
-   * edit's index word `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
-   */
-  readonly vcas: readonly string[];
 }
 
 interface ObservationLayoutField {
@@ -564,8 +551,8 @@ export class WasmBoundary {
   }
 
   /**
-   * The canonical track/source/submix order, the live routes and the VCAs in the engine's own
-   * order, and whether meter observers were prepared.
+   * The canonical track/source/submix order in the engine's own order, and whether meter
+   * observers were prepared.
    */
   sessionMap(): SessionMap {
     const shape = this.shape();
@@ -574,33 +561,7 @@ export class WasmBoundary {
       sources: shape.sources,
       metersAttached: this.#metersAttached,
       submixes: shape.submixes,
-      routes: this.#liveRoutes(),
-      vcas: this.#liveVcas(),
     });
-  }
-
-  /** The VCA IDs, read from the engine's enumeration, never sorted here (issue #1246). */
-  #liveVcas(): readonly string[] {
-    const handle = this.#live();
-    const vcaCount = Number(this.#exports.miso_engine_web_v1_live_control_vca_count(handle));
-    const vcas: string[] = [];
-    for (let index = 0; index < vcaCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_vca_id(handle, index));
-      vcas.push(this.#readIdBuffer(idBytes));
-    }
-    return Object.freeze(vcas);
-  }
-
-  /** The live route IDs, read from the engine's enumeration, never sorted here (issue #1223). */
-  #liveRoutes(): readonly string[] {
-    const handle = this.#live();
-    const routeCount = Number(this.#exports.miso_engine_web_v1_live_control_route_count(handle));
-    const routes: string[] = [];
-    for (let index = 0; index < routeCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_route_id(handle, index));
-      routes.push(this.#readIdBuffer(idBytes));
-    }
-    return Object.freeze(routes);
   }
 
   /** Read the current prepared owner's stable resident-observation bindings. */
@@ -1366,7 +1327,7 @@ export class WasmBoundary {
     const staging = this.#buffer("command");
     if (staging.pointer === 0 || staging.capacity === 0) {
       throw new MisoUsageError(
-        "this engine booted with no live controls attached; set liveControls.commandQueueRecords",
+        "this engine booted with no observation taps attached; set liveControls.observationTaps",
       );
     }
     if (records.byteLength !== count * recordBytes) {

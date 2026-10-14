@@ -537,7 +537,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     source_ring_frames: 0,
     reserved0: 0,
     maximum_memory_bytes: 0,
-    live_control_command_queue_records: 0,
+    reserved1: 0,
     live_control_meter_blocks: 0,
     live_control_observation_taps: 0,
     live_control_master_track_plus_one: 0,
@@ -3546,72 +3546,6 @@ pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
     })
 }
 
-/// Open the bounded EQ target-preparation workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_open() -> u32 {
-    crate::control_targets::open()
-}
-
-/// Return the writable EQ target request buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_request_ptr() -> u32 {
-    crate::control_targets::request_ptr()
-}
-
-/// Return the EQ target request capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_request_capacity() -> u32 {
-    crate::control_targets::request_capacity()
-}
-
-/// Prepare the staged EQ target request.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_prepare(request_bytes: u32) -> u32 {
-    crate::control_targets::prepare(request_bytes)
-}
-
-/// Return the EQ target result buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_ptr() -> u32 {
-    crate::control_targets::result_ptr()
-}
-
-/// Return the current EQ target result length.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_bytes() -> u32 {
-    crate::control_targets::result_bytes()
-}
-
-/// Return the EQ target result capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_capacity() -> u32 {
-    crate::control_targets::result_capacity()
-}
-
-/// Return the original edit index from the most recent refusal.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_rejected_edit_index() -> u32 {
-    crate::control_targets::rejected_edit_index()
-}
-
-/// Return the existing command reason from the most recent EQ preparation refusal.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_rejected_reason() -> u32 {
-    crate::control_targets::rejected_reason()
-}
-
-/// Close the EQ target-preparation workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
-    crate::control_targets::close()
-}
-
-/// Prepare the staged builtin input-filter target request.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_input_filters_prepare(request_bytes: u32) -> u32 {
-    crate::control_targets::input_filter_prepare(request_bytes)
-}
-
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
@@ -4107,88 +4041,17 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Admit one staged live-control command submission (issue #137 D1).
+/// Admit one staged observation command submission, kinds 7 and 8 (issue #137 D1; #1565A).
 ///
-/// `count` records were written into [`BUFFER_COMMAND`]. The submission is one transaction: the
-/// return value is the frozen result code, and
+/// `count` records were written into [`BUFFER_COMMAND`], which exists when the boot asked for
+/// observation taps. Every value goes through the control exports instead. The submission is one
+/// transaction: the return value is the frozen result code, and
 /// [`miso_engine_web_v1_command_report_ptr`] names the first refused record and why.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
     render_locked(|| {
         with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
             host.submit_commands(count)
-        })
-    })
-}
-
-/// Admit one semantic command batch with its opaque prepared-target companion.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_command_submit(
-    handle: u32,
-    count: u32,
-    companion_bytes: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.submit_prepared_commands(count, companion_bytes)
-        })
-    })
-}
-
-/// Return the fixed prepared companion staging address.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_companion_ptr(handle: u32) -> u32 {
-    with_host_mut(handle, 0, |host| {
-        host.prepared_companion_mut()
-            .map_or(0, |bytes| pointer_u32(bytes.as_mut_ptr()))
-    })
-}
-
-/// Return the fixed prepared companion staging capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_companion_capacity(handle: u32) -> u32 {
-    with_host(
-        handle,
-        0,
-        AudioWorkletEngineHost::prepared_companion_capacity,
-    )
-}
-
-/// Copy one accepted EQ owner's canonical configuration into the fixed config workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_config_copy(
-    handle: u32,
-    track_index: u32,
-    rack: u32,
-    effect_index: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.copy_eq_target_config(track_index, rack, effect_index)
-        })
-    })
-}
-
-/// Return the fixed addressed EQ configuration workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.eq_target_config()
-                .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
-        })
-    })
-}
-
-/// Copy one accepted builtin input-filter configuration into the shared config workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
-    handle: u32,
-    track_index: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.copy_input_filter_config(track_index)
         })
     })
 }
@@ -4255,7 +4118,7 @@ pub extern "C" fn miso_engine_web_v1_live_control_track_count(handle: u32) -> u3
 /// Copy one canonical track ID into the ID staging buffer; returns its byte length.
 ///
 /// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation already sized for the longest source, track, submix, route or VCA ID in the session.
+/// preparation already sized for the longest source, track or submix ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
@@ -4275,52 +4138,10 @@ pub extern "C" fn miso_engine_web_v1_live_control_submix_count(handle: u32) -> u
 /// D1).
 ///
 /// Zero means "no such submix". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
+/// preparation sized for the longest source, track or submix ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_submix_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_submix_id(index))
-}
-
-/// Return the number of live routes -- the routes into submixes, in canonical route-ID order -- or
-/// zero before compilation or without live controls (issue #1223 D1).
-///
-/// Live route `i` is the send a send kind's (`13`-`15`) index word `i` addresses, because this
-/// enumerates exactly the plan's live send producers, in their order.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_route_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.live_control_route_count()).unwrap_or(0)
-    })
-}
-
-/// Copy one live route ID into the ID staging buffer; returns its byte length (issue #1223 D1).
-///
-/// Zero means "no such live route". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_route_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_live_control_route_id(index))
-}
-
-/// Return the number of live VCAs -- the session's VCAs in canonical VCA-ID order -- or zero before
-/// compilation, without VCAs or without live controls (issue #1246 D1).
-///
-/// VCA `i` is the VCA a VCA kind's (`16`, `17`) index word `i` addresses: this is the count
-/// admission bounds that index by.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_vca_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.live_control_vca_count()).unwrap_or(0)
-    })
-}
-
-/// Copy one VCA ID into the ID staging buffer; returns its byte length (issue #1246 D1).
-///
-/// Zero means "no such VCA". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_vca_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_live_control_vca_id(index))
 }
 
 /// Return the number of prepared resident observation effects in the current owner map.
@@ -4905,28 +4726,6 @@ pub mod native_staging {
             host.command_staging_mut()
                 .and_then(|staging| staging.get_mut(..records.len()))
                 .map(|staging| staging.copy_from_slice(records))
-                .is_some()
-        })
-    }
-
-    /// Stage a prepared-command companion, as the worklet writes it through
-    /// `miso_engine_web_v1_prepared_companion_ptr`.
-    pub fn prepared_companion(handle: u32, companion: &[u8]) -> bool {
-        super::with_host_mut(handle, false, |host| {
-            host.prepared_companion_mut()
-                .and_then(|staging| staging.get_mut(..companion.len()))
-                .map(|staging| staging.copy_from_slice(companion))
-                .is_some()
-        })
-    }
-
-    /// Copy out the addressed configuration workspace's prefix, as the worklet reads it through
-    /// `miso_engine_web_v1_eq_target_config_ptr` after a copy export succeeds.
-    pub fn eq_target_config(handle: u32, output: &mut [u8]) -> bool {
-        super::with_host(handle, false, |host| {
-            host.eq_target_config()
-                .and_then(|config| config.get(..output.len()))
-                .map(|config| output.copy_from_slice(config))
                 .is_some()
         })
     }
@@ -7231,7 +7030,6 @@ mod observation_alias_tests {
             let options = WebBootOptions {
                 require_sample_rate_hz: 48_000,
                 require_quantum_frames: 128,
-                live_control_command_queue_records: 8,
                 live_control_meter_blocks: 1,
                 live_control_observation_taps: 4,
                 ..WebBootOptions::explicit_defaults()
@@ -7325,7 +7123,6 @@ mod observation_alias_tests {
         let options = WebBootOptions {
             require_sample_rate_hz: 48_000,
             require_quantum_frames: 128,
-            live_control_command_queue_records: 8,
             live_control_meter_blocks: 1,
             live_control_observation_taps: 4,
             ..WebBootOptions::explicit_defaults()

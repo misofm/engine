@@ -13,7 +13,6 @@ export const ARTIFACT_NAMES = new Set([
   "miso-engine-v1-audio-worklet.simd128.wasm",
   "miso-engine-v1-audio-worklet.js",
   "miso-engine-v1-audio-worklet-host.js",
-  "prepared-control.js",
   "miso-engine-v1-audio-worklet-host.d.ts",
   // Issue #137 D4: the parameter metadata ships with the module and is served with it.
   "miso-engine-v1-parameter-metadata.json",

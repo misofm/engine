@@ -98,7 +98,7 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     });
   const engine = await createOfflineEngine(sessionDocument({
     effects: { preInsert: [effectEntry("eq", "miso.parametric-eq", params)] },
-  }), { asset, liveControls: { commandQueueRecords: 64 } });
+  }), { asset });
   const request = {
     trackId: "t",
     grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },

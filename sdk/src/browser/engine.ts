@@ -220,7 +220,7 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription>;
   /** Arm, capture and analyze one complete 2048-frame spectrum window. */
   querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
-  /** Bind the semantic live controls once; rejects with MisoUsageError when none were attached. */
+  /** Bind the semantic live controls once (every value edit is a `SET_CONTROL` transaction). */
   liveControls(): Promise<EngineLiveControls>;
   /**
    * Dispose the worklet host, then close its context. Safe to call more than once.
@@ -684,16 +684,21 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       );
     };
     const getLiveControls = (): Promise<EngineLiveControls> => {
-      semanticLiveControls ??= (policy.liveControls?.commandQueueRecords ?? 0) === 0
-        ? Promise.reject(new MisoUsageError(
-          "this engine booted with no live controls attached; set policy.liveControls.commandQueueRecords",
-        ))
-        : createBrowserLiveControls(host, (edits, managed) =>
-          observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-        options.document instanceof SessionBuilder ? options.document : undefined,
-        bootedDocument);
+      // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
+      semanticLiveControls ??= createBrowserLiveControls(host, (edits, managed) =>
+        observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+      options.document instanceof SessionBuilder ? options.document : undefined,
+      bootedDocument);
       return semanticLiveControls;
     };
+    // An observation subscription is the one 48-byte command record left, and the host stages
+    // records only when `observationTaps` is nonzero.
+    const getObservationControls = (): Promise<EngineLiveControls> =>
+      (policy.liveControls?.observationTaps ?? 0) === 0
+        ? Promise.reject(new MisoUsageError(
+          "this engine booted with no observation taps attached; set policy.liveControls.observationTaps",
+        ))
+        : getLiveControls();
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {
       if (spectrum !== undefined) return Promise.resolve(spectrum);
       if (spectrumPromise !== undefined) return spectrumPromise;
@@ -1045,7 +1050,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       new ObservationSubscriptionOwner({
         observationMap,
         readObservations,
-        liveControls: getLiveControls,
+        liveControls: getObservationControls,
         // The audio thread renders on its own clock, so a subscription refused with backpressure
         // (an earlier one is not yet drained) may wait for the host's render count to move and be
         // sent again. The wait is bounded by the engine's request deadline and ends in the same

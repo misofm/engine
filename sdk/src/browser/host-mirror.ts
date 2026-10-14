@@ -13,8 +13,8 @@ import { validateBrowserSpectrumHopFrames } from "./policy.ts";
  * The shipped `.d.ts` predates this SDK and is the app's direct interface to the worklet host: it
  * is flat, every field is required, and the two live-control-adjacent words are `bigint` because
  * that is what the wire takes. `BootOptions` is the SDK's: every field optional, absent meaning
- * zero meaning *the engine's* default, and the four live-control words grouped, because a caller
- * who wants no live controls should be able to say nothing rather than write four zeroes.
+ * zero meaning *the engine's* default, and the three live-control words grouped, because a caller
+ * who wants no live controls should be able to say nothing rather than write three zeroes.
  *
  * Both are right for their callers, and neither should be bent to match the other. What must not
  * happen is a third, hand-written copy of the mapping between them appearing in an app -- which is
@@ -42,10 +42,6 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
 
   const liveControls = options.liveControls;
   const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
-  const commandQueueRecords = word(
-    "liveControls.commandQueueRecords",
-    liveControls?.commandQueueRecords,
-  );
   const masterTrackPlusOne = word(
     "liveControls.masterTrackPlusOne",
     liveControls?.masterTrackPlusOne,
@@ -55,12 +51,6 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   // The engine refuses these combinations at boot with `web.options.live_controls`. Catching them
   // here turns a boot-time refusal into a caller-time message that says which pair is inconsistent,
   // without duplicating the engine's authority: the engine still refuses if this check is wrong.
-  if (observationTaps !== 0n && commandQueueRecords === 0n) {
-    throw new MisoUsageError(
-      "an observation subscription is a live command, so liveControlObservationTaps requires "
-      + "liveControlCommandQueueRecords",
-    );
-  }
   if (masterTrackPlusOne !== 0n && observationTaps === 0n) {
     throw new MisoUsageError(
       "a designated master strip is a designation over observed effects, so "
@@ -70,11 +60,6 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   if (observationTaps > BigInt(ABI_LAYOUT.constants.maximumObservationTaps)) {
     throw new MisoUsageError(
       `liveControlObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
-    );
-  }
-  if (commandQueueRecords > BigInt(ABI_LAYOUT.constants.maximumCommandRecords)) {
-    throw new MisoUsageError(
-      `liveControlCommandQueueRecords is capped at ${ABI_LAYOUT.constants.maximumCommandRecords}`,
     );
   }
 
@@ -90,7 +75,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
-    liveControlCommandQueueRecords: commandQueueRecords,
+    reserved1: 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
     liveControlObservationTaps: observationTaps,
     liveControlMasterTrackPlusOne: masterTrackPlusOne,

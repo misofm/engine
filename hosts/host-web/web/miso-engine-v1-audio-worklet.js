@@ -8,9 +8,6 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
 const COMMAND_REASON_UNSUPPORTED_KIND = 7;
-const COMMAND_REASON_UNKNOWN_TRACK = 2;
-const COMMAND_REASON_UNKNOWN_RACK = 3;
-const COMMAND_REASON_UNKNOWN_EFFECT = 4;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
@@ -72,7 +69,7 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
   "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
@@ -91,12 +88,6 @@ const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 // events, 2 render diagnostics and 1 telemetry event, so a bound of 16 is never the limit.
 const CONTROL_EVENT_LANES = [0, 1];
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
-const EQ_CONFIG_FIELDS = ["tag", "requestId", "trackIndex", "rack", "effectIndex"];
-const PREPARED_COMMAND_FIELDS = ["tag", "requestId", "count", "records", "companion"];
-const EQ_CONFIG_BYTES = 272;
-const INPUT_FILTER_CONFIG_BYTES = 48;
-const PREPARED_COMPANION_HEADER_BYTES = 24;
-const PREPARED_COMPANION_RECORD_BYTES = 80;
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
 const SPECTRUM_FIELDS = ["tag", "requestId", "operation", "channels"];
 const SPECTRUM_STREAM_START_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
@@ -267,7 +258,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryDeadlineMisses = 0;
     this.observations = Object.freeze([]);
     this.observationSelectionView = null;
-    this.preparedCompanion = null;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -574,7 +564,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindLiveControls(init) {
-    this.liveControlsAttached = init.options.liveControlCommandQueueRecords !== 0n;
+    // Issue #1565a D4: the command staging exists exactly when observation taps are configured.
+    this.liveControlsAttached = init.options.liveControlObservationTaps !== 0n;
     const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
     const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
       this.handle,
@@ -587,24 +578,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (!u32(commandPointer) || commandPointer === 0
           || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
       this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
-      const companionPointer = this.exports.miso_engine_web_v1_prepared_companion_ptr(this.handle);
-      const companionCapacity = this.exports.miso_engine_web_v1_prepared_companion_capacity(this.handle);
-      if (!u32(companionPointer) || companionPointer === 0
-          || !u32(companionCapacity) || companionCapacity < PREPARED_COMPANION_HEADER_BYTES
-          || companionPointer + companionCapacity > this.memoryBuffer.byteLength) return false;
-      this.preparedCompanion = new Uint8Array(
-        this.memoryBuffer,
-        companionPointer,
-        companionCapacity,
-      );
     } else if (commandPointer !== 0 || commandCapacity !== 0) {
       // Released live controls must own no staging at all; a nonzero row here would mean the engine
       // charged for a buffer the ABI says does not exist.
       return false;
-    } else {
-      const companionPointer = this.exports.miso_engine_web_v1_prepared_companion_ptr(this.handle);
-      const companionCapacity = this.exports.miso_engine_web_v1_prepared_companion_capacity(this.handle);
-      if (companionPointer !== 0 || companionCapacity !== 0) return false;
     }
 
     this.trackCount = this.exports.miso_engine_web_v1_live_control_track_count(this.handle);
@@ -626,7 +603,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
     // sections), read through the same staging exactly as the track IDs are. Preparation sizes
-    // that staging for the longest source, track, submix, route or VCA ID, so the capacity check
+    // that staging for the longest source, track or submix ID, so the capacity check
     // below is a corrupt-artifact check, not a limit a valid session can reach.
     const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
     if (!u32(submixCount)) return false;
@@ -641,40 +618,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         id += String.fromCharCode(bytes[byte]);
       }
       this.submixIds.push(id);
-    }
-    // Issue #1223 D3: the live route IDs -- the routes into submixes, in canonical route-ID
-    // order -- read through the same staging. Live route `i` is what a send kind's (13-15) index
-    // word `i` addresses, so the SDK takes its route indices from this list and never sorts.
-    const routeCount = this.exports.miso_engine_web_v1_live_control_route_count(this.handle);
-    if (!u32(routeCount)) return false;
-    this.routeIds = [];
-    for (let index = 0; index < routeCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_live_control_route_id(this.handle, index);
-      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
-      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return false;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      this.routeIds.push(id);
-    }
-    // Issue #1246 D3: the VCA IDs, in canonical VCA-ID order, read through the same staging under
-    // the same rules. VCA `i` is what a VCA kind's (16, 17) index word `i` addresses, so the SDK
-    // takes its VCA indices from this list and never sorts. Zero without live controls.
-    const vcaCount = this.exports.miso_engine_web_v1_live_control_vca_count(this.handle);
-    if (!u32(vcaCount)) return false;
-    this.vcaIds = [];
-    for (let index = 0; index < vcaCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_live_control_vca_id(this.handle, index);
-      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
-      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return false;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      this.vcaIds.push(id);
     }
 
     // Issue #207: source introspection, read once here for the same reason the track identities
@@ -900,15 +843,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       throw new RangeError("Invalid boot option");
     }
     const liveControlWords = [
-      options.liveControlCommandQueueRecords, options.liveControlMeterBlocks,
+      options.reserved1, options.liveControlMeterBlocks,
       options.liveControlObservationTaps, options.liveControlMasterTrackPlusOne,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // A subscription is a live command, so capacity without a control channel has no delivery
-    // path; a master designation with no capacity would report a number nothing produces.
-    if ((options.liveControlObservationTaps !== 0n && options.liveControlCommandQueueRecords === 0n)
+    // Offset 32 is reserved and must be zero (issue #1565a D4); a master designation with no
+    // capacity would report a number nothing produces.
+    if (options.reserved1 !== 0n
         || (options.liveControlMasterTrackPlusOne !== 0n
           && options.liveControlObservationTaps === 0n)) {
       throw new RangeError("Invalid observation boot option");
@@ -1076,12 +1019,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveCommand(message);
     } else if (message?.tag === "miso.control.v1" && exactFields(message, CONTROL_FIELDS)) {
       this.receiveControl(message);
-    } else if (message?.tag === "miso.eq-target-config.v1"
-        && exactFields(message, EQ_CONFIG_FIELDS)) {
-      this.receiveEqTargetConfig(message);
-    } else if (message?.tag === "miso.prepared-command.v1"
-        && exactFields(message, PREPARED_COMMAND_FIELDS)) {
-      this.receivePreparedCommand(message);
     } else if (message?.tag === "miso.meters.v1" && exactFields(message, LEASE_FIELDS)) {
       this.receiveMeterLease(message);
     } else if (message?.tag === "miso.telemetry.v1" && exactFields(message, LEASE_FIELDS)) {
@@ -1100,8 +1037,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         })),
         metersAttached: this.metersAttached === true,
         submixes: [...this.submixIds],
-        routes: [...this.routeIds],
-        vcas: [...this.vcaIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {
@@ -1614,7 +1549,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return;
     }
     if (!this.liveControlsAttached) {
-      // A session prepared with `liveControlCommandQueueRecords === 0n` has no control channel and
+      // A session prepared with `liveControlObservationTaps === 0n` has no control channel and
       // no staging buffer. That is a typed refusal of a well-formed request, not a protocol error,
       // so the batch is acknowledged and its record block goes back to the caller untouched.
       this.port.postMessage({
@@ -1701,109 +1636,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const revision = this.exports.miso_engine_web_v1_control_revision(this.handle);
     return { result, response, revision };
-  }
-
-  /// Copy one addressed owner configuration. This request is control-plane only; the fixed Rust
-  /// workspace performs the actual ownership/classification check and the worklet returns a
-  /// detached copy. It never runs from `process()` and never invokes the preparation designer.
-  receiveEqTargetConfig(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !u32(message.trackIndex) || !u32(message.rack)
-        || !u32(message.effectIndex)) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    let result;
-    const builtin = message.rack === 255 && message.effectIndex === 0;
-    try {
-      result = builtin
-        ? this.exports.miso_engine_web_v1_input_filters_config_copy(this.handle, message.trackIndex)
-        : this.exports.miso_engine_web_v1_eq_target_config_copy(
-          this.handle, message.trackIndex, message.rack, message.effectIndex,
-        );
-    } catch (_) {
-      result = RESULT_INTERNAL;
-    }
-    if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
-      return;
-    }
-    let config = new Uint8Array(0);
-    if (result === RESULT_OK) {
-      const pointer = this.exports.miso_engine_web_v1_eq_target_config_ptr(this.handle);
-      const configBytes = builtin ? INPUT_FILTER_CONFIG_BYTES : EQ_CONFIG_BYTES;
-      if (!u32(pointer) || pointer === 0 || pointer + configBytes > this.memoryBuffer.byteLength) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      config = new Uint8Array(this.memoryBuffer, pointer, configBytes).slice();
-    }
-    let reason = 0;
-    if (result === RESULT_INVALID_ARGUMENT) {
-      // Issue #1213 D5a: the index is a strip index, tracks first, then submixes, so only an
-      // index past every strip is an unknown track; a bad rack or effect on a bus is not.
-      reason = message.trackIndex >= this.trackCount + this.submixIds.length
-        ? COMMAND_REASON_UNKNOWN_TRACK
-        : !effectRack(message.rack)
-          ? COMMAND_REASON_UNKNOWN_RACK
-          : COMMAND_REASON_UNKNOWN_EFFECT;
-    }
-    this.port.postMessage({
-      tag: "miso.eq-target-config.v1",
-      requestId: message.requestId,
-      result,
-      reason,
-      config,
-    }, [config.buffer]);
-  }
-
-  /// Copy semantic records and the opaque companion into the fixed Rust staging buffers, then
-  /// call the real prepared admission export. The worklet performs no target preparation.
-  receivePreparedCommand(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !u32(message.count) || message.count > MAXIMUM_COMMAND_RECORDS
-        || !(message.records instanceof Uint8Array)
-        || !(message.records.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined"
-          && message.records.buffer instanceof SharedArrayBuffer)
-        || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES
-        || !(message.companion instanceof Uint8Array)
-        || !(message.companion.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined"
-          && message.companion.buffer instanceof SharedArrayBuffer)
-        || message.companion.byteLength < PREPARED_COMPANION_HEADER_BYTES
-        || message.companion.byteLength > this.preparedCompanion?.byteLength
-        || this.preparedCompanion === null) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    this.commandStaging.set(message.records, 0);
-    this.preparedCompanion.set(message.companion, 0);
-    let result;
-    try {
-      result = this.exports.miso_engine_web_v1_prepared_command_submit(
-        this.handle, message.count, message.companion.byteLength,
-      );
-    } catch (_) {
-      result = RESULT_INTERNAL;
-    }
-    const report = this.commandReport;
-    if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
-        || report.getUint32(4, true) !== ABI_VERSION
-        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    this.port.postMessage({
-      tag: "miso.ack.v1",
-      requestId: message.requestId,
-      result,
-      reason: report.getUint32(12, true),
-      rejectedIndex: report.getUint32(16, true),
-      admitted: report.getUint32(20, true),
-      appliedAtSample: report.getBigUint64(24, true),
-      records: message.records,
-    }, [message.records.buffer]);
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).

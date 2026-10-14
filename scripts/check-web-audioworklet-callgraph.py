@@ -194,25 +194,17 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         ),
     },
     "miso_engine_web_v1_meter_poll": {
-        "_RNvMs5_Cs_8host_webNtB5_22AudioWorkletEngineHost11poll_meters": (
+        "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11poll_meters": (
             2,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` (#1381a D3): the active "
             "plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the downcast asks its "
             "`type_id`, one `call_indirect` each, neither of which allocates or drops",
         ),
     },
-    "miso_engine_web_v1_command_submit": {
-        "_RNvMs1_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer25publish_candidate_targets": (
-            4,
-            "the owner's `Arc<dyn NativeEffectFactory>`: `target_preparation()` and the "
-            "capability's target-count and validation calls, inlined from `publish`",
-        ),
-        "_RNvMs1_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer27preflight_candidate_targets": (
-            4,
-            "the same factory and target-preparation capability calls, inlined from "
-            "`preflight_publication`",
-        ),
-    },
+    # `command_submit` had two rows here (the prepared owner's factory calls inlined from
+    # `publish` and `preflight_publication`); #1565A deleted the prepared owners, so the
+    # observation-only admission has no indirect call site left, and the empty table pins that.
+    "miso_engine_web_v1_command_submit": {},
 }
 
 VECTOR = re.compile(r"^(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.")

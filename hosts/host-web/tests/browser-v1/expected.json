@@ -36,7 +36,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "0",
         "renderedQuanta": "0",
-        "memoryBytes": 2424832
+        "memoryBytes": 2883584
       },
       "beforeDisposeStatus": {
         "state": 2,
@@ -46,7 +46,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "384",
         "renderedQuanta": "3",
-        "memoryBytes": 2424832
+        "memoryBytes": 2883584
       },
       "resources": {
         "sampleRateHz": 48000,
@@ -87,72 +87,25 @@
       "pcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
     },
     "nativePcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e",
-    "commandTimeline": {
-      "reports": {
-        "matrix": {
+    "setControlTimeline": {
+      "frames": [
+        {
           "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "128"
+          "responseBytes": 80
         },
-        "unknownTrack": {
-          "result": 1,
-          "reason": 2,
-          "rejectedIndex": 0,
-          "admitted": 0,
-          "appliedAtSample": "256"
-        },
-        "unknownParameter": {
-          "result": 1,
-          "reason": 5,
-          "rejectedIndex": 0,
-          "admitted": 0,
-          "appliedAtSample": "0"
-        },
-        "pan": {
+        {
           "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "384"
+          "responseBytes": 80
         },
-        "fader": {
+        {
           "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "512"
+          "responseBytes": 80
         },
-        "mute": {
+        {
           "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "640"
-        },
-        "effectParam": {
-          "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "768"
-        },
-        "effectBypass": {
-          "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 1,
-          "appliedAtSample": "896"
-        },
-        "mixedBatch": {
-          "result": 0,
-          "reason": 0,
-          "rejectedIndex": 0,
-          "admitted": 2,
-          "appliedAtSample": "1024"
+          "responseBytes": 256
         }
-      },
+      ],
       "beforeDisposeStatus": {
         "state": 2,
         "lastResult": 0,
@@ -161,11 +114,11 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
         "renderedQuanta": "10",
-        "memoryBytes": 2555904
+        "memoryBytes": 3080192
       },
-      "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
+      "pcmF32leSha256": "c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd"
     },
-    "nativeCommandTimelinePcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7",
+    "nativeSetControlTimelinePcmF32leSha256": "c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd",
     "observationTimeline": {
       "armedTrackGrDbPositive": true,
       "armedMasterEqualsTrack": true,
@@ -174,7 +127,7 @@
       "unobservedMasterGrDb": null,
       "subscribeReason": 0,
       "unknownTapReason": 10,
-      "unboundReason": 11,
+      "unboundReason": 7,
       "pcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"
     },
     "nativeObservationPcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"

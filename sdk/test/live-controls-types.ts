@@ -77,8 +77,6 @@ const edits = new LiveControlEdits({
   sources: [],
   metersAttached: true,
   submixes: [],
-  routes: [],
-  vcas: [],
 });
 const track = edits.track("t");
 
@@ -150,8 +148,6 @@ const busEdits = new LiveControlEdits({
   sources: [],
   metersAttached: false,
   submixes: ["bus"],
-  routes: ["t-bus"],
-  vcas: [],
 });
 const bus = busEdits.submix("bus");
 bus.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -170,7 +166,6 @@ busEdits.strip("bus").effect("inserts", 0, "miso.compressor").observe("Gain Redu
 // (its record's channel is not applicable), no effects and no solo, and route() says so in its type.
 type _RouteReturn = Assert<Exact<ReturnType<LiveControlEdits["route"]>, RouteEdits>>;
 type _RouteSurface = Assert<Exact<keyof RouteEdits, "gainDb" | "mute" | "matrix" | "followsMute">>;
-type _SessionMapRoutes = Assert<Exact<MisoSessionMap["routes"], readonly string[]>>;
 const send = busEdits.route("t-bus");
 send.gainDb(-12, { smoothingSamples: 480 });
 send.mute(true);
@@ -188,18 +183,14 @@ send.faderDb(-6);
 
 // Issue #1246 D3/D4: a VCA's live edits are exactly its lane-selectable fader offset and mute. A
 // VCA has no audio path, so it has no pan, matrix, trim, effect or solo, and vca() says so in its
-// type. Both session maps carry the VCA list, and neither may leave it out.
+// type. The session maps carry no route or VCA list: a value edit names its target by stable ID.
 type _VcaReturn = Assert<Exact<ReturnType<LiveControlEdits["vca"]>, VcaEdits>>;
 type _VcaSurface = Assert<Exact<keyof VcaEdits, "faderDb" | "mute">>;
-type _SessionMapVcas = Assert<Exact<MisoSessionMap["vcas"], readonly string[]>>;
-type _SdkSessionMapVcas = Assert<Exact<SessionMap["vcas"], readonly string[]>>;
 const vcaEdits = new LiveControlEdits({
   tracks: ["t"],
   sources: [],
   metersAttached: false,
   submixes: [],
-  routes: [],
-  vcas: ["drums"],
 });
 const drums = vcaEdits.vca("drums");
 drums.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -214,9 +205,9 @@ drums.pan(-1, 1);
 drums.effect("inserts", 0, "miso.compressor");
 // @ts-expect-error a VCA's options are a lane and smoothing only
 drums.faderDb(-6, { gainDb: 0 });
-// @ts-expect-error a session map always carries its VCA list
-const noVcas: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [] };
-void noVcas;
+// @ts-expect-error a session map has no VCA or route list any more
+const staleMap: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] };
+void staleMap;
 
 // #1563B D6: a value edit resolves with the core's ControlReport, and only observation records
 // resolve with a CommandReport.

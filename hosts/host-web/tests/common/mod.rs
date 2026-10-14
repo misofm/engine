@@ -338,7 +338,6 @@ impl Rig {
             require_sample_rate_hz: rate,
             require_quantum_frames: QUANTUM,
             source_ring_frames: QUANTUM * 2,
-            live_control_command_queue_records: 64,
             ..WebBootOptions::explicit_defaults()
         };
         let host = AudioWorkletEngineHost::boot(document, options)

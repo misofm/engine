@@ -186,3 +186,118 @@ a refused batch does not undo a committed browser VCA batch* (#1525) close as su
 is implemented (root Q6).
 
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+## Decision record: #1565A (flip batch, written 2026-10-14)
+
+Root's slice order put D1-D4, D5, D6, D7 and D8 into one pass, because the SDK no longer sends a
+value command (#1563B) and the Worker-side path serves every value (#1562a). What shipped and where
+it departs from the filed text:
+
+### What was deleted
+
+- **Host-web.** Command kinds 1-6 and 9-17 and their constants; `admit_commands_staged`, the record
+  builders, the solo, VCA and follow passes, `WebEffectiveView`, `WebControlRows`, `SessionRamps`,
+  `SESSION_DEFAULT_RAMP`; the retained `ReadyOwnership` mirrors (`solo`, `vcas`, `routes`,
+  `strip_values`, `ramps`, `rows`, `controls`, `plan_gate`, `effect_controls`, `route_controls`,
+  `input_filter_shadows`) and the host generation; `prepared_command_submit`, every
+  `eq_target_*` and `input_filters_*` export, `prepared_companion_ptr` and `_capacity`, the two
+  `live_control_route_*` and `live_control_vca_*` pairs; `control_targets.rs` and
+  `web/prepared-control.js`; the browser VCA bounds (`MAXIMUM_BROWSER_VCAS`,
+  `MAXIMUM_BROWSER_VCA_REACH_PAIRS`, `web.vca.*`), which bounded only the deleted VCA command's
+  per-command work. Reasons `notSoloable`, `unknownRoute` and `unknownVca` are gone.
+- **Host-core (D5).** `LiveVcaState`, `LiveVcaFaderDelta`, `LiveControlSoloState`,
+  `LiveControlMuteDelta`, `StripMuteSeed`, `LiveRoute`, `LiveRouteState`, `LiveRouteStateError`,
+  `LiveRouteMuteFollow`, `LiveStripValues`, `StripValues` with their four modules and
+  `tests/vca_live.rs`; the rows of `host-core/tests/MUTATIONS.md` and `host-web/MUTATIONS.md` that
+  named them.
+- **D4, taken in the same pass (the filed #1565C).** The word at offset 32 is `reserved1`, refused
+  `web.options.reserved1` when nonzero. The command staging and its decode array exist exactly when
+  `live_control_observation_taps != 0`; a boot without taps refuses every submission `UNSUPPORTED`
+  with `COMMAND_REASON_UNSUPPORTED_KIND`, so reason `observationUnbound` (11) is declared and
+  reachable by nothing (its number stays). `DEFAULT_COMMAND_QUEUE_RECORDS` is gone;
+  `live_control_defaults()` is the default meter window alone. The decode array shrank from
+  `2 * 256 + 2 * strips + routes + 2 * vca-reached strips` entries of `StagedCommand` to 256
+  `StagedObserve` entries (none without taps), and the ID staging no longer reserves room for route
+  and VCA IDs.
+- **Kept on purpose, differing from D3.** `live_control_track_{count,id}` and
+  `live_control_submix_{count,id}` stay. The SDK's `shape()` and the meter frame's strip order read
+  them, and D3 itself moves that order to the core's list in #1564 D5 (not in this batch;
+  #1565B needs #1564C). Reasons `unknownParameter` (5) and `domain` (6), which nothing raises any
+  more, stay declared too: the filed text removes only the three reasons named above.
+
+### Tests
+
+- 111 of the 176 unit tests in `hosts/host-web/src/tests.rs` left (seven others were added). 98 of
+  the 113 `#[ignore]`d for this slice were deleted outright: each tested a deleted kind, mirror or export, and the core path
+  holds the claim in `tests/control_admission.rs` (gates 1-6, 11), `tests/control_parity.rs`
+  (gate 8: path and revision, every block's bits at four rates, the superseded count, the
+  `CONTROL_LIST_GET`, `CONTROL_STATE_GET` and snapshot bytes), `crates/host-core/tests/live_edit_classifier.rs`,
+  `live_delta.rs` (including the delay's and the multiband's prepared bypass, #1266) and
+  `crates/controls`. The 15 others were rewritten or deleted for a stated reason:
+  - rewritten: `decoded_command_resource_is_exact_...` (now `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes`),
+    `exact_retained_total_is_checked_as_one_budget_not_independent_caps`,
+    `idle_render_skips_admission_counter_clear_without_losing_queue_credit`,
+    `observation_misuse_is_typed_and_all_or_nothing`, `a_submission_names_each_observation_tap_once`,
+    `bus_edits_and_a_bus_observation_admit_and_render_without_allocating` (now the observation alone),
+    `unknown_targets_are_typed_and_leave_the_engine_untouched` (now gate 1,
+    `every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell`) and
+    `native_command_timeline_digest_pins_the_wasm_parity` (D6, below);
+  - deleted, the claim held elsewhere: `the_status_reports_the_sessions_superseded_count`
+    (`control_parity.rs` compares the browser status word with the C ABI's count),
+    `effect_control_browser_table_and_payload_reach_exact_budget_gate` and
+    `late_mixed_effect_refusal_...` (the control plane's retained row, charged once, and the core's
+    atomic transactions), `a_bus_session_admits_and_renders_without_allocating` (admission is control
+    work now), `retired_rack_codes_are_refused_on_every_browser_record` (the observe records' retired
+    racks are in `observation_misuse_...`), `a_live_bypass_cannot_lift_the_delay_or_multiband_session_bypass`
+    (`live_delta.rs` #1266 gate 1) and `every_browser_plan_carries_the_strip_lanes_...` (the boot
+    word no longer chooses lanes since #1562a; host-core's lane-bit tests hold the claim).
+- New: gate 1 above; gate 2, `the_boot_word_is_reserved_and_observation_staging_follows_the_taps`;
+  `a_subscription_without_capacity_is_unsupported`; and the D6 pair below.
+- `tests/control_command_timing.rs` (TBD9) did not compile on the batch head (it called the
+  `native_staging::drain_reliable_events` that #1570b deleted); it drains through `control_event`
+  now. Every `tests/*.rs` boot dropped the queue word.
+- `tools/parameter-metadata/tests/round_trip.rs::every_metadata_id_resolves_through_a_command_acknowledgement`
+  sent kind 4. It is now `every_metadata_effect_parameter_is_a_control_row_with_the_same_liveness`
+  (every metadata parameter ID is a row of the control catalog, with the same `automatable` and
+  `liveUpdatable` flags): driving the host there would add `protocol` and `test-support` to a
+  crate whose manifest is outside this slice, and `tests/control_admission.rs` already commits a
+  `SET_CONTROL` on an insert row and renders it as a fresh plan. The ABI-layout test's command
+  record offsets now use an observe record.
+- Gates `check-web-audioworklet-callgraph.py`: the `meter_poll` pin follows the renumbered `impl`
+  (`Ms5_` to `Ms0_`) and `command_submit` has an empty indirect-site table (its two prepared-owner
+  rows are gone); the session-map shape gate drops the route and VCA mutations.
+
+### D6: the cross-target timeline
+
+`direct-oracle.mjs` lost the command-record timeline (kinds 1-6, `createPreparedControl`) and gained
+`runSetControlTimeline`: four `SESSION_TRANSACTION_APPLY` frames (a fader move, a pan move, the EQ
+band 1 gain, and one refused out-of-domain fader value) committed as
+`tests/browser-v1/set-control-frames/frame-N.bin`, sent through `control_request_ptr` and
+`control_command`, with the events drained the way the worklet drains them. The native twin is
+`tests::native_set_control_timeline_digest_pins_the_wasm_parity`; the frames are pinned to their
+encoder by `tests::set_control_frames_are_the_committed_fixtures` (set
+`MISO_WRITE_SET_CONTROL_FRAMES=1` to rewrite them). `expected.json` lost `commandTimeline` and
+`nativeCommandTimelinePcmF32leSha256` and gained `setControlTimeline` and
+`nativeSetControlTimelinePcmF32leSha256`. The observation timeline's no-taps leg now reports
+`unsupportedKind` (7), not `observationUnbound` (11).
+
+Re-pins and their history lines are recorded with the batch's gate run below.
+
+### Re-pins and evidence (flip batch, 2026-10-14)
+
+- `expected.json` (history line: #1565A deleted the command-record timeline; the cross-target
+  owner is the `SET_CONTROL` timeline): `setControlTimeline` digest
+  `c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd`, native and simd128 equal on
+  the first run; the frames answer 80, 80, 80 and 256 bytes (the fourth is the refused
+  `control.domain` frame at the unchanged revision 4). The two status `memoryBytes` rows moved
+  (2,424,832 to 2,883,584 at boot; the old value predates the control plane's allocations since
+  #1381a); the observation timeline's no-taps leg reports reason 7 (was 11); the native/simd128
+  identity and observation digests did not move.
+- Boot growth of the 1 MiB worst document: 25,427,968 bytes, unchanged from #1381a (the peak is the
+  parse transient; the multiplier-25 gate passes).
+- Deleted-kind refusal and the boot word: gates 1 and 2, as tests above. Gates 3 and 5 run unchanged
+  (`control_parity.rs`, `control_admission.rs`, `worker_admission_realtime.rs`). Gate 4 and the
+  browser qualification rows were not run here (no local browser runs).
+- `RUSTDOCFLAGS='-D warnings' cargo doc` fails on `crates/control-plane/src/control.rs:236`
+  (`SessionControlSnapshot::effect_cells` unresolved link) on the batch head, also without this
+  slice's changes; that crate belongs to TBD10's lane.

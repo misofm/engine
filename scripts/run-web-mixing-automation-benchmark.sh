@@ -4,7 +4,7 @@
 # The console benchmark's native row renders the mono console in-process. This arm renders the
 # same session, with the same eight controls, through the product's browser path: the host_web
 # module built with the delivery recipe, booted and driven under Node's V8 through
-# `prepared-control.js` and `miso_engine_web_v1_command_submit` exactly as the SDK drives it, with
+# the module's control exports exactly as the SDK drives them, with
 # `miso_engine_web_v1_render` alone inside the clock (`scripts/web-mixing-automation-benchmark.mjs`
 # says what else it does and why, and how its input differs from the native row's). Each round
 # also times three console-strip documents after the arms (#1085, #1228): the standing
@@ -69,7 +69,7 @@ workdir=$2
 harness="$root/scripts/web-mixing-automation-benchmark.mjs"
 
 # Tracked files only: every input a build or a run reads -- the sources, this script, the harness,
-# `prepared-control.js`, the fixture, the ABI layout -- is tracked, and the console runner's own step
+# the fixture, the ABI layout -- is tracked, and the console runner's own step
 # artifacts may already sit untracked in the directory a run writes to.
 require_clean_tree() {
     [[ -z "$(git status --porcelain=v1 --untracked-files=no)" ]] ||
