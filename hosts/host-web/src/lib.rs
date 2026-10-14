@@ -35,12 +35,13 @@ use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
     InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps, LiveRouteMuteFollow,
-    LiveRouteState, LiveVcaState, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
-    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
-    prepare_host_runtime_with_live_controls_and_spectrum,
+    LiveRouteState, LiveStripValues, LiveVcaState, PrepareDiagnostics, PrepareRejection,
+    PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
+    SourceSubmission, StripMuteSeed, apply_input_filter_edit, changed_lane_records,
+    compile_host_model, compiled_session_shape, control_table_bytes, covers_lane, fader_gain_bits,
+    parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
+    trim_gain_bits,
 };
 use host_core::{
     ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
@@ -1873,6 +1874,11 @@ struct ReadyOwnership {
     /// transaction shadow, committed or rolled back with `solo` and `routes`. Empty -- and
     /// allocated nothing -- for a session without VCAs or without live controls.
     vcas: LiveVcaState,
+    /// Issue #1560: what the render plane was last told about each strip's own fader (for a strip
+    /// no VCA reaches), matrix, trim and polarity, so a command that repeats the committed value
+    /// stages no record, as the core's classifier writes none for it. It carries its own
+    /// transaction shadow, committed or rolled back with `solo`.
+    strip_values: LiveStripValues,
     /// Issue #1364 D2: what an absent ramp length resolves to, computed once at preparation.
     ramps: SessionRamps,
     /// The core's descriptors of the rows the live kinds write, resolved once at preparation
@@ -5002,12 +5008,14 @@ fn admit_commands(
             ready.solo.commit();
             ready.routes.commit();
             ready.vcas.commit();
+            ready.strip_values.commit();
             Ok(())
         }
         Err(rejection) => {
             ready.solo.rollback();
             ready.routes.rollback();
             ready.vcas.rollback();
+            ready.strip_values.rollback();
             for shadow in &mut ready.input_filter_shadows {
                 shadow.rollback();
             }
@@ -5229,6 +5237,37 @@ fn write_strip_cells(
     Ok(())
 }
 
+/// The lanes of `slot`'s cell that an earlier command of this batch already staged a record for
+/// (#1560). `select` names the lanes one staged record covers, `None` for a record of another
+/// kind.
+///
+/// A command that repeats the committed value stages nothing, but a repeat that follows an earlier
+/// command of the same batch on the same cell still stages its record: the cell keeps the last
+/// record, so the repeat's ramp length replaces the earlier one's, as it does for the core, whose
+/// transaction takes the last edit's length. Only the first write of a cell in a batch can be a
+/// no-op.
+fn staged_lanes(
+    ready: &ReadyOwnership,
+    lowered: usize,
+    slot: usize,
+    select: impl Fn(&AdmittedCommand) -> Option<BuiltinLaneSelector>,
+) -> [bool; 2] {
+    let mut lanes = [false; 2];
+    for staged in &ready.command_decoded[..lowered] {
+        if staged.queue_slot as usize != slot {
+            continue;
+        }
+        if let StagedCommandKind::Command(record) = &staged.kind
+            && let Some(selector) = select(record)
+        {
+            for (lane, seen) in lanes.iter_mut().enumerate() {
+                *seen |= covers_lane(selector, lane);
+            }
+        }
+    }
+    lanes
+}
+
 /// The three passes themselves. Every exit from here is a transaction boundary for its caller.
 fn admit_commands_staged(
     ready: &mut ReadyOwnership,
@@ -5336,58 +5375,176 @@ fn admit_commands_staged(
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
-                // Issue #1245 D3: a fader move on a strip some VCA reaches moves the member's own
-                // value, and what reaches the queue is its effective value -- the own value plus
-                // every reaching VCA's offset, clamped -- for the covered lanes. Two different
-                // lane values split a `Both` command into one `Left` and one `Right` record. A
-                // strip no VCA reaches (`set_member_db` refuses it) lowers exactly as before.
-                //
-                // Decision 17 C7, slice S7c D5: the effective value is `controls::effective_strip`'s.
-                // The fader does not read the solo term, so the `any_solo` it is given is moot.
-                if let AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                    lanes,
-                    db,
-                    smoothing_samples,
-                }) = staged[0]
-                    && ready.vcas.set_member_db(track, lanes, db)
-                {
-                    let [left, right] =
-                        WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
-                            .strip(track, false)
-                            .fader_db;
-                    let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
-                        for (position, (lane, db)) in [
-                            (BuiltinLaneSelector::Left, left),
-                            (BuiltinLaneSelector::Right, right),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            ready.vcas.record_emitted_db(track, lane, db);
-                            staged[position] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                                lanes: lane,
+                // Issue #1560: a command that repeats the value the render plane holds stages no
+                // record, as the core's classifier writes none for an equal value: the record
+                // would restart the cell's ramp over its own length, so a ramp still in flight
+                // would render other bits. The comparison is the core's, by the bits it compares
+                // (`LiveStripValues`), and the mirror moves with each record staged.
+                match staged[0] {
+                    AdmittedCommand::Matrix(record) => {
+                        let matrix = record.matrix;
+                        let bits = [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits);
+                        let held = ready.strip_values.get(track).map(|held| held.matrix);
+                        let staged_before = staged_lanes(ready, lowered, slot, |record| {
+                            matches!(record, AdmittedCommand::Matrix(_))
+                                .then_some(BuiltinLaneSelector::Both)
+                        });
+                        if held == Some(bits) && !staged_before[0] {
+                            (slot, 0)
+                        } else {
+                            ready.strip_values.set_matrix(track, bits);
+                            (slot, 1)
+                        }
+                    }
+                    // Issue #1245 D3: a fader move on a strip some VCA reaches moves the member's
+                    // own value, and what reaches the queue is its effective value -- the own
+                    // value plus every reaching VCA's offset, clamped -- for the covered lanes. Two
+                    // different lane values split a `Both` command into one `Left` and one `Right`
+                    // record. A strip no VCA reaches (`set_member_db` refuses it) lowers its own
+                    // value as is.
+                    //
+                    // Decision 17 C7, slice S7c D5: the effective value is
+                    // `controls::effective_strip`'s. The fader does not read the solo term, so the
+                    // `any_solo` it is given is moot.
+                    AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                        lanes,
+                        db,
+                        smoothing_samples,
+                    }) => {
+                        let member = ready.vcas.set_member_db(track, lanes, db);
+                        let target = if member {
+                            WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes)
+                                .strip(track, false)
+                                .fader_db
+                        } else {
+                            [db, db]
+                        };
+                        // What the render plane holds: a reached strip's effective value is the
+                        // VCA state's, any other strip's is the own value kept in the mirror.
+                        let held = match ready.vcas.emitted_db(track) {
+                            Some(emitted) => Some(emitted.map(fader_gain_bits)),
+                            None => ready.strip_values.get(track).map(|held| held.fader_gain),
+                        };
+                        let staged_before =
+                            staged_lanes(ready, lowered, slot, |record| match record {
+                                AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                                    lanes, ..
+                                }) => Some(*lanes),
+                                _ => None,
+                            });
+                        let changed = [0, 1].map(|lane| {
+                            covers_lane(lanes, lane)
+                                && (staged_before[lane]
+                                    || held.is_none_or(|held| {
+                                        fader_gain_bits(target[lane]) != held[lane]
+                                    }))
+                        });
+                        let mut produced = 0;
+                        for (lane_selector, lane) in changed_lane_records(
+                            changed,
+                            target[0].to_bits() == target[1].to_bits(),
+                        ) {
+                            let db = target[lane];
+                            if member {
+                                ready.vcas.record_emitted_db(track, lane_selector, db);
+                            } else {
+                                ready.strip_values.set_fader_gain(
+                                    track,
+                                    lane_selector,
+                                    fader_gain_bits(db),
+                                );
+                            }
+                            staged[produced] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                                lanes: lane_selector,
                                 db,
                                 smoothing_samples,
                             });
+                            produced += 1;
                         }
-                        2
-                    } else {
-                        let effective = if matches!(lanes, BuiltinLaneSelector::Right) {
-                            right
-                        } else {
-                            left
-                        };
-                        ready.vcas.record_emitted_db(track, lanes, effective);
-                        staged[0] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
-                            lanes,
-                            db: effective,
-                            smoothing_samples,
-                        });
-                        1
-                    };
-                    (slot, produced)
-                } else {
-                    (slot, 1)
+                        (slot, produced)
+                    }
+                    // The input cells are the strip's, whatever the value: a strip without them
+                    // refuses a trim or a polarity whether or not it would change anything.
+                    AdmittedCommand::Input(record) => {
+                        if ready
+                            .controls
+                            .get(track)
+                            .and_then(|control| control.input.as_ref())
+                            .is_none()
+                        {
+                            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                        }
+                        let held = ready.strip_values.get(track).copied();
+                        let mut produced = 0;
+                        match record {
+                            TrackInputRecord::TrimDb {
+                                lanes,
+                                db,
+                                smoothing_samples,
+                            } => {
+                                let bits = trim_gain_bits(db);
+                                let staged_before =
+                                    staged_lanes(ready, lowered, slot, |record| match record {
+                                        AdmittedCommand::Input(TrackInputRecord::TrimDb {
+                                            lanes,
+                                            ..
+                                        }) => Some(*lanes),
+                                        _ => None,
+                                    });
+                                let changed = [0, 1].map(|lane| {
+                                    covers_lane(lanes, lane)
+                                        && (staged_before[lane]
+                                            || held.is_none_or(|held| held.trim_gain[lane] != bits))
+                                });
+                                for (lane_selector, _) in changed_lane_records(changed, true) {
+                                    ready.strip_values.set_trim_gain(track, lane_selector, bits);
+                                    staged[produced] =
+                                        AdmittedCommand::Input(TrackInputRecord::TrimDb {
+                                            lanes: lane_selector,
+                                            db,
+                                            smoothing_samples,
+                                        });
+                                    produced += 1;
+                                }
+                            }
+                            TrackInputRecord::PolarityInvert {
+                                lanes,
+                                inverted,
+                                smoothing_samples,
+                            } => {
+                                let staged_before =
+                                    staged_lanes(ready, lowered, slot, |record| match record {
+                                        AdmittedCommand::Input(
+                                            TrackInputRecord::PolarityInvert { lanes, .. },
+                                        ) => Some(*lanes),
+                                        _ => None,
+                                    });
+                                let changed = [0, 1].map(|lane| {
+                                    covers_lane(lanes, lane)
+                                        && (staged_before[lane]
+                                            || held
+                                                .is_none_or(|held| held.polarity[lane] != inverted))
+                                });
+                                for (lane_selector, _) in changed_lane_records(changed, true) {
+                                    ready
+                                        .strip_values
+                                        .set_polarity(track, lane_selector, inverted);
+                                    staged[produced] =
+                                        AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
+                                            lanes: lane_selector,
+                                            inverted,
+                                            smoothing_samples,
+                                        });
+                                    produced += 1;
+                                }
+                            }
+                            TrackInputRecord::PreparedFilter { .. } => {
+                                return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                            }
+                        }
+                        (slot, produced)
+                    }
+                    _ => (slot, 1),
                 }
             }
             // A mute command carries the user's *intent*; what reaches the queue is the composed
@@ -5434,36 +5591,35 @@ fn admit_commands_staged(
                     let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
                     view.strip(track, view.any_solo(&mut any_solo_cache)).mute
                 };
-                let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
-                    for (position, (lane, muted)) in [
-                        (BuiltinLaneSelector::Left, left),
-                        (BuiltinLaneSelector::Right, right),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        ready.solo.record_emitted(track, lane, muted);
-                        staged[position] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                            lanes: lane,
-                            muted,
-                            smoothing_samples,
-                        });
-                    }
-                    2
-                } else {
-                    let effective = if matches!(lanes, BuiltinLaneSelector::Right) {
-                        right
-                    } else {
-                        left
-                    };
-                    ready.solo.record_emitted(track, lanes, effective);
-                    staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                        lanes,
-                        muted: effective,
+                // Issue #1560: only a covered lane whose effective mute differs from what the render
+                // plane was last told stages a record, as the core's classifier does: re-muting a
+                // settled lane restarts its ramp. A `Both` command whose lanes both change to one
+                // value stages the one record it always did; one lane changing stages that lane's.
+                let effective = [left, right];
+                let staged_before =
+                    staged_lanes(ready, lowered, strip_count + track, |record| match record {
+                        AdmittedCommand::Fader(TrackFaderRecord::Mute { lanes, .. }) => {
+                            Some(*lanes)
+                        }
+                        _ => None,
+                    });
+                let changed = [0, 1].map(|lane| {
+                    covers_lane(lanes, lane)
+                        && (staged_before[lane]
+                            || effective[lane] != ready.solo.emitted_mute(track, lane))
+                });
+                let mut produced = 0;
+                for (lane_selector, lane) in changed_lane_records(changed, left == right) {
+                    ready
+                        .solo
+                        .record_emitted(track, lane_selector, effective[lane]);
+                    staged[produced] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
+                        lanes: lane_selector,
+                        muted: effective[lane],
                         smoothing_samples,
                     });
-                    1
-                };
+                    produced += 1;
+                }
                 (strip_count + track, produced)
             }
             // Solo lowers to nothing here. It moves one live-control bit; the records that bit
@@ -5578,6 +5734,20 @@ fn admit_commands_staged(
                             refuse(COMMAND_REASON_DOMAIN, index)
                         }
                     })?;
+                // Issue #1560: the mirror holds the committed values, so it moves whether or not a
+                // record follows. A record is staged only when the target the render plane holds
+                // changes -- the folded coefficients or the silenced flag, the core's comparison
+                // (`route_records`): a repeated value, or a gain or matrix edit on a send that stays
+                // silenced, stages nothing, because the record would restart the send's ramp.
+                let held = producer
+                    .record(
+                        current.gain_db,
+                        current.matrix,
+                        current.mute,
+                        current.source_lane_muted,
+                        command.smoothing_samples,
+                    )
+                    .map_err(|_| refuse(COMMAND_REASON_DOMAIN, index))?;
                 let moved = match edit {
                     RouteEdit::GainDb(gain_db) => ready.routes.set_gain_db(track, gain_db),
                     RouteEdit::Mute(mute) => ready.routes.set_mute(track, mute),
@@ -5586,8 +5756,16 @@ fn admit_commands_staged(
                 if !moved {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
                 }
-                staged[0] = AdmittedCommand::Route(record);
-                (slot, 1)
+                let bits = |record: &RouteControlRecord| record.target().map(f32::to_bits);
+                let staged_before = staged_lanes(ready, lowered, slot, |record| {
+                    matches!(record, AdmittedCommand::Route(_)).then_some(BuiltinLaneSelector::Both)
+                })[0];
+                if !staged_before && held.mute() == record.mute() && bits(&held) == bits(&record) {
+                    (slot, 0)
+                } else {
+                    staged[0] = AdmittedCommand::Route(record);
+                    (slot, 1)
+                }
             }
             COMMAND_INPUT_FILTERS => {
                 if !prepared_submission {
@@ -7553,6 +7731,10 @@ fn compile_ready(
     } else {
         LiveVcaState::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?
     };
+    // Issue #1560: the strips' mirrored values, seeded from the same model and charged beside the
+    // VCA state, its shadow included.
+    let strip_values =
+        LiveStripValues::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     // Issue #1364 D2: the session's ramp table and the per-strip pan windows, computed here, once,
     // on the control thread, and charged like the other retained tables.
     let ramps =
@@ -7563,8 +7745,12 @@ fn compile_ready(
     let live_state_retained = vcas
         .retained_bytes()
         .checked_add(ramps.retained_bytes())
+        .and_then(|bytes| bytes.checked_add(strip_values.retained_bytes()))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let live_state_largest = vcas.largest_allocation_bytes().max(ramps.retained_bytes());
+    let live_state_largest = vcas
+        .largest_allocation_bytes()
+        .max(ramps.retained_bytes())
+        .max(strip_values.largest_allocation_bytes());
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
         .checked_add(live_state_retained)
@@ -7764,6 +7950,7 @@ fn compile_ready(
         )?,
         solo,
         vcas,
+        strip_values,
         ramps,
         rows,
         route_controls,

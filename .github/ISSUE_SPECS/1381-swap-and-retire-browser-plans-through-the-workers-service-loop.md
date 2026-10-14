@@ -329,3 +329,37 @@ the Rust host* (#1290) publishes through.
 - *Carry spectrum capture state across a plan swap* (#1395).
 
 **Decision 17 amendment (2026-10-13).** This slice lands as filed. #1596 then removes the spectrum capture from `RenderCompanions` and D3's **Spectrum** pairing bullet: the browser's spectrum readers move to the control plane in the Worker and are paired at promotion, as on the C ABI (#1593 D5).
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** This slice is split. Both pieces stay in this issue.
+
+- **#1381a** lands first, in `single` mode only, on today's one-instance module (no #1332, #1387 or
+  #1380).
+  - D1: the one instance's boot builds `SessionState` through `WebRuntimePreparer`. It takes the
+    instance's own `SourceControlSet` (D1.2), revision gate and cell producers (D1.3: the render
+    half stays in the instance's `LiveHost`; there is no transfer token).
+  - D2: the instance's source exports route through `SessionState`.
+  - D4 as filed.
+  - D5 as filed, except that the watermark read calls `PlanQueries::watermark()`
+    (`crates/control-plane/src/plan.rs:111`), not `SessionState::watermark()` (root Q5).
+  - D6: `single` mode only. The main-realm service tick posts `miso.service.v1` on the node's
+    existing port.
+  - D3: companions travel inside the plan as the attachment, with `active_attachment_mut`; there
+    is no `adopt_predecessor`.
+  - #1381a also takes #1332 D1's control counter: `CONTROL_ALLOCATIONS` in `render_lock.rs`, the
+    export `miso_engine_web_v1_control_allocation_count`, and `singleModeControlAllocations` in
+    the host status.
+  - It adds one `SessionState` accessor that lets the adapter reach an effect producer's
+    observation queue for observe kinds 7 and 8 (ruling C9). The later browser-feature phase
+    deletes it with those kinds.
+  - Gates: 1, 2 (swap, clock, bits, reclaim; no reader pairing), 4, 5, 6 and 7, on the
+    non-isolated leg.
+  - Dependencies: #1400, #1309, #1314, #1348.
+- **#1381b**: D3's `adopt_predecessor` pairing, gate 2's companion assertions and gate 3.
+  Dependencies: #1381a, #1327, #1395.
+
+The Worker deployment of D1-D6 is #1332 and #1387. It adds no logic: the same exports run in the
+Worker.
+
+**Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.

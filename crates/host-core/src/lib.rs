@@ -111,6 +111,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+pub mod strip_values;
 pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
@@ -136,23 +137,26 @@ pub use live_delta::take_lowered_owner_count;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
+    classify_live_delta_with_monitor,
 };
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps, MonitorBase,
     PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase,
     check_counts, compile_host_model, compile_host_session, count_effects,
     default_source_ring_frames, effect_producer_position, parse_host_session, prepare_host_runtime,
     prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
+    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
+    prepare_host_runtime_with_live_controls_and_spectrum_successor,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
-    prepare_host_runtime_with_live_lanes_successor,
+    prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_between_render_calls,
-    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    prepare_host_session, prepare_host_session_with_live_controls, strip_control_table_bytes,
-    strip_position,
+    prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
+    prepare_host_runtime_with_spectrum_collection, prepare_host_session,
+    prepare_host_session_with_live_controls, strip_control_table_bytes, strip_position,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -185,6 +189,10 @@ pub use spectrum::{
     SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
     spectrum_capture_collection_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
+};
+pub use strip_values::{
+    LiveStripValues, LiveStripValuesError, StripValues, changed_lane_records, covers_lane,
+    fader_gain_bits, trim_gain_bits,
 };
 pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 

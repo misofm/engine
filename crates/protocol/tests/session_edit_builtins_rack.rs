@@ -11,8 +11,9 @@
 //! `unreachable!()` there would abort the control thread on a well-formed wire message, and a
 //! `&mut track.inserts` fallback would edit a rack the caller did not name.
 //!
-//! The strip **is** editable, through `SetTrackBuiltins`, and the last test says so -- without it
-//! a refusal that refused everything would pass.
+//! The strip **is** editable, through `SET_CONTROL` on its builtin rows (decision 17, #1561 retired
+//! `SetTrackBuiltins`), and the last test says so -- without it a refusal that refused everything
+//! would pass.
 //!
 //! Decision 12's `console` token is refused by the same edits with a typed status of its own,
 //! `SessionEditError::ConsoleSlotFixed`; `console_session_edits.rs` owns it.
@@ -20,6 +21,7 @@
 //! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.inserts)` -> the
 //! refusal arms below start reporting `Ok` and the effect lands in the inserts.
 
+use protocol::control_core::{Lane, Owner, Section, row_address};
 use protocol::{SessionEdit, SessionEditError, apply_session_edit};
 use session::{RackName, SessionModel, parse_session_json};
 
@@ -110,21 +112,22 @@ fn the_same_edits_against_a_real_rack_are_applied() {
     assert_eq!(model.tracks[0].inserts, rack);
 }
 
-/// And the strip is edited through the edit that owns it, which the new token does not touch.
+/// And the strip is edited through `SET_CONTROL` on its builtin rows, which the new token does not
+/// touch.
 #[test]
-fn the_strip_is_still_editable_through_set_track_builtins() {
+fn the_strip_is_still_editable_through_set_control() {
     let mut model = session();
     let mut builtins = model.tracks[0].builtins.clone();
     builtins.left.trim_db = -6.0;
+    let address = row_address(
+        Owner::Strip(track_id()),
+        Section::Builtins,
+        "trim_db",
+        Lane::Left,
+    )
+    .expect("the trim row");
     assert_eq!(
-        apply_session_edit(
-            &mut model,
-            &SessionEdit::SetTrackBuiltins {
-                track_id: track_id(),
-                builtins: builtins.clone(),
-                ramp_samples: None,
-            },
-        ),
+        apply_session_edit(&mut model, &SessionEdit::set_control(address, -6.0, None)),
         Ok(()),
     );
     assert_eq!(model.tracks[0].builtins, builtins);

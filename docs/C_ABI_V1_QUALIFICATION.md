@@ -254,9 +254,22 @@ target of `AUTOMATION_ENQUEUE`, and a handle that names any other row is `INVALI
 `automation.target.unsupported`. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The four provider-owned counters (the two telemetry counters, canceled automation, and
-`live_values_superseded`, #1312 D8) retain an independent four-slot minimum even when the
-frame-derived telemetry configuration capacity is smaller.
+provider's counter and diagnostic pages. The five provider-owned counters (the two telemetry counters, canceled automation,
+`live_values_superseded`, #1312 D8, and `transition_reprepare_refusals`, #1351 D6) retain an independent
+five-slot minimum even when the frame-derived telemetry configuration capacity is smaller.
+
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those five
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all five and a read of
+any of them is never `NOT_FOUND`. `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+`MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
+is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
+event (`0x8021`) reports, for each configured ID in order, the value after the service step's first
+refresh. A counter that render changed since the previous call therefore reaches the snapshot that
+the next call stages, whichever control call that is. A snapshot is staged once render has completed at least `counter_period_blocks` blocks
+since the last one (a configuration counts its period from the call that accepted it), with the render
+sample at that point; blocks rendered with no control call between them yield one snapshot at the
+next call, and skipped periods are not replayed. The lane is lossy: the lossy queue may keep only part
+of a snapshot.
 Candidate catalogs allocate before structural commit and are included in double-live resource
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.
@@ -348,8 +361,7 @@ delivers fader, mute and pan edits through them (next section).
 
 The strip input section's `trim_db`, `polarity_invert`, `hpf_hz` and `lpf_hz` are live rows of the
 control list (decision 17, S5). `miso_engine_v1_submit_command` commits a change of them as a live
-revision, on tracks and submixes, per lane and on both, through `SET_CONTROL` or the per-kind
-edits; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
+revision, on tracks and submixes, per lane and on both, through `SET_CONTROL`; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
 needs new memory). The core chooses the lanes from the rows (`controls::live_lanes`), so **every C
 ABI plan carries an input lane per strip**: the trim, polarity and filter cells of
 `TrackControlProducer::input`, charged in `builtin_retained_payload_bytes` (31,424 -> 36,153 on the
@@ -410,7 +422,7 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
 
 A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
 the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
-live revision through `SET_CONTROL` or the per-kind route edits; no plan is prepared and the plan
+live revision through `SET_CONTROL`; no plan is prepared and the plan
 epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
 for decision 14's fold reason, at any tap. **A
 route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
@@ -445,8 +457,8 @@ A plan with no route into a submix attaches none and renders as before.
 
 A VCA's offset and mute, a VCA's members, a VCA added or removed, a mute that a send follows, and a
 send's `follows_mute` are value-only (decision 17, S7a). `miso_engine_v1_submit_command` commits a
-change of them as a live revision through `SET_CONTROL` or the per-kind edits (`UpsertVca`,
-`RemoveVca`, `SetTrackFader`, ...); no plan is prepared and the plan epoch does not move. A VCA has
+change of them as a live revision through `SET_CONTROL` or the structural edits (`UpsertVca`,
+`RemoveVca`, ...); no plan is prepared and the plan epoch does not move. A VCA has
 no render cell: a change reaches render as its members' effective fader and mute records, and a
 follow as the route's record, because the classifier diffs the effective values of the committed
 and the prospective model (`controls::effective`, the function preparation reads), never the raw
@@ -489,8 +501,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   `pan_ms`, or the researched default table (20, 10 and 20 ms) when the session says `default`,
   rounded at the session's sample rate; an explicit 0 is a step. A pan or matrix record whose
   committed model carries its own non-zero `smoothing_samples` uses that window instead. A live
-  edit may carry its own length (#1394): the optional `ramp_samples` of `SetTrackFader` and
-  `SetTrackMatrixOrPan` overrides the session's length for the records that edit writes -- the
+  edit may carry its own length (#1394): the optional `ramp_samples` of `SET_CONTROL` on a
+  fader, mute, pan or matrix row overrides the session's length for the records that edit writes -- the
   fader and mute records, or the matrix record, which it also puts ahead of a model window --
   and an explicit 0 steps that edit only. An edit with no length uses the session's. A length
   above one second at the session rate refuses the whole transaction with
@@ -501,8 +513,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   Editing `control_smoothing` itself is a model-only delta (#1365): see the next item.
 - **Model-only (#1260, #1365).** A delta that changes only fields no prepared plan reads -- the
   session ID, the render profile's `id`, the output profile's `id`, the stored `automation` table
-  and `control_smoothing` (the `SetControlSmoothing` edit, which sets the lengths or clears them
-  to the default table) -- is live with no records: it commits through the same admission and
+  and `control_smoothing` (`SET_CONTROL` of the session rows `fader_ms`, `mute_ms` and `pan_ms`;
+  only a document replace writes the default table back, #1561) -- is live with no records: it commits through the same admission and
   protocol predicates, emits the same response and `SESSION_COMMITTED`, and the running plan, its
   source rings and its effect state continue untouched. It may ride with fader, mute and pan
   edits, and the records of the same transaction ramp over the new `control_smoothing` lengths; a
@@ -551,7 +563,7 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   field `2:edit-path U8`: `live` 1 (records on the running plan's live lanes, no plan prepared),
   `model_only` 2 (committed; the classifier's delta holds no record of any kind) and `rebuild` 3
   (a successor plan was prepared and published, whatever live records the transaction also
-  held). The path is known at submit and written by the commit into the response frame and its
+  held) and `monitor` 4 (a transaction of solo writes only, #1559, below). The path is known at submit and written by the commit into the response frame and its
   replay entry, so an exact replay of the request returns the same bytes. Zero and every other
   value are refused on decode. This reverses #1053 Q3 ("not now"). A fallback after submit and a
   supersession are reported by the watermark's outcome flags (#1314). After a live edit or a
@@ -562,6 +574,24 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   `miso_engine_v1_plan_resources` describes whichever plan is active, which a replacement may
   leave unchanged. No new symbol, opcode, result code or event is added; the field travels inside
   the response bytes.
+- **Solo (#1559, decision 17 C8).** Solo is a `SET_CONTROL` on a track's own row 2 (`solo`, a
+  toggle, `both`); a submix has no solo row (`control.address.unknown`, a submix is solo-safe). It
+  is host-local: it lives in the session state's monitor overlay (empty at boot), is never saved,
+  is never in a `SESSION_SNAPSHOT_GET` document and changes no structure epoch; the list's and the
+  state's `solo` value is the overlay's. A transaction of solo writes only keeps the revision and
+  the model, replies `monitor` (4) at the committed revision, emits no `SESSION_COMMITTED`, and
+  is recorded in the replay table like any response. The overlay composes through
+  `controls::effective` for the live path and for preparation alike: the other tracks' mutes and
+  the sends that follow them are records of the running plan (or, while a replacement is pending,
+  of the newest plan's cells), and a rebuild prepares its successor under the overlay and carries
+  the difference as retargets. A solo's records ramp over `LiveRampRow::Solo` (`mute_ms`), the
+  write's `ramp_samples` when it gives one; a record that a model edit of the same transaction
+  also produced takes the model edit's length. The overlay is written only after every fallible
+  step of the transaction passed. The records ride the plan's revision gate as a monitor publication under the committed
+  revision (#1603): the gate orders every publication, and the applied watermark reports the
+  revision a publication carries, so a solo spends no revision number, committed revisions stay
+  dense (the next model commit after any number of solos is the committed revision plus one), and
+  the watermark never reads a number above the committed revision, and never an early one. No symbol, opcode, result code or event is added.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the

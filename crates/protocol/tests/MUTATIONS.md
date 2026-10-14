@@ -11,7 +11,7 @@ Driver: one mutation at a time on the committed tree,
 
 The two positive tests in that file are what stop a refusal that refuses everything from passing:
 the same edits against `RackName::Inserts` are applied, and the strip is still editable through
-`SetTrackBuiltins`, which is the edit that owns it.
+`SET_CONTROL` on its builtin rows (`SetTrackBuiltins` was retired by #1561).
 
 A third shape is worth naming and is **not** a mutation, because it is what the arm was written to
 avoid: an `unreachable!()` there would abort the control thread on a well-formed wire message. The

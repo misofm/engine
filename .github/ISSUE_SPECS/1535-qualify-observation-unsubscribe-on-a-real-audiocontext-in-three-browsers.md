@@ -381,3 +381,7 @@ These override any conflicting text above.
   is listed and routed to #1531), and no all-failures rise against main at one-sided Fisher
   p < 0.05.
 - **R4. Placement.** Stream H, after #1345 is on main, before H #1332.
+
+## Amendment (decision 17, root 2026-10-13)
+
+Gate 8 (loaded paired A/B acceptance) moves to #1605, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on gates 1-7 and 9 with its CI rows green.

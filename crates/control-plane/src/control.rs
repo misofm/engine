@@ -380,10 +380,19 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) response_scratch: Box<[u8]>,
     pub(crate) shared: Arc<SharedPlanState<A::Row>>,
     pub(crate) observed_render_sequence: u64,
+    /// The render sequence at which the counter snapshot was last staged, or while no counter is
+    /// configured the latest one the service step saw: the baseline of the configured period
+    /// (#1351 D4).
+    pub(crate) counter_snapshot_sequence: u64,
     pub(crate) render_diagnostics: Box<[RenderDiagnosticSlot]>,
     pub(crate) render_diagnostic_head: usize,
     pub(crate) render_diagnostic_len: usize,
     pub(crate) protocol_reliable_pending: bool,
+    /// The monitor overlay (decision 17, C8, #1559 D1): the soloed strips. Host-local, never saved
+    /// and never in a snapshot; empty at boot. The newest plan's cells hold it (D10), the control
+    /// catalog shows it (D11), and it is written only after every fallible step of the
+    /// transaction that sets it has passed (D8).
+    pub(crate) monitor: controls::MonitorOverlay,
 }
 
 pub(crate) struct ObservedController {
@@ -481,6 +490,8 @@ impl ObservedPreparedToken {
         self.inner.as_deref().expect("observed token is live")
     }
 
+    /// Commit the token. `path` is how a model transaction was applied (#1313); a token of
+    /// monitor writes only commits no model and takes the monitor path inside the protocol commit.
     pub(crate) fn commit(
         mut self,
         controller: &mut ObservedController,
@@ -541,6 +552,34 @@ pub enum CommandError {
     CompileRejected(CompileFailure),
     /// The control plane's own bookkeeping failed.
     Internal,
+}
+
+impl CommandError {
+    /// The diagnostic text of this refusal, the same on every host (decision 17 C1). An adapter
+    /// owns only its result-code numbering.
+    #[must_use]
+    pub fn diagnostic(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Invalid => std::borrow::Cow::Borrowed(b"control.frame.invalid"),
+            Self::BufferTooSmall { .. } => std::borrow::Cow::Borrowed(b"control.output.too_small"),
+            Self::Backpressure => std::borrow::Cow::Borrowed(b"control.plan.backpressure"),
+            Self::CompileRejected(failure) => failure.diagnostic(),
+            Self::Internal => std::borrow::Cow::Borrowed(b"control.internal"),
+        }
+    }
+}
+
+impl EventError {
+    /// The diagnostic text of this refusal, the same on every host (decision 17 C1). An adapter
+    /// owns only its result-code numbering.
+    #[must_use]
+    pub const fn diagnostic(self) -> &'static [u8] {
+        match self {
+            Self::BufferTooSmall { .. } => b"control.event.output.too_small",
+            Self::Backpressure => b"control.event.backpressure",
+            Self::Internal => b"control.event.internal",
+        }
+    }
 }
 
 /// What the live arm did with a structural token (#1257 D2).
@@ -669,9 +708,55 @@ where
             .store(observed, Ordering::Relaxed);
     }
 
+    /// Stages the `COUNTER_SNAPSHOT` event once render has completed at least the configured
+    /// `counter_period_blocks` blocks since the last staged one (#1351 D4; the render sequence
+    /// counts blocks). Its values are, for each configured ID in order, the provider's current
+    /// value for that ID, which the service step refreshed first (D3). Blocks rendered with no
+    /// control call in between yield one snapshot at the next call: the lane is lossy and skipped
+    /// periods are not replayed.
+    fn stage_counter_snapshot(
+        &mut self,
+        sequence: u64,
+        observed_sample: protocol::SampleTime,
+        revision: protocol::SessionRevision,
+    ) {
+        let telemetry = self.controller.telemetry_configuration();
+        if telemetry.counter_ids.is_empty()
+            || telemetry.counter_period_blocks == 0
+            || sequence.saturating_sub(self.counter_snapshot_sequence)
+                < u64::from(telemetry.counter_period_blocks)
+        {
+            return;
+        }
+        let ids = telemetry.counter_ids.iter().map(|&id| id as u32).collect();
+        self.counter_snapshot_sequence = sequence;
+        let Ok(snapshot) = protocol::ControlProvider::counters(
+            self.controller.provider_mut(),
+            &protocol::CountersRequest { all: false, ids },
+        ) else {
+            return;
+        };
+        let _ = self.controller.stage_counter_snapshot_event(
+            revision,
+            &protocol::CounterSnapshot {
+                observed_sample,
+                values: snapshot.values,
+            },
+        );
+    }
+
     pub(crate) fn collect_render_activity(&mut self) {
         self.refresh_render_peak_gate();
         let sequence = self.shared.render_sequence.load(Ordering::Acquire);
+        // While no counter snapshot is configured the baseline follows render, so a
+        // configuration counts its period from the call that accepted it, never from the first
+        // block ever rendered.
+        {
+            let telemetry = self.controller.telemetry_configuration();
+            if telemetry.counter_ids.is_empty() || telemetry.counter_period_blocks == 0 {
+                self.counter_snapshot_sequence = sequence;
+            }
+        }
         if sequence == self.observed_render_sequence {
             return;
         }
@@ -705,23 +790,7 @@ where
                 }],
             );
         }
-        let counter_ids = &self.controller.telemetry_configuration().counter_ids;
-        if !counter_ids.is_empty() {
-            let values = counter_ids
-                .iter()
-                .map(|&id| protocol::CounterValue {
-                    id,
-                    value: sequence,
-                })
-                .collect();
-            let _ = self.controller.stage_counter_snapshot_event(
-                revision,
-                &protocol::CounterSnapshot {
-                    observed_sample,
-                    values,
-                },
-            );
-        }
+        self.stage_counter_snapshot(sequence, observed_sample, revision);
         let diagnostics_enabled = {
             let configuration = self.controller.telemetry_configuration();
             configuration.diagnostics_enabled
@@ -1159,11 +1228,23 @@ where
                 // successor's base carries it, the preparation stamps its carry retargets with it
                 // on the candidate's own gate pin, and the stamp below is the same value again.
                 // #1503 D1 holds a prepared transaction's revision in range, so this cannot
-                // refuse; were it to, nothing has been built.
+                // refuse; were it to, nothing has been built. A transaction of monitor writes
+                // only never takes this arm (`commit_live` refuses it), so this revision is
+                // always the one the commit gives (#1603).
                 let revision = prepared.get().prospective_session().revision().0;
                 if !(1..=engine::realtime::GATE_REVISION_MAX).contains(&revision) {
                     return Err(CommandError::Internal);
                 }
+                // #1559 D9: the successor renders under the overlay the transaction leaves, and
+                // its carry joins the effective values under both overlays.
+                let monitor_change = self.monitor.after(
+                    prepared.get().monitor_edits(),
+                    prepared
+                        .get()
+                        .prospective_session()
+                        .compiled()
+                        .normalized_model(),
+                );
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
                 // #1471 Amendment 2: the preparation reads the newest epoch's design-bound seed
@@ -1179,6 +1260,11 @@ where
                         // #1394 D6: a carry retarget is the record of the transaction's own
                         // edit, so it takes that edit's ramp length.
                         edit_ramps: prepared.get().prospective_session().edit_ramps(),
+                        monitor: host_core::MonitorBase {
+                            committed: &self.monitor,
+                            next: &monitor_change.overlay,
+                            ramp: monitor_change.ramp,
+                        },
                     }),
                     &mut InputBoundCache::with_seed(&self.newest_providers().bound_seed),
                     &self.live_values_superseded,
@@ -1312,6 +1398,8 @@ where
                 let committed = prepared
                     .commit(&mut self.controller, protocol::EditPath::Rebuild)
                     .map_err(|_| CommandError::Internal)?;
+                // #1559 D8: the overlay is written after the last fallible step, with the commit.
+                self.monitor = monitor_change.overlay;
                 // Issue #1273 D2: the protocol commit was the last fallible step, so the
                 // persisting producers move now and never move back. Infallible.
                 // The newest epoch, spelled by field: the reservation borrows the publisher.
@@ -1385,19 +1473,36 @@ where
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
         let next = transaction.compiled().normalized_model();
-        let Ok(delta) = host_core::classify_live_delta(
+        // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
+        let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
+        let monitor_only = prepared.get().is_monitor_only();
+        let Ok(delta) = host_core::classify_live_delta_with_monitor(
             self.controller.session().compiled().normalized_model(),
             next,
             host_core::LiveRamps::for_session(next),
             transaction.edit_ramps(),
+            host_core::MonitorBase {
+                committed: &self.monitor,
+                next: &monitor_change.overlay,
+                ramp: monitor_change.ramp,
+            },
         ) else {
+            // A monitor-only transaction never rebuilds (#1603 D7): its records are strip mute and
+            // route gate records, which every plan carries, so a rebuild verdict is a defect.
+            if monitor_only {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
             return LiveCommit::Rebuild(prepared);
         };
+        // Whether the commit publishes on the plan gate: every model transaction does (a delta
+        // with no record is a revision render has nothing to do for), and a transaction of
+        // monitor writes does when the overlay change produced a record (#1559 D4, #1603 D7).
+        let publishes = !monitor_only || !delta.is_empty();
 
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
-        let catalog = match self.live_admission(&prepared) {
+        let catalog = match self.live_admission(&prepared, &monitor_change.overlay) {
             Ok(catalog) => catalog,
             Err(error) => return LiveCommit::Done(Err(error)),
         };
@@ -1586,61 +1691,84 @@ where
         // refusal writes nothing and uses no revision. Every step from here to the revision's
         // publication cannot fail: a cell write has no room to want, every record passed its
         // preflight, and the commit's predicate held under this borrow.
+        // A model transaction stamps its own revision (`(r + 1, 0)` in the gate's order); a
+        // monitor-only one spends no revision and stamps a monitor publication under the committed
+        // revision `r` (#1603 D7). A monitor-only transaction with no record takes no stamp and
+        // publishes nothing. An exhausted publication number refuses, as `INTERNAL`.
         let revision = prepared.get().prospective_session().revision().0;
-        let Ok(stamp) = revision_gate.stamp(revision) else {
-            drop(owners);
-            drop(prepared);
-            return LiveCommit::Done(Err(CommandError::Internal));
+        let stamp = if !publishes {
+            None
+        } else {
+            let stamped = if monitor_only {
+                revision_gate.stamp_monitor(revision)
+            } else {
+                revision_gate.stamp(revision)
+            };
+            let Ok(stamp) = stamped else {
+                drop(owners);
+                drop(prepared);
+                return LiveCommit::Done(Err(CommandError::Internal));
+            };
+            Some(stamp)
         };
+        // The key is read into a local now, so the publication below is the stamped one.
+        let key = stamp.map(|stamp| stamp.key());
         // Write the strips' cells, then each effect's cells and each EQ owner's target cells.
         // Nothing above changed anything but the owners' open candidates.
-        for (strip, &index) in delta.strips.iter().zip(&resolved) {
-            let producer = &mut strip_lanes[index];
-            for record in strip.fader_records() {
-                producer.fader.write(stamp, record);
-            }
-            if let Some(record) = strip.matrix {
-                producer.producer.write(stamp, record);
-            }
-            if let Some(input) = producer.input.as_mut() {
-                for &record in &strip.input {
-                    input.write(stamp, record);
+        if let Some(stamp) = stamp {
+            for (strip, &index) in delta.strips.iter().zip(&resolved) {
+                let producer = &mut strip_lanes[index];
+                for record in strip.fader_records() {
+                    producer.fader.write(stamp, record);
                 }
-            }
-        }
-        for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
-            route_lanes[index].write(stamp, route.record);
-        }
-        for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            let producer = &mut owners.effects[index];
-            match &instance.targets {
-                None => {
-                    for &record in &instance.records {
-                        producer.write(stamp, record).unwrap_or_else(|_| {
-                            unreachable!("every effect record passed its producer's preflight")
-                        });
+                if let Some(record) = strip.matrix {
+                    producer.producer.write(stamp, record);
+                }
+                if let Some(input) = producer.input.as_mut() {
+                    for &record in &strip.input {
+                        input.write(stamp, record);
                     }
                 }
-                Some(targets) => {
-                    for &record in &instance.records {
-                        if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
+            }
+            for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
+                route_lanes[index].write(stamp, route.record);
+            }
+            for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
+                let producer = &mut owners.effects[index];
+                match &instance.targets {
+                    None => {
+                        for &record in &instance.records {
                             producer.write(stamp, record).unwrap_or_else(|_| {
                                 unreachable!("every effect record passed its producer's preflight")
                             });
                         }
                     }
-                    let base_revision = producer
-                        .owner()
-                        .map(|owner| owner.committed_revision())
-                        .expect("an owner was begun");
-                    producer
-                        .publish_candidate_targets(stamp, base_revision, targets)
-                        .expect("the owner's targets were preflighted");
+                    Some(targets) => {
+                        for &record in &instance.records {
+                            if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
+                                producer.write(stamp, record).unwrap_or_else(|_| {
+                                    unreachable!(
+                                        "every effect record passed its producer's preflight"
+                                    )
+                                });
+                            }
+                        }
+                        let base_revision = producer
+                            .owner()
+                            .map(|owner| owner.committed_revision())
+                            .expect("an owner was begun");
+                        producer
+                            .publish_candidate_targets(stamp, base_revision, targets)
+                            .expect("the owner's targets were preflighted");
+                    }
                 }
             }
         }
         // #1313 D2: the path is the classifier's result. A delta with no record of any kind is a
         // commit render has nothing to do for.
+        // #1559 D5: a transaction with a model edit is `live` when the model part or the overlay
+        // change produced a record, else `model_only`; the commit gives a token of monitor
+        // writes only its own path.
         let path = if delta.is_empty() {
             protocol::EditPath::ModelOnly
         } else {
@@ -1659,6 +1787,8 @@ where
             self.controller.session().revision().0,
             "the revision stamped is the revision committed (#1312 D7)"
         );
+        // #1559 D8: the overlay is written after the last fallible step, with the commit.
+        self.monitor = monitor_change.overlay;
         for index in published {
             owners.effects[index]
                 .commit_owner()
@@ -1703,8 +1833,11 @@ where
         // are one plan's. Every record push, cell write, target publication and owner commit is
         // before it, so render's `Acquire` snapshot of the gate sees them all and the watermark
         // never reports the revision before its values can apply. The stamp's revision is
-        // published, read into a local, so the always-on bound of `stamp` covers the publication.
-        revision_gate.publish(revision);
+        // published, read into a local, so the always-on bound of `stamp` covers the publication. A
+        // monitor publication carries the committed revision (#1603).
+        if let Some(key) = key {
+            revision_gate.publish_key(key);
+        }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
@@ -1715,6 +1848,7 @@ where
     fn live_admission(
         &self,
         prepared: &ObservedPreparedToken,
+        overlay: &controls::MonitorOverlay,
     ) -> Result<host_core::ControlCatalog, CommandError> {
         // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
         // function, the same diagnostic, and nothing is committed on a refusal.
@@ -1737,6 +1871,7 @@ where
         let prospective = prepared.get().prospective_session().compiled();
         let catalog = host_core::ControlCatalog::build(
             prospective.normalized_model(),
+            overlay,
             prospective.sample_rate().0,
         )
         .map_err(|_| CommandError::Internal)?;
@@ -1939,4 +2074,24 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventError;
+
+    /// #1570a D2: the three event refusal texts are the C ABI's `last_error` bytes, which hosts
+    /// match on; a reworded text would silently change every adapter's diagnostic.
+    #[test]
+    fn event_refusals_spell_the_texts_every_host_reports() {
+        assert_eq!(
+            EventError::BufferTooSmall { required: 9 }.diagnostic(),
+            b"control.event.output.too_small"
+        );
+        assert_eq!(
+            EventError::Backpressure.diagnostic(),
+            b"control.event.backpressure"
+        );
+        assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
+    }
 }

@@ -232,3 +232,10 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
 
 Dependent: *Crossfade the browser's live bypass command over the session ramp* (#1393) depends on
 this issue.
+
+## Amendment (decision 17, root 2026-10-13, Q2)
+
+- This slice gains one gate taken from #1563B gate 3: the SDK's `bypass` builder (a `SET_CONTROL`
+  on control `0` of an effect section) renders, on the headless engine and through the browser's
+  core path, the same crossfade over the session ramp as the C ABI, bit for bit per block.
+  #1563B no longer waits for this slice; only that row does.

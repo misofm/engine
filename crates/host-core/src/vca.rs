@@ -298,6 +298,13 @@ impl LiveVcaState {
         self.own_db.get(strip).copied()
     }
 
+    /// A strip's effective `[left, right]` dB the render plane was last told, or `None` for a strip
+    /// no VCA reaches (this state keeps nothing for it).
+    #[must_use]
+    pub fn emitted_db(&self, strip: usize) -> Option<[f32; 2]> {
+        self.reaches(strip).then(|| self.emitted_db[strip])
+    }
+
     /// One VCA's `[left, right]` offset in dB and `[left, right]` mute, or `None` for an unknown
     /// VCA.
     #[must_use]

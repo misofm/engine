@@ -245,3 +245,7 @@ row today.
 ## Attempt record
 
 *(empty: to be filled by the implementer)*
+
+## Amendment (decision 17, root 2026-10-13)
+
+Gate 7 (source mutations M1-M9) moves to #1605, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on gates 1-6 and 8-10.

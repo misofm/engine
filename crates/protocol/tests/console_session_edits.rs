@@ -1,9 +1,11 @@
 //! Issue #1094 (decision 12): the control protocol's session edits carry the session console.
 //!
 //! - `SetConsole` (`0x0007`) replaces the session's console declaration and `SetTrackConsole`
-//!   (`0x0211`) replaces one track's entries.
-//! - `SetEffectBypass`, `UpsertEffectParam` and `RemoveEffectParam` addressed at `console` edit one
-//!   track's entry for the slot named by `effect_id`.
+//!   (`0x0211`) gives one track its entries after it; alone it is refused
+//!   (`session.edit.value_op_retired`, decision 17, #1561 D3).
+//! - A `SET_CONTROL` addressed at a `console` section edits one track's entry for the slot it
+//!   names (decision 17, #1561 retired `SetEffectBypass`, `UpsertEffectParam` and
+//!   `RemoveEffectParam`).
 //! - Every structural or declaration edit addressed at `console` is refused with
 //!   `SessionEditError::ConsoleSlotFixed`: a track cannot add, remove or reorder a slot.
 //! - A transaction that changes the slot set without rewriting every strip's entries -- every
@@ -12,6 +14,9 @@
 //! The base session has two tracks and one `pre_insert` slot, `eq`. Track `a` also carries an
 //! insert whose ID is `eq`, so an edit routed to the wrong place changes a value these tests read.
 
+use protocol::control_core::{
+    BYPASS_CONTROL, ControlAddress, ControlError, Lane, Owner, Section, row_address,
+};
 use protocol::{
     DecodeScratch, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionEditError,
     SessionRevision, SessionStore, SessionStoreError, SessionTransactionFrame, apply_session_edit,
@@ -124,6 +129,20 @@ fn param(
     }
 }
 
+/// A `SET_CONTROL` of `control` of strip `strip`'s entry for console slot `slot`, on `lane`.
+fn console_control(strip: &str, slot: &str, control: u32, lane: Lane, value: f32) -> SessionEdit {
+    SessionEdit::set_control(
+        ControlAddress {
+            owner: Owner::Strip(id(strip)),
+            section: Section::Console(id(slot)),
+            control,
+            lane,
+        },
+        value,
+        None,
+    )
+}
+
 fn slot(name: &str, effect_id: &str, quality: EffectQuality, link_mode: LinkMode) -> ConsoleSlot {
     ConsoleSlot {
         slot: id(name),
@@ -198,24 +217,17 @@ fn through_the_wire(edits: &[SessionEdit]) -> Vec<SessionEdit> {
 #[test]
 fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
     let edited = r#"{ "slot": "eq", "bypass": true, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
-    let two_params = r#"{ "slot": "eq", "bypass": false, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 }, { "parameter_id": 2, "channel": "left", "unit": "hz", "value": 1000.0 } ] }"#;
-    let no_params = r#"{ "slot": "eq", "bypass": false, "params": [] }"#;
+    let two_params = r#"{ "slot": "eq", "bypass": false, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 }, { "parameter_id": 3, "channel": "left", "unit": "hz", "value": 1000.0 } ] }"#;
     let limiter = r#"{ "slot": "limiter", "bypass": true, "params": [ { "parameter_id": 3, "channel": "right", "unit": "db", "value": -1.0 } ] }"#;
     let limiter_entry = entry(
         "limiter",
         true,
         vec![param(3, ParameterChannel::Right, ParameterUnit::Db, -1.0)],
     );
-    let eq = || RackName::Console;
     let cases: Vec<(&str, Vec<SessionEdit>, String)> = vec![
         (
-            "SetEffectBypass on one track's entry",
-            vec![SessionEdit::SetEffectBypass {
-                track_id: id("a"),
-                rack_name: eq(),
-                effect_id: id("eq"),
-                bypass: true,
-            }],
+            "SET_CONTROL bypass on one track's entry",
+            vec![console_control("a", "eq", BYPASS_CONTROL, Lane::Both, 1.0)],
             document(
                 8,
                 &console(&[EQ_SLOT], &[]),
@@ -224,13 +236,9 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
             ),
         ),
         (
-            "UpsertEffectParam on one track's entry",
-            vec![SessionEdit::UpsertEffectParam {
-                track_id: id("b"),
-                rack_name: eq(),
-                effect_id: id("eq"),
-                param: param(2, ParameterChannel::Left, ParameterUnit::Hz, 1_000.0),
-            }],
+            "SET_CONTROL parameter on one track's entry",
+            // The parametric EQ's band 1 frequency.
+            vec![console_control("b", "eq", 3, Lane::Left, 1_000.0)],
             document(
                 8,
                 &console(&[EQ_SLOT], &[]),
@@ -239,35 +247,33 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
             ),
         ),
         (
-            "RemoveEffectParam on one track's entry",
-            vec![SessionEdit::RemoveEffectParam {
-                track_id: id("a"),
-                rack_name: eq(),
-                effect_id: id("eq"),
-                parameter_id: 1,
-                channel: ParameterChannel::Both,
-            }],
+            "SetTrackConsole on one track, after a SetConsole that changes the console",
+            vec![
+                SessionEdit::SetConsole {
+                    console: Console {
+                        pre_insert: vec![slot(
+                            "eq",
+                            "miso.parametric-eq",
+                            EffectQuality::High,
+                            LinkMode::DualMono,
+                        )],
+                        post_insert: Vec::new(),
+                    },
+                    ramp_samples: None,
+                },
+                SessionEdit::SetTrackConsole {
+                    track_id: id("b"),
+                    console: vec![entry(
+                        "eq",
+                        true,
+                        vec![param(1, ParameterChannel::Both, ParameterUnit::Db, 0.0)],
+                    )],
+                    ramp_samples: None,
+                },
+            ],
             document(
                 8,
-                &console(&[EQ_SLOT], &[]),
-                &entries(&[no_params]),
-                &entries(&[EQ_ENTRY]),
-            ),
-        ),
-        (
-            "SetTrackConsole on one track",
-            vec![SessionEdit::SetTrackConsole {
-                track_id: id("b"),
-                console: vec![entry(
-                    "eq",
-                    true,
-                    vec![param(1, ParameterChannel::Both, ParameterUnit::Db, 0.0)],
-                )],
-                ramp_samples: None,
-            }],
-            document(
-                8,
-                &console(&[EQ_SLOT], &[]),
+                &console(&[EQ_SLOT_HIGH], &[]),
                 &entries(&[EQ_ENTRY]),
                 &entries(&[edited]),
             ),
@@ -385,33 +391,17 @@ fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
 
 /// A console knob edit changes one track's entry and nothing else: not the insert that shares the
 /// slot's ID, not the other track, not the declaration. A slot the track does not carry is
-/// `NotFound`, like an absent insert.
+/// `control.address.unknown`, like an absent insert.
 ///
-/// Red if `console` is routed to the inserts rack (the `eq` insert changes), to every track, or to
-/// the slot declaration.
+/// Red if the `console` section is routed to the inserts (the `eq` insert changes), to every track,
+/// or to the slot declaration.
 #[test]
 fn console_knob_edits_change_only_that_tracks_entry() {
     let before = base();
     for edit in [
-        SessionEdit::SetEffectBypass {
-            track_id: id("a"),
-            rack_name: RackName::Console,
-            effect_id: id("eq"),
-            bypass: true,
-        },
-        SessionEdit::UpsertEffectParam {
-            track_id: id("a"),
-            rack_name: RackName::Console,
-            effect_id: id("eq"),
-            param: param(1, ParameterChannel::Both, ParameterUnit::Db, -6.0),
-        },
-        SessionEdit::RemoveEffectParam {
-            track_id: id("a"),
-            rack_name: RackName::Console,
-            effect_id: id("eq"),
-            parameter_id: 1,
-            channel: ParameterChannel::Both,
-        },
+        console_control("a", "eq", BYPASS_CONTROL, Lane::Both, 1.0),
+        // The parametric EQ's band 1 gain.
+        console_control("a", "eq", 4, Lane::Both, -6.0),
     ] {
         let mut model = before.clone();
         assert_eq!(apply_session_edit(&mut model, &edit), Ok(()), "{edit:?}");
@@ -427,14 +417,9 @@ fn console_knob_edits_change_only_that_tracks_entry() {
     assert_eq!(
         apply_session_edit(
             &mut model,
-            &SessionEdit::SetEffectBypass {
-                track_id: id("a"),
-                rack_name: RackName::Console,
-                effect_id: id("limiter"),
-                bypass: true,
-            },
+            &console_control("a", "limiter", BYPASS_CONTROL, Lane::Both, 1.0),
         ),
-        Err(SessionEditError::NotFound)
+        Err(SessionEditError::Control(ControlError::AddressUnknown))
     );
     assert_eq!(model, before);
 }
@@ -502,16 +487,6 @@ fn structural_and_declaration_edits(
             },
         ),
         (
-            "SetEffectLinkMode",
-            SessionEdit::SetEffectLinkMode {
-                track_id: track_id.clone(),
-                rack_name,
-                effect_id: id("eq"),
-                link_mode: LinkMode::Maximum,
-                ramp_samples: None,
-            },
-        ),
-        (
             "SetEffectSidechain",
             SessionEdit::SetEffectSidechain {
                 track_id,
@@ -528,7 +503,7 @@ fn structural_and_declaration_edits(
 /// `ConsoleSlotFixed`, whatever the model holds -- even naming a track that does not exist.
 ///
 /// Red if `rack_mut` routes `console` anywhere (the inserts, the entries) or answers `NotFound`,
-/// which a client cannot tell from a typo. The control applies the same eight edits to track a's
+/// which a client cannot tell from a typo. The control applies the same seven edits to track a's
 /// `eq` insert, so the refusal is about the token, not the edits.
 #[test]
 fn console_structural_and_declaration_edits_refuse_with_a_typed_status() {
@@ -801,7 +776,7 @@ fn a_slot_set_change_that_skips_a_submix_refuses_whole() {
     assert_eq!(committed.submixes, [bus]);
 }
 
-/// `SetTrackConsole` edits a track's knobs; it cannot change the slot set. An entry array that
+/// `SetTrackConsole` gives a track its entries; it cannot change the slot set. An entry array that
 /// adds, drops or reorders a slot refuses whole at final validation.
 ///
 /// Red if `SetTrackConsole` were allowed to reshape the slot set for one track, which is exactly
@@ -819,6 +794,8 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
     for track in &mut start.tracks {
         track.console.push(entry("comp", false, Vec::new()));
     }
+    let mut changed_declaration = start.console.clone();
+    changed_declaration.pre_insert[0].quality = EffectQuality::High;
     for (name, console, code) in [
         (
             "add",
@@ -838,15 +815,23 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
     ] {
         let mut store = SessionStore::new(start.clone(), caps()).expect("start compiles");
         let snapshot = store.canonical_snapshot().to_owned();
-        let edits = through_the_wire(&[SessionEdit::SetTrackConsole {
-            track_id: id("a"),
-            console,
-            ramp_samples: None,
-        }]);
+        let edits = through_the_wire(&[
+            // The same slot set at another quality: the console differs from the committed one
+            // (so the `SetTrackConsole` is allowed), and only the entries break the slot set.
+            SessionEdit::SetConsole {
+                console: changed_declaration.clone(),
+                ramp_samples: None,
+            },
+            SessionEdit::SetTrackConsole {
+                track_id: id("a"),
+                console,
+                ramp_samples: None,
+            },
+        ]);
         let error = store
             .apply_transaction(ExpectedRevision::Exact(store.revision()), &edits)
             .expect_err(name);
-        let codes = refusal_codes(&error, 1);
+        let codes = refusal_codes(&error, 2);
         assert!(
             codes.iter().any(|(found, _)| found == code),
             "{name}: {codes:?}"
@@ -856,18 +841,19 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
     }
 }
 
-/// #1218 gates 6 and 7 (D1). `SetRouteFollowsMute` (`0x0507`), through the wire, is validated on
-/// the final candidate like every edit:
+/// #1218 gates 6 and 7 (D1), as a `SET_CONTROL` of a route's `follows_mute` row (decision 17,
+/// #1561 retired `SetRouteFollowsMute`), through the wire:
 ///
-/// - `true` on route `a-out`, whose destination is the output, refuses the whole transaction with
-///   `schema.invalid_enum` at `$.routes[0].follows_mute`; the revision, model and snapshot stay;
-/// - the same edit followed by re-pointing `a-out` into submix `bus` commits, and the committed
-///   snapshot is the canonical JSON of the hand-edited model;
+/// - `true` on route `a-out`, whose destination is the output, is refused at its own edit with
+///   `control.inactive` (the row does not apply to an output route); the revision, model and
+///   snapshot stay;
+/// - the same edit after re-pointing `a-out` into submix `bus` commits, and the committed snapshot
+///   is the canonical JSON of the hand-edited model;
 /// - `false` then commits back.
 ///
 /// Red if an output route can follow (a strip's main route would stay silent after a live
-/// unmute, VERIFY-2 N1), if the refusal were a per-edit check that refused the re-pointing
-/// transaction, or if `0x0507` writes the wrong route or ignores the value.
+/// unmute, VERIFY-2 N1), if the re-pointed route cannot, or if the row writes the wrong route or
+/// ignores the value.
 #[test]
 fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
     let mut start = base();
@@ -879,10 +865,18 @@ fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
     let snapshot = store.canonical_snapshot().to_owned();
     let model = store.compiled().normalized_model().clone();
     assert_eq!(model.routes[0].id.as_str(), "a-out");
-    let follow = |follows_mute| SessionEdit::SetRouteFollowsMute {
-        route_id: id("a-out"),
-        follows_mute,
-        ramp_samples: None,
+    let follow = |follows_mute| {
+        SessionEdit::set_control(
+            row_address(
+                Owner::Route(id("a-out")),
+                Section::Own,
+                "follows_mute",
+                Lane::Both,
+            )
+            .expect("the follows_mute row"),
+            f32::from(u8::from(follows_mute)),
+            None,
+        )
     };
 
     let refused = through_the_wire(&[follow(true)]);
@@ -890,24 +884,24 @@ fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
         .apply_transaction(ExpectedRevision::Exact(revision), &refused)
         .expect_err("an output route cannot follow");
     assert_eq!(
-        refusal_codes(&error, refused.len()),
-        [(
-            "schema.invalid_enum".to_owned(),
-            "$.routes[0].follows_mute".to_owned()
-        )]
+        error,
+        SessionStoreError::Edit {
+            operation_index: 0,
+            error: SessionEditError::Control(ControlError::Inactive),
+        }
     );
     assert_eq!(store.revision(), revision);
     assert_eq!(store.canonical_snapshot(), snapshot);
     assert_eq!(store.compiled().normalized_model(), &model);
 
     let repointed = through_the_wire(&[
-        follow(true),
         SessionEdit::SetRouteDestination {
             route_id: id("a-out"),
             destination: session::RouteDestination::SubmixInput {
                 submix_id: id("bus"),
             },
         },
+        follow(true),
     ]);
     let commit = store
         .apply_transaction(ExpectedRevision::Exact(revision), &repointed)
@@ -932,4 +926,97 @@ fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
         )
         .expect("a follow switched off commits");
     assert!(!store.compiled().normalized_model().routes[0].follows_mute);
+}
+
+/// #1561 gate 2 (D3). `SetTrackConsole` is structural: a transaction that carries one with no
+/// `SetConsole` before it is refused at that edit with `session.edit.value_op_retired`, and nothing
+/// commits -- not even an earlier edit of the transaction. Setting the same knob with `SET_CONTROL`
+/// commits, and so does the `SetTrackConsole` once a `SetConsole` that changes the console
+/// precedes it. A `SetConsole` that repeats the committed console does not open it (the window
+/// would be a second path to a knob's value for any client that sends the unchanged console first).
+///
+/// Red if `SetTrackConsole` stays a second path to a console knob's value, if the check looks at
+/// a `SetConsole` that comes after it or at a `SetConsole` that changed nothing, or if the
+/// structural use (after a changing `SetConsole`) breaks.
+#[test]
+fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
+    let mut store = store();
+    let revision = store.revision();
+    let snapshot = store.canonical_snapshot().to_owned();
+    let bypassed = SessionEdit::SetTrackConsole {
+        track_id: id("a"),
+        console: vec![entry("eq", true, eq_entry().params)],
+        ramp_samples: None,
+    };
+    // The committed console, repeated: it changes nothing, so it opens nothing.
+    let repeat = || SessionEdit::SetConsole {
+        console: base().console,
+        ramp_samples: None,
+    };
+    // The same slot at another quality: the console differs from the committed one.
+    let declare = || SessionEdit::SetConsole {
+        console: Console {
+            pre_insert: vec![slot(
+                "eq",
+                "miso.parametric-eq",
+                EffectQuality::High,
+                LinkMode::DualMono,
+            )],
+            post_insert: Vec::new(),
+        },
+        ramp_samples: None,
+    };
+    for (name, edits, index) in [
+        ("alone", vec![bypassed.clone()], 0),
+        (
+            "after an unrelated edit",
+            vec![
+                SessionEdit::SetSessionId {
+                    session_id: id("renamed"),
+                },
+                bypassed.clone(),
+            ],
+            1,
+        ),
+        (
+            "before the SetConsole",
+            vec![bypassed.clone(), declare()],
+            0,
+        ),
+        (
+            "after a SetConsole that repeats the committed console",
+            vec![repeat(), bypassed.clone()],
+            1,
+        ),
+    ] {
+        let edits = through_the_wire(&edits);
+        assert_eq!(
+            store.apply_transaction(ExpectedRevision::Exact(revision), &edits),
+            Err(SessionStoreError::Edit {
+                operation_index: index,
+                error: SessionEditError::ValueOpRetired,
+            }),
+            "{name}"
+        );
+        assert_eq!(store.revision(), revision, "{name}");
+        assert_eq!(store.canonical_snapshot(), snapshot, "{name}");
+    }
+
+    // The value path and the structural path both commit.
+    for (name, edits) in [
+        (
+            "SET_CONTROL",
+            vec![console_control("a", "eq", BYPASS_CONTROL, Lane::Both, 1.0)],
+        ),
+        ("SetConsole then SetTrackConsole", vec![declare(), bypassed]),
+    ] {
+        let mut store = self::store();
+        store
+            .apply_transaction(ExpectedRevision::Exact(revision), &through_the_wire(&edits))
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert!(
+            store.compiled().normalized_model().tracks[0].console[0].bypass,
+            "{name}"
+        );
+    }
 }

@@ -176,6 +176,11 @@ pub enum EditPath {
     ModelOnly = 2,
     /// A successor plan was prepared and published.
     Rebuild = 3,
+    /// The transaction held only writes to monitor rows (solo): they went to the host's
+    /// monitor overlay, which is not a session mutation, so the revision did not advance and no
+    /// `SESSION_COMMITTED` event followed (decision 17, C8, #1559). A transaction that holds a
+    /// model edit never has this path.
+    Monitor = 4,
 }
 
 impl EditPath {
@@ -192,6 +197,7 @@ impl EditPath {
             1 => Some(Self::Live),
             2 => Some(Self::ModelOnly),
             3 => Some(Self::Rebuild),
+            4 => Some(Self::Monitor),
             _ => None,
         }
     }
@@ -1068,6 +1074,7 @@ pub enum CounterId {
     AutomationOrderReject = 14,
     ValidationFailures = 15,
     LiveValuesSuperseded = 16,
+    TransitionReprepareRefusals = 17,
 }
 
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
@@ -2437,6 +2444,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         14 => Ok(CounterId::AutomationOrderReject),
         15 => Ok(CounterId::ValidationFailures),
         16 => Ok(CounterId::LiveValuesSuperseded),
+        17 => Ok(CounterId::TransitionReprepareRefusals),
         _ => Err(DecodeError::InvalidTlv),
     }
 }

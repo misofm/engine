@@ -49,7 +49,7 @@ use session::{
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{EffectiveDiff, StripEditRamps, lane_records, matrix_record};
-use crate::prepare::{LiveRampRow, LiveRamps};
+use crate::prepare::{LiveRampRow, LiveRamps, MonitorBase};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -277,6 +277,26 @@ pub fn classify_live_delta<'a>(
     ramps: LiveRamps,
     edit_ramps: &EditRamps,
 ) -> Result<LiveDelta<'a>, LiveRebuild> {
+    classify_live_delta_with_monitor(current, next, ramps, edit_ramps, MonitorBase::NONE)
+}
+
+/// [`classify_live_delta`] for a host that holds a monitor overlay (decision 17, C8, #1559 D6,
+/// D7): the effective values of step 5 are those of `current` under `monitor.committed` and of
+/// `next` under `monitor.next`, so a solo's mutes and the closing of the sends that follow them
+/// are records like any other. A change of the overlay alone makes the effective values differ
+/// (the model is the same), and its records take the ramp of `monitor.ramp` unless a model edit
+/// of the same transaction produced them too.
+///
+/// # Errors
+///
+/// As [`classify_live_delta`].
+pub fn classify_live_delta_with_monitor<'a>(
+    current: &SessionModel,
+    next: &'a SessionModel,
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+    monitor: MonitorBase<'_>,
+) -> Result<LiveDelta<'a>, LiveRebuild> {
     // Step 1. The control values are the rows' (decision 17, C6); the model-only fields are the
     // classifier's own. The VCAs are wholly control values (`mask_values`, #1558 D1).
     let mut masked = next.clone();
@@ -313,7 +333,8 @@ pub fn classify_live_delta<'a>(
     let mut routes: BTreeSet<StableId> = BTreeSet::new();
     // Whether the effective values can differ: a strip-level row, a VCA input or a send's row
     // changed (#1558 D1). A VCA added or removed has no row in the diff, so the lists decide.
-    let mut derived = current.vcas != next.vcas;
+    // A change of the overlay moves the effective mutes without moving a row.
+    let mut derived = current.vcas != next.vcas || monitor.committed != monitor.next;
     for change in &changes {
         let descriptor = &change.descriptor;
         match descriptor.class {
@@ -367,7 +388,7 @@ pub fn classify_live_delta<'a>(
     refuse_unresolvable_params(current, next)?;
 
     // Step 5. The effective values of both models, once (decision 17, C7).
-    let diff = derived.then(|| EffectiveDiff::new(current, next, ramps, edit_ramps));
+    let diff = derived.then(|| EffectiveDiff::new(current, next, ramps, edit_ramps, monitor));
     let mut delta = LiveDelta::default();
     let mut work = work.into_iter().peekable();
     for (index, after) in next.strips().enumerate() {

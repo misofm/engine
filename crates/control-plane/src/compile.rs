@@ -960,10 +960,12 @@ where
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
             shared: Arc::clone(&shared),
             observed_render_sequence: 0,
+            counter_snapshot_sequence: 0,
             render_diagnostics: prepare_render_diagnostic_slots()?,
             render_diagnostic_head: 0,
             render_diagnostic_len: 0,
             protocol_reliable_pending: false,
+            monitor: controls::MonitorOverlay::new(),
         },
         plan: PlanState::new(owner, shared),
     })

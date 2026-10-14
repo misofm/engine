@@ -91,20 +91,7 @@ pub(crate) mod plan_error {
 /// A resource fault is one whole-session line with capi's own code; diagnostics are the session,
 /// preparation and admission lines as the control plane built them.
 pub(crate) fn failure_bytes(failure: CompileFailure) -> Vec<u8> {
-    match failure {
-        CompileFailure::Resource(fault) => {
-            let code = match fault {
-                ResourceFault::Arithmetic => "capi.resource.arithmetic",
-                ResourceFault::Platform => "capi.resource.platform",
-                ResourceFault::Limit => "capi.resource.limit",
-                ResourceFault::Allocation => "capi.resource.allocation",
-                ResourceFault::ProtocolQueue => "capi.protocol.queue",
-                ResourceFault::PlanExchange => "capi.plan.exchange",
-            };
-            format!("{code}\t$\n").into_bytes()
-        }
-        CompileFailure::Diagnostics(bytes) => bytes,
-    }
+    failure.diagnostic().into_owned()
 }
 
 /// A refused compile, as `miso_engine_v1_compile_session` reports it.

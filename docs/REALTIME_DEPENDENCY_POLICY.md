@@ -207,8 +207,9 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   It compiles, submits structural transactions, renders (so a pending plan swaps in) and drains the
   event lanes through the C entries. Its unsafe is the C calls themselves, render included, each
   with the handle and storage contract stated beside it; it installs no allocator.
-- `hosts/host-web/tests/control_smoothing_parity.rs` (#1364): renders one session and one set of live
-  edits through the browser host and through the exported C entries, and compares the bits. Its unsafe
+- `hosts/host-web/tests/control_parity.rs` (#1560, which absorbed #1364's
+  `control_smoothing_parity.rs`): renders one session and one script of control edits through the
+  browser host and through the exported C entries, and compares the outcomes and the bits. Its unsafe
   is the C calls themselves (engine and plan create and destroy, compile, command submit, planar
   source submit, render, event dequeue), each with the handle and storage contract stated beside
   it; it installs no allocator.
@@ -349,7 +350,7 @@ Approved unsafe code that runs on a render thread, per entry:
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
-  `design_bound_cache.rs`, `control_smoothing_parity.rs` and `tools/audit/src/capi.rs` call the C
+  `design_bound_cache.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
   render entry from threads of their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
   which runs on the same test thread as its render calls.

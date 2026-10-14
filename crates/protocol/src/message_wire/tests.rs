@@ -2081,6 +2081,67 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
     );
 }
 
+/// Issue #1351 gate 4: every registered counter ID, the newest `TRANSITION_REPREPARE_REFUSALS`
+/// included, round-trips through the telemetry configuration, and the next ID is refused.
+///
+/// Test value: red if a counter joins the enum but not `parse_counter_id`, so that a host's
+/// configuration of it decodes as malformed.
+#[test]
+fn every_counter_id_round_trips_and_the_next_is_refused() {
+    let codec = codec();
+    let all = [
+        CounterId::ControlCommandBackpressure,
+        CounterId::AutomationBackpressure,
+        CounterId::ReliableResponseBackpressure,
+        CounterId::ReliableEventBackpressure,
+        CounterId::TelemetryCoalesced,
+        CounterId::TelemetryDropped,
+        CounterId::MalformedFrames,
+        CounterId::ReplayHits,
+        CounterId::RequestIdReuse,
+        CounterId::ReplayExpired,
+        CounterId::LateAutomation,
+        CounterId::CanceledAutomation,
+        CounterId::AutomationTimePast,
+        CounterId::AutomationOrderReject,
+        CounterId::ValidationFailures,
+        CounterId::LiveValuesSuperseded,
+        CounterId::TransitionReprepareRefusals,
+    ];
+    for (index, id) in all.iter().enumerate() {
+        assert_eq!(*id as usize, index + 1, "the registry has no gap or reuse");
+    }
+    let configuration = TelemetryConfiguration {
+        meter_handles: Vec::new(),
+        meter_period_blocks: 0,
+        counter_ids: all.to_vec(),
+        counter_period_blocks: 1,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: DiagnosticSeverity::Info,
+    };
+    let mut bytes = [0_u8; 192];
+    let len = codec
+        .encode_telemetry_configuration(&configuration, &mut bytes)
+        .expect("configuration");
+    assert_eq!(
+        codec.decode_telemetry_configuration(&bytes[..len], 6),
+        Ok(configuration)
+    );
+    let next = u32::try_from(all.len() + 1).expect("small");
+    let mut refused = bytes;
+    let id_bytes = (all.len() as u32).to_le_bytes();
+    let at = refused[..len]
+        .windows(4)
+        .position(|window| window == id_bytes)
+        .expect("last counter ID");
+    refused[at..at + 4].copy_from_slice(&next.to_le_bytes());
+    assert!(
+        codec
+            .decode_telemetry_configuration(&refused[..len], 6)
+            .is_err()
+    );
+}
+
 #[test]
 fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
     let codec = codec();
@@ -2769,6 +2830,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         (EditPath::Live, 1_u8),
         (EditPath::ModelOnly, 2),
         (EditPath::Rebuild, 3),
+        (EditPath::Monitor, 4),
     ] {
         let value = TransactionApplied {
             applied_operations: 5,
@@ -2788,7 +2850,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
             Ok(value)
         );
         // Zero and every value above the last allocated code are refused.
-        for bad in [0_u8, 4, 5, 255] {
+        for bad in [0_u8, 5, 6, 255] {
             let mut corrupt = bytes;
             corrupt[written - 8] = bad;
             assert!(

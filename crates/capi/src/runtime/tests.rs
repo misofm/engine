@@ -109,7 +109,7 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     // #1312 re-pin: the counter snapshot gains `LIVE_VALUES_SUPERSEDED` (id 16), value 0, as a
     // third value (a 40-byte `CounterValue` message): the length 0x70 became 0xa0 and the
     // frame's TLV count 3 became 4.
-    "4d49534f43544c0001000000300002000a000000a000000009000000000000002a0000000000000004000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000100000000000000002000401080000000000000000000000",
+    "4d49534f43544c0001000000300002000a0000000001000009000000000000002a0000000000000006000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b0128000000020000000000000001000301040000000c000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000110000000000000002000401080000000000000000000000",
     "4d49534f43544c0001000000300002000b000000200000000a000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020003000000200000000b000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000300000000000000",
 ];
@@ -2105,7 +2105,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         "4d49534f43544c000100000030000200090000005800000005000000000000002b00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
         "4d49534f43544c000100000030000200090000005800000006000000000000002b00000000000000060000000000000001000d010800000001000000020000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
         "4d49534f43544c00010000003000020001000000c801000007000000000000002b000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011600000001000200030006000700080009000a000b000c000d0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
-        "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000100000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
+        "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000600000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
     ];
     const EVENTS: [&str; 7] = [
         "4d49534f43544c000100000030000300108000005000000000000000000000002a0000000000000005000000000000000100040108000000010000000000000002000101010000000200000000000000030004010800000000000000000000000400040108000000000000000000000005000400080000000200000000000000",
@@ -2114,7 +2114,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         "4d49534f43544c000100000030000300308000006000000000000000000000002b00000000000000010000000000000001000b015800000004000000000000000100090114000000636170692e72656e6465722e616374697669747900000000020001010100000001000000000000000600040008000000800000000000000007000400080000000100000000000000",
         "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
         "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008001000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
-        "4d49534f43544c000100000030000300218000004000000000000000000000002b0000000000000002000000000000000100040108000000000200000000000002000b012800000002000000000000000100030104000000010000000000000002000401080000000400000000000000",
+        "4d49534f43544c000100000030000300218000004000000000000000000000002b0000000000000002000000000000000100040108000000000200000000000002000b012800000002000000000000000100030104000000060000000000000002000401080000000100000000000000",
     ];
     let (c_session, c_plan) = boxed_c_children(SESSION);
     let eager_capacities = crate::ffi::test_retained_capacities(c_session);
@@ -2269,7 +2269,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     let counter_configuration = protocol::TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
-        counter_ids: vec![protocol::CounterId::ControlCommandBackpressure],
+        counter_ids: vec![protocol::CounterId::TelemetryDropped],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
         minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
@@ -3814,6 +3814,358 @@ fn every_control_call_refreshes_the_provider_counters() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// A `TELEMETRY_CONFIGURE` command for the counter snapshot alone, at `revision`.
+pub(super) fn counter_telemetry_for(
+    request_id: u64,
+    revision: SessionRevision,
+    counter_ids: Vec<protocol::CounterId>,
+    counter_period_blocks: u32,
+) -> Vec<u8> {
+    let configuration = protocol::TelemetryConfiguration {
+        meter_handles: Vec::new(),
+        meter_period_blocks: 0,
+        counter_ids,
+        counter_period_blocks,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(revision),
+        protocol::CommandPayload::TelemetryConfigure(&configuration),
+    )
+}
+
+/// A `TELEMETRY_CONFIGURE` command for the counter snapshot (and, when `meters` is not empty, the
+/// meter batch), at the fixture's revision 42.
+fn counter_telemetry(
+    request_id: u64,
+    counter_ids: Vec<protocol::CounterId>,
+    counter_period_blocks: u32,
+    meters: Vec<u32>,
+) -> Vec<u8> {
+    let configuration = protocol::TelemetryConfiguration {
+        meter_period_blocks: u32::from(!meters.is_empty()),
+        meter_handles: meters,
+        counter_ids,
+        counter_period_blocks,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::TelemetryConfigure(&configuration),
+    )
+}
+
+/// The status of one command response.
+fn response_status(response: &[u8]) -> StatusCode {
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+        .expect("typed response")
+    {
+        protocol::DecodedTypedResponseFrame::Success { header, .. }
+        | protocol::DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+    }
+}
+
+/// `COUNTERS_GET` for `ids`, through the C command path, as `(id, value)` in the order asked; the
+/// status when the provider refuses.
+fn counters_get_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    ids: &[protocol::CounterId],
+) -> Result<Vec<protocol::CounterValue>, StatusCode> {
+    let request = command_bytes(
+        request_id,
+        protocol::CommandPayload::CountersGet(&protocol::CountersRequest {
+            all: ids.is_empty(),
+            ids: ids.iter().map(|&id| id as u32).collect(),
+        }),
+    );
+    let (result, response) = command_c(session, &request);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("counters response")
+    {
+        protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+            ..
+        } => Ok(snapshot.values),
+        protocol::DecodedTypedResponseFrame::NonOk { header, .. } => Err(header.status),
+        protocol::DecodedTypedResponseFrame::Success { .. } => panic!("expected counters"),
+    }
+}
+
+/// Every counter snapshot waiting on the lossy lane, oldest first; every other lossy event is
+/// dropped from the result.
+pub(super) fn lossy_counter_snapshots(
+    session: *mut crate::Session,
+) -> Vec<protocol::CounterSnapshot> {
+    let mut snapshots = Vec::new();
+    loop {
+        let (result, event) = event_c(session, crate::EVENT_LANE_LOSSY);
+        assert_eq!(result, crate::RESULT_OK);
+        if event.is_empty() {
+            return snapshots;
+        }
+        let mut fields = [0_u16; 64];
+        if let protocol::DecodedTypedEventFrame {
+            payload: protocol::DecodedEventPayload::CounterSnapshot(snapshot),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_event(&event, &mut DecodeScratch::new(&mut fields))
+            .expect("lossy event")
+        {
+            snapshots.push(snapshot);
+        }
+    }
+}
+
+/// Issue #1351 gate 1: every staged counter snapshot carries the configured counters' own values,
+/// the ones `COUNTERS_GET` returns, never the render-call count, whichever control call stages
+/// it; one call is a `source_submit`.
+///
+/// A snapshot reads the provider after the step's first refresh, so it equals `COUNTERS_GET` as
+/// the previous call left it (counters change only inside a service step), which is the value the
+/// test reads before each block.
+///
+/// Test value: red if the snapshot is filled with anything but the counter's own value (the
+/// render-call count it carried), or if only `command` refreshes the provider so that a submit
+/// stages a stale value.
+#[test]
+fn a_counter_snapshot_carries_each_configured_counters_own_value() {
+    let ids = [
+        protocol::CounterId::TelemetryCoalesced,
+        protocol::CounterId::TelemetryDropped,
+    ];
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    // Two meter records and the snapshot per observed render overflow the lossy lane's room.
+    assert_eq!(
+        command_c(
+            c_session,
+            &counter_telemetry(1, ids.to_vec(), 1, vec![1, 2])
+        )
+        .0,
+        crate::RESULT_OK
+    );
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let mut request = 1;
+    let mut expected = Vec::new();
+    let mut staged = Vec::new();
+    for block in 0..8_u64 {
+        request += 1;
+        expected.push(counters_get_c(c_session, request, &ids).expect("served counters"));
+        render_c(c_plan, block);
+        // The control call that stages the block's snapshot is a `source_submit`.
+        submit_silence_c(c_session, 1, block * 128);
+        let snapshots = lossy_counter_snapshots(c_session);
+        assert!(
+            snapshots.len() <= 1,
+            "block {block}: one snapshot per block"
+        );
+        staged.push((block, snapshots.into_iter().next()));
+    }
+    let counters = crate::ffi::test_telemetry_counters(c_session);
+    assert!(
+        counters.telemetry_coalesced + counters.telemetry_dropped > 0,
+        "the lossy lane coalesced or dropped a record"
+    );
+    // The lossy lane may keep only part of a snapshot, so each kept value is compared by ID.
+    let mut differs_from_render_calls = false;
+    let mut kept = 0;
+    for (block, snapshot) in staged {
+        for value in snapshot.into_iter().flat_map(|snapshot| snapshot.values) {
+            kept += 1;
+            let own = expected[block as usize]
+                .iter()
+                .find(|own| own.id == value.id)
+                .expect("a configured counter");
+            assert_eq!(
+                value, *own,
+                "block {block}: the snapshot value is COUNTERS_GET's"
+            );
+            differs_from_render_calls |= value.value != block + 1;
+        }
+    }
+    assert!(kept >= 4, "the lane kept values to compare: {kept}");
+    assert!(differs_from_render_calls);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1351 gate 2 (D4): with period 4 a snapshot is staged once render has completed four
+/// blocks since the last one, and not before.
+///
+/// Test value: red if the snapshot ignores the configured period and is staged at every observed
+/// block.
+#[test]
+fn a_counter_snapshot_waits_for_its_configured_period() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    assert_eq!(
+        command_c(
+            c_session,
+            &counter_telemetry(
+                1,
+                vec![protocol::CounterId::TelemetryDropped],
+                4,
+                Vec::new()
+            )
+        )
+        .0,
+        crate::RESULT_OK
+    );
+    for block in 0..3 {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert!(
+        lossy_counter_snapshots(c_session).is_empty(),
+        "three blocks stage nothing"
+    );
+    render_c(c_plan, 3);
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let snapshots = lossy_counter_snapshots(c_session);
+    assert_eq!(snapshots.len(), 1, "the fourth block stages one");
+    assert_eq!(snapshots[0].observed_sample, protocol::SampleTime(4 * 128));
+
+    // Blocks rendered with no call between yield one snapshot at the next call; skipped periods
+    // are not replayed.
+    for block in 4..13 {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(lossy_counter_snapshots(c_session).len(), 1);
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert!(lossy_counter_snapshots(c_session).is_empty());
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1351 gate 3 (D2): configuring a counter the C ABI does not serve is `NOT_FOUND`, and
+/// the stored configuration and the counters stay as they were.
+///
+/// Test value: red if a configuration naming a counter that can never report is accepted, or if a
+/// refused one still replaces the stored configuration.
+#[test]
+fn configuring_an_unserved_counter_is_refused_and_changes_nothing() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let served = vec![protocol::CounterId::TelemetryDropped];
+    let (result, response) = command_c(
+        c_session,
+        &counter_telemetry(1, served.clone(), 1, Vec::new()),
+    );
+    assert_eq!(
+        (result, response_status(&response)),
+        (crate::RESULT_OK, StatusCode::Ok)
+    );
+    let before = counters_get_c(c_session, 2, &[]).expect("all served counters");
+
+    let mut request = 2;
+    for unserved in [
+        protocol::CounterId::MalformedFrames,
+        protocol::CounterId::ControlCommandBackpressure,
+    ] {
+        request += 1;
+        let refused = counter_telemetry(request, vec![unserved], 1, vec![1]);
+        let (result, response) = command_c(c_session, &refused);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            response_status(&response),
+            StatusCode::NotFound,
+            "{unserved:?}"
+        );
+        request += 1;
+        assert_eq!(
+            counters_get_c(c_session, request, &[unserved]),
+            Err(StatusCode::NotFound),
+            "{unserved:?} is not readable either"
+        );
+    }
+    assert_eq!(
+        counters_get_c(c_session, 1_000, &[]).expect("counters"),
+        before
+    );
+
+    // The stored configuration is the accepted one: a snapshot of exactly that counter, and no
+    // meter batch from the refused configuration.
+    render_c(c_plan, 0);
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let snapshots = lossy_counter_snapshots(c_session);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0]
+            .values
+            .iter()
+            .map(|value| value.id)
+            .collect::<Vec<_>>(),
+        served
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1351 gate 4 (D1, D6): the provider serves every counter of its fixed set at 0 from
+/// construction, `TRANSITION_REPREPARE_REFUSALS` among them, and a configuration may name it.
+///
+/// Test value: red if the new counter is missing from the registry decoder or the served set, so
+/// that a host's read of it is `NOT_FOUND` or its configuration is refused.
+#[test]
+fn every_served_counter_reads_zero_on_a_fresh_session() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let all = counters_get_c(c_session, 1, &[]).expect("all served counters");
+    assert_eq!(
+        all.iter().map(|value| value.id).collect::<Vec<_>>(),
+        vec![
+            protocol::CounterId::TelemetryCoalesced,
+            protocol::CounterId::TelemetryDropped,
+            protocol::CounterId::CanceledAutomation,
+            protocol::CounterId::LiveValuesSuperseded,
+            protocol::CounterId::TransitionReprepareRefusals,
+        ]
+    );
+    assert!(all.iter().all(|value| value.value == 0));
+    assert_eq!(
+        counters_get_c(
+            c_session,
+            2,
+            &[protocol::CounterId::TransitionReprepareRefusals]
+        ),
+        Ok(vec![protocol::CounterValue {
+            id: protocol::CounterId::TransitionReprepareRefusals,
+            value: 0,
+        }])
+    );
+    let configure = counter_telemetry(
+        3,
+        vec![protocol::CounterId::TransitionReprepareRefusals],
+        1,
+        Vec::new(),
+    );
+    let (result, response) = command_c(c_session, &configure);
+    assert_eq!(
+        (result, response_status(&response)),
+        (crate::RESULT_OK, StatusCode::Ok)
+    );
+    render_c(c_plan, 0);
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let snapshots = lossy_counter_snapshots(c_session);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].values,
+        vec![protocol::CounterValue {
+            id: protocol::CounterId::TransitionReprepareRefusals,
+            value: 0,
+        }]
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// Issue #1348 gate 4 (D7): a published candidate scheduled `NoEarlierThan` 64 blocks ahead
 /// survives 1,000 service steps after a rendered block: render still adopts it, exactly at the
 /// block that starts at its sample, its provider stays pending until then, no plan or provider is
@@ -4001,13 +4353,12 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
-            protocol::CommandPayload::SessionTransactionApply(&[
-                protocol::SessionEdit::SetTrackFader {
-                    track_id: session::StableId::parse(&track_id).expect("track ID"),
-                    fader: fader.clone(),
-                    ramp_samples: None,
-                },
-            ]),
+            protocol::CommandPayload::SessionTransactionApply(
+                &protocol::control_core::fader_edits(
+                    &session::StableId::parse(&track_id).expect("track ID"),
+                    fader,
+                ),
+            ),
         )
     };
     let status = |response: &[u8]| {

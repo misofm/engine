@@ -191,3 +191,19 @@ Under a latency growth, the warm successor adopts in move mode at its first read
 (*Grow latency during playback by adopting a primed warm successor*, #1287). That is an ordinary
 move-mode carry at a later boundary, so D2's carried slots resolve at `S` by the same rule, and this
 slice's gates cover the rule.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Split.** Both pieces stay in this issue.
+
+- **(a)** D2 (carried cells) and D4 (carry, then retarget). Gates 1, 2, 3, 5 and 6.
+- **(b)** D5 (shunt) and D3 (pending Observe records). Gate 4 and the new gate 8. Dependency: (a).
+
+**Gate 8 (D3), new.** In `crates/host-core/tests/successor_swap.rs`: a compressor insert with
+live controls. After A's last block and before B is published, admit Observe records to the
+lane's observation queue (`LiveControlEffectBankStage::observe_queues`): one subscribe, and in a
+second case the queue filled to its capacity. At the carry, every record is applied to A's
+`ObservationLane` with the bounded drain: A's queue reads empty, and A's lane holds the state that
+A's next block would have reached by applying the same records. Zero allocations and frees on the
+swap block. It turns red if the carry leaves records in the retired queue (an acknowledged
+subscribe is lost) or drains past the queue's count at entry.

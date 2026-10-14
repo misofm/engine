@@ -5,6 +5,8 @@
 //! browser-message, and C ABI adapters without retaining any caller pointer.
 
 mod btlv;
+#[cfg(any(test, feature = "test-support"))]
+mod control_rows;
 mod controller;
 mod message_wire;
 mod model;
@@ -32,7 +34,15 @@ pub use message_wire::{
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {
-    pub use controls::{ControlAddress, ControlError, Lane, Owner, Section};
+    /// Name-to-address lookup and the edit lists of a whole fader, builtins or matrix: tests and
+    /// the audit tool write values by row name; no production caller does (the control list
+    /// carries each row's ID).
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::control_rows::{builtins_edits, fader_edits, matrix_or_pan_edits, row_address};
+    pub use controls::{
+        BYPASS_CONTROL, ControlAddress, ControlError, LINK_MODE_CONTROL, Lane, MonitorOverlay,
+        MonitorWrite, Owner, Section,
+    };
 }
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,

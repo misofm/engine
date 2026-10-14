@@ -140,3 +140,17 @@ for chromium, firefox and webkit.
   SDK half becomes a generated builder of the link-mode row, once that row exists.
 - Shrinks *Let a strip override a console slot's link mode* (#1236): its wire and SDK halves become
   one row; the session grammar and render work stay.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Name.** D1's list-row type is `ControlListEntry`, not `ControlRow`: `ControlRow` is already the
+generated catalog type (`sdk/src/generated/controls.ts:4313`). `ControlList.controls` is
+`ControlListEntry[]`.
+
+**Split.** All three pieces stay in this issue.
+
+- **(A)** D1-D3 and the list codec: `engine.controls()`, `engine.controlState()`, `edit.set`.
+  Gates 1, 2 and 4. Dependencies: #1563B, #1562a, #1551, #1549, #1550.
+- **(B)** D4, the generated builders. Gate 3. Dependency: (A).
+- **(C)** D5 and D6: strip order from the list, the `direct-oracle.mjs` timeline and the native
+  parity leg. Gates 5 and 6. Dependency: (A). #1565B needs (C).

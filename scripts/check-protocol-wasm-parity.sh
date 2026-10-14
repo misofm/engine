@@ -169,14 +169,14 @@ PY
     )
     local -a files=("$PIN_FILE" "$PIN_FILE" "$GUEST_FILE")
     local -a searches=(
-        'COMPLETE_SCHEMA_HASH: u64 = 0xa19a_7794_3966_0743;'
-        'COMPLETE_SCHEMA_HASH: u64 = 0xa19a_7794_3966_0743;'
-        'assert_eq!(corpus.len(), 46);'
+        'COMPLETE_SCHEMA_HASH: u64 = 0x7de4_0861_2b83_7afd;'
+        'COMPLETE_SCHEMA_HASH: u64 = 0x7de4_0861_2b83_7afd;'
+        'assert_eq!(corpus.len(), 47);'
     )
     local -a replacements=(
         'COMPLETE_SCHEMA_HASH: u64 = 0x88a8_ee6a_6d9e_4acc;'
         'COMPLETE_SCHEMA_HASH: u64 = 0x0bad_0bad_0bad_0bad;'
-        'assert_eq!(corpus.len(), 45);'
+        'assert_eq!(corpus.len(), 46);'
     )
     local index
     for index in "${!labels[@]}"; do

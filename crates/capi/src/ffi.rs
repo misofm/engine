@@ -18,8 +18,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
     CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailure,
-    SourceFailureReport, compile_children, failure_bytes, limits_are_valid, plan_error,
-    render_error_code,
+    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -721,37 +720,20 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                 }
                 code
             }
-            Err(CommandError::BufferTooSmall { required }) => {
-                // SAFETY: The response descriptor was validated above; only required length is
-                // updated and no caller payload byte is written.
-                unsafe { (*response).required_bytes = required };
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.output.too_small");
-                RESULT_BUFFER_TOO_SMALL
-            }
-            Err(CommandError::Invalid) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.frame.invalid");
-                RESULT_INVALID_ARGUMENT
-            }
-            Err(CommandError::Backpressure) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.plan.backpressure");
-                RESULT_BACKPRESSURE
-            }
-            Err(CommandError::CompileRejected(failure)) => {
-                session.last_error.borrow_mut().set(&failure_bytes(failure));
-                RESULT_COMPILE_REJECTED
-            }
-            Err(CommandError::Internal) => {
-                session.last_error.borrow_mut().set(b"control.internal");
-                RESULT_INTERNAL
+            Err(refused) => {
+                if let CommandError::BufferTooSmall { required } = refused {
+                    // SAFETY: The response descriptor was validated above; only required length
+                    // is updated and no caller payload byte is written.
+                    unsafe { (*response).required_bytes = required };
+                }
+                session.last_error.borrow_mut().set(&refused.diagnostic());
+                match refused {
+                    CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                    CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+                    CommandError::Backpressure => RESULT_BACKPRESSURE,
+                    CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+                    CommandError::Internal => RESULT_INTERNAL,
+                }
             }
         }
     })
@@ -806,28 +788,17 @@ pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
                 }
                 code
             }
-            Err(EventError::BufferTooSmall { required }) => {
-                // SAFETY: Validation established writable descriptor metadata.
-                unsafe { (*event).required_bytes = required };
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.event.output.too_small");
-                RESULT_BUFFER_TOO_SMALL
-            }
-            Err(EventError::Backpressure) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.event.backpressure");
-                RESULT_BACKPRESSURE
-            }
-            Err(EventError::Internal) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.event.internal");
-                RESULT_INTERNAL
+            Err(refused) => {
+                if let EventError::BufferTooSmall { required } = refused {
+                    // SAFETY: Validation established writable descriptor metadata.
+                    unsafe { (*event).required_bytes = required };
+                }
+                session.last_error.borrow_mut().set(refused.diagnostic());
+                match refused {
+                    EventError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                    EventError::Backpressure => RESULT_BACKPRESSURE,
+                    EventError::Internal => RESULT_INTERNAL,
+                }
             }
         }
     })
@@ -927,32 +898,19 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
             };
         match state.render(absolute_sample, render_output) {
             Ok(()) => {
-                // Issue #163 phase 4 item 2: the scan runs only for an armed observer.
+                // The control plane scans the two planes for an armed observer (#163 phase 4
+                // item 2) and publishes the block's activity.
                 //
-                // This is `2 * frames` scalar loads plus an `abs` and a `max` on every successful
-                // render -- 256 of them at the launch quantum -- and its sole consumer is
-                // `collect_render_activity`, which discards it unless the endpoint has configured
-                // meter handles and a nonzero meter period. `render_peak_observed` is that
-                // condition, refreshed by the control thread. When it is false the block
-                // publishes `NaN`, which the consumer reads as "not measured" and drops, so an
-                // unarmed block never fabricates a peak of `0.0`.
-                let peak = if state.render_peak_observed() {
-                    let mut peak = 0.0_f32;
-                    for channel in 0..2_usize {
-                        let plane = channel * stride;
-                        for frame in 0..frames {
-                            // SAFETY: The validated two-plane layout proves this exact sample
-                            // index is initialized and readable after the exclusive render borrow
-                            // ended.
-                            let sample = unsafe { *samples_pointer.add(plane + frame) };
-                            peak = peak.max(sample.abs());
-                        }
-                    }
-                    peak
-                } else {
-                    f32::NAN
+                // SAFETY: `PlanarBufferMut::try_new` proved `2` planes of `frames` samples at
+                // `stride` lie inside the `capacity` initialized, readable elements, and the
+                // exclusive render borrow ended with `render`.
+                let (left, right) = unsafe {
+                    (
+                        core::slice::from_raw_parts(samples_pointer, frames),
+                        core::slice::from_raw_parts(samples_pointer.add(stride), frames),
+                    )
                 };
-                state.publish_render_observation(peak);
+                state.observe_rendered_block([left, right]);
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }

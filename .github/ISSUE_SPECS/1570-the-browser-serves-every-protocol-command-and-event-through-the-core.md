@@ -255,3 +255,27 @@ Commands: `cargo test --locked -p host-web --features host-web/test-support` (ga
 ## Supersedes and shrinks
 
 - None. #1571 shrinks #1293 and #1294.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** D4 and D5 run in `single` mode on the node's port. #1332 later posts
+the same `control-event` frames on its port. Dependencies: #1332 is removed; #1381 means #1381a.
+
+The slice is split. Both pieces stay in this issue.
+
+- **#1570a** (core half, batch 4): D2 (`EventError::diagnostic`), D3's
+  `PlanState::observe_rendered_block`, and the C ABI rewired to them. Gate 5. Hermetic; no
+  dependency on #1562.
+- **#1570b** (host half): D1 (the export), D3's browser call, D4 (the drain), D5 (the wrapper),
+  D6 and D7 (the mirrors). Gates 1-4. Dependencies: #1570a, #1562a, #1381a. #1570b lands in one
+  batch with #1381a, #1562a, #1563B and #1565A.
+
+**Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+## Implementation record (#1570a, batch 4 review fold, 2026-10-14)
+
+Gate 5 (the C ABI is unchanged), `audit capi` on the merge base `205a8d2b4` and on the batch 4 fold
+head: `pcm_digest` `76525e7ef9e78cf4` on both (`cargo run --locked --release -p audit -- capi`,
+`total_violations` 0). PR evidence, not a committed test. The fold also makes `control-plane` own
+every command refusal text: `CommandError::diagnostic` beside `EventError::diagnostic`, which the
+C ABI calls (#1562a needs it).

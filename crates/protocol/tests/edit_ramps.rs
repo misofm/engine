@@ -1,15 +1,18 @@
 //! Issue #1394: a live-value edit may carry its own ramp length, recorded as transaction metadata
 //! (`EditRamps`) beside the candidate model and bounded at one second of the committed rate.
+//! Since decision 17 (#1561) the value edits are `SET_CONTROL`, `SetConsole` and `SetTrackConsole`.
 //!
 //! The base is the canonical fixture (track `vocal` with an insert `eq`, route `to-main`, 48 kHz,
 //! revision 7) plus a second track `second`, a submix `bus` and an empty VCA `grp`.
 
+use protocol::control_core::{ControlAddress, ControlError, Lane, Owner, Section, row_address};
 use protocol::{
     ExpectedRevision, SessionEdit, SessionEditError, SessionRevision, SessionStore,
     SessionStoreError,
 };
 use session::{
-    CompileCaps, EditRampRow, EditRampTarget, RackName, StableId, Submix, Vca, parse_session_json,
+    CompileCaps, ConsoleEntry, ConsoleSlot, EditRampRow, EditRampTarget, EffectIdentity,
+    EffectQuality, LinkMode, RackName, StableId, Submix, Vca, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -44,6 +47,23 @@ fn store() -> SessionStore {
         members: vec![],
     };
     model.tracks.push(second);
+    // One console slot, so that a `SetConsole` can change the console (a `SetTrackConsole` is
+    // accepted only after one that does) without rewriting any strip's entries.
+    model.console.pre_insert.push(ConsoleSlot {
+        slot: id("comp"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: LinkMode::Maximum,
+    });
+    for track in &mut model.tracks {
+        track.console.push(ConsoleEntry {
+            slot: id("comp"),
+            bypass: false,
+            params: Vec::new(),
+        });
+    }
     model
         .submixes
         .push(Submix::unity(id("bus"), &model.console));
@@ -63,6 +83,8 @@ fn vocal(store: &SessionStore) -> &session::Track {
         .expect("vocal")
 }
 
+/// A `SET_CONTROL` of `track`'s fader dB on both lanes to the value it already holds, with
+/// `ramp_samples`: the fader row of the strip, and nothing else.
 fn fader(store: &SessionStore, track: &str, ramp_samples: Option<u32>) -> SessionEdit {
     let model = store.compiled().normalized_model();
     let track = model
@@ -70,9 +92,35 @@ fn fader(store: &SessionStore, track: &str, ramp_samples: Option<u32>) -> Sessio
         .iter()
         .find(|t| t.id == id(track))
         .expect("track");
-    SessionEdit::SetTrackFader {
+    set_control(
+        builtin(track.id.as_str(), FADER_DB, Lane::Both),
+        track.fader.left_db,
+        ramp_samples,
+    )
+}
+
+/// The edit that changes the console without touching the slot set (the slot's quality moves), so
+/// a `SetTrackConsole` may follow (decision 17, #1561 D3).
+fn declare(store: &SessionStore, ramp_samples: Option<u32>) -> SessionEdit {
+    let mut console = store.compiled().normalized_model().console.clone();
+    console.pre_insert[0].quality = EffectQuality::High;
+    SessionEdit::SetConsole {
+        console,
+        ramp_samples,
+    }
+}
+
+/// A `SetTrackConsole` of `strip` to the entries it holds, with `ramp_samples`.
+fn track_console(store: &SessionStore, strip: &str, ramp_samples: Option<u32>) -> SessionEdit {
+    let model = store.compiled().normalized_model();
+    let track = model
+        .tracks
+        .iter()
+        .find(|t| t.id == id(strip))
+        .expect("track");
+    SessionEdit::SetTrackConsole {
         track_id: track.id.clone(),
-        fader: track.fader.clone(),
+        console: track.console.clone(),
         ramp_samples,
     }
 }
@@ -88,58 +136,49 @@ fn recorded(store: &SessionStore, edits: &[SessionEdit]) -> Recorded {
         .entries()
 }
 
-/// #1394 gate 2: the last edit that writes a `(target, row)` decides its length; a fader edit
-/// records the fader and the mute rows; `None` removes an earlier length; an upsert removes every
-/// entry of its strip.
+/// #1394 gate 2: the last per-kind edit that writes a `(target, row)` decides its length, and a
+/// `SET_CONTROL` records the one row its address names; `None` removes an earlier length of a
+/// per-kind edit; an upsert removes every entry of its strip.
 ///
 /// Red if a later edit without a length keeps an earlier one, if an edit records the wrong row,
 /// target or one row too few, or if an upsert leaves a stale entry.
 #[test]
 fn the_last_edit_to_write_a_row_decides_its_length() {
     let store = store();
-    let matrix = {
-        let track = vocal(&store);
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: track.id.clone(),
-            matrix_or_pan: track.matrix_or_pan.clone(),
-            ramp_samples: None,
-        }
-    };
-    let route_gain = SessionEdit::SetRouteGainDb {
-        route_id: id("to-main"),
-        gain_db: 0.0,
-        ramp_samples: Some(0),
-    };
+    let route_gain = set_control(
+        row_address(
+            Owner::Route(id("to-main")),
+            Section::Own,
+            "gain_db",
+            Lane::Both,
+        )
+        .expect("the gain row"),
+        0.0,
+        Some(0),
+    );
+    let pan = set_control(builtin("vocal", PAN, Lane::Both), 0.5, Some(9));
     let edits = [
+        declare(&store, None),
         fader(&store, "vocal", Some(37)),
-        matrix.clone(),
-        route_gain.clone(),
-        fader(&store, "second", Some(5)),
-        fader(&store, "second", None),
+        pan,
+        route_gain,
+        track_console(&store, "second", Some(5)),
+        track_console(&store, "second", None),
     ];
     assert_eq!(
         recorded(&store, &edits),
         vec![
             (strip("vocal"), EditRampRow::Fader, 37),
-            (strip("vocal"), EditRampRow::Mute, 37),
+            (strip("vocal"), EditRampRow::Matrix, 9),
             (
                 EditRampTarget::Route(id("to-main")),
                 EditRampRow::RouteGain,
                 0
             ),
         ],
-        "the vocal fader carries 37 on its fader and mute rows, the route's explicit 0 is an \
-         entry, and the second track's later edit without a length removed its 5"
+        "the vocal fader row carries 37 and only that row, the pan row 9, the route's explicit 0 \
+         is an entry, and the second track's later console edit without a length removed its 5"
     );
-
-    // The matrix edit with a length writes only the matrix row of its own strip.
-    let mut with_matrix = edits.to_vec();
-    if let SessionEdit::SetTrackMatrixOrPan { ramp_samples, .. } = &mut with_matrix[1] {
-        *ramp_samples = Some(9);
-    }
-    let entries = recorded(&store, &with_matrix);
-    assert!(entries.contains(&(strip("vocal"), EditRampRow::Matrix, 9)));
-    assert_eq!(entries.len(), 4);
 
     // An upsert of the strip after the first edit removes its entries; one before keeps them.
     let upsert = SessionEdit::UpsertTrack {
@@ -148,123 +187,152 @@ fn the_last_edit_to_write_a_row_decides_its_length() {
     let after = [fader(&store, "vocal", Some(37)), upsert.clone()];
     assert_eq!(recorded(&store, &after), vec![]);
     let before = [upsert, fader(&store, "vocal", Some(37))];
-    assert_eq!(recorded(&store, &before).len(), 2);
+    assert_eq!(recorded(&store, &before).len(), 1);
 }
 
 /// #1394 D3: every live-value edit records exactly the rows the table names, on the target the
 /// table names, and nothing else.
 ///
 /// Red if an edit records the wrong row (a mute edit on the gain row, a follow toggle off the mute
-/// row) or the wrong target (an effect's link on the strip).
+/// row) or the wrong target (a route's row on the strip).
 #[test]
 fn every_live_value_edit_records_its_rows_on_its_target() {
     let store = store();
     let model = store.compiled().normalized_model();
-    let track = vocal(&store);
-    let effect = &track.inserts.effects[0];
-    let route = &model.routes[0];
-    let edits_and_rows: Vec<(SessionEdit, EditRampTarget, Vec<EditRampRow>)> = vec![
+    let route = |row: &str, value: f32, ramp| {
+        set_control(
+            row_address(Owner::Route(id("to-main")), Section::Own, row, Lane::Both)
+                .expect("a route row"),
+            value,
+            ramp,
+        )
+    };
+    let vca = |row: &str, value: f32, ramp| {
+        set_control(
+            row_address(Owner::Vca(id("grp")), Section::Own, row, Lane::Left).expect("a VCA row"),
+            value,
+            ramp,
+        )
+    };
+    let on = |row: &str, value: f32, ramp| {
+        set_control(
+            row_address(
+                Owner::Strip(id("vocal")),
+                Section::Builtins,
+                row,
+                Lane::Left,
+            )
+            .expect("a builtin row"),
+            value,
+            ramp,
+        )
+    };
+    let own = |row: &str, value: f32, ramp| {
+        set_control(
+            row_address(Owner::Strip(id("vocal")), Section::Own, row, Lane::Both)
+                .expect("a strip row"),
+            value,
+            ramp,
+        )
+    };
+    type Case = (
+        Box<dyn Fn(Option<u32>) -> Vec<SessionEdit>>,
+        EditRampTarget,
+        EditRampRow,
+    );
+    let cases: Vec<Case> = vec![
         (
-            SessionEdit::SetTrackBuiltins {
-                track_id: track.id.clone(),
-                builtins: track.builtins.clone(),
-                ramp_samples: Some(11),
-            },
+            Box::new(move |ramp| vec![on("fader_db", -1.0, ramp)]),
             strip("vocal"),
-            vec![EditRampRow::Input],
+            EditRampRow::Fader,
         ),
         (
-            SessionEdit::SetTrackConsole {
-                track_id: track.id.clone(),
-                console: track.console.clone(),
-                ramp_samples: Some(11),
-            },
+            Box::new(move |ramp| vec![on("mute", 1.0, ramp)]),
             strip("vocal"),
-            vec![EditRampRow::Link],
+            EditRampRow::Mute,
         ),
         (
-            SessionEdit::SetEffectLinkMode {
-                track_id: track.id.clone(),
-                rack_name: RackName::Inserts,
-                effect_id: effect.id.clone(),
-                link_mode: effect.link_mode,
-                ramp_samples: Some(11),
-            },
-            EditRampTarget::Effect {
-                strip: track.id.clone(),
-                rack: RackName::Inserts,
-                effect: effect.id.clone(),
-            },
-            vec![EditRampRow::Link],
+            Box::new(move |ramp| vec![on("pan", 0.5, ramp)]),
+            strip("vocal"),
+            EditRampRow::Matrix,
         ),
         (
-            SessionEdit::SetConsole {
-                console: model.console.clone(),
-                ramp_samples: Some(11),
-            },
-            EditRampTarget::Console,
-            vec![EditRampRow::Link],
+            Box::new(move |ramp| vec![own("matrix_mode", 1.0, ramp)]),
+            strip("vocal"),
+            EditRampRow::Matrix,
         ),
         (
-            SessionEdit::SetRouteMute {
-                route_id: route.id.clone(),
-                mute: route.mute,
-                ramp_samples: Some(11),
-            },
-            EditRampTarget::Route(route.id.clone()),
-            vec![EditRampRow::RouteMute],
+            Box::new(move |ramp| vec![on("trim_db", -1.0, ramp)]),
+            strip("vocal"),
+            EditRampRow::Input,
         ),
         (
-            SessionEdit::SetRouteFollowsMute {
-                route_id: route.id.clone(),
-                follows_mute: route.follows_mute,
-                ramp_samples: Some(11),
-            },
-            EditRampTarget::Route(route.id.clone()),
-            vec![EditRampRow::RouteMute],
+            Box::new(move |ramp| vec![on("polarity_invert", 1.0, ramp)]),
+            strip("vocal"),
+            EditRampRow::Input,
         ),
         (
-            SessionEdit::SetRouteChannelMatrix {
-                route_id: route.id.clone(),
-                channel_matrix: route.channel_matrix.clone(),
-                ramp_samples: Some(11),
-            },
-            EditRampTarget::Route(route.id.clone()),
-            vec![EditRampRow::RouteMatrix],
+            Box::new(move |ramp| vec![route("gain_db", -1.0, ramp)]),
+            EditRampTarget::Route(id("to-main")),
+            EditRampRow::RouteGain,
         ),
         (
-            SessionEdit::SetVcaFader {
-                vca_id: id("grp"),
-                fader: model.vcas[0].fader.clone(),
-                ramp_samples: Some(11),
-            },
+            Box::new(move |ramp| vec![route("mute", 1.0, ramp)]),
+            EditRampTarget::Route(id("to-main")),
+            EditRampRow::RouteMute,
+        ),
+        (
+            Box::new(move |ramp| vec![route("matrix_ll", 0.5, ramp)]),
+            EditRampTarget::Route(id("to-main")),
+            EditRampRow::RouteMatrix,
+        ),
+        (
+            Box::new(move |ramp| vec![vca("offset_db", -1.0, ramp)]),
             EditRampTarget::Vca(id("grp")),
-            vec![EditRampRow::VcaFader, EditRampRow::VcaMute],
+            EditRampRow::VcaFader,
+        ),
+        (
+            Box::new(move |ramp| vec![vca("mute", 1.0, ramp)]),
+            EditRampTarget::Vca(id("grp")),
+            EditRampRow::VcaMute,
         ),
     ];
-    for (edit, target, rows) in edits_and_rows {
-        let expected: Vec<_> = rows.iter().map(|row| (target.clone(), *row, 11)).collect();
+    for (edits, target, row) in cases {
         assert_eq!(
-            recorded(&store, std::slice::from_ref(&edit)),
-            expected,
-            "{:?}",
-            edit.opcode()
+            recorded(&store, &edits(Some(11))),
+            vec![(target.clone(), row, 11)],
+            "{target:?} {row:?}"
         );
         // The same edit without a length records nothing: absence is not an entry.
-        let mut bare = edit;
-        match &mut bare {
-            SessionEdit::SetTrackBuiltins { ramp_samples, .. }
-            | SessionEdit::SetTrackConsole { ramp_samples, .. }
-            | SessionEdit::SetEffectLinkMode { ramp_samples, .. }
-            | SessionEdit::SetConsole { ramp_samples, .. }
-            | SessionEdit::SetRouteMute { ramp_samples, .. }
-            | SessionEdit::SetRouteFollowsMute { ramp_samples, .. }
-            | SessionEdit::SetRouteChannelMatrix { ramp_samples, .. }
-            | SessionEdit::SetVcaFader { ramp_samples, .. } => *ramp_samples = None,
-            other => panic!("unexpected {other:?}"),
-        }
-        assert_eq!(recorded(&store, &[bare]), vec![]);
+        assert_eq!(recorded(&store, &edits(None)), vec![], "{target:?} {row:?}");
     }
+    // The two console edits keep their ramp field and write the link row of their own target.
+    let console_edit = |ramp| SessionEdit::SetConsole {
+        console: model.console.clone(),
+        ramp_samples: ramp,
+    };
+    assert_eq!(
+        recorded(&store, &[console_edit(Some(11))]),
+        vec![(EditRampTarget::Console, EditRampRow::Link, 11)]
+    );
+    assert_eq!(recorded(&store, &[console_edit(None)]), vec![]);
+    assert_eq!(
+        recorded(
+            &store,
+            &[
+                declare(&store, None),
+                track_console(&store, "vocal", Some(11))
+            ]
+        ),
+        vec![(strip("vocal"), EditRampRow::Link, 11)]
+    );
+    assert_eq!(
+        recorded(
+            &store,
+            &[declare(&store, None), track_console(&store, "vocal", None)]
+        ),
+        vec![]
+    );
 }
 
 /// #1394 gate 3: one second at the committed rate commits, one sample more refuses with
@@ -312,13 +380,14 @@ fn a_length_above_one_second_of_the_committed_rate_refuses_the_whole_transaction
 
     // A later edit of the same row without a length does not excuse an earlier one.
     let overwritten = [
-        fader(&store, "vocal", Some(48_001)),
-        fader(&store, "vocal", None),
+        declare(&store, None),
+        track_console(&store, "vocal", Some(48_001)),
+        track_console(&store, "vocal", None),
     ];
     assert_eq!(
         refuse(&store, &overwritten),
         SessionStoreError::Edit {
-            operation_index: 0,
+            operation_index: 1,
             error: SessionEditError::RampOutOfRange,
         }
     );
@@ -350,29 +419,23 @@ fn a_length_above_one_second_of_the_committed_rate_refuses_the_whole_transaction
 }
 
 /// #1394 D3: an edit that rewrites or removes a target whose rows `EditRamps` keys carries no
-/// length for them, so it clears the target's earlier entries; an edit after it decides afresh.
+/// length for them, so it clears the target's earlier entries; an edit after it decides afresh. A
+/// rack edit writes no such row, so it leaves its strip's entries as they were.
 ///
-/// Red if a `PutTrackEffect`, `SetTrackRack`, `RemoveTrackEffect`, `RemoveTrack`, `RemoveSubmix`,
-/// `RemoveRoute` or `RemoveVca` leaves the stale length of an earlier edit in place (a later reader
-/// would ramp a row over a length that its last writer did not give), if `SetTrackRack` takes
-/// another strip's effect entries, or if a clear also drops a write that comes after it.
+/// Red if an `UpsertTrack`, `RemoveTrack`, `RemoveSubmix`, `RemoveRoute` or `RemoveVca` leaves the
+/// stale length of an earlier edit in place (a later reader would ramp a row over a length that its
+/// last writer did not give), if a clear takes another target's entries, if a clear also drops a
+/// write that comes after it, or if a rack edit clears its strip's rows.
 #[test]
 fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
     let store = store();
     let model = store.compiled().normalized_model();
     let vocal_track = vocal(&store);
     let eq = vocal_track.inserts.effects[0].clone();
-    let effect_target = |strip: &str| EditRampTarget::Effect {
-        strip: id(strip),
-        rack: RackName::Inserts,
-        effect: eq.id.clone(),
-    };
-    let link = |strip: &str, samples: u32| SessionEdit::SetEffectLinkMode {
-        track_id: id(strip),
+    let set_rack = SessionEdit::SetTrackRack {
+        track_id: id("vocal"),
         rack_name: RackName::Inserts,
-        effect_id: eq.id.clone(),
-        link_mode: eq.link_mode,
-        ramp_samples: Some(samples),
+        rack: vocal_track.inserts.clone(),
     };
     let put = SessionEdit::PutTrackEffect {
         track_id: id("vocal"),
@@ -380,100 +443,74 @@ fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
         final_position: 0,
         effect: eq.clone(),
     };
-    let set_rack = SessionEdit::SetTrackRack {
-        track_id: id("vocal"),
-        rack_name: RackName::Inserts,
-        rack: vocal_track.inserts.clone(),
-    };
     let remove_effect = SessionEdit::RemoveTrackEffect {
         track_id: id("vocal"),
         rack_name: RackName::Inserts,
         effect_id: eq.id.clone(),
     };
     let strip_fader = |strip: &str, samples: u32| {
-        let fader = if strip == "bus" {
-            model.submixes[0].fader.clone()
+        let value = if strip == "bus" {
+            model.submixes[0].fader.left_db
         } else {
-            vocal_track.fader.clone()
+            vocal_track.fader.left_db
         };
-        SessionEdit::SetTrackFader {
-            track_id: id(strip),
-            fader,
-            ramp_samples: Some(samples),
-        }
+        set_control(builtin(strip, FADER_DB, Lane::Both), value, Some(samples))
     };
-    let vocal_link = (effect_target("vocal"), EditRampRow::Link, 37);
-    let second_link = (effect_target("second"), EditRampRow::Link, 38);
-    // The entries of `strip_fader("vocal", 9)`: a rack edit does not touch its strip's own rows.
-    let vocal_fader = (
-        (strip("vocal"), EditRampRow::Fader, 9),
-        (strip("vocal"), EditRampRow::Mute, 9),
-    );
+    let upsert_vocal = SessionEdit::UpsertTrack {
+        track: vocal_track.clone(),
+    };
+    let route_gain = |samples| {
+        set_control(
+            row_address(
+                Owner::Route(id("to-main")),
+                Section::Own,
+                "gain_db",
+                Lane::Both,
+            )
+            .expect("the gain row"),
+            0.0,
+            Some(samples),
+        )
+    };
+    let vca_offset = |samples| {
+        set_control(
+            row_address(Owner::Vca(id("grp")), Section::Own, "offset_db", Lane::Left)
+                .expect("the offset row"),
+            0.0,
+            Some(samples),
+        )
+    };
 
     let cases: Vec<(&str, Vec<SessionEdit>, Recorded)> = vec![
         (
-            "PutTrackEffect replaces the effect with no length",
-            vec![link("vocal", 37), put.clone()],
-            vec![],
-        ),
-        (
-            "SetTrackRack replaces every effect of the rack with no length",
-            vec![link("vocal", 37), set_rack.clone()],
-            vec![],
-        ),
-        (
-            "SetTrackRack clears its own strip's rack only",
-            vec![
-                link("vocal", 37),
-                link("second", 38),
-                strip_fader("vocal", 9),
-                set_rack.clone(),
-            ],
-            vec![
-                second_link.clone(),
-                vocal_fader.0.clone(),
-                vocal_fader.1.clone(),
-            ],
-        ),
-        (
-            "PutTrackEffect clears its own effect only",
-            vec![
-                link("vocal", 37),
-                link("second", 38),
-                strip_fader("vocal", 9),
-                put.clone(),
-            ],
-            vec![second_link, vocal_fader.0, vocal_fader.1],
-        ),
-        (
-            "RemoveTrackEffect removes the effect",
-            vec![link("vocal", 37), remove_effect.clone()],
-            vec![],
-        ),
-        (
-            "RemoveTrackEffect then PutTrackEffect re-creates it with no length",
-            vec![link("vocal", 37), remove_effect, put.clone()],
+            "UpsertTrack replaces the strip with no length",
+            vec![strip_fader("vocal", 9), upsert_vocal.clone()],
             vec![],
         ),
         (
             "an edit after the rewrite decides the row",
-            vec![put, set_rack.clone(), link("vocal", 37)],
-            vec![vocal_link],
+            vec![
+                strip_fader("vocal", 9),
+                upsert_vocal,
+                strip_fader("vocal", 5),
+            ],
+            vec![(strip("vocal"), EditRampRow::Fader, 5)],
         ),
         (
-            "RemoveTrack removes the strip's rows and its effects' rows, and only its own",
+            "a rack edit leaves its strip's rows",
+            vec![strip_fader("vocal", 9), set_rack, put, remove_effect],
+            vec![(strip("vocal"), EditRampRow::Fader, 9)],
+        ),
+        (
+            "RemoveTrack removes the strip's rows, and only its own",
             vec![
                 strip_fader("second", 5),
-                link("second", 6),
                 strip_fader("vocal", 7),
                 SessionEdit::RemoveTrack {
                     track_id: id("second"),
                 },
             ],
-            vec![
-                (strip("vocal"), EditRampRow::Fader, 7),
-                (strip("vocal"), EditRampRow::Mute, 7),
-            ],
+            vec![(strip("vocal"), EditRampRow::Fader, 7)],
         ),
         (
             "RemoveSubmix removes the strip's rows",
@@ -488,11 +525,7 @@ fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
         (
             "RemoveRoute removes the route's rows",
             vec![
-                SessionEdit::SetRouteGainDb {
-                    route_id: id("to-main"),
-                    gain_db: 0.0,
-                    ramp_samples: Some(5),
-                },
+                route_gain(5),
                 SessionEdit::RemoveRoute {
                     route_id: id("to-main"),
                 },
@@ -501,14 +534,7 @@ fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
         ),
         (
             "RemoveVca removes the VCA's rows",
-            vec![
-                SessionEdit::SetVcaFader {
-                    vca_id: id("grp"),
-                    fader: model.vcas[0].fader.clone(),
-                    ramp_samples: Some(5),
-                },
-                SessionEdit::RemoveVca { vca_id: id("grp") },
-            ],
+            vec![vca_offset(5), SessionEdit::RemoveVca { vca_id: id("grp") }],
             vec![],
         ),
     ];
@@ -518,8 +544,6 @@ fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
 }
 
 // ---- #1553: SET_CONTROL --------------------------------------------------------------------
-
-use controls::{ControlAddress, ControlError, Lane, Owner, Section};
 
 /// The builtin IDs the address names (`BUILTIN_PARAMETER_DESCRIPTORS`).
 const TRIM_DB: u32 = 2;
@@ -537,19 +561,14 @@ fn builtin(strip: &str, control: u32, lane: Lane) -> ControlAddress {
 }
 
 fn set_control(address: ControlAddress, value: f32, ramp_samples: Option<u32>) -> SessionEdit {
-    SessionEdit::SetControl {
-        address,
-        value,
-        ramp_samples,
-    }
+    SessionEdit::set_control(address, value, ramp_samples)
 }
 
-/// #1553 D4: a `SetControl` records the one row its address names, on that address's owner, and a
-/// later one without a length removes it; a fixed-ramp row records nothing.
+/// #1553 D4: a `SetControl` records the one row its address names, on that address's owner; a
+/// fixed-ramp row records nothing.
 ///
-/// Red if the address maps to the wrong row (a fader edit also taking the mute row as the per-kind
-/// edit does, a pan on the fader row), the wrong target, or if an absent length keeps an earlier
-/// explicit one.
+/// Red if the address maps to the wrong row (a fader edit also taking the mute row, a pan on the
+/// fader row), or the wrong target.
 #[test]
 fn set_control_records_the_row_its_address_names() {
     let store = store();
@@ -572,10 +591,6 @@ fn set_control_records_the_row_its_address_names() {
             0.0,
             Some(7),
         ),
-        // The second track's fader is set by address, then rewritten by the per-kind edit without
-        // a length: the per-kind edit is not a control write, so the last edit decides.
-        set_control(builtin("second", FADER_DB, Lane::Both), 0.0, Some(5)),
-        fader(&store, "second", None),
     ];
     let entries = recorded(&store, &edits);
     let expected = vec![
@@ -689,8 +704,8 @@ fn a_refused_set_control_refuses_the_whole_transaction() {
 
 /// Batch 2 review fold item 1: several `SET_CONTROL` rows share one ramp key, and one transaction
 /// that gives the key two lengths (an explicit one against another, or against none) is refused
-/// at the later edit with `control.ramp.conflict` and nothing is written; equal lengths agree; a
-/// per-kind edit keeps its last-edit-decides behaviour.
+/// at the later edit with `control.ramp.conflict` and nothing is written; equal lengths agree; an
+/// upsert of the strip between them clears the key.
 ///
 /// Red if the later control silently decides the length of the earlier one (the left fader at 480
 /// samples would then ramp the right at the session default), or if equal lengths are refused.
@@ -749,8 +764,6 @@ fn two_controls_that_share_a_ramp_row_must_agree_on_its_length() {
         ])
         .is_ok()
     );
-    // A per-kind edit between the two is not a control write: the last edit decides.
-    assert!(prepare(&[left(Some(480)), fader(&store, "vocal", None), right(None)]).is_ok());
     // An upsert of the strip clears its lengths, control writes included.
     let upsert = SessionEdit::UpsertTrack {
         track: vocal(&store).clone(),
@@ -760,25 +773,14 @@ fn two_controls_that_share_a_ramp_row_must_agree_on_its_length() {
     assert_eq!(store.canonical_snapshot(), before);
 }
 
-/// #1553 gate 1 at the model: a `SetControl` writes the same field the per-kind edit writes.
+/// #1553 gate 1 at the model, kept by #1561: a `SetControl` writes exactly the field its address
+/// names, on the lane it names, and leaves every other byte of the model as it was.
 ///
-/// Red if the address resolves a different field, lane or value than the old op.
+/// Red if the address resolves a different field, lane or value.
 #[test]
-fn set_control_writes_what_the_per_kind_edit_writes() {
-    let base = store();
-    let per_kind = {
-        let track = vocal(&base);
-        let mut fader = track.fader.clone();
-        fader.left_db = -4.5;
-        SessionEdit::SetTrackFader {
-            track_id: track.id.clone(),
-            fader,
-            ramp_samples: None,
-        }
-    };
-    let by_address = set_control(builtin("vocal", FADER_DB, Lane::Left), -4.5, None);
+fn set_control_writes_exactly_the_field_its_address_names() {
     let commit = |edit: SessionEdit| {
-        let store = self::store();
+        let store = store();
         store
             .prepare_transaction(ExpectedRevision::Exact(store.revision()), &[edit])
             .expect("prepares")
@@ -786,7 +788,24 @@ fn set_control_writes_what_the_per_kind_edit_writes() {
             .normalized_model()
             .clone()
     };
-    assert_eq!(commit(per_kind), commit(by_address));
+    let base = store().compiled().normalized_model().clone();
+    let mut expected = base.clone();
+    expected.revision += 1;
+    expected
+        .tracks
+        .iter_mut()
+        .find(|t| t.id == id("vocal"))
+        .unwrap()
+        .fader
+        .left_db = -4.5;
+    assert_eq!(
+        commit(set_control(
+            builtin("vocal", FADER_DB, Lane::Left),
+            -4.5,
+            None
+        )),
+        expected
+    );
     // The mute row has its own address, and the left lane only.
     let model = commit(set_control(builtin("vocal", MUTE, Lane::Left), 1.0, None));
     let track = model.tracks.iter().find(|t| t.id == id("vocal")).unwrap();

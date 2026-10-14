@@ -3837,3 +3837,227 @@ fn one_send_edit_lowers_one_route_and_records_are_in_route_id_order() {
     assert_eq!(ids, sorted);
     assert_eq!(ids.len(), 4);
 }
+
+/// Classify `current` against `edit` of it with the monitor overlays `committed` and `next` and the
+/// solo ramp `ramp`; the strip and route records, owned.
+fn classify_monitor(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+    overlays: [&controls::MonitorOverlay; 2],
+    ramp: Option<u32>,
+) -> Result<Both, LiveRebuild> {
+    let next = edited(current, edit);
+    host_core::classify_live_delta_with_monitor(
+        current,
+        &next,
+        ramps,
+        edit_ramps,
+        host_core::MonitorBase {
+            committed: overlays[0],
+            next: overlays[1],
+            ramp,
+        },
+    )
+    .map(|delta| {
+        let routes = delta
+            .routes
+            .iter()
+            .map(|route| {
+                (
+                    route.route_id.to_owned(),
+                    route.record.target(),
+                    route.record.mute(),
+                    route.record.length(),
+                )
+            })
+            .collect();
+        (flatten(&delta), routes)
+    })
+}
+
+/// #1559 D6, D7. A change of the monitor overlay alone, with the model as it is, gives the other
+/// tracks' mute records and the gate of the send their strip feeds; the soloed track and the
+/// solo-safe bus get none. The records take the solo's ramp (the session's `mute_ms` when it gave
+/// none, a step for 0), an unsolo reverses them, and a record that a model edit of the same
+/// transaction also produced takes the model edit's ramp, with the send following its source.
+///
+/// Red if the overlay change is not an effective-value difference (no records), a solo-safe
+/// submix or the soloed track mutes, the send is left open, a solo resolves its default from
+/// another key, or the solo's ramp overrides a model edit's.
+#[test]
+fn a_change_of_the_monitor_overlay_alone_is_the_other_strips_mutes_and_the_followers_gate() {
+    let current = with_bus(true);
+    let send = send_index(&current);
+    let send_id = current.routes[send].id.as_str().to_owned();
+    let (gain, matrix) = (
+        current.routes[send].gain_db,
+        matrix_of(&current.routes[send]),
+    );
+    let fed = track_id(&current, 0);
+    let other = track_id(&current, 1);
+    let ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 40,
+        pan_samples: 200,
+        link_samples: 100,
+    };
+    let none = controls::MonitorOverlay::new();
+    let soloed = controls::MonitorOverlay::with_soloed([id(&other)]);
+    let closed = [0.0; 4];
+
+    // Solo the track that feeds nothing: the fed track mutes and its send closes, both over mute_ms.
+    let (strips, routes) = classify_monitor(
+        &current,
+        |_| {},
+        ramps,
+        &EditRamps::new(),
+        [&none, &soloed],
+        None,
+    )
+    .expect("live");
+    assert_eq!(
+        strips,
+        vec![(
+            fed.clone(),
+            vec![mute(BuiltinLaneSelector::Both, true, 40)],
+            None
+        )]
+    );
+    assert_eq!(routes, vec![(send_id.clone(), closed, true, 40)]);
+
+    // A step, and an explicit length.
+    for (ramp, expected) in [(Some(0), 0), (Some(480), 480)] {
+        let (strips, routes) = classify_monitor(
+            &current,
+            |_| {},
+            ramps,
+            &EditRamps::new(),
+            [&none, &soloed],
+            ramp,
+        )
+        .expect("live");
+        assert_eq!(
+            strips[0].1,
+            vec![mute(BuiltinLaneSelector::Both, true, expected)]
+        );
+        assert_eq!(routes[0].3, expected);
+    }
+
+    // The unsolo reverses it: the track unmutes and the send reopens to the folded coefficients.
+    let (strips, routes) = classify_monitor(
+        &current,
+        |_| {},
+        ramps,
+        &EditRamps::new(),
+        [&soloed, &none],
+        None,
+    )
+    .expect("live");
+    assert_eq!(
+        strips,
+        vec![(
+            fed.clone(),
+            vec![mute(BuiltinLaneSelector::Both, false, 40)],
+            None
+        )]
+    );
+    assert_eq!(
+        routes,
+        vec![(
+            send_id.clone(),
+            folded(gain, matrix, false, [false; 2]),
+            false,
+            40
+        )]
+    );
+
+    // No change of the overlay, no record.
+    let (strips, routes) = classify_monitor(
+        &current,
+        |_| {},
+        ramps,
+        &EditRamps::new(),
+        [&soloed, &soloed],
+        Some(9),
+    )
+    .expect("live");
+    assert!(strips.is_empty() && routes.is_empty());
+
+    // The fed track's own mute edit, with its own length, beside the solo with another: the
+    // record both produced takes the edit's, and so does the send that follows it.
+    let mut edit_ramps = EditRamps::new();
+    edit_ramps.set(&EditRampTarget::Strip(id(&fed)), EditRampRow::Mute, Some(3));
+    let (strips, routes) = classify_monitor(
+        &current,
+        |next| {
+            next.tracks[0].fader.left_mute = true;
+            next.tracks[0].fader.right_mute = true;
+        },
+        ramps,
+        &edit_ramps,
+        [&none, &soloed],
+        Some(9),
+    )
+    .expect("live");
+    assert_eq!(
+        strips,
+        vec![(fed, vec![mute(BuiltinLaneSelector::Both, true, 3)], None)]
+    );
+    assert_eq!(routes, vec![(send_id, closed, true, 3)]);
+}
+
+/// #1559 D7 with #1558 D7. A transaction that changes a strip's VCA reach and a solo with an
+/// explicit ramp gives the strip's mute record the model's length: a change in VCA reach is the
+/// model's cause, and the solo's ramp keeps only a mute that the overlay alone moved. Here the
+/// second track joins a muted VCA while the first track is soloed (which also mutes the second);
+/// the record takes the VCA mute's default length, not the solo's 9. The same solo with no
+/// membership change still takes its own 9.
+///
+/// Red if the solo's ramp wins over a membership change: the check for a model cause looks only
+/// at VCAs whose own value changed, so a strip that joins a VCA that already held its mute is
+/// missed.
+#[test]
+fn a_vca_reach_change_beside_a_solo_takes_the_models_ramp() {
+    let current = with_vca(0.0, 0.0, [true, true]);
+    let (first, second) = (track_id(&current, 0), track_id(&current, 1));
+    let ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 40,
+        pan_samples: 200,
+        link_samples: 100,
+    };
+    let none = controls::MonitorOverlay::new();
+    let soloed = controls::MonitorOverlay::with_soloed([id(&first)]);
+    let mute_of = |join: bool, ramp: Option<u32>| {
+        let (strips, _) = classify_monitor(
+            &current,
+            |next| {
+                if join {
+                    let member = next.tracks[1].id.clone();
+                    next.vcas[0].members.push(member);
+                }
+            },
+            ramps,
+            &EditRamps::new(),
+            [&none, &soloed],
+            ramp,
+        )
+        .expect("live");
+        strips
+            .into_iter()
+            .find(|strip| strip.0 == second)
+            .map(|strip| strip.1)
+    };
+    // The solo alone: the second track mutes over the solo's length.
+    assert_eq!(
+        mute_of(false, Some(9)),
+        Some(vec![mute(BuiltinLaneSelector::Both, true, 9)])
+    );
+    // The same solo with the second track joining the muted VCA: the model's length.
+    assert_eq!(
+        mute_of(true, Some(9)),
+        Some(vec![mute(BuiltinLaneSelector::Both, true, 40)])
+    );
+}

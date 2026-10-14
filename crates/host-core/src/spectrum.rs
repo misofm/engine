@@ -997,8 +997,10 @@ impl SpectrumCaptureCollection {
         // preserve the old active capture and its queued result.
         let cadence = self.selected.and_then(|old| self.captures[old].cadence());
         if let Some(cadence) = cadence {
+            // The old entry's checked cadence value moves over unchanged, so an explicit hop
+            // survives the replacement; the default cadence is not rebuilt from its parts.
             self.captures[index]
-                .start_continuous(cadence.sample_rate_hz(), cadence.quantum_frames())
+                .begin_continuous(cadence, false)
                 .map_err(|error| match error {
                     SpectrumContinuousCaptureError::EpochOverflow => {
                         SpectrumCaptureCollectionSelectionError::EpochOverflow
@@ -3711,6 +3713,81 @@ mod tests {
         let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
         assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
         assert_eq!(legacy.cadence(), Some(expected));
+    }
+
+    #[test]
+    fn collection_select_keeps_the_cadence_on_the_new_entry() {
+        let quantum = 256;
+        let total_frames = SPECTRUM_WINDOW_FRAMES + 3 * 2_048;
+        let mut cases = SpectrumHop::SUPPORTED
+            .iter()
+            .map(|hop| Some(hop.get()))
+            .collect::<Vec<_>>();
+        cases.push(None);
+        for explicit_hop in cases {
+            let (_first_observer, first) = continuous_pair(SpectrumChannels::Stereo);
+            let (mut observer, mut second) = continuous_pair(SpectrumChannels::Stereo);
+            second.target = SpectrumTarget::Output("alt-out".into());
+            let second_target = second.target.clone();
+            let first_target = first.target.clone();
+            let mut collection = SpectrumCaptureCollection::new(vec![first, second]);
+            collection
+                .select(first_target.as_ref(), SpectrumChannels::Stereo)
+                .expect("select entry 0");
+            let started = match explicit_hop {
+                Some(hop) => collection
+                    .start_continuous_with_hop(
+                        48_000,
+                        quantum,
+                        SpectrumHop::new(hop).expect("supported hop"),
+                    )
+                    .expect("explicit start"),
+                None => collection
+                    .start_continuous(48_000, quantum)
+                    .expect("default start"),
+            };
+
+            assert_eq!(
+                collection
+                    .select(second_target.as_ref(), SpectrumChannels::Stereo)
+                    .expect("select entry 1"),
+                1
+            );
+            assert_eq!(
+                collection.cadence(),
+                Some(started),
+                "hop {explicit_hop:?}: the replacement keeps the started cadence"
+            );
+
+            let mut starts = Vec::new();
+            for first_sample in (0..total_frames).step_by(quantum as usize) {
+                let (left, right) = ramp_block(first_sample, quantum as usize);
+                observer.capture(
+                    &left,
+                    &right,
+                    first_sample as u64,
+                    super::GraphObservationValidity::CLEAR,
+                );
+                match collection.try_read_continuous() {
+                    Ok(window) => starts.push(window.first_sample),
+                    Err(
+                        SpectrumContinuousReadError::Pending | SpectrumContinuousReadError::Warming,
+                    ) => {}
+                    Err(error) => panic!("unexpected ramp capture status: {error:?}"),
+                }
+            }
+            assert!(
+                starts.len() >= 2,
+                "hop {explicit_hop:?}: at least two windows publish"
+            );
+            for pair in starts.windows(2) {
+                assert_eq!(
+                    pair[1] - pair[0],
+                    u64::from(started.hop_frames()),
+                    "hop {explicit_hop:?}: successive windows start one hop apart"
+                );
+            }
+        }
     }
 
     #[test]

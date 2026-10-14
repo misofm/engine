@@ -254,3 +254,7 @@ Recommended: **stream H**, as a qualification slice after B #1345 reaches `main`
 Alternative: stream B, in batch 3 right after #1345, with a named exception for the three paths
 and a "B #NNNN" entry in both hot-file rows. Choose it only if root wants m2 closed in the same
 batch merge as #1345.
+
+## Amendment (decision 17, root 2026-10-13)
+
+Gate 6 (soak) moves to #1605, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on its other gates with its CI rows green.

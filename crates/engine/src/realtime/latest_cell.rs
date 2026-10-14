@@ -1,35 +1,53 @@
 //! The revision gate and the revision-bounded latest-target cell (decision 15, D15-2 and D15-17;
-//! issue #1432).
+//! issues #1432 and #1603).
 //!
 //! # What this module guarantees
 //!
-//! One control thread writes live values into [`LatestCell`]s and then publishes the revision of
-//! the transaction that wrote them through a [`RevisionGate`]. Render takes one
-//! [`LiveSnapshot`] `S` of the gate per block, and every read of that block applies, per cell, the
-//! newest value whose revision is `<= S`. It never applies a value newer than `S`, never a torn
-//! value, never a value twice, and never skips one. So every value of one revision takes effect
-//! in one block. A write cannot fail and never waits, however far control laps render.
+//! One control thread writes live values into [`LatestCell`]s and then publishes the transaction
+//! that wrote them through a [`RevisionGate`]. Render takes one [`LiveSnapshot`] `S` of the gate
+//! per block, and every read of that block applies, per cell, the newest value whose publication
+//! is `<= S`. It never applies a value newer than `S`, never a torn value, never a value twice,
+//! and never skips one. So every value of one publication takes effect in one block. A write
+//! cannot fail and never waits, however far control laps render.
+//!
+//! # Publications and revisions
+//!
+//! The gate orders by a **publication number**: a `u64` that counts the gate's publications, one
+//! per publish, starting at 1 (0 is the gate's birth state). It is internal: no wire, session or
+//! status field carries it. Every publication also carries the **session revision** it belongs
+//! to. A model commit of revision `r` is a new publication that carries `r`; a monitor write
+//! (#1603) is a new publication that carries the current revision `r` again and spends no
+//! revision. So revisions stay dense while monitor writes are ordered with the model commits.
+//! The applied-revision watermark reports the revision of the last applied publication, which
+//! is never above the committed revision.
+//!
+//! Render learns the revision of its snapshot without a lock and without a retry. Control
+//! writes each publication's `(number, revision)` pair into a three-slot record before it
+//! publishes the number, with the same slot rule the cells use (below), and render reads the
+//! slot with the greatest number at or below `S`. The pair is therefore never torn and render's
+//! cost is a fixed number of loads.
 //!
 //! # The two operations that carry the proof
 //!
-//! The gate word is `ANNOUNCED | revision`: bit 63 is render's announcement, bits 0-62 are the
-//! revision. Render's `snapshot` is one `fetch_or(ANNOUNCED, AcqRel)`: the same atomic operation
-//! reads `S` and records that a reader holds it. Control's `publish` is one `swap(revision,
-//! AcqRel)`: it clears the announcement and, if the old word carried one, learns the snapshot
-//! (`pinned`) render may still be reading. A cell write then protects two of its three slots from
-//! reuse: `A`, the newest value at or below the revision the gate had published when the write was
-//! stamped, and `B`, the newest value at or below the pin. Those two slots hold every value a
-//! reader can still need, so the third slot is always free to overwrite. The writer needs no
-//! knowledge of render's progress beyond the pin, and render needs no retry.
+//! The gate word is `ANNOUNCED | publication number`: bit 63 is render's announcement, bits 0-62
+//! are the number. Render's `snapshot` is one `fetch_or(ANNOUNCED, AcqRel)`: the same atomic
+//! operation reads `S` and records that a reader holds it. Control's `publish_key` is one
+//! `swap(number, AcqRel)`: it clears the announcement and, if the old word carried one, learns the
+//! snapshot (`pinned`) render may still be reading. A cell write (or the gate's own record write)
+//! then protects two of its three slots from reuse: `A`, the newest value at or below the number
+//! the gate had published when the write was stamped, and `B`, the newest value at or below the
+//! pin. Those two slots hold every value a reader can still need, so the third slot is always
+//! free to overwrite. The writer needs no knowledge of render's progress beyond the pin, and
+//! render needs no retry.
 //!
 //! A gate and its [`GatePin`] are born together ([`RevisionGate::pair`]), so a pin cannot start
 //! below, or apart from, its gate's initial revision. Control keeps one rule: it publishes each
-//! revision it stamped before it stamps a higher one. `stamp` and `publish` debug-assert it; the
-//! choice of `A` makes a violation harmless to a reader even in a release build. `stamp` also
-//! refuses, in every build, a revision at or below the last published one or above the ceiling
-//! ([`StampRefused`]); a refusal changes nothing. A
-//! [`LiveStamp`] borrows its pin, so a stamp cannot outlive its own publication: the compiler,
-//! not a check, refuses a write with a stamp made stale by a later `publish`.
+//! publication it stamped before it stamps another. `stamp`, `stamp_monitor` and `publish_key`
+//! debug-assert it. A stamp also refuses, in every build, a model revision at or below the last
+//! published one or above the ceiling, a monitor stamp under any revision but the last published
+//! one, and a gate that has used every publication number ([`StampRefused`]); a refusal changes
+//! nothing. A [`LiveStamp`] borrows its pin, so a stamp cannot outlive its own publication: the
+//! compiler, not a check, refuses a write with a stamp made stale by a later `publish`.
 //!
 //! **Every write to a gate word is a read-modify-write**, and every read of it masks
 //! `ANNOUNCED`. A plain store would end the release sequences the visibility argument uses. The
@@ -42,17 +60,18 @@
 //! forbids that. On a location written only by read-modify-writes loom is exact. So every model in
 //! this file keeps each atomic location in one of two classes: written only by read-modify-writes
 //! (the gate word, the dirty word, the model's mailbox word, all initialised by construction) or
-//! written only by plain stores (a slot's words, revision and sequence). No model races a plain
-//! store against a read-modify-write on one location.
+//! written only by plain stores (a slot's words, publication number and sequence, and the gate's
+//! record slots). No model races a plain store against a read-modify-write on one location.
 //!
 //! # Realtime
 //!
 //! Safe Rust, atomics only. Construction allocates and runs on the control thread.
 //! `snapshot`, `publish`, `stamp`, a write, a read and a peek never allocate, lock or make a
-//! syscall. Render pays one read-modify-write per plan per block (the snapshot), one `Relaxed`
-//! load per idle stage, and for each pending cell three revision loads, one sequence load and `N`
-//! word loads. On AArch64 without LSE (ARMv8.0) a read-modify-write is a load-linked or
-//! store-conditional loop, which `docs/REALTIME_DEPENDENCY_POLICY.md` states.
+//! syscall. Render pays one read-modify-write per plan per block (the snapshot), three number
+//! loads and one revision load for the snapshot's record, one `Relaxed` load per idle stage, and
+//! for each pending cell three number loads, one sequence load and `N` word loads. On AArch64
+//! without LSE (ARMv8.0) a read-modify-write is a load-linked or store-conditional loop, which
+//! `docs/REALTIME_DEPENDENCY_POLICY.md` states.
 
 use core::marker::PhantomData;
 #[cfg(not(loom))]
@@ -67,42 +86,97 @@ const ANNOUNCED: u64 = 1 << 63;
 /// value (#1503).
 pub const GATE_REVISION_MAX: u64 = ANNOUNCED - 1;
 
-/// A slot's revision before its first write. It is above every legal revision and above every
+/// The largest publication number a gate holds (bits 0-62).
+const PUBLICATION_MAX: u64 = ANNOUNCED - 1;
+
+/// A slot's number before its first write. It is above every legal number and above every
 /// snapshot, so a reader tests for it before it compares.
 const UNWRITTEN: u64 = u64::MAX;
 
-/// Every cell has exactly three slots: the newest published value `A`, the value the pin
-/// protects `B`, and one slot control may overwrite.
+/// Every cell, and the gate's record, has exactly three slots: the newest published value `A`,
+/// the value the pin protects `B`, and one slot control may overwrite.
 const SLOTS: usize = 3;
 
-/// The revision render reads in one block, taken by [`RevisionGate::snapshot`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LiveSnapshot(u64);
+/// The identity of one publication: its internal number, which orders it among its gate's
+/// publications, and the session revision it carries (#1603). A model commit and the monitor
+/// writes after it carry the same revision and consecutive numbers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GateKey {
+    publication: u64,
+    revision: u64,
+}
 
-impl LiveSnapshot {
-    /// Every revision a cell can hold. Its only user is a drain of a quiescent predecessor plan
-    /// (#1312 D6): no production render path takes it.
-    pub const ALL: Self = Self(GATE_REVISION_MAX);
+impl GateKey {
+    /// The internal publication number: 1 for a gate's first publication.
+    #[must_use]
+    pub const fn publication(self) -> u64 {
+        self.publication
+    }
 
-    /// The revision this snapshot covers: reads apply values at or below it.
+    /// The session revision the publication carries.
     #[must_use]
     pub const fn revision(self) -> u64 {
-        self.0
+        self.revision
     }
 }
 
-/// A refused [`GatePin::stamp`]: the revision is at or below the last published one, or above
-/// [`GATE_REVISION_MAX`]. The pin is unchanged. It borrows nothing.
+/// The publication render reads in one block, taken by [`RevisionGate::snapshot`], and the
+/// session revision it carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveSnapshot {
+    publication: u64,
+    revision: u64,
+}
+
+impl LiveSnapshot {
+    /// Every publication a cell can hold. Its only user is a drain of a quiescent predecessor plan
+    /// (#1312 D6): no production render path takes it.
+    pub const ALL: Self = Self {
+        publication: PUBLICATION_MAX,
+        revision: GATE_REVISION_MAX,
+    };
+
+    /// The session revision of the snapshot's publication: the revision the block applied. The
+    /// applied watermark reports this.
+    #[must_use]
+    pub const fn revision(self) -> u64 {
+        self.revision
+    }
+
+    /// The internal publication number: reads apply values at or below it.
+    #[must_use]
+    pub const fn publication(self) -> u64 {
+        self.publication
+    }
+}
+
+/// Why a stamp was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StampRefusal {
+    /// A model stamp whose revision is at or below the last published revision.
+    NotAbovePublished,
+    /// A revision above [`GATE_REVISION_MAX`].
+    AboveCeiling,
+    /// A monitor stamp under a revision other than the one the gate published last.
+    NotPublishedRevision,
+    /// The gate has published every number it can hold (2^63 - 1 publications).
+    PublicationsExhausted,
+}
+
+/// A refused [`GatePin::stamp`] or [`GatePin::stamp_monitor`]. The pin is unchanged. It borrows
+/// nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StampRefused {
     /// The refused revision.
     pub revision: u64,
-    /// The pin's last published revision.
+    /// The revision of the pin's last publication.
     pub last_published: u64,
+    /// Why it was refused.
+    pub reason: StampRefusal,
 }
 
-/// The revision a transaction commits as, and the snapshot render may still hold, as of the time
-/// control stamps it. Only [`GatePin::stamp`] makes one.
+/// The publication a transaction makes, and the snapshot render may still hold, as of the time
+/// control stamps it. Only [`GatePin::stamp`] and [`GatePin::stamp_monitor`] make one.
 ///
 /// A stamp borrows the pin that made it (`'p`), so [`GatePin::publish`] cannot run while a stamp
 /// is alive: a stamp cannot outlive its own publication, and a write cannot use a stamp whose
@@ -119,8 +193,8 @@ pub struct StampRefused {
 /// for (bit, (writer, cell)) in writers.iter_mut().zip(&cells).enumerate() {
 ///     writer.write(cell, &dirty, bit as u32, stamp, [7]);
 /// }
-/// let revision = stamp.revision();
-/// pin.publish(&gate, revision);
+/// let key = stamp.key();
+/// pin.publish_key(&gate, key);
 /// ```
 ///
 /// A stamp used after its publication does not compile, because the publication needs the pin
@@ -139,9 +213,12 @@ pub struct StampRefused {
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveStamp<'p> {
+    /// The publication number the transaction publishes as.
+    key: u64,
+    /// The session revision it carries.
     revision: u64,
     pinned: Option<u64>,
-    /// The gate's published revision when the stamp was made: `A` is the newest value at or below
+    /// The gate's published number when the stamp was made: `A` is the newest value at or below
     /// it.
     published: u64,
     /// The borrow of the pin that made the stamp.
@@ -149,34 +226,55 @@ pub struct LiveStamp<'p> {
 }
 
 impl LiveStamp<'_> {
-    /// The revision of the transaction that writes with this stamp.
+    /// The session revision the transaction that writes with this stamp carries.
     #[must_use]
     pub const fn revision(self) -> u64 {
         self.revision
     }
 
-    /// The snapshot render may still be reading, learned from the gate at the last publication
-    /// that saw an announcement. `None` when render has not announced since the gate was built.
+    /// The publication the transaction makes. A caller reads it into a local and publishes it
+    /// with [`GatePin::publish_key`].
+    #[must_use]
+    pub const fn key(self) -> GateKey {
+        GateKey {
+            publication: self.key,
+            revision: self.revision,
+        }
+    }
+
+    /// The publication number of the snapshot render may still be reading, learned from the gate
+    /// at the last publication that saw an announcement. `None` when render has not announced
+    /// since the gate was built.
     #[must_use]
     pub const fn pinned(self) -> Option<u64> {
         self.pinned
     }
 }
 
-/// One plan's revision gate: the word render snapshots and control publishes to.
+/// One slot of a gate's record: a publication number and the revision it carries. Both are
+/// written by plain stores only, and a reader reads the slot only when the slot rule protects it.
+struct RecordSlot {
+    publication: AtomicU64,
+    revision: AtomicU64,
+}
+
+/// One plan's revision gate: the word render snapshots and control publishes to, and the record
+/// of the revision each recent publication carries.
 ///
 /// A gate belongs to one plan for the plan's life (#1502), so it has no re-arm. It is embeddable:
 /// it owns no `Arc`.
 pub struct RevisionGate {
     word: AtomicU64,
+    record: [RecordSlot; SLOTS],
 }
 
 impl RevisionGate {
     /// A gate at `initial` with no announcement, and the one [`GatePin`] that publishes to it.
     ///
-    /// The pin starts at the gate's own revision, so the two cannot disagree. A gate built at
-    /// `initial` takes stamps above `initial` only, and a candidate whose first writes are stamped
-    /// at revision `r` needs a gate built below `r`.
+    /// The gate starts at publication number 0, which carries `initial`, and the pin starts there
+    /// too, so the two cannot disagree. A gate built at `initial` takes model stamps above
+    /// `initial` only (and monitor stamps under it), and a candidate whose first writes are
+    /// stamped at revision `r` needs a gate built below `r`.
     ///
     /// # Panics
     ///
@@ -188,134 +286,292 @@ impl RevisionGate {
             initial <= GATE_REVISION_MAX,
             "gate revision {initial} is above the ceiling {GATE_REVISION_MAX}"
         );
+        let record = core::array::from_fn(|index| RecordSlot {
+            publication: AtomicU64::new(if index == 0 { 0 } else { UNWRITTEN }),
+            revision: AtomicU64::new(if index == 0 { initial } else { 0 }),
+        });
         (
             Self {
-                word: AtomicU64::new(initial),
+                word: AtomicU64::new(0),
+                record,
             },
             GatePin {
                 pinned: None,
-                last_published: initial,
+                last_publication: 0,
+                last_revision: initial,
+                record_numbers: [0, UNWRITTEN, UNWRITTEN],
                 open: None,
             },
         )
     }
 
-    /// The newest published revision, with the announcement masked.
+    /// The revision carried by the newest publication at or below `bound`, or 0 when no slot
+    /// holds one (the slot rule keeps the snapshot's publication readable, so 0 is unreachable;
+    /// it is the value that can never be early).
+    fn revision_at_or_below(&self, bound: u64) -> u64 {
+        let mut best: Option<(&RecordSlot, u64)> = None;
+        for slot in &self.record {
+            let number = slot.publication.load(Ordering::Relaxed);
+            if number == UNWRITTEN || number > bound {
+                continue;
+            }
+            if best.is_none_or(|(_, held)| number > held) {
+                best = Some((slot, number));
+            }
+        }
+        best.map_or(0, |(slot, _)| slot.revision.load(Ordering::Relaxed))
+    }
+
+    /// The revision carried by the newest published publication, with the announcement masked.
+    /// Control reads it on its own gate, or anyone reads it once control is quiescent: the record
+    /// is not protected against a concurrent publish.
     #[must_use]
-    pub fn revision(&self) -> u64 {
-        self.word.load(Ordering::Acquire) & GATE_REVISION_MAX
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision_at_or_below(self.word.load(Ordering::Acquire) & PUBLICATION_MAX)
+    }
+
+    /// The newest published publication number, with the announcement masked.
+    #[must_use]
+    pub fn publication(&self) -> u64 {
+        self.word.load(Ordering::Acquire) & PUBLICATION_MAX
     }
 }
 
 // REALTIME_POLICY_BEGIN
 impl RevisionGate {
-    /// Render, once per block: read `S` and announce it in one read-modify-write.
+    /// Render, once per block: read `S` and announce it in one read-modify-write, then read the
+    /// revision `S` carries.
     ///
     /// One `fetch_or(ANNOUNCED, AcqRel)`. The acquire half synchronizes with every earlier
-    /// control `publish`, so every cell store of a revision `<= S` is visible. The release half
-    /// ends the previous section's reads for the next `publish`. A load here would lose the
-    /// announcement, and a `Relaxed` operation would lose both edges.
+    /// control `publish`, so every cell store and record store of a publication `<= S` is visible.
+    /// The release half ends the previous section's reads for the next `publish`. A load here
+    /// would lose the announcement, and a `Relaxed` operation would lose both edges. The record
+    /// read that follows is three number loads and one revision load: the slot with the greatest
+    /// number at or below `S` is protected by the slot rule, so it is never overwritten while
+    /// render reads it, and there is no retry.
     #[must_use]
     pub fn snapshot(&self) -> LiveSnapshot {
-        LiveSnapshot(self.word.fetch_or(ANNOUNCED, Ordering::AcqRel) & GATE_REVISION_MAX)
+        let publication = self.word.fetch_or(ANNOUNCED, Ordering::AcqRel) & PUBLICATION_MAX;
+        LiveSnapshot {
+            publication,
+            revision: self.revision_at_or_below(publication),
+        }
     }
 }
 // REALTIME_POLICY_END
 
-/// Control's private half of one gate: the snapshot render may still hold, the last revision
-/// published and the revision stamped but not yet published. One per gate, born with it by
+/// Control's private half of one gate: the snapshot render may still hold, the last publication
+/// made and the publication stamped but not yet made. One per gate, born with it by
 /// [`RevisionGate::pair`]; it moves between threads only by ownership transfer.
 #[derive(Debug)]
 pub struct GatePin {
     pinned: Option<u64>,
-    last_published: u64,
-    open: Option<u64>,
+    last_publication: u64,
+    last_revision: u64,
+    /// A mirror of the three record slots' numbers. Exact: control is the record's only writer.
+    record_numbers: [u64; SLOTS],
+    open: Option<GateKey>,
 }
 
 impl GatePin {
-    /// The last revision published on the gate, or the gate's initial revision.
+    /// The revision of the last publication on the gate, or the gate's initial revision.
     #[must_use]
     pub const fn last_published(&self) -> u64 {
-        self.last_published
+        self.last_revision
     }
 
-    /// Control, the last write of a commit: publish `revision` on `gate`, the gate this pin was
-    /// born with.
+    /// The last publication on the gate: number 0 and the initial revision for a gate that has
+    /// published nothing.
+    #[must_use]
+    pub const fn last_published_key(&self) -> GateKey {
+        GateKey {
+            publication: self.last_publication,
+            revision: self.last_revision,
+        }
+    }
+
+    /// The record slot with the greatest mirrored number at or below `bound`.
+    fn record_newest_at_or_below(&self, bound: u64) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for (index, &number) in self.record_numbers.iter().enumerate() {
+            if number == UNWRITTEN || number > bound {
+                continue;
+            }
+            if best.is_none_or(|held| number > self.record_numbers[held]) {
+                best = Some(index);
+            }
+        }
+        best
+    }
+
+    /// Control, the last write of a model commit: publish a new publication that carries
+    /// `revision` on `gate`, the gate this pin was born with. It is [`Self::publish_key`] of the
+    /// stamped key when `revision` is the stamped one, else of the next number carrying
+    /// `revision`.
     ///
-    /// One `swap(revision, AcqRel)`. If the old word carried the announcement, the pin becomes
-    /// the old revision (render's snapshot); otherwise it is unchanged, because render has
-    /// announced nothing newer.
+    /// # Panics
     ///
-    /// In debug builds, these panic: a revision at or below the last published one, or above
-    /// [`GATE_REVISION_MAX`] (it would end the ordering that protects render's slots); a revision
-    /// below the one stamped and not yet published (that revision's writes would be abandoned); and
-    /// a `gate` whose old revision is not the last published one (the pin was born with another
-    /// gate). The last check reads the swap's result and costs nothing.
+    /// In every build, when `revision` is above [`GATE_REVISION_MAX`]. In debug builds,
+    /// [`Self::publish_key`]'s panics, and a `revision` at or below the last published one.
     pub fn publish(&mut self, gate: &RevisionGate, revision: u64) {
-        debug_assert!(
+        assert!(
             revision <= GATE_REVISION_MAX,
             "published revision {revision} is above the ceiling {GATE_REVISION_MAX}"
         );
         debug_assert!(
-            revision > self.last_published,
+            revision > self.last_revision,
             "published revision {revision} is not above the last published {}",
-            self.last_published
+            self.last_revision
+        );
+        let key = self
+            .open
+            .filter(|open| open.revision == revision)
+            .unwrap_or(GateKey {
+                publication: self.last_publication + 1,
+                revision,
+            });
+        self.publish_key(gate, key);
+    }
+
+    /// Control, the last write of a commit: publish `key` on `gate`, the gate this pin was born
+    /// with.
+    ///
+    /// It records `(number, revision)` in a record slot that is neither `A` nor `B`, then does one
+    /// `swap(number, AcqRel)`. If the old word carried the announcement, the pin becomes the old
+    /// number (render's snapshot); otherwise it is unchanged, because render has announced
+    /// nothing newer.
+    ///
+    /// In debug builds, these panic: a number at or below the last published one (it would end
+    /// the ordering that protects render's slots); a key other than the one stamped and not yet
+    /// published (that stamp's writes would be abandoned or would leak into another revision);
+    /// a revision below the last published one; and a `gate` whose old number is not the last
+    /// published one (the pin was born with another gate). The last check reads the swap's result
+    /// and costs nothing.
+    pub fn publish_key(&mut self, gate: &RevisionGate, key: GateKey) {
+        debug_assert!(
+            key.revision <= GATE_REVISION_MAX,
+            "published revision {} is above the ceiling {GATE_REVISION_MAX}",
+            key.revision
         );
         debug_assert!(
-            self.open.is_none_or(|open| revision >= open),
-            "published revision {revision} is below the stamped, unpublished revision {:?}",
+            key.publication > self.last_publication && key.publication <= PUBLICATION_MAX,
+            "published number {} is not above the last published {}",
+            key.publication,
+            self.last_publication
+        );
+        debug_assert!(
+            key.revision >= self.last_revision,
+            "published revision {} is below the last published {}",
+            key.revision,
+            self.last_revision
+        );
+        debug_assert!(
+            self.open.is_none_or(|open| open == key),
+            "published key {key:?} is not the stamped, unpublished key {:?}",
             self.open
         );
-        let old = gate.word.swap(revision, Ordering::AcqRel);
+        // The record slot: neither `A`, the newest publication, nor `B`, the pinned one.
+        let a = self.record_newest_at_or_below(self.last_publication);
+        let b = self
+            .pinned
+            .and_then(|pinned| self.record_newest_at_or_below(pinned));
+        let index = (0..SLOTS)
+            .find(|&index| Some(index) != a && Some(index) != b)
+            .expect("three slots leave one free of A and B");
+        let slot = &gate.record[index];
+        slot.revision.store(key.revision, Ordering::Relaxed);
+        slot.publication.store(key.publication, Ordering::Relaxed);
+        self.record_numbers[index] = key.publication;
+        let old = gate.word.swap(key.publication, Ordering::AcqRel);
         debug_assert_eq!(
-            old & GATE_REVISION_MAX,
-            self.last_published,
+            old & PUBLICATION_MAX,
+            self.last_publication,
             "this pin was born with another gate"
         );
         if old & ANNOUNCED != 0 {
-            self.pinned = Some(old & GATE_REVISION_MAX);
+            self.pinned = Some(old & PUBLICATION_MAX);
         }
-        self.last_published = revision;
+        self.last_publication = key.publication;
+        self.last_revision = key.revision;
         self.open = None;
     }
 
-    /// The stamp for a transaction that commits as `revision`.
+    /// The stamp for a model transaction that commits as `revision`: the next publication number,
+    /// carrying `revision`.
     ///
-    /// The stamp borrows the pin, so `publish` cannot run while the stamp is alive: take the
+    /// The stamp borrows the pin, so a publication cannot run while the stamp is alive: take the
     /// stamp, write every cell of the transaction with it, then publish.
     ///
-    /// **Rule:** control publishes every revision it stamped before it stamps a higher one. A
-    /// transaction that stamps `revision` writes all its cells and then calls `publish(revision)`;
-    /// no other revision is stamped between. Cell writes choose their slot on this rule.
+    /// **Rule:** control publishes every stamp it took before it takes another. A transaction
+    /// that stamps writes all its cells and then publishes that key; no other stamp is taken
+    /// between. Cell writes choose their slot on this rule.
     ///
     /// # Errors
     ///
-    /// Refuses, in every build, a `revision` at or below the last published one or above
-    /// [`GATE_REVISION_MAX`]: the in-place rule would rewrite a slot render may be reading, and
-    /// render could apply mixed words or lose the write. A refusal changes nothing in the pin. The
-    /// cost is two integer compares on the control thread. A caller publishes the revision its
-    /// stamp returned, read into a local, so this check covers the publication too.
+    /// Refuses, in every build, a `revision` above [`GATE_REVISION_MAX`]
+    /// ([`StampRefusal::AboveCeiling`]), a `revision` at or below the last published one
+    /// ([`StampRefusal::NotAbovePublished`]: the in-place rule would rewrite a slot render may be
+    /// reading, and render could report a revision twice) and a gate with no publication number
+    /// left ([`StampRefusal::PublicationsExhausted`]). A refusal changes nothing in the pin. The
+    /// cost is integer compares on the control thread. A caller publishes the key its stamp
+    /// returned, read into a local, so this check covers the publication too.
     ///
-    /// In debug builds a second revision stamped while one is stamped and not yet published panics
+    /// In debug builds a second key stamped while another is stamped and not yet published panics
     /// (the rule above). That rule stays debug-only: breaking it leaks an abandoned value, never a
     /// torn one.
     pub fn stamp(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
-        if revision > GATE_REVISION_MAX || revision <= self.last_published {
-            return Err(StampRefused {
-                revision,
-                last_published: self.last_published,
-            });
+        if revision > GATE_REVISION_MAX {
+            return Err(self.refuse(revision, StampRefusal::AboveCeiling));
         }
+        if revision <= self.last_revision {
+            return Err(self.refuse(revision, StampRefusal::NotAbovePublished));
+        }
+        self.open_stamp(revision)
+    }
+
+    /// The stamp for a monitor write under the committed `revision`: the next publication number,
+    /// carrying `revision` again (#1603). A monitor write spends no revision.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, in every build and with the pin unchanged: a `revision` other than the last
+    /// published one ([`StampRefusal::NotPublishedRevision`]; a monitor write sits under the
+    /// revision the gate published last, which is the committed one) and a gate with no
+    /// publication number left ([`StampRefusal::PublicationsExhausted`]).
+    pub fn stamp_monitor(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
+        if revision != self.last_revision {
+            return Err(self.refuse(revision, StampRefusal::NotPublishedRevision));
+        }
+        self.open_stamp(revision)
+    }
+
+    fn refuse(&self, revision: u64, reason: StampRefusal) -> StampRefused {
+        StampRefused {
+            revision,
+            last_published: self.last_revision,
+            reason,
+        }
+    }
+
+    fn open_stamp(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
+        if self.last_publication >= PUBLICATION_MAX {
+            return Err(self.refuse(revision, StampRefusal::PublicationsExhausted));
+        }
+        let key = GateKey {
+            publication: self.last_publication + 1,
+            revision,
+        };
         debug_assert!(
-            self.open.is_none_or(|open| open == revision),
-            "stamped revision {revision} while revision {:?} is stamped and not yet published",
+            self.open.is_none_or(|open| open == key),
+            "stamped key {key:?} while key {:?} is stamped and not yet published",
             self.open
         );
-        self.open = Some(revision);
+        self.open = Some(key);
         Ok(LiveStamp {
+            key: key.publication,
             revision,
             pinned: self.pinned,
-            published: self.last_published,
+            published: self.last_publication,
             pin: PhantomData,
         })
     }
@@ -323,7 +579,7 @@ impl GatePin {
 
 struct Slot<const N: usize> {
     words: [AtomicU32; N],
-    revision: AtomicU64,
+    key: AtomicU64,
     sequence: AtomicU64,
 }
 
@@ -342,7 +598,7 @@ impl<const N: usize> LatestCell<N> {
         Self {
             slots: core::array::from_fn(|_| Slot {
                 words: core::array::from_fn(|_| AtomicU32::new(0)),
-                revision: AtomicU64::new(UNWRITTEN),
+                key: AtomicU64::new(UNWRITTEN),
                 sequence: AtomicU64::new(0),
             }),
         }
@@ -420,11 +676,11 @@ impl DirtyReader {
 }
 // REALTIME_POLICY_END
 
-/// Control's private half of one cell: a mirror of the three slot revisions and the next
+/// Control's private half of one cell: a mirror of the three slot keys and the next
 /// sequence number. The mirror is exact, because control is the cell's only writer.
 #[derive(Debug)]
 pub struct CellWriter<const N: usize> {
-    revisions: [u64; SLOTS],
+    keys: [u64; SLOTS],
     next_sequence: u64,
 }
 
@@ -433,20 +689,20 @@ impl<const N: usize> CellWriter<N> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            revisions: [UNWRITTEN; SLOTS],
+            keys: [UNWRITTEN; SLOTS],
             next_sequence: 1,
         }
     }
 
-    /// The slot with the greatest mirrored revision at or below `bound`.
+    /// The slot with the greatest mirrored key at or below `bound`.
     fn newest_at_or_below(&self, bound: u64) -> Option<usize> {
         let mut best: Option<usize> = None;
-        for (index, &revision) in self.revisions.iter().enumerate() {
-            if revision == UNWRITTEN || revision > bound {
+        for (index, &key) in self.keys.iter().enumerate() {
+            if key == UNWRITTEN || key > bound {
                 continue;
             }
             match best {
-                Some(held) if self.revisions[held] >= revision => {}
+                Some(held) if self.keys[held] >= key => {}
                 _ => best = Some(index),
             }
         }
@@ -455,13 +711,13 @@ impl<const N: usize> CellWriter<N> {
 
     /// The slot a write stamped `stamp` stores into.
     fn target(&self, stamp: LiveStamp<'_>) -> usize {
-        // One revision occupies at most one slot, so a second write of it rewrites that slot.
-        // Render reads only revisions at or below its snapshot, and this one is not published.
-        if let Some(index) = self.revisions.iter().position(|&r| r == stamp.revision) {
+        // One key occupies at most one slot, so a second write of it rewrites that slot. Render
+        // reads only keys at or below its snapshot, and this one is not published.
+        if let Some(index) = self.keys.iter().position(|&k| k == stamp.key) {
             return index;
         }
-        // A: the newest published value. A value above the published revision is never `A`, so a
-        // revision that was stamped and abandoned cannot shield a slot render needs.
+        // A: the newest published value. A value above the published key is never `A`, so a key
+        // that was stamped and abandoned cannot shield a slot render needs.
         let a = self.newest_at_or_below(stamp.published);
         // B: the newest value at or below the snapshot render may still hold.
         let b = stamp
@@ -475,20 +731,20 @@ impl<const N: usize> CellWriter<N> {
     /// Control: store `words` as this transaction's value of the cell and mark its dirty bit.
     ///
     /// It cannot fail and never waits. The slot is chosen as D1 states: the slot already holding
-    /// `stamp.revision`, else a slot that is neither `A` nor `B`. The stores are `Relaxed` and in
-    /// any order; the dirty bit follows them with a `Release` `fetch_or`, and the revision's
+    /// `stamp.key`, else a slot that is neither `A` nor `B`. The stores are `Relaxed` and in
+    /// any order; the dirty bit follows them with a `Release` `fetch_or`, and the key's
     /// publication on the gate, which the caller makes after all of the transaction's writes,
     /// carries the visibility.
     ///
-    /// **Rule:** every revision written to a cell is published (by [`GatePin::publish`]) before a
-    /// higher revision is stamped; [`GatePin::stamp`] states it and debug-asserts it. A revision
-    /// written and then abandoned leaves its value in a slot that a later write reuses; that is
-    /// the caller's contract, and the slot of a published value is never taken.
+    /// **Rule:** every key written to a cell is published (by [`GatePin::publish_key`]) before a
+    /// higher key is stamped; [`GatePin::stamp`] states it and debug-asserts it. A key written and
+    /// then abandoned leaves its value in a slot that a later write reuses; that is the caller's
+    /// contract, and the slot of a published value is never taken.
     ///
-    /// In debug builds, a stamp whose revision is below the cell's newest written revision
-    /// panics (a stamp of this pin cannot be stale, because it borrows the pin; the check catches
-    /// a stamp from another pin only when its revision is below one already written), and so does
-    /// a `bit` of 64 or more.
+    /// In debug builds, a stamp whose publication is below the cell's newest written one panics (a stamp
+    /// of this pin cannot be stale, because it borrows the pin; the check catches a stamp from
+    /// another pin only when its key is below one already written), and so does a `bit` of 64 or
+    /// more.
     pub fn write(
         &mut self,
         cell: &LatestCell<N>,
@@ -499,16 +755,14 @@ impl<const N: usize> CellWriter<N> {
     ) {
         debug_assert!(bit < u64::BITS, "dirty bit {bit} is outside the word");
         debug_assert!(
-            stamp.revision <= GATE_REVISION_MAX,
-            "stamped revision {} is above the ceiling {GATE_REVISION_MAX}",
-            stamp.revision
+            stamp.key <= PUBLICATION_MAX,
+            "stamped publication {} is above the ceiling {PUBLICATION_MAX}",
+            stamp.key
         );
         debug_assert!(
-            self.revisions
-                .iter()
-                .all(|&r| r == UNWRITTEN || r <= stamp.revision),
-            "stamp revision {} is below a revision already written to this cell",
-            stamp.revision
+            self.keys.iter().all(|&k| k == UNWRITTEN || k <= stamp.key),
+            "stamp publication {} is below a publication already written to this cell",
+            stamp.key
         );
         let index = self.target(stamp);
         let sequence = self.next_sequence;
@@ -518,8 +772,8 @@ impl<const N: usize> CellWriter<N> {
             word.store(value, Ordering::Relaxed);
         }
         slot.sequence.store(sequence, Ordering::Relaxed);
-        slot.revision.store(stamp.revision, Ordering::Relaxed);
-        self.revisions[index] = stamp.revision;
+        slot.key.store(stamp.key, Ordering::Relaxed);
+        self.keys[index] = stamp.key;
         dirty.mark(bit);
     }
 }
@@ -570,7 +824,7 @@ impl CellReader {
     /// Render, after the block's snapshot and for each cell the stage's [`DirtyReader`] reports
     /// pending, in the stage's canonical order: apply the newest write at or below `snapshot`.
     ///
-    /// Of the three slots it picks the greatest revision at or below `snapshot`, skipping
+    /// Of the three slots it picks the greatest key at or below `snapshot`, skipping
     /// unwritten ones, and loads the words of that slot only. A written slot above `snapshot`
     /// keeps the cell in `stage`'s deferred mask (as `bit`), so the next block reads it again.
     /// There is no retry and no spin.
@@ -585,14 +839,14 @@ impl CellReader {
         let mut chosen: Option<(&Slot<N>, u64)> = None;
         let mut newer = false;
         for slot in &cell.slots {
-            let revision = slot.revision.load(Ordering::Relaxed);
-            if revision == UNWRITTEN {
+            let key = slot.key.load(Ordering::Relaxed);
+            if key == UNWRITTEN {
                 continue;
             }
-            if revision > snapshot.0 {
+            if key > snapshot.publication {
                 newer = true;
-            } else if chosen.is_none_or(|(_, best)| revision > best) {
-                chosen = Some((slot, revision));
+            } else if chosen.is_none_or(|(_, best)| key > best) {
+                chosen = Some((slot, key));
             }
         }
         if newer {
@@ -650,7 +904,7 @@ impl CellReader {
     pub fn peek_unread<const N: usize>(&self, cell: &LatestCell<N>) -> Option<([u32; N], u64)> {
         let mut chosen: Option<(&Slot<N>, u64)> = None;
         for slot in &cell.slots {
-            if slot.revision.load(Ordering::Relaxed) == UNWRITTEN {
+            if slot.key.load(Ordering::Relaxed) == UNWRITTEN {
                 continue;
             }
             let sequence = slot.sequence.load(Ordering::Relaxed);
@@ -974,9 +1228,12 @@ mod tests {
         assert_eq!(gate.snapshot().revision(), 0);
         pin.publish(&gate, 0x7fff_ffff_ffff_ffff);
         assert_eq!(pin.pinned, Some(0), "the announcement was set");
-        assert_eq!(gate.snapshot(), LiveSnapshot::ALL);
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot.revision(), 0x7fff_ffff_ffff_ffff);
+        assert_eq!(snapshot.publication(), 1);
         assert_eq!(gate.revision(), 0x7fff_ffff_ffff_ffff);
         assert_eq!(GATE_REVISION_MAX, 0x7fff_ffff_ffff_ffff);
+        assert_eq!(LiveSnapshot::ALL.revision(), GATE_REVISION_MAX);
     }
 
     #[test]
@@ -998,8 +1255,20 @@ mod tests {
             CellReader::new(),
             DirtyReader::new(),
         );
-        for revision in [5, 3, GATE_REVISION_MAX + 1] {
-            assert!(pin.stamp(revision).is_err(), "revision {revision}");
+        for (revision, reason) in [
+            (5, StampRefusal::NotAbovePublished),
+            (3, StampRefusal::NotAbovePublished),
+            (GATE_REVISION_MAX + 1, StampRefusal::AboveCeiling),
+            (u64::MAX, StampRefusal::AboveCeiling),
+        ] {
+            assert_eq!(
+                pin.stamp(revision).map(|_| ()),
+                Err(StampRefused {
+                    revision,
+                    last_published: 5,
+                    reason
+                })
+            );
         }
         assert_eq!(pin.last_published(), 5);
         // In a debug build this stamp would panic if a refusal had set `open`.
@@ -1034,7 +1303,7 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "is below the stamped, unpublished revision")]
+    #[should_panic(expected = "is not the stamped, unpublished key")]
     fn a_publication_below_the_stamped_revision_panics() {
         let mut f = Fixture::new();
         let _ = f.pin.stamp(5).expect("a legal revision");
@@ -1045,8 +1314,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "born with another gate")]
     fn a_pin_publishes_only_to_its_own_gate() {
-        let (other_gate, _) = RevisionGate::pair(5);
-        let (_, mut pin) = RevisionGate::pair(0);
+        let (other_gate, mut other_pin) = RevisionGate::pair(5);
+        other_pin.publish(&other_gate, 6);
+        let (_, mut pin) = RevisionGate::pair(5);
         pin.publish(&other_gate, 6);
     }
 
@@ -1071,9 +1341,10 @@ mod tests {
         assert_eq!(f.stage.pending(&f.dirty) & 1, 1);
         f.write(3, 0);
         let stamp = LiveStamp {
+            key: 4,
             revision: 4,
             pinned: f.pin.pinned,
-            published: f.pin.last_published(),
+            published: f.pin.last_publication,
             pin: PhantomData,
         };
         f.writer
@@ -1092,7 +1363,7 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "is below a revision already written")]
+    #[should_panic(expected = "is below a publication already written")]
     fn a_write_below_a_written_revision_panics() {
         // A stamp of this pin cannot be kept across a publication (it borrows the pin), so the
         // stale stamp is forged, as a stamp of another pin would be.
@@ -1101,12 +1372,204 @@ mod tests {
         f.publish(3);
         f.write(4, 0);
         let old = LiveStamp {
+            key: 1,
             revision: 3,
             pinned: None,
             published: 0,
             pin: PhantomData,
         };
         f.writer.write(&f.cell, &f.dirty, 0, old, value_words(3, 0));
+    }
+
+    /// Stamp, write the fixture's cell with the gate's publication number as the value index,
+    /// publish; the key.
+    fn write_and_publish(f: &mut Fixture, revision: u64, monitor: bool) -> GateKey {
+        let stamp = if monitor {
+            f.pin.stamp_monitor(revision)
+        } else {
+            f.pin.stamp(revision)
+        }
+        .expect("a legal stamp");
+        let published = stamp.key();
+        f.writer.write(
+            &f.cell,
+            &f.dirty,
+            0,
+            stamp,
+            value_words(
+                revision,
+                u32::try_from(published.publication()).expect("small"),
+            ),
+        );
+        f.pin.publish_key(&f.gate, published);
+        published
+    }
+
+    /// Gate 1 (#1603): a monitor stamp takes the next publication under the published revision
+    /// and spends no revision; a model stamp carries its own revision; a refusal moves nothing.
+    #[test]
+    fn monitor_stamps_take_publications_under_a_revision_and_spend_none() {
+        let (gate, mut pin) = RevisionGate::pair(0);
+        let publish = |pin: &mut GatePin, monitor: bool, revision: u64| {
+            let stamp = if monitor {
+                pin.stamp_monitor(revision)
+            } else {
+                pin.stamp(revision)
+            }
+            .expect("a legal stamp");
+            let published = stamp.key();
+            pin.publish_key(&gate, published);
+            (published.publication(), published.revision())
+        };
+        assert_eq!(publish(&mut pin, false, 1), (1, 1));
+        for number in 2..=4 {
+            assert_eq!(publish(&mut pin, true, 1), (number, 1));
+        }
+        assert_eq!(pin.last_published(), 1, "monitor writes spend no revision");
+        assert_eq!(publish(&mut pin, false, 2), (5, 2));
+        for revision in [1, 3] {
+            assert_eq!(
+                pin.stamp_monitor(revision).map(|_| ()),
+                Err(StampRefused {
+                    revision,
+                    last_published: 2,
+                    reason: StampRefusal::NotPublishedRevision
+                })
+            );
+        }
+        assert_eq!(publish(&mut pin, true, 2), (6, 2));
+        assert_eq!(
+            pin.stamp(2).map(|_| ()),
+            Err(StampRefused {
+                revision: 2,
+                last_published: 2,
+                reason: StampRefusal::NotAbovePublished
+            }),
+            "a model stamp at the published revision is refused after monitor writes"
+        );
+        assert_eq!(gate.publication(), 6, "a refusal leaves the gate word");
+        assert_eq!(gate.revision(), 2);
+        assert_eq!(pin.last_published_key().publication(), 6);
+        assert_eq!(publish(&mut pin, true, 2), (7, 2));
+        assert_eq!(publish(&mut pin, false, 3), (8, 3));
+    }
+
+    /// Gate 1: a gate that used every publication number refuses both stamps, changes nothing,
+    /// and `publish` of a stamped key at the last number still works.
+    #[test]
+    fn an_exhausted_gate_refuses_both_stamps_and_changes_nothing() {
+        let (gate, mut pin) = RevisionGate::pair(4);
+        gate.word.store(PUBLICATION_MAX - 1, Ordering::Relaxed);
+        pin.last_publication = PUBLICATION_MAX - 1;
+        pin.record_numbers = [PUBLICATION_MAX - 1, UNWRITTEN, UNWRITTEN];
+        let stamp = pin.stamp_monitor(4).expect("the last number");
+        let last = stamp.key();
+        assert_eq!(last.publication(), PUBLICATION_MAX);
+        pin.publish_key(&gate, last);
+        assert_eq!(gate.revision(), 4);
+        let reason = StampRefusal::PublicationsExhausted;
+        assert_eq!(
+            pin.stamp_monitor(4).map(|_| ()),
+            Err(StampRefused {
+                revision: 4,
+                last_published: 4,
+                reason
+            })
+        );
+        assert_eq!(
+            pin.stamp(5).map(|_| ()),
+            Err(StampRefused {
+                revision: 5,
+                last_published: 4,
+                reason
+            })
+        );
+        assert_eq!(gate.publication(), PUBLICATION_MAX);
+        assert!(pin.open.is_none(), "a refusal opens nothing");
+    }
+
+    /// Gate 1: a snapshot reads the revision its own publication carries, however many
+    /// publications follow it: the pinned record slot is never overwritten.
+    #[test]
+    fn a_pinned_snapshot_keeps_its_revision_across_laps() {
+        let mut f = Fixture::new();
+        write_and_publish(&mut f, 1, false);
+        write_and_publish(&mut f, 1, true);
+        let snapshot = f.gate.snapshot();
+        assert_eq!((snapshot.publication(), snapshot.revision()), (2, 1));
+        let mut revision = 1;
+        for step in 0..40_u32 {
+            if step % 7 == 6 {
+                revision += 1;
+                write_and_publish(&mut f, revision, false);
+            } else {
+                write_and_publish(&mut f, revision, true);
+            }
+            assert_eq!(
+                f.gate.revision_at_or_below(snapshot.publication()),
+                1,
+                "step {step}: the pinned publication still names revision 1"
+            );
+            assert_eq!(f.gate.revision(), revision);
+        }
+    }
+
+    /// Gate 2: a cell read compares publications, so a monitor write applies, the snapshot bounds
+    /// monitor writes too, and `superseded` counts the writes a read skipped. The snapshot's
+    /// revision is the revision of the last publication.
+    #[test]
+    fn a_cell_applies_the_newest_publication_at_or_below_the_snapshot() {
+        let mut f = Fixture::new();
+        let mut applied = Vec::new();
+        for (revision, monitor) in [(1, false), (1, true), (1, true), (2, false)] {
+            let published = write_and_publish(&mut f, revision, monitor);
+            let (snapshot, read) = f.block();
+            assert_eq!(snapshot.publication(), published.publication());
+            applied.push((snapshot.revision(), read));
+        }
+        for (index, (revision, read)) in applied.into_iter().enumerate() {
+            assert_eq!(revision, [1, 1, 1, 2][index]);
+            let CellRead::Applied {
+                sequence,
+                superseded,
+                ..
+            } = read
+            else {
+                panic!("every publication applies in its own block");
+            };
+            assert_eq!((sequence, superseded), (index as u64 + 1, 0));
+        }
+        // Three monitor writes published between two blocks: the read applies the newest and
+        // counts two.
+        for _ in 0..3 {
+            write_and_publish(&mut f, 2, true);
+        }
+        let (snapshot, read) = f.block();
+        assert_eq!((snapshot.publication(), snapshot.revision()), (7, 2));
+        assert_eq!(
+            read,
+            CellRead::Applied {
+                words: value_words(2, 7),
+                sequence: 7,
+                superseded: 2
+            }
+        );
+        // A monitor write stamped and written but not yet published waits for its publication.
+        let stamp = f.pin.stamp_monitor(2).expect("publication 8");
+        let key = stamp.key();
+        f.writer
+            .write(&f.cell, &f.dirty, 0, stamp, value_words(2, 8));
+        let (snapshot, read) = f.block();
+        assert_eq!(snapshot.publication(), 7);
+        assert_eq!(
+            read,
+            CellRead::Unchanged,
+            "publication 8 is above the snapshot"
+        );
+        f.pin.publish_key(&f.gate, key);
+        let (snapshot, read) = f.block();
+        assert_eq!((snapshot.publication(), snapshot.revision()), (8, 2));
+        assert!(matches!(read, CellRead::Applied { sequence: 8, .. }));
     }
 }
 
@@ -1499,6 +1962,78 @@ mod loom_tests {
                 resolved[1], 4,
                 "C's writes at 2 to 5 are resolved once each"
             );
+        });
+    }
+
+    /// L5 (#1603 gate 3): monitor writes race reads. Control publishes a model commit, two
+    /// monitor writes and the next model commit on one two-word cell, storing the revision it is
+    /// about to publish in a read-modify-write mailbox first. Render takes snapshots and reads.
+    /// Every read is whole, is the newest written publication at or below its snapshot, the
+    /// snapshot's revision is the revision of its own publication, and it never exceeds the
+    /// newest model revision control had begun to publish.
+    #[test]
+    fn spsc_loom_cells_monitor_writes_race_reads() {
+        // `(revision, monitor)` in publication order: publication `i + 1` is `WRITES[i]`.
+        const WRITES: [(u64, bool); 4] = [(1, false), (1, true), (1, true), (2, false)];
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(3);
+        builder.check(|| {
+            let (shared, mut pin) = Shared::<1>::new();
+            let announced = Arc::new(AtomicU64::new(0));
+            let control_shared = Arc::clone(&shared);
+            let control_announced = Arc::clone(&announced);
+            let control = thread::spawn(move || {
+                let mut writer = CellWriter::<2>::new();
+                for (index, (revision, monitor)) in WRITES.into_iter().enumerate() {
+                    if !monitor {
+                        control_announced.fetch_max(revision, Ordering::Relaxed);
+                    }
+                    let stamp = if monitor {
+                        pin.stamp_monitor(revision)
+                    } else {
+                        pin.stamp(revision)
+                    }
+                    .expect("a legal stamp");
+                    let published = stamp.key();
+                    assert_eq!(published.publication(), index as u64 + 1);
+                    writer.write(
+                        &control_shared.cells[0],
+                        &control_shared.dirty,
+                        0,
+                        stamp,
+                        value_words(revision, u32::try_from(index).expect("small")),
+                    );
+                    pin.publish_key(&control_shared.gate, published);
+                }
+            });
+            let mut render = Render::<1>::new();
+            let block = |render: &mut Render<1>| {
+                let snapshot = shared.gate.snapshot();
+                let number = snapshot.publication();
+                let expected = usize::try_from(number)
+                    .expect("small")
+                    .checked_sub(1)
+                    .map(|index| (WRITES[index].0, u32::try_from(index).expect("small")));
+                assert_eq!(
+                    snapshot.revision(),
+                    expected.map_or(0, |(revision, _)| revision),
+                    "publication {number} names its own revision"
+                );
+                assert!(
+                    snapshot.revision() <= announced.load(Ordering::Relaxed),
+                    "snapshot revision {} above the announced model revision",
+                    snapshot.revision()
+                );
+                let pending = render.stage.pending(&shared.dirty);
+                render.drain(&shared, snapshot, pending);
+                assert_eq!(render.applied[0], expected, "publication {number}");
+            };
+            block(&mut render);
+            block(&mut render);
+            control.join().expect("control");
+            block(&mut render);
+            assert_eq!(render.applied[0], Some((2, 3)));
+            assert_eq!(render.superseded + render.applications, 4);
         });
     }
 }

@@ -4,8 +4,8 @@ use session::SessionModel;
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
-use crate::descriptor::{ControlDescriptor, Lanes, Motion, check};
-use crate::effective::{EffectiveStrip, MonitorOverlay, effective};
+use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
+use crate::effective::{EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
@@ -97,6 +97,20 @@ pub fn row_motion(owner: OwnerKind, section: SectionKind, control: u32) -> Optio
             builtin_rows::row(control).map(|row| row.ramp.map_or(Motion::Fixed, Motion::Ramp))
         }
         _ => row_descriptor(owner, section, control, 0).map(|descriptor| descriptor.motion),
+    }
+}
+
+/// Where the non-effect row `control` of `section` of `owner` is held, with no sample rate: the
+/// scope of a row does not depend on the rate (every builtin row is a model row), so a caller that
+/// needs only the scope asks this and not [`row_descriptor`] at a placeholder rate. The same rows
+/// and `None` cases as [`row_descriptor`].
+#[must_use]
+pub fn row_scope(owner: OwnerKind, section: SectionKind, control: u32) -> Option<ControlScope> {
+    match (owner, section) {
+        (OwnerKind::Strip, SectionKind::Builtins) => {
+            builtin_rows::row(control).map(|_| ControlScope::Model)
+        }
+        _ => row_descriptor(owner, section, control, 0).map(|descriptor| descriptor.scope),
     }
 }
 
@@ -294,6 +308,40 @@ pub fn set(
         return Ok(());
     }
     write(model, address, descriptor.lanes, value)
+}
+
+/// Validate a write to a monitor row (solo) and say what it sets (decision 17, C8, #1559 D3).
+///
+/// The address is looked up and the value checked exactly as [`set`] does: an unknown strip, a
+/// submix (it has no solo row, a submix is solo-safe) or an unknown control is
+/// [`ControlError::AddressUnknown`], a lane other than `both` is [`ControlError::Lane`], a value
+/// other than exactly `0` or `1` is [`ControlError::Domain`]. Nothing is written: the overlay is
+/// the host's. `Ok(None)` for an address whose row is a model row, which [`set`] writes; its
+/// value is not checked here.
+///
+/// # Errors
+///
+/// Any [`ControlError`] a write to the row would meet before its write.
+pub fn check_monitor(
+    model: &SessionModel,
+    address: &ControlAddress,
+    value: f32,
+    ramp: Option<u32>,
+    sample_rate: u32,
+) -> Result<Option<MonitorWrite>, ControlError> {
+    let resolved = resolve(model, address, sample_rate)?;
+    if resolved.descriptor.scope != ControlScope::Monitor {
+        return Ok(None);
+    }
+    check(&resolved.descriptor, address.lane, value, ramp)?;
+    let Owner::Strip(strip) = &address.owner else {
+        return Err(ControlError::AddressUnknown);
+    };
+    Ok(Some(MonitorWrite {
+        strip: strip.clone(),
+        soloed: crate::lane::is_on(value),
+        ramp,
+    }))
 }
 
 /// The model write behind [`set`], for a value that passed [`check`].

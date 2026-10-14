@@ -134,3 +134,7 @@ transaction format.
   now reads `0x0001`-`0x0008`.
 
 **Decision 17 amendment (2026-10-13).** Every value edit is one `SET_CONTROL` (opcode `0x0800`); the per-kind value ops are retired by #1561. #1563 adds the SDK's `SET_CONTROL` frame encoder (`sdk/src/core/control-frame.ts`) and the per-engine transaction queue; this issue reuses both and encodes only the structural edits.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Order (root Q7).** This slice lands after #1563.

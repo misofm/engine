@@ -314,11 +314,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     let mut limited = controller(8, 1);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
-    // `SetTrackConsole`, #1216 appended `SetRouteMute`, #1218 `SetRouteFollowsMute`, #1241 the
-    // three VCA edits, #1365 `SetControlSmoothing` and #1553 `SetControl`, so the boundary this
-    // row exists to probe is now 47. A smaller number still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 48);
-    limited.config.maximum_transaction_edits = 47;
+    // `SetTrackConsole`, #1241 the VCA edits and #1553 `SetControl`, and decision 17 (#1561)
+    // retired thirteen value ops, so the boundary this row exists to probe is now 34. A smaller
+    // number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 35);
+    limited.config.maximum_transaction_edits = 34;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,
@@ -1319,6 +1319,217 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
     }
 }
 
+fn response_revision(frame: &[u8]) -> SessionRevision {
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut fields))
+        .expect("decodable response")
+    {
+        crate::DecodedTypedResponseFrame::Success { header, .. } => header.revision,
+        crate::DecodedTypedResponseFrame::NonOk { .. } => panic!("expected a success"),
+    }
+}
+
+/// A `SET_CONTROL` of the builtin row `row` of `strip`, on `lane`.
+fn builtin_edit(
+    strip: &str,
+    row: &str,
+    lane: crate::control_core::Lane,
+    value: f32,
+    ramp: Option<u32>,
+) -> SessionEdit {
+    SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Strip(session::StableId::parse(strip).expect("ID")),
+            crate::control_core::Section::Builtins,
+            row,
+            lane,
+        )
+        .expect("a builtin row"),
+        value,
+        ramp,
+    )
+}
+
+fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionEdit {
+    SessionEdit::SetControl {
+        address: crate::control_core::ControlAddress {
+            owner: crate::control_core::Owner::Strip(track.clone()),
+            section: crate::control_core::Section::Own,
+            control: 2,
+            lane: crate::control_core::Lane::Both,
+        },
+        value: f32::from(u8::from(on)),
+        ramp_samples: ramp,
+    }
+}
+
+/// A transaction of monitor writes (#1559 D3, D4): its token exposes the writes, commits no model
+/// and no revision, emits no `SESSION_COMMITTED` and cancels no automation, answers `monitor` at
+/// the committed revision, and an exact replay returns the same bytes. A solo spends no revision
+/// number: the next model commit is the committed revision plus one (#1603). The one-call path has
+/// no overlay and refuses the write.
+///
+/// Red if a monitor write advances or spends a revision or emits an event (a listener would reload
+/// a session that did not change), if a replay is not byte-identical, or if the one-call path
+/// acknowledges a write that nobody applies.
+#[test]
+fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
+    let track = parse_session_json(EXAMPLE).expect("fixture").tracks[0]
+        .id
+        .clone();
+    let solo = [solo_edit(&track, true, Some(96))];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&solo),
+    );
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| match endpoint
+        .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .expect("prepare")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_) => panic!("expected a token"),
+    };
+
+    {
+        let mut endpoint = controller(8, 2);
+        let snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let events = endpoint
+            .queues_mut()
+            .report(crate::QueueKind::ReliableEvent);
+        let prepared = prepare(&mut endpoint, &input);
+        assert!(prepared.is_monitor_only());
+        assert_eq!(
+            prepared.monitor_edits(),
+            [crate::control_core::MonitorWrite {
+                strip: track.clone(),
+                soloed: true,
+                ramp: Some(96),
+            }]
+        );
+        assert_eq!(
+            prepared.prospective_session().revision(),
+            SessionRevision(7)
+        );
+        assert_eq!(
+            prepared.prospective_session().compiled().canonical_json(),
+            snapshot,
+            "the model is the committed one"
+        );
+        let committed = endpoint
+            .commit_prepared_structural(prepared, EditPath::ModelOnly)
+            .expect("a monitor token takes the monitor path whatever path the host names");
+        let mut first = [0_u8; 2048];
+        let len = committed.write_into(&mut first).expect("bytes");
+        assert_eq!(transaction_edit_path(&first[..len]), EditPath::Monitor);
+        assert_eq!(response_revision(&first[..len]), SessionRevision(7));
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+        assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+        assert_eq!(
+            endpoint.queues().report(crate::QueueKind::ReliableEvent),
+            events,
+            "no SESSION_COMMITTED"
+        );
+
+        // The replay returns the committed bytes and spends nothing.
+        let mut replay = [0_u8; 2048];
+        let replay_len = endpoint
+            .process_command_frame_into(
+                &input,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                &mut replay,
+            )
+            .expect("replay");
+        assert_eq!(&replay[..replay_len], &first[..len]);
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+
+        // The next model commit is the committed revision plus one: a solo spends no number
+        // (#1603).
+        let model_edit = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("after-solo").expect("ID"),
+        }];
+        let next = full_command(
+            2,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&model_edit),
+        );
+        let prepared = prepare(&mut endpoint, &next);
+        assert!(!prepared.is_monitor_only());
+        assert!(prepared.monitor_edits().is_empty());
+        assert_eq!(
+            prepared.prospective_session().revision(),
+            SessionRevision(8)
+        );
+        endpoint
+            .commit_prepared_structural(prepared, EditPath::ModelOnly)
+            .expect("commit");
+        assert_eq!(endpoint.session().revision(), SessionRevision(8));
+    }
+
+    // A solo beside a model edit is a model transaction with a monitor write, in order, the later
+    // write of a strip replacing the earlier.
+    let mut endpoint = controller(8, 2);
+    let mixed = [
+        solo_edit(&track, true, Some(10)),
+        SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("mixed").expect("ID"),
+        },
+        solo_edit(&track, false, Some(20)),
+    ];
+    let input = full_command(
+        3,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&mixed),
+    );
+    let prepared = prepare(&mut endpoint, &input);
+    assert!(!prepared.is_monitor_only());
+    assert_eq!(
+        prepared.monitor_edits(),
+        [crate::control_core::MonitorWrite {
+            strip: track.clone(),
+            soloed: false,
+            ramp: Some(20),
+        }]
+    );
+    assert_eq!(
+        prepared.prospective_session().revision(),
+        SessionRevision(8)
+    );
+    endpoint
+        .commit_prepared_structural(prepared, EditPath::Live)
+        .expect("commit");
+    assert_eq!(endpoint.session().revision(), SessionRevision(8));
+
+    // The one-call path has no overlay: it refuses the write, as it always did.
+    let mut endpoint = controller(8, 2);
+    let input = full_command(
+        4,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&solo),
+    );
+    let mut output = [0_u8; 2048];
+    let len = endpoint
+        .process_command_frame_into(
+            &input,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut output,
+        )
+        .expect("a typed refusal");
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&output[..len], &mut DecodeScratch::new(&mut fields))
+        .expect("decodable")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::ValidationFailed);
+            assert_eq!(payload.diagnostics[0].code, "control.monitor");
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => panic!("acknowledged a lost write"),
+    }
+    assert_eq!(endpoint.session().revision(), SessionRevision(7));
+}
+
 #[test]
 fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     fn structural(
@@ -1559,21 +1770,17 @@ fn session_diagnostic_path_segments_preserve_field_index_and_stable_id_variants(
 fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
     let mut controller = controller(4, 1);
     controller.config.maximum_response_diagnostics = 1;
-    let mut fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
-    fader.left_db = f32::NAN;
-    fader.right_db = f32::INFINITY;
+    // A structural upsert can carry a bad value to the final validation; `SET_CONTROL` refuses a
+    // non-finite value at its own edit instead.
+    let mut track = controller.session().compiled().normalized_model().tracks[0].clone();
+    track.fader.left_db = f32::NAN;
+    track.fader.right_db = f32::INFINITY;
     let request = ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
         canonical_bytes: b"two-validation-diagnostics",
         command: ControlCommand::SessionTransactionApply {
-            edits: &[SessionEdit::SetTrackFader {
-                track_id: session::StableId::parse("vocal").expect("stable ID"),
-                fader,
-                ramp_samples: None,
-            }],
+            edits: &[SessionEdit::UpsertTrack { track }],
         },
     };
 
@@ -1652,9 +1859,6 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
 #[test]
 fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
     let mut controller = controller(4, 1);
-    let fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
     let response = controller.process(ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -1664,11 +1868,13 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
                 SessionEdit::SetSessionId {
                     session_id: session::StableId::parse("renamed").expect("stable ID"),
                 },
-                SessionEdit::SetTrackFader {
-                    track_id: session::StableId::parse("vocal").expect("stable ID"),
-                    fader,
-                    ramp_samples: Some(u32::MAX),
-                },
+                builtin_edit(
+                    "vocal",
+                    "fader_db",
+                    crate::control_core::Lane::Left,
+                    -2.0,
+                    Some(u32::MAX),
+                ),
             ],
         },
     });
@@ -1703,7 +1909,7 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 24 + 4 + 8 + 2 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 2 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
@@ -2227,15 +2433,13 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
 #[test]
 fn decoded_track_edit_reaches_same_atomic_session_store() {
     let mut controller = controller(4, 1);
-    let mut fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
-    fader.left_db = -2.0;
-    let edits = [SessionEdit::SetTrackFader {
-        track_id: session::StableId::parse("vocal").expect("ID"),
-        fader,
-        ramp_samples: None,
-    }];
+    let edits = [builtin_edit(
+        "vocal",
+        "fader_db",
+        crate::control_core::Lane::Left,
+        -2.0,
+        None,
+    )];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -2266,11 +2470,17 @@ fn decoded_track_edit_reaches_same_atomic_session_store() {
 #[test]
 fn decoded_route_edit_reaches_same_atomic_session_store() {
     let mut controller = controller(4, 1);
-    let edits = [SessionEdit::SetRouteGainDb {
-        route_id: session::StableId::parse("to-main").expect("ID"),
-        gain_db: -1.0,
-        ramp_samples: None,
-    }];
+    let edits = [SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Route(session::StableId::parse("to-main").expect("ID")),
+            crate::control_core::Section::Own,
+            "gain_db",
+            crate::control_core::Lane::Both,
+        )
+        .expect("a route row"),
+        -1.0,
+        None,
+    )];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),

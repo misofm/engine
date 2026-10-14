@@ -248,10 +248,19 @@ rows (`effective_fader_db`, `effective_mute` per strip lane; `effective_gate` pe
 
 **C8. Solo.** Solo is a strip-own control with `scope: monitor`, held in the core's overlay
 (`LiveControlSoloState` moves behind `controls`) and written by `SET_CONTROL` on both hosts. A
-monitor write is not a session mutation (the same class as observe). The reply carries
-`path: monitor` and no revision. It applies by D15-2's convergence block, or at adoption when a
-replacement plan is pending. A transaction that mixes it with model edits is all or nothing
-(#1562 D4, formerly #1382 D3 and D4). The C ABI gains solo.
+monitor write is not a session mutation (the same class as observe): it never advances or
+spends a revision, so committed revisions stay dense. The reply carries `path: monitor` and
+the committed revision, unchanged. Its records are published on the newest plan's revision
+gate as a new publication that carries the current revision: the gate orders publications by
+an internal number that is never exposed, each publication carries its session revision in a
+record render reads without a lock or a retry, and the applied watermark reports the revision
+of the last applied publication, so it is never above the committed revision (amended
+2026-10-13, root, option C for #1559's revision gap; #1603). A monitor-only transaction is
+always live and applies by D15-2's convergence block: the first block that begins after the
+reply returns, or, while a replacement plan is pending, the block that adopts it, which the
+watermark reports when it reaches the reply's revision. A transaction that mixes it with model
+edits is all or nothing and advances the revision by one (#1559 D5 and D8, #1562 D4, formerly
+#1382 D3 and D4). The C ABI gains solo.
 
 **C9. Observation is not a control.** Observe subscriptions and the meter lease are not values and
 stay monitor operations (#1057 section 3.3). C13 still moves them into the core.

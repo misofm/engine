@@ -206,3 +206,34 @@ Solo is the core's monitor overlay. Nothing in the browser lowers, checks or com
   the amendment record.
 - Supersedes *Make a send's follows_mute live in the browser* (#1342): gate 1 makes the toggle live
   in the browser through the core.
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Single instance first.** This slice targets `single` mode on today's one-instance module.
+The four `control_*` exports run in the worklet's message handler, never in `process()`. The
+`control` message travels on the node's existing port. #1332 later deploys the same exports in the
+Worker, with no other logic. Dependencies: #1332 is removed; #1381 means #1381a; #1290 moves to
+#1562b. **D7 is withdrawn**: the old command path is deleted in the same batch (#1565A), so it
+never runs beside `SessionState`.
+
+The slice is split. Both pieces stay in this issue.
+
+- **#1562a**: D1-D6, D8, and D9 below.
+  - **D9. Rebuild pending (root ruling B).** Until #1562b, the browser preparer's successor entry
+    that the command path uses refuses a frame that classifies as a rebuild with
+    `web.apply.rebuild_pending`. The refusal comes before commit: no ack precedes it, nothing is
+    queued, and the model, revision and plan are unchanged. The browser has no in-place structural
+    edit today, so this withdraws nothing. Test-support republish (#1381a's gates) keeps working.
+  - Gates: 1 (the live rows), 2-6, 8 (all but its rebuild part) and 9. Gate 5's browser half and
+    gate 7 run on the non-isolated leg only.
+  - Gate 7 reads: "The live-control rows of the browser qualification pass through `SET_CONTROL`
+    in chromium, firefox and webkit", plus the `CONTROL_LIST_GET` row.
+  - New gate 11: a `SET_CONTROL` on `delay_samples` is refused with `web.apply.rebuild_pending`;
+    the model, revision, plan epoch and cells are unchanged, and the next 8 blocks are
+    bit-identical to a run without the call. It turns red if a rebuild-path frame reaches
+    `SessionState`'s rebuild arm (a plan swap with no companion pairing) before #1562b.
+  - Dependencies: as filed, with #1381a for #1381, and without #1332 and #1290.
+- **#1562b**: gate 1's `delay_samples` row, the rebuild part of gate 8, and the deletion of D9's
+  refusal and gate 11. Dependencies: #1562a, #1381b, #1290a.
+
+**Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.

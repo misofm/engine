@@ -194,3 +194,21 @@ browser's boot already prepares through it, and its rendered bits do not change.
 Dependent: *Swap and retire browser plans through the Worker's service loop* (#1381).
 
 **Decision 17 amendment (2026-10-13).** This slice lands as filed. #1593 then gives `RuntimePreparer::prepare` a `spectrum: Option<&SpectrumPreparation>` argument and an `Option<PreparedSpectrumCaptures>` result (D1), and `WebRuntimePreparer` takes the spectrum request from that argument instead of holding it (D5). #1596 then moves the spectrum capture out of `RenderCompanions` to the control plane, as on the C ABI (D5).
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Amendment 2.**
+
+- **D1.** The trait method's signature follows `prepare_runtime`'s current parameters
+  (`crates/control-plane/src/compile.rs:647-653`): beside `compiled`, the caps and `successor`, it
+  takes `bound_cache` and `superseded`, and passes them to host-core's entries as
+  `prepare_runtime` does today (`:667-686`).
+- **D3 is withdrawn.** The core chooses live lanes with `controls::live_lanes(model)` (#1555,
+  `compile.rs:665-666`); `CapiPreparer` passes them through and holds no lane constant.
+- **D5.** The browser preparer attaches `controls::live_lanes(model)` (#1562 D5); the boot word
+  chooses no lane.
+
+Split, both in this issue:
+
+- **(a)** the trait, `CapiPreparer`, engine D4 (`HostAttachment`), gates 1 and 3.
+- **(b)** `WebRuntimePreparer` and `RenderCompanions` (D5), gates 2 and 4. Dependency: (a).

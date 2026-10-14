@@ -172,3 +172,19 @@ checks.
 ## Decision record
 
 (Filled in by the spike.)
+
+## Amendment (decision 17, root 2026-10-13)
+
+**Split (root, 2026-10-13).** Both pieces stay in this issue.
+
+- **#1331a, the desktop legs.** D1-D5, D7 and D8 in Chromium, Firefox and WebKit, and the
+  decision record (the spike's evidence: build flags and digests, the D4/D5 table, the desktop
+  headroom table, the parity results). Gates 1 and 3-7. It runs when a lane is free; it is off the
+  critical path, because the browser ships `single` mode first and the Worker deployment (#1331a
+  -> #1334 -> #1380 -> #1332 -> #1387) lands after #1565A.
+- **#1331b, the iOS leg.** D6, D5's iOS record and D7 on iOS. Gate 2. It is an owner-scheduled
+  human step: it needs a person with a real iPhone. It is not in the post-sprint heavy-gate
+  successor (#1605). D9's iOS clause is judged on its record: an iOS failure stops the Worker
+  deployment (#1332) for a decision 15 re-ruling; `single` mode is not affected.
+
+The issue closes when both pieces have their records.

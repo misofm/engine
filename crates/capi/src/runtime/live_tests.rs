@@ -7,7 +7,8 @@
 use super::tests::{
     SESSION, add_muted_track, automation_status, automation_target, boxed_c_children_with_limits,
     command_bytes, command_bytes_at_revision, command_c, control_list_all_c, control_list_c,
-    control_state_all_c, control_state_c, event_c, generated_parity_session, limits, submit_c,
+    control_state_all_c, control_state_c, counter_telemetry_for, event_c, generated_parity_session,
+    limits, lossy_counter_snapshots, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -415,28 +416,86 @@ fn window(latency_samples: u32, smoothing_samples: u32, quantum: usize) -> u64 {
     u64::from(latency_samples + smoothing_samples).div_ceil(quantum as u64) + 1
 }
 
-fn fader_edit(track_id: &str, fader: DualMonoFader) -> SessionEdit {
-    SessionEdit::SetTrackFader {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        fader,
-        ramp_samples: None,
-    }
+/// The `SET_CONTROL`s that give strip `track_id` the whole fader `fader` (decision 17, #1561).
+fn fader_edit(track_id: &str, fader: DualMonoFader) -> Vec<SessionEdit> {
+    protocol::control_core::fader_edits(&StableId::parse(track_id).expect("track ID"), &fader)
+}
+
+/// The two `SET_CONTROL`s that set the fader dB of strip `track_id` (left, right).
+fn db_edits(track_id: &str, left_db: f32, right_db: f32) -> Vec<SessionEdit> {
+    [
+        (protocol::control_core::Lane::Left, left_db),
+        (protocol::control_core::Lane::Right, right_db),
+    ]
+    .into_iter()
+    .map(|(lane, db)| {
+        SessionEdit::set_control(
+            protocol::control_core::row_address(
+                protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+                protocol::control_core::Section::Builtins,
+                "fader_db",
+                lane,
+            )
+            .expect("the fader row"),
+            db,
+            None,
+        )
+    })
+    .collect()
+}
+
+/// One `SET_CONTROL` that sets the mute of both lanes of strip `track_id`. A `SET_CONTROL` is about
+/// 160 bytes, so a transaction over ten strips stays inside the test limit's 4 KiB frame only when
+/// it writes the rows that change.
+fn mute_edit(track_id: &str, muted: bool) -> SessionEdit {
+    SessionEdit::set_control(
+        protocol::control_core::row_address(
+            protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+            protocol::control_core::Section::Builtins,
+            "mute",
+            protocol::control_core::Lane::Both,
+        )
+        .expect("the mute row"),
+        f32::from(u8::from(muted)),
+        None,
+    )
+}
+
+/// The `SET_CONTROL`s that give strip `track_id` the whole pan or matrix `shape`.
+fn matrix_edit(track_id: &StableId, shape: MatrixOrPan) -> Vec<SessionEdit> {
+    protocol::control_core::matrix_or_pan_edits(track_id, &shape)
+}
+
+/// The `SET_CONTROL`s of the three session rows that give `control_smoothing` the explicit
+/// `lengths`. Since #1561 no transaction writes the `default` arm back.
+fn smoothing_edits(lengths: ControlSmoothing) -> Vec<SessionEdit> {
+    [
+        ("fader_ms", lengths.fader_ms),
+        ("mute_ms", lengths.mute_ms),
+        ("pan_ms", lengths.pan_ms),
+    ]
+    .into_iter()
+    .map(|(row, value)| {
+        SessionEdit::set_control(
+            protocol::control_core::row_address(
+                protocol::control_core::Owner::Session,
+                protocol::control_core::Section::Own,
+                row,
+                protocol::control_core::Lane::Both,
+            )
+            .expect("a session row"),
+            value,
+            None,
+        )
+    })
+    .collect()
 }
 
 fn mute_all(model: &SessionModel, muted: bool) -> Vec<SessionEdit> {
     model
         .tracks
         .iter()
-        .map(|track| {
-            fader_edit(
-                track.id.as_str(),
-                DualMonoFader {
-                    left_mute: muted,
-                    right_mute: muted,
-                    ..track.fader.clone()
-                },
-            )
-        })
+        .map(|track| mute_edit(track.id.as_str(), muted))
         .collect()
 }
 
@@ -548,28 +607,25 @@ fn live_pcm_shape(
     let matrix_track = model.tracks[model.tracks.len() - 1].id.as_str();
     let smoothing = 16;
     assert!(smoothing as usize <= quantum);
-    let edits = [
-        fader_edit(
-            fader_track,
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: 3.0,
-                left_mute: false,
-                right_mute: false,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse(matrix_track).expect("matrix track"),
-            matrix_or_pan: MatrixOrPan::Matrix {
-                ll: 0.75,
-                lr: 0.125,
-                rl: -0.25,
-                rr: 0.5,
-                smoothing_samples: smoothing,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        fader_track,
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: 3.0,
+            left_mute: false,
+            right_mute: false,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse(matrix_track).expect("matrix track"),
+        MatrixOrPan::Matrix {
+            ll: 0.75,
+            lr: 0.125,
+            rl: -0.25,
+            rr: 0.5,
+            smoothing_samples: smoothing,
+        },
+    ));
     let (revision, _, epoch, _) = rig.summary();
     assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
     let (after, _, after_epoch, after_pending) = rig.summary();
@@ -767,7 +823,7 @@ fn with_ramp(edits: Vec<SessionEdit>, ramp: Option<u32>) -> Vec<SessionEdit> {
     edits
         .into_iter()
         .map(|mut edit| {
-            let SessionEdit::SetTrackFader { ramp_samples, .. } = &mut edit else {
+            let SessionEdit::SetControl { ramp_samples, .. } = &mut edit else {
                 panic!("a fader edit");
             };
             *ramp_samples = ramp;
@@ -957,7 +1013,12 @@ fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
     let mut rig = Rig::new(document);
     let model = parse_session_json(document).expect("model");
     let muted: Vec<SessionEdit> = with_ramp(
-        mute_all(&model, true).into_iter().step_by(2).collect(),
+        model
+            .tracks
+            .iter()
+            .step_by(2)
+            .map(|track| mute_edit(track.id.as_str(), true))
+            .collect(),
         ramp,
     );
     for _ in 0..3 {
@@ -1067,45 +1128,28 @@ fn control_smoothing_rebuild_run(
     }
     let mut edits = Vec::new();
     if in_transaction {
-        edits.push(SessionEdit::SetControlSmoothing {
-            control_smoothing: Some(smoothing),
-        });
+        edits.extend(smoothing_edits(smoothing));
     }
     edits.push(content_edit(&model));
     let last = model.tracks.len() - 1;
     for (index, track) in model.tracks.iter().enumerate() {
         let id = track.id.as_str();
         if index % 2 == 0 {
-            edits.push(fader_edit(
-                id,
-                DualMonoFader {
-                    left_mute: true,
-                    right_mute: true,
-                    ..track.fader.clone()
-                },
-            ));
+            edits.push(mute_edit(id, true));
         } else {
-            edits.push(fader_edit(
-                id,
-                DualMonoFader {
-                    left_db: -6.0,
-                    right_db: 3.0,
-                    ..track.fader.clone()
-                },
-            ));
+            edits.extend(db_edits(id, -6.0, 3.0));
         }
     }
-    edits.push(SessionEdit::SetTrackMatrixOrPan {
-        track_id: model.tracks[last].id.clone(),
-        matrix_or_pan: MatrixOrPan::Matrix {
+    edits.extend(matrix_edit(
+        &model.tracks[last].id,
+        MatrixOrPan::Matrix {
             ll: 0.75,
             lr: 0.125,
             rl: -0.25,
             rr: 0.5,
             smoothing_samples: 0,
         },
-        ramp_samples: None,
-    });
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "a content edit prepares a candidate");
     let (_, swap_used) = rig.render_counted();
@@ -1169,15 +1213,18 @@ fn a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild() {
     );
 }
 
+/// A `SET_CONTROL` of the left fader dB of strip `track_id`.
 fn left_db_edit(track_id: &str, left_db: f32) -> SessionEdit {
-    fader_edit(
-        track_id,
-        DualMonoFader {
-            left_db,
-            right_db: 0.0,
-            left_mute: false,
-            right_mute: false,
-        },
+    SessionEdit::set_control(
+        protocol::control_core::row_address(
+            protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+            protocol::control_core::Section::Builtins,
+            "fader_db",
+            protocol::control_core::Lane::Left,
+        )
+        .expect("the fader row"),
+        left_db,
+        None,
     )
 }
 
@@ -1255,13 +1302,13 @@ fn forty_fader_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
     let last = -1.0 - 39.0 * 0.25;
     for edit in 0..40 {
         assert_eq!(
-            rig.apply(&[both(-1.0 - edit as f32 * 0.25)]),
+            rig.apply(&both(-1.0 - edit as f32 * 0.25)),
             crate::RESULT_OK,
             "edit {edit}"
         );
     }
     assert_eq!(rig.writes(Epoch::Current, "eq0"), (80, 0));
-    assert_eq!(twin.apply(&[both(last)]), crate::RESULT_OK);
+    assert_eq!(twin.apply(&both(last)), crate::RESULT_OK);
     // The counter is the render side's: nothing has been read yet.
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
     // The plan's latency delays the first audible block; render past it.
@@ -1288,6 +1335,68 @@ fn forty_fader_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
     // Nothing is pending now: another block replaces nothing.
     rig.step();
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 78);
+}
+
+/// Issue #1351 gate 7 (#1348 verdict N-3): the service step refreshes the provider's counters
+/// before it stages the snapshot, so a counter that render changed since the last call reaches the
+/// snapshot that the next call stages. Three fader edits on one track, then one block, replace two
+/// writes of each of the two fader cells: render adds `2 x 2 = 4` to `LIVE_VALUES_SUPERSEDED`
+/// (#1312 D2), and the next call, a `source_submit`, stages exactly that.
+///
+/// Test value: red if the service step stages the snapshot before refreshing the provider (the
+/// snapshot then reads the stale 0), which no other counter shows because the telemetry counters
+/// change only inside the step itself.
+#[test]
+fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
+    let mut rig = Rig::new(&long_session(10, 48_000));
+    rig.step();
+    let request = rig.next_request();
+    let configure = counter_telemetry_for(
+        request,
+        SessionRevision(rig.summary().0),
+        vec![protocol::CounterId::LiveValuesSuperseded],
+        1,
+    );
+    assert_eq!(rig.send(&configure).0, crate::RESULT_OK);
+    for edit in 0..3 {
+        let fader = DualMonoFader {
+            left_db: -1.0 - edit as f32,
+            right_db: -1.0 - edit as f32,
+            left_mute: false,
+            right_mute: false,
+        };
+        assert_eq!(
+            rig.apply(&fader_edit("eq0", fader)),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert!(
+        lossy_counter_snapshots(rig.session).is_empty(),
+        "no block was rendered since the configuration, so nothing is staged"
+    );
+    rig.render();
+    // The next call is a source submit, not a command.
+    let [left, right] = source_chunk(rig.fed, rig.quantum);
+    submit_c(
+        rig.session,
+        rig.generation,
+        rig.fed,
+        rig.rate,
+        &left,
+        &right,
+        false,
+    );
+    let snapshots = lossy_counter_snapshots(rig.session);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].values,
+        vec![protocol::CounterValue {
+            id: protocol::CounterId::LiveValuesSuperseded,
+            value: 4,
+        }]
+    );
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 4);
 }
 
 /// Gate 3 (c): an exact replay of a live edit returns the cached response and writes nothing.
@@ -1322,26 +1431,23 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     assert_eq!(rig.summary().3, 1, "a candidate is pending");
     assert_eq!(rig.writes(Epoch::Pending, "eq3"), (0, 0));
 
-    let edits = [
-        fader_edit(
-            "eq3",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: 3.0,
-                left_mute: false,
-                right_mute: true,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq3").expect("eq3"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.5,
-                right: 0.75,
-                smoothing_samples: 8,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        "eq3",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: 3.0,
+            left_mute: false,
+            right_mute: true,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse("eq3").expect("eq3"),
+        MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.75,
+            smoothing_samples: 8,
+        },
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "still the one candidate");
     // Two fader cells (left and right dB differ), one mute cell (right only), one matrix cell.
@@ -1437,7 +1543,7 @@ fn a_live_edit_on_a_pending_candidate_completes_at_the_swap() {
             right_mute: false,
         },
     );
-    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&edit), crate::RESULT_OK);
     let r2 = rig.summary().0;
     assert_eq!((r1, r2), (initial + 1, initial + 2));
     assert_eq!(
@@ -1499,7 +1605,7 @@ fn a_live_edit_completes_in_the_next_block() {
             right_mute: false,
         },
     );
-    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&edit), crate::RESULT_OK);
     let r = rig.summary().0;
     assert_eq!(rig.summary().3, 0, "the edit was live");
     assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
@@ -1537,14 +1643,14 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
     assert_eq!((fader.left_db, fader.right_db), (0.0, 0.0));
     let document = session::canonical_session_json(&model).expect("canonical");
     let structural = super::tests::add_muted_track(&model, "a-muted");
-    let live = [fader_edit(
+    let live = fader_edit(
         "eq0",
         DualMonoFader {
             left_db: -6.0,
             right_db: -6.0,
             ..fader
         },
-    )];
+    );
     let mut rig = Rig::new(&document);
     for _ in 0..4 {
         rig.step();
@@ -1759,7 +1865,7 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
     ] {
         let mut rig = Rig::new(document);
         rig.step();
-        assert_eq!(rig.apply(&[edit]), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.apply(&edit), crate::RESULT_OK, "{label}");
         assert_eq!(rig.summary().3, 0, "{label} is live");
     }
     let unfollowed = submix_session(false);
@@ -1769,32 +1875,37 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
         &unfollowed,
         &[
             fader_edit("eq0", quiet.clone()),
-            content_edit(&parse_session_json(&unfollowed).expect("model")),
-        ],
+            vec![content_edit(
+                &parse_session_json(&unfollowed).expect("model"),
+            )],
+        ]
+        .concat(),
         "a live fader beside a source content edit",
     );
 
     let model = parse_session_json(&base).expect("model");
     assert_rebuilds(&base, &[content_edit(&model)], "a source content edit");
 
-    // A fader outside the setter's domain is today's compile rejection, and writes nothing.
+    // A fader outside the control's domain is refused at its own edit by the control validator
+    // (`control.domain`, a protocol refusal under `RESULT_OK`), and writes nothing.
     let mut rig = Rig::new(&base);
     rig.step();
     let before = refusal_state(&rig);
     assert_eq!(
-        rig.apply(&[left_db_edit("eq0", 30.0)]),
-        crate::RESULT_COMPILE_REJECTED
+        set_control::refusal(&mut rig, &[left_db_edit("eq0", 30.0)]),
+        (
+            protocol::StatusCode::ValidationFailed,
+            vec![("control.domain".to_owned(), 0)]
+        )
     );
-    let rejected = with_model(&base, |model| model.tracks[0].fader.left_db = 30.0);
-    let Err(failure) = compile_children(&rejected, limits(), None) else {
-        panic!("a 30 dB fader does not prepare")
-    };
+    // The revision, the snapshot and the event lane are as they were; the refusal itself is the one
+    // answer the replay cache keeps.
+    let after = refusal_state(&rig);
     assert_eq!(
-        rig.last_error(),
-        failure.diagnostics,
-        "the live arm reports today's preparation diagnostic"
+        (after.0, &after.1, after.3),
+        (before.0, &before.1, before.3)
     );
-    assert_eq!(refusal_state(&rig), before);
+    assert_eq!(after.2, before.2 + 1);
     assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0));
     assert_eq!(rig.summary().3, 0);
 }
@@ -1816,18 +1927,15 @@ fn a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone() {
     let before = refusal_state(&rig);
     let cells = rig.current_cells();
     // A fader edit and a pan edit: two lanes, three cells.
-    let refused = [
-        left_db_edit("eq0", -9.0),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq3").expect("eq3"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: -0.75,
-                right: 0.25,
-                smoothing_samples: 0,
-            },
-            ramp_samples: None,
+    let mut refused = vec![left_db_edit("eq0", -9.0)];
+    refused.extend(matrix_edit(
+        &StableId::parse("eq3").expect("eq3"),
+        MatrixOrPan::Pan {
+            left: -0.75,
+            right: 0.25,
+            smoothing_samples: 0,
         },
-    ];
+    ));
     crate::ffi::test_set_structural_faults(
         rig.session,
         [Some(TestStructuralFaultPhase::BeforeLivePush), None],
@@ -1876,18 +1984,15 @@ fn a_refused_rebuild_with_a_carry_retarget_is_never_reused() {
     let fader = model.tracks[0].fader.clone();
     let document = session::canonical_session_json(&model).expect("canonical");
     let structural = super::tests::add_muted_track(&model, "a-muted");
-    let retargeted = [
-        structural[0].clone(),
-        structural[1].clone(),
-        fader_edit(
-            "eq0",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: -6.0,
-                ..fader
-            },
-        ),
-    ];
+    let mut retargeted = vec![structural[0].clone(), structural[1].clone()];
+    retargeted.extend(fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            ..fader
+        },
+    ));
     let mut rig = Rig::new(&document);
     let mut twin = Rig::new(&document);
     let mut accepted = Rig::new(&document);
@@ -1949,26 +2054,23 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
 
     // The last track sits right before the submix in the strip table; eq0 feeds the submix.
     let smoothing = 12;
-    let edits = [
-        fader_edit(
-            "eq9",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: -6.0,
-                left_mute: false,
-                right_mute: false,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq0").expect("eq0"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.25,
-                right: 0.875,
-                smoothing_samples: smoothing,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        "eq9",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            left_mute: false,
+            right_mute: false,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse("eq0").expect("eq0"),
+        MatrixOrPan::Pan {
+            left: 0.25,
+            right: 0.875,
+            smoothing_samples: smoothing,
+        },
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the edit is live");
     assert_eq!(rig.writes(Epoch::Current, "eq9"), (2, 0));
@@ -2015,18 +2117,15 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_n
     let cells = crate::ffi::test_transaction_snapshot(rig.session).strip_cells;
     let (revision, ..) = rig.summary();
 
-    let edits = [
-        left_db_edit("eq1", -3.0),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq2").expect("eq2"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.5,
-                right: 0.25,
-                smoothing_samples: 16,
-            },
-            ramp_samples: None,
+    let mut edits = vec![left_db_edit("eq1", -3.0)];
+    edits.extend(matrix_edit(
+        &StableId::parse("eq2").expect("eq2"),
+        MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.25,
+            smoothing_samples: 16,
         },
-    ];
+    ));
     let bytes = rig.transaction(&edits);
     let (result, response) = command_c(rig.session, &bytes);
     assert_eq!(result, crate::RESULT_OK, "a protocol refusal is RESULT_OK");
@@ -2290,13 +2389,13 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
         ),
         (
             "control smoothing",
-            SessionEdit::SetControlSmoothing {
-                control_smoothing: Some(ControlSmoothing {
-                    mute_ms: 1.0,
-                    fader_ms: 2.0,
-                    pan_ms: 3.0,
-                }),
-            },
+            // The first write turns the `default` arm into the explicit lengths (#1561 D4a).
+            smoothing_edits(ControlSmoothing {
+                mute_ms: 1.0,
+                fader_ms: 2.0,
+                pan_ms: 3.0,
+            })
+            .remove(0),
         ),
     ]
 }
@@ -2436,15 +2535,15 @@ fn each_transactions_response_names_its_edit_path() {
     assert_eq!(rig.summary().3, 1);
 }
 
-/// `SetControlSmoothing` with the given `mute_ms` and the default table's other two lengths.
+/// A `SET_CONTROL` of the session's `mute_ms` row: the given `mute_ms` and the default table's
+/// other two lengths (the first write makes the lengths explicit, #1561 D4a).
 fn mute_smoothing_edit(mute_ms: f32) -> SessionEdit {
-    SessionEdit::SetControlSmoothing {
-        control_smoothing: Some(ControlSmoothing {
-            mute_ms,
-            fader_ms: 20.0,
-            pan_ms: 20.0,
-        }),
-    }
+    smoothing_edits(ControlSmoothing {
+        mute_ms,
+        fader_ms: 20.0,
+        pan_ms: 20.0,
+    })
+    .remove(1)
 }
 
 /// Gate 4 (#1365), the step. Under the default table (a 10 ms mute ramp), `mute_ms` set to 0 by a
@@ -2634,20 +2733,27 @@ fn upsert(
     effect_id: &str,
     parameter_id: u32,
     channel: session::ParameterChannel,
-    unit: session::ParameterUnit,
+    _unit: session::ParameterUnit,
     value: f32,
 ) -> SessionEdit {
-    SessionEdit::UpsertEffectParam {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        rack_name,
-        effect_id: StableId::parse(effect_id).expect("effect ID"),
-        param: session::EffectParam {
-            parameter_id,
-            channel,
-            unit,
-            value,
+    let effect = StableId::parse(effect_id).expect("effect ID");
+    let section = match rack_name {
+        session::RackName::Console => protocol::control_core::Section::Console(effect),
+        _ => protocol::control_core::Section::Inserts(effect),
+    };
+    // The unit is the effect descriptor's (decision 17): a `SET_CONTROL` names only the value.
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: parameter_id,
+            lane: channel,
         },
-    }
+        value,
+        None,
+    )
 }
 
 /// A `host_core` plan of one document prepared with every live lane, as the browser prepares,
@@ -2880,8 +2986,8 @@ fn control_readback(rig: &mut Rig) -> (Vec<String>, Vec<(u32, u32)>) {
 }
 
 /// #1264 gate 3, over the control list (#1552). Red if the readback keeps the old value after a
-/// live edit, or reports a value a rebuild's catalog would not: a set, a lane split and a removal
-/// back to the default.
+/// live edit, or reports a value a rebuild's catalog would not: a set, a lane split and a write
+/// of the default.
 #[test]
 fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
     use session::{ParameterChannel, ParameterUnit, RackName};
@@ -2913,13 +3019,16 @@ fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
             ParameterUnit::Db,
             -30.0,
         ),
-        SessionEdit::RemoveEffectParam {
-            track_id: StableId::parse(first).expect("track"),
-            rack_name: RackName::Inserts,
-            effect_id: StableId::parse("comp").expect("comp"),
-            parameter_id: 2,
-            channel: ParameterChannel::Both,
-        },
+        // The ratio goes back to its default (4), the value a removed entry reads as.
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            2,
+            ParameterChannel::Both,
+            ParameterUnit::Ratio,
+            4.0,
+        ),
         upsert(
             last,
             RackName::Console,
@@ -3362,13 +3471,16 @@ fn the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
             ParameterUnit::Hz,
             300.0,
         ),
-        SessionEdit::RemoveEffectParam {
-            track_id: StableId::parse(last).expect("track"),
-            rack_name: RackName::Inserts,
-            effect_id: StableId::parse("eq-insert").expect("EQ insert"),
-            parameter_id: 4,
-            channel: ParameterChannel::Both,
-        },
+        // Band 1's gain goes back to its default (0 dB), the value a removed entry reads as.
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            4,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            0.0,
+        ),
     ];
 
     let mut live = Rig::new(&document);
@@ -3396,12 +3508,23 @@ fn bypass_edit(
     effect_id: &str,
     bypass: bool,
 ) -> SessionEdit {
-    SessionEdit::SetEffectBypass {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        rack_name,
-        effect_id: StableId::parse(effect_id).expect("effect ID"),
-        bypass,
-    }
+    let effect = StableId::parse(effect_id).expect("effect ID");
+    let section = match rack_name {
+        session::RackName::Console => protocol::control_core::Section::Console(effect),
+        _ => protocol::control_core::Section::Inserts(effect),
+    };
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: protocol::control_core::BYPASS_CONTROL,
+            lane: protocol::control_core::Lane::Both,
+        },
+        f32::from(u8::from(bypass)),
+        None,
+    )
 }
 
 /// #1266 gate 2 for one session: bypass the first track's compressor insert and the last track's
@@ -4372,11 +4495,10 @@ fn a_structural_commit_advances_the_epoch_and_a_value_only_rebuild_keeps_it() {
     builtins.left.delay_samples = 4;
     builtins.right.delay_samples = 4;
     assert_eq!(
-        rig.apply(&[SessionEdit::SetTrackBuiltins {
-            track_id: model.tracks[0].id.clone(),
-            builtins,
-            ramp_samples: None,
-        }]),
+        rig.apply(&protocol::control_core::builtins_edits(
+            &model.tracks[0].id,
+            &builtins
+        )),
         crate::RESULT_OK
     );
     assert_eq!(rig.summary().3, 1, "a delay rebuilds");
@@ -4459,17 +4581,16 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
         panic!("the fixture's tracks pan");
     };
     assert_eq!(
-        rig.apply(&[SessionEdit::SetTrackMatrixOrPan {
-            track_id: model.tracks[0].id.clone(),
-            matrix_or_pan: MatrixOrPan::Matrix {
+        rig.apply(&matrix_edit(
+            &model.tracks[0].id,
+            MatrixOrPan::Matrix {
                 ll: 1.0,
                 lr: 0.0,
                 rl: 0.0,
                 rr: 1.0,
                 smoothing_samples,
             },
-            ramp_samples: None,
-        }]),
+        )),
         crate::RESULT_OK
     );
     assert_eq!(rig.summary().3, 0, "a mode switch is live");
@@ -4519,7 +4640,6 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
 mod set_control {
     use super::*;
     use protocol::control_core::{ControlAddress, Lane, Owner, Section};
-    use session::{ParameterChannel, ParameterUnit, RackName};
 
     /// The builtin IDs the addresses name (`BUILTIN_PARAMETER_DESCRIPTORS`).
     const POLARITY_INVERT: u32 = 1;
@@ -4593,14 +4713,15 @@ mod set_control {
         model
     }
 
-    /// Two rigs of one document: one takes `by_address`, the other `per_kind`. Both commit one
-    /// revision with the plan epoch unchanged and no candidate, and their next 8 blocks are
-    /// bit-identical, and differ from an untouched third rig (the edit is heard). Returns the 8
-    /// blocks.
+    /// Two rigs of one document: one takes `by_row`, the edits of the rows that change, the other
+    /// `whole`, the same change written as the whole fader, pan or matrix that holds it (every
+    /// row of the struct, the unchanged ones at their committed values). Both commit one revision
+    /// with the plan epoch unchanged and no candidate, and their next 8 blocks are bit-identical,
+    /// and differ from an untouched third rig (the edit is heard). Returns the 8 blocks.
     fn live_twin(
         document: &str,
-        by_address: &[SessionEdit],
-        per_kind: &[SessionEdit],
+        by_row: &[SessionEdit],
+        whole: &[SessionEdit],
         label: &str,
     ) -> Vec<Vec<f32>> {
         let mut address = Rig::new(document);
@@ -4612,8 +4733,8 @@ mod set_control {
             assert_eq!(bits(&kind.step()), expected, "{label}: warm-up {block}");
         }
         let (revision, _, epoch, _) = address.summary();
-        assert_eq!(address.apply(by_address), crate::RESULT_OK, "{label}");
-        assert_eq!(kind.apply(per_kind), crate::RESULT_OK, "{label}");
+        assert_eq!(address.apply(by_row), crate::RESULT_OK, "{label}");
+        assert_eq!(kind.apply(whole), crate::RESULT_OK, "{label}");
         for rig in [&address, &kind] {
             let (after, _, after_epoch, pending) = rig.summary();
             assert_eq!(
@@ -4639,15 +4760,42 @@ mod set_control {
         blocks
     }
 
-    /// Gate 1: each value the old classifier makes live is as live through `SET_CONTROL`, and
-    /// renders the bits of the per-kind edit on a second rig.
+    /// One rig of one document takes `edits`: one revision, the plan epoch unchanged, no candidate,
+    /// and the next blocks are heard to differ from an untouched second rig. The effect rows'
+    /// render bits are pinned against the browser's lane by
+    /// `live_effect_parameter_edits_render_like_the_browsers_lane` and
+    /// `live_effect_bypass_edits_render_like_a_rebuild`.
+    fn live_alone(document: &str, edits: &[SessionEdit], label: &str) {
+        let mut rig = Rig::new(document);
+        let mut untouched = Rig::new(document);
+        for block in 0..window(rig.latency(), 0, rig.quantum) {
+            assert_eq!(
+                bits(&rig.step()),
+                bits(&untouched.step()),
+                "{label}: warm-up {block}"
+            );
+        }
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(rig.apply(edits), crate::RESULT_OK, "{label}");
+        let (after, _, after_epoch, pending) = rig.summary();
+        assert_eq!(
+            (after, after_epoch, pending),
+            (revision + 1, epoch, 0),
+            "{label}: one revision, the same plan, no candidate"
+        );
+        let heard = (0..8).any(|_| bits(&rig.step()) != bits(&untouched.step()));
+        assert!(heard, "{label}: the edit changes the output");
+    }
+
+    /// Gate 1: each value the classifier makes live is live through `SET_CONTROL`, and a write of
+    /// its one row renders the bits of the same change written as the whole struct that holds it.
     ///
-    /// Red if `SET_CONTROL` writes a different field, lane or value than the per-kind op (the
-    /// left lane for a both-lane write, the mute in place of the fader, a matrix coefficient
-    /// written without its mode switch), or reaches the plan through a path the per-kind op does
+    /// Red if a row write touches another field, lane or value than the one it names (the left
+    /// lane for a both-lane write, the mute in place of the fader, a matrix coefficient written
+    /// without its mode switch), or reaches the plan through a path the whole-struct write does
     /// not.
     #[test]
-    fn a_set_control_on_a_live_value_is_live_and_renders_like_the_per_kind_edit() {
+    fn a_set_control_on_a_live_value_is_live_and_renders_like_the_whole_struct_write() {
         let document = long_session(10, 48_000);
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
@@ -4662,32 +4810,32 @@ mod set_control {
         live_twin(
             &document,
             &[set(builtin(name, FADER_DB, Lane::Left), -6.0, None)],
-            &[fader_edit(
+            &fader_edit(
                 name,
                 DualMonoFader {
                     left_db: -6.0,
                     ..track.fader.clone()
                 },
-            )],
+            ),
             "fader, left lane",
         );
         live_twin(
             &document,
             &[set(builtin(name, FADER_DB, Lane::Both), -3.0, None)],
-            &[fader_edit(name, fader(-3.0, -3.0, false))],
+            &fader_edit(name, fader(-3.0, -3.0, false)),
             "fader, both lanes",
         );
         live_twin(
             &document,
             &[set(builtin(name, MUTE, Lane::Both), 1.0, None)],
-            &[fader_edit(
+            &fader_edit(
                 name,
                 DualMonoFader {
                     left_mute: true,
                     right_mute: true,
                     ..track.fader.clone()
                 },
-            )],
+            ),
             "mute",
         );
 
@@ -4698,11 +4846,7 @@ mod set_control {
         live_twin(
             &document,
             &[pan_edit],
-            &[SessionEdit::SetTrackMatrixOrPan {
-                track_id: id(name),
-                matrix_or_pan: panned,
-                ramp_samples: None,
-            }],
+            &matrix_edit(&id(name), panned),
             "pan",
         );
 
@@ -4716,11 +4860,7 @@ mod set_control {
         live_twin(
             &document,
             &matrix,
-            &[SessionEdit::SetTrackMatrixOrPan {
-                track_id: id(name),
-                matrix_or_pan: switched,
-                ramp_samples: None,
-            }],
+            &matrix_edit(&id(name), switched),
             "matrix after a mode switch",
         );
 
@@ -4729,60 +4869,26 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let first = model.tracks[0].id.as_str();
         let last = model.tracks[model.tracks.len() - 1].id.as_str();
-        live_twin(
+        live_alone(
             &document,
             &[
                 set(insert(first, "comp", 1, Lane::Left), -30.0, None),
                 set(insert(first, "comp", 6, Lane::Both), 6.0, None),
                 set(console(last, "clip", 1, Lane::Both), 12.0, None),
             ],
-            &[
-                upsert(
-                    first,
-                    RackName::Inserts,
-                    "comp",
-                    1,
-                    ParameterChannel::Left,
-                    ParameterUnit::Db,
-                    -30.0,
-                ),
-                upsert(
-                    first,
-                    RackName::Inserts,
-                    "comp",
-                    6,
-                    ParameterChannel::Both,
-                    ParameterUnit::Db,
-                    6.0,
-                ),
-                upsert(
-                    last,
-                    RackName::Console,
-                    "clip",
-                    1,
-                    ParameterChannel::Both,
-                    ParameterUnit::Db,
-                    12.0,
-                ),
-            ],
             "effect parameters",
         );
-        live_twin(
+        live_alone(
             &document,
             &[
                 set(insert(first, "comp", 0, Lane::Both), 1.0, None),
                 set(console(last, "clip", 0, Lane::Both), 1.0, None),
             ],
-            &[
-                bypass_edit(first, RackName::Inserts, "comp", true),
-                bypass_edit(last, RackName::Console, "clip", true),
-            ],
             "effect bypass",
         );
     }
 
-    /// Gate 2: a value the old classifier leaves to a rebuild is a rebuild through `SET_CONTROL`,
-    /// exactly as the per-kind op is.
+    /// Gate 2: a value the classifier leaves to a rebuild is a rebuild through `SET_CONTROL`.
     ///
     /// Red if a rebuild-only value is acked as live (a candidate not prepared, a cell written).
     #[test]
@@ -4791,75 +4897,61 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
-        let builtins = |change: &dyn Fn(&mut session::ChannelBuiltins)| {
-            let mut builtins = track.builtins.clone();
-            change(&mut builtins.left);
-            change(&mut builtins.right);
-            SessionEdit::SetTrackBuiltins {
-                track_id: id(name),
-                builtins,
-                ramp_samples: None,
-            }
-        };
-        let by_address = set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None);
-        let per_kind = builtins(&|lane| lane.delay_samples = 64);
         assert_rebuilds(
             &document,
-            core::slice::from_ref(&by_address),
+            &[set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None)],
             "delay by address",
         );
+        // The whole builtin section with the same delay is the same rebuild.
+        let mut builtins = track.builtins.clone();
+        builtins.left.delay_samples = 64;
+        builtins.right.delay_samples = 64;
         assert_rebuilds(
             &document,
-            core::slice::from_ref(&per_kind),
-            "delay per kind",
+            &protocol::control_core::builtins_edits(&track.id, &builtins),
+            "delay in the whole builtin section",
         );
         let route_id = model.routes[0].id.clone();
         assert_rebuilds(
             &document,
             &[set(
-                address(Owner::Route(route_id.clone()), Section::Own, 1, Lane::Both),
+                address(Owner::Route(route_id), Section::Own, 1, Lane::Both),
                 -6.0,
                 None,
             )],
             "send gain by address",
         );
-        assert_rebuilds(
-            &document,
-            &[SessionEdit::SetRouteGainDb {
-                route_id,
-                gain_db: -6.0,
-                ramp_samples: None,
-            }],
-            "send gain per kind",
-        );
     }
 
-    /// Gate 3: the ramp of an address edit is the per-kind edit's. Absent, 0 and 480 are the
-    /// session default, a step and 480 samples, and are three different renders.
+    /// Gate 3: the ramp of a row edit is the ramp of the same change written as the whole fader.
+    /// Absent, 0 and 480 are the session default, a step and 480 samples, and are three different
+    /// renders.
     ///
     /// Red if an absent ramp is read as 0 or 480 is ignored, or the length is applied to another
     /// row.
     #[test]
-    fn a_set_control_ramp_is_the_per_kind_ramp() {
+    fn a_set_control_ramp_is_the_whole_struct_ramp() {
         let document = long_session(10, 48_000);
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
         let mut renders = Vec::new();
         for ramp in [None, Some(0), Some(480)] {
-            let per_kind = SessionEdit::SetTrackFader {
-                track_id: id(name),
-                fader: DualMonoFader {
-                    left_db: -12.0,
-                    right_db: -12.0,
-                    ..track.fader.clone()
-                },
-                ramp_samples: ramp,
-            };
+            let whole = with_ramp(
+                fader_edit(
+                    name,
+                    DualMonoFader {
+                        left_db: -12.0,
+                        right_db: -12.0,
+                        ..track.fader.clone()
+                    },
+                ),
+                ramp,
+            );
             renders.push(live_twin(
                 &document,
                 &[set(builtin(name, FADER_DB, Lane::Both), -12.0, ramp)],
-                &[per_kind],
+                &whole,
                 &format!("fader ramp {ramp:?}"),
             ));
         }
@@ -5273,7 +5365,10 @@ mod set_control {
     }
 
     /// The status and the `(code, operation index)` of each diagnostic of a refused transaction.
-    fn refusal(rig: &mut Rig, edits: &[SessionEdit]) -> (protocol::StatusCode, Vec<(String, u32)>) {
+    pub(super) fn refusal(
+        rig: &mut Rig,
+        edits: &[SessionEdit],
+    ) -> (protocol::StatusCode, Vec<(String, u32)>) {
         let bytes = rig.transaction(edits);
         let (result, response) = command_c(rig.session, &bytes);
         assert_eq!(result, crate::RESULT_OK, "a protocol refusal is RESULT_OK");
@@ -5302,8 +5397,9 @@ mod set_control {
     }
 
     /// Gates 3 and 4: a bad write is refused with its control code at its edit, before anything
-    /// changes, and a good edit beside it does not commit. Every `ControlError` code is produced
-    /// once through the frame path, and a ramp the row cannot honour or above the rate is refused.
+    /// changes, and a good edit beside it does not commit. Every `ControlError` code but
+    /// `control.monitor` (a solo is a monitor write now, #1559) is produced once through the frame
+    /// path, and a ramp the row cannot honour or above the rate is refused.
     ///
     /// Red if one bad edit lets a good edit of the same transaction commit (the revision, the
     /// model, a cell or the next block moves), if a fixed-ramp row silently ignores a length, or
@@ -5391,12 +5487,6 @@ mod set_control {
                 ],
                 "control.ramp.fixed",
                 1,
-            ),
-            (
-                "monitor",
-                vec![set(own(name, SOLO, Lane::Both), 1.0, None)],
-                "control.monitor",
-                0,
             ),
             (
                 "ramp above the rate",
@@ -6484,10 +6574,14 @@ mod set_control {
         let same_size = [set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -3.0, None)];
         let catalog_bytes = |document: &str| {
             let model = parse_session_json(document).expect("model");
-            host_core::ControlCatalog::build(&model, model.sample_rate_hz)
-                .expect("catalog")
-                .resources()
-                .retained_bytes
+            host_core::ControlCatalog::build(
+                &model,
+                &protocol::control_core::MonitorOverlay::default(),
+                model.sample_rate_hz,
+            )
+            .expect("catalog")
+            .resources()
+            .retained_bytes
         };
         let growth = catalog_bytes(&grown) - catalog_bytes(&document);
         assert!(growth > 0, "the added VCAs add catalog bytes");
@@ -6564,5 +6658,694 @@ mod set_control {
         rig.step();
         assert_eq!(rig.apply(&adds), crate::RESULT_OK);
         assert_eq!(rig.apply(&same_size), crate::RESULT_OK);
+    }
+
+    // ---- Solo (#1559): a monitor write through the core's overlay -----------------------------
+
+    fn solo_edit(strip: &str, on: bool, ramp: Option<u32>) -> SessionEdit {
+        set(own(strip, SOLO, Lane::Both), f32::from(u8::from(on)), ramp)
+    }
+
+    /// [`stateless_bus_document`] with `eq0`'s send into the bus pre-fader and following its mute,
+    /// and a second send from `eq1` into the bus, post-fader and following. A solo on `eq1`
+    /// mutes `eq0` and closes the send it feeds, while `eq1` and the bus stay audible.
+    fn solo_document() -> String {
+        with_model(&stateless_bus_document(), |model| {
+            let mut other = model
+                .routes
+                .iter()
+                .find(|route| route.id == id("eq0-bus"))
+                .expect("the send")
+                .clone();
+            for route in model.routes.iter_mut().filter(|r| r.id == id("eq0-bus")) {
+                route.follows_mute = true;
+                if let RouteSource::Track { tap, .. } = &mut route.source {
+                    *tap = session::SendTap::PreFader;
+                }
+            }
+            other.id = id("eq1-bus");
+            other.follows_mute = true;
+            other.source = RouteSource::Track {
+                track_id: id("eq1"),
+                tap: session::SendTap::PostFader,
+            };
+            model.routes.push(other);
+        })
+    }
+
+    /// `document` with every track but `soloed` muted: the committed session that a solo of
+    /// `soloed` is equivalent to, once the mutes have ramped.
+    fn muted_but(document: &str, soloed: &[&str]) -> String {
+        with_model(document, |model| {
+            for track in &mut model.tracks {
+                if !soloed.contains(&track.id.as_str()) {
+                    track.fader.left_mute = true;
+                    track.fader.right_mute = true;
+                }
+            }
+        })
+    }
+
+    /// The revision a success response frame carries.
+    fn response_revision(response: &[u8]) -> u64 {
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+            .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+            .expect("transaction response")
+        else {
+            panic!("expected a success")
+        };
+        header.revision.0
+    }
+
+    /// The value `CONTROL_STATE_GET` reports for strip `strip`'s solo row, and the structure epoch.
+    fn solo_state(rig: &mut Rig, strip: &str) -> (f32, u64) {
+        let (entries, epoch, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+        let handle = entries
+            .iter()
+            .find(|entry| {
+                entry.address.owner_id.as_deref() == Some(strip)
+                    && entry.address.section == protocol::ControlSection::Own
+                    && control_of(entry).is_some_and(|row| row.name == "solo")
+            })
+            .expect("the solo row")
+            .handle;
+        let value = control_state_all_c(rig.session, &mut rig.request, 256)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == handle)
+            .map(|(_, bits)| f32::from_bits(bits))
+            .expect("the solo row has a value");
+        (value, epoch)
+    }
+
+    /// Gate 1, 6 and 7 (#1559): a solo is a monitor write. The reply is `monitor` at the committed
+    /// revision, the plan and the snapshot stay, no `SESSION_COMMITTED` follows, an exact replay
+    /// returns the same bytes and writes no cell, the list shows the solo, and from the block the
+    /// mute ramp leaves behind the output is that of the plan prepared with every other track
+    /// muted: the other tracks mute, the send they feed closes, and the bus (solo-safe) stays.
+    /// An unsolo returns the unsoloed plan's bits. No render block allocates or frees.
+    ///
+    /// Red if the live solo composes differently from preparation, mutes a solo-safe submix,
+    /// leaves a following send open, advances the revision or the epoch, or re-applies a replay.
+    #[test]
+    fn a_solo_is_a_monitor_write_that_renders_the_prepared_plan_bits() {
+        bench_support::alloc::assert_installed();
+        let document = solo_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, _, epoch, pending) = rig.summary();
+        let snapshot = rig.snapshot();
+        let (listed, structure_epoch) = solo_state(&mut rig, "eq1");
+        assert_eq!(listed, 0.0);
+        let cells = rig.current_cells();
+        let routes = rig.current_route_cells();
+
+        let bytes = rig.transaction(&[solo_edit("eq1", true, None)]);
+        let (result, first) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&first), protocol::EditPath::Monitor);
+        assert_eq!(response_revision(&first), revision, "no new revision");
+        assert_eq!(
+            (rig.summary().0, rig.summary().2, rig.summary().3),
+            (revision, epoch, pending),
+            "the model, the plan epoch and the candidate are as they were"
+        );
+        assert_eq!(
+            reliable_event_kinds(&rig),
+            Vec::<&str>::new(),
+            "a monitor write is not a session change"
+        );
+        // An exact replay (before any newer request, which would expire it): the same bytes, and
+        // no cell is written.
+        let written = (rig.current_cells(), rig.current_route_cells());
+        let (result, replay) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(replay, first, "the replay is the first response");
+        assert_eq!((rig.current_cells(), rig.current_route_cells()), written);
+        assert_eq!(reliable_event_kinds(&rig), Vec::<&str>::new());
+        assert_eq!(rig.snapshot(), snapshot, "a solo is never saved");
+        assert_eq!(solo_state(&mut rig, "eq1"), (1.0, structure_epoch));
+        assert_eq!(solo_state(&mut rig, "eq0").0, 0.0);
+        assert_ne!(
+            rig.current_cells(),
+            cells,
+            "the other tracks' mutes were written"
+        );
+        assert_ne!(
+            rig.current_route_cells(),
+            routes,
+            "the send's gate was written"
+        );
+        let soloed = muted_but(&document, &["eq1"]);
+        let k = window(rig.latency(), ramp, rig.quantum);
+        let edit_block = rig.block;
+        let mut live = Vec::new();
+        for _ in 0..k + 4 {
+            let (pcm, used) = rig.step_counted();
+            assert_eq!(
+                (used.allocations, used.deallocations),
+                (0, 0),
+                "a render block allocated or freed"
+            );
+            live.push(pcm);
+        }
+        let prepared = Reference::run(&soloed, rig.block);
+        let unsoloed = Reference::run(&document, rig.block);
+        let mut heard = false;
+        for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+            let block = edit_block as usize + offset;
+            assert!(pcm.iter().any(|sample| *sample != 0.0), "signal");
+            assert_eq!(bits(pcm), bits(&prepared[block]), "block {block}");
+            heard |= bits(pcm) != bits(&unsoloed[block]);
+        }
+        assert!(heard, "the solo is heard");
+
+        // Unsolo: back to the unsoloed plan's bits.
+        let unsolo = rig.transaction(&[solo_edit("eq1", false, None)]);
+        let (result, response) = rig.send(&unsolo);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&response), protocol::EditPath::Monitor);
+        assert_eq!(solo_state(&mut rig, "eq1").0, 0.0);
+        let edit_block = rig.block;
+        let mut back = Vec::new();
+        for _ in 0..k + 4 {
+            back.push(rig.step());
+        }
+        let unsoloed = Reference::run(&document, rig.block);
+        for (offset, pcm) in back.iter().enumerate().skip(k as usize) {
+            let block = edit_block as usize + offset;
+            assert_eq!(bits(pcm), bits(&unsoloed[block]), "unsolo, block {block}");
+        }
+        assert_eq!((rig.summary().0, rig.summary().2), (revision, epoch));
+    }
+
+    /// The edits that add an unmuted track `name`, a copy of `eq0`, with a route to the output.
+    fn added_track(model: &SessionModel, name: &str) -> [SessionEdit; 2] {
+        let mut track = model.tracks[0].clone();
+        track.id = id(name);
+        let mut route = model
+            .routes
+            .iter()
+            .find(|route| route.id == id("eq0-main"))
+            .expect("eq0's route to the output")
+            .clone();
+        route.id = id(&format!("{name}-main"));
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        [
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ]
+    }
+
+    /// Renders until the pending candidate (if any) is adopted and its ramps and latency have
+    /// passed, then `compared` more blocks; returns those and the index of the first.
+    fn run_to_settled(rig: &mut Rig, ramp: u32, compared: u64) -> (Vec<Vec<f32>>, u64) {
+        let mut guard = 0;
+        while rig.summary().3 != 0 {
+            rig.step();
+            guard += 1;
+            assert!(guard < 16, "the candidate is adopted");
+        }
+        for _ in 0..window(rig.latency(), ramp, rig.quantum) {
+            rig.step();
+        }
+        let first = rig.block;
+        ((0..compared).map(|_| rig.step()).collect(), first)
+    }
+
+    /// One stage of [`structural_script`]: its settled blocks, the first block's index and the
+    /// committed session.
+    type Stage = (Vec<Vec<f32>>, u64, String);
+
+    /// The stages of the structural script of [`a_structural_commit_keeps_the_solo_and_a_removed_strip_drops_it`]
+    /// on one rig: `eq1` soloed first when `solo`, then a track added, `eq1` removed, and a track
+    /// named `eq1` added. Each stage's settled blocks and first block index come back with the
+    /// rig's committed session.
+    fn structural_script(document: &str, ramp: u32, solo: bool) -> (Vec<Stage>, Rig) {
+        let model = parse_session_json(document).expect("model");
+        let mut rig = Rig::new(document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        if solo {
+            assert_eq!(rig.apply(&[solo_edit("eq1", true, None)]), crate::RESULT_OK);
+        }
+        for _ in 0..window(rig.latency(), ramp, rig.quantum) {
+            rig.step();
+        }
+        let mut stages = Vec::new();
+        let mut stage = |rig: &mut Rig, edits: &[SessionEdit]| {
+            let bytes = rig.transaction(edits);
+            let (result, response) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK);
+            assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+            let (blocks, first) = run_to_settled(rig, ramp, 4);
+            stages.push((blocks, first, rig.snapshot()));
+        };
+        stage(&mut rig, &added_track(&model, "added"));
+        stage(
+            &mut rig,
+            &[
+                SessionEdit::RemoveRoute {
+                    route_id: id("eq1-bus"),
+                },
+                SessionEdit::RemoveRoute {
+                    route_id: id("eq1-main"),
+                },
+                SessionEdit::RemoveTrack {
+                    track_id: id("eq1"),
+                },
+            ],
+        );
+        let reborn = added_track(&rig.model(), "eq1");
+        stage(&mut rig, &reborn);
+        (stages, rig)
+    }
+
+    /// Gate 2 (#1559): a structural commit keeps the solo. With `eq1` soloed, a track added by a
+    /// rebuild is solo-muted from the successor's first block and `eq1` stays audible, as in a
+    /// fresh plan prepared with the same overlay; removing `eq1` drops its entry, so every track is
+    /// audible again (the blocks are those of a rig that never soloed), and a new strip named
+    /// `eq1` is not soloed. A solo spends no revision number (#1603): the three rebuilds after it
+    /// are the next three revisions.
+    ///
+    /// Red if a rebuild drops the overlay, keeps an entry for a removed strip, or leaves a new
+    /// strip audible beside a soloed one.
+    #[test]
+    fn a_structural_commit_keeps_the_solo_and_a_removed_strip_drops_it() {
+        let document = solo_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let (soloed, mut rig) = structural_script(&document, ramp, true);
+        let (plain, _) = structural_script(&document, ramp, false);
+
+        // The first rebuild: the solo survives, the added track is solo-muted, and the rebuilt
+        // plan renders the bits of a fresh plan with the same overlay.
+        let (blocks, first, committed) = &soloed[0];
+        let prepared = Reference::run(&muted_but(committed, &["eq1"]), first + 4);
+        for (offset, pcm) in blocks.iter().enumerate() {
+            let block = *first as usize + offset;
+            assert!(pcm.iter().any(|sample| *sample != 0.0), "signal");
+            assert_eq!(
+                bits(pcm),
+                bits(&prepared[block]),
+                "added track, block {block}"
+            );
+        }
+        // Gone with the strip; and the strip that takes its name later is not soloed.
+        for (stage, (a, _, _)) in soloed.iter().enumerate().skip(1) {
+            assert_eq!(
+                a.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+                plain[stage]
+                    .0
+                    .iter()
+                    .map(|pcm| bits(pcm))
+                    .collect::<Vec<_>>(),
+                "stage {stage}: every track is audible, as on a rig that never soloed"
+            );
+        }
+        assert_eq!(solo_state(&mut rig, "eq1").0, 0.0);
+        assert_eq!(solo_state(&mut rig, "eq0").0, 0.0);
+        // The solo took no revision number; the three rebuilds are consecutive after the boot
+        // revision.
+        assert_eq!(
+            rig.summary().0,
+            parse_session_json(&document).expect("model").revision + 3
+        );
+    }
+
+    /// #1603 (#1559 D4): a solo spends no revision number. Solos between two model commits leave
+    /// the committed revisions dense (committed `r`, solos, the next commit `r + 1`, a rebuild
+    /// `r + 2`), the applied watermark never reads a revision above the committed one, its exact
+    /// count is one per model revision, and a rebuild after the solos keeps the solo: the
+    /// successor renders the bits of a plan prepared with every other track muted.
+    ///
+    /// Red if a solo's records consume a gate revision (the next commit skips a number or the
+    /// watermark passes the committed revision), if a solo moves the exact count, or if a
+    /// successor is swapped in without the solo it replaces.
+    #[test]
+    fn a_solo_spends_no_revision_and_a_rebuild_after_it_keeps_it() {
+        let document = solo_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let initial = rig.summary().0;
+        // Committed `revision`, the watermark's applied revision and its exact count, after two
+        // blocks that give the plan its chance to apply anything pending.
+        let settled = |rig: &mut Rig, revision: u64| {
+            rig.step();
+            rig.step();
+            assert_eq!(rig.summary().0, revision, "the committed revision");
+            let (applied, _, flags, exact) = watermark(rig);
+            assert_eq!(applied, revision, "the watermark is the committed revision");
+            assert_eq!(flags, crate::OUTCOME_EXACT);
+            assert_eq!(
+                exact,
+                revision - initial,
+                "one exact revision per model commit"
+            );
+        };
+        let revision_of = |rig: &mut Rig, edits: &[SessionEdit]| {
+            let bytes = rig.transaction(edits);
+            let (result, response) = command_c(rig.session, &bytes);
+            assert_eq!(result, crate::RESULT_OK);
+            response_revision(&response)
+        };
+
+        // Solos, then a model commit: the commit is `r + 1`.
+        assert_eq!(
+            revision_of(&mut rig, &[solo_edit("eq1", true, None)]),
+            initial
+        );
+        settled(&mut rig, initial);
+        assert_eq!(
+            revision_of(&mut rig, &[solo_edit("eq1", false, None)]),
+            initial
+        );
+        settled(&mut rig, initial);
+        let live = revision_of(
+            &mut rig,
+            &[set(builtin("eq0", FADER_DB, Lane::Both), -4.0, None)],
+        );
+        assert_eq!(live, initial + 1, "no number was spent by the solos");
+        settled(&mut rig, initial + 1);
+
+        // Many solos, each on a block of its own, never move the watermark past the commit.
+        for round in 0..9 {
+            let on = round % 2 == 0;
+            assert_eq!(
+                revision_of(&mut rig, &[solo_edit("eq1", on, None)]),
+                initial + 1
+            );
+            settled(&mut rig, initial + 1);
+        }
+        assert_eq!(
+            solo_state(&mut rig, "eq1").0,
+            1.0,
+            "the run ends soloing eq1"
+        );
+
+        // A rebuild is the next revision again, and the successor keeps the solo.
+        let added = added_track(&rig.model(), "added");
+        let bytes = rig.transaction(&added);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+        assert_eq!(response_revision(&response), initial + 2);
+        let (blocks, first) = run_to_settled(&mut rig, ramp, 4);
+        assert_eq!(rig.summary().0, initial + 2);
+        let (applied, _, _, exact) = watermark(&rig);
+        assert_eq!((applied, exact), (initial + 2, 2));
+        assert_eq!(solo_state(&mut rig, "eq1").0, 1.0);
+        let committed = rig.snapshot();
+        let prepared = Reference::run(&muted_but(&committed, &["eq1"]), first + 4);
+        for (offset, pcm) in blocks.iter().enumerate() {
+            let block = first as usize + offset;
+            assert!(pcm.iter().any(|sample| *sample != 0.0), "signal");
+            assert_eq!(bits(pcm), bits(&prepared[block]), "rebuilt, block {block}");
+        }
+    }
+
+    /// Two rigs of `document`, one taking `solo_edits` and one `mute_edits` (the mutes that the
+    /// solo is equivalent to), each in one transaction after the same warm-up. Their next 12
+    /// blocks are bit-identical, ramp included. Returns the blocks.
+    fn solo_twin(
+        document: &str,
+        solo_edits: &[SessionEdit],
+        mute_edits: &[SessionEdit],
+        label: &str,
+    ) -> Vec<Vec<f32>> {
+        let mut solo = Rig::new(document);
+        let mut mutes = Rig::new(document);
+        for block in 0..4 {
+            assert_eq!(
+                bits(&solo.step()),
+                bits(&mutes.step()),
+                "{label}: warm-up {block}"
+            );
+        }
+        assert_eq!(solo.apply(solo_edits), crate::RESULT_OK, "{label}");
+        assert_eq!(mutes.apply(mute_edits), crate::RESULT_OK, "{label}");
+        let mut blocks = Vec::new();
+        for block in 0..12 {
+            let heard = solo.step();
+            assert!(heard.iter().any(|sample| *sample != 0.0), "{label}: signal");
+            assert_eq!(bits(&heard), bits(&mutes.step()), "{label}: block {block}");
+            blocks.push(heard);
+        }
+        blocks
+    }
+
+    /// `muted(r)` mutes every track of the 10-track session but `eq1`, as a solo of `eq1` does,
+    /// with `ramp` as each edit's own length.
+    fn mutes_but_eq1(except: &[&str], ramp: Option<u32>) -> Vec<SessionEdit> {
+        (0..10)
+            .map(|index| format!("eq{index}"))
+            .filter(|name| name != "eq1" && !except.contains(&name.as_str()))
+            .map(|name| set(builtin(&name, MUTE, Lane::Both), 1.0, ramp))
+            .collect()
+    }
+
+    /// Gate 4 (#1559): a solo's records ramp over `mute_ms` when it gives no length (and not over
+    /// `fader_ms` or `pan_ms`), step with 0, and take 480 when it says 480; and a record that a
+    /// model edit of the same transaction also produced takes the model edit's length. Each case
+    /// renders the bits of the per-kind mutes on a twin rig, ramp blocks included.
+    ///
+    /// Red if solo resolves its default from another key, drops its own length, or lets its length
+    /// override the model edit's.
+    #[test]
+    fn a_solo_takes_the_mute_ramp_and_a_model_edits_ramp_wins() {
+        let document = with_model(&solo_document(), |model| {
+            model.control_smoothing = Some(ControlSmoothing {
+                mute_ms: 4.0,
+                fader_ms: 30.0,
+                pan_ms: 50.0,
+            });
+        });
+        let absent = solo_twin(
+            &document,
+            &[solo_edit("eq1", true, None)],
+            &mutes_but_eq1(&[], None),
+            "no ramp: mute_ms",
+        );
+        let step = solo_twin(
+            &document,
+            &[solo_edit("eq1", true, Some(0))],
+            &mutes_but_eq1(&[], Some(0)),
+            "ramp 0: a step",
+        );
+        let long = solo_twin(
+            &document,
+            &[solo_edit("eq1", true, Some(480))],
+            &mutes_but_eq1(&[], Some(480)),
+            "ramp 480",
+        );
+        for (one, other, label) in [
+            (&absent, &step, "mute_ms against a step"),
+            (&absent, &long, "mute_ms against 480"),
+            (&step, &long, "a step against 480"),
+        ] {
+            assert_ne!(
+                one.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+                other.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+                "{label}: the ramps differ, so the comparison is not vacuous"
+            );
+        }
+        // eq0's own mute, with 0, beside the solo with 480: eq0 steps, the others ramp 480.
+        let mixed = solo_twin(
+            &document,
+            &[
+                set(builtin("eq0", MUTE, Lane::Both), 1.0, Some(0)),
+                solo_edit("eq1", true, Some(480)),
+            ],
+            &[
+                vec![set(builtin("eq0", MUTE, Lane::Both), 1.0, Some(0))],
+                mutes_but_eq1(&["eq0"], Some(480)),
+            ]
+            .concat(),
+            "a model edit and a solo",
+        );
+        assert_ne!(
+            mixed.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            long.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            "eq0's step is heard"
+        );
+    }
+
+    /// Gates 3 and 5 (#1559): a transaction of a VCA move, a solo and a pan out of domain is
+    /// refused with the pan's `control.domain` at its edit, and the model, the revision, the
+    /// overlay, the cells and the next 8 blocks are as without the call. A solo on a submix is
+    /// `control.address.unknown`, on one lane `control.lane`, with `0.5` `control.domain`, and
+    /// `controls::set` on the row is `control.monitor`; each changes nothing.
+    ///
+    /// Red if the overlay commits while the model refuses, if a submix becomes soloable, or if a
+    /// malformed solo is accepted.
+    #[test]
+    fn a_refused_transaction_leaves_the_overlay_with_the_model() {
+        let document = with_model(&solo_document(), |model| {
+            model.vcas.push(vca_of("inner", &["eq0"]));
+        });
+        let mut rig = Rig::new(&document);
+        let untouched = Reference::run(&document, 64);
+        for (block, expected) in untouched.iter().enumerate().take(4) {
+            assert_eq!(bits(&rig.step()), bits(expected), "warm-up {block}");
+        }
+        let validation = protocol::StatusCode::ValidationFailed;
+        let before = refusal_state(&rig);
+        let cells = rig.current_cells();
+        let routes = rig.current_route_cells();
+        let cases: [(&str, Vec<SessionEdit>, &str, u32); 5] = [
+            (
+                "a VCA move, a solo and a pan out of domain",
+                vec![
+                    set(vca_row("inner", VCA_OFFSET_DB, Lane::Both), -6.0, None),
+                    solo_edit("eq1", true, None),
+                    set(builtin("eq2", PAN, Lane::Both), 7.0, None),
+                ],
+                "control.domain",
+                2,
+            ),
+            (
+                "a submix has no solo",
+                vec![solo_edit("bus", true, None)],
+                "control.address.unknown",
+                0,
+            ),
+            (
+                "one lane",
+                vec![set(own("eq1", SOLO, Lane::Left), 1.0, None)],
+                "control.lane",
+                0,
+            ),
+            (
+                "a value between",
+                vec![set(own("eq1", SOLO, Lane::Both), 0.5, None)],
+                "control.domain",
+                0,
+            ),
+            (
+                "a ramp above the rate",
+                vec![solo_edit("eq1", true, Some(48_001))],
+                "session.edit.ramp_out_of_range",
+                0,
+            ),
+        ];
+        for (label, edits, code, index) in cases {
+            assert_eq!(
+                refusal(&mut rig, &edits),
+                (validation, vec![(code.to_owned(), index)]),
+                "{label}"
+            );
+            assert_eq!(refusal_state(&rig).0, before.0, "{label}: the revision");
+            assert_eq!(refusal_state(&rig).1, before.1, "{label}: the model");
+            assert_eq!(solo_state(&mut rig, "eq1").0, 0.0, "{label}: the overlay");
+            assert_eq!(rig.current_cells(), cells, "{label}: the strip cells");
+            assert_eq!(
+                rig.current_route_cells(),
+                routes,
+                "{label}: the route cells"
+            );
+            assert_eq!(rig.summary().3, 0, "{label}: no candidate");
+        }
+        // The model write refuses the row, whatever transport reaches it (`controls::set` has the
+        // same test in its own crate).
+        let mut model = parse_session_json(&document).expect("model");
+        assert_eq!(
+            protocol::apply_session_edit(&mut model, &solo_edit("eq1", true, None)),
+            Err(protocol::SessionEditError::Control(
+                protocol::control_core::ControlError::Monitor
+            ))
+        );
+        for (block, expected) in untouched.iter().enumerate().take(12).skip(4) {
+            assert_eq!(bits(&rig.step()), bits(expected), "block {block}");
+        }
+        // The good solo alone commits, as a monitor write.
+        let bytes = rig.transaction(&[solo_edit("eq1", true, None)]);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&response), protocol::EditPath::Monitor);
+        assert_eq!(solo_state(&mut rig, "eq1").0, 1.0);
+    }
+
+    /// D5 (#1559): a solo beside a model edit is one model transaction. With a
+    /// value edit it is `live`, with a structural one `rebuild`; either way the revision advances
+    /// by one, exactly one `SESSION_COMMITTED` follows, the model holds the edit and not the solo,
+    /// and the solo is in effect: the live one renders the bits of the plan prepared with the
+    /// committed model and the other tracks muted.
+    ///
+    /// Red if a mixed transaction takes the monitor path or spends a second revision, loses the
+    /// solo or the model edit, or reports the solo's records as nothing.
+    #[test]
+    fn a_solo_beside_a_model_edit_is_one_model_transaction() {
+        let document = solo_document();
+        let model = parse_session_json(&document).expect("model");
+        let ramps = model.control_smoothing_samples();
+        let ramp = ramps.fader.max(ramps.mute).max(ramps.pan).max(64);
+
+        // A value edit: live.
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, _, epoch, _) = rig.summary();
+        let bytes = rig.transaction(&[
+            set(builtin("eq1", FADER_DB, Lane::Both), -4.0, None),
+            solo_edit("eq1", true, None),
+        ]);
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&response), protocol::EditPath::Live);
+        assert_eq!(response_revision(&response), revision + 1);
+        assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
+        assert_eq!((rig.summary().0, rig.summary().2), (revision + 1, epoch));
+        assert_eq!(solo_state(&mut rig, "eq1").0, 1.0);
+        let committed = rig.snapshot();
+        assert!(
+            !committed.contains("solo"),
+            "the solo is not in the session"
+        );
+        let edit_block = rig.block;
+        let k = window(rig.latency(), ramp, rig.quantum);
+        let live: Vec<_> = (0..k + 4).map(|_| rig.step()).collect();
+        let prepared = Reference::run(&muted_but(&committed, &["eq1"]), rig.block);
+        for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+            let block = edit_block as usize + offset;
+            assert_eq!(bits(pcm), bits(&prepared[block]), "live, block {block}");
+        }
+
+        // A structural edit: a rebuild that carries the solo.
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, ..) = rig.summary();
+        let [track, route] = added_track(&model, "added");
+        let bytes = rig.transaction(&[track, route, solo_edit("eq1", true, Some(96))]);
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+        assert_eq!(response_revision(&response), revision + 1);
+        assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
+        assert_eq!(solo_state(&mut rig, "eq1").0, 1.0);
+        let (blocks, first) = run_to_settled(&mut rig, ramp, 4);
+        let committed = rig.snapshot();
+        let prepared = Reference::run(&muted_but(&committed, &["eq1"]), first + 4);
+        for (offset, pcm) in blocks.iter().enumerate() {
+            let block = first as usize + offset;
+            assert_eq!(bits(pcm), bits(&prepared[block]), "rebuild, block {block}");
+        }
     }
 }

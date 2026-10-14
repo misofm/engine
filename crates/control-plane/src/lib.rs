@@ -12,7 +12,9 @@
 //! of its plan resource table and the fixed allocations it keeps per session. It passes plain
 //! [`ControlLimits`], and reads plain [`PlanResources`] and typed failures
 //! ([`CompileFailure`], [`SourceFailure`], [`CommandError`], [`EventError`]) that it maps to its
-//! own codes. The crate never spells an adapter's diagnostic codes.
+//! own codes. The crate owns every command and event refusal text (decision 17 C1), through
+//! [`CommandError::diagnostic`], [`CompileFailure::diagnostic`] and [`EventError::diagnostic`]; an
+//! adapter owns only its result-code numbering.
 //!
 //! | module | job |
 //! |---|---|

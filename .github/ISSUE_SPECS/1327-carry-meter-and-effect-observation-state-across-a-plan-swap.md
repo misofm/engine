@@ -185,3 +185,8 @@ changed or added owners start fresh.
 
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284), and through it every
   effect carry that observation taps follow.
+
+## Amendment (decision 17, root 2026-10-13)
+
+Dependencies gain *Prepare every browser preparation branch concurrently, as a successor too, in
+host-core* (#1401), for D2's meter successor entry.

@@ -760,16 +760,20 @@ fn pair_command(request_id: u64, revision: u64, edit: u64) -> Vec<u8> {
     } else {
         (0.0, -6.0)
     };
-    let edits = [("eq0", first), ("eq1", second)].map(|(id, db)| SessionEdit::SetTrackFader {
-        track_id: StableId::parse(id).expect("track ID"),
-        fader: session::DualMonoFader {
-            left_db: db,
-            right_db: db,
-            left_mute: false,
-            right_mute: false,
-        },
-        ramp_samples: None,
-    });
+    let edits: Vec<SessionEdit> = [("eq0", first), ("eq1", second)]
+        .into_iter()
+        .flat_map(|(id, db)| {
+            protocol::control_core::fader_edits(
+                &StableId::parse(id).expect("track ID"),
+                &session::DualMonoFader {
+                    left_db: db,
+                    right_db: db,
+                    left_mute: false,
+                    right_mute: false,
+                },
+            )
+        })
+        .collect();
     let mut bytes = vec![0_u8; 4_096];
     let len = ProtocolCodec::default()
         .encode_command_frame_into(

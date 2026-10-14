@@ -1,17 +1,19 @@
-//! Issue #1241: VCAs are edited through session transactions, `0700` (`UpsertVca`), `0701`
-//! (`RemoveVca`) and `0702` (`SetVcaFader`).
+//! Issue #1241: VCAs are edited through session transactions, `0700` (`UpsertVca`) and `0701`
+//! (`RemoveVca`); a VCA's fader and mute are `SET_CONTROL` rows (decision 17, #1561 retired the
+//! `0702` `SetVcaFader`).
 //!
 //! The base session has tracks `a` and `x`, submix `bus` (fed by `a`, feeding output `main-out`),
 //! and one VCA, `grp`, over `a` and `x`. Every transaction travels through the wire codec first,
 //! so each assertion is about what a peer's frame does to the committed snapshot.
 
+use protocol::control_core::{ControlError, Lane, Owner, Section, row_address};
 use protocol::{
     DecodeScratch, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionEditError,
     SessionRevision, SessionStore, SessionStoreError, SessionTransactionFrame,
 };
 use session::{
-    ChannelBuiltins, CompileCaps, DualMonoBuiltins, DualMonoFader, MatrixOrPan, SessionModel,
-    StableId, Vca, canonical_session_json, parse_session_json,
+    CompileCaps, Console, ConsoleSlot, DualMonoFader, EffectIdentity, EffectQuality, LinkMode,
+    SessionModel, StableId, Vca, canonical_session_json, parse_session_json,
 };
 
 const BUILTINS: &str = r#"{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 20.0, "lpf_hz": 20000.0, "delay_samples": 0 }"#;
@@ -88,6 +90,35 @@ fn fader(left_db: f32, right_db: f32, left_mute: bool, right_mute: bool) -> Dual
         left_mute,
         right_mute,
     }
+}
+
+/// A `SET_CONTROL` of the row `row` (`offset_db` or `mute`) of VCA `vca_id`, on `lane`.
+fn vca_row(vca_id: &str, row: &str, lane: Lane, value: f32) -> SessionEdit {
+    SessionEdit::set_control(
+        row_address(Owner::Vca(id(vca_id)), Section::Own, row, lane).expect("a VCA row"),
+        value,
+        None,
+    )
+}
+
+/// The four `SET_CONTROL`s that give VCA `vca_id` the fader `fader`.
+fn set_fader(vca_id: &str, fader: &DualMonoFader) -> Vec<SessionEdit> {
+    vec![
+        vca_row(vca_id, "offset_db", Lane::Left, fader.left_db),
+        vca_row(vca_id, "offset_db", Lane::Right, fader.right_db),
+        vca_row(
+            vca_id,
+            "mute",
+            Lane::Left,
+            f32::from(u8::from(fader.left_mute)),
+        ),
+        vca_row(
+            vca_id,
+            "mute",
+            Lane::Right,
+            f32::from(u8::from(fader.right_mute)),
+        ),
+    ]
 }
 
 fn vca(vca_id: &str, fader: DualMonoFader, members: &[&str]) -> Vca {
@@ -171,7 +202,7 @@ fn snapshot_vcas(store: &SessionStore) -> Vec<(String, Vec<String>)> {
 /// Gate 2, the commits. One transaction upserts a parent VCA that lists a nested VCA before it
 /// upserts that nested VCA (`0700` twice; the parent is declared first, so the parent's member
 /// resolves only on the final candidate), and the snapshot carries both, sorted by ID with sorted
-/// members. Then `0702` sets the nested VCA's fader (the parent and `grp` keep theirs), `0701`
+/// members. Then `SET_CONTROL` sets the nested VCA's fader (the parent and `grp` keep theirs), `0701`
 /// removes the parent, and `0701` removes the nested VCA, now a leaf no VCA lists. Each step's
 /// snapshot is the canonical JSON of the model written directly, and round-trips.
 ///
@@ -209,14 +240,7 @@ fn vca_edits_commit_and_snapshot_canonically() {
     );
 
     let moved = fader(-12.0, 6.0, true, false);
-    commit(
-        &mut store,
-        &[SessionEdit::SetVcaFader {
-            vca_id: id("nested"),
-            fader: moved.clone(),
-            ramp_samples: None,
-        }],
-    );
+    commit(&mut store, &set_fader("nested", &moved));
     expected.vcas[2].fader = moved;
     assert_snapshot(&store, expected.clone(), "set the nested fader");
 
@@ -282,28 +306,26 @@ enum Refusal {
 /// Gate 2, the refusals. Each transaction opens with an edit that commits on its own (a `0702` on
 /// `grp`), then:
 ///
-/// - `0701` and `0702` at an unknown ID, and the strip edits `0203`, `020f`, `0210` and `0211` at
-///   the VCA ID `grp`, are `session.edit.not_found`;
+/// - `0701` at an unknown ID, and the strip edit `0211` at the VCA ID `grp` (after a `0007`, which
+///   it requires), are `session.edit.not_found`, and a `SET_CONTROL` at an unknown VCA ID or at
+///   `grp` read as a strip is `control.address_unknown`;
 /// - removing member track `x` or member submix `bus` without rewriting `grp`, or a nested VCA its
 ///   parent still lists, is `reference.missing_entity` at the member path; a `0700` that closes a
 ///   cycle is `vca.cycle` on both VCAs; a `0700` reusing a track's ID is `id.duplicate`;
-/// - a `0702` past the fader domain (+30 dB) is `numeric.out_of_schema_range` at its lane;
+/// - a `SET_CONTROL` past the fader domain (+30 dB) is `control.domain` at its edit;
 ///
 /// and the revision and snapshot are unchanged after each. Removing `x` while the same
 /// transaction rewrites `grp` without it commits.
 ///
-/// Red if a strip edit reaches a VCA, if `0701`/`0702` at an unknown ID is skipped silently, if
-/// `0701`, `RemoveTrack` or `RemoveSubmix` cascades into the member lists that name it, if `0702`
-/// clamps an out-of-domain offset instead of refusing it, or if a VCA edit commits without the
+/// Red if a strip edit reaches a VCA, if `0701` or a `SET_CONTROL` at an unknown ID is skipped
+/// silently, if `0701`, `RemoveTrack` or `RemoveSubmix` cascades into the member lists that name
+/// it, if a `SET_CONTROL` clamps an out-of-domain offset instead of refusing it, or if a VCA edit commits without the
 /// transaction's final validation (a dangling member, a cycle or a collision committed, or the
 /// opening edit committed alone).
 #[test]
 fn vca_refusals_commit_nothing() {
-    let opening = || SessionEdit::SetVcaFader {
-        vca_id: id("grp"),
-        fader: fader(-6.0, -6.0, false, false),
-        ramp_samples: None,
-    };
+    let opening = || vca_row("grp", "offset_db", Lane::Both, -6.0);
+    let unknown = SessionEditError::Control(ControlError::AddressUnknown);
     let unity = || fader(0.0, 0.0, false, false);
     let cases: Vec<(&str, Vec<SessionEdit>, Refusal)> = vec![
         (
@@ -314,68 +336,81 @@ fn vca_refusals_commit_nothing() {
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
         (
-            "0702 at an unknown ID",
-            vec![SessionEdit::SetVcaFader {
-                vca_id: id("ghost"),
-                fader: unity(),
-                ramp_samples: None,
-            }],
-            Refusal::Edit(1, SessionEditError::NotFound),
+            "SET_CONTROL at an unknown VCA ID",
+            vec![vca_row("ghost", "offset_db", Lane::Both, 0.0)],
+            Refusal::Edit(1, unknown.clone()),
         ),
         (
-            "0203 at a VCA ID",
-            vec![SessionEdit::SetTrackBuiltins {
-                track_id: id("grp"),
-                builtins: DualMonoBuiltins {
-                    left: ChannelBuiltins {
-                        polarity_invert: true,
-                        trim_db: 0.0,
-                        hpf_hz: 20.0,
-                        lpf_hz: 20_000.0,
-                        delay_samples: 0,
-                    },
-                    right: ChannelBuiltins {
-                        polarity_invert: false,
-                        trim_db: 0.0,
-                        hpf_hz: 20.0,
-                        lpf_hz: 20_000.0,
-                        delay_samples: 0,
-                    },
-                },
-                ramp_samples: None,
-            }],
-            Refusal::Edit(1, SessionEditError::NotFound),
+            "a builtin row at a VCA ID",
+            vec![SessionEdit::set_control(
+                row_address(
+                    Owner::Strip(id("grp")),
+                    Section::Builtins,
+                    "trim_db",
+                    Lane::Left,
+                )
+                .expect("the trim row"),
+                -3.0,
+                None,
+            )],
+            Refusal::Edit(1, unknown.clone()),
         ),
         (
-            "020f at a VCA ID",
-            vec![SessionEdit::SetTrackFader {
-                track_id: id("grp"),
-                fader: fader(-12.0, -12.0, true, true),
-                ramp_samples: None,
-            }],
-            Refusal::Edit(1, SessionEditError::NotFound),
+            "a fader row at a VCA ID",
+            vec![SessionEdit::set_control(
+                row_address(
+                    Owner::Strip(id("grp")),
+                    Section::Builtins,
+                    "fader_db",
+                    Lane::Left,
+                )
+                .expect("the fader row"),
+                -12.0,
+                None,
+            )],
+            Refusal::Edit(1, unknown.clone()),
         ),
         (
-            "0210 at a VCA ID",
-            vec![SessionEdit::SetTrackMatrixOrPan {
-                track_id: id("grp"),
-                matrix_or_pan: MatrixOrPan::Pan {
-                    left: 0.5,
-                    right: 0.5,
-                    smoothing_samples: 16,
-                },
-                ramp_samples: None,
-            }],
-            Refusal::Edit(1, SessionEditError::NotFound),
+            "a pan row at a VCA ID",
+            vec![SessionEdit::set_control(
+                row_address(
+                    Owner::Strip(id("grp")),
+                    Section::Builtins,
+                    "pan",
+                    Lane::Left,
+                )
+                .expect("the pan row"),
+                0.5,
+                None,
+            )],
+            Refusal::Edit(1, unknown.clone()),
         ),
         (
             "0211 at a VCA ID",
-            vec![SessionEdit::SetTrackConsole {
-                track_id: id("grp"),
-                console: Vec::new(),
-                ramp_samples: None,
-            }],
-            Refusal::Edit(1, SessionEditError::NotFound),
+            vec![
+                // A console that differs from the committed one, so that the check of the VCA ID
+                // is reached; the edit refuses at its own index, before any final validation.
+                SessionEdit::SetConsole {
+                    console: Console {
+                        pre_insert: vec![ConsoleSlot {
+                            slot: id("eq"),
+                            identity: EffectIdentity::Native {
+                                effect_id: id("miso.parametric-eq"),
+                            },
+                            quality: EffectQuality::Normal,
+                            link_mode: LinkMode::DualMono,
+                        }],
+                        post_insert: Vec::new(),
+                    },
+                    ramp_samples: None,
+                },
+                SessionEdit::SetTrackConsole {
+                    track_id: id("grp"),
+                    console: Vec::new(),
+                    ramp_samples: None,
+                },
+            ],
+            Refusal::Edit(2, SessionEditError::NotFound),
         ),
         (
             "remove member track x without rewriting grp",
@@ -435,13 +470,9 @@ fn vca_refusals_commit_nothing() {
             Refusal::Validation(&[("reference.missing_entity", "$.vcas[0].members[1]")]),
         ),
         (
-            "0702 past the fader domain",
-            vec![SessionEdit::SetVcaFader {
-                vca_id: id("grp"),
-                fader: fader(30.0, 0.0, false, false),
-                ramp_samples: None,
-            }],
-            Refusal::Validation(&[("numeric.out_of_schema_range", "$.vcas[0].fader.left_db")]),
+            "SET_CONTROL past the fader domain",
+            vec![vca_row("grp", "offset_db", Lane::Left, 30.0)],
+            Refusal::Edit(1, SessionEditError::Control(ControlError::Domain)),
         ),
     ];
     for (name, tail, refusal) in cases {
