@@ -111,6 +111,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+pub mod spectrum_service;
 pub mod strip_values;
 pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
@@ -194,6 +195,14 @@ pub use spectrum::{
     SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
     spectrum_capture_collection_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
+};
+pub use spectrum_service::{
+    PreparedSpectrumCaptures, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
+    SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN, SpectrumAnalysis,
+    SpectrumAnalysisResult, SpectrumPreparation, SpectrumRequestError, SpectrumService,
+    SpectrumServiceError, SpectrumSnapshot, spectrum_channels_from_raw, spectrum_target_kind,
+    spectrum_target_ref,
 };
 pub use strip_values::{
     LiveStripValues, LiveStripValuesError, StripValues, changed_lane_records, covers_lane,

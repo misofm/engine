@@ -234,3 +234,55 @@ chromium, firefox and webkit.
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record
+
+Implemented 2026-10-14 on `codex/controls-batch-6k` (feature sprint mode; no mutation runs, no
+browser runs). Adaptations to the frozen decisions, each with its reason:
+
+1. **D7 applies to a select that would change the selection.** A select of the entry that is
+   already selected discards nothing, so it stays accepted (`Ok(false)`) while the caller holds an
+   arm. `selection_would_change` reports the same `Busy`, so the browser's preflight in
+   `select_spectrum_with_smoothing` sees the refusal first. Reason: the spec names `arm` followed
+   by `select` of another entry as the only changed browser sequence; refusing a no-op select would
+   change a second one.
+2. **The stream hand-off.** `PreparedSpectrumCaptures` carries the stream methods that
+   `PreparedSpectrumCapture` had (start, start with hop, restart, stop, read, cadence, epoch),
+   because the host-web stream methods still call them until #1592. `SpectrumService::captures`
+   (read-only) and `captures_mut` give host-web that access; `end_caller_arm` is called after a
+   successful stream start, which replaces a collection entry's arm. #1592 D4 replaces the three
+   accessors with the stream methods on the service.
+3. **`SpectrumPreparationRequest` stays as a `pub use` alias** of `host_core::SpectrumPreparation`
+   in host-web, so its public name and `tests.rs` do not change. The host-web `SPECTRUM_*`
+   constants are `const` re-exports of the core's, with the same values and names.
+4. **Collection staging order.** host-web checks the record words of every entry (reserved words,
+   ID length, UTF-8) before the core checks the aggregate budget and the entry kinds and masks. A
+   request that is wrong in both ways answers `RESULT_INVALID_ARGUMENT` where it answered
+   `RESULT_REFUSED_BUDGET` when the budget was zero. A valid request answers as before; the core
+   checks the budget before any entry. An empty collection with a non-zero budget keeps
+   `RESULT_INVALID_ARGUMENT` through host-web's own record check.
+5. **Read.** (a) A collection with no selection answers `RESULT_WRONG_STATE` (`NotArmed`, D3); it
+   was `RESULT_INVALID_ARGUMENT`. (b) The token advance is checked before the pop: the old code
+   popped, then refused with `RESULT_REFUSED_BUDGET` and lost the window. (c) The export no longer
+   reads the host's rate: the service stamps its own session rate on the snapshot.
+6. **`SpectrumSnapshot::validate` runs on the stream path too**, as the one place that holds the
+   kind, token, end-sample and rate checks. A stream header now needs a launch rate; the engine
+   writes one, so no producible window changes.
+7. **Analysis storage.** The staging holds `Option<SpectrumAnalysis>` and one
+   `Option<Box<SpectrumAnalysisResult>>`, made together by `ensure_analysis_storage`. Like the
+   analyzer, they are worker-owned and outside the retained-bytes report, so no budget row moves.
+   The stream analysis writes into the same result arrays.
+8. **`write_spectrum_window` keeps its signature**; the read export passes the snapshot's fields.
+   The realtime policy's reached-function list is unchanged, so `REALTIME_DEPENDENCY_POLICY.md`
+   needed no edit. No file under `crates/engine/src/realtime/` was touched.
+
+Not done, by the sprint mode: the browser qualification rows, the SDK browser evals, the one-time
+byte comparison of analyzed output against the base commit, and `hosts/host-web/MUTATIONS.md`
+(two rows still name `PreparedSpectrumCapture::channels`, now `PreparedSpectrumCaptures::channels`
+in `host-core`; that file is outside this slice's paths).
+
+Evidence: `cargo test -p host-core --all-features` (new `tests/spectrum_service.rs`: gates 1-5),
+`cargo test -p host-web --features test-support` (one new test, `select_after_the_callers_arm_is_
+backpressure_until_the_window_is_read`, gate 6), `realtime-policy`, `check-host-core-policy.sh`,
+workspace clippy and rustdoc with warnings denied, the AudioWorklet build and its static check,
+`check-sdk-headless.sh` (429 tests) and `check-browser-expected-resources.py`.

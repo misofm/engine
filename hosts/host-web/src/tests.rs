@@ -17817,8 +17817,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                 );
                 let shape = match companions.spectrum_capture {
                     None => CompanionCapture::None,
-                    Some(PreparedSpectrumCapture::Single(_)) => CompanionCapture::Single,
-                    Some(PreparedSpectrumCapture::Collection(_)) => CompanionCapture::Collection,
+                    Some(PreparedSpectrumCaptures::Single(_)) => CompanionCapture::Single,
+                    Some(PreparedSpectrumCaptures::Collection(_)) => CompanionCapture::Collection,
                 };
                 assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
                 assert_eq!(
