@@ -155,6 +155,7 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
   artifact).
 - Stream H owns `hosts/host-web` and `sdk/`; `tools/parameter-metadata/src/abi_layout.rs` follows
   `docs/handoffs/decision-15-2026-10-05/STREAMS.md` row 105: this slice rebases after those.
+- #TBD7 (session-less response core function), root 2026-10-14.
 
 ## Supersedes and shrinks
 

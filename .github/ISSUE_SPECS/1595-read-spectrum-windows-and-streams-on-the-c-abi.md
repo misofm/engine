@@ -182,6 +182,7 @@ Fixture as #1593's, with `maximum_control_frame_bytes` 65,536 unless a gate says
 
 - #1594 (the dispatch variant and the configuration), #1593, #1592, #1591.
 - `crates/capi` is stream B's: rebase after stream B's open edits.
+- #TBD6 (make the spectrum one-shot handoff safe across threads), root 2026-10-14.
 
 ## Supersedes and shrinks
 
