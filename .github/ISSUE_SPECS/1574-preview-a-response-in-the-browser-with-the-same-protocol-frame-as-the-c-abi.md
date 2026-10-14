@@ -250,3 +250,8 @@ Checked against `main` at `7feb27800`.
   `check-web-audioworklet.sh`, `test-web-audioworklet.sh`, `check-sdk-types.sh`,
   `check-sdk-headless.sh` (526 pass), `check-sdk-generated.sh`, the browser qualification with
   `--check-matrix --self-test-mutations` on chromium. Firefox and webkit were not run here.
+
+## Fold (batch 9 gates)
+
+- host-web does not name `host-core`'s `control-provider` feature: `scripts/check-host-core-policy.sh` allows only `control-plane` to enable it, and host-web reaches `serve_response_frame` through `control-plane`'s enablement (the batch-9 amendment's line on this is superseded).
+- The `serve_response_frame` doc no longer links the private `serve_response_at` (`cargo doc -D warnings`).

@@ -716,7 +716,7 @@ pub enum ResponseFrameError {
 /// answered with a non-OK `UNSUPPORTED_MESSAGE` frame, and a payload that does not decode with
 /// the status of its decode error. A `RESPONSE_GET` needs a configuration target
 /// (`response.target.unavailable` otherwise) and both `sample_rate_hz` and `quantum_frames`
-/// (`response.rate` otherwise); it then runs [`serve_response_at`], the function a session
+/// (`response.rate` otherwise); it then runs `serve_response_at`, the function a session
 /// endpoint runs, so the reply payload equals a session endpoint's for the same request. The
 /// reply echoes the request ID with revision 0. `reply` is cleared, then holds one complete
 /// frame, OK or non-OK.
