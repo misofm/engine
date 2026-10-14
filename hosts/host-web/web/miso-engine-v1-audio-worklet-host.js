@@ -519,6 +519,13 @@ function snapshotFactory(value) {
   return { descriptors: captured.descriptors, preparedModule };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 function webError(result, requestId = 0, planes) {
   const record = { tag: "miso.error.v1", requestId, result };
   if (planes !== undefined) record.planes = planes;
@@ -705,7 +712,8 @@ function isUnsupportedBrowser(value) {
 /// -- there is nowhere for a further chunk to go -- rather than one for the whole host.
 ///
 /// Seeks stay at one unsettled per source because the ring carries a single command slot. Status
-/// stays at one because a second answer would carry no new information. Dispose is terminal and
+/// is never refused for being in flight: concurrent calls share one read, and a reply reflects
+/// every request the host sent before the call (see `status()`). Dispose is terminal and
 /// waits for nothing: the worklet handles messages in arrival order, so every earlier request is
 /// already settled by the time its acknowledgement is posted.
 ///
@@ -716,7 +724,11 @@ class MisoAudioWorkletHost {
   #pending = new Map();
   #inFlightSources = new Map();
   #inFlightSeeks = new Map();
-  #inFlightStatus = 0;
+  /// The one status request on the port, `{ requestId, promise }`, or null. A `status()` call joins
+  /// it only while no later request was sent; otherwise it joins `#statusFollow`, the one pending
+  /// read the host sends when this one settles.
+  #statusRead = null;
+  #statusFollow = null;
   #inFlightRenderAllocations = 0;
   #inFlightCommands = 0;
   #inFlightObservationReads = 0;
@@ -871,7 +883,10 @@ class MisoAudioWorkletHost {
     } else if (pending.response === "seek") {
       this.#inFlightSeeks.delete(pending.sourceId);
     } else if (pending.response === "status") {
-      this.#inFlightStatus -= 1;
+      if (this.#statusRead?.requestId === pending.requestId) {
+        this.#statusRead = null;
+        this.#sendStatusFollow();
+      }
     } else if (pending.response === "renderAllocations") {
       this.#inFlightRenderAllocations -= 1;
     } else if (pending.response === "command") {
@@ -1161,12 +1176,15 @@ class MisoAudioWorkletHost {
     this.#pending.clear();
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
-    this.#inFlightStatus = 0;
+    this.#statusRead = null;
+    const follow = this.#statusFollow;
+    this.#statusFollow = null;
     this.#inFlightRenderAllocations = 0;
     this.#inFlightObservationReads = 0;
     this.#inFlightTrackResponses = 0;
     this.#inFlightSpectrum = 0;
     for (const pending of unsettled) pending.reject(error);
+    follow?.reject(error);
   }
 
   // The per-kind bound. `true` means the request has nowhere to go and is refused locally, before
@@ -1176,7 +1194,6 @@ class MisoAudioWorkletHost {
       return (this.#inFlightSources.get(sourceId) ?? 0) >= this.#ringBlocks;
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
-    if (response === "status") return this.#inFlightStatus >= 1;
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
     // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
@@ -1198,8 +1215,6 @@ class MisoAudioWorkletHost {
       this.#inFlightSources.set(sourceId, (this.#inFlightSources.get(sourceId) ?? 0) + 1);
     } else if (response === "seek") {
       this.#inFlightSeeks.set(sourceId, true);
-    } else if (response === "status") {
-      this.#inFlightStatus += 1;
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
     } else if (response === "command" || response === "preparedCommand") {
@@ -1306,8 +1321,45 @@ class MisoAudioWorkletHost {
     );
   }
 
+  /// Read the engine status. Concurrent calls share one read and `status()` is never refused for
+  /// being in flight: a call joins the in-flight read while no later request was sent, and
+  /// otherwise joins the one follow-up read the host sends when that read settles. Every reply
+  /// therefore reflects every request the host sent before the call. A joined read settles every
+  /// joined caller with the same reply or the same rejection, and a caller that stops waiting does
+  /// not cancel it. A call made once `dispose()` was sent is refused with result 3 and posts nothing.
   status() {
-    return this.#request({ tag: "miso.status.v1" }, [], "status");
+    if (this.#disposePending()) return Promise.reject(webError(3));
+    const read = this.#statusRead;
+    if (read !== null) {
+      if (read.requestId === this.#lastRequestId) return read.promise;
+      this.#statusFollow ??= deferred();
+      return this.#statusFollow.promise;
+    }
+    return this.#sendStatus();
+  }
+
+  #disposePending() {
+    for (const pending of this.#pending.values()) if (pending.response === "dispose") return true;
+    return false;
+  }
+
+  #sendStatus() {
+    const before = this.#lastRequestId;
+    const promise = this.#request({ tag: "miso.status.v1" }, [], "status");
+    // A request refused or failed to post before it was kept leaves nothing in flight to share.
+    const requestId = this.#lastRequestId;
+    if (requestId !== before && this.#pending.has(requestId)) {
+      this.#statusRead = { requestId, promise };
+    }
+    return promise;
+  }
+
+  #sendStatusFollow() {
+    const follow = this.#statusFollow;
+    if (follow === null) return;
+    this.#statusFollow = null;
+    (this.#disposePending() ? Promise.reject(webError(3)) : this.#sendStatus())
+      .then(follow.resolve, follow.reject);
   }
 
   /// Read this instance's render-locked allocator count (issue #1333 D3).

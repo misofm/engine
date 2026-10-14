@@ -154,9 +154,9 @@
 // Sources stream just-in-time into bounded per-source rings. One message carries exactly one
 // quantum of planar PCM (the final chunk of a region may be shorter). Up to
 // `sourceRingFrames / quantumFrames` chunks may be unsettled per source ID at once -- there is
-// nowhere for a further chunk to go -- plus one unsettled seek per source and one unsettled status.
-// A request over its bound rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so
-// the caller keeps its planes and can retry.
+// nowhere for a further chunk to go -- plus one unsettled seek per source. A request over its bound
+// rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so the caller keeps its planes
+// and can retry. Status is never refused for being in flight: see `status()`.
 //
 // The default ring covers a 100 ms main-thread stall: `(ceil(100ms * fs / quantum) + 2) * quantum`
 // frames, which is 5 120 frames (40 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. It is
@@ -952,6 +952,11 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  /// Reads the engine status. Concurrent calls share one read, and a reply reflects every request
+  /// the host sent before the call: a call joins the in-flight read while no later request was
+  /// sent, and otherwise joins the one follow-up read sent when that read settles. A joined read
+  /// settles every joined caller with the same reply or the same rejection, and a caller that stops
+  /// waiting does not cancel it. `status()` is never refused for being in flight.
   status(): Promise<MisoStatus>;
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
