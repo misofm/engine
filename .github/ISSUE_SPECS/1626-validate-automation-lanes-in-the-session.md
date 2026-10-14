@@ -243,3 +243,39 @@ Checked against `12d4a4f9d`.
   record rule ("holds its end value until replaced") is `docs/CONTROL_PROTOCOL_REGISTRY.md:93`.
 - **Gates.** `bash scripts/check-session-policy.sh` and the other commands stand; there is no
   `test-debug-a` change. Batch P1, first, as written (section "Batch P1 readiness" of the README).
+
+## Decision record: #1626 (batch 10)
+
+**Shipped.** D1 (`automation.duplicate_lane`) and D3 (`automation.discontinuity_spacing`) in
+`crates/session/src/{validate,diagnostic}.rs`; D4 in `docs/SESSION_SCHEMA_V1.md` (after the
+"consumed by nothing" paragraph, which stays) and the `author-session` skill (the hold rule in the
+semantic cautions and an "Automation refusals, by code" table). D2 and D5 were already done by
+#1566 and were not touched, as the amendment says.
+
+**Where.** `validate_automation` collects the entries that reach the lane check (target accepted,
+`id` the first of its value) and `validate_lane_uniqueness` sorts them once by the lane key
+`(owner kind, owner id, section kind, slot id, control)` then `id`, and in one pass per key refuses
+an entry whose lane an earlier (lesser `id`) entry covers (`both` covers both channels). The
+discontinuity check runs per entry, only when its segments passed the order, overlap and range
+checks (`ordered`), and compares `f32` bits.
+
+**Departures and choices.**
+- A `step` whose end a segment meets at once is one boundary at that sample, decided at the next
+  segment's start (before it, the lane held the step's `start_value`). The filed text said the
+  previous segment's `end_value` for every start; the two differ only for a step met at its end,
+  where the true value just before the sample is `start_value`. A step end followed by a gap is a
+  jump when its values differ, named at the step's `end_sample`.
+- "Once per offending pair" is read as consecutive jumps; a non-consecutive close pair implies a
+  close consecutive one, so nothing is lost.
+- The "target already refused" skip compares the diagnostic count around the target check.
+
+**Gates.** `cargo test --locked -p session` (new: `tests/automation_lanes.rs`, seven tests; five
+new rows in `tests/diagnostic_parity.rs`: `lane-both-both`, `lane-both-left`, `lane-left-left`,
+`lane-insert-copy`, `discontinuity-spacing`), `-p session-validator` (two new `MUTATIONS` rows at
+stage 1 on `builtins-automation.json`: a trim ride moved to the fader control, and a second segment
+40 samples after the polarity step's end), `-p conformance`, `-p controls -p protocol -p host-core
+-p control-plane` pass; clippy `-D warnings` on session and session-validator, `fmt --check`,
+`check-session-policy.sh`, `check-workspace-policy.sh` pass. The gate-1 pan/matrix case and the
+validator pan row are dropped with D2. No fixture or SDK eval changed, so the SDK twin comparison
+and wasm build were not rerun. Not run here: the audit `pcm_digest` comparison, the workspace
+debug leg, `check-cross-targets.sh` (no render code changed).
