@@ -1095,19 +1095,6 @@ impl ControlProvider for SessionControlProvider {
         })
     }
 
-    fn record_canceled_automation(&mut self, records: u64) {
-        let current = self
-            .counter_snapshot
-            .iter()
-            .find(|value| value.id == CounterId::CanceledAutomation)
-            .map_or(0, |value| value.value);
-        set_counter(
-            &mut self.counter_snapshot,
-            CounterId::CanceledAutomation,
-            current.saturating_add(records),
-        );
-    }
-
     fn diagnostics(
         &mut self,
         request: DiagnosticsRequest,
@@ -3211,7 +3198,6 @@ mod tests {
             telemetry_coalesced: 7,
             telemetry_dropped: 9,
         });
-        provider.record_canceled_automation(11);
         provider.set_live_values_superseded(13);
         let counters = provider
             .counters(&CountersRequest {
@@ -3222,7 +3208,9 @@ mod tests {
         assert_eq!(counters.observed_sample, SampleTime(256));
         assert_eq!(counters.values[0].value, 7);
         assert_eq!(counters.values[1].value, 9);
-        assert_eq!(counters.values[2].value, 11);
+        // Nothing cancels automation any more (#1628): the counter stays 0 until #1629 retires it.
+        assert_eq!(counters.values[2].id, CounterId::CanceledAutomation);
+        assert_eq!(counters.values[2].value, 0);
         assert_eq!(counters.values[3].id, CounterId::LiveValuesSuperseded);
         assert_eq!(counters.values[3].value, 13);
         assert_eq!(

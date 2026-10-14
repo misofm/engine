@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
+The shared `complete_schema_corpus()` fixture has 45 canonical frames: all 11 commands (the
 session transaction contains all 35 allocated `SessionEditOpcode` values), all 13 successful
-responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
+responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all five event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`cfa58ab7b7bbb7c4`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`4b21d9e6f520afd9`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -62,6 +62,10 @@ corpus loses the command frame, its success response and the two status frames (
 46, the commands are 11, the successful responses 13 and the statuses 16), and the capabilities
 response carries 23 fields and lists no command `0x0006`. The retired codes are covered by
 `retired_code_rows()` and the decoder tests, not by a frame.
+Issue #1628 (draft 21b) re-pinned it from `cfa58ab7b7bbb7c4`: the event `AUTOMATION_CANCELED`
+(`0x8002`) is retired and never reallocated, so the corpus loses `event.automation_canceled` (the
+frame count is 45 and the events are five), and the capabilities response lists no event `0x8002`.
+`retired_code_rows()` gains a row for `0x8002`.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

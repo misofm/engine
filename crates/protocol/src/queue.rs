@@ -333,21 +333,6 @@ pub enum ReliablePayload {
         /// Originating transport-set command, when any.
         origin_request_id: Option<RequestId>,
     },
-    /// The frozen reliable `AUTOMATION_CANCELED` event payload.
-    AutomationCanceled {
-        /// Endpoint-monotonic reliable event sequence.
-        event_sequence: u64,
-        /// Original accepted automation command identity.
-        origin_request_id: RequestId,
-        /// Exact record count from the canceled fixed batch.
-        canceled_records: u16,
-        /// Explicit reason; no accepted batch disappears silently.
-        reason: crate::AutomationCancellationReason,
-        /// Immutable automation queue generation.
-        queue_generation: u64,
-        /// Effective endpoint sample if known.
-        effective_sample: Option<SampleTime>,
-    },
     /// A bounded controller-owned typed diagnostic reference. The diagnostic itself remains in
     /// prepared endpoint storage until its complete event frame has reached caller output.
     Diagnostic {
@@ -412,32 +397,6 @@ impl ReliableSlot {
                 position,
                 effective_sample,
                 origin_request_id,
-            },
-        }
-    }
-
-    /// Construct a typed reliable `AUTOMATION_CANCELED` event with zero outer request ID.
-    #[must_use]
-    pub const fn automation_canceled(
-        revision: SessionRevision,
-        event_sequence: u64,
-        origin_request_id: RequestId,
-        canceled_records: u16,
-        reason: crate::AutomationCancellationReason,
-        queue_generation: u64,
-        effective_sample: Option<SampleTime>,
-    ) -> Self {
-        Self {
-            header: ReliableHeader::Event,
-            revision,
-            message_id: MessageId::AutomationCanceled,
-            payload: ReliablePayload::AutomationCanceled {
-                event_sequence,
-                origin_request_id,
-                canceled_records,
-                reason,
-                queue_generation,
-                effective_sample,
             },
         }
     }
@@ -796,20 +755,13 @@ impl ProtocolQueues {
 
     /// Pop one fixed batch without decoding or allocation.
     ///
-    /// The only production consumer is `ProtocolController::cancel_queued_automation_reserved`;
-    /// no render-side drain exists (see `docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status").
+    /// No production consumer remains: the cancellation path is retired (#1628) and no render-side
+    /// drain exists (see `docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status").
     pub fn try_dequeue_automation(&mut self) -> Result<AutomationBatchSlot, QueueEmpty> {
         let batch = self.automation.consumer.try_pop()?;
         self.remove_automation_density(&batch);
         self.remove_automation_intervals(&batch);
         Ok(batch)
-    }
-
-    /// Begin a new accepted-automation ordering epoch after explicit cancellation drained the
-    /// queue. This is control-side bookkeeping only and does not allocate.
-    pub(crate) fn reset_automation_ordering_after_cancellation(&mut self) {
-        debug_assert_eq!(self.automation.report(QueueKind::Automation).occupancy, 0);
-        self.automation_frontier = None;
     }
 
     /// Enqueue a reliable response or preserve it exactly on full.

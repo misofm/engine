@@ -628,27 +628,6 @@ pub(crate) mod transport_state_event {
     };
 }
 
-pub(crate) mod automation_canceled {
-    use super::*;
-    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
-    pub(crate) const ORIGIN_REQUEST_ID: FieldSpec = FieldSpec::req(2, Wire::U64);
-    pub(crate) const CANCELED_RECORDS: FieldSpec = FieldSpec::req(3, Wire::U16);
-    pub(crate) const REASON: FieldSpec = FieldSpec::req(4, Wire::U8);
-    pub(crate) const QUEUE_GENERATION: FieldSpec = FieldSpec::req(5, Wire::U64);
-    pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::opt(6, Wire::U64);
-    pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "AutomationCanceled",
-        fields: &[
-            EVENT_SEQUENCE,
-            ORIGIN_REQUEST_ID,
-            CANCELED_RECORDS,
-            REASON,
-            QUEUE_GENERATION,
-            EFFECTIVE_SAMPLE,
-        ],
-    };
-}
-
 pub(crate) mod meter_batch {
     use super::*;
     pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
@@ -1793,7 +1772,6 @@ mod tests {
             &transport_set::SPEC,
             &transport_snapshot::SPEC,
             &transport_state_event::SPEC,
-            &automation_canceled::SPEC,
             &meter_batch::SPEC,
             &telemetry_configuration::SPEC,
             &counters_request::SPEC,

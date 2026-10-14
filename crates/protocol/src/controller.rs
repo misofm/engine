@@ -18,18 +18,17 @@ std::thread_local! {
 }
 
 use crate::{
-    AutomationCanceled, AutomationCancellationReason, Backpressure, BackpressureQueueKind,
-    Capabilities, CapabilityFlags, CommandHeader, ControlListPage, ControlListRequest,
-    ControlStatePage, CounterSnapshot, CounterSnapshotRef, CounterTelemetryRecord, CounterValue,
-    CountersRequest, DecodeError, DecodeScratch, DecodedCommandPayload, Diagnostic,
-    DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EditPath, EncodeError, EventPayload,
-    ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse,
-    PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
-    ReliableSlot, RequestId, ResponseGetRequest, ResponseResult, SampleTime, SessionCommitted,
-    SessionEdit, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
-    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    Backpressure, BackpressureQueueKind, Capabilities, CapabilityFlags, CommandHeader,
+    ControlListPage, ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
+    CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
+    DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
+    EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
+    NonOkResponse, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
+    ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest, ResponseResult, SampleTime,
+    SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot, SessionStore,
+    SessionStoreError, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TelemetryKey,
+    TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -596,8 +595,6 @@ pub trait ControlProvider {
         &mut self,
         request: &CountersRequest,
     ) -> Result<CounterSnapshot, ParameterProviderError>;
-    /// Record explicitly canceled accepted automation. The counter is saturating and never reset.
-    fn record_canceled_automation(&mut self, _records: u64) {}
     /// Return one bounded typed nondestructive diagnostics page.
     fn diagnostics(
         &mut self,
@@ -842,27 +839,6 @@ impl ControlProvider for MockProvider {
             values,
         })
     }
-    fn record_canceled_automation(&mut self, records: u64) {
-        let id = crate::CounterId::CanceledAutomation;
-        if let Some(value) = self
-            .counter_snapshot
-            .values
-            .iter_mut()
-            .find(|value| value.id == id)
-        {
-            value.value = value.value.saturating_add(records);
-        } else {
-            let insert = self
-                .counter_snapshot
-                .values
-                .iter()
-                .position(|value| value.id > id)
-                .unwrap_or(self.counter_snapshot.values.len());
-            self.counter_snapshot
-                .values
-                .insert(insert, crate::CounterValue { id, value: records });
-        }
-    }
     fn diagnostics(
         &mut self,
         request: DiagnosticsRequest,
@@ -1049,7 +1025,7 @@ pub struct ControllerResponse {
 struct CapabilitySet {
     commands: [u16; 12],
     command_len: u8,
-    events: [u16; 6],
+    events: [u16; 5],
     event_len: u8,
     flags: CapabilityFlags,
 }
@@ -1180,7 +1156,6 @@ struct StructuralCommandPlan {
     prospective_session: PreparedSessionTransaction,
     replay_plan: ReplayPreflightPlan,
     event_sequence: u64,
-    cancellation_batches: usize,
     required_events: usize,
     applied_operations: u32,
     response_measure: crate::btlv::MessageMeasure,
@@ -1214,7 +1189,6 @@ pub struct PreparedStructuralCommand {
     response: Option<ControllerResponse>,
     event_reservations: Option<crate::ReliableEventReservations>,
     event_sequence: u64,
-    cancellation_batches: usize,
     applied_operations: u32,
     armed: bool,
 }
@@ -1851,7 +1825,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             response: Some(response),
             event_reservations: Some(event_reservations),
             event_sequence: plan.event_sequence,
-            cancellation_batches: plan.cancellation_batches,
             applied_operations: plan.applied_operations,
             armed: true,
         })
@@ -1922,20 +1895,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 outcome: self.non_ok(StatusCode::LimitExceeded, None),
             });
         }
-        // A transaction of monitor writes changes no revision: it cancels no automation and
-        // emits no event, so it needs no event room (#1559 D4).
+        // A transaction of monitor writes changes no revision and emits no event, so it needs no
+        // event room (#1559 D4). Any other commit reserves its `SESSION_COMMITTED` and nothing
+        // else: a revision change cancels nothing (#1628).
         let monitor_only = monitor && crate::model::is_monitor_transaction(&edits);
-        let cancellation_batches = if monitor_only {
-            0
-        } else {
-            usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                .unwrap_or(usize::MAX)
-        };
-        let required_events = if monitor_only {
-            0
-        } else {
-            cancellation_batches.saturating_add(1)
-        };
+        let required_events = usize::from(!monitor_only);
         let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
         if required_events
             > event_report
@@ -2027,7 +1991,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 prospective_session,
                 replay_plan,
                 event_sequence,
-                cancellation_batches,
                 required_events,
                 applied_operations,
                 response_measure,
@@ -2067,7 +2030,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             .queues
             .reserve_reliable_events(plan.required_events)
             .expect("read-only structural plan reserved exact reliable-event capacity");
-        let effective_sample = self.provider.current_sample();
         self.replay
             .apply_preflight_plan(plan.request_id, input, plan.replay_plan);
         self.replay
@@ -2087,12 +2049,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             ),
         );
         self.next_reliable_event_sequence = plan.event_sequence.saturating_add(1);
-        self.cancel_queued_automation_reserved(
-            &mut event_reservations,
-            AutomationCancellationReason::RevisionChanged,
-            Some(effective_sample),
-        )
-        .expect("planned cancellation events retain their exact reservations");
         Ok(written)
     }
 
@@ -2162,8 +2118,8 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// # Errors
     ///
     /// [`PreparedCommandCommitError::WrongController`] for a token another controller prepared;
-    /// [`PreparedCommandCommitError::StaleGeneration`] when the generation, the revision or the
-    /// automation-queue occupancy changed since the token was prepared.
+    /// [`PreparedCommandCommitError::StaleGeneration`] when the generation or the revision changed
+    /// since the token was prepared.
     pub fn check_prepared_structural(
         &self,
         prepared: &PreparedStructuralCommand,
@@ -2171,18 +2127,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         if !Arc::ptr_eq(&self.structural_generation, &prepared.owner) {
             return Err(PreparedCommandCommitError::WrongController);
         }
-        // A monitor-only token cancels no automation, so the automation queue may hold what it
-        // likes.
-        let monitor_only = prepared
-            .prospective_session
-            .as_ref()
-            .is_some_and(PreparedSessionTransaction::is_monitor_only);
         if self.structural_generation.load(Ordering::Acquire) != prepared.generation
             || self.session.revision() != prepared.previous_revision
-            || (!monitor_only
-                && usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                    .unwrap_or(usize::MAX)
-                    != prepared.cancellation_batches)
         {
             return Err(PreparedCommandCommitError::StaleGeneration);
         }
@@ -2212,14 +2158,13 @@ impl<P: ControlProvider> ProtocolController<P> {
             .event_reservations
             .take()
             .expect("affine token owns exact event reservations");
-        let effective_sample = self.provider.current_sample();
         let session = prepared
             .prospective_session
             .take()
             .expect("affine token owns prospective session");
         let response_revision = session.revision();
         // A monitor-only transaction is not a session mutation (#1559 D4): the model and the
-        // revision stay, no `SESSION_COMMITTED` follows and no queued automation is canceled.
+        // revision stay and no `SESSION_COMMITTED` follows.
         // Its token reserved no event. The response and the replay entry are recorded as for any
         // other transaction, so an exact replay returns these bytes and applies nothing.
         let monitor_only = session.is_monitor_only();
@@ -2249,11 +2194,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ),
             );
             self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
-            let _ = self.cancel_queued_automation_reserved(
-                &mut event_reservations,
-                AutomationCancellationReason::RevisionChanged,
-                Some(effective_sample),
-            );
         }
         let response = prepared
             .response
@@ -2929,27 +2869,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 },
                 output,
             ),
-            ReliablePayload::AutomationCanceled {
-                event_sequence,
-                origin_request_id,
-                canceled_records,
-                reason,
-                queue_generation,
-                effective_sample,
-            } => self.codec.encode_event_frame_into(
-                &TypedEventFrame {
-                    revision: slot.revision,
-                    payload: EventPayload::AutomationCanceled(AutomationCanceled {
-                        event_sequence,
-                        origin_request_id,
-                        canceled_records,
-                        reason,
-                        queue_generation,
-                        effective_sample,
-                    }),
-                },
-                output,
-            ),
             ReliablePayload::TransportState {
                 event_sequence,
                 state,
@@ -3144,37 +3063,16 @@ impl<P: ControlProvider> ProtocolController<P> {
                     return self.non_ok(StatusCode::LimitExceeded, None);
                 }
                 let event_sequence = self.next_reliable_event_sequence;
-                let cancellation_batches =
-                    usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                        .unwrap_or(usize::MAX);
-                let Some(_) = event_sequence.checked_add(
-                    u64::try_from(cancellation_batches)
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(1),
-                ) else {
+                if event_sequence.checked_add(1).is_none() {
                     return self.non_ok(StatusCode::Internal, None);
-                };
-                let mut cancellation_reservations =
-                    match self.queues.reserve_reliable_events(cancellation_batches) {
-                        Ok(reservations) => reservations,
-                        Err(report) => {
-                            return self.queue_backpressure_outcome(report);
-                        }
-                    };
-                let applied_operations = match u32::try_from(edits.len()) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        self.queues
-                            .release_reliable_events(cancellation_reservations);
-                        return self.non_ok(StatusCode::LimitExceeded, None);
-                    }
+                }
+                let Ok(applied_operations) = u32::try_from(edits.len()) else {
+                    return self.non_ok(StatusCode::LimitExceeded, None);
                 };
                 let previous_revision = self.session.revision();
                 let reservation = match self.queues.reserve_reliable_event() {
                     Ok(reservation) => reservation,
                     Err(report) => {
-                        self.queues
-                            .release_reliable_events(cancellation_reservations);
                         return self.queue_backpressure_outcome(report);
                     }
                 };
@@ -3194,12 +3092,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                             ),
                         );
                         self.next_reliable_event_sequence = event_sequence.saturating_add(1);
-                        let effective_sample = self.provider.current_sample();
-                        let _ = self.cancel_queued_automation_reserved(
-                            &mut cancellation_reservations,
-                            AutomationCancellationReason::RevisionChanged,
-                            Some(effective_sample),
-                        );
                         self.ok_at_revision(
                             commit.revision,
                             Body::TransactionApplied(TransactionApplied {
@@ -3210,8 +3102,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     }
                     Err(error) => {
                         self.queues.release_reliable_event(reservation);
-                        self.queues
-                            .release_reliable_events(cancellation_reservations);
                         self.transaction_error_outcome(&error)
                     }
                 }
@@ -3253,31 +3143,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 request: transport_request,
             } => {
                 let event_sequence = self.next_reliable_event_sequence;
-                let cancellation_batches = if transport_request.position.is_some() {
-                    usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                        .unwrap_or(usize::MAX)
-                } else {
-                    0
-                };
-                let Some(_) = event_sequence.checked_add(
-                    u64::try_from(cancellation_batches)
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(1),
-                ) else {
+                if event_sequence.checked_add(1).is_none() {
                     return self.non_ok(StatusCode::Internal, None);
-                };
-                let mut cancellation_reservations =
-                    match self.queues.reserve_reliable_events(cancellation_batches) {
-                        Ok(reservations) => reservations,
-                        Err(report) => {
-                            return self.queue_backpressure_outcome(report);
-                        }
-                    };
+                }
                 let reservation = match self.queues.reserve_reliable_event() {
                     Ok(reservation) => reservation,
                     Err(report) => {
-                        self.queues
-                            .release_reliable_events(cancellation_reservations);
                         return self.queue_backpressure_outcome(report);
                     }
                 };
@@ -3294,13 +3165,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     ),
                 );
                 self.next_reliable_event_sequence = event_sequence.saturating_add(1);
-                if transport_request.position.is_some() {
-                    let _ = self.cancel_queued_automation_reserved(
-                        &mut cancellation_reservations,
-                        AutomationCancellationReason::TransportLocate,
-                        Some(snapshot.effective_sample),
-                    );
-                }
                 self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
@@ -3623,12 +3487,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 command_len += 1;
             }
         }
-        let candidates = [0x8001_u16, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030];
-        let mut events = [0_u16; 6];
+        let candidates = [0x8001_u16, 0x8010, 0x8020, 0x8021, 0x8030];
+        let mut events = [0_u16; 5];
         let mut event_len = 0_usize;
         for id in candidates {
             let enabled = match id {
-                0x8001 | 0x8002 => session_transactions,
+                0x8001 => session_transactions,
                 0x8010 => features.transport && features.transport_events,
                 0x8020 => features.meters,
                 0x8021 => features.counters,
@@ -3772,72 +3636,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         )
     }
 
-    /// Explicitly cancel all still-queued accepted automation for a non-command lifecycle path.
-    /// A full reliable queue leaves automation untouched.
-    pub fn cancel_pending_automation(
-        &mut self,
-        reason: AutomationCancellationReason,
-        effective_sample: Option<SampleTime>,
-    ) -> Result<u64, QueueReport> {
-        if self.structural_outstanding() {
-            return Err(self.queues.report(crate::QueueKind::ReliableEvent));
-        }
-        let batches = usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
-        let mut reservations = self.queues.reserve_reliable_events(batches)?;
-        self.cancel_queued_automation_reserved(&mut reservations, reason, effective_sample)
-    }
-
     fn structural_outstanding(&self) -> bool {
         self.structural_generation.load(Ordering::Acquire) & 1 != 0
-    }
-
-    fn cancel_queued_automation_reserved(
-        &mut self,
-        reservations: &mut crate::ReliableEventReservations,
-        reason: AutomationCancellationReason,
-        effective_sample: Option<SampleTime>,
-    ) -> Result<u64, QueueReport> {
-        let batches = usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
-        let next = self
-            .next_reliable_event_sequence
-            .checked_add(u64::try_from(batches).unwrap_or(u64::MAX));
-        let Some(next_event_sequence) = next else {
-            return Err(self.queues.report(crate::QueueKind::ReliableEvent));
-        };
-        let generation = self
-            .queues
-            .report(crate::QueueKind::Automation)
-            .generation
-            .0;
-        let mut canceled = 0_u64;
-        for _ in 0..batches {
-            let batch = match self.queues.try_dequeue_automation() {
-                Ok(batch) => batch,
-                Err(_) => unreachable!("reservation and control-side cancellation are exclusive"),
-            };
-            self.queues.commit_reserved_reliable_event(
-                reservations,
-                ReliableSlot::automation_canceled(
-                    self.session.revision(),
-                    self.next_reliable_event_sequence,
-                    batch.request_id,
-                    batch.len,
-                    reason,
-                    generation,
-                    effective_sample,
-                ),
-            );
-            self.next_reliable_event_sequence = self.next_reliable_event_sequence.saturating_add(1);
-            canceled = canceled.saturating_add(u64::from(batch.len));
-        }
-        self.queues.reset_automation_ordering_after_cancellation();
-        self.next_reliable_event_sequence = next_event_sequence;
-        if canceled != 0 {
-            self.provider.record_canceled_automation(canceled);
-        }
-        Ok(canceled)
     }
 }
 

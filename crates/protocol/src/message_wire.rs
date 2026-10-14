@@ -886,39 +886,6 @@ pub struct TransportStateEvent {
     pub origin_request_id: Option<crate::RequestId>,
 }
 
-/// Frozen reason why an already accepted automation batch was canceled.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum AutomationCancellationReason {
-    /// A structural session revision invalidated revision-scoped handles.
-    RevisionChanged = 1,
-    /// An absolute transport locate invalidated pending automation.
-    TransportLocate = 2,
-    /// The endpoint is shutting down.
-    EndpointShutdown = 3,
-    /// The typed provider became unavailable.
-    ProviderUnavailable = 4,
-    /// An explicit endpoint reconfiguration invalidated pending automation.
-    ExplicitReconfiguration = 5,
-}
-
-/// Typed reliable `AUTOMATION_CANCELED` event payload.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AutomationCanceled {
-    /// Endpoint-monotonic reliable event sequence.
-    pub event_sequence: u64,
-    /// Original nonzero automation command request ID.
-    pub origin_request_id: crate::RequestId,
-    /// Number of records canceled from the accepted batch.
-    pub canceled_records: u16,
-    /// Explicit cancellation cause.
-    pub reason: AutomationCancellationReason,
-    /// Immutable automation queue generation.
-    pub queue_generation: u64,
-    /// Effective endpoint sample, when known.
-    pub effective_sample: Option<crate::SampleTime>,
-}
-
 /// Frozen meter component registry for one fixed telemetry record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -1724,74 +1691,6 @@ impl ProtocolCodec {
         })
     }
 
-    /// Return the exact direct caller-buffer size for a reliable automation cancellation event.
-    pub const fn encoded_automation_canceled_len(&self, value: AutomationCanceled) -> usize {
-        if value.effective_sample.is_some() {
-            96
-        } else {
-            80
-        }
-    }
-
-    /// Encode a reliable typed `AUTOMATION_CANCELED` payload without allocation.
-    pub fn encode_automation_canceled(
-        &self,
-        value: AutomationCanceled,
-        output: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let required = self.encoded_automation_canceled_len(value);
-        if output.len() < required {
-            return Err(EncodeError::OutputTooSmall { required });
-        }
-        let mut writer = SliceSink::new(output, self.limits());
-        write_automation_canceled(&mut writer, value)?;
-        checked_writer_len(&writer, required)
-    }
-
-    /// Strictly decode a reliable typed `AUTOMATION_CANCELED` payload.
-    pub fn decode_automation_canceled(
-        &self,
-        payload: &[u8],
-        count: u32,
-    ) -> Result<AutomationCanceled, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::automation_canceled::SPEC)?;
-        let value = AutomationCanceled {
-            event_sequence: read_u64(one_spec!(
-                message,
-                schema::automation_canceled::EVENT_SEQUENCE
-            )?)?,
-            origin_request_id: crate::RequestId::new(read_u64(one_spec!(
-                message,
-                schema::automation_canceled::ORIGIN_REQUEST_ID
-            )?)?)
-            .ok_or(DecodeError::InvalidTlv)?,
-            canceled_records: read_u16(one_spec!(
-                message,
-                schema::automation_canceled::CANCELED_RECORDS
-            )?)?,
-            reason: parse_automation_cancellation_reason(read_u8(one_spec!(
-                message,
-                schema::automation_canceled::REASON
-            )?)?)?,
-            queue_generation: read_u64(one_spec!(
-                message,
-                schema::automation_canceled::QUEUE_GENERATION
-            )?)?,
-            effective_sample: optional_spec!(
-                message,
-                schema::automation_canceled::EFFECTIVE_SAMPLE
-            )?
-            .map(read_u64)
-            .transpose()?
-            .map(crate::SampleTime),
-        };
-        if value.canceled_records == 0 {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(value)
-    }
-
     /// Return the exact caller-buffer bytes required for one fixed-record meter batch.
     pub fn encoded_meter_batch_len(&self, value: MeterBatch<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
@@ -2210,19 +2109,6 @@ fn parse_transport_state(value: u8) -> Result<TransportState, DecodeError> {
     }
 }
 
-fn parse_automation_cancellation_reason(
-    value: u8,
-) -> Result<AutomationCancellationReason, DecodeError> {
-    match value {
-        1 => Ok(AutomationCancellationReason::RevisionChanged),
-        2 => Ok(AutomationCancellationReason::TransportLocate),
-        3 => Ok(AutomationCancellationReason::EndpointShutdown),
-        4 => Ok(AutomationCancellationReason::ProviderUnavailable),
-        5 => Ok(AutomationCancellationReason::ExplicitReconfiguration),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-
 fn parse_meter_component(value: u16) -> Result<MeterComponent, DecodeError> {
     match value {
         1 => Ok(MeterComponent::Left),
@@ -2602,52 +2488,6 @@ pub(crate) fn write_transport_state_event(
             sink,
             schema::transport_state_event::ORIGIN_REQUEST_ID,
             &origin.get().to_le_bytes()
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn write_automation_canceled(
-    sink: &mut dyn Sink,
-    value: AutomationCanceled,
-) -> Result<(), EncodeError> {
-    if value.canceled_records == 0 {
-        return Err(EncodeError::LimitExceeded);
-    }
-    sink.check_field_count(schema::automation_canceled::SPEC.field_count(&[(
-        schema::automation_canceled::EFFECTIVE_SAMPLE,
-        usize::from(value.effective_sample.is_some()),
-    )])?)?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::EVENT_SEQUENCE,
-        &value.event_sequence.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::ORIGIN_REQUEST_ID,
-        &value.origin_request_id.get().to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::CANCELED_RECORDS,
-        &value.canceled_records.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::REASON,
-        &[value.reason as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::QUEUE_GENERATION,
-        &value.queue_generation.to_le_bytes()
-    )?;
-    if let Some(sample) = value.effective_sample {
-        write_spec!(
-            sink,
-            schema::automation_canceled::EFFECTIVE_SAMPLE,
-            &sample.0.to_le_bytes()
         )?;
     }
     Ok(())
@@ -4008,7 +3848,7 @@ impl<'a> From<&DecodedCapabilities<'a>> for CapabilityInvariantView<'a> {
 fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(), DecodeError> {
     let has_command = |wanted| value.supported_commands.contains(wanted);
     let has_event = |wanted| value.supported_events.contains(wanted);
-    let session_family = has_command(0x0003) && has_event(0x8001) && has_event(0x8002);
+    let session_family = has_command(0x0003) && has_event(0x8001);
     if value.minimum_version.major != 1
         || value.maximum_version.major != 1
         || value.minimum_version.minor > value.maximum_version.minor
@@ -4033,7 +3873,6 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
         || (has_command(0x0003) != has_event(0x8001))
-        || (has_event(0x8001) != has_event(0x8002))
         || (has_command(0x000c) != has_command(0x000d))
         || (has_command(0x0008) != has_event(0x8010))
         || (has_command(0x000a) != has_event(0x8021))
@@ -4045,7 +3884,9 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
 }
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
-        matches!(id, 0x8001 | 0x8002 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
+        // `0x8002` is retired: never allocated again, never advertised (#1628).
+        matches!(id, 0x8001 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
+            && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
         matches!(id, 1..=14) && !crate::wire::is_retired_message_id(id)

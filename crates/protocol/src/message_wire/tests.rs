@@ -288,7 +288,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     }
 
     let commands = [1, 2, 3];
-    let events = [0x8001, 0x8002];
+    let events = [0x8001];
     let command_bytes = le(&commands);
     let event_bytes = le(&events);
     assert!(
@@ -306,12 +306,14 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     );
 
     assert_parity_rejects(&[1, 3, 2], &events);
-    // The pair rule, an unallocated ID and a retired ID are each refused.
+    // The pair rule, an unallocated ID and a retired ID are each refused: a record that adds the
+    // retired event `0x8002` back is refused whatever else it lists (#1628).
+    assert_parity_rejects(&commands, &[0x8001, 0x8002]);
     assert_parity_rejects(&[1, 2, 12], &events);
     assert_parity_rejects(&[1, 2, 14], &events);
     assert_parity_rejects(&[1, 2, 4], &events);
     assert_parity_rejects(&[1, 2, 6], &events);
-    assert_parity_rejects(&commands, &[0x8001]);
+    assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
 }
 
@@ -319,7 +321,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
 fn b1b_success_schemas_round_trip_and_truncate() {
     let codec = codec();
     let commands = [1_u16, 2, 3];
-    let events = [0x8001_u16, 0x8002];
+    let events = [0x8001_u16];
     let capabilities = Capabilities {
         minimum_version: crate::ProtocolVersion::V1,
         maximum_version: crate::ProtocolVersion::V1,
@@ -1718,11 +1720,11 @@ fn control_code_tables_are_exact() {
 /// Gate 2: a retired message ID decodes to `UNSUPPORTED_MESSAGE`, no message variant uses a
 /// retired code, and a capability registry that lists one is refused.
 ///
-/// Red if `0x0004`, `0x0005` or `0x0006` is reallocated to a new message or still served, or a
+/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served, or a
 /// peer can advertise one.
 #[test]
 fn retired_message_ids_are_never_reused_or_advertised() {
-    assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005, 0x0006]);
+    assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005, 0x0006, 0x8002]);
     for raw in 0..=u16::MAX {
         match crate::MessageId::from_raw(raw) {
             Ok(message) => {
@@ -1743,6 +1745,12 @@ fn retired_message_ids_are_never_reused_or_advertised() {
         !allocated_id(0x0004, false)
             && !allocated_id(0x0005, false)
             && !allocated_id(0x0006, false)
+            && !allocated_id(0x8002, true)
+    );
+    assert!(
+        [0x8001, 0x8010, 0x8020, 0x8021, 0x8030]
+            .into_iter()
+            .all(|id| allocated_id(id, true))
     );
     assert!(
         [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14]
@@ -1792,7 +1800,7 @@ fn session_capabilities<'a>(commands: &'a [u16], events: &'a [u16]) -> Capabilit
 fn retired_capability_fields_are_refused_in_either_flag_form() {
     let codec = codec();
     let commands = [1_u16, 2, 3];
-    let events = [0x8001_u16, 0x8002];
+    let events = [0x8001_u16];
     let capabilities = session_capabilities(&commands, &events);
     let mut bytes = vec![
         0;
@@ -1836,7 +1844,7 @@ fn retired_capability_fields_are_refused_in_either_flag_form() {
 fn capability_flag_bit_5_is_unknown_and_the_floor_is_the_field_count() {
     let codec = codec();
     let commands = [1_u16, 2, 3];
-    let events = [0x8001_u16, 0x8002];
+    let events = [0x8001_u16];
     let mut capabilities = session_capabilities(&commands, &events);
     assert_eq!(capabilities.flags.0 & (1 << 5), 0);
     assert!(codec.encoded_capabilities_len(&capabilities).is_ok());
@@ -2342,47 +2350,6 @@ fn b3b2_diagnostics_pages_are_canonical_bounded_and_strict() {
 #[test]
 fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     let codec = codec();
-    let canceled = AutomationCanceled {
-        event_sequence: 1,
-        origin_request_id: crate::RequestId::new(2).expect("id"),
-        canceled_records: 3,
-        reason: AutomationCancellationReason::RevisionChanged,
-        queue_generation: 2,
-        effective_sample: Some(crate::SampleTime(9)),
-    };
-    let mut canceled_bytes = [0_u8; 96];
-    codec
-        .encode_automation_canceled(canceled, &mut canceled_bytes)
-        .expect("cancel");
-    assert_eq!(
-        hex(&canceled_bytes),
-        concat!(
-            "01000401080000000100000000000000",
-            "02000401080000000200000000000000",
-            "03000201020000000300000000000000",
-            "04000101010000000100000000000000",
-            "05000401080000000200000000000000",
-            "06000400080000000900000000000000"
-        )
-    );
-    assert_eq!(
-        codec.decode_automation_canceled(&canceled_bytes, 6),
-        Ok(canceled)
-    );
-    for end in 0..canceled_bytes.len() {
-        assert!(
-            codec
-                .decode_automation_canceled(&canceled_bytes[..end], 6)
-                .is_err()
-        );
-    }
-    let mut bad_canceled = canceled_bytes;
-    bad_canceled[40..42].fill(0);
-    assert!(codec.decode_automation_canceled(&bad_canceled, 6).is_err());
-    bad_canceled = canceled_bytes;
-    bad_canceled[56] = 9;
-    assert!(codec.decode_automation_canceled(&bad_canceled, 6).is_err());
-
     let records = [MeterRecord {
         handle: 1,
         component: MeterComponent::Right,
@@ -2525,18 +2492,6 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
                 );
             }
         };
-    assert_event_frame(
-        crate::MessageId::AutomationCanceled,
-        &canceled_bytes,
-        6,
-        concat!(
-            "4d49534f43544c00010000003000030002800000600000000000000000000000",
-            "07000000000000000600000000000000",
-            "0100040108000000010000000000000002000401080000000200000000000000",
-            "0300020102000000030000000000000004000101010000000100000000000000",
-            "0500040108000000020000000000000006000400080000000900000000000000"
-        ),
-    );
     assert_event_frame(
         crate::MessageId::MeterBatch,
         &meter_bytes,

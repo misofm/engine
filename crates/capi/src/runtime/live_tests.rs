@@ -2305,15 +2305,14 @@ fn reliable_event_kinds(rig: &Rig) -> Vec<&'static str> {
             .expect("reliable event");
         kinds.push(match event.payload {
             protocol::DecodedEventPayload::SessionCommitted(_) => "SESSION_COMMITTED",
-            protocol::DecodedEventPayload::AutomationCanceled(_) => "AUTOMATION_CANCELED",
             _ => "other",
         });
     }
 }
 
 /// #1053 D10: a live edit emits exactly the events a rebuild's commit does -- one
-/// `SESSION_COMMITTED`, and no `AUTOMATION_CANCELED`: `AUTOMATION_ENQUEUE` is retired (#1627), so
-/// no batch is queued for a commit to cancel.
+/// `SESSION_COMMITTED` and nothing else: `AUTOMATION_CANCELED` is retired with `AUTOMATION_ENQUEUE`
+/// (#1627, #1628), so no commit cancels anything.
 ///
 /// Test value: red if a live edit commits through a path that skips the protocol commit's events,
 /// for example a live-only commit that emits no `SESSION_COMMITTED`.

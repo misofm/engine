@@ -120,8 +120,6 @@ pub enum MessageId {
     ResponseGet = 0x000e,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
-    /// `AUTOMATION_CANCELED`.
-    AutomationCanceled = 0x8002,
     /// `TRANSPORT_STATE`.
     TransportState = 0x8010,
     /// `METER_BATCH`.
@@ -132,12 +130,13 @@ pub enum MessageId {
     Diagnostic = 0x8030,
 }
 
-/// The command message IDs that were allocated and are retired: `PARAMETER_METADATA_GET`
-/// (`0x0004`) and `PARAMETER_STATE_GET` (`0x0005`), replaced by `CONTROL_LIST_GET` and
-/// `CONTROL_STATE_GET` (decision 17, C4), and `AUTOMATION_ENQUEUE` (`0x0006`), retired because
-/// every sample-timed change is a stored automation edit (`0x0600`-`0x0603`; #1627). A retired ID
-/// decodes to `UnsupportedMessage`, is never advertised and is never reallocated.
-pub const RETIRED_MESSAGE_IDS: [u16; 3] = [0x0004, 0x0005, 0x0006];
+/// The message IDs that were allocated and are retired: `PARAMETER_METADATA_GET` (`0x0004`) and
+/// `PARAMETER_STATE_GET` (`0x0005`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET`
+/// (decision 17, C4); `AUTOMATION_ENQUEUE` (`0x0006`), retired because every sample-timed change
+/// is a stored automation edit (`0x0600`-`0x0603`; #1627); and the event `AUTOMATION_CANCELED`
+/// (`0x8002`), retired with it because no batch can enter a queue to be canceled (#1628). A
+/// retired ID decodes to `UnsupportedMessage`, is never advertised and is never reallocated.
+pub const RETIRED_MESSAGE_IDS: [u16; 4] = [0x0004, 0x0005, 0x0006, 0x8002];
 
 /// Whether `value` is a retired message ID.
 #[must_use]
@@ -178,7 +177,6 @@ impl MessageId {
             0x000d => Self::ControlStateGet,
             0x000e => Self::ResponseGet,
             0x8001 => Self::SessionCommitted,
-            0x8002 => Self::AutomationCanceled,
             0x8010 => Self::TransportState,
             0x8020 => Self::MeterBatch,
             0x8021 => Self::CounterSnapshot,

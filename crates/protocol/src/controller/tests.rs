@@ -1608,14 +1608,6 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
         ),
         Err(EventEgressError::ReliableQueueFull(_))
     ));
-    assert!(
-        owner
-            .cancel_pending_automation(
-                AutomationCancellationReason::ExplicitReconfiguration,
-                Some(SampleTime(0)),
-            )
-            .is_err()
-    );
     drop(canceled);
     assert_eq!(owner.session().revision(), SessionRevision(7));
     assert!(owner.replay().is_empty());
@@ -1934,7 +1926,7 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 3 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 4 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
@@ -2694,41 +2686,46 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
     );
 }
 
+/// #1628 gate 3. Nothing cancels: a transaction that changes the revision reserves and emits
+/// exactly its `SESSION_COMMITTED`, and a `TRANSPORT_SET` that locates exactly its
+/// `TRANSPORT_STATE`, even with a batch in the automation queue (which `AUTOMATION_ENQUEUE`, now
+/// retired, could once have filled). A reliable-event queue of two slots holds each pair of events
+/// only if neither commit also reserves a cancellation.
+///
+/// Red if a revision change or a locate still reserves or emits an `AUTOMATION_CANCELED` event,
+/// which would spend a reliable slot for nothing and put a retired ID on the wire.
 #[test]
-fn transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch() {
-    let mut controller = egress_controller(3, 1);
+fn a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events() {
+    let mut controller = egress_controller(2, 1);
     controller
         .queues_mut()
         .try_enqueue_automation(SampleTime(0), batch(9, 100))
-        .expect("queued automation");
-    let state_only = controller.process(ControllerRequest {
+        .expect("queued batch");
+    let edits = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("nothing-cancels").expect("ID"),
+    }];
+    let committed = controller.process(ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"state-only-preserves-automation",
-        command: ControlCommand::TransportSet {
-            request: TransportSetRequest {
-                state: TransportState::Playing,
-                position: None,
-            },
-        },
+        canonical_bytes: b"revision-change",
+        command: ControlCommand::SessionTransactionApply { edits: &edits },
     });
-    assert_eq!(state_only.status, StatusCode::Ok);
+    assert_eq!(committed.status, StatusCode::Ok);
     assert_eq!(
         controller
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
+            .queues()
+            .report(crate::QueueKind::ReliableEvent)
             .occupancy,
         1
     );
-    let _ = controller
-        .queues_mut()
-        .try_dequeue_event()
-        .expect("state event");
+    let event = controller.queues_mut().try_dequeue_event().expect("event");
+    assert_eq!(event.message_id, MessageId::SessionCommitted);
+    assert!(controller.queues_mut().try_dequeue_event().is_err());
 
     let locate = controller.process(ControllerRequest {
         request_id: id(2),
-        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"locate-cancels-automation",
+        expected_revision: ExpectedRevision::Exact(SessionRevision(8)),
+        canonical_bytes: b"locate",
         command: ControlCommand::TransportSet {
             request: TransportSetRequest {
                 state: TransportState::Playing,
@@ -2737,11 +2734,46 @@ fn transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoc
         },
     });
     assert_eq!(locate.status, StatusCode::Ok);
-    assert!(controller.queues_mut().try_dequeue_automation().is_err());
-    controller
-        .queues_mut()
-        .try_enqueue_automation(SampleTime(0), batch(10, 50))
-        .expect("locate reset permits an earlier absolute scheduling epoch");
+    let event = controller.queues_mut().try_dequeue_event().expect("event");
+    assert_eq!(event.message_id, MessageId::TransportState);
+    assert!(controller.queues_mut().try_dequeue_event().is_err());
+}
+
+/// #1628 gate 1. An event frame under the retired ID `0x8002` (`AUTOMATION_CANCELED`) fails typed
+/// event decode as an unsupported message, as the retired command frame under the same ID does in
+/// the conformance rows.
+///
+/// Red if the retired event ID decodes again, or a peer's old frame is read as another event.
+#[test]
+fn an_event_frame_under_the_retired_cancellation_id_is_refused() {
+    let codec = ProtocolCodec::default();
+    let frame = TypedEventFrame {
+        revision: SessionRevision(7),
+        payload: EventPayload::SessionCommitted(SessionCommitted {
+            event_sequence: 1,
+            origin_request_id: id(1),
+            previous_revision: SessionRevision(6),
+            applied_operations: 1,
+        }),
+    };
+    let mut bytes = vec![0_u8; 256];
+    let written = codec
+        .encode_event_frame_into(&frame, &mut bytes)
+        .expect("event frame");
+    bytes.truncate(written);
+    assert!(
+        codec
+            .decode_typed_event(&bytes, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .is_ok(),
+        "the control frame decodes before its ID is patched"
+    );
+    bytes[16..18].copy_from_slice(&0x8002_u16.to_le_bytes());
+    assert_eq!(
+        codec
+            .decode_typed_event(&bytes, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .err(),
+        Some(DecodeError::UnsupportedMessage)
+    );
 }
 
 #[test]
@@ -3185,7 +3217,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
         !decoded
             .supported_events
             .chunks_exact(2)
-            .any(|value| { matches!(u16::from_le_bytes([value[0], value[1]]), 0x8001 | 0x8002) })
+            .any(|value| { matches!(u16::from_le_bytes([value[0], value[1]]), 0x8001) })
     );
     assert_eq!(decoded.flags.0 & ((1 << 3) | (1 << 12)), 0);
     assert_eq!(
@@ -3447,7 +3479,7 @@ fn canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pa
 }
 
 #[test]
-fn c2b2_event_egress_emits_all_six_schema_closed_full_frames() {
+fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
     let codec = ProtocolCodec::default();
     let mut controller = egress_controller(4, 256);
     let revision = controller.session().revision();
@@ -3459,18 +3491,9 @@ fn c2b2_event_egress_emits_all_six_schema_closed_full_frames() {
     configure_event_egress(&mut controller, 1, meter_handles, counter_ids, true);
 
     let committed = ReliableSlot::session_committed(revision, 1, id(9), SessionRevision(6), 2);
-    let canceled = ReliableSlot::automation_canceled(
-        revision,
-        2,
-        id(10),
-        3,
-        AutomationCancellationReason::ExplicitReconfiguration,
-        2,
-        Some(SampleTime(12)),
-    );
     let transport = ReliableSlot::transport_state(
         revision,
-        3,
+        2,
         TransportState::Playing,
         SampleTime(8),
         SampleTime(12),
@@ -3480,10 +3503,6 @@ fn c2b2_event_egress_emits_all_six_schema_closed_full_frames() {
         .queues_mut()
         .try_enqueue_event(committed)
         .expect("committed");
-    controller
-        .queues_mut()
-        .try_enqueue_event(canceled)
-        .expect("canceled");
     controller
         .queues_mut()
         .try_enqueue_event(transport)
@@ -3546,19 +3565,8 @@ fn c2b2_event_egress_emits_all_six_schema_closed_full_frames() {
         },
         TypedEventFrame {
             revision,
-            payload: EventPayload::AutomationCanceled(AutomationCanceled {
-                event_sequence: 2,
-                origin_request_id: id(10),
-                canceled_records: 3,
-                reason: AutomationCancellationReason::ExplicitReconfiguration,
-                queue_generation: 2,
-                effective_sample: Some(SampleTime(12)),
-            }),
-        },
-        TypedEventFrame {
-            revision,
             payload: EventPayload::TransportState(TransportStateEvent {
-                event_sequence: 3,
+                event_sequence: 2,
                 state: TransportState::Playing,
                 position: SampleTime(8),
                 effective_sample: SampleTime(12),

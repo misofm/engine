@@ -290,7 +290,7 @@ pub fn console_session_fixture() -> SessionModel {
 /// One wire conformance row for decision 12's retired and refused codes (#1094).
 ///
 /// `bytes` is one complete command frame, request ID 1: a `SESSION_TRANSACTION_APPLY` at exact
-/// revision 7, or, for the three retired message IDs, a frame under the retired ID (empty, or for `0x0006` carrying the payload the command had), which
+/// revision 7, or, for the four retired message IDs, a frame under the retired ID (empty, or for `0x0006` carrying the payload the command had), which
 /// the endpoint refuses with the decoder's `UNSUPPORTED_MESSAGE` and no response frame. An endpoint whose session is [`console_session_fixture`] answers it with `status`
 /// and exactly the diagnostic codes in `diagnostic`: the endpoint's generic `protocol.failure` for
 /// a frame refused at decode, the edit's own code for an edit refusal, none for a success. A
@@ -324,9 +324,10 @@ pub struct RetiredCodeRow {
 ///   (`VALIDATION_FAILED`, `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
 ///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
-///   C4), and `0x0006` (`AUTOMATION_ENQUEUE`, #1627, a frame with the payload the command had):
-///   `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
-///   no message leaves no safe request identity, so these three rows carry the status the decoder
+///   C4), `0x0006` (`AUTOMATION_ENQUEUE`, #1627, a frame with the payload the command had) and
+///   `0x8002` (the event `AUTOMATION_CANCELED`, #1628, under the command header): `UNSUPPORTED_MESSAGE`,
+///   never served and never reallocated. A message ID that decodes to
+///   no message leaves no safe request identity, so these four rows carry the status the decoder
 ///   maps the refusal to, no diagnostic, and the endpoint writes no response frame for them.
 ///
 /// The last row, `control.unknown_optional_track_field_12`, is the splice's control: the same
@@ -417,7 +418,7 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         status: VALIDATION_FAILED,
         diagnostic: Some("session.edit.value_op_retired"),
     });
-    for retired in [0x0004_u16, 0x0005, 0x0006] {
+    for retired in [0x0004_u16, 0x0005, 0x0006, 0x8002] {
         let mut bytes = vec![0; OUTER_HEADER_BYTES];
         ProtocolCodec::default()
             .encode_command_frame_into(
@@ -800,7 +801,10 @@ pub enum ConformanceDecoder {
 /// are retired and never reallocated, so the corpus loses the `command.automation_enqueue` and
 /// `response.automation` frames and the two status frames, and the capabilities response carries
 /// 23 fields and lists no command `0x0006` (flag bit 5 clear). The frame count is 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xcfa5_8ab7_b7bb_b7c4;
+/// Issue #1628 (draft 21b) repinned it from `cfa58ab7b7bbb7c4`: the event `AUTOMATION_CANCELED`
+/// (`0x8002`) is retired and never reallocated, so the corpus loses `event.automation_canceled`
+/// and the capabilities response lists no event `0x8002`. The frame count is 45.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x4b21_d9e6_f520_afd9;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -967,7 +971,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
         supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
-        supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
+        supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
     macro_rules! success {
@@ -1157,17 +1161,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             origin_request_id: request,
             previous_revision: SessionRevision(6),
             applied_operations: 1
-        })
-    );
-    event!(
-        "event.automation_canceled",
-        EventPayload::AutomationCanceled(AutomationCanceled {
-            event_sequence: 1,
-            origin_request_id: request,
-            canceled_records: 1,
-            reason: AutomationCancellationReason::RevisionChanged,
-            queue_generation: 1,
-            effective_sample: None
         })
     );
     event!(

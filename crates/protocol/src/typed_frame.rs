@@ -6,14 +6,14 @@
 
 use crate::btlv::{CountSink, MessageMeasure, Sink, SliceSink};
 use crate::{
-    AutomationCanceled, Capabilities, CommandHeader, ControlListPage, ControlListRequest,
-    ControlStatePage, CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError,
-    DecodeScratch, DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent,
-    DiagnosticsPage, DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId,
-    MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ProtocolCodec, RequestId, ResponseGetRequest,
-    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionRevision,
-    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    Capabilities, CommandHeader, ControlListPage, ControlListRequest, ControlStatePage,
+    CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
+    DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
+    DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
+    OUTER_HEADER_BYTES, ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader,
+    ResponseResult, SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot,
+    SessionSnapshotRequest, StatusCode, TelemetryConfiguration, TransactionApplied,
+    TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -98,7 +98,6 @@ pub struct TypedNonOkResponseFrame<'a> {
 #[allow(missing_docs)] // Variant names exactly mirror the frozen event registry.
 pub enum EventPayload<'a> {
     SessionCommitted(SessionCommitted),
-    AutomationCanceled(AutomationCanceled),
     TransportState(TransportStateEvent),
     MeterBatch(MeterBatch<'a>),
     CounterSnapshot(CounterSnapshotRef<'a>),
@@ -168,7 +167,6 @@ pub enum DecodedTypedResponseFrame<'a> {
 #[allow(missing_docs)]
 pub enum DecodedEventPayload<'a> {
     SessionCommitted(SessionCommitted),
-    AutomationCanceled(AutomationCanceled),
     TransportState(TransportStateEvent),
     MeterBatch(DecodedMeterBatch<'a>),
     CounterSnapshot(CounterSnapshot),
@@ -222,7 +220,6 @@ impl<'a> EventPayload<'a> {
     const fn message_id(&self) -> MessageId {
         match self {
             Self::SessionCommitted(_) => MessageId::SessionCommitted,
-            Self::AutomationCanceled(_) => MessageId::AutomationCanceled,
             Self::TransportState(_) => MessageId::TransportState,
             Self::MeterBatch(_) => MessageId::MeterBatch,
             Self::CounterSnapshot(_) => MessageId::CounterSnapshot,
@@ -529,9 +526,6 @@ impl ProtocolCodec {
             MessageId::SessionCommitted => DecodedEventPayload::SessionCommitted(
                 self.decode_session_committed(decoded.payload, header.tlv_count)?,
             ),
-            MessageId::AutomationCanceled => DecodedEventPayload::AutomationCanceled(
-                self.decode_automation_canceled(decoded.payload, header.tlv_count)?,
-            ),
             MessageId::TransportState => DecodedEventPayload::TransportState(
                 self.decode_transport_state_event(decoded.payload, header.tlv_count)?,
             ),
@@ -731,9 +725,6 @@ fn write_event_payload(
         EventPayload::SessionCommitted(value) => {
             crate::message_wire::write_session_committed(sink, *value)
         }
-        EventPayload::AutomationCanceled(value) => {
-            crate::message_wire::write_automation_canceled(sink, *value)
-        }
         EventPayload::TransportState(value) => {
             crate::message_wire::write_transport_state_event(sink, *value)
         }
@@ -776,7 +767,7 @@ mod tests {
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
             supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
-            supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
+            supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
             flags: crate::CapabilityFlags::B4_BASE,
         }
     }
@@ -1339,20 +1330,6 @@ mod tests {
                     }),
                 },
                 MessageId::SessionCommitted,
-            ),
-            (
-                TypedEventFrame {
-                    revision: SessionRevision(7),
-                    payload: EventPayload::AutomationCanceled(AutomationCanceled {
-                        event_sequence: 1,
-                        origin_request_id: request_id(),
-                        canceled_records: 1,
-                        reason: crate::AutomationCancellationReason::RevisionChanged,
-                        queue_generation: 1,
-                        effective_sample: None,
-                    }),
-                },
-                MessageId::AutomationCanceled,
             ),
             (
                 TypedEventFrame {

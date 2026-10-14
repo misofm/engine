@@ -560,8 +560,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   changes until the last of them passes. The cell writes and the commit then cannot
   fail, and render applies every value it reads, because the classifier refuses every value the
   setters would refuse. A refused transaction writes no cell and uses no revision.
-- **Same events.** A live edit emits one `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per
-  queued batch), exactly as a replacement does. The reliable event lane holds two events, so a
+- **Same events.** A live edit emits one `SESSION_COMMITTED` and nothing else (`AUTOMATION_CANCELED`
+  is retired, #1628), exactly as a replacement does. The reliable event lane holds two events, so a
   host drains it after each edit either way.
 - **Edit path in the response (#1313).** The `TransactionApplied` response carries a required
   field `2:edit-path U8`: `live` 1 (records on the running plan's live lanes, no plan prepared),
