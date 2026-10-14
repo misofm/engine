@@ -17,23 +17,23 @@ std::thread_local! {
     static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::TransportState;
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
-    CapabilityFlags, CommandHeader, ControlBody, ControlEntry, ControlKind, ControlListPage,
-    ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
-    CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
-    DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
-    EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
-    NonOkResponse, ParameterHandle, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues,
-    QueueReport, ReliablePayload, ReliableSlot, RequestId, SampleTime, SessionCommitted,
-    SessionEdit, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
-    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    CapabilityFlags, CommandHeader, ControlKind, ControlListPage, ControlListRequest, ControlRow,
+    ControlStatePage, CounterSnapshot, CounterSnapshotRef, CounterTelemetryRecord, CounterValue,
+    CountersRequest, DecodeError, DecodeScratch, DecodedCommandPayload, Diagnostic,
+    DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EditPath, EncodeError, EventPayload,
+    ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterHandle,
+    PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
+    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
+    SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
+    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
+    TypedSuccessResponseFrame,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::{ControlBody, ControlEntry, TransportState};
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -599,13 +599,14 @@ pub trait ControlProvider {
         &mut self,
         request: &ControlListRequest,
     ) -> Result<ControlStatePage, ParameterProviderError>;
-    /// Borrow one control row for transient automation domain admission: an automatable
-    /// continuous, toggle or enumeration row. A row that no automation can reach is
-    /// [`ParameterProviderError::UnsupportedTarget`].
+    /// Borrow the descriptor of one control row for transient automation domain admission: an
+    /// automatable continuous, toggle or enumeration row. A provider that shares one stored
+    /// descriptor between rows lends that one (its `value` is not the row's). A row that no
+    /// automation can reach, a header among them, is [`ParameterProviderError::UnsupportedTarget`].
     fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ControlEntry, ParameterProviderError>;
+    ) -> Result<&ControlRow, ParameterProviderError>;
     /// Return a typed nondestructive counter snapshot for the requested registered IDs.
     fn counters(
         &mut self,
@@ -774,11 +775,18 @@ impl ControlProvider for MockProvider {
     fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ControlEntry, ParameterProviderError> {
-        self.controls
+    ) -> Result<&ControlRow, ParameterProviderError> {
+        let entry = self
+            .controls
             .iter()
             .find(|entry| entry.handle == handle.0)
-            .ok_or(ParameterProviderError::NotFound)
+            .ok_or(ParameterProviderError::NotFound)?;
+        match &entry.body {
+            ControlBody::Control(row) => Ok(row),
+            ControlBody::OwnerHeader(_) | ControlBody::SectionHeader(_) => {
+                Err(ParameterProviderError::UnsupportedTarget)
+            }
+        }
     }
     fn counters(
         &mut self,
@@ -3605,13 +3613,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         batch: &AutomationBatchSlot,
     ) -> Result<(), AutomationRefusal> {
         for record in batch.as_slice() {
-            let entry = self
+            let row = self
                 .provider
                 .control_row(record.handle)
                 .map_err(AutomationRefusal::Provider)?;
-            let ControlBody::Control(row) = &entry.body else {
-                return Err(AutomationRefusal::InvalidField);
-            };
             if !row.automatable {
                 return Err(AutomationRefusal::InvalidField);
             }

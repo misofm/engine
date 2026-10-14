@@ -1,5 +1,7 @@
 //! Session-backed implementation of the transport-neutral control-provider boundary.
 
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use controls::{LiveRampRow, LiveRamps, MonitorOverlay, Motion, Owner, Section};
@@ -9,13 +11,13 @@ use effect_contract::{EffectDescriptor, ParameterUnit, StepUnit};
 use protocol::{
     ControlAddress, ControlBody, ControlClass, ControlEntry, ControlFamily, ControlKind,
     ControlListPage, ControlListRequest, ControlOwnerHeader, ControlOwnerHeaderKind,
-    ControlProvider, ControlRampRow, ControlReason, ControlRouteEnds, ControlRow, ControlScope,
-    ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord, ControlTaper,
-    ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue, CountersRequest,
-    Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EnumChoice,
-    ParameterHandle, ParameterProviderError, ParameterUnit as ProtocolUnit, SampleTime,
-    TelemetryConfiguration, TelemetryCounters, TransportSetRequest, TransportSnapshot,
-    TransportState,
+    ControlOwnerKind, ControlProvider, ControlRampRow, ControlReason, ControlRouteEnds, ControlRow,
+    ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
+    ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
+    CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
+    EnumChoice, ParameterChannel, ParameterHandle, ParameterProviderError,
+    ParameterUnit as ProtocolUnit, SampleTime, TelemetryConfiguration, TelemetryCounters,
+    TransportSetRequest, TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -59,15 +61,92 @@ pub struct SessionControlProviderResources {
 /// rows and a section header before each section's, each at its handle, and the committed value
 /// of every control row.
 ///
+/// The list is held in three shared tables and two vectors in step (#1599). `owners` holds each
+/// owner once, `sections` each section once with its owner's index, and `descriptors` each
+/// distinct control row once (every `f32` compared by bits). `rows` holds one fixed-size record
+/// per entry and no heap allocation; a control's record names its section, its control and lane,
+/// and its descriptor. `values` holds the committed value of each entry, in step with `rows`.
+/// A page builds its wire entries from these tables, so the bytes a client reads are the ones a
+/// full wire row per entry would give.
+///
 /// Handles count from 1 in list order, so an entry's handle is its index plus one and no handle
-/// is stored twice. `values` holds the committed value of each entry, in step with `entries`; the
-/// `value` inside a stored control row is always `0.0`, so that two catalogs' entries compare equal
-/// exactly when their addresses, headers and descriptors do (a page fills the value in from
-/// `values`).
+/// is stored twice. A descriptor's `value` is always `0.0`, so that two catalogs' tables compare
+/// equal exactly when every entry's address, header and descriptor do (a page fills the value in
+/// from `values`).
 pub struct ControlCatalog {
-    entries: Vec<ControlEntry>,
+    owners: Vec<OwnerRecord>,
+    sections: Vec<SectionRecord>,
+    descriptors: Vec<ControlRow>,
+    rows: Vec<RowRecord>,
     values: Vec<f32>,
     resources: CatalogResources,
+}
+
+/// What a catalog row is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowKind {
+    /// An owner header; `parent` is the owner's index.
+    Owner,
+    /// A section header; `parent` is the section's index.
+    Section,
+    /// A control row; `parent` is its section's index.
+    Control,
+}
+
+/// One entry of the list, with no heap allocation (16 bytes).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RowRecord {
+    /// The owner index of an owner header, the section index of every other row.
+    parent: u32,
+    /// The control ID of a control row; `0` in a header.
+    control: u32,
+    /// The index into `descriptors` of a control row; `0` in a header.
+    descriptor: u32,
+    kind: RowKind,
+    /// The lane of a control row; unused in a header.
+    lane: ParameterChannel,
+}
+
+/// One owner of the list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OwnerRecord {
+    kind: ControlOwnerKind,
+    header: ControlOwnerHeaderKind,
+    /// The owner's stable ID; absent exactly for the session. It is also the owner header's name
+    /// (the session's is `session`).
+    id: Option<String>,
+    /// A route's ends.
+    route: Option<ControlRouteEnds>,
+}
+
+impl OwnerRecord {
+    fn name(&self) -> &str {
+        self.id.as_deref().unwrap_or("session")
+    }
+}
+
+/// One section of the list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SectionRecord {
+    /// The index of the section's owner.
+    owner: u32,
+    section: ControlSection,
+    /// The console slot or insert ID; it is also the section header's name for those two.
+    slot_id: Option<String>,
+    /// The native effect identity of a console slot or an insert.
+    effect: Option<String>,
+}
+
+impl SectionRecord {
+    fn name(&self) -> &str {
+        match self.section {
+            ControlSection::Own => "own",
+            ControlSection::Builtins => "builtins",
+            ControlSection::Console | ControlSection::Inserts => {
+                self.slot_id.as_deref().unwrap_or_default()
+            }
+        }
+    }
 }
 
 /// The retained bytes of one catalog and its largest single allocation, the catalog-only part of
@@ -75,15 +154,20 @@ pub struct ControlCatalog {
 /// catalog is built, so a live commit reads the current catalog's figure without a walk.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CatalogResources {
-    /// Bytes the catalog retains: entries, values, choices, ladders and strings.
+    /// Bytes the catalog retains: its tables, values, choices, ladders and strings.
     pub retained_bytes: u64,
     /// The largest single allocation among them.
     pub largest_allocation_bytes: u64,
 }
 
 impl CatalogResources {
-    fn of(entries: &[ControlEntry], values: &[f32]) -> Result<Self, SessionControlProviderError> {
-        let row_count = entries.len();
+    fn of(
+        owners: &[OwnerRecord],
+        sections: &[SectionRecord],
+        descriptors: &[ControlRow],
+        rows: &[RowRecord],
+        values: &[f32],
+    ) -> Result<Self, SessionControlProviderError> {
         let mut enum_count = 0_usize;
         let mut ladder_count = 0_usize;
         let mut string_bytes = 0_usize;
@@ -98,59 +182,57 @@ impl CatalogResources {
                 .max(u64::try_from(value.len()).map_err(|_| SessionControlProviderError)?);
             Ok(())
         };
-        for entry in entries {
-            charge(entry.address.owner_id.as_deref().unwrap_or_default())?;
-            charge(entry.address.slot_id.as_deref().unwrap_or_default())?;
-            match &entry.body {
-                ControlBody::OwnerHeader(header) => {
-                    charge(&header.name)?;
-                    if let Some(route) = &header.route {
-                        charge(&route.source)?;
-                        charge(&route.destination)?;
-                    }
-                }
-                ControlBody::SectionHeader(header) => {
-                    charge(&header.name)?;
-                    charge(header.effect.as_deref().unwrap_or_default())?;
-                }
-                ControlBody::Control(row) => {
-                    enum_count = enum_count
-                        .checked_add(row.choices.len())
-                        .ok_or(SessionControlProviderError)?;
-                    ladder_count = ladder_count
-                        .checked_add(row.ladder.len())
-                        .ok_or(SessionControlProviderError)?;
-                    largest_enum = largest_enum.max(bytes::<EnumChoice>(row.choices.len())?);
-                    largest_ladder = largest_ladder.max(bytes::<f32>(row.ladder.len())?);
-                    charge(&row.name)?;
-                    charge(&row.display_name)?;
-                    charge(&row.display_unit)?;
-                    charge(row.reopen.as_deref().unwrap_or_default())?;
-                    for choice in &row.choices {
-                        charge(&choice.label)?;
-                    }
-                }
+        for owner in owners {
+            charge(owner.id.as_deref().unwrap_or_default())?;
+            if let Some(route) = &owner.route {
+                charge(&route.source)?;
+                charge(&route.destination)?;
             }
         }
-        let metadata_bytes = bytes::<ControlEntry>(row_count)?;
-        let values_bytes = bytes::<f32>(values.len())?;
-        let catalog_retained_bytes = [
-            metadata_bytes,
-            values_bytes,
-            bytes::<EnumChoice>(enum_count)?,
-            bytes::<f32>(ladder_count)?,
-            u64::try_from(string_bytes).map_err(|_| SessionControlProviderError)?,
-        ]
-        .into_iter()
-        .try_fold(0_u64, u64::checked_add)
-        .ok_or(SessionControlProviderError)?;
+        for section in sections {
+            charge(section.slot_id.as_deref().unwrap_or_default())?;
+            charge(section.effect.as_deref().unwrap_or_default())?;
+        }
+        for row in descriptors {
+            enum_count = enum_count
+                .checked_add(row.choices.len())
+                .ok_or(SessionControlProviderError)?;
+            ladder_count = ladder_count
+                .checked_add(row.ladder.len())
+                .ok_or(SessionControlProviderError)?;
+            largest_enum = largest_enum.max(bytes::<EnumChoice>(row.choices.len())?);
+            largest_ladder = largest_ladder.max(bytes::<f32>(row.ladder.len())?);
+            charge(&row.name)?;
+            charge(&row.display_name)?;
+            charge(&row.display_unit)?;
+            charge(row.reopen.as_deref().unwrap_or_default())?;
+            for choice in &row.choices {
+                charge(&choice.label)?;
+            }
+        }
+        let tables = [
+            bytes::<OwnerRecord>(owners.len())?,
+            bytes::<SectionRecord>(sections.len())?,
+            bytes::<ControlRow>(descriptors.len())?,
+            bytes::<RowRecord>(rows.len())?,
+            bytes::<f32>(values.len())?,
+        ];
+        let catalog_retained_bytes = tables
+            .into_iter()
+            .chain([
+                bytes::<EnumChoice>(enum_count)?,
+                bytes::<f32>(ladder_count)?,
+                u64::try_from(string_bytes).map_err(|_| SessionControlProviderError)?,
+            ])
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or(SessionControlProviderError)?;
         Ok(Self {
             retained_bytes: catalog_retained_bytes,
-            largest_allocation_bytes: metadata_bytes
-                .max(values_bytes)
-                .max(largest_enum)
-                .max(largest_ladder)
-                .max(largest_string),
+            largest_allocation_bytes: tables
+                .into_iter()
+                .chain([largest_enum, largest_ladder, largest_string])
+                .max()
+                .unwrap_or_default(),
         })
     }
 }
@@ -273,8 +355,12 @@ impl SessionControlProvider {
     /// ones in anything but a value: an address, a header or any control row's descriptor (a
     /// `matrix_mode` switch flips `active` on live). A client therefore never holds a stale
     /// descriptor under a current epoch. A commit that changes only values keeps the epoch.
+    ///
+    /// The comparison reads the tables, every `f32` by bits. Both catalogs fill `descriptors` in
+    /// order of first use, so their tables are equal exactly when every entry's address, header
+    /// and descriptor are.
     pub fn replace_session_catalog(&mut self, catalog: ControlCatalog, revision: u64) {
-        if self.catalog.entries != catalog.entries {
+        if !self.catalog.same_structure(&catalog) {
             self.structure_epoch = self.structure_epoch.saturating_add(1);
         }
         self.catalog = catalog;
@@ -302,28 +388,29 @@ impl SessionControlProvider {
         if request.structure_epoch != 0 && request.structure_epoch != self.structure_epoch {
             return Err(ParameterProviderError::Stale);
         }
-        let entries = &self.catalog.entries;
+        let rows = &self.catalog.rows;
         // Handle `h` is entry `h - 1`, so the entries after the cursor start at index `h`.
         let from = usize::try_from(request.after_handle)
             .unwrap_or(usize::MAX)
-            .min(entries.len());
+            .min(rows.len());
         let limit = usize::from(request.limit);
-        let Some(owner) = &request.owner else {
-            let end = from.saturating_add(limit).min(entries.len());
-            return Ok((from, end, end == entries.len()));
+        let Some(filter) = &request.owner else {
+            let end = from.saturating_add(limit).min(rows.len());
+            return Ok((from, end, end == rows.len()));
         };
-        let owned = |entry: &ControlEntry| {
-            entry.address.owner_kind == owner.kind && entry.address.owner_id == owner.id
+        let Some(owner) = self.catalog.owner_index(filter) else {
+            return Ok((rows.len(), rows.len(), true));
         };
-        let start = entries[from..]
+        let owned = |record: &RowRecord| self.catalog.owner_of(record) == owner;
+        let start = rows[from..]
             .iter()
             .position(owned)
-            .map_or(entries.len(), |offset| from + offset);
+            .map_or(rows.len(), |offset| from + offset);
         let mut end = start;
-        while end < entries.len() && end - start < limit && owned(&entries[end]) {
+        while end < rows.len() && end - start < limit && owned(&rows[end]) {
             end += 1;
         }
-        Ok((start, end, end == entries.len() || !owned(&entries[end])))
+        Ok((start, end, end == rows.len() || !owned(&rows[end])))
     }
 
     /// Record the two queue-owned telemetry counters exposed by the provider boundary.
@@ -390,11 +477,7 @@ impl ControlProvider for SessionControlProvider {
             .try_reserve_exact(end - start)
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
-            let mut entry = self.catalog.entries[index].clone();
-            if let ControlBody::Control(row) = &mut entry.body {
-                row.value = self.catalog.values[index];
-            }
-            entries.push(entry);
+            entries.push(self.catalog.entry(index));
         }
         Ok(ControlListPage {
             revision: self.revision,
@@ -415,7 +498,7 @@ impl ControlProvider for SessionControlProvider {
             .try_reserve_exact(end - start)
             .map_err(|_| ParameterProviderError::Unavailable)?;
         for index in start..end {
-            if matches!(self.catalog.entries[index].body, ControlBody::Control(_)) {
+            if self.catalog.rows[index].kind == RowKind::Control {
                 records.push(ControlStateRecord {
                     handle: handle_of(index),
                     value: self.catalog.values[index],
@@ -434,24 +517,23 @@ impl ControlProvider for SessionControlProvider {
     fn control_row(
         &mut self,
         handle: ParameterHandle,
-    ) -> Result<&ControlEntry, ParameterProviderError> {
-        let entry = usize::try_from(handle.0)
+    ) -> Result<&ControlRow, ParameterProviderError> {
+        let record = usize::try_from(handle.0)
             .ok()
             .and_then(|handle| handle.checked_sub(1))
-            .and_then(|index| self.catalog.entries.get(index))
+            .and_then(|index| self.catalog.rows.get(index))
             .ok_or(ParameterProviderError::NotFound)?;
         // Until #1567 only an effect parameter is a target of `AUTOMATION_ENQUEUE`: no other
         // row has a render record that a timed value could reach.
-        match &entry.body {
-            ControlBody::Control(row)
-                if row.family == ControlFamily::Effect
-                    && entry.address.control != Some(controls::BYPASS_CONTROL)
-                    && entry.address.control != Some(controls::LINK_MODE_CONTROL) =>
-            {
-                Ok(entry)
-            }
-            _ => Err(ParameterProviderError::UnsupportedTarget),
+        if record.kind == RowKind::Control
+            && record.control != controls::BYPASS_CONTROL
+            && record.control != controls::LINK_MODE_CONTROL
+            && let Some(row) = self.catalog.descriptors.get(record.descriptor as usize)
+            && row.family == ControlFamily::Effect
+        {
+            return Ok(row);
         }
+        Err(ParameterProviderError::UnsupportedTarget)
     }
 
     fn counters(
@@ -590,28 +672,40 @@ impl ControlCatalog {
         overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
-        let rows = controls::list(model, overlay, sample_rate).collect::<Vec<_>>();
+        let listed = controls::list(model, overlay, sample_rate).collect::<Vec<_>>();
         // Every owner opens with a header and every section of it with another.
-        let mut headers = 0_usize;
+        let mut owner_count = 0_usize;
+        let mut section_count = 0_usize;
         let mut previous: Option<&controls::ControlAddress> = None;
-        for row in &rows {
+        for row in &listed {
             let (owner_opens, section_opens) = openings(previous, &row.address);
-            headers += usize::from(owner_opens) + usize::from(section_opens);
+            owner_count += usize::from(owner_opens);
+            section_count += usize::from(section_opens);
             previous = Some(&row.address);
         }
-        let total = rows
+        let total = listed
             .len()
-            .checked_add(headers)
+            .checked_add(owner_count)
+            .and_then(|total| total.checked_add(section_count))
             .filter(|total| u32::try_from(*total).is_ok())
             .ok_or(SessionControlProviderError)?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(total)
+        let mut owners = Vec::new();
+        owners
+            .try_reserve_exact(owner_count)
+            .map_err(|_| SessionControlProviderError)?;
+        let mut sections = Vec::new();
+        sections
+            .try_reserve_exact(section_count)
+            .map_err(|_| SessionControlProviderError)?;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(total)
             .map_err(|_| SessionControlProviderError)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(total)
             .map_err(|_| SessionControlProviderError)?;
+        // The distinct descriptors, found through a table that is freed before `build` returns.
+        let mut shapes = ShapeTable::default();
 
         let ramps = LiveRamps::for_session(model);
         let mut strips = model.strips();
@@ -620,19 +714,15 @@ impl ControlCatalog {
         let mut vcas = model.vcas.iter();
         let mut effect: Option<&'static EffectDescriptor> = None;
         let mut previous: Option<&controls::ControlAddress> = None;
-        for row in &rows {
+        for row in &listed {
             let address = &row.address;
             let (owner_opens, section_opens) = openings(previous, address);
             previous = Some(address);
             if owner_opens {
-                let header = match &address.owner {
+                let (header, route) = match &address.owner {
                     Owner::Session => {
                         strip = None;
-                        ControlOwnerHeader {
-                            kind: ControlOwnerHeaderKind::Session,
-                            name: try_string("session")?,
-                            route: None,
-                        }
+                        (ControlOwnerHeaderKind::Session, None)
                     }
                     Owner::Strip(id) => {
                         let found = strips
@@ -640,14 +730,13 @@ impl ControlCatalog {
                             .find(|candidate| candidate.id == id)
                             .ok_or(SessionControlProviderError)?;
                         strip = Some(found);
-                        ControlOwnerHeader {
-                            kind: match found.kind {
+                        (
+                            match found.kind {
                                 StripKind::Track(_) => ControlOwnerHeaderKind::Track,
                                 StripKind::Submix(_) => ControlOwnerHeaderKind::Submix,
                             },
-                            name: try_string(id.as_str())?,
-                            route: None,
-                        }
+                            None,
+                        )
                     }
                     Owner::Route(id) => {
                         let found = routes
@@ -662,36 +751,36 @@ impl ControlCatalog {
                             session::RouteDestination::SubmixInput { submix_id } => submix_id,
                             session::RouteDestination::OutputInput { output_id } => output_id,
                         };
-                        ControlOwnerHeader {
-                            kind: ControlOwnerHeaderKind::Route,
-                            name: try_string(id.as_str())?,
-                            route: Some(ControlRouteEnds {
+                        (
+                            ControlOwnerHeaderKind::Route,
+                            Some(ControlRouteEnds {
                                 source: try_string(source.as_str())?,
                                 destination: try_string(destination.as_str())?,
                                 tap,
                             }),
-                        }
+                        )
                     }
                     Owner::Vca(id) => {
                         vcas.by_ref()
                             .find(|candidate| candidate.id == *id)
                             .ok_or(SessionControlProviderError)?;
-                        ControlOwnerHeader {
-                            kind: ControlOwnerHeaderKind::Vca,
-                            name: try_string(id.as_str())?,
-                            route: None,
-                        }
+                        (ControlOwnerHeaderKind::Vca, None)
                     }
                 };
-                let mut owner_address = wire_address(address)?;
-                owner_address.section = ControlSection::Own;
-                owner_address.slot_id = None;
-                owner_address.control = None;
-                owner_address.lane = None;
-                entries.push(ControlEntry {
-                    handle: handle_of(entries.len()),
-                    address: owner_address,
-                    body: ControlBody::OwnerHeader(header),
+                // The owner's wire kind and ID are the protocol's one address conversion's.
+                let owner_address = wire_address(address)?;
+                rows.push(RowRecord {
+                    parent: index_of(owners.len())?,
+                    control: 0,
+                    descriptor: 0,
+                    kind: RowKind::Owner,
+                    lane: ParameterChannel::Both,
+                });
+                owners.push(OwnerRecord {
+                    kind: owner_address.owner_kind,
+                    header,
+                    id: owner_address.owner_id,
+                    route,
                 });
                 values.push(0.0);
             }
@@ -713,40 +802,46 @@ impl ControlCatalog {
                     Section::Own | Section::Builtins => None,
                 };
                 effect = identity.and_then(contract);
-                let (name, effect_identity) = match (&address.section, identity) {
-                    (Section::Own, _) => ("own", None),
-                    (Section::Builtins, _) => ("builtins", None),
-                    (Section::Console(id) | Section::Inserts(id), identity) => (
-                        id.as_str(),
-                        match identity {
-                            Some(EffectIdentity::Native { effect_id }) => Some(effect_id.as_str()),
-                            _ => None,
-                        },
-                    ),
+                let effect_identity = match identity {
+                    Some(EffectIdentity::Native { effect_id })
+                        if matches!(address.section, Section::Console(_) | Section::Inserts(_)) =>
+                    {
+                        Some(effect_id.as_str())
+                    }
+                    _ => None,
                 };
-                let mut section_address = wire_address(address)?;
-                section_address.control = None;
-                section_address.lane = None;
-                entries.push(ControlEntry {
-                    handle: handle_of(entries.len()),
-                    address: section_address,
-                    body: ControlBody::SectionHeader(ControlSectionHeader {
-                        name: try_string(name)?,
-                        effect: effect_identity.map(try_string).transpose()?,
-                    }),
+                let section_address = wire_address(address)?;
+                rows.push(RowRecord {
+                    parent: index_of(sections.len())?,
+                    control: 0,
+                    descriptor: 0,
+                    kind: RowKind::Section,
+                    lane: ParameterChannel::Both,
+                });
+                sections.push(SectionRecord {
+                    owner: index_of(owners.len() - 1)?,
+                    section: section_address.section,
+                    slot_id: section_address.slot_id,
+                    effect: effect_identity.map(try_string).transpose()?,
                 });
                 values.push(0.0);
             }
-            entries.push(ControlEntry {
-                handle: handle_of(entries.len()),
-                address: wire_address(address)?,
-                body: ControlBody::Control(control_row(row, ramps, effect)?),
+            rows.push(RowRecord {
+                parent: index_of(sections.len() - 1)?,
+                control: address.control,
+                descriptor: shapes.intern(Shape::of(row, ramps, effect))?,
+                kind: RowKind::Control,
+                lane: ParameterChannel::from(address.lane),
             });
             values.push(row.value);
         }
-        let resources = CatalogResources::of(&entries, &values)?;
+        let descriptors = shapes.into_rows()?;
+        let resources = CatalogResources::of(&owners, &sections, &descriptors, &rows, &values)?;
         Ok(Self {
-            entries,
+            owners,
+            sections,
+            descriptors,
+            rows,
             values,
             resources,
         })
@@ -758,6 +853,135 @@ impl ControlCatalog {
     pub const fn resources(&self) -> CatalogResources {
         self.resources
     }
+
+    /// The index of the owner a request filters on, if the list has it.
+    fn owner_index(&self, filter: &protocol::ControlOwnerFilter) -> Option<u32> {
+        self.owners
+            .iter()
+            .position(|owner| owner.kind == filter.kind && owner.id == filter.id)
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// The index of the owner that a row belongs to.
+    fn owner_of(&self, record: &RowRecord) -> u32 {
+        match record.kind {
+            RowKind::Owner => record.parent,
+            RowKind::Section | RowKind::Control => self.sections[record.parent as usize].owner,
+        }
+    }
+
+    /// The wire entry at `index`, with the committed value of a control row filled in.
+    fn entry(&self, index: usize) -> ControlEntry {
+        let record = &self.rows[index];
+        let handle = handle_of(index);
+        match record.kind {
+            RowKind::Owner => {
+                let owner = &self.owners[record.parent as usize];
+                ControlEntry {
+                    handle,
+                    address: ControlAddress {
+                        owner_kind: owner.kind,
+                        owner_id: owner.id.clone(),
+                        section: ControlSection::Own,
+                        slot_id: None,
+                        control: None,
+                        lane: None,
+                    },
+                    body: ControlBody::OwnerHeader(ControlOwnerHeader {
+                        kind: owner.header,
+                        name: owner.name().to_owned(),
+                        route: owner.route.clone(),
+                    }),
+                }
+            }
+            RowKind::Section => {
+                let section = &self.sections[record.parent as usize];
+                let owner = &self.owners[section.owner as usize];
+                ControlEntry {
+                    handle,
+                    address: ControlAddress {
+                        owner_kind: owner.kind,
+                        owner_id: owner.id.clone(),
+                        section: section.section,
+                        slot_id: section.slot_id.clone(),
+                        control: None,
+                        lane: None,
+                    },
+                    body: ControlBody::SectionHeader(ControlSectionHeader {
+                        name: section.name().to_owned(),
+                        effect: section.effect.clone(),
+                    }),
+                }
+            }
+            RowKind::Control => {
+                let section = &self.sections[record.parent as usize];
+                let owner = &self.owners[section.owner as usize];
+                let mut row = self.descriptors[record.descriptor as usize].clone();
+                row.value = self.values[index];
+                ControlEntry {
+                    handle,
+                    address: ControlAddress {
+                        owner_kind: owner.kind,
+                        owner_id: owner.id.clone(),
+                        section: section.section,
+                        slot_id: section.slot_id.clone(),
+                        control: Some(record.control),
+                        lane: Some(record.lane),
+                    },
+                    body: ControlBody::Control(row),
+                }
+            }
+        }
+    }
+
+    /// Whether the two catalogs list the same owners, sections and rows with the same descriptors,
+    /// every `f32` of a descriptor compared by bits. Values are not compared.
+    fn same_structure(&self, other: &Self) -> bool {
+        self.owners == other.owners
+            && self.sections == other.sections
+            && self.rows == other.rows
+            && self.descriptors.len() == other.descriptors.len()
+            && self
+                .descriptors
+                .iter()
+                .zip(&other.descriptors)
+                .all(|(left, right)| same_descriptor(left, right))
+    }
+
+    /// Every wire entry, with the committed values filled in.
+    #[cfg(test)]
+    fn entries(&self) -> Vec<ControlEntry> {
+        (0..self.rows.len())
+            .map(|index| self.entry(index))
+            .collect()
+    }
+}
+
+/// `index` as a table index.
+fn index_of(index: usize) -> Result<u32, SessionControlProviderError> {
+    u32::try_from(index).map_err(|_| SessionControlProviderError)
+}
+
+/// Whether two descriptors are equal in every field, every `f32` by bits.
+fn same_descriptor(left: &ControlRow, right: &ControlRow) -> bool {
+    let bits = |value: f32| value.to_bits();
+    left == right
+        && bits(left.minimum) == bits(right.minimum)
+        && bits(left.maximum) == bits(right.maximum)
+        && left.disabled_value.map(bits) == right.disabled_value.map(bits)
+        && bits(left.default) == bits(right.default)
+        && bits(left.step) == bits(right.step)
+        && bits(left.value) == bits(right.value)
+        && left
+            .ladder
+            .iter()
+            .map(|value| bits(*value))
+            .eq(right.ladder.iter().map(|value| bits(*value)))
+        && left
+            .choices
+            .iter()
+            .map(|choice| bits(choice.value))
+            .eq(right.choices.iter().map(|choice| bits(choice.value)))
 }
 
 /// Whether `address` opens a new owner and whether it opens a new section, after `previous`.
@@ -790,121 +1014,245 @@ fn wire_address(
     ControlAddress::try_from_controls(address, try_string)
 }
 
-/// The wire row of one control: its descriptor, with the value left at `0.0`. `effect` is the
-/// contract of the effect section the row is in, which gives an effect parameter's own ramp.
-fn control_row(
-    row: &controls::ControlRow,
-    ramps: LiveRamps,
-    effect: Option<&'static EffectDescriptor>,
-) -> Result<ControlRow, SessionControlProviderError> {
-    let descriptor = &row.descriptor;
-    // Reserved exactly, as every other catalog allocation is: `resource_report` charges these by
-    // length, and collecting through `Result<Vec<_>, _>` (which has no lower size bound) grew six
-    // choices to a capacity of eight, 64 retained bytes per EQ kind descriptor that no row
-    // charged (#1060).
-    let mut choices = Vec::new();
-    choices
-        .try_reserve_exact(descriptor.choices.len())
-        .map_err(|_| SessionControlProviderError)?;
-    for choice in descriptor.choices {
-        choices.push(EnumChoice {
-            value: choice.value,
-            label: try_string(choice.label)?,
-        });
+/// The named choices of a control, compared by the bits of each value.
+#[derive(Clone, Copy, Debug)]
+struct Choices(&'static [controls::Choice]);
+
+impl PartialEq for Choices {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(other.0).all(|(left, right)| {
+                left.value.to_bits() == right.value.to_bits() && left.label == right.label
+            })
     }
-    // The named step sizes are the lattice multiples of the step; an index lattice (a toggle or
-    // an enumeration) has none.
-    let mut ladder = Vec::new();
-    if descriptor.lattice.step_unit != StepUnit::Index {
-        ladder
-            .try_reserve_exact(descriptor.lattice.ladder.multiples.len())
-            .map_err(|_| SessionControlProviderError)?;
-        ladder.extend(
-            descriptor
-                .lattice
-                .ladder
-                .multiples
-                .iter()
-                .map(|multiple| f32::from(*multiple)),
-        );
+}
+
+/// Every field of a control's wire descriptor in copyable form, with each `f32` as its bits: the
+/// key that two rows share a stored descriptor by, and the source of the stored descriptor. No
+/// field owns memory, so a row's shape is found without allocating.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shape {
+    name: &'static str,
+    display_name: &'static str,
+    display_unit: &'static str,
+    unit: ProtocolUnit,
+    kind: ControlKind,
+    minimum: u32,
+    maximum: u32,
+    disabled_value: Option<u32>,
+    default: u32,
+    taper: ControlTaper,
+    step: u32,
+    precision: u8,
+    /// The named step multiples; absent on an index lattice.
+    ladder: Option<[u8; 5]>,
+    choices: Choices,
+    ramp_row: Option<ControlRampRow>,
+    default_ramp_samples: u32,
+    class: ControlClass,
+    reason: Option<ControlReason>,
+    reason_issue: Option<u32>,
+    reopen: Option<&'static str>,
+    scope: ControlScope,
+    automatable: bool,
+    family: ControlFamily,
+    active: bool,
+}
+
+impl Eq for Shape {}
+
+impl Hash for Shape {
+    /// The fields that tell rows apart cheaply; equal shapes hash equal.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.display_name.hash(state);
+        self.minimum.hash(state);
+        self.maximum.hash(state);
+        self.default.hash(state);
+        self.default_ramp_samples.hash(state);
+        self.active.hash(state);
     }
-    let (ramp_row, default_ramp_samples) = match descriptor.motion {
-        Motion::Ramp(live) => (Some(ramp_row(live)), ramps.for_row(live)),
-        // A coefficient ramp that the effect's own kernel owns.
-        Motion::Fixed => (
-            None,
-            effect
-                .filter(|_| descriptor.family == controls::Family::Effect)
-                .and_then(|effect| {
-                    effect
-                        .parameters
-                        .iter()
-                        .find(|parameter| parameter.id.0 == row.address.control)
-                })
-                .map_or(0, |parameter| parameter.smoothing_samples),
-        ),
-    };
-    let (class, reason, reason_issue, reopen) = match descriptor.class {
-        controls::ControlClass::Live => (ControlClass::Live, None, None, None),
-        controls::ControlClass::Derived => (ControlClass::Derived, None, None, None),
-        controls::ControlClass::RebuildOnly { reason, reopen } => (
-            ControlClass::RebuildOnly,
-            Some(control_reason(reason)),
-            match reason {
-                RebuildReason::RuledLiveNotBuilt { issue } => Some(issue),
-                _ => None,
+}
+
+impl Shape {
+    /// The shape of one control row. `effect` is the contract of the effect section the row is in,
+    /// which gives an effect parameter's own ramp.
+    fn of(
+        row: &controls::ControlRow,
+        ramps: LiveRamps,
+        effect: Option<&'static EffectDescriptor>,
+    ) -> Self {
+        let descriptor = &row.descriptor;
+        let (ramp_row, default_ramp_samples) = match descriptor.motion {
+            Motion::Ramp(live) => (Some(ramp_row(live)), ramps.for_row(live)),
+            // A coefficient ramp that the effect's own kernel owns.
+            Motion::Fixed => (
+                None,
+                effect
+                    .filter(|_| descriptor.family == controls::Family::Effect)
+                    .and_then(|effect| {
+                        effect
+                            .parameters
+                            .iter()
+                            .find(|parameter| parameter.id.0 == row.address.control)
+                    })
+                    .map_or(0, |parameter| parameter.smoothing_samples),
+            ),
+        };
+        let (class, reason, reason_issue, reopen) = match descriptor.class {
+            controls::ControlClass::Live => (ControlClass::Live, None, None, None),
+            controls::ControlClass::Derived => (ControlClass::Derived, None, None, None),
+            controls::ControlClass::RebuildOnly { reason, reopen } => (
+                ControlClass::RebuildOnly,
+                Some(control_reason(reason)),
+                match reason {
+                    RebuildReason::RuledLiveNotBuilt { issue } => Some(issue),
+                    _ => None,
+                },
+                Some(reopen),
+            ),
+        };
+        Self {
+            name: descriptor.name,
+            display_name: descriptor.display_name,
+            display_unit: descriptor.display_unit,
+            unit: protocol_unit(descriptor.unit),
+            kind: match descriptor.kind {
+                controls::ControlKind::Continuous => ControlKind::Continuous,
+                controls::ControlKind::Toggle => ControlKind::Toggle,
+                controls::ControlKind::Enumeration => ControlKind::Enumeration,
             },
-            Some(try_string(reopen)?),
-        ),
-    };
-    Ok(ControlRow {
-        name: try_string(descriptor.name)?,
-        display_name: try_string(descriptor.display_name)?,
-        display_unit: try_string(descriptor.display_unit)?,
-        unit: protocol_unit(descriptor.unit),
-        kind: match descriptor.kind {
-            controls::ControlKind::Continuous => ControlKind::Continuous,
-            controls::ControlKind::Toggle => ControlKind::Toggle,
-            controls::ControlKind::Enumeration => ControlKind::Enumeration,
-        },
-        minimum: descriptor.minimum,
-        maximum: descriptor.maximum,
-        disabled_value: descriptor.disabled_value,
-        default: descriptor.default,
-        taper: match descriptor.taper {
-            controls::Taper::Linear => ControlTaper::Linear,
-            controls::Taper::Logarithmic => ControlTaper::Logarithmic,
-            controls::Taper::Exponential => ControlTaper::Exponential,
-            controls::Taper::Decibel => ControlTaper::Decibel,
-            controls::Taper::Stepped => ControlTaper::Stepped,
-        },
-        step: descriptor.lattice.step,
-        precision: descriptor.lattice.precision,
-        ladder,
-        choices,
-        ramp_row,
-        default_ramp_samples,
-        class,
-        reason,
-        reason_issue,
-        reopen,
-        scope: match descriptor.scope {
-            controls::ControlScope::Model => ControlScope::Model,
-            controls::ControlScope::Monitor => ControlScope::Monitor,
-        },
-        automatable: descriptor.automatable(),
-        family: match descriptor.family {
-            controls::Family::StripLevel => ControlFamily::StripLevel,
-            controls::Family::StripMatrix => ControlFamily::StripMatrix,
-            controls::Family::StripInput => ControlFamily::StripInput,
-            controls::Family::Route => ControlFamily::Route,
-            controls::Family::Effect => ControlFamily::Effect,
-            controls::Family::Setting => ControlFamily::Setting,
-        },
-        active: descriptor.active,
-        // The committed value lives in the catalog's `values`.
-        value: 0.0,
-    })
+            minimum: descriptor.minimum.to_bits(),
+            maximum: descriptor.maximum.to_bits(),
+            disabled_value: descriptor.disabled_value.map(f32::to_bits),
+            default: descriptor.default.to_bits(),
+            taper: match descriptor.taper {
+                controls::Taper::Linear => ControlTaper::Linear,
+                controls::Taper::Logarithmic => ControlTaper::Logarithmic,
+                controls::Taper::Exponential => ControlTaper::Exponential,
+                controls::Taper::Decibel => ControlTaper::Decibel,
+                controls::Taper::Stepped => ControlTaper::Stepped,
+            },
+            step: descriptor.lattice.step.to_bits(),
+            precision: descriptor.lattice.precision,
+            // The named step sizes are the lattice multiples of the step; an index lattice (a
+            // toggle or an enumeration) has none.
+            ladder: (descriptor.lattice.step_unit != StepUnit::Index)
+                .then_some(descriptor.lattice.ladder.multiples),
+            choices: Choices(descriptor.choices),
+            ramp_row,
+            default_ramp_samples,
+            class,
+            reason,
+            reason_issue,
+            reopen,
+            scope: match descriptor.scope {
+                controls::ControlScope::Model => ControlScope::Model,
+                controls::ControlScope::Monitor => ControlScope::Monitor,
+            },
+            automatable: descriptor.automatable(),
+            family: match descriptor.family {
+                controls::Family::StripLevel => ControlFamily::StripLevel,
+                controls::Family::StripMatrix => ControlFamily::StripMatrix,
+                controls::Family::StripInput => ControlFamily::StripInput,
+                controls::Family::Route => ControlFamily::Route,
+                controls::Family::Effect => ControlFamily::Effect,
+                controls::Family::Setting => ControlFamily::Setting,
+            },
+            active: descriptor.active,
+        }
+    }
+
+    /// The stored wire descriptor of this shape, with the value left at `0.0` (the committed
+    /// value lives in the catalog's `values`).
+    fn to_row(self) -> Result<ControlRow, SessionControlProviderError> {
+        // Reserved exactly, as every other catalog allocation is: `resource_report` charges these
+        // by length, and collecting through `Result<Vec<_>, _>` (which has no lower size bound)
+        // grew six choices to a capacity of eight, 64 retained bytes per EQ kind descriptor that
+        // no row charged (#1060).
+        let mut choices = Vec::new();
+        choices
+            .try_reserve_exact(self.choices.0.len())
+            .map_err(|_| SessionControlProviderError)?;
+        for choice in self.choices.0 {
+            choices.push(EnumChoice {
+                value: choice.value,
+                label: try_string(choice.label)?,
+            });
+        }
+        let mut ladder = Vec::new();
+        if let Some(multiples) = self.ladder {
+            ladder
+                .try_reserve_exact(multiples.len())
+                .map_err(|_| SessionControlProviderError)?;
+            ladder.extend(multiples.iter().map(|multiple| f32::from(*multiple)));
+        }
+        Ok(ControlRow {
+            name: try_string(self.name)?,
+            display_name: try_string(self.display_name)?,
+            display_unit: try_string(self.display_unit)?,
+            unit: self.unit,
+            kind: self.kind,
+            minimum: f32::from_bits(self.minimum),
+            maximum: f32::from_bits(self.maximum),
+            disabled_value: self.disabled_value.map(f32::from_bits),
+            default: f32::from_bits(self.default),
+            taper: self.taper,
+            step: f32::from_bits(self.step),
+            precision: self.precision,
+            ladder,
+            choices,
+            ramp_row: self.ramp_row,
+            default_ramp_samples: self.default_ramp_samples,
+            class: self.class,
+            reason: self.reason,
+            reason_issue: self.reason_issue,
+            reopen: self.reopen.map(try_string).transpose()?,
+            scope: self.scope,
+            automatable: self.automatable,
+            family: self.family,
+            active: self.active,
+            value: 0.0,
+        })
+    }
+}
+
+/// The distinct shapes of one build, in order of first use, and the index that finds one. It is
+/// transient: `build` turns it into the stored descriptors and frees it.
+#[derive(Default)]
+struct ShapeTable {
+    index: HashMap<Shape, u32, BuildHasherDefault<DefaultHasher>>,
+    shapes: Vec<Shape>,
+}
+
+impl ShapeTable {
+    /// The index of `shape` among the distinct shapes, adding it when it is new.
+    fn intern(&mut self, shape: Shape) -> Result<u32, SessionControlProviderError> {
+        if let Some(index) = self.index.get(&shape) {
+            return Ok(*index);
+        }
+        let index = index_of(self.shapes.len())?;
+        self.index
+            .try_reserve(1)
+            .map_err(|_| SessionControlProviderError)?;
+        self.shapes
+            .try_reserve(1)
+            .map_err(|_| SessionControlProviderError)?;
+        self.index.insert(shape, index);
+        self.shapes.push(shape);
+        Ok(index)
+    }
+
+    /// The stored descriptors, one per distinct shape, in order of first use.
+    fn into_rows(self) -> Result<Vec<ControlRow>, SessionControlProviderError> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.shapes.len())
+            .map_err(|_| SessionControlProviderError)?;
+        for shape in self.shapes {
+            rows.push(shape.to_row()?);
+        }
+        Ok(rows)
+    }
 }
 
 const fn ramp_row(value: LiveRampRow) -> ControlRampRow {
@@ -1222,18 +1570,18 @@ mod tests {
         let catalog =
             ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         let expected = controls::list(&model, &MonitorOverlay::default(), RATE).collect::<Vec<_>>();
-        let controls_listed = catalog
-            .entries
+        let entries = catalog.entries();
+        let controls_listed = entries
             .iter()
             .filter(|entry| matches!(entry.body, ControlBody::Control(_)))
             .count();
         assert_eq!(controls_listed, expected.len());
-        assert_eq!(catalog.values.len(), catalog.entries.len());
+        assert_eq!(catalog.values.len(), entries.len());
 
         let mut next_control = expected.iter();
         let mut owner: Option<&ControlAddress> = None;
         let mut section: Option<&ControlAddress> = None;
-        for (index, entry) in catalog.entries.iter().enumerate() {
+        for (index, entry) in entries.iter().enumerate() {
             assert_eq!(entry.handle as usize, index + 1, "handles count from 1");
             match &entry.body {
                 ControlBody::OwnerHeader(_) => {
@@ -1270,8 +1618,7 @@ mod tests {
             "every listed control is held"
         );
         // Every owner kind has a header: strips, the VCA, routes and the session.
-        let kinds = catalog
-            .entries
+        let kinds = entries
             .iter()
             .filter_map(|entry| match &entry.body {
                 ControlBody::OwnerHeader(header) => Some(header.kind),
@@ -1361,6 +1708,7 @@ mod tests {
         assert_eq!(effects.entries.len(), descriptor_ids.len() + 2 * eligible);
         let catalog =
             ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
+        let entries = catalog.entries();
         let mut saw_both = false;
         let mut saw_left = false;
         let mut saw_right = false;
@@ -1389,7 +1737,7 @@ mod tests {
                         PreparedChannel::Both => ParameterChannel::Both,
                     };
                     let listed = find(
-                        &catalog.entries,
+                        &entries,
                         &entry.track_id,
                         section,
                         Some(&entry.effect_id),
@@ -1652,12 +2000,17 @@ mod tests {
                     && entry.address.control != Some(controls::BYPASS_CONTROL)
             })
             .expect("a live effect parameter");
+        let ControlBody::Control(listed) = &parameter.body else {
+            unreachable!("matched as a control row");
+        };
+        let mut descriptor = listed.clone();
+        descriptor.value = 0.0;
         assert_eq!(
             provider
                 .control_row(ParameterHandle(parameter.handle))
-                .expect("a parameter")
-                .address,
-            parameter.address
+                .expect("a parameter"),
+            &descriptor,
+            "the lent row is the stored descriptor, whose value is 0.0"
         );
         let others = [
             // The bypass, the fader (a strip builtin), a header and a handle past the end.
@@ -1743,6 +2096,217 @@ mod tests {
                 .map(|diagnostic| diagnostic.provider_sequence)
                 .collect::<Vec<_>>(),
             vec![Some(2), Some(3)]
+        );
+    }
+    /// The catalog holds a row's descriptor once for every row that converts to the same wire
+    /// descriptor and holds a different one for every row whose conversion differs.
+    ///
+    /// Red if deduplication merges two descriptors that differ in one field (`active` of two
+    /// strips' matrix rows, a `reopen` text, a default ramp), or merges nothing.
+    #[test]
+    fn rows_share_a_descriptor_exactly_when_their_wire_descriptors_are_equal() {
+        let mut model = nine_track();
+        let registry = effect_compiler::launch_native_effect_registry().expect("registry");
+        let mut insert_ids = registry
+            .descriptors()
+            .map(|descriptor| descriptor.id.as_str().to_owned());
+        let first_insert = insert_ids.next().expect("an effect");
+        let second_insert = insert_ids
+            .find(|id| *id != first_insert)
+            .expect("a second effect");
+        // Two tracks that differ in `matrix_mode`, and two different inserts on the first.
+        let session::MatrixOrPan::Pan {
+            smoothing_samples, ..
+        } = model.tracks[1].matrix_or_pan
+        else {
+            panic!("the fixture's tracks pan");
+        };
+        model.tracks[1].matrix_or_pan = session::MatrixOrPan::Matrix {
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+            smoothing_samples,
+        };
+        let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        for (name, identity) in [("insert-a", &first_insert), ("insert-b", &second_insert)] {
+            let mut effect = template.clone();
+            effect.id = session::StableId::parse(name).expect("insert ID");
+            effect.identity = session::EffectIdentity::Native {
+                effect_id: session::StableId::parse(identity).expect("native effect ID"),
+            };
+            effect.params.clear();
+            model.tracks[0].inserts.effects.push(effect);
+        }
+        // A submix, a route into it and one into the output, and a VCA.
+        let bus = session::StableId::parse("bus").expect("submix ID");
+        let track = model.tracks[0].clone();
+        model.submixes.push(session::Submix {
+            id: bus.clone(),
+            builtins: track.builtins.clone(),
+            console: track.console.clone(),
+            inserts: session::Rack {
+                effects: Vec::new(),
+            },
+            fader: track.fader.clone(),
+            matrix_or_pan: track.matrix_or_pan.clone(),
+        });
+        let mut into_submix = model.routes[0].clone();
+        into_submix.id = session::StableId::parse("into-bus").expect("route ID");
+        into_submix.destination = session::RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        };
+        let mut out_of_submix = model.routes[0].clone();
+        out_of_submix.id = session::StableId::parse("bus-out").expect("route ID");
+        out_of_submix.source = session::RouteSource::Submix {
+            submix_id: bus,
+            tap: session::SendTap::PostPan,
+        };
+        model.routes.push(into_submix);
+        model.routes.push(out_of_submix);
+        model.vcas.push(session::Vca {
+            id: session::StableId::parse("vca0").expect("ID"),
+            fader: model.tracks[0].fader.clone(),
+            members: vec![model.tracks[0].id.clone()],
+        });
+
+        let catalog =
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
+        let listed = controls::list(&model, &MonitorOverlay::default(), RATE).collect::<Vec<_>>();
+        let ramps = LiveRamps::for_session(&model);
+        let control_rows = catalog
+            .rows
+            .iter()
+            .filter(|record| record.kind == RowKind::Control)
+            .collect::<Vec<_>>();
+        assert_eq!(control_rows.len(), listed.len());
+        // The oracle converts each listed row on its own, with its section's effect contract.
+        let converted = listed
+            .iter()
+            .zip(&control_rows)
+            .map(|(row, record)| {
+                let effect = catalog.sections[record.parent as usize]
+                    .effect
+                    .as_deref()
+                    .and_then(|id| registry.get_ascii(id))
+                    .map(|factory| factory.descriptor());
+                Shape::of(row, ramps, effect).to_row().expect("a wire row")
+            })
+            .collect::<Vec<_>>();
+        let stored = control_rows
+            .iter()
+            .map(|record| &catalog.descriptors[record.descriptor as usize])
+            .collect::<Vec<_>>();
+        let (mut saw_active_split, mut saw_shared) = (false, false);
+        for left in 0..converted.len() {
+            for right in left + 1..converted.len() {
+                let same = converted[left] == converted[right];
+                assert_eq!(
+                    stored[left] == stored[right],
+                    same,
+                    "{:?} against {:?}",
+                    listed[left].address,
+                    listed[right].address
+                );
+                saw_shared |= same;
+                saw_active_split |= !same
+                    && converted[left].name == converted[right].name
+                    && converted[left].active != converted[right].active;
+            }
+        }
+        assert!(
+            saw_shared && saw_active_split,
+            "the fixture shares rows and splits two rows that differ in `active` alone"
+        );
+        for (stored, converted) in stored.iter().zip(&converted) {
+            assert!(same_descriptor(stored, converted));
+        }
+        assert!(
+            catalog.descriptors.len() * 4 < listed.len(),
+            "{} descriptors for {} rows",
+            catalog.descriptors.len(),
+            listed.len()
+        );
+    }
+
+    /// Two descriptors that differ only in a float's bits (`0.0` and `-0.0`) are two descriptors.
+    ///
+    /// Red if deduplication or the epoch comparison reads an `f32` with `==`.
+    #[test]
+    fn descriptors_that_differ_in_float_bits_alone_stay_distinct() {
+        let model = nine_track();
+        let listed = controls::list(&model, &MonitorOverlay::default(), RATE)
+            .next()
+            .expect("a row");
+        let base = Shape::of(&listed, LiveRamps::for_session(&model), None);
+        let with_default = |default: f32| Shape {
+            default: default.to_bits(),
+            ..base
+        };
+        let mut table = ShapeTable::default();
+        let first = table.intern(with_default(0.0)).expect("interned");
+        let second = table.intern(with_default(-0.0)).expect("interned");
+        assert_ne!(first, second);
+        let rows = table.into_rows().expect("rows");
+        assert!(!same_descriptor(&rows[0], &rows[1]));
+        assert!(
+            rows[0] == rows[1],
+            "the derived `==` cannot tell them apart"
+        );
+    }
+
+    /// A commit that changes only `control_smoothing` moves every fader row's default ramp and no
+    /// address, and the epoch advances; a second catalog of the same model keeps it.
+    ///
+    /// Red if the epoch comparison reads descriptor indices (a rebuild may renumber them) and so
+    /// misses a changed descriptor, or reads values and so advances on every commit.
+    #[test]
+    fn a_changed_default_ramp_advances_the_epoch_and_an_equal_model_keeps_it() {
+        let mut model = nine_track();
+        let smoothing = |fader_ms: f32| session::ControlSmoothing {
+            mute_ms: 5.0,
+            fader_ms,
+            pan_ms: 20.0,
+        };
+        model.control_smoothing = Some(smoothing(10.0));
+        let (mut provider, _clock) = provider_of(&model);
+        let before = whole_list(&mut provider, 256);
+        provider.replace_session_catalog(
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog"),
+            2,
+        );
+        assert_eq!(
+            provider.structure_epoch(),
+            1,
+            "an equal model keeps the epoch"
+        );
+
+        model.control_smoothing = Some(smoothing(40.0));
+        provider.replace_session_catalog(
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog"),
+            3,
+        );
+        assert_eq!(provider.structure_epoch(), 2, "a default ramp changed");
+        let after = whole_list(&mut provider, 256);
+        let ramps = |list: &[ControlEntry]| {
+            list.iter()
+                .filter_map(|entry| match &entry.body {
+                    ControlBody::Control(row) if row.name == "fader_db" => {
+                        Some(row.default_ramp_samples)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(ramps(&before), ramps(&after));
+        provider.replace_session_catalog(
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog"),
+            4,
+        );
+        assert_eq!(
+            provider.structure_epoch(),
+            2,
+            "a second equal catalog keeps it"
         );
     }
 }

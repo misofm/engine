@@ -1198,6 +1198,20 @@ impl Budget {
 /// lane's cells are lane-width independent, so the four-lane ceiling moves with it (not measured
 /// on AArch64, which runs only in CI). The ceilings are the new value plus 10 %, rounded up to 64:
 /// 39,768.3 -> 39,808.
+///
+/// #1599 shrank the two catalog rows, a structural move: the control list's catalog no longer
+/// holds a full wire row per entry. It holds three shared tables (owners, sections and the
+/// distinct control descriptors, each stored once) and a 16-byte record per entry, so the
+/// reference session's 932 entries cost 932 x 16 = 14,912 bytes (the catalog's single allocation
+/// 253,504 -> 14,912) and the whole catalog 340,804 -> 39,982 bytes on x86-64 (the 9 tracks' rows
+/// share their descriptors). capi retained moved 503,819 -> 197,105 and the largest named
+/// allocation 253,504 -> 48,915, which is now the engine's (its graph and bank allocations, not
+/// the catalog). capi retained is lane-independent, so its four-lane ceiling moves with the
+/// eight-lane one. The largest named allocation is no longer the catalog's, which was
+/// lane-independent; the new one is the engine's and its four-lane size is printed only by
+/// CI's `aarch64-debug` run, so that row's four-lane ceiling stays at its previous value until
+/// that run prints it. The eight-lane ceilings are the new values plus 10 %, rounded up to 64:
+/// 216,815.5 -> 216,832 and 53,806.5 -> 53,824.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1304,13 +1318,13 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 554_240,
-        four_lanes: 554_240,
+        eight_lanes: 216_832,
+        four_lanes: 216_832,
     },
     Budget {
         row: "largest_named_allocation_bytes",
         value: |report| report.largest_named_allocation_bytes,
-        eight_lanes: 278_912,
+        eight_lanes: 53_824,
         four_lanes: 278_912,
     },
 ];
