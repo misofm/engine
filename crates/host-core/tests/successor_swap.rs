@@ -982,10 +982,18 @@ impl LivePlan {
     }
 
     fn fresh(session: &Session, backend: Backend) -> Self {
+        Self::fresh_with(session, &Self::request(), backend)
+    }
+
+    fn fresh_with(
+        session: &Session,
+        request: &host_core::HostLiveControlRequest,
+        backend: Backend,
+    ) -> Self {
         let (prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
             &session.compiled,
             &caps(),
-            &Self::request(),
+            request,
             backend,
         )
         .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
@@ -998,11 +1006,21 @@ impl LivePlan {
         committed: &SessionModel,
         backend: Backend,
     ) -> Self {
+        Self::successor_with(session, &Self::request(), predecessor, committed, backend)
+    }
+
+    fn successor_with(
+        session: &Session,
+        request: &host_core::HostLiveControlRequest,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        backend: Backend,
+    ) -> Self {
         let (prepared, handles) =
             host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
                 &session.compiled,
                 &caps(),
-                &Self::request(),
+                request,
                 host_core::SuccessorBase {
                     inventory: predecessor,
                     committed,
@@ -5728,4 +5746,264 @@ fn a_live_difference_on_a_carried_lane_is_retargeted_at_eight_lanes() {
 )]
 fn a_live_difference_on_a_carried_lane_is_retargeted_at_four_lanes() {
     a_live_difference_on_a_carried_lane_is_retargeted(Backend::Simd4);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1280b gate 8: the Observe records a carried lane's retired queue still holds.
+//
+// A subscribe is acknowledged when it is queued. After the predecessor's last block nothing pops
+// its queue, so the carry applies what the queue holds to the predecessor's tap, bounded by the
+// count at entry, at the sample the predecessor's next block would have applied it.
+
+/// A compressor insert on each of `tracks` tracks, so the inserts form one bank of lanes with an
+/// observation tap each.
+fn compressor_insert_session(tracks: usize) -> SessionModel {
+    let mut model = filtered_session(false);
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(tracks)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.inserts.effects.push(Effect {
+            id: id("comp"),
+            identity: EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            params: console_params("comp", index, false),
+            sidechain: SidechainDeclaration::None,
+        });
+    }
+    model
+}
+
+/// What sits in the retired queues when the swap block starts.
+#[derive(Clone, Copy, Debug)]
+enum PendingObserve {
+    /// One subscribe, in the first lane's queue; every other queue is empty.
+    OneSubscribe,
+    /// Every lane's queue filled to its capacity, so a further push is refused.
+    FullQueues,
+}
+
+/// The records `pending` puts in `plan`'s queues; returns the strips that now hold some.
+fn admit_observes(plan: &mut LivePlan, strips: &[&str], pending: PendingObserve) -> Vec<String> {
+    let admitted: &[&str] = match pending {
+        PendingObserve::OneSubscribe => &strips[..1],
+        PendingObserve::FullQueues => strips,
+    };
+    for strip in admitted {
+        let producer = plan
+            .handles
+            .effect_control_mut(strip, LiveEffectAddress::insert(0))
+            .expect("a control channel for the insert");
+        let capacity = producer.observe_capacity();
+        assert!(capacity > 0, "{strip}: the insert has an observation queue");
+        let records = match pending {
+            PendingObserve::OneSubscribe => 1,
+            PendingObserve::FullQueues => capacity,
+        };
+        for _ in 0..records {
+            producer
+                .try_push_observe(0, true, 1)
+                .expect("room in the queue");
+        }
+        if let PendingObserve::FullQueues = pending {
+            assert!(
+                producer.try_push_observe(0, true, 1).is_err(),
+                "{strip}: the queue is full"
+            );
+        }
+        assert_eq!(
+            producer.observe_available_capacity(),
+            capacity - records,
+            "{strip}: the records are queued"
+        );
+    }
+    admitted.iter().map(|strip| (*strip).to_owned()).collect()
+}
+
+fn observed_request() -> host_core::HostLiveControlRequest {
+    host_core::HostLiveControlRequest {
+        observation_taps: 1,
+        ..LivePlan::request()
+    }
+}
+
+fn pending_observe_records_are_applied_at_the_carry(
+    backend: Backend,
+    tracks: usize,
+    pending: PendingObserve,
+) {
+    use bench_support::alloc as bench_alloc;
+    let a = Session::compile(compressor_insert_session(tracks));
+    let mut b_model = with_muted_track(compressor_insert_session(tracks));
+    track_mut(&mut b_model, MUTED_TRACK).inserts.effects.clear();
+    let b = Session::compile(b_model);
+    let feed = bursty_feed(SOURCE, 5);
+    let quantum = a.model.quantum_frames as usize;
+    let request = observed_request();
+    let strips: Vec<&str> = a
+        .model
+        .tracks
+        .iter()
+        .map(|track| track.id.as_str())
+        .collect();
+    let what = format!("{backend:?} {pending:?}");
+
+    // The reference: the same session, records admitted after the same last block, and the block
+    // the swap block would have been rendered by the predecessor itself.
+    let mut reference = LivePlan::fresh_with(&a, &request, backend);
+    for block in 0..SWAP_BLOCK {
+        reference.submit(&feed, quantum, block);
+        reference.render(quantum);
+    }
+    let admitted = admit_observes(&mut reference, &strips, pending);
+    reference.submit(&feed, quantum, SWAP_BLOCK);
+    reference.render(quantum);
+    let armed_at_reference = reference.prepared.plan.observation_binding_counts()[2];
+    assert_eq!(armed_at_reference, admitted.len() as u64, "{what}");
+    let window_of = |plan: &LivePlan, strip: &str| {
+        plan.handles
+            .effect_observations
+            .iter()
+            .find(|handle| {
+                handle.track_id.as_ref() == strip && handle.address == LiveEffectAddress::insert(0)
+            })
+            .and_then(|handle| handle.readers[0].read())
+            .map(|window| (window.first_sample, window.end_sample, window.blocks))
+    };
+
+    // The swap: A renders its blocks, the records are admitted, B is prepared and adopts.
+    let mut plan = LivePlan::fresh_with(&a, &request, backend);
+    for block in 0..SWAP_BLOCK {
+        plan.submit(&feed, quantum, block);
+        plan.render(quantum);
+    }
+    let admitted = admit_observes(&mut plan, &strips, pending);
+    assert_eq!(
+        plan.prepared.plan.observation_binding_counts()[2],
+        0,
+        "{what}: nothing is armed before the carry: the predecessor drains no more"
+    );
+    let mut successor =
+        LivePlan::successor_with(&b, &request, &plan.prepared.inventory, &a.model, backend);
+    assert_eq!(
+        successor.prepared.restarted_strips(),
+        &[] as &[Box<str>],
+        "{what}: every insert lane carries"
+    );
+    assert_eq!(
+        successor
+            .prepared
+            .sources
+            .adopt_persisting(&mut plan.prepared.sources),
+        1
+    );
+    successor.submit(&feed, quantum, SWAP_BLOCK);
+    let mut output = vec![f32::NAN; quantum * 2];
+    engine::realtime::audit::reset();
+    let mark = bench_alloc::current_thread_counters();
+    let carry = successor
+        .prepared
+        .plan
+        .adopt_predecessor_plan(&mut plan.prepared.plan);
+    successor.render_into(&mut output, quantum);
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    let audit = engine::realtime::audit::snapshot();
+    assert_eq!(carry, CarryOutcome::Carried, "{what}: the swap block");
+    assert_eq!(
+        (
+            (delta.allocations, delta.reallocations, delta.deallocations),
+            (audit.allocations, audit.deallocations)
+        ),
+        ((0, 0, 0), (0, 0)),
+        "{what}: allocator and render audit over the swap block"
+    );
+    assert_eq!(
+        graph::carry_refusal_count(&mut successor.prepared.plan).expect("a graph plan"),
+        0,
+        "{what}: no restore was refused"
+    );
+
+    // A's queues read empty and A's taps hold what its next block would have reached.
+    for strip in &strips {
+        let producer = plan
+            .handles
+            .effect_control_mut(strip, LiveEffectAddress::insert(0))
+            .expect("a control channel for the insert");
+        assert_eq!(
+            producer.observe_available_capacity(),
+            producer.observe_capacity(),
+            "{what}: {strip}: the retired queue reads empty"
+        );
+    }
+    assert_eq!(
+        plan.prepared.plan.observation_binding_counts()[2],
+        armed_at_reference,
+        "{what}: every admitted subscribe is armed on A's tap"
+    );
+    // One more block of A's own (its sources moved on, so it renders silence) closes the windows
+    // the records opened: they open at the sample A's next block starts at, as the reference's do.
+    plan.render(quantum);
+    for strip in &strips {
+        let expected = window_of(&reference, strip);
+        assert_eq!(
+            expected.is_some(),
+            admitted.iter().any(|admitted| admitted == strip),
+            "{what}: {strip}: the reference publishes exactly the subscribed windows"
+        );
+        assert_eq!(
+            window_of(&plan, strip),
+            expected,
+            "{what}: {strip}: A's window opens at the sample its next block starts at"
+        );
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_pending_subscribe_is_applied_at_the_carry_at_eight_lanes() {
+    pending_observe_records_are_applied_at_the_carry(
+        Backend::Simd8,
+        8,
+        PendingObserve::OneSubscribe,
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn full_observe_queues_are_applied_at_the_carry_at_eight_lanes() {
+    pending_observe_records_are_applied_at_the_carry(Backend::Simd8, 8, PendingObserve::FullQueues);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_pending_subscribe_is_applied_at_the_carry_at_four_lanes() {
+    pending_observe_records_are_applied_at_the_carry(
+        Backend::Simd4,
+        4,
+        PendingObserve::OneSubscribe,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn full_observe_queues_are_applied_at_the_carry_at_four_lanes() {
+    pending_observe_records_are_applied_at_the_carry(Backend::Simd4, 4, PendingObserve::FullQueues);
 }

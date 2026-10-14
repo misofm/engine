@@ -415,3 +415,48 @@ works, so nothing is wrong today, but the name says more than it checks.
 ### `audit capi` digest (batch 10)
 
 The C ABI render audit commits one structural transaction after its first call (it adds a muted track, `tools/audit/src/capi.rs`). Before #1280a that swap restarted every strip with a console EQ slot; now the slots carry their state across it. So `audit capi`'s `pcm_digest` moves from `76525e7ef9e78cf4` (every batch through 9) to `9bc5ec3d8a4c223c`, measured at `f0e387307` and its parent `869ffb78b`; allocations, frees and render errors stay 0. CI checks the digest's format only.
+
+## Decision record: #1280b (batch 10)
+
+**Shipped.** D3 (pending Observe records) and gate 8. (D5 shipped in #1280a.)
+
+- `LiveControlEffectBankStage::apply_pending_observations(lane) -> u64` (`crates/rack/src/lib.rs`):
+  pops lane `lane`'s observation queue to the count it held at entry and applies each record to the
+  lane's `ObservationLane` (`apply_observe`), at the first sample of the block the stage would have
+  rendered next. It has the same counted-drain shape as `drain` and counts a record with no tap in
+  `unbound_observations` as `drain` does. The two loops are written twice, not shared: the
+  realtime-policy call rule refuses a call to a popping function from inside a marked loop.
+- `Runtime::carry_effect_lanes` (`crates/graph/src/runtime.rs`) calls it on the predecessor's lane
+  through `EffectStageMut::settle_observations` (a stage with no control lane has no queue) right
+  after each lane's hand-over, so it runs for every moved effect lane. Bounded by the queue's count
+  at entry and by the number of moves; allocation-, lock- and syscall-free. The wrapper is named
+  apart from the popping method on purpose: the carry's move loop may not call a popping function
+  by name, and `begin_block` over `drain` is the same two-level shape (the tool's stated limit of a
+  helper two calls deep). Root may want to rule on whether that shape is the intended one.
+- The sample: `adopt_predecessor` gets no clock, and the engine trait is outside this slice (no edit
+  under `crates/engine/src/realtime`). The stage keeps `next_block_sample`, the first sample of the
+  block after the last one it drained (`first_sample + quantum`, one saturating add in `drain`), and
+  the carry applies at it. A stage that never drained a block applies at sample 0.
+
+**Departures.**
+
+- Every shipped compressor, gate, multiband and limiter declares one tap, so a queue's capacity is
+  one record. "The queue filled to its capacity" is therefore every lane's queue full (a further push
+  is refused), and "one subscribe" is one lane's queue holding a record while the others are empty.
+- The tap state is observed by the armed count and by the window a further block of A closes: the
+  window opens at the sample A's next block starts at, equal to the reference's.
+
+**Gate 8** (`crates/host-core/tests/successor_swap.rs`, compressor insert on a full bank with live
+controls and one observation tap):
+`a_pending_subscribe_is_applied_at_the_carry_at_{eight,four}_lanes` and
+`full_observe_queues_are_applied_at_the_carry_at_{eight,four}_lanes`. Each admits the records after
+A's last block, hands over, and checks: zero allocations, reallocations and frees on the swap block
+(allocator and render audit), no restart, no refused restore; every retired queue reads empty; A's
+armed-tap count equals the reference's (the same session that rendered the swap block itself with
+the same records); and after one more block of A the published windows (`first_sample`,
+`end_sample`, `blocks`) equal the reference's, subscribed lanes only. Red under mutation (each run
+once, reverted): no call in the carry (queues not empty), and the carry applying at sample 0 (window
+opens at 0 instead of 768). The four-lane cases are `ignore`d on this AVX2 host (#1017).
+
+**Found, not fixed.** The tap state A now holds is not carried to B: that is the observer carry
+(#1327). Until it lands, an acknowledged subscribe armed on A's retired tap is not armed on B.

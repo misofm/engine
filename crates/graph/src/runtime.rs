@@ -4377,6 +4377,18 @@ impl EffectStageMut<'_> {
         }
     }
 
+    /// Applies the `Observe` records a live stage's lane still has queued (#1280 D3). A stage with
+    /// no control lane has no queue.
+    ///
+    /// The carry's per-move loop calls this, not the stage's drain: each call is bounded by the
+    /// queue's count at entry and the loop by the number of moves, as `begin_block` bounds a
+    /// block's drain from the chain's loop over slots.
+    fn settle_observations(&mut self, lane: usize) {
+        if let Self::Live(stage) = self {
+            stage.apply_pending_observations(lane);
+        }
+    }
+
     /// [`rack::EffectBankStage::carry_lane_from`] or its live twin, for a checked pair.
     fn carry_lane_from(
         &mut self,
@@ -4832,7 +4844,7 @@ impl crate::runtime::Runtime {
                 disengaged = Some(step.predecessor.unit);
             }
             let agree = chain.carried_channel_agreement();
-            let Some(from) = effect_stage_mut(chain, slot) else {
+            let Some(mut from) = effect_stage_mut(chain, slot) else {
                 continue;
             };
             let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
@@ -4844,6 +4856,9 @@ impl crate::runtime::Runtime {
             if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                 chain.inherit_channel_agreement(agree);
             }
+            // The predecessor never renders again: an Observe record admitted after its last
+            // block is applied to its tap now, as its next block would have (#1280 D3).
+            from.settle_observations(predecessor_lane);
         }
     }
     // REALTIME_POLICY_END

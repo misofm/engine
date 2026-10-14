@@ -1238,6 +1238,10 @@ pub struct LiveControlEffectBankStage {
     staged_spans: usize,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
     unbound: u64,
+    /// The first sample of the block after the last one this stage drained: where the stage's next
+    /// block would apply a record still queued, and so where a plan swap's carry applies it
+    /// (#1280 D3). `None` until the stage has drained a block.
+    next_block_sample: Option<u64>,
     /// One bit per lane, set when the lane's last restored payload had left and right sections that
     /// differ (clear for a lane never restored): the `RESTORED` term of the witness, held as
     /// [`EffectBankStage`] holds it and set by a plan swap's carry. A bank has at most eight
@@ -1372,6 +1376,7 @@ impl LiveControlEffectBankStage {
             samples,
             staged_spans: 0,
             unbound: 0,
+            next_block_sample: None,
             unrestored: 0,
             layout,
             carry_refused: 0,
@@ -1740,6 +1745,7 @@ impl LiveControlEffectBankStage {
             self.offsets[lane + 1] = packed as u32;
         }
         self.staged_spans = packed;
+        self.next_block_sample = Some(first_sample.saturating_add(u64::from(self.quantum)));
         let mut observations = self.observations.as_deref_mut();
         let mut unbound = 0_u64;
         for (index, queue) in self.observe_queues.iter_mut() {
@@ -1762,6 +1768,49 @@ impl LiveControlEffectBankStage {
         }
         self.unbound = self.unbound.saturating_add(unbound);
         Ok(())
+    }
+
+    /// Applies every `Observe` record queued for lane `lane` to the lane's observation tap, at the
+    /// first sample of the block this stage would have rendered next (#1280 D3). A plan swap's
+    /// carry calls it on the predecessor, which never renders again: an acknowledged subscribe
+    /// that was admitted after the predecessor's last block would otherwise be lost with the
+    /// retired queue.
+    ///
+    /// The same bounded drain as [`Self::drain`]: the queue's count at entry, and nothing else.
+    /// A record the lane has no tap for counts in [`Self::unbound_observations`]. Returns the
+    /// number of records popped. Allocation-, lock- and syscall-free.
+    pub fn apply_pending_observations(&mut self, lane: usize) -> u64 {
+        let first_sample = self.next_block_sample.unwrap_or(0);
+        let Some(position) = self
+            .observe_queues
+            .iter()
+            .position(|(index, _)| *index == lane)
+        else {
+            return 0;
+        };
+        let mut observations = self.observations.as_deref_mut();
+        let queue = &mut self.observe_queues[position].1;
+        let mut available = queue.available_at_entry();
+        let mut popped = 0_u64;
+        let mut unbound = 0_u64;
+        while available != 0 {
+            available -= 1;
+            let Ok(record) = queue.try_pop() else {
+                // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
+                // drain bounded if a malformed test double violates that invariant.
+                break;
+            };
+            popped = popped.saturating_add(1);
+            let observation = observations
+                .as_deref_mut()
+                .and_then(|lanes| lanes.get_mut(lane))
+                .and_then(Option::as_mut);
+            if !apply_observe(record, first_sample, observation) {
+                unbound = unbound.saturating_add(1);
+            }
+        }
+        self.unbound = self.unbound.saturating_add(unbound);
+        popped
     }
     // REALTIME_POLICY_END
 
