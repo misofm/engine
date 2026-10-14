@@ -3,6 +3,7 @@ use core::mem::{offset_of, size_of, size_of_val};
 use effect_contract::{PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget};
 use host_core::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, InputFilterPreparer,
+    prepare_host_runtime_with_selected_meters_between_render_calls,
 };
 use session::{canonical_session_json, parse_session_json};
 
@@ -3394,32 +3395,15 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     builtins_compiler::test_only_reset_fader_matrix_witness();
     feed_and_render(&mut host, 2, 0, 0.5);
     let witness = builtins_compiler::test_only_fader_matrix_witness();
-    // #916 (608f0379, scope amendment 9c762d7c) made the session Output dedicated storage, so
-    // track 0 pairs: tracks 0-7 now take one fused eight-lane bank call before the track-8 tail.
-    // `process_members` sums both calls. The per-call witness is the first output sample, which
-    // the last call records: only track 8 carries the acknowledged -6 dB and [0.5, 0, 0, 1].
-    assert_eq!(
-        witness.process_calls, 2,
-        "one eight-lane bank call over tracks 0-7 and the scalar track-8 tail"
-    );
-    assert_eq!(
-        witness.process_members, 9,
-        "eight bank members plus the one scalar track-8 tail member"
-    );
+    // #1400 D5: the browser prepares every branch with concurrent control delivery, which forms
+    // no fused fader-matrix bank (the fusion is the between-render-calls form's, and a producer
+    // may push a record while render runs). The acknowledged pair reaches its two lanes as
+    // separate stages, so no fused call is counted, and each acknowledged value is applied once,
+    // by the render call that carries the acknowledgement.
+    assert_eq!(witness.process_calls, 0, "no fused bank call forms");
+    assert_eq!(witness.fused_calls + witness.fallback_calls, 0);
     assert_eq!(witness.fader_values_applied, 1);
     assert_eq!(witness.matrix_values_applied, 1);
-    let selected_left = f32::from_bits(witness.first_left_bits);
-    let selected_right = f32::from_bits(witness.first_right_bits);
-    assert!(
-        selected_left > 0.11 && selected_left < 0.14,
-        "the acknowledged records reached the selected track-8 tail, the last call: {selected_left}"
-    );
-    assert_eq!(selected_right.to_bits(), (selected_left * 2.0).to_bits());
-    assert_eq!(witness.fused_calls + witness.fallback_calls, 2);
-    assert_eq!(
-        witness.fused_calls, 2,
-        "both calls fuse: the acknowledged commands settle before the tail call"
-    );
     assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
     let output = host.output_pcm().expect("output");
     let quantum = QUANTUM as usize;
@@ -17731,6 +17715,191 @@ fn a_refused_batch_leaves_the_strip_mirror_so_the_retry_still_writes() {
             counts(&subject),
             counts(&twin),
             "{name}: the retry after a refused batch wrote like a first submission"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1400 gate 4: the browser's preparer, three branches, at boot and as a successor
+// ---------------------------------------------------------------------------------------------
+
+/// The shape of a spectrum request a preparer was given, and what its plan's companions hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompanionCapture {
+    None,
+    Single,
+    Collection,
+}
+
+fn companion_request(capture: CompanionCapture) -> Option<SpectrumPreparationRequest> {
+    let target = SpectrumTarget::TrackPostMatrix("eq0".into());
+    match capture {
+        CompanionCapture::None => None,
+        CompanionCapture::Single => {
+            Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+                target,
+                channels: SpectrumChannels::Stereo,
+                maximum_capture_bytes: u64::MAX,
+            }))
+        }
+        CompanionCapture::Collection => Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![host_core::SpectrumCaptureCollectionEntry {
+                    target,
+                    channels: SpectrumChannels::Stereo,
+                }],
+                maximum_capture_bytes: u64::MAX,
+            },
+        )),
+    }
+}
+
+/// Gate 4. Red if one branch drops its capture or leaves a meter consumer or an observation
+/// handle in the returned handles (the control plane would drop it on the control thread and its
+/// meter would go silent), if the plan carries no companions, or if a successor ignores its base
+/// (every unchanged source would allocate a new ring, so nothing would be carried).
+#[test]
+fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
+    use control_plane::RuntimePreparer;
+
+    let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+    let options = WebBootOptions {
+        source_ring_frames: 512,
+        live_control_observation_taps: 4,
+        ..WebBootOptions::live_control_defaults()
+    };
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: 128,
+        ..options
+    };
+    let parsed = parse_host_session(document).expect("nine-track parse");
+    let compile_caps = CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_requested_runtime_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_queue_items: u64::MAX,
+        max_source_ring_frames: u64::MAX,
+        max_source_ring_bytes: u64::MAX,
+    };
+    let compiled = compile_host_model(&parsed, compile_caps).expect("nine-track compile");
+    let model = compiled.normalized_model();
+    let strips = model.tracks.len() + model.submixes.len();
+    assert_eq!(model.tracks.len(), 9, "the nine-track fixture");
+    let caps = prepare_caps(&compiled, options, 512, u64::MAX);
+    let lanes = controls::live_lanes(model).into();
+
+    for capture in [
+        CompanionCapture::None,
+        CompanionCapture::Single,
+        CompanionCapture::Collection,
+    ] {
+        let preparer = WebRuntimePreparer::new(options, companion_request(capture));
+        let superseded = host_core::LiveValuesSuperseded::new();
+        let check =
+            |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
+                assert!(
+                    handles.meters.is_empty(),
+                    "{capture:?} {at}: no meter in the handles"
+                );
+                assert!(
+                    handles.effect_observations.is_empty(),
+                    "{capture:?} {at}: no observation handle in the handles"
+                );
+                let companions = host
+                    .plan
+                    .host_attachment_mut::<RenderCompanions>()
+                    .unwrap_or_else(|| panic!("{capture:?} {at}: the plan carries its companions"));
+                assert_eq!(
+                    companions.meters().len(),
+                    strips,
+                    "{capture:?} {at}: one meter per strip"
+                );
+                let shape = match companions.spectrum_capture {
+                    None => CompanionCapture::None,
+                    Some(PreparedSpectrumCapture::Single(_)) => CompanionCapture::Single,
+                    Some(PreparedSpectrumCapture::Collection(_)) => CompanionCapture::Collection,
+                };
+                assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
+                assert_eq!(
+                    companions.has_spectrum_capture(),
+                    capture != CompanionCapture::None
+                );
+            };
+
+        let mut boot_cache = control_plane::InputBoundCache::new();
+        let (mut boot, boot_handles) = preparer
+            .prepare(&compiled, &caps, lanes, None, &mut boot_cache, &superseded)
+            .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
+        check(&mut boot, &boot_handles, "boot");
+        // The attachment is charged in the plan's rows (the control plane builds its plan
+        // resource row from this report): the same preparation without the attachment, plus the
+        // attachment's own box and vector buffers, in both plan rows and in the largest allocation.
+        let (reference, _, _) = prepare_web_host(
+            &compiled,
+            &caps,
+            &live_control_request(options, 128).expect("request"),
+            companion_request(capture).as_ref(),
+            lanes,
+            &superseded,
+            None,
+        )
+        .unwrap_or_else(|failure| panic!("{capture:?} reference: {failure:?}"));
+        let (retained, largest) = boot
+            .plan
+            .host_attachment_mut::<RenderCompanions>()
+            .and_then(|companions| companions.retained_bytes())
+            .expect("the companions' retained bytes");
+        assert!(
+            retained >= (strips * size_of::<MeterConsumer>()) as u64,
+            "{capture:?}: the meter consumers' buffer is charged"
+        );
+        assert_eq!(
+            boot.report.graph_session_plus_plan_bytes,
+            reference.report.graph_session_plus_plan_bytes + retained,
+            "{capture:?}: the attachment is charged in the plan row"
+        );
+        assert_eq!(
+            boot.report.graph_incremental_plan_bytes,
+            reference.report.graph_incremental_plan_bytes + retained,
+            "{capture:?}: and in the incremental row"
+        );
+        assert_eq!(
+            boot.report.largest_engine_allocation_bytes,
+            reference
+                .report
+                .largest_engine_allocation_bytes
+                .max(largest),
+            "{capture:?}: and in the largest allocation"
+        );
+        assert_eq!(
+            boot.report.carried_source_total_bytes, 0,
+            "{capture:?}: boot carries none"
+        );
+
+        let edit_ramps = session::EditRamps::new();
+        let base = host_core::SuccessorBase {
+            inventory: &boot.inventory,
+            committed: model,
+            revision: 1,
+            edit_ramps: &edit_ramps,
+            monitor: host_core::MonitorBase::NONE,
+        };
+        let mut successor_cache = control_plane::InputBoundCache::new();
+        let (mut successor, successor_handles) = preparer
+            .prepare(
+                &compiled,
+                &caps,
+                lanes,
+                Some(base),
+                &mut successor_cache,
+                &superseded,
+            )
+            .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
+        check(&mut successor, &successor_handles, "successor");
+        assert!(
+            successor.report.carried_source_total_bytes > 0,
+            "{capture:?}: the successor prepares the unchanged source vacant"
         );
     }
 }

@@ -30,18 +30,17 @@ use effect_contract::{
     EffectControlRecord, ObservationCost, ObservationDescriptor, ParameterChannel,
     ParameterChannelPolicy, parameter_value_valid,
 };
-use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
     InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps, LiveRouteMuteFollow,
     LiveRouteState, LiveStripValues, LiveVcaState, PrepareDiagnostics, PrepareRejection,
     PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
-    SourceSubmission, StripMuteSeed, apply_input_filter_edit, changed_lane_records,
+    SourceSubmission, StripMuteSeed, SuccessorBase, apply_input_filter_edit, changed_lane_records,
     compile_host_model, compiled_session_shape, control_table_bytes, covers_lane, fader_gain_bits,
     parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
-    prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
-    trim_gain_bits,
+    source_id_arena_bytes, trim_gain_bits,
 };
 use host_core::{
     ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence, SpectrumCapture,
@@ -7355,6 +7354,257 @@ fn prepare_caps(
     }
 }
 
+/// The browser's preparation (issue #1400 D5): the live request's meters, the three branches
+/// (no spectrum, one spectrum capture, a spectrum collection) and the host-core entry each one
+/// calls, at boot (`successor` is `None`) and as a successor of a running plan.
+///
+/// Every branch delivers controls concurrently and none calls a `_between_render_calls` entry, so
+/// the same function serves a control plane that prepares while another thread renders. A
+/// successor prepares every source it leaves unchanged vacant, to carry the displaced plan's ring.
+/// Issue #1209 D3: one `PostMatrix` sample-peak meter per strip, the tracks then the submixes, in
+/// the strip order host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair;
+/// none when the request has no meter period.
+fn prepare_web_host(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    spectrum: Option<&SpectrumPreparationRequest>,
+    lanes: HostLiveLanes,
+    superseded: &host_core::LiveValuesSuperseded,
+    successor: Option<SuccessorBase<'_>>,
+) -> Result<
+    (
+        PreparedHost,
+        host_core::HostLiveControlHandles,
+        Option<PreparedSpectrumCapture>,
+    ),
+    PrepareDiagnostics,
+> {
+    match spectrum {
+        Some(SpectrumPreparationRequest::Single(request)) => {
+            let (host, handles, capture) = match successor {
+                Some(base) => {
+                    host_core::prepare_host_runtime_with_live_controls_and_spectrum_successor(
+                        compiled,
+                        caps,
+                        live_controls,
+                        request,
+                        lanes,
+                        superseded,
+                        base,
+                    )
+                }
+                None => prepare_host_runtime_with_live_controls_and_spectrum(
+                    compiled,
+                    caps,
+                    live_controls,
+                    request,
+                    lanes,
+                    superseded,
+                ),
+            }?;
+            Ok((
+                host,
+                handles,
+                Some(PreparedSpectrumCapture::Single(capture)),
+            ))
+        }
+        Some(SpectrumPreparationRequest::Collection(request)) => {
+            let (host, handles, capture) = match successor {
+                Some(base) => {
+                    host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
+                        compiled,
+                        caps,
+                        live_controls,
+                        request,
+                        lanes,
+                        superseded,
+                        base,
+                    )
+                }
+                None => host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection(
+                    compiled,
+                    caps,
+                    live_controls,
+                    request,
+                    lanes,
+                    superseded,
+                ),
+            }?;
+            Ok((
+                host,
+                handles,
+                Some(PreparedSpectrumCapture::Collection(capture)),
+            ))
+        }
+        None => {
+            let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
+                let model = compiled.normalized_model();
+                model
+                    .tracks
+                    .iter()
+                    .map(|track| track.id.as_str())
+                    .chain(model.submixes.iter().map(|submix| submix.id.as_str()))
+                    .map(|strip| HostMeterRequest {
+                        strip_id: strip.into(),
+                        tap: MeterTap::PostMatrix,
+                        metrics: MeterMetricSet::SAMPLE_PEAK,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let (host, handles) = match successor {
+                Some(base) => host_core::prepare_host_runtime_with_selected_meters_successor(
+                    compiled,
+                    caps,
+                    live_controls,
+                    &meters,
+                    lanes,
+                    superseded,
+                    base,
+                ),
+                None => host_core::prepare_host_runtime_with_selected_meters(
+                    compiled,
+                    caps,
+                    live_controls,
+                    &meters,
+                    lanes,
+                    superseded,
+                ),
+            }?;
+            Ok((host, handles, None))
+        }
+    }
+}
+
+/// The render-side halves a browser plan's preparation returns beside the plan (issue #1400 D5):
+/// the meter consumers, the effect observation handles and the spectrum capture.
+///
+/// They travel inside the plan as its [`HostAttachment`], so a plan the control plane prepares
+/// carries everything the render side reads, and they drop with the plan on the retirement path.
+/// The browser renders its plan directly until it renders through the plan owner (#1381), which
+/// reads them there; #1381 adds its own bookkeeping to this struct.
+///
+/// Field order is the drop order: the capture, then the consumers, as in `ReadyOwnership`.
+pub struct RenderCompanions {
+    spectrum_capture: Option<PreparedSpectrumCapture>,
+    /// One consumer per selected meter, in strip order; empty when metering is off.
+    meters: Vec<MeterConsumer>,
+    /// One reader set per observed effect instance, in `HostLiveControlHandles` order.
+    effect_observations: Vec<EffectObservationHandle>,
+}
+
+impl RenderCompanions {
+    /// The meter consumers: one per selected meter, in strip order.
+    #[must_use]
+    pub fn meters(&self) -> &[MeterConsumer] {
+        &self.meters
+    }
+
+    /// The effect observation handles, one reader set per observed effect instance.
+    #[must_use]
+    pub fn effect_observations(&self) -> &[EffectObservationHandle] {
+        &self.effect_observations
+    }
+
+    /// The heap the attachment itself holds for the plan's lifetime, and its largest single
+    /// allocation: the box, and the buffers of the two vectors. What the consumers, the handles
+    /// and the capture own is host-core's report's, which already counts it; `None` on overflow.
+    fn retained_bytes(&self) -> Option<(u64, u64)> {
+        let shell = u64::try_from(size_of::<Self>()).ok()?;
+        let meters = u64::try_from(self.meters.capacity())
+            .ok()?
+            .checked_mul(u64::try_from(size_of::<MeterConsumer>()).ok()?)?;
+        let observations = u64::try_from(self.effect_observations.capacity())
+            .ok()?
+            .checked_mul(u64::try_from(size_of::<EffectObservationHandle>()).ok()?)?;
+        let total = shell.checked_add(meters)?.checked_add(observations)?;
+        Some((total, shell.max(meters).max(observations)))
+    }
+
+    /// Whether the plan was prepared with a spectrum capture (one, or a collection).
+    #[must_use]
+    pub fn has_spectrum_capture(&self) -> bool {
+        self.spectrum_capture.is_some()
+    }
+}
+
+impl HostAttachment for RenderCompanions {
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+/// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): `prepare_web_host` for the
+/// session's boot options and spectrum request, with the render-side companions moved into the
+/// plan.
+///
+/// It attaches the live lanes the control plane chose ([`controls::live_lanes`], passed in as the
+/// `lanes` argument), so the boot word chooses no lane here. It ignores `bound_cache`: no browser
+/// entry reads the input-design bound cache (#1602).
+pub struct WebRuntimePreparer {
+    options: WebBootOptions,
+    spectrum: Option<SpectrumPreparationRequest>,
+}
+
+impl WebRuntimePreparer {
+    /// A preparer for a session booted with `options` and the optional `spectrum` request.
+    #[must_use]
+    pub fn new(options: WebBootOptions, spectrum: Option<SpectrumPreparationRequest>) -> Self {
+        Self { options, spectrum }
+    }
+}
+
+impl control_plane::RuntimePreparer for WebRuntimePreparer {
+    fn prepare(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        successor: Option<SuccessorBase<'_>>,
+        _bound_cache: &mut control_plane::InputBoundCache<'_>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
+        let live_controls =
+            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
+                PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
+            })?;
+        let (mut host, mut handles, spectrum_capture) = prepare_web_host(
+            compiled,
+            caps,
+            &live_controls,
+            self.spectrum.as_ref(),
+            lanes,
+            superseded,
+            successor,
+        )?;
+        let companions = RenderCompanions {
+            spectrum_capture,
+            meters: core::mem::take(&mut handles.meters),
+            effect_observations: core::mem::take(&mut handles.effect_observations),
+        };
+        // The attachment is the plan's own allocation, so the plan's rows charge it: the control
+        // plane builds its plan resource row from this report, and nothing else would count the
+        // box or the two vectors the companions keep alive for the plan's lifetime.
+        let (retained, largest) = companions.retained_bytes().ok_or_else(|| {
+            PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic")
+        })?;
+        let report = &mut host.report;
+        let charged = |row: u64| {
+            row.checked_add(retained).ok_or_else(|| {
+                PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic")
+            })
+        };
+        report.graph_session_plus_plan_bytes = charged(report.graph_session_plus_plan_bytes)?;
+        report.graph_incremental_plan_bytes = charged(report.graph_incremental_plan_bytes)?;
+        report.largest_engine_allocation_bytes =
+            report.largest_engine_allocation_bytes.max(largest);
+        host.plan.set_host_attachment(Box::new(companions));
+        Ok((host, handles))
+    }
+}
+
 /// Run the shared pipeline, then fold its engine-owned report into the frozen browser report.
 ///
 /// The split is the one the facade documents: engine-owned rows come from
@@ -7376,71 +7626,18 @@ fn compile_ready(
     // plan is prepared. Every plan the session prepares takes this count, so host-core charges
     // none for it and the report below charges it once, as a bridge allocation.
     let live_values_superseded = host_core::LiveValuesSuperseded::new();
-    // Issue #1209 D3: one meter per strip, the tracks then the submixes, in the strip order
-    // host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair.
-    let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
-        let model = session.normalized_model();
-        model
-            .tracks
-            .iter()
-            .map(|track| track.id.as_str())
-            .chain(model.submixes.iter().map(|submix| submix.id.as_str()))
-            .map(|strip| HostMeterRequest {
-                strip_id: strip.into(),
-                tap: MeterTap::PostMatrix,
-                metrics: MeterMetricSet::SAMPLE_PEAK,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let (host, handles, spectrum_capture) = match spectrum_request {
-        Some(SpectrumPreparationRequest::Single(request)) => {
-            let (host, handles, capture) = prepare_host_runtime_with_live_controls_and_spectrum(
-                &session,
-                caps,
-                &live_controls,
-                request,
-                lanes,
-                &live_values_superseded,
-            )
-            .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Single(capture)),
-            )
-        }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
-            let (host, handles, capture) =
-                host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection(
-                    &session,
-                    caps,
-                    &live_controls,
-                    request,
-                    lanes,
-                    &live_values_superseded,
-                )
-                .map_err(BootFailure::preparation)?;
-            (
-                host,
-                handles,
-                Some(PreparedSpectrumCapture::Collection(capture)),
-            )
-        }
-        None => {
-            let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-                &session,
-                caps,
-                &live_controls,
-                &meters,
-                lanes,
-                &live_values_superseded,
-            )
-            .map_err(BootFailure::preparation)?;
-            (host, handles, None)
-        }
-    };
+    // #1400 D5: the three boot shapes are `prepare_web_host`'s; the companions stay in
+    // `ReadyOwnership` until the browser renders through the plan owner (#1381).
+    let (host, handles, spectrum_capture) = prepare_web_host(
+        &session,
+        caps,
+        &live_controls,
+        spectrum_request,
+        lanes,
+        &live_values_superseded,
+        None,
+    )
+    .map_err(BootFailure::preparation)?;
     let engine = host.report;
 
     let control_table = control_table_bytes(engine.source_count as usize)
