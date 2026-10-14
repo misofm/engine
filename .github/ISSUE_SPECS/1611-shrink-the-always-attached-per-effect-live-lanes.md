@@ -125,3 +125,30 @@ Commands: `cargo test --locked -p effect-contract`, `cargo test --locked -p effe
 ## Size
 
 One implementer-day, one sonnet-high implementer.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Anchors held** (`prepare.rs:1727`; `live.rs:164`, `:349`, `:568`, `:623`, `:695`, `:818`;
+  `rack/src/lib.rs:1151`; `resource_lifecycle.rs:1317-1322`, 216,832).
+- **The multiplier is in three places, and they move together.** `scripts/check-web-boot-budget.mjs:9`
+  (25); `PARSE_TRANSIENT_MULTIPLIER` in `hosts/host-web/src/lib.rs:94` (25), the host's typed
+  pre-parse refusal `host.budget.parse_projection`, which the script's second block checks at the pin
+  minus one; and `hosts/host-web/src/tests.rs:195`, which pins it. The two host-web lines are added
+  authorized paths.
+- **The figure has not moved since the flip.** A release browser module built after batch 7
+  (`codex/controls-batch-8w`, 2026-10-14 12:56 UTC) grows 25,427,968 bytes (388 pages, 24.25 times
+  the document) on the 1 MiB worst document. That equals the flip-branch figure: #1599, #1600, #1612
+  and #1613 did not change it. The 20 pin plus one page is 21,037,056 bytes (321 pages), so this slice
+  must remove at least 4,390,912 bytes (67 pages) of high-water growth to reach D5's first branch.
+- **#1341a1 and #1341a2 change this slice's files** (batch 9): `effect-contract/src/live.rs`
+  (`BypassSwitch` in a `LatestCell<2>`, the crossfade state on `EffectControlLane`) and the bank stage
+  in `rack/src/lib.rs` (`BankCrossfade`, inline arrays, no heap). They are a dependency. Measure every
+  "before" figure on `main` after both merge, not on the flip-branch figures: the D2 per-field
+  breakdown (one EQ, one compressor, one delay); the boot growth with the release module
+  (`scripts/build-web-audioworklet.sh`, then `check-web-boot-budget.mjs`); the native retained bytes
+  of the worst document; `capi_retained_bytes`; and the one descriptive render run.
+- **Edit order.** After #1341a1/a2 (`live.rs`, `rack/src/lib.rs`, `effect-compiler/src/prepare.rs`)
+  and before #1566 in `effect-compiler/src/prepare.rs` (different functions). After #1602 and
+  before #1574 in `hosts/host-web/src/lib.rs`.

@@ -142,3 +142,25 @@ Commands: `cargo test --locked -p session -p parameter-metadata`,
 ## Supersedes and shrinks
 
 - None.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Anchors moved.** `parameter_metadata`'s `run` is `tools/parameter-metadata/src/lib.rs:1107-1160`
+  (the `--write`/`--check` document list at `:1138-1141`); `expectedModules` is
+  `sdk/codegen/generate.mjs:888`; the asset list is `sdk/codegen/assets.mjs:42-46`. The `visit.rs` and
+  `session-json.ts` anchors held.
+- **#1568** is in batch 9 (`codex/controls-batch-9s`). After it merges, `keys::MODULES` and each
+  `ALL` exist. Its table keeps a `control_smoothing` row with no wire message; that does not affect
+  this slice.
+- **D3 needs a tie rule.** #1566 walks the automation target as one variant arm per section. The `own`
+  and `builtins` arms have the same key set and the same order, so D3's "more than one candidate
+  throws" would throw for them. Amended rule: when more than one candidate has the record's key set,
+  all of them must have the same key order and the same leaf kinds, and the writer uses that order.
+  D2's generator checks this and fails, naming the candidates, when they differ. So the SDK never
+  meets the tie at run time.
+- **The generator needs `session`.** `tools/parameter-metadata/Cargo.toml` has no direct `session`
+  dependency today. Add it (and update `Cargo.lock`); both are authorized paths for this slice.
+- **Edit order.** After #1568. Before #1566 (shared `visit.rs`, `session-json.ts` and the canonical
+  writer corpus): #1566 then regenerates the key tables and adds its target arms to D4's table.

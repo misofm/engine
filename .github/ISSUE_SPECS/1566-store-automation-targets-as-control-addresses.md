@@ -187,3 +187,59 @@ Commands: `cargo test --locked -p session -p protocol -p controls -p effect-comp
 - Shrinks *Refuse commands that would be acknowledged with no effect* (#1315): its stored-target
   half (which targets automation may name) is this slice's row rule; its `AUTOMATION_ENQUEUE`
   refusal stays until automation renders.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Anchors moved.** `BUILTIN_AUTOMATION_EFFECT_ID` is `validate.rs:870`, `BUILTIN_AUTOMATION_TARGETS`
+  `:894`, `validate_automation` `:961`. `schema::session::automation_target` is `schema.rs:1255-1265`
+  (the session specs start at `:903`). `tx_automation_target` is `session_wire.rs:1011`,
+  `parse_automation_target` `:1689`. The classifier's call is `live_delta.rs:370`. The SDK resolver is
+  `session.ts:1389-1502`. `parse.rs:1584`, `visit.rs:121`, `prepare.rs:370`/`:675` and
+  `session-json.ts:91` held.
+- **D1 moves the whole module.** `crates/controls/src/address.rs` now also holds `Lane` (the
+  `ParameterChannel` alias), `OwnerKind`, `SectionKind` and their `code`/`name`/`kind` impls (#1546
+  S7c). An inherent impl cannot stay behind its type, so all of it moves to `session::address`
+  (it uses only `session` types), and `controls` re-exports all six names, as `controls/src/lib.rs:46`
+  exports them today.
+- **D4's codec exists.** `SET_CONTROL`'s edit already reads and writes the address through
+  `message_wire::write_set_control_address` and `decode_set_control_address`
+  (`session_wire.rs:1296-1305`, `control` and `lane` required). The automation target calls the same
+  two functions and then refuses owner kind session. The spec is the top-level
+  `crate::schema::control_address` (`schema.rs:344-356`), not a `schema::session` module.
+- **#1568 lands first (batch 9).** Its test `session_keys_and_wire_fields_have_equal_ids` pairs the
+  `target` row with `automation_target::SPEC`. This slice changes that row to
+  `crate::schema::control_address::SPEC` with no wire-only IDs (both sides `{1..6}`), in
+  `schema.rs`'s test module (already an authorized path).
+- **D3's walk.** Walk the target with `variants!`, one arm per section (the arm token is the section
+  name), so each arm has one fixed key list. #1569 D2 refuses a record walked with two key lists.
+  The `own` and `builtins` arms have the same key list; #1569's amendment accepts that. The migrated
+  corpus walks all four arms.
+- **D6 has a gap: `control.inactive`.** `controls::check` returns `control.inactive` for a row that the
+  owner's shape does not use (a matrix row on a pan strip). Such a row is `automatable()`, so it
+  reaches `check`, and D6's four codes do not include it. Options: (A) add `control.inactive` as a
+  fifth code, for stored and enqueued automation alike; (B) report it as `control.automation.target`.
+  Recommendation: A. It is `check`'s own code for the same fault in `SET_CONTROL`, so one fault has one
+  code everywhere. `control.read_only` cannot occur, because a derived row fails `automatable()`
+  first. `ControlError` has no `control.automation.target` variant today; this slice adds one.
+- **D7's call sites.** Host-core preparation collects effect diagnostics at `prepare.rs:1908`
+  (`prepare_native_session_effects(...).map_err(effect_diagnostics)`); the automation diagnostics
+  join that set. `tools/session-validator` has no `controls` dependency yet: add it in its
+  `Cargo.toml` (under `tools/session-validator/**`) and update `Cargo.lock`.
+- **The browser.** Since #1562a the browser applies session edits through the core. An automation edit
+  that the row rule refuses classifies as a rebuild (`LiveRebuild::AutomationTarget`), so until
+  #1562b the browser refuses it with `web.apply.rebuild_pending`, not with the row code. An accepted
+  edit commits on the live path. Gate 5 keeps its three paths; no browser gate is added.
+- **#1315 is closed (batch 8).** Its `AUTOMATION_ENQUEUE` refusal is on `main`; this slice does not
+  change it. "Supersedes and shrinks" needs no action.
+- **More files that name the old target** (authorized): `crates/effect-compiler/tests/native_session.rs`,
+  `crates/host-core/tests/{launch_registry_once,live_delta,live_edit_classifier}.rs`,
+  `sdk/src/core/types.ts`, `docs/EFFECT_CONTRACT_V1.md` (its `effect.automation.rate` lines) and
+  `Cargo.lock`. Closed handoff records under `docs/handoffs/` stay unedited.
+- **Edit order.** After #1568 (`visit.rs`, `schema.rs`); after #1341a1/a2 and #1611
+  (`effect-compiler/src/prepare.rs`; #1341a1 also `host-core/src/live_delta.rs`); after #1569
+  (shared `visit.rs`, `session-json.ts` and the corpus: this slice then regenerates the SDK key
+  tables instead of editing them by hand, and adds the target arms to #1569 D4's `$defs` table);
+  after #1602 (`host-core/src/prepare.rs`, `hosts/host-web/src/tests.rs`, different functions).
+  Before #1567, and before #1615 (`session/src/canonical.rs`).

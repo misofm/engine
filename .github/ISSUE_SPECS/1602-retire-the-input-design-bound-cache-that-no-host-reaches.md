@@ -193,3 +193,42 @@ Commands: `cargo test --locked -p builtins --features test-support`,
 ## Size
 
 Half a day to one day. Most of the work is deletion and dropping one argument at each caller.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Dependencies are met.** #1556 and #1565 are closed. The browser's preparer
+  (`WebRuntimePreparer`, `hosts/host-web/src/lib.rs:4900-4960`) attaches the lanes that the control
+  plane chose (#1381a, #1400), so no host designs an input bound in production. The browser
+  preparation calls of Context (`lib.rs:7193`, `:7210`, `:7226`, `live_lanes` `:7850`) are gone. D7's
+  closure of #1470 (still open) needs only this slice upstream.
+- **#1400 added a trait parameter.** Every preparation now goes through
+  `control_plane::RuntimePreparer::prepare(..., bound_cache: &mut InputBoundCache<'_>, ...)`
+  (`crates/control-plane/src/compile.rs:659-672`). Its three implementations: capi
+  (`crates/capi/src/runtime/mod.rs:92-114`), host-web (`WebRuntimePreparer::prepare`, `lib.rs:4951`,
+  which ignores `_bound_cache`) and the test preparer in
+  `crates/control-plane/tests/runtime_preparer.rs:13-75`. D3 also removes this parameter. The
+  non-goal "Any change to host-web" is replaced: host-web drops the parameter from its preparer, the
+  doc lines at `lib.rs:4906-4907` and the two test caches in `src/tests.rs:5758`, `:5816`, and changes
+  nothing else.
+- **The cache type now has a lifetime** (`InputBoundCache<'seed>`, `with_seed`). D2 deletes it whole.
+- **Anchors moved.** `host-core`: re-export `lib.rs:258`; `prepare_host_runtime_with_live_lanes`
+  `prepare.rs:1067-1100` and `_successor` `:1103-1130`; the policy function is now
+  `prepare_host_runtime_with_live_controls_policy_and_spectrum` (`:1667-1677`), its pass `:2159`; the
+  test `a_design_bound_cache_changes_no_prepared_value` `:4005`. `builtins-compiler`: `:4437-4443`,
+  `:4540-4548`, test `:13719`. `control-plane`: re-export `lib.rs:69`; `compile.rs` `bound_seed` is a
+  field of `CompiledChildren` (`:29`), `capi_resources` `:213-294`, `prepared_capi_resources`
+  `:375-421`, `prepare_runtime` `:698-832`, `compile_children` `:843-923` and `:1008`; `control.rs`
+  `:54`, `:96`, `:106-116`, `:130-140`, rebuild `:1330-1353`. `capi`: `abi.rs:426-436`, `ffi.rs:385`,
+  `runtime/mod.rs:92-149`; `tests/design_bound_cache.rs:301`; `tests/resource_lifecycle.rs`
+  `three_cutoff_session` `:527`, `bound_seed_bytes` `:692`, `capi_epoch_terms` `:722-751`, "three input
+  cutoffs" `:1031-1033`, the seed assertion `:1848`. Header `miso_engine_v1.h:167-179`.
+  `docs/C_ABI_V1_QUALIFICATION.md:783-829`; `docs/REALTIME_DEPENDENCY_POLICY.md:211`, `:377`;
+  `tools/realtime-policy/src/policy.rs:197`. The `builtins` anchors held.
+- **Added authorized paths:** `crates/control-plane/tests/runtime_preparer.rs`,
+  `hosts/host-web/src/{lib.rs,tests.rs}` (the parameter and its doc lines only).
+- **Edit order.** After #1341a1/a2 (`control-plane/src/control.rs`). Before #1566 in
+  `host-core/src/prepare.rs` and before #1574 and #1611 in `hosts/host-web/src/lib.rs`. The open
+  #1593 also changes `RuntimePreparer` and `host-core/src/prepare.rs`: this slice lands first (it
+  only deletes), and #1593 rebases.
