@@ -180,7 +180,9 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
   #1532 (`sdk/src/browser/engine.ts` and `errors.ts` edit order).
 - **#1563B**: D2, D3 and D5-D9: the builders on both transports, the deletions and the eval
   migration, and the qualification rows. Gates 2, 3 and 5. Gate 5 runs on the non-isolated leg.
-  Dependencies: #1563A, #1562a, #1559 and #1341 (root, 2026-10-13). #1563B lands in one batch with
+  Dependencies: #1563A, #1562a and #1559. #1341 is a dependency of gate 3's bypass row only: that
+  row waits for #1341 and moves to #1341's gates (root Q2, 2026-10-13; the batch table is not
+  reordered). #1563B lands in one batch with
   #1381a, #1562a, #1570b and #1565A.
 
 - Authorized paths gain `sdk/README.md` (the reference text of the changed submit result).

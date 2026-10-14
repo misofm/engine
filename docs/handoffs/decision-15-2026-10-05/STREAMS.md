@@ -710,7 +710,7 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
 
   | Batch | Lane | Slices, in merge order | Hot-file order |
   |---|---|---|---|
-  | 4 | C | #TBD4, #1559, #1560, #1561 | (fixed) |
+  | 4 | C | #1603, #1559, #1560, #1561 | (fixed) |
   | 4 | K | #1570a, #1401, #1351, #1165 | (fixed) |
   | 5 | W | #1400a -> #1400b; #1536, #1534, #1530 | `lib.rs`: #1534 then #1400b; host.js (#1536); qualification `run.mjs` (#1530); engine `plan.rs` and control-plane (#1400a, K-type code carried by W) |
   | 5 | K | #1532 -> #1563A; #1280a, #1280b | sdk `engine.ts`/`errors.ts`: #1532 then #1563A; `live.rs`, rack, host-core `prepare.rs`/`live_delta.rs` (#1280) |
