@@ -585,8 +585,11 @@ export class WasmBoundary {
     });
   }
 
-  /** Read the current prepared owner's stable resident-observation bindings. */
-  observationMap(): ObservationMap {
+  /**
+   * Read the current prepared owner's stable resident-observation bindings. A caller that already
+   * holds the strip order of this call passes it in, so the structure epoch is probed once.
+   */
+  observationMap(knownOrder?: ControlStripOrder): ObservationMap {
     const handle = this.#live();
     const count = Number(this.#exports.miso_engine_web_v1_observation_count(handle));
     if (!Number.isSafeInteger(count) || count < 0 || count > 0xffff_ffff) {
@@ -608,7 +611,7 @@ export class WasmBoundary {
       });
     }
     // Issue #1210 D5: a binding's index is a strip index, the tracks then the submixes.
-    const order = this.stripOrder();
+    const order = knownOrder ?? this.stripOrder();
     const strips = [...order.tracks, ...order.submixes];
     const raw: RawObservationBinding[] = [];
     const readId = (length: number, path: string): string => {
@@ -683,9 +686,10 @@ export class WasmBoundary {
   readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
     validateObservationSelections(selections);
     const handle = this.#live();
-    const map = this.observationMap();
-    // Issue #1210 D5: selections resolve against the strips, the tracks then the submixes.
+    // Issue #1210 D5: selections resolve against the strips, the tracks then the submixes. The
+    // order is read once and shared with the map: each read probes the structure epoch.
     const order = this.stripOrder();
+    const map = this.observationMap(order);
     const strips = [...order.tracks, ...order.submixes];
     const addresses = resolveObservationAddressesWithTracks(map, strips, selections);
     const selectionPointer = Number(this.#exports.miso_engine_web_v1_observation_selection_ptr());

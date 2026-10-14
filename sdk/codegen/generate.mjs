@@ -289,16 +289,15 @@ function renderAddress(address) {
  *
  * Only the public names #1563 left, which the tables cannot say: a method is the camel case of the
  * row's name unless {@link METHOD_NAMES} names it, a few rows are written together
- * ({@link COMPOSITES}: a pan's two lanes, a matrix's four coefficients, the input filters), and
- * {@link TRACK_ONLY} lists the rows a bus does not offer (a bus is solo-safe). Each is checked
- * against the tables; one that names a row the core no longer has throws.
+ * ({@link COMPOSITES}: a pan's two lanes, a matrix's four coefficients, the input filters). Which
+ * owner kinds offer a row is not decided here: the tables carry `onSubmix: false` on a strip row a
+ * submix does not have (solo: a bus is solo-safe), from the same flag the core refuses a write
+ * with, and the track-only builders are derived from it. Each name table is checked against the
+ * tables; one that names a row the core no longer has throws.
  */
 
 /** The method of a row whose name is not its camel case: the VCA's offset is its fader. */
 const METHOD_NAMES = { "vca/own/offset_db": "faderDb" };
-
-/** Rows a submix does not offer: the core refuses the solo of a bus. */
-const TRACK_ONLY = ["strip/own/solo"];
 
 /**
  * Rows written together, by the owner and section kind that lists them. `lanePair` takes one value
@@ -633,13 +632,14 @@ function renderControlBuilders(catalog) {
     }
   }
   const stripEntries = entriesByOwner.get("strip");
-  const trackOnly = stripEntries.filter((entry) => entry.shape === "row"
-    && TRACK_ONLY.includes(`strip/${entry.section}/${entry.row.name}`));
-  for (const named of TRACK_ONLY) {
-    if (!trackOnly.some((entry) => `strip/${entry.section}/${entry.row.name}` === named)) {
-      throw new Error(`TRACK_ONLY ${named}: the core has no such strip row`);
+  const entryRows = (entry) => (entry.shape === "row" ? [entry.row] : entry.members);
+  const trackOnly = stripEntries.filter((entry) => {
+    const absent = entryRows(entry).map((row) => row.onSubmix === false);
+    if (absent.some(Boolean) && !absent.every(Boolean)) {
+      throw new Error(`strip ${entry.method}: its rows disagree on whether a submix has them`);
     }
-  }
+    return absent.every(Boolean);
+  });
   const sharedEntries = stripEntries.filter((entry) => !trackOnly.includes(entry));
   const { parameters, linkModes } = effectTables(catalog);
 

@@ -398,3 +398,16 @@ and the mirrors they generate (`sdk/assets/miso-engine-v1-abi-layout.json`, `sdk
 and the SDK's `UNUSED_EXPORTS` (`sdk/src/core/boundary.ts`). The SDK's `MisoSessionMap` type
 (`shipped-host.d.ts`, a pinned mirror of the host's `.d.ts`) still carries `tracks`/`submixes`, which
 the SDK now ignores.
+
+## Fold (batch 8 review)
+
+- **m2 (#1564B).** The TRACK_ONLY table in `sdk/codegen/generate.mjs` is deleted. The core's
+  controls document already carries `onSubmix: false` on a strip row a submix does not have, and it
+  comes from `StripRow::on_submix` in `crates/controls/src/strip.rs`, the flag the core's own listing
+  and refusal read. The generator now derives the track-only builders from that flag (a group whose
+  rows disagree throws). No Rust changed and the regenerated SDK files are byte-identical, so the
+  surface did not move; a change to the core's rule now reaches the typed surface by regeneration.
+  `METHOD_NAMES` and `COMPOSITES` stay (naming and grouping only).
+- **Nit (#1564C).** `readObservations` took the strip order twice (the map and the resolver), and each
+  read probes the structure epoch. It now takes the order once and passes it to
+  `observationMap(order)`, whose argument is optional.
