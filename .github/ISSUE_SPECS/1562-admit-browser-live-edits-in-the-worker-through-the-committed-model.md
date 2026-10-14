@@ -371,3 +371,13 @@ The slice is split. Both pieces stay in this issue.
 - Browser qualification rows (gate 7) in three browsers: no local browser runs in sprint mode; the
   rows and the `CONTROL_LIST_GET` row belong to the batch's qualification run.
 - `npm run qualify` and `check-sdk-types.sh` (needs `npm ci`).
+
+## Amendment (batch 7 review, coordinator 2026-10-14): parity rows owed by #1562b
+
+The flip's parity test (`hosts/host-web/tests/control_parity.rs`) cannot yet compare edits that the
+classifier sends to the rebuild arm, because #1562a refuses them in the browser with
+`web.apply.rebuild_pending` while the C ABI rebuilds. #1562b, which deletes that refusal, adds these
+rows to the parity script, each compared per step by reply bytes and per block by PCM bits: a route
+into the output (gain and mute), the delay and multiband prepared bypass, `delay_samples`, and an
+audio-rate effect parameter if a launch effect declares one. Until #1562b lands this is the one
+known host difference, and it is a sequenced refusal, not a divergent result.
