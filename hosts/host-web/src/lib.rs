@@ -3,6 +3,17 @@
 //! This module deliberately contains no raw pointer handling or JavaScript integration. It owns
 //! the complete immutable session and render plan that the AudioWorklet boundary drives.
 //!
+//! # The control plane (issue #1381a)
+//!
+//! The one instance's session is `control_plane::SessionState`, built at boot through
+//! [`WebRuntimePreparer`]: it owns the committed model, the source, strip and effect producers, the
+//! plan's revision gate, the plan publisher and the retirer. The host renders through the plan
+//! owner (`PlanState`), which adopts a published successor at a block boundary with its
+//! [`RenderCompanions`], and the service step (`miso_engine_web_v1_service`) reclaims the displaced
+//! plan and its attachment on the control side, in the worklet's message handler, never in
+//! `process()`. The retained live-command path holds no cell producer: only the observation kinds
+//! still reach the control plane, until `SET_CONTROL` serves the rest (#1562a, #1565A).
+//!
 //! # What is here and what is not
 //!
 //! The compile pipeline is **not** here. Parsing, compiling, source rings, effect and builtin
@@ -17,6 +28,7 @@
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use builtins::{
     BuiltinLaneSelector, Matrix2x2, MeterMetricSet, MeterSnapshot, MeterTap,
@@ -25,22 +37,26 @@ use builtins::{
 use builtins_compiler::{
     MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
+use control_plane::{
+    CompileFailure, ControlAdapter, ControlLimits, PlanQueries, PlanResources, PlanState,
+    SessionState, SourceFailure,
+};
 use controls::{ControlDescriptor, ControlError, Lane, OwnerKind, SectionKind};
 use effect_contract::{
     EffectControlRecord, ObservationCost, ObservationDescriptor, ParameterChannel,
     ParameterChannelPolicy, parameter_value_valid,
 };
-use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut};
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
-    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
-    InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps, LiveRouteMuteFollow,
-    LiveRouteState, LiveStripValues, LiveVcaState, PrepareDiagnostics, PrepareRejection,
-    PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
-    SourceSubmission, StripMuteSeed, SuccessorBase, apply_input_filter_edit, changed_lane_records,
-    compile_host_model, compiled_session_shape, control_table_bytes, covers_lane, fader_gain_bits,
-    parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
-    source_id_arena_bytes, trim_gain_bits,
+    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    InputFilterEdit, InputFilterEditErrorKind, LiveControlSoloState, LiveRampRow, LiveRamps,
+    LiveRouteMuteFollow, LiveRouteState, LiveStripValues, LiveVcaState, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
+    SourceControlError, SourceSubmission, StripMuteSeed, SuccessorBase, apply_input_filter_edit,
+    changed_lane_records, compile_host_model, compiled_session_shape, control_table_bytes,
+    covers_lane, fader_gain_bits, parse_host_session,
+    prepare_host_runtime_with_live_controls_and_spectrum, source_id_arena_bytes, trim_gain_bits,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
@@ -75,11 +91,15 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// headroom. Issue #1093 re-measured it after decision 12's required root `console` grew the
 /// minimal document from 447 to 511 bytes and its parse, model and compile peak from 6,780 to
 /// 8,944 bytes: 17.503 bytes per input byte, now the largest ratio (the dense documents stay
-/// below 13.1). 20 leaves 14.3% headroom. Boot checks
+/// below 13.1). 20 left 14.3% headroom. Issue #1381a re-measured the exact 1 MiB, 512-track by
+/// 4-effect document on the shipped module (`scripts/check-web-boot-budget.mjs`): the boot now
+/// builds the control plane's session, whose catalog, producers and protocol state the browser did
+/// not hold, and the wasm high-water growth rose from under 20 MiB to 25,427,968 bytes (24.25
+/// bytes per input byte). 26 leaves 7.2% headroom over that. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 26;
 
 /// The most VCAs a browser session may declare (issue #1245 amendment A1).
 ///
@@ -1354,6 +1374,37 @@ pub struct WebStatus {
     pub reserved: [u64; 3],
 }
 
+/// The applied-revision watermark of the plan (#1381a D5), in the order and sizes of the C ABI's
+/// `miso_engine_v1_watermark` (#1314 D6). It has no pre-roll counter (D15-8, round-5 amendment).
+///
+/// The host keeps one at a stable address, written by [`AudioWorkletEngineHost::read_watermark`]
+/// and found through `miso_engine_web_v1_watermark_ptr`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebPlanWatermark {
+    /// Exact structure byte size ([`WATERMARK_BYTES`]).
+    pub struct_size: u32,
+    /// Required zero.
+    pub reserved0: u32,
+    /// The highest committed revision in effect together with every revision before it.
+    pub revision: u64,
+    /// The absolute render sample of the first block in which `revision` was in effect.
+    pub first_sample: u64,
+    /// The OR of the outcome flags over the revisions the last advance covered.
+    pub outcome_flags: u64,
+    /// Saturating count of revisions completed as exact.
+    pub exact_count: u64,
+    /// Saturating count of revisions completed as a transition fallback.
+    pub transition_fallback_count: u64,
+    /// Saturating count of revisions completed as superseded.
+    pub superseded_count: u64,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 5],
+}
+
+/// Exact byte size of [`WebPlanWatermark`], equal to the C ABI watermark's.
+pub const WATERMARK_BYTES: u32 = size_of::<WebPlanWatermark>() as u32;
+
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1700,39 +1751,70 @@ impl controls::EffectiveInputs for WebEffectiveView<'_> {
     }
 }
 
+/// What the browser knows of one effect instance of the plan, in the dense `effect_slot` order
+/// (#1381a): where its producer is in the control plane's list, what the instance declares, and,
+/// when it declares a tap, where its reader set is in the attachment's [`RenderCompanions`].
+///
+/// The queries that name an effect read this table, and only the window reads reach the
+/// attachment; an observe record reaches the instance's observation queue through `producer`.
+struct EffectInstance {
+    /// The position of this effect's producer in [`SessionState::effect_producers_mut`].
+    producer: u32,
+    /// The position of this effect's [`EffectObservationHandle`] in `RenderCompanions`'s list, or
+    /// `None` for an effect that declares no tap.
+    reader: Option<u32>,
+    /// Normalized identity of the strip this instance belongs to.
+    track_id: Box<str>,
+    /// The session-declared effect identifier.
+    effect_id: Box<str>,
+    /// The instance's live address within its strip.
+    address: LiveEffectAddress,
+    /// The effect's declared parameter table and observation menu.
+    descriptor: &'static effect_contract::EffectDescriptor,
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
-/// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
-/// the source consumers) before its control-side producers, and the compiled session model outlives
-/// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
+/// Field order is the drop order and is load-bearing: the control plane's session drops first (its
+/// producers, then the plan exchange's control ends and the retirement queue), and the compiled
+/// session model outlives it. The render half (the plan owner, which owns the source consumers and
+/// the active attachment) is the host's own `plan` field, declared after this one. Nothing here is
+/// ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
+    /// The control plane (#1381a D1): the committed model at its boot revision, the source, strip
+    /// and effect producers, the plan's revision gate, the plan publisher and the retirer. It is
+    /// the one owner of the producers; the retained command path below holds none.
+    control: WebSession,
+    /// The any-thread projection of the plan: its resource row and the applied-revision watermark
+    /// (#1381a D5).
+    queries: PlanQueries<WebAdapter>,
     /// Whether the app opted in to live commands (`live_control_command_queue_records != 0`,
     /// issue #1326 D4). The command gate reads this, never the producers: every plan carries each
     /// strip's fader/mute and matrix/pan lanes for the engine's own transitions, and only an app
     /// that opted in may drive them.
     commands_enabled: bool,
-    /// Issue #137 D1 / #140 B: per-strip control-side producers -- matrix/pan and fader/mute --
-    /// declared first so they are released before the plan that owns their consumer endpoints.
-    /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
+    /// Issue #137 D1 / #140 B: per-strip control-side producers -- matrix/pan and fader/mute.
+    /// Empty since #1381a: the control plane owns them, and the retained command path refuses
+    /// every kind that would write through them until it is deleted (#1565A).
     controls: Vec<TrackControlProducer>,
-    /// The session's `live_values_superseded` count (#1312 D2): one count, made once by
-    /// [`compile_ready`], which every cell reader of every plan the session prepares adds to, and
-    /// which the status reports (#1399). A successor plan the session prepares must be given this
-    /// same count.
+    /// A handle on the session's `live_values_superseded` count (#1312 D2): the one count the
+    /// control plane made, which every cell reader of every plan the session prepares adds to,
+    /// and which the status reports (#1399).
     live_values_superseded: host_core::LiveValuesSuperseded,
-    /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
-    /// stamps those writes from this handle and publishes their revision on it, as the control
-    /// plane does through its provider epoch; the plan's own render takes its snapshot from the
-    /// same gate. Until Worker admission (#1382) this is the one handle on the one plan. It is
-    /// never moved while a stamp is open: every revision stamped here is published in the same
-    /// admission.
-    plan_gate: engine::realtime::PlanRevisionGate,
+    /// The plan's gate handle (#1502 D1, #1312 D7). `None` since #1381a: the control plane's
+    /// provider epoch holds the plan's one handle, and the retained command path, which would
+    /// stamp from a second one, refuses every kind that writes a cell.
+    plan_gate: Option<engine::realtime::PlanRevisionGate>,
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense slot
-    /// order [`ReadyOwnership::effect_slot`] computes (a staged command's `queue_slot`), so an
-    /// addressed command reaches its cells and its observation queue with one index and no search. The producer's
-    /// parameter, bypass and EQ-target values are latest-target cells (#1345); only an
-    /// observation subscription is a queue record.
+    /// order [`ReadyOwnership::effect_slot`] computes. Empty since #1381a: the control plane owns
+    /// the producers, and the retained command path reaches an effect's observation queue through
+    /// [`ReadyOwnership::effect_producer_index`] instead.
     effect_controls: Box<[Option<EffectControlProducer>]>,
+    /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
+    /// number of instances ([`ReadyOwnership::effect_controls`] had it before the producers
+    /// moved). It is how an observe record (kinds 7 and 8, ruling C9) reaches its effect's
+    /// observation queue, and how the reads reach its readers.
+    effect_instances: Box<[Option<EffectInstance>]>,
     /// Issue #1222: one live send producer per route into a submix, in canonical route-ID order
     /// (`HostLiveControlHandles::route_controls`), so a send command's live-route index reaches
     /// its queue with one index and no search. Declared before the plan that owns their lanes.
@@ -1813,14 +1895,9 @@ struct ReadyOwnership {
     /// collection. It is declared before the prepared host so consumers are released before the
     /// plan's producers.
     spectrum: Option<SpectrumService>,
-    host: PreparedHost,
-    /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
-    /// when `live_control_meter_blocks` was zero, in which case no observer exists at all.
-    meters: Vec<MeterConsumer>,
-    /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
-    /// order the command producers use, so an addressed subscription reaches its lane with one
-    /// index and no search. Empty when the configuration named no observation capacity.
-    effect_observations: Box<[Option<EffectObservationHandle>]>,
+    /// Issue #143: the meter consumers (issue #137 D2, one per selected meter, empty when
+    /// `live_control_meter_blocks` was zero) and the observation reader sets are the active
+    /// plan's [`RenderCompanions`]; `effect_instances` says where each effect's reader set is.
     /// Strip index of each observed effect slot (a submix's is `tracks.len() + j`), or `u32::MAX`
     /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
     /// than a search.
@@ -1885,13 +1962,6 @@ struct ReadyOwnership {
     /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
     #[cfg(test)]
     meter_effect_scan_count: u64,
-    /// The compiled session model, retained so the browser bridge keeps charging itself for what
-    /// it holds -- and, since issue #207, read by the source-introspection queries.
-    ///
-    /// The queries read it directly rather than copying a parallel table out of it, so the order
-    /// they report *is* the normalized model's order by construction: `compile_session` sorts
-    /// `sources` by stable ID, and there is no second list that could disagree with it.
-    session: CompiledSession,
 }
 
 #[derive(Clone, Copy)]
@@ -1902,6 +1972,16 @@ struct MasterMeasurement {
 }
 
 impl ReadyOwnership {
+    /// The compiled session model, which the control plane retains (#1381a): read by the
+    /// source-introspection queries (issue #207) and the addressing tables.
+    ///
+    /// The queries read it directly rather than copying a parallel table out of it, so the order
+    /// they report *is* the normalized model's order by construction: `compile_session` sorts
+    /// `sources` by stable ID, and there is no second list that could disagree with it.
+    fn session(&self) -> &CompiledSession {
+        self.control.committed_session()
+    }
+
     /// Clear host-owned pending delivery state. Producer-side accumulators continue rendering;
     /// `meter_activation_sample` makes the already bounded poll reject queued pre-activation
     /// windows before it accepts a clean interval.
@@ -1998,20 +2078,28 @@ impl ReadyOwnership {
             *self.rack_effects.get(track)?,
             address,
         )?;
-        (slot < self.effect_controls.len()).then_some(slot)
+        (slot < self.effect_instances.len()).then_some(slot)
+    }
+
+    /// The control plane's producer of the effect at dense slot `effect` (#1381a): the one way the
+    /// retained command path reaches an effect's observation queue (ruling C9).
+    fn effect_producer_mut(&mut self, effect: usize) -> Option<&mut EffectControlProducer> {
+        let position = self.effect_instances.get(effect)?.as_ref()?.producer;
+        self.control
+            .effect_producers_mut()
+            .get_mut(position as usize)
     }
 
     /// The free room of one destination queue. The matrix, fader, input and send bands are
     /// latest-target cells (#1312, #1346, #1347), which have no room to want and are never asked:
     /// they answer `None`, as an unaddressable queue does. An effect's values are cells too
     /// (#1345); its queue is its observation queue, one slot per declared tap.
-    fn queue_available(&self, slot: usize) -> Option<u32> {
+    fn queue_available(&mut self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
         if slot < tracks * 3 {
             return None;
         }
-        let effect = slot - tracks * 3;
-        let producer = self.effect_controls.get(effect)?.as_ref()?;
+        let producer = self.effect_producer_mut(slot - tracks * 3)?;
         u32::try_from(producer.observe_available_capacity()).ok()
     }
 
@@ -2019,7 +2107,7 @@ impl ReadyOwnership {
     /// the effects. `None` for an index past the last live route.
     fn route_slot(&self, route: usize) -> Option<usize> {
         (route < self.route_controls.len())
-            .then(|| self.strip_count() * 3 + self.effect_controls.len() + route)
+            .then(|| self.strip_count() * 3 + self.effect_instances.len() + route)
     }
 
     /// Queue one admitted observation subscription on its effect. `Err` only on a full queue,
@@ -2053,13 +2141,8 @@ impl ReadyOwnership {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
-                let producer = self
-                    .effect_controls
-                    .get_mut(effect)
+                self.effect_producer_mut(effect)
                     .ok_or(())?
-                    .as_mut()
-                    .ok_or(())?;
-                producer
                     .try_push_observe(tap_index, armed, window_blocks)
                     .map_err(|_| ())?;
                 if let Some(mask) = self.observation_armed.get_mut(effect)
@@ -2221,11 +2304,19 @@ pub struct AudioWorkletEngineHost {
     command_report: WebCommandReport,
     /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
     meter_lease: bool,
+    /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
+    /// control half: all zero until the first successful read.
+    watermark: WebPlanWatermark,
     /// First sample eligible for the current lease. A snapshot that opens before this boundary
     /// is an old/partial interval and is dropped rather than presented as a clean measurement.
     meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
+    /// The render half of the plan exchange (#1381a D4): the plan owner that `render_next` renders
+    /// through, and whose active plan's attachment holds the meter consumers and the observation
+    /// readers. It is the render side of the single instance, beside the control half in `ready`,
+    /// so the two borrow apart. Dropped, with `ready`, only by [`Self::dispose`].
+    plan: Option<WebPlan>,
     /// Checked host-scoped generation for prepared companion ownership. This token is distinct
     /// from the wrapping Wasm handle and changes on every successfully published host.
     host_generation: u64,
@@ -2387,10 +2478,16 @@ impl AudioWorkletEngineHost {
             ));
         }
         let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
-        let (ready, resources) = compile_ready(
-            session,
+        // The control plane compiles the session again and retains the one model the host reads
+        // (#1381a). What this function holds of its own is freed first, so the boot's transient
+        // peak is the one compile's, as it was before.
+        drop(session);
+        drop(model);
+        let (ready, plan, resources) = compile_ready(
+            document,
             &caps,
             options,
+            memory_budget,
             projection.report,
             spectrum_request.as_ref(),
         )?;
@@ -2424,10 +2521,15 @@ impl AudioWorkletEngineHost {
             },
             resources,
             command_report: empty_command_report(),
+            watermark: WebPlanWatermark {
+                struct_size: WATERMARK_BYTES,
+                ..WebPlanWatermark::default()
+            },
             meter_lease: false,
             meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
+            plan: Some(plan),
             host_generation,
             spectrum_hop: spectrum_request.as_ref().and(spectrum_hop),
             diagnostic_len: 0,
@@ -2450,6 +2552,123 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn resources(&self) -> &WebResourceReport {
         &self.resources
+    }
+
+    /// The active plan's companions, for the tests that read the consumers and readers a plan
+    /// carries (#1381a).
+    #[cfg(test)]
+    pub(crate) fn test_companions(&mut self) -> &mut RenderCompanions {
+        self.plan
+            .as_mut()
+            .and_then(|plan| plan.active_attachment_mut::<RenderCompanions>())
+            .expect("a ready host's plan carries its companions")
+    }
+
+    /// The observation handle of the effect at dense slot `effect`, from the active plan's
+    /// companions (#1381a).
+    #[cfg(test)]
+    pub(crate) fn test_observation_handle(
+        &mut self,
+        effect: usize,
+    ) -> Option<&EffectObservationHandle> {
+        let reader = self
+            .ready
+            .as_ref()?
+            .effect_instances
+            .get(effect)?
+            .as_ref()?
+            .reader?;
+        self.test_companions()
+            .effect_observations
+            .get(reader as usize)
+    }
+
+    /// Run one structural command frame through the control plane (#1381a gates 2 and 4): it
+    /// prepares a successor of the committed model through the browser's preparer and publishes
+    /// it, for the render of the next block to adopt. No export reaches it, and the production
+    /// host has no structural edit of its own until #1290.
+    ///
+    /// Returns the control plane's response frame.
+    ///
+    /// # Errors
+    ///
+    /// The control plane's refusal of the frame.
+    #[cfg(feature = "test-support")]
+    pub fn structural_command_for_test(
+        &mut self,
+        request: &[u8],
+    ) -> Result<Vec<u8>, control_plane::CommandError> {
+        let ready = self
+            .ready
+            .as_mut()
+            .ok_or(control_plane::CommandError::Internal)?;
+        let length = ready.control.command(request, CONTROL_FRAME_BYTES)?;
+        Ok(ready.control.command_response(length).to_vec())
+    }
+
+    /// The epoch of the plan that renders (#1381a gates 2 and 4): 0 for the boot plan, and one
+    /// more for each published plan the owner adopted.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn active_plan_epoch_for_test(&self) -> Option<u64> {
+        self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
+    }
+
+    /// Run the control plane's service step once (#1381a D5, #1348 D1): bring the provider epochs
+    /// up to render and reclaim every retired plan and its attachment, here, never on the render
+    /// thread. It commits and acknowledges nothing, and it leaves the status's last result alone,
+    /// so a periodic tick never overwrites a refusal the host has yet to read.
+    ///
+    /// An epoch failure is sticky: the host fails with the session's diagnostic.
+    pub fn service(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        match ready.control.service() {
+            Ok(()) => RESULT_OK,
+            Err(error) => {
+                let diagnostic = error.diagnostic().into_owned();
+                self.fail(RESULT_INTERNAL, &diagnostic)
+            }
+        }
+    }
+
+    /// Copy the plan's applied-revision watermark into the host's record (#1381a D5).
+    ///
+    /// A read that gives up after the watermark's bounded attempts returns
+    /// [`RESULT_BACKPRESSURE`] and leaves the record untouched: a read to retry, never a refused
+    /// edit. Like [`Self::service`] it leaves the status's last result alone.
+    pub fn read_watermark(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return RESULT_WRONG_STATE;
+        };
+        let Ok(watermark) = ready.queries.watermark() else {
+            return RESULT_BACKPRESSURE;
+        };
+        self.watermark = WebPlanWatermark {
+            struct_size: WATERMARK_BYTES,
+            reserved0: 0,
+            revision: watermark.revision,
+            first_sample: watermark.first_sample,
+            outcome_flags: watermark.outcome_flags,
+            exact_count: watermark.exact,
+            transition_fallback_count: watermark.transition_fallback,
+            superseded_count: watermark.superseded,
+            reserved: [0; 5],
+        };
+        RESULT_OK
+    }
+
+    /// The record [`Self::read_watermark`] fills.
+    #[must_use]
+    pub const fn watermark(&self) -> &WebPlanWatermark {
+        &self.watermark
     }
 
     /// Read the last live-control submission report (issue #137 D1).
@@ -2502,7 +2721,7 @@ impl AudioWorkletEngineHost {
     pub fn session_source_count(&self) -> usize {
         self.ready
             .as_ref()
-            .map_or(0, |ready| ready.session.normalized_model().sources.len())
+            .map_or(0, |ready| ready.session().normalized_model().sources.len())
     }
 
     /// One canonical source ID, or `None` for an out-of-range index (issue #207).
@@ -2514,7 +2733,7 @@ impl AudioWorkletEngineHost {
     pub fn session_source_id(&self, index: u32) -> Option<&str> {
         let ready = self.ready.as_ref()?;
         let source = ready
-            .session
+            .session()
             .normalized_model()
             .sources
             .get(index as usize)?;
@@ -2526,7 +2745,7 @@ impl AudioWorkletEngineHost {
     pub fn session_source_shape(&self, index: u32) -> Option<SessionSourceShape> {
         let ready = self.ready.as_ref()?;
         let source = ready
-            .session
+            .session()
             .normalized_model()
             .sources
             .get(index as usize)?;
@@ -2582,16 +2801,18 @@ impl AudioWorkletEngineHost {
     pub fn observation_attached(&self) -> bool {
         self.ready.as_ref().is_some_and(|ready| {
             ready
-                .effect_observations
+                .effect_instances
                 .iter()
-                .any(std::option::Option::is_some)
+                .flatten()
+                .any(|instance| instance.reader.is_some())
         })
     }
 
     /// Copy one selected track's response owners at the current completed render boundary.
     ///
-    /// The prepared plan remains exclusively owned by this host. The caller supplies bounded
-    /// storage and may finish/evaluate the immutable copy after this method returns.
+    /// The plan belongs to the plan owner (#1381a), which copies them from the active plan between
+    /// blocks. The caller supplies bounded storage and may finish/evaluate the immutable copy
+    /// after this method returns.
     pub fn copy_response_snapshot(
         &mut self,
         track_id: &str,
@@ -2600,10 +2821,10 @@ impl AudioWorkletEngineHost {
         if self.status.state != STATE_READY {
             return Err(ResponseSnapshotError::Owner);
         }
-        let Some(ready) = self.ready.as_mut() else {
+        let Some(plan) = self.plan.as_mut() else {
             return Err(ResponseSnapshotError::Owner);
         };
-        ready.host.copy_response_snapshot(track_id, sink)
+        plan.copy_response_snapshot(engine::realtime::ResponseSnapshotRequest { track_id, sink })
     }
 
     /// The spectrum service of a ready host, or the result word that refuses the call.
@@ -2848,16 +3069,34 @@ impl AudioWorkletEngineHost {
     /// existing control-side cell without acknowledging it; legacy meter polling therefore keeps
     /// its own consumer semantics and repeated selected reads remain non-consuming.
     pub fn read_observations(
-        &self,
+        &mut self,
         selections: &[ObservationSelection<'_>],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
-        if self.status.state != STATE_READY {
+        Self::read_selected(
+            self.status.state,
+            self.status.sample_rate_hz,
+            self.ready.as_ref(),
+            self.plan.as_mut(),
+            selections,
+        )
+    }
+
+    /// The body of [`Self::read_observations`], over split borrows: the selections may borrow the
+    /// ready table's IDs while the readers are read through the render half.
+    fn read_selected(
+        state: u32,
+        sample_rate_hz: u32,
+        ready: Option<&ReadyOwnership>,
+        plan: Option<&mut WebPlan>,
+        selections: &[ObservationSelection<'_>],
+    ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
+        if state != STATE_READY {
             return Err(ObservationReadError::WrongState);
         }
         if selections.len() > MAXIMUM_OBSERVATION_READS {
             return Err(ObservationReadError::BufferTooSmall);
         }
-        let Some(ready) = self.ready.as_ref() else {
+        let (Some(ready), Some(plan)) = (ready, plan) else {
             return Err(ObservationReadError::WrongState);
         };
 
@@ -2878,10 +3117,10 @@ impl AudioWorkletEngineHost {
 
         let mut results = Vec::with_capacity(selections.len());
         for selection in selections {
-            let values = read_observation_values(ready, self.status.sample_rate_hz, selection)?;
+            let values = read_observation_values(ready, plan, sample_rate_hz, selection)?;
             let (effect, tap_index) = resolve_observation(ready, selection)?;
             let handle = ready
-                .effect_observations
+                .effect_instances
                 .get(effect)
                 .and_then(Option::as_ref)
                 .ok_or(ObservationReadError::Unsupported)?;
@@ -2912,9 +3151,10 @@ impl AudioWorkletEngineHost {
     pub fn observation_binding_count(&self) -> usize {
         self.ready.as_ref().map_or(0, |ready| {
             ready
-                .effect_observations
+                .effect_instances
                 .iter()
-                .filter(|entry| entry.is_some())
+                .flatten()
+                .filter(|instance| instance.reader.is_some())
                 .count()
         })
     }
@@ -2924,8 +3164,8 @@ impl AudioWorkletEngineHost {
     pub fn observation_binding(&self, index: u32) -> Option<ObservationBinding<'_>> {
         let ready = self.ready.as_ref()?;
         let mut observed_index = 0_u32;
-        for (effect, handle) in ready.effect_observations.iter().enumerate() {
-            let Some(handle) = handle.as_ref() else {
+        for (effect, handle) in ready.effect_instances.iter().enumerate() {
+            let Some(handle) = handle.as_ref().filter(|handle| handle.reader.is_some()) else {
                 continue;
             };
             if observed_index == index {
@@ -2953,7 +3193,7 @@ impl AudioWorkletEngineHost {
 
     /// Read a bounded numeric batch after the current stable map has resolved it.
     pub fn read_observation_addresses(
-        &self,
+        &mut self,
         addresses: &[ObservationAddress],
     ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
         if addresses.len() > MAXIMUM_OBSERVATION_READS {
@@ -2966,12 +3206,18 @@ impl AudioWorkletEngineHost {
         for address in addresses {
             selections.push(observation_selection_for_address(ready, *address)?);
         }
-        self.read_observations(&selections)
+        Self::read_selected(
+            self.status.state,
+            self.status.sample_rate_hz,
+            self.ready.as_ref(),
+            self.plan.as_mut(),
+            &selections,
+        )
     }
 
     /// Fill a caller-owned numeric result slice without allocating on the Wasm boundary.
     pub fn read_observation_addresses_into(
-        &self,
+        &mut self,
         addresses: &[ObservationAddress],
         output: &mut [ObservationReadValues],
     ) -> Result<(), ObservationReadError> {
@@ -2981,7 +3227,7 @@ impl AudioWorkletEngineHost {
         if addresses.len() > MAXIMUM_OBSERVATION_READS || output.len() < addresses.len() {
             return Err(ObservationReadError::BufferTooSmall);
         }
-        let Some(ready) = self.ready.as_ref() else {
+        let (Some(ready), Some(plan)) = (self.ready.as_ref(), self.plan.as_mut()) else {
             return Err(ObservationReadError::WrongState);
         };
         for (index, address) in addresses.iter().enumerate() {
@@ -2993,7 +3239,8 @@ impl AudioWorkletEngineHost {
         }
         for (index, address) in addresses.iter().enumerate() {
             let selection = observation_selection_for_address(ready, *address)?;
-            output[index] = read_observation_values(ready, self.status.sample_rate_hz, &selection)?;
+            output[index] =
+                read_observation_values(ready, plan, self.status.sample_rate_hz, &selection)?;
         }
         Ok(())
     }
@@ -3005,17 +3252,23 @@ impl AudioWorkletEngineHost {
     }
 
     #[cfg(test)]
-    pub(crate) fn meter_poll_work(&self) -> (u64, u64) {
-        self.ready.as_ref().map_or((0, 0), |ready| {
-            (
-                ready
+    pub(crate) fn meter_poll_work(&mut self) -> (u64, u64) {
+        let scans = self
+            .ready
+            .as_ref()
+            .map_or(0, |ready| ready.meter_effect_scan_count);
+        let meters = self
+            .plan
+            .as_mut()
+            .and_then(|plan| plan.active_attachment_mut::<RenderCompanions>())
+            .map_or(0, |companions| {
+                companions
                     .meters
                     .iter()
                     .map(|meter| meter.consumer.empty_count() + meter.consumer.success_count())
-                    .sum(),
-                ready.meter_effect_scan_count,
-            )
-        })
+                    .sum()
+            });
+        (meters, scans)
     }
 
     /// Whether meter observers were attached at preparation (issue #137 D2).
@@ -3023,7 +3276,7 @@ impl AudioWorkletEngineHost {
     pub fn meters_attached(&self) -> bool {
         self.ready
             .as_ref()
-            .is_some_and(|ready| !ready.meters.is_empty())
+            .is_some_and(|ready| !ready.meter_pending.is_empty())
     }
 
     /// Take or release the meter lease. Returns the frozen result code.
@@ -3294,7 +3547,7 @@ impl AudioWorkletEngineHost {
         if index >= ready.vcas.vca_count() {
             return 0;
         }
-        let Some(vca) = ready.session.normalized_model().vcas.get(index) else {
+        let Some(vca) = ready.session().normalized_model().vcas.get(index) else {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), vca.id.as_str().as_bytes())
@@ -3305,7 +3558,12 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
         };
-        let Some(source) = ready.session.normalized_model().sources.get(index as usize) else {
+        let Some(source) = ready
+            .session()
+            .normalized_model()
+            .sources
+            .get(index as usize)
+        else {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), source.id.as_str().as_bytes())
@@ -3365,7 +3623,9 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let result = ready.host.sources.submit(
+        // #1381a D2: through the control plane's source routing, which feeds the sources of the
+        // newest committed session and runs its service step first.
+        let result = ready.control.submit(
             source_id,
             SourceSubmission {
                 generation,
@@ -3378,47 +3638,45 @@ impl AudioWorkletEngineHost {
         );
         let code = match result {
             Ok(_) => RESULT_OK,
-            Err(error) => source_result(error),
+            Err(failure) => source_failure_result(failure),
         };
         self.record(code)
     }
 
     /// Apply one strictly increasing generation-tagged source seek between render blocks.
-    /// This web host owns both producer and render plan on one exclusive thread. Successful
-    /// admission also prepares its consumer so new PCM can enter even when old queues were full.
-    /// A seek changes source-content position while the absolute render clock stays continuous;
-    /// it therefore neither resets meter accumulators nor advances the meter publication epoch.
+    ///
+    /// The seek goes through the control plane's source routing (#1381a D2). This host also owns
+    /// the render plan on its one thread, so a successful admission prepares the plan's consumer
+    /// too, and new PCM can enter even when old queues were full. A seek changes source-content
+    /// position while the absolute render clock stays continuous; it therefore neither resets
+    /// meter accumulators nor advances the meter publication epoch.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
-        let Some(ready) = self.ready.as_mut() else {
+        let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let Ok(source_index) = ready
-            .session
+            .session()
             .normalized_model()
             .sources
             .binary_search_by(|source| source.id.as_str().as_bytes().cmp(source_id))
         else {
             return self.record(RESULT_INVALID_ARGUMENT);
         };
-        if !ready.host.plan.can_prepare_source_seek(source_index) {
+        if !plan.can_prepare_source_seek(source_index) {
             return self.record(RESULT_WRONG_STATE);
         }
-        let code = match ready.host.sources.seek(source_id, generation, source_frame) {
+        let code = match ready.control.seek(source_id, generation, source_frame) {
             Ok(()) => {
-                if ready
-                    .host
-                    .plan
-                    .prepare_source_seek(source_index, generation, source_frame)
-                {
+                if plan.prepare_source_seek(source_index, generation, source_frame) {
                     RESULT_OK
                 } else {
                     RESULT_INTERNAL
                 }
             }
-            Err(error) => source_result(error),
+            Err(failure) => source_failure_result(failure),
         };
         self.record(code)
     }
@@ -3436,7 +3694,7 @@ impl AudioWorkletEngineHost {
             .options
             .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames));
-        let Some(ready) = self.ready.as_mut() else {
+        let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let Some(buffers) = self.buffers.as_mut() else {
@@ -3447,15 +3705,13 @@ impl AudioWorkletEngineHost {
             Err(_) => return self.fail(RESULT_INTERNAL, b"web.internal.output\t$\n"),
         };
         let render_first_sample = self.status.next_absolute_sample;
-        let result = ready.host.plan.render(
-            RenderIo { output },
-            RenderTime {
-                absolute_sample: self.status.next_absolute_sample,
-            },
-        );
+        // #1381a D4: through the plan owner, which adopts a published successor at this block's
+        // boundary and continues the clock.
+        let result = plan.render(self.status.next_absolute_sample, output);
         match result {
-            Ok(report) => {
-                self.status.next_absolute_sample = report.next_absolute_sample;
+            Ok(()) => {
+                let next_absolute_sample = plan.owner().next_absolute_sample();
+                self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
@@ -3497,7 +3753,7 @@ impl AudioWorkletEngineHost {
                     if ready.master_start_sample.is_none() {
                         ready.master_start_sample = Some(render_first_sample);
                     }
-                    ready.master_end_sample = report.next_absolute_sample;
+                    ready.master_end_sample = next_absolute_sample;
                     if let Some(period) = meter_period.filter(|period| *period != 0)
                         && ready.master_start_sample.is_some()
                         && ready.master_end_sample.saturating_sub(
@@ -3652,7 +3908,12 @@ impl AudioWorkletEngineHost {
             return 0;
         }
         let reset_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
-        let Some(ready) = self.ready.as_mut() else {
+        let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
+            return 0;
+        };
+        // #1381a D3: the meter consumers and the observation readers are the active plan's
+        // companions. The downcast allocates and drops nothing.
+        let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
             return 0;
         };
         // This function has no runtime-checked `[]` index (only `get`/`get_mut` and constant
@@ -3661,7 +3922,7 @@ impl AudioWorkletEngineHost {
         // `try_pop` (`slots[self.local]` in `crates/engine/src/realtime/spsc.rs`), which the ring
         // keeps in range. This export is called from `process()`, so the shipped artifact's
         // call-graph gate covers it as it covers the render export.
-        let meter_count = ready.meters.len();
+        let meter_count = companions.meters.len();
         if meter_count == 0 {
             return 0;
         }
@@ -3677,7 +3938,7 @@ impl AudioWorkletEngineHost {
         // pass that does not end the loop has cleared at least one pending slot, and the next pass
         // either refills it (spending one count) or ends the loop at the empty-slot check, so
         // `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery short.
-        for (meter, remaining) in ready.meters.iter().zip(&mut ready.meter_remaining) {
+        for (meter, remaining) in companions.meters.iter().zip(&mut ready.meter_remaining) {
             *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
         }
         let mut passes = 1_usize;
@@ -3689,7 +3950,7 @@ impl AudioWorkletEngineHost {
         let mut folded_end = 0_u64;
         let mut folded = false;
         for _ in 0..passes {
-            for ((meter, pending), remaining) in ready
+            for ((meter, pending), remaining) in companions
                 .meters
                 .iter_mut()
                 .zip(&mut ready.meter_pending)
@@ -3722,7 +3983,7 @@ impl AudioWorkletEngineHost {
                 .enumerate()
                 .all(|(index, entry)| {
                     let Some(snapshot) = entry else { return false };
-                    ready
+                    companions
                         .meters
                         .get(index)
                         .is_some_and(|meter| snapshot.handle == meter.handle)
@@ -3898,12 +4159,18 @@ impl AudioWorkletEngineHost {
             *slot = false;
         }
         let mut observed_any = false;
-        for (effect, entry) in ready.effect_observations.iter().enumerate() {
+        for (effect, entry) in ready.effect_instances.iter().enumerate() {
             #[cfg(test)]
             {
                 ready.meter_effect_scan_count = ready.meter_effect_scan_count.saturating_add(1);
             }
-            let Some(handle) = entry.as_ref() else {
+            let Some(observed) = entry.as_ref() else {
+                continue;
+            };
+            let Some(handle) = observed
+                .reader
+                .and_then(|reader| companions.effect_observations.get(reader as usize))
+            else {
                 continue;
             };
             let Some(track) = ready.observation_tracks.get(effect).copied() else {
@@ -3934,7 +4201,7 @@ impl AudioWorkletEngineHost {
                     continue;
                 };
                 reader.acknowledge(window.sequence);
-                let Some(tap) = handle.descriptor.observations.get(tap_index) else {
+                let Some(tap) = observed.descriptor.observations.get(tap_index) else {
                     continue;
                 };
                 let magnitude = if window.left > window.right {
@@ -4030,6 +4297,7 @@ impl AudioWorkletEngineHost {
     pub fn dispose(&mut self) -> u32 {
         self.meter_lease = false;
         self.ready = None;
+        self.plan = None;
         self.buffers = None;
         self.diagnostic_len = 0;
         self.status.state = STATE_DISPOSED;
@@ -4043,13 +4311,13 @@ impl AudioWorkletEngineHost {
 
     /// Record a sticky failure without ever releasing ownership.
     ///
-    /// `self.ready` **is** this host's one-slot retirement queue (AGENTS.md: "the displaced plan
-    /// goes to a bounded retirement queue and is reclaimed off the render thread"). `fail` is
-    /// reachable from `render_next`, which the AudioWorklet calls on the rendering thread, so it
-    /// must not move, overwrite or drop the plan, the compiled session or the source rings:
-    /// dropping them would free `Arc<spsc::Ring<_>>` payloads and run `dlmalloc::free` inside
-    /// `process()`. The ownership stays exactly where it is and only [`Self::dispose`] — a control
-    /// path call, delivered on `port.onmessage` — reclaims it.
+    /// `self.ready` and `self.plan` **are** this host's one-slot retirement queue (AGENTS.md: "the
+    /// displaced plan goes to a bounded retirement queue and is reclaimed off the render thread").
+    /// `fail` is reachable from `render_next`, which the AudioWorklet calls on the rendering
+    /// thread, so it must not move, overwrite or drop the plan, the compiled session or the source
+    /// rings: dropping them would free `Arc<spsc::Ring<_>>` payloads and run `dlmalloc::free`
+    /// inside `process()`. The ownership stays exactly where it is and only [`Self::dispose`] — a
+    /// control path call, delivered on `port.onmessage` — reclaims it.
     ///
     /// A separate `retired` field would not help: `self.retired = self.ready.take()` compiles to a
     /// conditional `drop_glue::<Option<ReadyOwnership>>` call on the overwritten value, which the
@@ -4946,8 +5214,18 @@ fn write_strip_cells(
     else {
         return Ok(());
     };
-    let revision = ready.plan_gate.last_published().saturating_add(1);
-    let Ok(stamp) = ready.plan_gate.stamp(revision) else {
+    // #1381a: the control plane holds the plan's one gate handle, so there is none to stamp from
+    // here. The front door of the admission refuses every kind that reaches this point first; this
+    // is the same refusal, as an invariant, for a path that would write without a gate.
+    let Some(gate) = ready.plan_gate.as_mut() else {
+        return Err(CommandRejection {
+            result: RESULT_UNSUPPORTED,
+            reason: COMMAND_REASON_UNSUPPORTED_KIND,
+            index: first_wire_index,
+        });
+    };
+    let revision = gate.last_published().saturating_add(1);
+    let Ok(stamp) = gate.stamp(revision) else {
         return Err(CommandRejection {
             result: RESULT_INTERNAL,
             reason: COMMAND_REASON_BACKPRESSURE,
@@ -4986,7 +5264,7 @@ fn write_strip_cells(
                 ready
                     .route_controls
                     .get_mut(
-                        slot.checked_sub(strip_count * 3 + ready.effect_controls.len())
+                        slot.checked_sub(strip_count * 3 + ready.effect_instances.len())
                             .expect("a staged send record sits in the send band"),
                     )
                     .expect("a staged send record addresses a live route's cell producer")
@@ -5044,7 +5322,7 @@ fn write_strip_cells(
                                         *ready.rack_effects.get(track)?,
                                         address,
                                     )?;
-                                    (addressed < ready.effect_controls.len()).then_some(addressed)
+                                    (addressed < ready.effect_instances.len()).then_some(addressed)
                                 })
                                 .is_some_and(|addressed| strip_count * 3 + addressed == slot);
                         if addressed {
@@ -5108,7 +5386,7 @@ fn write_strip_cells(
             _ => {}
         }
     }
-    ready.plan_gate.publish(revision);
+    gate.publish(revision);
     Ok(())
 }
 
@@ -5211,6 +5489,17 @@ fn admit_commands_staged(
         let command = CommandRecord::decode(record)
             .map_err(|reason| refuse(reason, index))?
             .with_session_ramp(&ready.ramps);
+        // #1381a: the control plane owns the plan's gate and the cell producers, so the retained
+        // command path serves the observation kinds only (the effect producers' observation
+        // queues, through the control plane's accessor, ruling C9). Every other kind needs a
+        // producer this path no longer holds; it is refused whole, before anything is staged, until
+        // `SET_CONTROL` serves it through the core (#1562a) and the path is deleted (#1565A).
+        if !matches!(
+            command.kind,
+            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
+        ) {
+            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+        }
         let track = command.track_index as usize;
         // Issue #1222 D2: the index word is read by kind. A send kind's is a live-route index,
         // checked against the live routes in its own arm below, and a VCA kind's a VCA index
@@ -5704,14 +5993,24 @@ fn admit_commands_staged(
                     return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
                 };
                 let (descriptor, is_eq, has_owner) = {
-                    let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref)
+                    let Some(descriptor) = ready
+                        .effect_instances
+                        .get(effect)
+                        .and_then(Option::as_ref)
+                        .map(|instance| instance.descriptor)
+                    else {
+                        return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                    };
+                    let Some(has_owner) = ready
+                        .effect_producer_mut(effect)
+                        .map(|producer| producer.has_owner())
                     else {
                         return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                     };
                     (
-                        producer.descriptor,
-                        producer.descriptor.id.as_str() == "miso.parametric-eq",
-                        producer.has_owner(),
+                        descriptor,
+                        descriptor.id.as_str() == "miso.parametric-eq",
+                        has_owner,
                     )
                 };
                 let produced = if matches!(
@@ -5719,9 +6018,10 @@ fn admit_commands_staged(
                     COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
                 ) {
                     let observed = ready
-                        .effect_observations
+                        .effect_instances
                         .get(effect)
-                        .is_some_and(Option::is_some);
+                        .and_then(Option::as_ref)
+                        .is_some_and(|instance| instance.reader.is_some());
                     staged[0] = command
                         .into_observe_record(descriptor, observed)
                         .map_err(|reason| refuse(reason, index))?;
@@ -5971,7 +6271,7 @@ fn admit_commands_staged(
     // built.
     if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
         let follow_start = lowered;
-        let route_base = strip_count * 3 + ready.effect_controls.len();
+        let route_base = strip_count * 3 + ready.effect_instances.len();
         // Decision 17 C7, slice S7c D5: each send's follow gate is `controls::effective_gate`'s.
         let view = WebEffectiveView::new(&ready.vcas, &ready.solo, &ready.routes);
         let any_solo = view.any_solo(&mut any_solo_cache);
@@ -6259,7 +6559,7 @@ fn admit_commands_staged(
         }
         // The send band follows the effects (#1347): a send's target is a cell, which has no room
         // to want. Its route index was resolved while staging.
-        if slot >= strip_count * 3 + ready.effect_controls.len() {
+        if slot >= strip_count * 3 + ready.effect_instances.len() {
             continue;
         }
         // An effect's queue is its observation queue (#1345 D2): the subscriptions this
@@ -6375,20 +6675,15 @@ fn observation_selection_for_address<'a>(
             },
         )
         .ok_or(ObservationReadError::InvalidSelection)?;
-    let effect_slot_id = ready
-        .effect_controls
+    let instance = ready
+        .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
-        .map(|producer| producer.effect_id.as_ref())
         .ok_or(ObservationReadError::InvalidSelection)?;
-    if ready
-        .effect_observations
-        .get(effect)
-        .and_then(Option::as_ref)
-        .is_none()
-    {
+    if instance.reader.is_none() {
         return Err(ObservationReadError::Unsupported);
     }
+    let effect_slot_id = instance.effect_id.as_ref();
     Ok(ObservationSelection {
         track_id,
         rack: address.rack,
@@ -6423,19 +6718,20 @@ fn resolve_observation(
         let Some(effect) = ready.effect_slot(track, address) else {
             return Err(ObservationReadError::InvalidSelection);
         };
-        let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
+        let Some(observed) = ready.effect_instances.get(effect).and_then(Option::as_ref) else {
             continue;
         };
-        if producer.effect_id.as_ref() == selection.effect_slot_id {
+        if observed.effect_id.as_ref() == selection.effect_slot_id {
             addressed = Some(effect);
             break;
         }
     }
     let effect = addressed.ok_or(ObservationReadError::InvalidSelection)?;
     let handle = ready
-        .effect_observations
+        .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
+        .filter(|instance| instance.reader.is_some())
         .ok_or(ObservationReadError::Unsupported)?;
     if handle.track_id.as_ref() != selection.track_id
         || handle.effect_id.as_ref() != selection.effect_slot_id
@@ -6478,14 +6774,21 @@ fn window_since_arm(
 
 fn read_observation_values(
     ready: &ReadyOwnership,
+    plan: &mut WebPlan,
     sample_rate_hz: u32,
     selection: &ObservationSelection<'_>,
 ) -> Result<ObservationReadValues, ObservationReadError> {
     let (effect, tap_index) = resolve_observation(ready, selection)?;
-    let handle = ready
-        .effect_observations
+    let observed = ready
+        .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
+        .ok_or(ObservationReadError::Unsupported)?;
+    // #1381a D3: the readers are the active plan's companions.
+    let handle = plan
+        .active_attachment_mut::<RenderCompanions>()
+        .zip(observed.reader)
+        .and_then(|(companions, reader)| companions.effect_observations.get(reader as usize))
         .ok_or(ObservationReadError::Unsupported)?;
     let armed = ready.observation_armed.get(effect).copied().unwrap_or(0)
         & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
@@ -6662,21 +6965,6 @@ impl BootFailure {
         Self {
             result: RESULT_REFUSED_DOCUMENT,
             diagnostic,
-        }
-    }
-
-    fn preparation(failure: PrepareDiagnostics) -> Self {
-        let result = match failure.kind() {
-            PrepareRejection::Resource | PrepareRejection::Platform => RESULT_REFUSED_BUDGET,
-            PrepareRejection::Session
-            | PrepareRejection::Shape
-            | PrepareRejection::Effect
-            | PrepareRejection::Builtin
-            | PrepareRejection::Graph => RESULT_REFUSED_DOCUMENT,
-        };
-        Self {
-            result,
-            diagnostic: failure.into_bytes(),
         }
     }
 
@@ -7162,6 +7450,16 @@ fn source_result(error: SourceControlError) -> u32 {
     }
 }
 
+/// The result word of a source submission or seek the control plane's source routing refused
+/// (#1381a D2): the facade's typed rejection as [`source_result`] maps it, or the control plane's
+/// own epoch failure, which is internal.
+fn source_failure_result(failure: SourceFailure) -> u32 {
+    match failure {
+        SourceFailure::Control(error) => source_result(error),
+        SourceFailure::Internal => RESULT_INTERNAL,
+    }
+}
+
 /// Translate document-derived shape plus host policy into the shared preparation caps.
 ///
 /// Count ceilings are intentionally unbounded: boot v1 has one physics gate, not structural caps.
@@ -7216,6 +7514,68 @@ fn prepare_caps(
         maximum_meter_streams: u64::MAX,
         maximum_meter_items: u64::MAX,
         maximum_meter_bytes: memory_budget,
+    }
+}
+
+/// The control plane's limits for the browser's session (#1381a D1): the preparation caps the boot
+/// computed, as plain values, and the control plane's own fixed allocations.
+///
+/// The byte ceilings are the memory budget, as the caps' are, and counts are unbounded: the
+/// boot's one physics gate is the budget. The control frame, the replay cache and the diagnostic
+/// are the control plane's fixed allocations; they are small and the same for every session, and
+/// the budget's exact check ([`exact_retained_bytes`]) charges them in the bridge rows.
+fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
+    ControlLimits {
+        source_ring_frames: caps.source_ring_frames,
+        maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+        maximum_document_bytes: u64::from(MAXIMUM_DOCUMENT_BYTES),
+        maximum_diagnostic_bytes: u64::from(DIAGNOSTIC_BYTES),
+        maximum_tracks: caps.maximum_tracks,
+        maximum_sources: caps.maximum_sources,
+        maximum_routes: caps.maximum_routes,
+        maximum_effects: caps.maximum_effects,
+        maximum_graph_session_plus_plan_bytes: caps.maximum_graph_session_plus_plan_bytes,
+        maximum_source_total_bytes: caps.maximum_source_total_bytes,
+        maximum_source_overhead_bytes: caps.maximum_source_overhead_bytes,
+        maximum_effect_state_bytes: caps.maximum_effect_state_bytes,
+        maximum_effect_scratch_bytes: caps.maximum_effect_scratch_bytes,
+        maximum_builtin_retained_bytes: caps.maximum_builtin_retained_bytes,
+        maximum_control_retained_bytes: memory_budget,
+        maximum_named_allocation_bytes: caps.maximum_named_allocation_bytes,
+        maximum_meter_streams: caps.maximum_meter_streams,
+        maximum_meter_items: caps.maximum_meter_items,
+        maximum_meter_bytes: caps.maximum_meter_bytes,
+        maximum_control_frame_bytes: CONTROL_FRAME_BYTES,
+        maximum_replay_bytes: CONTROL_REPLAY_BYTES,
+        maximum_replay_entries: CONTROL_REPLAY_ENTRIES,
+        maximum_submixes: caps.maximum_submixes,
+        maximum_vcas: caps.maximum_vcas,
+    }
+}
+
+/// Bytes of the control plane's one control frame (#1381a): the request and response scratch the
+/// session keeps for the protocol the browser serves through the core.
+const CONTROL_FRAME_BYTES: u64 = 16 << 10;
+/// Bytes of the control plane's replay cache.
+const CONTROL_REPLAY_BYTES: u64 = 64 << 10;
+/// Entries of the control plane's replay cache.
+const CONTROL_REPLAY_ENTRIES: u64 = 32;
+
+/// A refused boot preparation as the browser reports it (#1381a): the control plane's diagnostic
+/// bytes, and the result code the refusal's class chooses: a resource or platform refusal is a
+/// budget refusal and the rest are document refusals, as boot chose them before the control plane
+/// prepared the plan. The class is what the preparer saw; a refusal it
+/// did not see is the control plane's own, and a resource fault is a budget refusal.
+fn boot_refusal(failure: &CompileFailure, record: &Mutex<BootRecord>) -> BootFailure {
+    let rejection = record.lock().ok().and_then(|record| record.rejection);
+    let result = match (rejection, failure) {
+        (Some(PrepareRejection::Resource | PrepareRejection::Platform), _)
+        | (None, CompileFailure::Resource(_)) => RESULT_REFUSED_BUDGET,
+        (Some(_), _) | (None, CompileFailure::Diagnostics(_)) => RESULT_REFUSED_DOCUMENT,
+    };
+    BootFailure {
+        result,
+        diagnostic: failure.diagnostic().into_owned(),
     }
 }
 
@@ -7343,13 +7703,35 @@ fn prepare_web_host(
     }
 }
 
+/// The browser as a control-plane adapter (#1381a): its plan resource table stores the control
+/// plane's own row, and it keeps no per-session handle beside the two halves.
+///
+/// The row is the control plane's [`PlanResources`] unchanged, because the browser's resource
+/// report projects from it directly (`compile_ready`). The adapter's own fixed allocations are
+/// the browser bridge's, which [`WebResourceReport`] charges in its bridge rows.
+pub struct WebAdapter;
+
+impl ControlAdapter for WebAdapter {
+    type Row = PlanResources;
+    const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+}
+
+/// The control-protocol session the browser host owns (#1381a): the committed model at its boot
+/// revision, the source, strip and effect producers, the plan publisher and the retirer.
+type WebSession = SessionState<WebAdapter>;
+/// The render half of the browser's plan exchange: the plan owner that renders and adopts.
+type WebPlan = PlanState<WebAdapter>;
+
 /// The render-side halves a browser plan's preparation returns beside the plan (issue #1400 D5):
 /// the meter consumers, the effect observation handles and the spectrum capture.
 ///
 /// They travel inside the plan as its [`HostAttachment`], so a plan the control plane prepares
 /// carries everything the render side reads, and they drop with the plan on the retirement path.
-/// The browser renders its plan directly until it renders through the plan owner (#1381), which
-/// reads them there; #1381 adds its own bookkeeping to this struct.
+/// The browser renders through the plan owner (#1381a D4) and reaches the active plan's companions
+/// through `PlanState::active_attachment_mut`: the meter poll and the observation reads read the
+/// readers there. The spectrum capture is the one companion the host does not read there:
+/// [`SpectrumService`] owns its captures, so boot moves the capture out into it
+/// (`take_spectrum_capture`) until the spectrum readers move to the control plane (#1596).
 ///
 /// Field order is the drop order: the spectrum capture, then the meter consumers, then the effect
 /// observation handles, the relative order the same three fields have in `ReadyOwnership`. No one
@@ -7402,6 +7784,46 @@ impl RenderCompanions {
     pub fn has_spectrum_capture(&self) -> bool {
         self.spectrum_capture.is_some()
     }
+
+    /// Move the spectrum capture out, once, to the host's spectrum service (#1381a). Control side
+    /// only: boot calls it before the first render.
+    fn take_spectrum_capture(&mut self) -> Option<PreparedSpectrumCaptures> {
+        self.spectrum_capture.take()
+    }
+}
+
+#[cfg(feature = "test-support")]
+std::thread_local! {
+    static COMPANION_DROPS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// How many [`RenderCompanions`] dropped on this thread (#1381a gate 2: the retired plan's
+/// attachment drops in the service step, on the control side, and never in a render call).
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn companion_drops_on_this_thread() -> u64 {
+    COMPANION_DROPS.with(core::cell::Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for RenderCompanions {
+    fn drop(&mut self) {
+        COMPANION_DROPS.with(|drops| drops.set(drops.get() + 1));
+    }
+}
+
+/// What a boot preparation leaves for the host (#1381a D1): the facts of the first plan that
+/// `PlanResources` and the attachment do not carry. The preparer writes it, boot reads it.
+#[derive(Default)]
+struct BootRecord {
+    /// The engine-owned report of the boot plan, after the attachment's rows were charged.
+    report: Option<HostPrepareReport>,
+    /// The designated master strip, echoed back by preparation after validation.
+    master_track: Option<u32>,
+    /// The session's `live_values_superseded` count, shared with every cell reader of its plans.
+    superseded: Option<host_core::LiveValuesSuperseded>,
+    /// The class of the preparation refusal, so a refused boot keeps its result code.
+    rejection: Option<PrepareRejection>,
 }
 
 impl HostAttachment for RenderCompanions {
@@ -7420,13 +7842,26 @@ impl HostAttachment for RenderCompanions {
 pub struct WebRuntimePreparer {
     options: WebBootOptions,
     spectrum: Option<SpectrumPreparationRequest>,
+    /// Where the boot preparation leaves its facts for the host (#1381a), or `None` for a preparer
+    /// that is only called.
+    record: Option<Arc<Mutex<BootRecord>>>,
 }
 
 impl WebRuntimePreparer {
     /// A preparer for a session booted with `options` and the optional `spectrum` request.
     #[must_use]
     pub fn new(options: WebBootOptions, spectrum: Option<SpectrumPreparationRequest>) -> Self {
-        Self { options, spectrum }
+        Self {
+            options,
+            spectrum,
+            record: None,
+        }
+    }
+
+    /// The same preparer, leaving its boot facts in `record`.
+    fn recording(mut self, record: Arc<Mutex<BootRecord>>) -> Self {
+        self.record = Some(record);
+        self
     }
 }
 
@@ -7440,10 +7875,40 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         _bound_cache: &mut control_plane::InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
+        let boot = successor.is_none();
+        let prepared = self.prepare_plan(compiled, caps, lanes, successor, superseded, boot);
+        if let (Err(failure), Some(record)) = (&prepared, &self.record)
+            && let Ok(mut record) = record.lock()
+        {
+            record.rejection = Some(failure.kind());
+        }
+        prepared
+    }
+}
+
+impl WebRuntimePreparer {
+    /// The preparation itself. `boot` is whether it prepares the session's first plan, whose facts
+    /// the host's boot reads from the record.
+    fn prepare_plan(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        successor: Option<SuccessorBase<'_>>,
+        superseded: &host_core::LiveValuesSuperseded,
+        boot: bool,
+    ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
         let live_controls =
             live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
+        // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
+        // effect lanes whatever the session's live rows chose, as before the control plane chose
+        // the lanes, so a session with no effect to observe still boots.
+        let lanes = HostLiveLanes {
+            effects: lanes.effects || live_controls.observation_taps != 0,
+            ..lanes
+        };
         let (mut host, mut handles, spectrum_capture) = prepare_web_host(
             compiled,
             caps,
@@ -7466,6 +7931,14 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         })?;
         charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
+        if boot
+            && let Some(record) = &self.record
+            && let Ok(mut record) = record.lock()
+        {
+            record.report = Some(host.report);
+            record.master_track = handles.master_track;
+            record.superseded = Some(handles.live_values_superseded.clone());
+        }
         Ok((host, handles))
     }
 }
@@ -7517,61 +7990,85 @@ fn charge_attachment(
     Ok(())
 }
 
-/// Run the shared pipeline, then fold its engine-owned report into the frozen browser report.
+/// Prepare the session through the control plane, then fold its report into the frozen browser
+/// report (#1381a D1).
 ///
-/// The split is the one the facade documents: engine-owned rows come from
-/// `host_core::HostPrepareReport`, the browser bridge's own rows (staging buffers, the
-/// host shell, the plane-reference table) were already computed by `prepare_buffers`, and the three
-/// browser caps are applied here because they are the *browser's* caps on the shared report.
+/// The control plane's `compile_children` prepares the boot plan through [`WebRuntimePreparer`]
+/// and owns the producers from then on: the sources, the strips' and effects' cells, the plan's
+/// revision gate and the exchange's control ends. What this function builds is the browser's own:
+/// the dense tables that address the readers in the plan's attachment, the live-control mirrors
+/// of the retained command path, and the report. Engine-owned rows come from the plan's
+/// [`PlanResources`] row and the preparer's [`BootRecord`]; the browser bridge's own rows
+/// (staging buffers, the host shell, the plane-reference table) were already computed by
+/// `prepare_buffers`, and the three browser caps are applied here because they are the *browser's*
+/// caps on the shared report.
 fn compile_ready(
-    session: CompiledSession,
+    document: &str,
     caps: &HostPrepareCaps,
     options: WebBootOptions,
+    memory_budget: u64,
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
-) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
-    let live_controls = live_control_request(options, session.quantum().0)
-        .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
-    let lanes = live_lanes(options);
+) -> Result<(ReadyOwnership, WebPlan, WebResourceReport), BootFailure> {
     let commands_enabled = options_enable_commands(options);
-    // #1312 D2, #1399: the session's `live_values_superseded` count, made here once, before any
-    // plan is prepared. Every plan the session prepares takes this count, so host-core charges
-    // none for it and the report below charges it once, as a bridge allocation.
-    let live_values_superseded = host_core::LiveValuesSuperseded::new();
-    // #1400 D5: the three boot shapes are `prepare_web_host`'s; the companions stay in
-    // `ReadyOwnership` until the browser renders through the plan owner (#1381).
-    let (host, handles, spectrum_capture) = prepare_web_host(
-        &session,
-        caps,
-        &live_controls,
-        spectrum_request,
-        lanes,
-        &live_values_superseded,
-        None,
-    )
-    .map_err(BootFailure::preparation)?;
-    let engine = host.report;
+    // #1312 D2, #1399: the session's `live_values_superseded` count is the control plane's, made
+    // once before any plan is prepared; the preparer leaves a handle on it in the record, which the
+    // status reads. #1400 D5: the three boot shapes are `prepare_web_host`'s.
+    let record = Arc::new(Mutex::new(BootRecord::default()));
+    let preparer =
+        WebRuntimePreparer::new(options, spectrum_request.cloned()).recording(Arc::clone(&record));
+    let limits = control_limits(caps, memory_budget);
+    let control_plane::CompiledChildren {
+        session: mut control,
+        mut plan,
+    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
+        .map_err(|failure| boot_refusal(&failure, &record))?;
+    let (engine, master_track, live_values_superseded) = {
+        let mut record = record
+            .lock()
+            .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
+        match (record.report.take(), record.superseded.take()) {
+            (Some(engine), Some(superseded)) => (engine, record.master_track, superseded),
+            _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
+        }
+    };
+    let resources = plan.queries().resources();
+    // The effect producers' identities, taken before the control plane's model is borrowed for the
+    // rest of this function: the control plane keeps the one compiled model, and the browser reads
+    // it (#1381a), so the host holds no second copy of it.
+    let producer_facts: Vec<(
+        Box<str>,
+        LiveEffectAddress,
+        Box<str>,
+        &'static effect_contract::EffectDescriptor,
+    )> = control
+        .effect_producers_mut()
+        .iter()
+        .map(|producer| {
+            (
+                producer.track_id.clone(),
+                producer.address,
+                producer.effect_id.clone(),
+                producer.descriptor,
+            )
+        })
+        .collect();
+    let session = control.committed_session();
+    let session_sample_rate_hz = session.sample_rate().0;
+    let session_quantum_frames = session.quantum().0;
 
     let control_table = control_table_bytes(engine.source_count as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let id_arena = source_id_arena_bytes(engine.source_id_bytes as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    // Charged because the browser bridge retains them: the facade's control table and ID arena
-    // (`control_retained_bytes` is exactly those two), the compiled session model, and the
-    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor,
-    // the session's `live_values_superseded` count (#1399), the one allocation every plan of
-    // the session shares and host-core's graph row therefore leaves out, and the control catalog
-    // (decision 17, C4): the control-plane dependency turns host-core's `control-provider` on for
-    // this artifact, so every preparation builds it, `PreparedHost` keeps it, and `ReadyOwnership`
-    // holds it for the whole session (#1400 amendment). No host-core row counts it.
-    let catalog = host.control_catalog.resources();
-    let ready_metadata = checked_sum_prepare([
-        engine.control_retained_bytes,
-        engine.session_model_bytes,
-        engine.inventory_retained_bytes,
-        host_core::LiveValuesSuperseded::retained_bytes(),
-        catalog.retained_bytes,
-    ])?;
+    // Charged because the browser bridge retains them: everything the control plane keeps for the
+    // session (its `control_retained_bytes` row: the facade's control table and ID arena, the
+    // plan's state inventory (issue #1272), the strip, effect and send producers with their
+    // payload, the protocol queues, the replay cache and the session's `live_values_superseded`
+    // count (#1399)), and the compiled session model, which the control plane's store keeps and
+    // the bridge reads.
+    let ready_metadata =
+        checked_sum_prepare([resources.control_retained_bytes, engine.session_model_bytes])?;
     let mut bridge_metadata = report
         .bridge_metadata_bytes
         .checked_add(ready_metadata)
@@ -7623,13 +8120,13 @@ fn compile_ready(
                 },
             ];
             builtins::validate_input_filter_pair(
-                session.sample_rate().0,
+                session_sample_rate_hz,
                 candidate[0],
                 candidate[1],
             )
             .map_err(|_| fixed_diagnostic("web.live_controls.input_filter"))?;
             builtins::validate_input_filter_pair(
-                session.sample_rate().0,
+                session_sample_rate_hz,
                 candidate[2],
                 candidate[3],
             )
@@ -7676,17 +8173,32 @@ fn compile_ready(
     // Issue #1207 D1: `handles.strips` is the tracks, then the submixes. Since issue #1213 D1
     // every queue band, per-strip table and meter word covers both segments, tracks first, so a
     // track's entry is the same with or without submixes.
-    let track_count = handles.track_count;
-    let mut tracks = handles.strips;
-    if track_count > tracks.len() {
-        return Err(fixed_diagnostic("web.live_controls.effects").into());
-    }
-    let strip_count = tracks.len();
+    //
+    // #1381a: the strip order is the normalized model's, tracks then submixes, the order host-core's
+    // addressing authority uses and the control plane's producers follow.
+    let model = session.normalized_model();
+    let track_count = model.tracks.len();
+    let strip_count = track_count + model.submixes.len();
+    let mut tracks: Vec<Box<str>> = Vec::new();
+    tracks
+        .try_reserve_exact(track_count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    tracks.extend(
+        model
+            .tracks
+            .iter()
+            .map(|track| Box::from(track.id.as_str())),
+    );
     let mut submixes: Vec<Box<str>> = Vec::new();
     submixes
         .try_reserve_exact(strip_count - track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    submixes.extend(tracks.drain(track_count..));
+    submixes.extend(
+        model
+            .submixes
+            .iter()
+            .map(|submix| Box::from(submix.id.as_str())),
+    );
     let mut rack_effects = Vec::new();
     rack_effects
         .try_reserve_exact(strip_count)
@@ -7704,10 +8216,6 @@ fn compile_ready(
     prepared_mutes
         .try_reserve_exact(strip_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let model = session.normalized_model();
-    if model.tracks.len() != track_count || model.submixes.len() != submixes.len() {
-        return Err(fixed_diagnostic("web.live_controls.effects").into());
-    }
     let effective_faders = controls::effective(model, &controls::MonitorOverlay::default());
     let count = |effects: usize| -> Result<u32, Vec<u8>> {
         u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
@@ -7757,114 +8265,43 @@ fn compile_ready(
                 .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
         }
     }
-    let mut effect_controls: Vec<Option<EffectControlProducer>> = Vec::new();
-    effect_controls
+    // #1381a: the effect producers are the control plane's. The browser keeps, in the dense slot
+    // order, where each instance's producer is, so an observe record (kinds 7 and 8) reaches its
+    // effect's observation queue through the control plane's accessor.
+    let mut effect_instances: Vec<Option<EffectInstance>> = Vec::new();
+    effect_instances
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    effect_controls.resize_with(total_effects as usize, || None);
-    for producer in handles.effect_controls {
-        let Some(strip) = strip_index(&tracks, &submixes, &producer.track_id) else {
+    effect_instances.resize_with(total_effects as usize, || None);
+    for (position, (track_id, address, effect_id, descriptor)) in producer_facts.iter().enumerate()
+    {
+        let Some(strip) = strip_index(&tracks, &submixes, track_id) else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
-        let Some(entry) =
-            dense_effect_slot(effect_base[strip], rack_effects[strip], producer.address)
-                .and_then(|slot| effect_controls.get_mut(slot))
+        let Some(entry) = dense_effect_slot(effect_base[strip], rack_effects[strip], *address)
+            .and_then(|slot| effect_instances.get_mut(slot))
         else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         if entry.is_some() {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         }
-        *entry = Some(producer);
+        *entry = Some(EffectInstance {
+            producer: u32::try_from(position)
+                .map_err(|_| fixed_diagnostic("web.live_controls.effects"))?,
+            reader: None,
+            track_id: track_id.clone(),
+            effect_id: effect_id.clone(),
+            address: *address,
+            descriptor,
+        });
     }
-    // Host-core checked its native Vec and owned payload against the preparation caps. The
-    // browser retains this dense replacement table instead of that Vec. Add only the replacement
-    // table and transferred payload to the bridge rows, each once.
-    let effect_control_table_bytes = u64::try_from(effect_controls.len())
-        .ok()
-        .and_then(|count| count.checked_mul(size_of::<Option<EffectControlProducer>>() as u64))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let effect_control_payload_bytes = engine.effect_control_resources.owned_payload_bytes;
-    let effect_control_largest = effect_control_table_bytes.max(
-        engine
-            .effect_control_resources
-            .largest_owned_allocation_bytes,
-    );
-    let effect_control_retained = effect_control_table_bytes
-        .checked_add(effect_control_payload_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_metadata_bytes = report
-        .bridge_metadata_bytes
-        .checked_add(effect_control_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_retained_bytes = report
-        .bridge_retained_bytes
-        .checked_add(effect_control_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.largest_bridge_allocation_bytes = report
-        .largest_bridge_allocation_bytes
-        .max(effect_control_largest);
-    report.largest_named_allocation_bytes = report
-        .largest_named_allocation_bytes
-        .max(effect_control_largest);
-    // Issue #1222 D3: the live sends, in `handles.route_controls` order, which must be the
-    // model's live-route order -- the order a command's live-route index and the mirror both
-    // read. Checked by ID here, once, rather than assumed.
-    let route_controls = handles.route_controls;
-    let live_routes_in_order = route_controls.is_empty()
-        || (LiveRouteState::live_routes(model).count() == route_controls.len()
-            && LiveRouteState::live_routes(model)
-                .zip(&route_controls)
-                .all(|(route, producer)| route.id.as_str() == producer.route_id()));
-    if !live_routes_in_order {
-        return Err(fixed_diagnostic("web.live_controls.routes").into());
-    }
+    // #1381a: the send producers are the control plane's too, so the retained command path holds
+    // no live send and its mirror is empty.
+    let route_controls: Vec<RouteControlProducer> = Vec::new();
     let solo = LiveControlSoloState::try_new(&prepared_mutes)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    // A following send's source lanes start at its source strip's effective mute; solo is never
-    // persisted, so at preparation that is the session fader mute or VCA mute the compilers
-    // folded in (issue #1242 D3).
-    let routes = if route_controls.is_empty() {
-        LiveRouteState::empty()
-    } else {
-        LiveRouteState::try_new(model, &|strip, lane| {
-            effective_faders
-                .strips
-                .get(strip)
-                .is_some_and(|effective| effective.mute[lane])
-        })
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
-    };
-    // Retained bridge state the browser owns for its live sends (issue #1222; #1221 verdict
-    // MINOR-1): every byte the route lanes add -- cells, render-side owners, the producer table
-    // this host keeps as host-core built it, the route IDs and the activity table -- which the
-    // compile-time graph estimate deliberately leaves out, plus the mirror and its shadow.
-    let route_mirror_bytes = u64::try_from(routes.len())
-        .ok()
-        .and_then(|count| count.checked_mul(size_of::<host_core::LiveRoute>() as u64))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let route_retained = engine
-        .route_control_resources
-        .total_bytes
-        .checked_add(route_mirror_bytes)
-        .and_then(|bytes| bytes.checked_add(route_mirror_bytes))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let route_largest = engine
-        .route_control_resources
-        .largest_allocation_bytes
-        .max(route_mirror_bytes);
-    report.bridge_metadata_bytes = report
-        .bridge_metadata_bytes
-        .checked_add(route_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_retained_bytes = report
-        .bridge_retained_bytes
-        .checked_add(route_retained)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.largest_bridge_allocation_bytes =
-        report.largest_bridge_allocation_bytes.max(route_largest);
-    report.largest_named_allocation_bytes =
-        report.largest_named_allocation_bytes.max(route_largest);
+    let routes = LiveRouteState::empty();
     // Issue #1245 D3/D4: the live VCA state, built after the solo state from the same normalized
     // model, and charged beside the route mirror -- every byte it reserved, its shadow included.
     // A session without VCAs, or a host without live controls (which refuses every VCA kind),
@@ -7883,7 +8320,7 @@ fn compile_ready(
     let ramps =
         SessionRamps::try_new(model).ok_or_else(|| fixed_diagnostic("web.resource.allocation"))?;
     // Decision 17, slice S7c D1: the core's descriptor of every row the live kinds write.
-    let rows = WebControlRows::new(session.sample_rate().0)
+    let rows = WebControlRows::new(session_sample_rate_hz)
         .ok_or_else(|| fixed_diagnostic("web.live_controls.rows"))?;
     let live_state_retained = vcas
         .retained_bytes()
@@ -7916,13 +8353,14 @@ fn compile_ready(
         .and_then(|value| value.checked_add(total_effects as usize))
         .and_then(|value| value.checked_add(route_controls.len()))
         .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
-    // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
-    // the command producers use, so one index serves both the subscribe path and the poll.
-    let mut effect_observations: Vec<Option<EffectObservationHandle>> = Vec::new();
-    effect_observations
-        .try_reserve_exact(total_effects as usize)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    effect_observations.resize_with(total_effects as usize, || None);
+    // Issue #143: the observation handles stay in the plan's attachment, in host-core's order; the
+    // browser keeps, in the same dense `effect_slot` order the command addressing uses, which
+    // reader each slot's handle is and what the handle declares, so one index serves both the
+    // subscribe path and the poll. The companions are reached through the plan's owner.
+    let companions = plan
+        .active_attachment_mut::<RenderCompanions>()
+        .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
+    let spectrum_capture = companions.take_spectrum_capture();
     let mut observation_arm_samples: Vec<Box<[u64]>> = Vec::new();
     observation_arm_samples
         .try_reserve_exact(total_effects as usize)
@@ -7932,7 +8370,7 @@ fn compile_ready(
     // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
     let mut observation_tracks = vec![u32::MAX; total_effects as usize];
     let observation_present = vec![false; strip_count];
-    for handle in handles.effect_observations {
+    for (reader, handle) in companions.effect_observations().iter().enumerate() {
         let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
@@ -7940,12 +8378,13 @@ fn compile_ready(
         else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
-        let Some(entry) = effect_observations.get_mut(slot) else {
+        let Some(instance) = effect_instances
+            .get_mut(slot)
+            .and_then(Option::as_mut)
+            .filter(|instance| instance.reader.is_none())
+        else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
-        if entry.is_some() {
-            return Err(fixed_diagnostic("web.live_controls.observation").into());
-        }
         // The frame carries one gain-reduction slot per strip, so every observed effect of a strip
         // points at that strip and the poll folds them max-magnitude into the one slot; a
         // submix's effect points at its strip index `T + j` (issue #1209 D5).
@@ -7958,11 +8397,24 @@ fn compile_ready(
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
         arm_samples.resize(tap_count, 0);
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
-        *entry = Some(handle);
+        instance.reader = Some(
+            u32::try_from(reader).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?,
+        );
     }
+    // The IDs the dense instance table copies out of the producers are retained beside the arm
+    // samples.
+    let observed_string_bytes = effect_instances
+        .iter()
+        .flatten()
+        .try_fold(0_u64, |total, instance| {
+            total.checked_add(
+                u64::try_from(instance.track_id.len() + instance.effect_id.len()).ok()?,
+            )
+        })
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let observation_arm_sample_bytes = observation_arm_samples
         .iter()
-        .try_fold(0_u64, |total, samples| {
+        .try_fold(observed_string_bytes, |total, samples| {
             total.checked_add(
                 u64::try_from(samples.len())
                     .ok()?
@@ -7980,7 +8432,7 @@ fn compile_ready(
         })
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let observation_arm_table_bytes = u64::from(total_effects)
-        .checked_mul(size_of::<Box<[u64]>>() as u64)
+        .checked_mul((size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>()) as u64)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let observation_arm_largest = observation_arm_sample_largest.max(observation_arm_table_bytes);
     report.bridge_metadata_bytes = report
@@ -8004,12 +8456,10 @@ fn compile_ready(
         u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
     meter_header.submix_count =
         u32::try_from(submixes.len()).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
-    meter_header.master_track_plus_one = handles
-        .master_track
-        .map_or(0, |track| track.saturating_add(1));
-    let meter_count = handles.meters.len();
-    let master_capacity = handles
-        .meters
+    meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
+    let meter_count = companions.meters().len();
+    let master_capacity = companions
+        .meters()
         .first()
         .map_or(0, |meter| meter.consumer.capacity());
     let pending_meter_bytes = u64::try_from(meter_count)
@@ -8065,23 +8515,23 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
-    let mut host = host;
-    let plan_gate = host
-        .plan
-        .take_revision_gate()
-        .ok_or_else(|| fixed_diagnostic("web.internal.plan_gate"))?;
+    let queries = plan.queries();
     let ready = ReadyOwnership {
+        control,
+        queries,
         commands_enabled,
-        controls: handles.strip_controls,
+        // #1381a: the control plane owns the plan's gate and every producer of its cells. The
+        // retained command path keeps empty slots where it held them, and refuses what needs them.
+        controls: Vec::new(),
         live_values_superseded,
-        plan_gate,
-        effect_controls: effect_controls.into_boxed_slice(),
-        effect_observations: effect_observations.into_boxed_slice(),
+        plan_gate: None,
+        effect_controls: Vec::new().into_boxed_slice(),
+        effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
         observation_present: observation_present.into_boxed_slice(),
         observation_armed: boxed_zero_u32(total_effects as usize)?,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
-        master_track: handles.master_track,
+        master_track,
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
@@ -8101,15 +8551,13 @@ fn compile_ready(
         in_flight: boxed_zero_u32(queue_count)?,
         has_in_flight_commands: false,
         input_filter_shadows: input_filter_shadows.into_boxed_slice(),
-        sample_rate_hz: session.sample_rate().0,
+        sample_rate_hz: session_sample_rate_hz,
         tracks,
         submixes,
         rack_effects: rack_effects.into_boxed_slice(),
         spectrum: spectrum_capture.map(|captures| {
-            SpectrumService::new(captures, session.sample_rate().0, session.quantum().0)
+            SpectrumService::new(captures, session_sample_rate_hz, session_quantum_frames)
         }),
-        host,
-        meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(strip_count)?,
         master_peak: [0.0, 0.0],
         master_start_sample: None,
@@ -8136,9 +8584,8 @@ fn compile_ready(
         meter_windows: 0,
         #[cfg(test)]
         meter_effect_scan_count: 0,
-        session,
     };
-    Ok((ready, report))
+    Ok((ready, plan, report))
 }
 
 /// Translate the browser configuration's two live-control words into the facade's live-control
@@ -8179,6 +8626,7 @@ fn options_enable_commands(options: WebBootOptions) -> bool {
 /// The live lanes a browser plan attaches (issue #1326 D3): every lane for an app that opted in to
 /// live commands, and only each strip's fader/mute and matrix/pan lanes otherwise, so no strip's
 /// builtin tail turns infinite and no route loses its fold.
+#[cfg(test)]
 fn live_lanes(options: WebBootOptions) -> HostLiveLanes {
     if options_enable_commands(options) {
         HostLiveLanes::ALL

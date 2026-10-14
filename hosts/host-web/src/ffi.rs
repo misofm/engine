@@ -33,14 +33,19 @@
 //! are the named exceptions below, each with its reason in the table. Boot is outside the rule,
 //! as the next paragraph says.
 //!
-//! Two post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
-//! and is also the boot-failure path; and `render_allocation_count`, the reader of the count. Boot
-//! is outside the rule. The `render_lock` module header names the exports it calls, wrapped or
-//! not, among them the 28 unwrapped ones it calls after the `boot` export returns a handle.
+//! Four post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
+//! and is also the boot-failure path; `render_allocation_count`, the reader of the count; and,
+//! since issue #1381a, `service` and `control_allocation_count`. The service step is the single
+//! instance's control work: the worklet's message handler runs it after every control message,
+//! never in `process()`, and it frees every plan and attachment render displaced, so its calls are
+//! the *control* allocations that `control_allocation_count` reads. The render-locked count stays
+//! zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
+//! wrapped or not, among them the 28 unwrapped ones it calls after the `boot` export returns a
+//! handle.
 
 #![allow(unsafe_code)]
 
-use crate::render_lock::{render_allocation_count, render_locked};
+use crate::render_lock::{control_allocation_count, render_allocation_count, render_locked};
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
@@ -3616,6 +3621,16 @@ pub extern "C" fn miso_engine_web_v1_render_allocation_count() -> u32 {
     render_allocation_count()
 }
 
+/// Return how many allocator calls this instance made outside render-locked windows (issue #1381a,
+/// #1332 D1): its boot, its control messages and its service steps. In `single` mode, a page
+/// without cross-origin isolation, the worklet's message handler runs the control work, so this is
+/// the count of the one place the engine allocates on an audio thread; the host reports it as
+/// `singleModeControlAllocations`. Control side only, never `process()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_allocation_count() -> u32 {
+    control_allocation_count()
+}
+
 /// Return the module-owned, zero-default boot-options address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
@@ -3958,6 +3973,40 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
             }
             host.render_next()
         })
+    })
+}
+
+/// Run the control plane's service step once (issue #1381a D5, #1348 D1): reclaim every plan and
+/// attachment render has displaced, in the caller's thread and never in render. Control side
+/// only: the control Worker, or in `single` mode the worklet's message handler, never `process()`.
+///
+/// It commits and acknowledges nothing and leaves the status's last result alone. Results:
+/// [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle; [`RESULT_WRONG_STATE`] for a host
+/// that is not ready; an epoch failure as [`RESULT_INTERNAL`] with the session's diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
+}
+
+/// Copy the plan's applied-revision watermark into its fixed record (issue #1381a D5), found at
+/// [`miso_engine_web_v1_watermark_ptr`]. Control side only.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, which writes nothing;
+/// [`RESULT_WRONG_STATE`] for a host that is not ready; [`RESULT_BACKPRESSURE`] for a read that
+/// gave up after the watermark's bounded attempts, which leaves the record untouched: a read to
+/// retry, never a refused edit.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_watermark_read(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.read_watermark()
+    })
+}
+
+/// Return the stable address of the 96-byte watermark record or zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_watermark_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        pointer_u32(ptr::from_ref(host.watermark()))
     })
 }
 
@@ -4369,7 +4418,7 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                 let ObservationStaging {
                     addresses, rows, ..
                 } = &mut *staging;
-                with_host(
+                with_host_mut(
                     handle,
                     Err(ObservationReadError::InvalidSelection),
                     |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
@@ -4688,6 +4737,42 @@ pub mod native_staging {
         super::with_host_mut(handle, false, |host| {
             host.source_pcm_mut().map(|pcm| pcm.fill(value)).is_some()
         })
+    }
+
+    /// Run one structural command frame through the control plane of the host `handle` names
+    /// (#1381a gates 2 and 4), which publishes the successor plan. The result is the control
+    /// plane's refusal rendered as its debug text, or `None` for an unknown handle.
+    #[cfg(feature = "test-support")]
+    pub fn structural_command(handle: u32, request: &[u8]) -> Option<Result<Vec<u8>, String>> {
+        super::with_host_mut(handle, None, |host| {
+            Some(
+                host.structural_command_for_test(request)
+                    .map_err(|error| format!("{error:?}")),
+            )
+        })
+    }
+
+    /// The epoch of the plan that renders, for the host `handle` names (#1381a gates 2 and 4).
+    #[cfg(feature = "test-support")]
+    pub fn active_plan_epoch(handle: u32) -> Option<u64> {
+        super::with_host(handle, None, |host| host.active_plan_epoch_for_test())
+    }
+
+    /// The status record of the host `handle` names; `None` for an unknown handle.
+    pub fn status(handle: u32) -> Option<crate::WebStatus> {
+        super::with_host(handle, None, |host| Some(*host.status()))
+    }
+
+    /// The output planes (left, then right) the host `handle` names rendered last, as the worklet
+    /// reads them through `miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT_PCM)`.
+    pub fn output_pcm(handle: u32) -> Option<Vec<f32>> {
+        super::with_host(handle, None, |host| host.output_pcm().map(<[f32]>::to_vec))
+    }
+
+    /// The watermark record the host `handle` names last copied (#1381a gate 5), as the worklet
+    /// reads it through `miso_engine_web_v1_watermark_ptr`; `None` for an unknown handle.
+    pub fn watermark(handle: u32) -> Option<crate::WebPlanWatermark> {
+        super::with_host(handle, None, |host| Some(*host.watermark()))
     }
 
     /// Stage live-control command records, as the worklet writes them through

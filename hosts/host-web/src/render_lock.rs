@@ -39,6 +39,16 @@
 //!   `track_response_track_id_capacity`, `track_response_snapshot_ptr` and
 //!   `track_response_snapshot_capacity`.
 //!
+//! # The control counter (issue #1381a, #1332 D1)
+//!
+//! Every allocator call made while the flag is *clear* counts in a second counter,
+//! `CONTROL_ALLOCATIONS`: boot, the control messages and the service step. In `single` mode, the
+//! browser's page without cross-origin isolation, that is the one place this engine allocates on
+//! an audio thread (decision 15 D15-10): the instance's control work runs in the worklet's message
+//! handler, outside `process()`. The host reports the count as `singleModeControlAllocations`
+//! through `miso_engine_web_v1_control_allocation_count`, so the allocation is counted and reported
+//! and not hidden. The render-locked count stays exactly zero.
+//!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it
 //! registers nothing with std: it is a plain static on today's non-atomic module and an
 //! instance-local slot once the module is built with atomics. The counter is a process-wide
@@ -60,8 +70,11 @@ thread_local! {
 
 static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
 
-/// A global allocator that counts every call made while the current thread is render-locked, then
-/// forwards it unchanged to the wrapped allocator.
+/// The allocator calls made while no render-locked window was open (#1381a).
+static CONTROL_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// A global allocator that counts every call made while the current thread is render-locked, and
+/// every other call in the control counter, then forwards it unchanged to the wrapped allocator.
 ///
 /// `alloc`, `alloc_zeroed`, `realloc` and `dealloc` each count one call, whatever their outcome:
 /// the claim is "render calls no allocator", not "render obtains no memory".
@@ -77,9 +90,11 @@ fn locked() -> bool {
 }
 
 #[inline]
-fn count_if_locked() {
+fn count_call() {
     if locked() {
         RENDER_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        CONTROL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -87,25 +102,25 @@ fn count_if_locked() {
 // counter observes calls and never alters a pointer, layout, size or lifetime.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for RenderLockedAllocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::alloc` is forwarded unchanged.
         unsafe { self.0.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::alloc_zeroed` is forwarded unchanged.
         unsafe { self.0.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::realloc` is forwarded unchanged.
         unsafe { self.0.realloc(pointer, layout, new_size) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::dealloc` is forwarded unchanged.
         unsafe { self.0.dealloc(pointer, layout) }
     }
@@ -136,6 +151,12 @@ pub(crate) fn render_allocation_count() -> u32 {
     RENDER_ALLOCATIONS.load(Ordering::Relaxed)
 }
 
+/// The number of allocator calls made outside render-locked windows since this instance started
+/// (#1381a): its boot, control messages and service steps.
+pub(crate) fn control_allocation_count() -> u32 {
+    CONTROL_ALLOCATIONS.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,11 +167,11 @@ mod tests {
     static WRAPPER: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 
     /// Every allocator entry point, called once each through the wrapper, in one window or none.
-    /// Returns how far the shared counter moved.
-    fn exercise(lock: bool) -> u32 {
+    /// Returns how far the render counter and the control counter moved.
+    fn exercise(lock: bool) -> (u32, u32) {
         let layout = Layout::from_size_align(64, 16).expect("valid layout");
         let run = || {
-            let before = render_allocation_count();
+            let before = (render_allocation_count(), control_allocation_count());
             // SAFETY: each pointer comes from the wrapper with `layout` and goes back to it with
             // the matching layout or size; nothing reads uninitialised memory.
             unsafe {
@@ -167,7 +188,10 @@ mod tests {
                 );
                 WRAPPER.dealloc(zeroed, layout);
             }
-            render_allocation_count().wrapping_sub(before)
+            (
+                render_allocation_count().wrapping_sub(before.0),
+                control_allocation_count().wrapping_sub(before.1),
+            )
         };
         if lock { render_locked(run) } else { run() }
     }
@@ -178,14 +202,23 @@ mod tests {
     #[test]
     fn render_lock_counts_each_entry_point_only_inside_its_own_window() {
         assert!(!locked(), "a fresh thread starts unlocked");
-        assert_eq!(exercise(false), 0, "an unlocked thread counts nothing");
+        assert_eq!(
+            exercise(false),
+            (0, 5),
+            "an unlocked thread counts in the control counter only"
+        );
         assert_eq!(
             exercise(true),
-            5,
-            "alloc, alloc_zeroed, realloc and two deallocs each count once in the window"
+            (5, 0),
+            "alloc, alloc_zeroed, realloc and two deallocs each count once in the window, and \
+             the window counts nothing in the control counter"
         );
         assert!(!locked(), "the window clears the flag when it returns");
-        assert_eq!(exercise(false), 0, "nothing counts after the window");
+        assert_eq!(
+            exercise(false),
+            (0, 5),
+            "nothing counts in the render counter after the window"
+        );
         assert_eq!(
             render_locked(|| 7_u8),
             7,
@@ -204,6 +237,9 @@ mod tests {
                     .expect("thread joins")
             })
         });
-        assert_eq!(moved, 0, "a window on another thread counts nothing here");
+        assert_eq!(
+            moved.0, 0,
+            "a window on another thread counts nothing in the render counter"
+        );
     }
 }

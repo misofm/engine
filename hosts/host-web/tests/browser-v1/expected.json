@@ -67,11 +67,11 @@
         "observationRetainedBytes": "0"
       },
       "resourceCeilings": {
-        "bridgeMetadataBytes": "1159360",
-        "bridgeRetainedBytes": "1181888",
+        "bridgeMetadataBytes": "1628864",
+        "bridgeRetainedBytes": "1651520",
         "sourceTotalBytes": "3648",
         "sourceOverheadBytes": "2496",
-        "builtinRetainedBytes": "3008",
+        "builtinRetainedBytes": "4288",
         "graphSessionPlusPlanBytes": "35648",
         "graphIncrementalPlanBytes": "35648",
         "graphMetadataBytes": "4608"

@@ -365,3 +365,68 @@ Worker.
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
 
 **Catalog held once (batch 6 review fold, root 2026-10-14).** The browser holds its control catalog in `PreparedHost.control_catalog`, which `ReadyOwnership.host` keeps for the session, and the browser report charges it (#1400 amendment). #1381a must not hold the catalog twice: when `SessionState` (through `SessionControlProvider`) takes the session's catalog, `ReadyOwnership` stops holding the prepared one, and the report charges one catalog, not two.
+
+## Evidence: #1381a (flip batch 6W, attempt 1)
+
+Landed on `codex/controls-batch-7`, single mode only, on today's one-instance module.
+
+- **D1.** Boot builds `control_plane::SessionState` through `compile_children` and
+  `WebRuntimePreparer`, with the instance's own sources, revision gate and cell producers. The
+  browser's early checks (budgets, shape, the VCA bound) run first, as before; their compiled model
+  and parse are dropped before the control plane compiles the session again, so the boot's transient
+  peak is one compile's. `SessionState` retains the one compiled model, read through the new
+  `SessionState::committed_session()`.
+- **D2.** `source_submit` and `source_seek` call `SessionState::submit` and `seek`.
+- **D3.** The companions are the plan's attachment. The meter poll and the observation reads reach
+  the active plan's `RenderCompanions` through `RealtimePlanOwner::active_attachment_mut`
+  (`PlanState::active_attachment_mut`). There is no `adopt_predecessor`: readers are not paired
+  (#1381b), so after a swap the host reads the successor's fresh readers.
+  Spectrum is the exception to "travels in the attachment": `SpectrumService` owns its captures
+  (host-core), so boot moves the capture out of the attachment into it, until #1596 moves the
+  spectrum readers to the control plane.
+- **D4, D5, D6.** `render_next` renders through `PlanState`. `miso_engine_web_v1_service`,
+  `_watermark_read` and `_watermark_ptr` (the 96-byte `WebPlanWatermark`, read through
+  `PlanQueries::watermark()`), `_control_allocation_count` (`CONTROL_ALLOCATIONS`, every allocator
+  call outside a render-locked window) and `singleModeControlAllocations` in the status. The
+  worklet's control handler runs one service step after every message, and the main realm posts
+  `miso.service.v1` (no request ID, no reply) from the one pinned `setInterval(`.
+- **Ruling C9.** `SessionState::effect_producers_mut()` lets observe kinds 7 and 8 reach an effect
+  producer's observation queue.
+
+### Deviations from the filed text
+
+1. **Two owner edits beyond D3's accessor.** `RealtimePlanOwner::can_prepare_source_seek`,
+   `prepare_source_seek` and `copy_response_snapshot` forward to the active plan (outside the
+   policy region of `plan_exchange.rs`), with thin `PlanState` wrappers. Without them the paused
+   seek (`seek_source` prepares the consumer so new PCM enters a full ring) and the live response
+   capture lose their only route to the plan once the owner holds it.
+2. **`PARSE_TRANSIENT_MULTIPLIER` 20 to 26.** The worst 1 MiB boot document (512 tracks, 4 effects)
+   grows the wasm high-water to 25,427,968 bytes with the control plane's catalog and producers
+   retained; `check-web-boot-budget.mjs` pins 26 (7.2 % headroom).
+3. **Retained budgets re-pinned** (`retained_ceilings.rs`, `expected.json` ceilings): the bridge
+   rows charge the control plane's `control_retained_bytes` (427,534 bytes for the one-strip
+   fixture), `builtin_retained_bytes` rises because the control plane attaches the strip input
+   lanes.
+4. **The integration binary is `plan_exchange_threads.rs`, single-thread form** (gate 4), with the
+   module's own counting allocator instead of `bench_support::alloc` (the workspace has no such
+   crate). Its session has empty console sections, no insert and filters off: console slots,
+   inserts and input filters carry no state across a swap yet (#1281, #1282, #1277 D6), so a
+   session that holds one is not bit-identical after the adoption. Gate 3 and the pairing
+   assertions of gate 2 are #1381b's.
+5. **Lanes follow the control plane** (decision 17 C6), not the boot words. The preparer widens the
+   effect lane when observation taps are requested, so a session with no live effect still boots.
+
+### Old-path behaviours that stop working until the next slices (#1562a, #1570b, #1565A)
+
+- Command kinds 1 to 6 and 9 to 17 (pan, matrix, fader, mute, effect parameter and bypass, solo,
+  trim, polarity, input filters, route gain, mute and matrix, VCA fader and mute) are refused whole
+  with `COMMAND_REASON_UNSUPPORTED_KIND`. Kinds 7 and 8 (observe) work.
+- The prepared commands (`prepared_command_submit`: EQ targets, builtin input filters), the EQ and
+  input-filter configuration copies (`eq_target_config_copy` answers `RESULT_UNSUPPORTED`), the live
+  route count and IDs (zero) and `live_values_superseded` writes from commands.
+- The live response capture (`track_response_capture`) answers `RESULT_UNSUPPORTED` for an effect
+  whose lane is live, which the control plane attaches to every effect with a live row.
+- `check-browser-expected-resources.py` stops at the command timeline digest (the identity digest
+  and the resource rows are checked first and hold); `check-sdk-headless.sh` fails 25 subtests, all
+  of them command-driven; 113 host-web unit tests and the two `control_parity.rs` tests are
+  `#[ignore]`d with one reason string, for #1565A to delete.

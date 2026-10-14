@@ -142,11 +142,13 @@ fn configuration_and_command_exports(handle: u32, before: u32) {
         host_web::miso_engine_web_v1_eq_target_config_copy(handle, 0, 0, 0),
         RESULT_INVALID_ARGUMENT,
     );
+    // #1381a: the control plane owns the effect producers, so the retained path has no prepared
+    // EQ owner to copy; the refusal is still a render-locked window that allocates nothing.
     unchanged(
         before,
-        "eq_target_config_copy",
+        "eq_target_config_copy (refused: the control plane owns the owner)",
         host_web::miso_engine_web_v1_eq_target_config_copy(handle, 0, u32::from(RACK_CONSOLE), 0),
-        RESULT_OK,
+        RESULT_UNSUPPORTED,
     );
     // The export returns the config's address as a `u32`, or zero when it does not fit. A native
     // heap address usually does not fit, so the result is not checked here; the claim is about
@@ -161,6 +163,8 @@ fn configuration_and_command_exports(handle: u32, before: u32) {
     );
 
     let mut config = [0_u8; 24];
+    // The refused copy left the staged configuration zeroed, so the companion's generation is the
+    // host's own, read from the input-filter configuration copy above.
     assert!(native_staging::eq_target_config(handle, &mut config));
     let generation = &config[16..24];
     let mut companion = [0_u8; COMPANION_HEADER_BYTES];
@@ -184,11 +188,12 @@ fn configuration_and_command_exports(handle: u32, before: u32) {
         host_web::miso_engine_web_v1_prepared_command_submit(handle, 1, header - 1),
         RESULT_INVALID_ARGUMENT,
     );
+    // #1381a: the matrix record is a kind the retained path no longer serves.
     unchanged(
         before,
-        "prepared_command_submit",
+        "prepared_command_submit (refused: the kind needs a producer the control plane owns)",
         host_web::miso_engine_web_v1_prepared_command_submit(handle, 1, header),
-        RESULT_OK,
+        RESULT_UNSUPPORTED,
     );
 }
 

@@ -8,7 +8,17 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 
 /// The exports of that table that are not wrapped in `render_locked`, each with its reason in the
 /// table: `docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked allocator".
-const UNWRAPPED_EXPORTS: [&str; 2] = ["dispose", "render_allocation_count"];
+///
+/// Issue #1381a adds the two control exports of the single-instance mode: the service step and the
+/// control allocation counter. The worklet's message handler calls them outside `process()` and
+/// outside every render-locked window, because their allocations and frees are the control
+/// counter's (`render_lock.rs`).
+const UNWRAPPED_EXPORTS: [&str; 4] = [
+    "dispose",
+    "render_allocation_count",
+    "service",
+    "control_allocation_count",
+];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a
 /// control, teardown or harness thread, never inside a product render callback.

@@ -2033,6 +2033,25 @@ where
             .unwrap_or(&mut self.providers)
     }
 
+    /// The committed session in its compiled form (#1381a): what the plan was prepared from. A
+    /// single-instance adapter reads its addressing tables and source shapes from it, so it keeps
+    /// no second copy of the model beside the control plane's own.
+    #[must_use]
+    pub fn committed_session(&self) -> &CompiledSession {
+        self.controller.session().compiled()
+    }
+
+    /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
+    /// (#1381a): the adapter reaches an effect's observation queue through them, for the
+    /// browser's observe kinds 7 and 8 (ruling C9).
+    ///
+    /// These are the producers of the plan that renders, not a pending candidate's: a
+    /// subscription must reach the observer the active plan's readers belong to. The browser's
+    /// feature phase deletes this accessor together with those kinds.
+    pub fn effect_producers_mut(&mut self) -> &mut [host_core::EffectControlProducer] {
+        &mut self.providers.effects
+    }
+
     /// Feeds a source of the newest committed session. A source that persists across a pending
     /// structural transaction is fed through its moved producer into the ring the running plan
     /// still renders and its successor carries (issue #1273 D3).

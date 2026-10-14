@@ -91,14 +91,14 @@ use host_web::{
     SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING,
     SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig, WebCommandReport,
-    WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult, WebInputFilterEdit,
-    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
-    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
-    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebBuiltinInputConfig,
+    WebCommandReport, WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult,
+    WebInputFilterEdit, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
+    WebLiveResponseSection, WebMeterHeader, WebObservationResult, WebObservationSelection,
+    WebPlanWatermark, WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord,
+    WebPreparedEffectTarget, WebResourceReport, WebResponseParameter, WebResponseRequest,
+    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -132,7 +132,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 123] = [
+pub const EXPORTS: [&str; 127] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -143,6 +143,7 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -203,6 +204,7 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
     "miso_engine_web_v1_source_frames",
@@ -256,6 +258,8 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_track_response_snapshot_set_bytes",
     "miso_engine_web_v1_track_response_track_id_capacity",
     "miso_engine_web_v1_track_response_track_id_ptr",
+    "miso_engine_web_v1_watermark_ptr",
+    "miso_engine_web_v1_watermark_read",
 ];
 
 /// The boot staging sequence, by export name, in call order.
@@ -524,6 +528,45 @@ fn meter_header_fields() -> [Field; 12] {
             offset_of!(WebMeterHeader, reserved_pad),
             "u32",
         ),
+    ]
+}
+
+/// The watermark record (issue #1381a D5), in the order of the C ABI's `miso_engine_v1_watermark`.
+fn plan_watermark_fields() -> [Field; 9] {
+    [
+        (
+            "structSize",
+            offset_of!(WebPlanWatermark, struct_size),
+            "u32",
+        ),
+        ("reserved0", offset_of!(WebPlanWatermark, reserved0), "u32"),
+        ("revision", offset_of!(WebPlanWatermark, revision), "u64"),
+        (
+            "firstSample",
+            offset_of!(WebPlanWatermark, first_sample),
+            "u64",
+        ),
+        (
+            "outcomeFlags",
+            offset_of!(WebPlanWatermark, outcome_flags),
+            "u64",
+        ),
+        (
+            "exactCount",
+            offset_of!(WebPlanWatermark, exact_count),
+            "u64",
+        ),
+        (
+            "transitionFallbackCount",
+            offset_of!(WebPlanWatermark, transition_fallback_count),
+            "u64",
+        ),
+        (
+            "supersededCount",
+            offset_of!(WebPlanWatermark, superseded_count),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebPlanWatermark, reserved), "u64[5]"),
     ]
 }
 
@@ -1869,6 +1912,13 @@ pub fn render() -> String {
         "commandReport",
         COMMAND_REPORT_BYTES,
         &command_report_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "planWatermark",
+        WATERMARK_BYTES,
+        &plan_watermark_fields(),
         true,
     );
     render_structure(
