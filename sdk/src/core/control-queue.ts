@@ -196,6 +196,7 @@ export class ControlTransactionQueue {
    * The session was replaced: the queue starts over from `revision` (a booted session is at `0`).
    * Staged edits are rejected with `MisoUsageError`; a reply still in flight is delivered to its
    * submits but sets no revision. Request IDs keep counting, so none repeats.
+   * A closed queue stays closed: `reset()` never reopens it.
    */
   reset(revision = 0n): void {
     if (typeof revision !== "bigint" || revision < 0n) {
@@ -203,7 +204,6 @@ export class ControlTransactionQueue {
     }
     this.#epoch += 1;
     this.#revision = revision;
-    this.#closed = false;
     this.#rejectNext(new MisoUsageError("the session was replaced before the staged edits were sent"));
   }
 

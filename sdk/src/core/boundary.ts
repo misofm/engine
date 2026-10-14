@@ -1222,6 +1222,9 @@ export class WasmBoundary {
    * command and the reply a complete BTLV response, refusals included. The four exports are looked
    * up when called, not at load, because a module built before #1562 does not export them; such a
    * module refuses here with the typed `unsupported`.
+   *
+   * A malformed reply after the core committed rejects although the edit was applied; values are
+   * absolute, so a resend is safe.
    */
   controlFrame(frame: Uint8Array): Uint8Array {
     const handle = this.#live();

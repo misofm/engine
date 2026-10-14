@@ -35,7 +35,7 @@ function hexOf(bytes) {
   return Buffer.from(bytes).toString("hex");
 }
 
-/** A float32 from its bit pattern, so a NaN keeps the payload the Rust codec wrote. */
+/** A float32 from its bit pattern (canonical NaN only: JS may canonicalise other NaN payloads). */
 function floatFromBits(bits) {
   const view = new DataView(new ArrayBuffer(4));
   view.setUint32(0, Number.parseInt(bits, 16));

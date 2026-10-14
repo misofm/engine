@@ -247,7 +247,7 @@ row today.
 Gates 1-6 and 8: implemented and green locally (`node --test test/browser-evals.mjs
 test/spectrum-browser-evals.mjs`: 39 pass; `check-sdk-headless.sh` on a fresh artifact build: 393
 pass; `check-sdk-types.sh`, `check-sdk-generated.sh`, `check-sdk-deletions.py`,
-`check-workspace-policy.sh` pass). Gate 7 (mutations) moved to #TBD5 and was not run. Gate 9 (real
+`check-workspace-policy.sh` pass). Gate 7 (mutations) moved to #1605 and was not run. Gate 9 (real
 browsers) runs in CI; no local browser run (sprint mode).
 
 ## Decision record

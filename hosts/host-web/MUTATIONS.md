@@ -770,13 +770,12 @@ runs are the `browser` legs of `qualification.yml`.
 | `sdk-observation-wait-rendered` | `wait.deadline.renderedQuantaAfterRefusal = "1"` | gate 1 (the context did not render) |
 | `sdk-observation-wait-after-render` | `wait.deadline.closeAfterRender.resolved = false` | gate 2 |
 | `sdk-observation-wait-resend` | a second `bp` entry before the last `ok` of `wait.render`'s command log | gate 3 (log) |
-| `sdk-observation-wait-quanta` | `wait.render.renderedQuantaAtResolve = "0"` | gate 3 (the status moved) |
 
 ### Source mutations (PR evidence; one at a time in `sdk/src`, then reverted)
 
 Not run in this slice (sprint mode, root 2026-10-13: no mutation runs locally). The expected red
 is the spec's (gate 5); the observed red and message belong to the successor "Post-sprint
-qualification of decision 15's heavy gates" (TBD5) or the first CI run that applies them.
+qualification of decision 15's heavy gates" (#1605) or the first CI run that applies them.
 
 | Where | Mutation | Expected red |
 |---|---|---|

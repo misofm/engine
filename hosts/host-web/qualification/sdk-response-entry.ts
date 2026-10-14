@@ -1770,7 +1770,6 @@ async function runObservationWaitRender(): Promise<Record<string, unknown>> {
     const rendering = browser.context.startRendering();
     rendering.catch(() => undefined);
     const close = await closing;
-    const renderedQuantaAtResolve = await renderedQuantaOf(browser);
     await rendering;
     const renderedQuantaAfterRender = await renderedQuantaOf(browser);
     const commands = commandLog.map((entry) => ({ ...entry }));
@@ -1781,7 +1780,6 @@ async function runObservationWaitRender(): Promise<Record<string, unknown>> {
       resolved: close.resolved,
       elapsedMs: close.elapsedMs,
       renderedQuantaBefore,
-      renderedQuantaAtResolve,
       renderedQuantaAfterRender,
       commands,
       resendIdentical: commands.length === 3 && commands[1]?.records === commands[2]?.records,

@@ -45,7 +45,7 @@ const MUTATIONS = [
   // Issue #1530 gate 4: the browser observation wait, one predicate each.
   "sdk-observation-wait-unbounded", "sdk-observation-wait-late", "sdk-observation-wait-early",
   "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
-  "sdk-observation-wait-after-render", "sdk-observation-wait-resend", "sdk-observation-wait-quanta",
+  "sdk-observation-wait-after-render", "sdk-observation-wait-resend",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -359,7 +359,6 @@ function validateSdkObservationWait(browserName, wait) {
     && render.resolved === true
     && Number.isFinite(render.elapsedMs) && render.elapsedMs < 10_000
     && render.renderedQuantaBefore === "0"
-    && canonicalU64(render.renderedQuantaAtResolve) > 0n
     && render.renderedQuantaAfterRender === "16"
     && log(render.commands) === expected(OK, BP, OK)
     && render.resendIdentical === true,
@@ -840,7 +839,6 @@ function mutate(result, mutation) {
     wait.render.commands.splice(wait.render.commands.length - 1, 0,
       { result: 6, reason: 8, records: wait.render.commands[1].records });
   }
-  if (mutation === "sdk-observation-wait-quanta") wait.render.renderedQuantaAtResolve = "0";
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   return copy;

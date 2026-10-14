@@ -339,6 +339,13 @@ describe("a replaced session starts the queue over", () => {
     assert.deepEqual(requests, [1n, 2n], "request IDs keep counting across a reset");
   });
 
+  test("reset keeps a closed queue closed", () => {
+    const queue = new ControlTransactionQueue(fakeCore().send);
+    queue.close();
+    queue.reset();
+    assert.throws(() => queue.stage(edit(vocal, 3, 0)), MisoUsageError);
+  });
+
   test("close rejects staged edits and refuses new ones; the transaction in flight settles", async () => {
     const core = fakeCore({ hold: true });
     const queue = new ControlTransactionQueue(core.send);

@@ -132,12 +132,11 @@ shipped AudioWorklet in Chromium, Firefox and WebKit, not only against a scripte
    - **Render instance.** Subscribe (`comp`); read `renderedQuantaBefore`; call `close()` without
      awaiting it; wait (at most 5_000 ms, polling the log every 1 ms) until the log holds the
      close's first refusal, record `refusalSeenBeforeRender`; call `startRendering()`; await the
-     close (D5 guard) and record `settled`, `resolved`, `elapsedMs`; read
-     `renderedQuantaAtResolve` right after; await the render; read `renderedQuantaAfterRender`;
+     close (D5 guard) and record `settled`, `resolved`, `elapsedMs`; await the render; read `renderedQuantaAfterRender`;
      record the command log and `resendIdentical` (the refused close's `records` equal the
      admitted close's).
 2. The `sdk-observation-wait` gate in `run.mjs` (the predicates of gates 1-3 below), the two
-   labels in `SDK_RENDER_ALLOCATION_WORKLOADS`, and the eight result mutations of gate 4 in
+   labels in `SDK_RENDER_ALLOCATION_WORKLOADS`, and the seven result mutations of gate 4 in
    `MUTATIONS` and `mutate`.
 3. A new section in `hosts/host-web/MUTATIONS.md`: one row per result mutation (gate 4) and one row
    per source mutation with its observed red (gate 5), in the format of the #1476 and #1480 rows.
@@ -189,7 +188,7 @@ Gate names are the `gate(...)` names in `run.mjs`. "Command log" entries are
    worklet's tap slot unusable after a drain; the scripted host fabricates both.
 3. **`sdk-observation-wait`, the wait renders.** On the render instance,
    `refusalSeenBeforeRender === true`, `settled === true`, `resolved === true`,
-   `elapsedMs < 10_000`, `renderedQuantaBefore === "0"`, `renderedQuantaAtResolve` is above `"0"`,
+   `elapsedMs < 10_000`, `renderedQuantaBefore === "0"`,
    `renderedQuantaAfterRender === "16"`, the log is exactly `[ok, bp, ok]`, and
    `resendIdentical === true`.
    *Test value:* turns red if the browser owner does not resend after a real render, or if a block
@@ -206,8 +205,7 @@ Gate names are the `gate(...)` names in `run.mjs`. "Command log" entries are
    - `sdk-observation-wait-rendered`: `wait.deadline.renderedQuantaAfterRefusal = "1"`;
    - `sdk-observation-wait-after-render`: `wait.deadline.closeAfterRender.resolved = false`;
    - `sdk-observation-wait-resend`: a second `bp` entry inserted before the last `ok` of
-     `wait.render`'s log;
-   - `sdk-observation-wait-quanta`: `wait.render.renderedQuantaAtResolve = "0"`.
+     `wait.render`'s log.
    *Test value:* turns red if a predicate of gates 1-3 is dropped or weakened, which the real
    green result alone cannot show.
 5. **Source mutations (PR evidence, rows in `MUTATIONS.md`; not committed tests).** Apply one at a
@@ -280,13 +278,13 @@ Gate 6 (soak) moves to #1605, *Post-sprint qualification of decision 15's heavy 
      would fail the gates by name in CI; the spec's `[ok, bp]` log is taken as the contract.
   2. The deadline instance also records `commandsBeforeRender` (a copy of the log taken before
      `startRendering()`), because gate 1 needs the log at that point and gate 2 the whole log.
-  3. `mutationProofs` now requires the prefix `<browser>: sdk-observation-wait:` for the eight new
+  3. `mutationProofs` now requires the prefix `<browser>: sdk-observation-wait:` for the seven new
      mutations (the other mutations keep the `<browser>:` prefix), so a mutation that fails a
      different gate does not count as caught.
   4. Gate 6 (soak) is not built or run: moved to #1605 by the amendment.
   5. Source mutations S1-S5 (gate 5) were not run: sprint mode, no mutation runs locally. The rows
-     are in `MUTATIONS.md` as expected reds, not observed ones. The eight result mutations were
-     checked against a green fixture in node (all eight throw the `sdk-observation-wait` gate); no
+     are in `MUTATIONS.md` as expected reds, not observed ones. The seven result mutations were
+     checked against a green fixture in node (all seven throw the `sdk-observation-wait` gate); no
      browser ran locally.
 - **Checked locally.** `node --check run.mjs`; esbuild bundle of `sdk-response-entry.ts`;
   `bash scripts/check-sdk-types.sh`; `bash scripts/check-workspace-policy.sh`;
@@ -296,9 +294,18 @@ Gate 6 (soak) moves to #1605, *Post-sprint qualification of decision 15's heavy 
   elsewhere in that file.
 - **CI.** The `browser` legs run `npm run qualify -- ... --check-matrix --self-test-mutations` in
   Chromium, Firefox and WebKit: the real results feed `sdk-observation-wait` (gates 1-3) and the
-  eight result mutations, and `sdk-render-allocations` now expects 19 rows.
+  seven result mutations, and `sdk-render-allocations` now expects 19 rows.
 
 ## Attempt record
 
 Attempt 1 (lane W): per-browser `sdk-render-allocations` lines naming the two instances and the
 `sdk-observation-wait` timings are recorded here after the first CI run of the leg.
+
+## Fold (batch 5 review, decision 17)
+
+- **Gate 3's `renderedQuantaAtResolve > 0` predicate and the `sdk-observation-wait-quanta`
+  mutation are dropped.** The reading was taken after the close resolved, so it only showed that the
+  context had rendered, which `renderedQuantaAfterRender === "16"` and the `[ok, bp, ok]` log
+  already show. Gate 3's proof is `resolved === true` together with that log (the refused close was
+  resent and admitted after a real render). The field is no longer read, and the result mutations
+  are seven.

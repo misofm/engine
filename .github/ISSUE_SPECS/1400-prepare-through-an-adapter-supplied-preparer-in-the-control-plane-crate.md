@@ -251,3 +251,8 @@ cannot install an allocator: `crates/engine/tests/host_attachment.rs` (render an
 the attachment; the displaced plan's attachment survives the swap and drops on the retirer's thread;
 the downcast) and `crates/host-core/tests/host_attachment_render.rs` (a plan with an attachment
 renders and swaps with zero allocator calls on the render thread, through the audited allocator).
+
+**Gate 1 audit evidence (batch 5 review fold, 2026-10-14).** `cargo build --locked --release -p audit
+&& ./target/release/audit capi` on this tree (`bf03f9f7b`) reports `pcm_digest` `76525e7ef9e78cf4`,
+100000 calls, 0 render errors, 0 allocations, deallocations, locks, syscalls and violations. This is
+the same digest as the base (PR evidence, not a committed pin).
