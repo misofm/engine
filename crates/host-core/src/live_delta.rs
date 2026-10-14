@@ -356,7 +356,7 @@ pub fn classify_live_delta_with_monitor<'a>(
     let mut settings_changed = false;
     for change in &changes {
         let descriptor = &change.descriptor;
-        if let Some(position) = owner_position(next, &change.address.owner) {
+        if let Some(position) = controls::owner_index(next, &change.address.owner) {
             // The changes come in list order, but the VCA rows follow the session's.
             if let Err(at) = changed_owners.binary_search(&position) {
                 changed_owners.insert(at, position);
@@ -638,26 +638,6 @@ enum Lowered<'a> {
     Effect(Option<LiveEffectRecords<'a>>),
     Route(Option<LiveRouteRecord<'a>>),
     Nothing,
-}
-
-/// The index of `owner` in the control list's owner order: the strips, the routes, the VCAs, the
-/// session.
-fn owner_position(model: &SessionModel, owner: &Owner) -> Option<usize> {
-    let strips = model.tracks.len() + model.submixes.len();
-    match owner {
-        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
-        Owner::Route(id) => model
-            .routes
-            .iter()
-            .position(|route| route.id == *id)
-            .map(|index| strips + index),
-        Owner::Vca(id) => model
-            .vcas
-            .iter()
-            .position(|vca| vca.id == *id)
-            .map(|index| strips + model.routes.len() + index),
-        Owner::Session => Some(controls::owner_count(model) - 1),
-    }
 }
 
 #[cfg(feature = "test-support")]

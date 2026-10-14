@@ -281,12 +281,13 @@ fn tables_are_self_consistent() {
 
 /// The control catalog is built one owner at a time (#1400b): every owner of `owner_count` lists
 /// one contiguous run under one owner address, the runs follow `list`'s owner order and add up to
-/// exactly `list`, and an index past the last owner appends nothing. Red if `owner_count` miscounts
+/// exactly `list`, and an index past the last owner appends nothing; `owner_index` names the index
+/// of each owner's address. Red if `owner_count` or `owner_index` miscounts
 /// the owners (a streamed build would skip or repeat an owner's rows) or an owner's run mixes
 /// owners (the catalog opens an owner header only at a run's first row).
 #[test]
 fn owners_stream_one_run_each_in_list_order() {
-    use controls::{MonitorOverlay, effective, owner_count, owner_rows_with};
+    use controls::{MonitorOverlay, effective, owner_count, owner_index, owner_rows_with};
 
     let model = fixture();
     let overlay = MonitorOverlay::with_soloed([id("vocal")]);
@@ -309,8 +310,24 @@ fn owners_stream_one_run_each_in_list_order() {
                 "owner {owner}: no owner is listed twice"
             );
             owners_seen.push(first.address.owner.clone());
+            // The owner's address names this very index: `owner_index` is the inverse of the
+            // order the streamed build walks.
+            assert_eq!(
+                owner_index(&model, &first.address.owner),
+                Some(owner),
+                "owner {owner}: its address names its index"
+            );
         }
     }
+    assert_eq!(
+        owner_index(&model, &Owner::Session),
+        Some(owner_count(&model) - 1),
+        "the session is the last owner"
+    );
+    assert_eq!(
+        owner_index(&model, &Owner::Strip(id("no-such-strip"))),
+        None
+    );
     assert_eq!(streamed, listed);
     let mut past = Vec::new();
     owner_rows_with(

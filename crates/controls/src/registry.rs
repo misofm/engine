@@ -80,6 +80,29 @@ pub fn owner_count(model: &SessionModel) -> usize {
     model.tracks.len() + model.submixes.len() + model.routes.len() + model.vcas.len() + 1
 }
 
+/// The index of `owner` in [`list`]'s owner order (see [`owner_count`]): the strips (tracks, then
+/// submixes), the routes, the VCAs, then the session. `None` when the model has no such owner. It is
+/// the inverse of the order [`owner_rows_with`] walks, so a caller that holds an [`Owner`] and wants
+/// its rows names the index here and nowhere else.
+#[must_use]
+pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
+    let strips = model.tracks.len() + model.submixes.len();
+    match owner {
+        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
+        Owner::Route(id) => model
+            .routes
+            .iter()
+            .position(|route| route.id == *id)
+            .map(|index| strips + index),
+        Owner::Vca(id) => model
+            .vcas
+            .iter()
+            .position(|vca| vca.id == *id)
+            .map(|index| strips + model.routes.len() + index),
+        Owner::Session => Some(owner_count(model) - 1),
+    }
+}
+
 /// Which kind of owner an index of [`list`]'s owner order names, and where in its table.
 enum OwnerSlot {
     Strip(usize),

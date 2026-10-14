@@ -216,3 +216,22 @@ Built on batch 5's head (#1599 compact catalog, #1558 VCA add/remove live, #1559
 - **No change under `crates/engine/src/realtime/`.**
 - **Gate 1 VCA row.** The VCA offset case runs through the C ABI (a VCA owner is a changed owner of
   its own and its members' derived rows are refreshed).
+
+**Batch 6 review fold, 2026-10-14.**
+
+- **Edits outside the slice's crates, recorded.** The slice's spec names `host-core`, `control-plane` and
+  `controls` registry and list code; the commits also edit:
+  - `crates/controls/src/route.rs`: `push_derived_rows`, with `push_route_rows(.., derived_only)`
+    behind `push_rows` (the rows of class `Derived`, in listing order).
+  - `crates/controls/src/strip.rs`: `push_own_rows(.., derived_only)` extracted from `push_rows`, and
+    `push_derived_rows` on it. `push_rows` lists exactly what it did.
+  - `crates/controls/src/registry.rs` and `lib.rs`: `derived_rows_with`, and, in this fold,
+    `owner_index`.
+  - `crates/session/src/model.rs` (commit `c71b1dcac`, #1400b): `StripRef::track` and
+    `StripRef::submix` are public, so a caller finds a strip by its index in O(1) (the staged-write
+    path of the provider does) rather than by `strips().nth`.
+- **One owner order.** `live_delta.rs` kept its own `owner_position`, a second copy of the order that
+  `owner_rows_with` walks (strips, routes, VCAs, session). `controls::owner_index(model, &Owner)` is
+  now the inverse of that order, in the crate that owns it, and the classifier calls it;
+  `owners_stream_one_run_each_in_list_order` checks that each owner's address names the index it was
+  streamed at.
