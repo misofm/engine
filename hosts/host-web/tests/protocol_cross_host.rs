@@ -710,11 +710,24 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         start_value: 0.0,
         end_value: 0.0,
     };
-    legs.command(
+    let automation = legs.command(
         "11 automation",
         CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
             records: core::slice::from_ref(&record),
         }),
+    );
+    // Neither host renders stored automation, so both refuse it with a type before any ack (#1315):
+    // equal bytes alone would also hold if both hosts acked it and dropped it.
+    let mut fields = [0_u16; 64];
+    assert!(
+        matches!(
+            ProtocolCodec::default()
+                .decode_typed_response(&automation, &mut protocol::DecodeScratch::new(&mut fields))
+                .expect("the automation response"),
+            protocol::DecodedTypedResponseFrame::NonOk { header, .. }
+                if header.status == protocol::StatusCode::Unavailable
+        ),
+        "AUTOMATION_ENQUEUE is UNAVAILABLE on both hosts"
     );
 
     // 12. A frame with message ID 0x0004.

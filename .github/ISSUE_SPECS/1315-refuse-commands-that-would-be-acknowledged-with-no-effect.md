@@ -184,3 +184,43 @@ Checked against `main` at `32cee58d0`.
   for `protocol_cross_host.rs`.
 - **What remains.** D1-D3 and D5 in `protocol`, `control-plane`, the `capi` tests and the two docs;
   gates 1, 2, 4 and 5. #1567 depends on it ("Still not served", its gate 4).
+
+## Decision record: D1-D3 and D5 (batch 8)
+
+**Shipped.** `ProviderFeatures` gains `automation` (`ALL` true, `NONE` false). `execute` answers `UNAVAILABLE` to
+`AUTOMATION_ENQUEUE` in the family feature match, before the revision and domain checks;
+`capability_registry` omits command `0x0006` and clears flag bit 5 when it is false, and keeps `0x8002`.
+`control_plane::compile_children` builds its controller with `ProviderFeatures { automation: false, ..ALL }`, so
+the C ABI and the browser (one shared build since the flip) both refuse the command and neither advertises it.
+Nothing is queued, no revision or event moves, so no ack precedes a drop. D5: `CONTROL_PROTOCOL_SEMANTICS.md`
+("Delivery status", and the cancel paragraph), `CONTROL_PROTOCOL_REGISTRY.md`, `C_ABI_V1_QUALIFICATION.md` and
+decision 14's IO-5 bullet. D4 and gate 3 are dropped (root ruling 2026-10-14); no effect-compiler or host-web
+source is touched. No new status, reason or kind, so the vocabulary scripts are unchanged and pass.
+
+**Gates.**
+1. `capi ... tests::automation_enqueue_is_refused_unavailable_and_not_advertised` (C ABI: status 14, queue
+   occupancy 0, revision and reliable lane unchanged, no `0x0006`, bit 5 clear, `0x8002` listed, record decodes
+   through the wire validator). Browser leg: `hosts/host-web/tests/protocol_cross_host.rs`
+   `the_browser_and_the_c_abi_give_the_same_bytes_for_one_script` step 11 now also asserts the shared response is
+   `UNAVAILABLE` (equal bytes alone would pass if both hosts acked).
+2. Protocol's own automation tests pass unchanged with `ALL`; new
+   `controller::tests::a_controller_without_the_automation_feature_refuses_and_does_not_advertise_the_command`
+   (refusal, no queue, registry, re-enable serves the same batch).
+4. `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes` became
+   `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`: no other C ABI path raises `0x8002` (it needs a
+   queued batch), so the sixth family is gone until #1058; the refusal frame, the capabilities frame and the event
+   list are re-pinned. `capi_controller_dispatches_every_advertised_command_family` expects `UNAVAILABLE` for the
+   automation command; vectors 0 (capabilities: list 22 bytes, flags 0x7fdf) and 4 (the refusal) re-pinned.
+   `exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact` follows vector 0.
+5. `cargo test --locked -p protocol --features test-support`, `-p control-plane --features test-support`,
+   `-p capi`, `-p host-web --features host-web/test-support`, `-p conformance`: pass.
+   `check-protocol-control-policy.sh`, `check-workspace-policy.sh`, both vocabulary scripts, `cargo fmt`,
+   clippy `-D warnings` on protocol, control-plane, capi, host-web (all targets and features): pass.
+
+**Departures.** Tests that used automation as an accepted command were rewritten (outside the listed paths,
+mechanical): `live_tests.rs::a_live_edit_emits_the_commit_events_of_a_rebuild` now offers a batch, sees it
+refused and sees the next live edit emit only `SESSION_COMMITTED` (the cancel half is the protocol crate's, tested
+with the command enabled); `live_tests.rs::automation_is_admitted_for_an_effect_parameter_and_refused_for_any_other_row`
+(#1552 gate 4) is deleted because the row-domain rule it pinned is unreachable through the C ABI and is held by
+host-core's `only_an_effect_parameter_is_an_automation_target`; `tests.rs::c_commands_publish_the_replacement_control_list`
+probes the superseded handle with a `CONTROL_LIST_GET` page instead of an automation record.
