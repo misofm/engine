@@ -1,6 +1,6 @@
 # Size the per-node live effect window by its live cells
 
-Successor of #1611 (batch 9 review), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as TBD16). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of #1611 (batch 9 review), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as #1621). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 

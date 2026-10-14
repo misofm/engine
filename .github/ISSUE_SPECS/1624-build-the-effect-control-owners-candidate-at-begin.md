@@ -1,6 +1,6 @@
 # Build the effect control owner's candidate at begin
 
-Successor of #1611 (its decision record), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as TBD19). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of #1611 (its decision record), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as #1624). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 

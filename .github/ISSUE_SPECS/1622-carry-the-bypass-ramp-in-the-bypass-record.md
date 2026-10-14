@@ -1,6 +1,6 @@
 # Carry the bypass ramp in the bypass record
 
-Successor of #1341a1 (batch 9 review), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as TBD17). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of #1341a1 (batch 9 review), decision 17. Code anchors verified on the batch 9 branch `codex/controls-batch-9`. Issue number: assigned at filing (written here as #1622). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 
