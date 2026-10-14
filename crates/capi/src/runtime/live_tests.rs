@@ -4635,6 +4635,236 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
     );
 }
 
+// Issue #1600: a live commit refreshes only the changed owners' catalog rows.
+
+/// The `SET_CONTROL` edit that writes `value` to the control that `entry` lists.
+fn set_listed(entry: &protocol::ControlEntry, value: f32) -> SessionEdit {
+    SessionEdit::SetControl {
+        address: protocol::control_core::ControlAddress::try_from(&entry.address)
+            .expect("a listed address"),
+        value,
+        ramp_samples: None,
+    }
+}
+
+/// The first control row of `list` that `keep` accepts.
+fn listed(
+    list: &[protocol::ControlEntry],
+    keep: impl Fn(&protocol::ControlEntry, &protocol::ControlRow) -> bool,
+) -> &protocol::ControlEntry {
+    list.iter()
+        .find(|entry| control_of(entry).is_some_and(|row| keep(entry, row)))
+        .expect("a listed control")
+}
+
+/// The list of a session started fresh from the committed model of `rig`.
+fn fresh_list(rig: &mut Rig) -> Vec<protocol::ControlEntry> {
+    let mut fresh = Rig::new(&rig.snapshot());
+    control_list_all_c(fresh.session, &mut fresh.request, 256).0
+}
+
+/// #1600 gates 1 and 3. Each of these live commits gives the control list of a session started
+/// fresh from the committed model, entry by entry, at limit 256: one track `fader_db` lane, a
+/// submix `mute`, a console parameter, an insert bypass, a VCA offset, two edits on two strips in
+/// one transaction, and a followed mute. The epoch holds for all of them, and none of them stages
+/// the whole catalog. A `control_smoothing` change moves a default ramp of every owner, so it
+/// does stage the whole catalog, and the epoch advances.
+///
+/// Red if the patched list differs from a full rebuild in any value or descriptor, if the epoch
+/// moves for a values-only commit or stays for a descriptor change, or if a setting is patched
+/// as values only.
+#[test]
+fn a_live_commit_gives_the_control_list_of_a_fresh_session() {
+    let document = control_list_session();
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (list, epoch, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+
+    let named = |owner: &'static str, section: protocol::ControlSection, name: &'static str| {
+        move |entry: &protocol::ControlEntry, row: &protocol::ControlRow| {
+            entry.address.owner_id.as_deref() == Some(owner)
+                && entry.address.section == section
+                && row.name == name
+                && matches!(
+                    entry.address.lane,
+                    Some(protocol::ParameterChannel::Left | protocol::ParameterChannel::Both)
+                )
+        }
+    };
+    let parameter = listed(&list, |entry, row| {
+        entry.address.owner_id.as_deref() == Some("eq1")
+            && entry.address.section == protocol::ControlSection::Console
+            && row.family == protocol::ControlFamily::Effect
+            && row.class == protocol::ControlClass::Live
+            && row.name != "bypass"
+            && entry.address.lane != Some(protocol::ParameterChannel::Right)
+    });
+    let row = control_of(parameter).expect("row");
+    let parameter_value = if row.value == row.minimum {
+        row.maximum
+    } else {
+        row.minimum
+    };
+    let commits: [(&str, Vec<SessionEdit>); 7] = [
+        (
+            "a track fader lane",
+            vec![set_listed(
+                listed(
+                    &list,
+                    named("eq0", protocol::ControlSection::Builtins, "fader_db"),
+                ),
+                -3.0,
+            )],
+        ),
+        (
+            "a submix mute",
+            vec![set_listed(
+                listed(
+                    &list,
+                    named("bus", protocol::ControlSection::Builtins, "mute"),
+                ),
+                1.0,
+            )],
+        ),
+        (
+            "a console parameter",
+            vec![set_listed(parameter, parameter_value)],
+        ),
+        (
+            "an insert bypass",
+            vec![set_listed(
+                listed(
+                    &list,
+                    named("eq0", protocol::ControlSection::Inserts, "bypass"),
+                ),
+                1.0,
+            )],
+        ),
+        (
+            "a VCA offset",
+            vec![set_listed(
+                listed(
+                    &list,
+                    named("vca", protocol::ControlSection::Own, "offset_db"),
+                ),
+                -4.0,
+            )],
+        ),
+        (
+            "two edits on two strips",
+            vec![
+                set_listed(
+                    listed(
+                        &list,
+                        named("eq0", protocol::ControlSection::Builtins, "fader_db"),
+                    ),
+                    -8.0,
+                ),
+                set_listed(
+                    listed(
+                        &list,
+                        named("eq1", protocol::ControlSection::Builtins, "mute"),
+                    ),
+                    1.0,
+                ),
+            ],
+        ),
+        (
+            "a mute that a send follows",
+            vec![
+                set_listed(
+                    listed(
+                        &list,
+                        named("eq0-bus", protocol::ControlSection::Own, "follows_mute"),
+                    ),
+                    1.0,
+                ),
+                set_listed(
+                    listed(
+                        &list,
+                        named("eq0", protocol::ControlSection::Builtins, "mute"),
+                    ),
+                    1.0,
+                ),
+            ],
+        ),
+    ];
+    for (label, edits) in commits {
+        host_core::take_stage_counts();
+        assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.summary().3, 0, "{label} is live");
+        let (owners, full) = host_core::take_stage_counts();
+        assert_eq!(full, 0, "{label} stages no whole catalog");
+        assert!(owners >= 1, "{label} reads a changed owner");
+        let (committed, now, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+        assert_eq!(now, epoch, "{label} keeps the epoch");
+        assert_eq!(committed, fresh_list(&mut rig), "{label}");
+    }
+
+    // The followed mute reached the send's gate row, which no edit named.
+    let (committed, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let gate = listed(&committed, |entry, row| {
+        entry.address.owner_id.as_deref() == Some("eq0-bus")
+            && row.name == "effective_gate"
+            && entry.address.lane == Some(protocol::ParameterChannel::Left)
+    });
+    assert_eq!(control_of(gate).expect("row").value, 1.0);
+
+    host_core::take_stage_counts();
+    let smoothing = smoothing_edits(ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 55.0,
+        pan_ms: 20.0,
+    });
+    assert_eq!(rig.apply(&smoothing), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "a smoothing change is live");
+    assert_eq!(
+        host_core::take_stage_counts().1,
+        1,
+        "every owner's ramp moved"
+    );
+    let (after, now, _) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(now, epoch + 1, "a default ramp is a descriptor");
+    assert_eq!(after, fresh_list(&mut rig));
+}
+
+/// #1600 gate 5. A live commit whose catalog stage fails is refused before its first write: the
+/// session, its replay log and its list are what they were, and the same edit commits once the
+/// fault is gone.
+///
+/// Red if the stage moves after the first cell write, or an acknowledged commit can drop it.
+#[test]
+fn a_failed_catalog_stage_commits_nothing() {
+    let document = control_list_session();
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (list, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+    let edit = set_listed(
+        listed(&list, |entry, row| {
+            entry.address.owner_id.as_deref() == Some("eq0")
+                && entry.address.section == protocol::ControlSection::Builtins
+                && row.name == "fader_db"
+                && entry.address.lane == Some(protocol::ParameterChannel::Left)
+        }),
+        -6.0,
+    );
+    let state = refusal_state(&rig);
+    let writes = rig.writes(Epoch::Current, "eq0");
+    host_core::fail_next_stages(1);
+    assert_ne!(rig.apply(std::slice::from_ref(&edit)), crate::RESULT_OK);
+    assert_eq!(refusal_state(&rig), state);
+    assert_eq!(
+        rig.writes(Epoch::Current, "eq0"),
+        writes,
+        "no cell was written"
+    );
+    let (same, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+    assert_eq!(same, list);
+
+    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    assert_ne!(rig.writes(Epoch::Current, "eq0"), writes);
+}
+
 // Issue #1553: `SET_CONTROL`, any control by its stable address.
 
 mod set_control {

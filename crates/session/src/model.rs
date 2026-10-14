@@ -438,7 +438,7 @@ pub enum StripKind<'a> {
 
 impl<'a> StripRef<'a> {
     /// The strip of one track.
-    fn track(track: &'a Track) -> Self {
+    pub fn track(track: &'a Track) -> Self {
         Self {
             id: &track.id,
             kind: StripKind::Track(track),
@@ -451,7 +451,7 @@ impl<'a> StripRef<'a> {
     }
 
     /// The strip of one submix, with its console entries (#1202).
-    fn submix(submix: &'a Submix) -> Self {
+    pub fn submix(submix: &'a Submix) -> Self {
         Self {
             id: &submix.id,
             kind: StripKind::Submix(submix),

@@ -278,3 +278,65 @@ fn tables_are_self_consistent() {
         }
     }
 }
+
+/// The control catalog is built one owner at a time (#1400b): every owner of `owner_count` lists
+/// one contiguous run under one owner address, the runs follow `list`'s owner order and add up to
+/// exactly `list`, and an index past the last owner appends nothing; `owner_index` names the index
+/// of each owner's address. Red if `owner_count` or `owner_index` miscounts
+/// the owners (a streamed build would skip or repeat an owner's rows) or an owner's run mixes
+/// owners (the catalog opens an owner header only at a run's first row).
+#[test]
+fn owners_stream_one_run_each_in_list_order() {
+    use controls::{MonitorOverlay, effective, owner_count, owner_index, owner_rows_with};
+
+    let model = fixture();
+    let overlay = MonitorOverlay::with_soloed([id("vocal")]);
+    let effective = effective(&model, &overlay);
+    let listed: Vec<ControlRow> = list(&model, &overlay, RATE).collect();
+    let mut streamed = Vec::new();
+    let mut owners_seen = Vec::<Owner>::new();
+    for owner in 0..owner_count(&model) {
+        let before = streamed.len();
+        owner_rows_with(&model, &effective, &overlay, owner, RATE, &mut streamed);
+        let run = &streamed[before..];
+        if let Some(first) = run.first() {
+            assert!(
+                run.iter()
+                    .all(|row| row.address.owner == first.address.owner),
+                "owner {owner}: one owner address per run"
+            );
+            assert!(
+                !owners_seen.contains(&first.address.owner),
+                "owner {owner}: no owner is listed twice"
+            );
+            owners_seen.push(first.address.owner.clone());
+            // The owner's address names this very index: `owner_index` is the inverse of the
+            // order the streamed build walks.
+            assert_eq!(
+                owner_index(&model, &first.address.owner),
+                Some(owner),
+                "owner {owner}: its address names its index"
+            );
+        }
+    }
+    assert_eq!(
+        owner_index(&model, &Owner::Session),
+        Some(owner_count(&model) - 1),
+        "the session is the last owner"
+    );
+    assert_eq!(
+        owner_index(&model, &Owner::Strip(id("no-such-strip"))),
+        None
+    );
+    assert_eq!(streamed, listed);
+    let mut past = Vec::new();
+    owner_rows_with(
+        &model,
+        &effective,
+        &overlay,
+        owner_count(&model),
+        RATE,
+        &mut past,
+    );
+    assert!(past.is_empty());
+}

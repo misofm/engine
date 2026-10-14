@@ -1,11 +1,11 @@
 //! The control list and the one read and write path: [`list`], [`get`], [`set`].
 
-use session::SessionModel;
+use session::{SessionModel, StripRef};
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
-use crate::effective::{EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
+use crate::effective::{Effective, EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
@@ -58,6 +58,8 @@ pub(crate) fn push_control(
 /// rows. Within a strip: its own rows, then its builtin rows, then the effect rows in chain order: the pre-insert console slots, the inserts, the post-insert
 /// console slots (each instance: bypass, parameters, link mode). A per-lane row is listed as `left`
 /// then `right`; a shared row once, as `both`. Every address appears exactly once.
+///
+/// The list is the rows of every owner in turn, from [`owner_rows_with`] and nowhere else.
 pub fn list(
     model: &SessionModel,
     overlay: &MonitorOverlay,
@@ -65,25 +67,136 @@ pub fn list(
 ) -> impl Iterator<Item = ControlRow> + use<> {
     let effective = effective(model, overlay);
     let mut rows = Vec::new();
-    for (index, strip) in model.strips().enumerate() {
-        let soloed = overlay.is_soloed(strip.id);
-        strip::push_rows(
-            &mut rows,
-            &model.console,
-            &strip,
-            &effective.strips[index],
-            soloed,
-            sample_rate,
-        );
+    for owner in 0..owner_count(model) {
+        owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut rows);
     }
-    for (index, route) in model.routes.iter().enumerate() {
-        route::push_rows(&mut rows, route, effective.routes[index].gate);
-    }
-    for vca in &model.vcas {
-        vca::push_rows(&mut rows, vca);
-    }
-    session_rows::push_rows(&mut rows, model);
     rows.into_iter()
+}
+
+/// How many owners [`list`] walks: the strips, the routes, the VCAs, then the session. An owner
+/// can list no row; [`owner_rows_with`] then appends nothing.
+#[must_use]
+pub fn owner_count(model: &SessionModel) -> usize {
+    model.tracks.len() + model.submixes.len() + model.routes.len() + model.vcas.len() + 1
+}
+
+/// The index of `owner` in [`list`]'s owner order (see [`owner_count`]): the strips (tracks, then
+/// submixes), the routes, the VCAs, then the session. `None` when the model has no such owner. It is
+/// the inverse of the order [`owner_rows_with`] walks, so a caller that holds an [`Owner`] and wants
+/// its rows names the index here and nowhere else.
+#[must_use]
+pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
+    let strips = model.tracks.len() + model.submixes.len();
+    match owner {
+        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
+        Owner::Route(id) => model
+            .routes
+            .iter()
+            .position(|route| route.id == *id)
+            .map(|index| strips + index),
+        Owner::Vca(id) => model
+            .vcas
+            .iter()
+            .position(|vca| vca.id == *id)
+            .map(|index| strips + model.routes.len() + index),
+        Owner::Session => Some(owner_count(model) - 1),
+    }
+}
+
+/// Which kind of owner an index of [`list`]'s owner order names, and where in its table.
+enum OwnerSlot {
+    Strip(usize),
+    Route(usize),
+    Vca(usize),
+    Session,
+    None,
+}
+
+fn owner_slot(model: &SessionModel, owner: usize) -> OwnerSlot {
+    let strips = model.tracks.len() + model.submixes.len();
+    if owner < strips {
+        return OwnerSlot::Strip(owner);
+    }
+    let owner = owner - strips;
+    if owner < model.routes.len() {
+        return OwnerSlot::Route(owner);
+    }
+    let owner = owner - model.routes.len();
+    if owner < model.vcas.len() {
+        OwnerSlot::Vca(owner)
+    } else if owner == model.vcas.len() {
+        OwnerSlot::Session
+    } else {
+        OwnerSlot::None
+    }
+}
+
+/// The strip at `index` of [`SessionModel::strips`] order: the tracks, then the submixes.
+fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
+    match model.tracks.get(index) {
+        Some(track) => StripRef::track(track),
+        None => StripRef::submix(&model.submixes[index - model.tracks.len()]),
+    }
+}
+
+/// Append the rows of owner number `owner` of [`list`]'s order (see [`owner_count`]) to `out`, from
+/// the effective values the caller computed once with [`effective`] for the same `model` and
+/// `overlay`. [`list`] is this function for every owner in turn, so a caller that reads an owner at
+/// a time (to compact each into a smaller form, reusing one `out`, or to refresh only the owners
+/// that changed) gets the very rows `list` gives, in the same order, without the whole list ever
+/// being held.
+///
+/// Appends nothing for an `owner` of `owner_count(model)` or more.
+pub fn owner_rows_with(
+    model: &SessionModel,
+    effective: &Effective,
+    overlay: &MonitorOverlay,
+    owner: usize,
+    sample_rate: u32,
+    out: &mut Vec<ControlRow>,
+) {
+    match owner_slot(model, owner) {
+        OwnerSlot::Strip(index) => {
+            let strip = strip_at(model, index);
+            strip::push_rows(
+                out,
+                &model.console,
+                &strip,
+                &effective.strips[index],
+                overlay.is_soloed(strip.id),
+                sample_rate,
+            );
+        }
+        OwnerSlot::Route(index) => {
+            route::push_rows(out, &model.routes[index], effective.routes[index].gate);
+        }
+        OwnerSlot::Vca(index) => vca::push_rows(out, &model.vcas[index]),
+        OwnerSlot::Session => session_rows::push_rows(out, model),
+        OwnerSlot::None => {}
+    }
+}
+
+/// Append only the derived rows of owner number `owner` (a strip's effective fader and mute, a
+/// route's effective gate), in the order [`owner_rows_with`] gives them, from the same `effective`
+/// values. Another owner kind has no derived row and appends nothing.
+///
+/// A derived value follows other owners' controls (a VCA, a followed mute), so a catalog that
+/// refreshes only the changed owners reads these for every owner that has them.
+pub fn derived_rows_with(
+    model: &SessionModel,
+    effective: &Effective,
+    owner: usize,
+    out: &mut Vec<ControlRow>,
+) {
+    match owner_slot(model, owner) {
+        OwnerSlot::Strip(index) => {
+            strip::push_derived_rows(out, &strip_at(model, index), &effective.strips[index]);
+        }
+        OwnerSlot::Route(index) => {
+            route::push_derived_rows(out, &model.routes[index], effective.routes[index].gate);
+        }
+        OwnerSlot::Vca(_) | OwnerSlot::Session | OwnerSlot::None => {}
+    }
 }
 
 /// How the non-effect row `control` of `section` of `owner` moves, with no sample rate: the

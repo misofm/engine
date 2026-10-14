@@ -111,6 +111,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+pub mod spectrum_service;
 pub mod strip_values;
 pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
@@ -122,8 +123,10 @@ mod limiter_linked_session;
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
     CatalogResources, ControlCatalog, PlanSampleSource, SessionControlProvider,
-    SessionControlProviderError, SessionControlProviderResources,
+    SessionControlProviderError, SessionControlProviderResources, StagedCatalog, StagedValues,
 };
+#[cfg(all(feature = "control-provider", feature = "test-support"))]
+pub use control_provider::{fail_next_stages, take_response_counts, take_stage_counts};
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
@@ -160,11 +163,14 @@ pub use prepare::{
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
-    PreparedResponsePreview, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
-    ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
-    ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
-    ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
-    generate_response_grid, prepare_response_preview, query_response_snapshot_into,
+    PreparedResponsePreview, PreparedResponseQuery, RESPONSE_MAXIMUM_OVERRIDES,
+    RESPONSE_MAXIMUM_POINTS, ResponseChannels, ResponseCurves, ResponseParameterOverride,
+    ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
+    ResponsePreviewRequest, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
+    ResponseRefusal, ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode,
+    ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
+    ResponseSnapshotQuerySummary, generate_response_grid, input_filter_target,
+    prepare_response_preview, prepare_response_query, query_response_snapshot_into,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
@@ -189,6 +195,14 @@ pub use spectrum::{
     SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
     spectrum_capture_collection_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
+};
+pub use spectrum_service::{
+    PreparedSpectrumCaptures, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
+    SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN, SpectrumAnalysis,
+    SpectrumAnalysisResult, SpectrumPreparation, SpectrumRequestError, SpectrumService,
+    SpectrumServiceError, SpectrumSnapshot, spectrum_channels_from_raw, spectrum_target_kind,
+    spectrum_target_ref,
 };
 pub use strip_values::{
     LiveStripValues, LiveStripValuesError, StripValues, changed_lane_records, covers_lane,

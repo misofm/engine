@@ -256,3 +256,79 @@ renders and swaps with zero allocator calls on the render thread, through the au
 && ./target/release/audit capi` on this tree (`bf03f9f7b`) reports `pcm_digest` `76525e7ef9e78cf4`,
 100000 calls, 0 render errors, 0 allocations, deallocations, locks, syscalls and violations. This is
 the same digest as the base (PR evidence, not a committed pin).
+
+**Part (b), 2026-10-14 (batch 5 lane W).**
+
+- **`prepare_web_host` takes the live request, not the options.** `compile_ready` already builds
+  `live_control_request(options, quantum)` and refuses a bad word with its own
+  `web.live_controls.config` document failure, so the inner function takes
+  `live_controls: &HostLiveControlRequest` (plus `lanes`, `superseded` and `successor`) and holds the
+  meter selection and the three branches. `WebRuntimePreparer::prepare` builds the same request from its
+  options and maps a refused word to `PrepareDiagnostics::fixed(Session, "web.live_controls.config")`.
+- **Lanes.** `WebRuntimePreparer::prepare` attaches the `lanes` argument (`controls::live_lanes(model)`,
+  part (a)); the boot word chooses no lane there. `compile_ready` still passes `live_lanes(options)`:
+  the browser renders its plan directly until the flip batch (#1381a, #1562a), so its plan, bits and
+  resource rows do not move in this slice. Root's flip batch deletes `live_lanes(options)`.
+- **`bound_cache` is ignored.** No browser host-core entry takes the input-design bound cache; the
+  journal the core opens on it stays empty (#1602 retires the cache).
+- **The spectrum request is held, as filed.** The trait (part (a)) has no `spectrum` argument yet, so
+  `WebRuntimePreparer::new(options, spectrum)` holds it and `RenderCompanions` carries the capture
+  (#1593 and #1596 move it, per the amendment).
+- **Concurrent delivery changes one witness test.** The browser's no-spectrum branch now prepares through
+  `prepare_host_runtime_with_selected_meters[_successor]` (concurrent) at boot too, because
+  `compile_ready` calls `prepare_web_host`. `acknowledged_pair_render_records_the_same_live_dispatch`
+  (#459) pinned the fused fader-matrix bank's call counts (`process_calls == 2`, `fused_calls == 2`);
+  concurrent delivery forms no fused bank, so it now pins `process_calls == 0`, no fused or fallback call,
+  and each acknowledged value applied once. The rendered bits are held by gate 2, not by this witness.
+- **Dependency.** `control-plane` moves from host-web's `[dev-dependencies]` to `[dependencies]`; the
+  browser artifact now links it (and, through it, host-core's `control-provider` feature).
+- **Gate 4** is `web_runtime_preparer_attaches_the_companions_on_every_branch` in
+  `hosts/host-web/src/tests.rs`, with the nine-track fixture: three branches, boot and successor.
+- **Boot memory: the catalog is built streaming (root ruling 2026-10-14).** The `control-plane`
+  dependency turns on host-core's `control-provider` feature in the browser artifact, so every browser
+  `prepare` builds a `ControlCatalog` that the browser does not read before the flip. Built from a
+  full `controls::list` (every `ControlRow` at once, then compacted) it took the 1 MiB worst document
+  (192 tracks x 4 effects) to a wasm high-water growth of 26,542,080 bytes against the pinned
+  20 x document = 20,971,520. `ControlCatalog::build` now walks the list one owner at a time through one
+  reused buffer (`controls::owner_count` and `controls::owner_rows_with`, which `controls::list` is
+  built from, so there is one row-generation path), twice: once to size every table, once to fill
+  them. The transient is one owner's rows, not every control of the session. Measured on the same
+  tree, `check-web-boot-budget.mjs`: growth 26,542,080 -> 16,121,856 bytes (pin 20,971,520 plus one
+  page, unchanged; it passes). `#1600`'s own `owner_rows_with` (its D2) has this name and meaning;
+  this one takes the overlay too, because a strip's `solo` row reads it, and `#1600` reconciles the
+  signatures. `session::StripRef::{track, submix}` are public for the by-index owner lookup (the
+  chained `strips()` iterator is O(n) per `nth`).
+- **One page of expected resources moves.** `scripts/check-browser-expected-resources.py`:
+  `commandTimeline.beforeDisposeStatus.memoryBytes` 2,490,368 -> 2,555,904 (one wasm page) in
+  `hosts/host-web/tests/browser-v1/expected.json`, before and after streaming alike (streaming did
+  not move it). Cause, from the earlier experiment that built the catalog from a minimal model (both gates then passed): the memory high-water includes the catalog of that session while
+  the plan is prepared; the other timelines and every digest and exact row are unchanged. Re-pinned
+  because it is a high-water of memory the browser really takes, not a behaviour change; no PCM digest
+  moved.
+- **The attachment is charged in the plan's rows.** `RenderCompanions::retained_bytes` is the
+  attachment's own heap: its box and the buffers of its two vectors (what the consumers, handles and
+  the capture own is host-core's report's). `WebRuntimePreparer::prepare` adds it to
+  `graph_session_plus_plan_bytes` and `graph_incremental_plan_bytes` and takes the maximum of the
+  largest allocations, so the control plane's `PlanResources` row, built from this report, counts it.
+  `compile_ready` creates no attachment (the browser renders directly until #1381), so the browser's
+  own report does not move.
+- **Retirement frees on a non-isolated page are #1381's to count.** The browser host retires no plan
+  in this slice (no swap: #1381), so no attachment is freed in the worklet's message handler yet, and
+  host-web has no control-side allocation counter beyond the render-locked one
+  (`render_lock.rs`, which counts only render windows). #1381's service step drops the retired
+  plan, attachment included, and must count those frees under the AGENTS.md non-isolated exception.
+
+**Batch 6 review fold, 2026-10-14 (root decision A1).**
+
+- **The catalog is retained, not transient.** The decision record above says the browser builds a
+  `ControlCatalog` it does not read before the flip, and treats it as a boot-time high-water. That
+  is half right. Because `control-plane` is a normal dependency of host-web, feature unification
+  turns on host-core's `control-provider` in the browser artifact; every prepare builds
+  `PreparedHost.control_catalog`, and `ReadyOwnership.host` holds it for the whole session. No
+  `WebResourceReport` row counted it. `compile_ready` now charges `host.control_catalog.resources()`:
+  its retained bytes join the bridge metadata and bridge retained rows (so the exact retained check
+  against `memory_budget` sees them before the commit), and its largest allocation joins the largest
+  bridge allocation row. For `browser-v1/session.json` the charge is 9,556 bytes (bridge metadata
+  1,151,078 to 1,160,634; bridge retained 1,171,689 to 1,181,245), and the ceilings in
+  `hosts/host-web/tests/retained_ceilings.rs` are re-pinned with those numbers. The boot budget
+  pin (20,971,520) does not move.

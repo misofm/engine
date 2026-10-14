@@ -4254,12 +4254,14 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             .chunks_exact(2)
             .map(|id| u16::from_le_bytes([id[0], id[1]]))
             .collect::<Vec<_>>();
+        // Bit 14 tracks `RESPONSE_GET` whatever else is listed.
+        assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
     let mut endpoint = controller(8, 1);
     assert_eq!(
         ids(&mut endpoint, 1),
-        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13], true)
+        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14], true)
     );
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
@@ -4267,7 +4269,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     });
     assert_eq!(
         ids(&mut endpoint, 2),
-        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11], false)
+        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 14], false)
     );
     for (request_id, payload) in [
         (
@@ -4368,4 +4370,196 @@ fn automation_keeps_its_domain_rules_over_the_control_row() {
     assert_eq!(attempt(&mut endpoint, 6, 0.0), StatusCode::InvalidField);
     assert_eq!(attempt(&mut endpoint, 1, 0.0), StatusCode::InvalidField);
     assert_eq!(attempt(&mut endpoint, 99, 0.0), StatusCode::NotFound);
+}
+
+fn response_request(points: u32) -> crate::ResponseGetRequest {
+    crate::ResponseGetRequest {
+        target: crate::ResponseTarget::Configuration(crate::ResponseConfiguration::InputFilters),
+        grid: crate::ResponseGrid::Linear,
+        points,
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: crate::ParameterChannel::Both,
+        sections: true,
+        overrides: Vec::new(),
+        configuration_id: Some(5),
+        sample_rate_hz: None,
+        quantum_frames: None,
+        maximum_prepared_bytes: None,
+        maximum_state_bytes: None,
+        maximum_scratch_bytes: None,
+        maximum_automation_spans: None,
+        maximum_reply_bytes: None,
+    }
+}
+
+/// Gate 3, 4 and 5 at the protocol layer: a `RESPONSE_GET` reaches the provider through a typed
+/// frame and answers its curves; a provider refusal is its status with one error diagnostic that
+/// carries its code; a reply past the response bound is `LIMIT_EXCEEDED`
+/// (`response.reply_too_large`); a disabled provider is `UNAVAILABLE` and unadvertised; the same
+/// request ID and bytes replay byte for byte and never reach the provider again; and a read leaves
+/// the revision where it was.
+///
+/// Red if the request is dropped between frame and provider, a refusal loses its code, an
+/// oversized reply is cached or sent, a replayed read runs twice, or a read moves the revision.
+#[test]
+fn response_get_dispatches_refuses_and_replays_through_the_controller() {
+    let mut endpoint = controller(8, 1);
+    let revision = endpoint.session().revision();
+    let ask = |endpoint: &mut ProtocolController<MockProvider>,
+               request_id: u64,
+               request: &crate::ResponseGetRequest| {
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ResponseGet(request),
+        );
+        (input.clone(), process_full_command(endpoint, &input))
+    };
+    let (_, output) = ask(&mut endpoint, 1, &response_request(16));
+    let crate::DecodedTypedResponseFrame::Success {
+        header,
+        payload:
+            crate::DecodedSuccessResponsePayload::ResponseResult(crate::ResponseResult::Curves(curves)),
+    } = decode_response(&output)
+    else {
+        panic!("expected curves");
+    };
+    assert_eq!(header.message_id, MessageId::ResponseGet);
+    assert_eq!(
+        (
+            curves.frequencies_hz.len(),
+            curves.configuration_id,
+            curves.section_count
+        ),
+        (16, 5, 2)
+    );
+    assert_eq!(curves.sections_left_db.as_ref().map(Vec::len), Some(32));
+
+    // A refusal keeps its status and its code.
+    let mut address = response_request(16);
+    address.target = crate::ResponseTarget::Strip("vocal".to_owned());
+    address.sections = false;
+    let (_, output) = ask(&mut endpoint, 2, &address);
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } = decode_response(&output)
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::Unavailable);
+    assert_eq!(payload.diagnostics.len(), 1);
+    assert_eq!(payload.diagnostics[0].code, "response.target.unavailable");
+    assert_eq!(
+        payload.diagnostics[0].severity,
+        crate::DiagnosticSeverity::Error
+    );
+    let (_, output) = ask(&mut endpoint, 3, &response_request(1));
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } = decode_response(&output)
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::InvalidField);
+    assert_eq!(payload.diagnostics[0].code, "response.points");
+
+    // A reply past the response bound is refused whole, with its code.
+    let (_, output) = ask(&mut endpoint, 4, &response_request(200));
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } = decode_response(&output)
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::LimitExceeded);
+    assert_eq!(payload.diagnostics[0].code, "response.reply_too_large");
+
+    // The same request ID and bytes replay the same bytes and never reach the provider again.
+    let calls = endpoint.provider().response_calls();
+    let (input, first) = ask(&mut endpoint, 5, &response_request(8));
+    assert_eq!(endpoint.provider().response_calls(), calls + 1);
+    let replayed = process_full_command(&mut endpoint, &input);
+    assert_eq!(replayed, first);
+    assert_eq!(endpoint.provider().response_calls(), calls + 1);
+    assert_eq!(endpoint.session().revision(), revision);
+
+    // A disabled provider is unavailable and unadvertised.
+    endpoint.set_provider_features(ProviderFeatures {
+        response: false,
+        ..ProviderFeatures::ALL
+    });
+    let (_, output) = ask(&mut endpoint, 6, &response_request(8));
+    let crate::DecodedTypedResponseFrame::NonOk { header, .. } = decode_response(&output) else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::Unavailable);
+}
+
+/// Gate 4: a peer's capability frame that lists `0x000e` without bit 14, or sets bit 14 without
+/// `0x000e`, is refused.
+///
+/// Red if the invariant check stops tying the flag to the message.
+#[test]
+fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
+    let codec = ProtocolCodec::default();
+    let mut endpoint = controller(8, 1);
+    let response = endpoint.process(capability(1, b"tie"));
+    assert!(codec.decode_capabilities(response.payload(), 27).is_ok());
+    // Re-encode the registry with one side of the tie removed.
+    let decoded = codec
+        .decode_capabilities(response.payload(), 27)
+        .expect("registry");
+    let commands = decoded
+        .supported_commands
+        .chunks_exact(2)
+        .map(|id| u16::from_le_bytes([id[0], id[1]]))
+        .collect::<Vec<_>>();
+    let events = decoded
+        .supported_events
+        .chunks_exact(2)
+        .map(|id| u16::from_le_bytes([id[0], id[1]]))
+        .collect::<Vec<_>>();
+    let rebuilt = |commands: &[u16], flags: u64| {
+        let value = crate::Capabilities {
+            minimum_version: decoded.minimum_version,
+            maximum_version: decoded.maximum_version,
+            maximum_frame_bytes: decoded.maximum_frame_bytes,
+            maximum_tlvs: decoded.maximum_tlvs,
+            maximum_string_bytes: decoded.maximum_string_bytes,
+            maximum_nesting: decoded.maximum_nesting,
+            maximum_automation_records: decoded.maximum_automation_records,
+            control_command_slots: decoded.control_command_slots,
+            control_command_bytes: decoded.control_command_bytes,
+            automation_batch_slots: decoded.automation_batch_slots,
+            reliable_response_slots: decoded.reliable_response_slots,
+            reliable_event_slots: decoded.reliable_event_slots,
+            telemetry_slots: decoded.telemetry_slots,
+            replay_entries: decoded.replay_entries,
+            replay_bytes: decoded.replay_bytes,
+            maximum_cached_response_bytes: decoded.maximum_cached_response_bytes,
+            per_block_automation_density: decoded.per_block_automation_density,
+            admission_quantum_frames: decoded.admission_quantum_frames,
+            maximum_control_page_items: decoded.maximum_control_page_items,
+            maximum_diagnostic_page_items: decoded.maximum_diagnostic_page_items,
+            maximum_telemetry_handles: decoded.maximum_telemetry_handles,
+            maximum_transaction_edits: decoded.maximum_transaction_edits,
+            supported_commands: commands,
+            supported_events: &events,
+            flags: crate::CapabilityFlags(flags),
+        };
+        let mut payload = vec![0_u8; 4096];
+        match codec.encode_capabilities(&value, &mut payload) {
+            Ok(length) => {
+                payload.truncate(length);
+                Ok(payload)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let flags = decoded.flags.0;
+    assert!(flags & (1 << 14) != 0);
+    assert!(rebuilt(&commands, flags).is_ok());
+    let without_message = commands
+        .iter()
+        .copied()
+        .filter(|id| *id != 14)
+        .collect::<Vec<_>>();
+    assert!(rebuilt(&without_message, flags).is_err());
+    assert!(rebuilt(&commands, flags & !(1 << 14)).is_err());
+    assert!(rebuilt(&without_message, flags & !(1 << 14)).is_ok());
 }

@@ -471,6 +471,115 @@ pub(crate) mod control_state_page {
     };
 }
 
+/// `RESPONSE_GET` (decision 17, C13): the request names exactly one of a configuration, a control
+/// address or a strip, then the axis and the output shape.
+pub(crate) mod response_configuration {
+    use super::*;
+    pub(crate) const KIND: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const EFFECT: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    pub(crate) const QUALITY: FieldSpec = FieldSpec::opt(3, Wire::U8);
+    pub(crate) const LINK_MODE: FieldSpec = FieldSpec::opt(4, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseConfiguration",
+        fields: &[KIND, EFFECT, QUALITY, LINK_MODE],
+    };
+}
+
+pub(crate) mod response_override {
+    use super::*;
+    pub(crate) const CONTROL: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const LANE: FieldSpec = FieldSpec::req(2, Wire::U8);
+    pub(crate) const VALUE: FieldSpec = FieldSpec::req(3, Wire::F32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseOverride",
+        fields: &[CONTROL, LANE, VALUE],
+    };
+}
+
+pub(crate) mod response_request {
+    use super::*;
+    pub(crate) const CONFIGURATION: FieldSpec =
+        FieldSpec::msg(1, false, false, &response_configuration::SPEC);
+    pub(crate) const ADDRESS: FieldSpec = FieldSpec::msg(2, false, false, &control_address::SPEC);
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::opt(3, Wire::Utf8);
+    pub(crate) const GRID: FieldSpec = FieldSpec::req(4, Wire::U8);
+    pub(crate) const POINTS: FieldSpec = FieldSpec::req(5, Wire::U32);
+    pub(crate) const MINIMUM_HZ: FieldSpec = FieldSpec::req(6, Wire::F32);
+    pub(crate) const MAXIMUM_HZ: FieldSpec = FieldSpec::req(7, Wire::F32);
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(8, Wire::U8);
+    pub(crate) const SECTIONS: FieldSpec = FieldSpec::req(9, Wire::Bool);
+    pub(crate) const OVERRIDE: FieldSpec =
+        FieldSpec::msg(10, false, true, &response_override::SPEC);
+    pub(crate) const CONFIGURATION_ID: FieldSpec = FieldSpec::opt(11, Wire::U64);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::opt(12, Wire::U32);
+    pub(crate) const QUANTUM_FRAMES: FieldSpec = FieldSpec::opt(13, Wire::U32);
+    pub(crate) const MAXIMUM_PREPARED_BYTES: FieldSpec = FieldSpec::opt(14, Wire::U64);
+    pub(crate) const MAXIMUM_STATE_BYTES: FieldSpec = FieldSpec::opt(15, Wire::U64);
+    pub(crate) const MAXIMUM_SCRATCH_BYTES: FieldSpec = FieldSpec::opt(16, Wire::U64);
+    pub(crate) const MAXIMUM_AUTOMATION_SPANS: FieldSpec = FieldSpec::opt(17, Wire::U32);
+    pub(crate) const MAXIMUM_REPLY_BYTES: FieldSpec = FieldSpec::opt(18, Wire::U32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseRequest",
+        fields: &[
+            CONFIGURATION,
+            ADDRESS,
+            STRIP_ID,
+            GRID,
+            POINTS,
+            MINIMUM_HZ,
+            MAXIMUM_HZ,
+            CHANNELS,
+            SECTIONS,
+            OVERRIDE,
+            CONFIGURATION_ID,
+            SAMPLE_RATE_HZ,
+            QUANTUM_FRAMES,
+            MAXIMUM_PREPARED_BYTES,
+            MAXIMUM_STATE_BYTES,
+            MAXIMUM_SCRATCH_BYTES,
+            MAXIMUM_AUTOMATION_SPANS,
+            MAXIMUM_REPLY_BYTES,
+        ],
+    };
+}
+
+pub(crate) mod response_result {
+    use super::*;
+    pub(crate) const REQUEST_TAG: FieldSpec = FieldSpec::opt(1, Wire::U64);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::opt(2, Wire::U32);
+    pub(crate) const CONFIGURATION_ID: FieldSpec = FieldSpec::opt(3, Wire::U64);
+    pub(crate) const FLOOR_DB: FieldSpec = FieldSpec::opt(4, Wire::F32);
+    pub(crate) const BYPASS: FieldSpec = FieldSpec::opt(5, Wire::Bool);
+    pub(crate) const SECTION_COUNT: FieldSpec = FieldSpec::opt(6, Wire::U32);
+    pub(crate) const ENABLED_LEFT: FieldSpec = FieldSpec::opt(7, Wire::U32);
+    pub(crate) const ENABLED_RIGHT: FieldSpec = FieldSpec::opt(8, Wire::U32);
+    pub(crate) const RETAINED_BYTES: FieldSpec = FieldSpec::opt(9, Wire::U64);
+    pub(crate) const FREQUENCIES_HZ: FieldSpec = FieldSpec::opt(10, Wire::PackedF32);
+    pub(crate) const LEFT_DB: FieldSpec = FieldSpec::opt(11, Wire::PackedF32);
+    pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::opt(12, Wire::PackedF32);
+    pub(crate) const SECTIONS_LEFT_DB: FieldSpec = FieldSpec::opt(13, Wire::PackedF32);
+    pub(crate) const SECTIONS_RIGHT_DB: FieldSpec = FieldSpec::opt(14, Wire::PackedF32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseResult",
+        fields: &[
+            REQUEST_TAG,
+            SAMPLE_RATE_HZ,
+            CONFIGURATION_ID,
+            FLOOR_DB,
+            BYPASS,
+            SECTION_COUNT,
+            ENABLED_LEFT,
+            ENABLED_RIGHT,
+            RETAINED_BYTES,
+            FREQUENCIES_HZ,
+            LEFT_DB,
+            RIGHT_DB,
+            SECTIONS_LEFT_DB,
+            SECTIONS_RIGHT_DB,
+        ],
+    };
+}
+
 pub(crate) mod automation_enqueued {
     use super::*;
     pub(crate) const ACCEPTED_RECORDS: FieldSpec = FieldSpec::req(1, Wire::U16);
@@ -1624,6 +1733,10 @@ mod tests {
             &control_entry::SPEC,
             &control_list_page::SPEC,
             &control_state_page::SPEC,
+            &response_configuration::SPEC,
+            &response_override::SPEC,
+            &response_request::SPEC,
+            &response_result::SPEC,
             &automation_enqueue::SPEC,
             &automation_enqueued::SPEC,
             &transport_get::SPEC,

@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 47 canonical frames: all 11 commands (the
-session transaction contains all 35 allocated `SessionEditOpcode` values), all 12 successful
+The shared `complete_schema_corpus()` fixture has 50 canonical frames: all 12 commands (the
+session transaction contains all 35 allocated `SessionEditOpcode` values), all 14 successful
 responses, all 18 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`7de408612b837afd`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`cdfdb0540f093424`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -51,6 +51,11 @@ count is unchanged.
 The batch 4 review fold (decision 17, #1559) re-pinned it from `0433af905dc618bc`: the corpus gains
 `response.session_transaction_monitor`, a `TransactionApplied` with `edit_path` `monitor` (4), so the
 frame count is 47 and the successful responses are 12.
+Issue #1573 (decision 17, C13) re-pinned it from `7de408612b837afd`: `RESPONSE_GET` (`0x000e`)
+appends one command frame (an effect configuration with every optional field and three overrides)
+and two response frames (a curve reply with sections on both sides, and a lone tag), and the
+capability registry lists `0x000e` and sets bit 14, so the frame count is 50, the commands are 12
+and the successful responses are 14.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

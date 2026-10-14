@@ -11,7 +11,7 @@ use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PreparedPorts,
     PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput, ResponsePrepareLimits,
-    ResponseQuery, ResponseSummary, default_initial_values, normalize_zero,
+    ResponseQuery as OwnerResponseQuery, ResponseSummary, default_initial_values,
 };
 use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
@@ -481,7 +481,7 @@ impl PreparedResponsePreview {
         }
         self.owner
             .query_into(
-                ResponseQuery {
+                OwnerResponseQuery {
                     configuration_id: self.configuration_id,
                     frequencies_hz: output.frequencies_hz,
                     maximum_points: points,
@@ -585,6 +585,15 @@ pub fn prepare_response_preview(
     })
 }
 
+/// Whether two lanes of one parameter are the same storage: equal lanes, or `both` against any.
+/// A (parameter, lane) pair given twice, or `both` beside `left` or `right`, is a duplicate.
+fn lanes_overlap(first: ParameterChannel, second: ParameterChannel) -> bool {
+    first == second || first == ParameterChannel::Both || second == ParameterChannel::Both
+}
+
+/// Apply the numeric overrides over the descriptor defaults, by the decision-17 lane rule: `both`
+/// on a per-lane parameter sets both lanes, `left` or `right` sets one, and a shared parameter
+/// takes `both` only.
 fn apply_overrides(
     descriptor: &'static effect_contract::EffectDescriptor,
     initial_values: &mut [InitialParameterValue],
@@ -597,40 +606,401 @@ fn apply_overrides(
             .position(|parameter| parameter.id.0 == override_value.parameter_id)
             .ok_or(ResponsePreviewError::InvalidParameter)?;
         let parameter = &descriptor.parameters[parameter_index];
-        let expected_channel = match parameter.channel_policy {
+        let lanes: &[ParameterChannel] = match parameter.channel_policy {
             effect_contract::ParameterChannelPolicy::Shared => {
                 if override_value.channel != ParameterChannel::Both {
                     return Err(ResponsePreviewError::ConflictingChannel);
                 }
-                ParameterChannel::Both
+                &[ParameterChannel::Both]
             }
-            effect_contract::ParameterChannelPolicy::PerLane => {
-                if override_value.channel == ParameterChannel::Both {
-                    return Err(ResponsePreviewError::ConflictingChannel);
-                }
-                override_value.channel
-            }
+            effect_contract::ParameterChannelPolicy::PerLane => match override_value.channel {
+                ParameterChannel::Both => &[ParameterChannel::Left, ParameterChannel::Right],
+                ParameterChannel::Left => &[ParameterChannel::Left],
+                ParameterChannel::Right => &[ParameterChannel::Right],
+            },
         };
-        let Some(slot) = initial_values.iter_mut().find(|value| {
-            value.parameter_index == parameter_index as u32 && value.channel == expected_channel
-        }) else {
-            return Err(ResponsePreviewError::InvalidParameter);
-        };
-        if slot.value.to_bits() != parameter.default_value.to_bits()
-            && slot.value.to_bits() != normalize_zero(parameter.default_value).to_bits()
-        {
-            return Err(ResponsePreviewError::DuplicateParameter);
-        }
-        // The exact slot is still marked below; a separate bitset is not needed because a
-        // duplicate is detected by the sentinel's original default value for every descriptor.
-        // Defaults can be repeated, so use the preceding rows to make duplicate detection exact.
         if overrides[..index].iter().any(|previous| {
             previous.parameter_id == override_value.parameter_id
-                && previous.channel == override_value.channel
+                && lanes_overlap(previous.channel, override_value.channel)
         }) {
             return Err(ResponsePreviewError::DuplicateParameter);
         }
-        slot.value = override_value.value;
+        for lane in lanes {
+            let slot = initial_values
+                .iter_mut()
+                .find(|value| {
+                    value.parameter_index == parameter_index as u32 && value.channel == *lane
+                })
+                .ok_or(ResponsePreviewError::InvalidParameter)?;
+            slot.value = override_value.value;
+        }
+    }
+    Ok(())
+}
+
+/// The input-filter target of a list of override rows over the rows' defaults: the builtin
+/// `hpf_hz` and `lpf_hz` parameters, each per lane. An absent lane keeps the row's default;
+/// `both` sets both lanes; any other builtin parameter is not part of the input filters.
+pub fn input_filter_target(
+    overrides: &[ResponseParameterOverride],
+) -> Result<ResponsePreviewTarget<'static>, ResponsePreviewError> {
+    let default_of = |name: &str| {
+        builtins::BUILTIN_PARAMETER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == name)
+            .map_or(0.0, |descriptor| descriptor.default)
+    };
+    let (hpf, lpf) = (default_of("hpf_hz"), default_of("lpf_hz"));
+    // [left hpf, left lpf, right hpf, right lpf]
+    let mut cutoffs = [hpf, lpf, hpf, lpf];
+    for (index, row) in overrides.iter().enumerate() {
+        let descriptor = builtins::BUILTIN_PARAMETER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == row.parameter_id)
+            .ok_or(ResponsePreviewError::InvalidParameter)?;
+        let offset = match descriptor.name {
+            "hpf_hz" => 0,
+            "lpf_hz" => 1,
+            _ => return Err(ResponsePreviewError::InvalidParameter),
+        };
+        if overrides[..index].iter().any(|previous| {
+            previous.parameter_id == row.parameter_id
+                && lanes_overlap(previous.channel, row.channel)
+        }) {
+            return Err(ResponsePreviewError::DuplicateParameter);
+        }
+        if matches!(row.channel, ParameterChannel::Left | ParameterChannel::Both) {
+            cutoffs[offset] = row.value;
+        }
+        if matches!(
+            row.channel,
+            ParameterChannel::Right | ParameterChannel::Both
+        ) {
+            cutoffs[2 + offset] = row.value;
+        }
+    }
+    Ok(ResponsePreviewTarget::InputFilters {
+        left_hpf_hz: cutoffs[0],
+        left_lpf_hz: cutoffs[1],
+        right_hpf_hz: cutoffs[2],
+        right_lpf_hz: cutoffs[3],
+    })
+}
+
+/// The most points one response query may ask for, on every host.
+pub const RESPONSE_MAXIMUM_POINTS: usize = 4096;
+/// The most parameter overrides one effect response query may carry, on every host.
+pub const RESPONSE_MAXIMUM_OVERRIDES: usize = 256;
+
+/// Which sides of a response a query returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ResponseChannels {
+    /// The left side only.
+    Left = 1,
+    /// The right side only.
+    Right = 2,
+    /// Both sides.
+    Both = 3,
+}
+
+impl ResponseChannels {
+    /// Decode the wire bits (`1` left, `2` right, `3` both); any other value is `None`.
+    #[must_use]
+    pub fn from_raw(raw: impl Into<u32>) -> Option<Self> {
+        match raw.into() {
+            1 => Some(Self::Left),
+            2 => Some(Self::Right),
+            3 => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    const fn left(self) -> bool {
+        matches!(self, Self::Left | Self::Both)
+    }
+
+    const fn right(self) -> bool {
+        matches!(self, Self::Right | Self::Both)
+    }
+}
+
+/// One complete response query: the owner, the axis and the output shape.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseQuery<'a> {
+    /// Opaque caller correlation identity, echoed in the curves.
+    pub configuration_id: u64,
+    /// Explicit launch sample rate.
+    pub sample_rate_hz: u32,
+    /// Explicit render quantum used by native effect validation.
+    pub quantum_frames: u32,
+    /// One owner-local target.
+    pub target: ResponsePreviewTarget<'a>,
+    /// The frequency axis.
+    pub grid: ResponsePreviewGrid,
+    /// Which sides to return.
+    pub channels: ResponseChannels,
+    /// Whether to return the per-section curves as well as the totals.
+    pub sections: bool,
+    /// Preparation/resource caps.
+    pub limits: ResponsePreviewLimits,
+}
+
+/// Why a response query was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseQueryError {
+    /// The shared preview preparation or query refused it.
+    Preview(ResponsePreviewError),
+    /// The point count is outside `2..=RESPONSE_MAXIMUM_POINTS`.
+    Points,
+    /// More than `RESPONSE_MAXIMUM_OVERRIDES` overrides.
+    Overrides,
+    /// The sample rate is not a launch rate.
+    SampleRate,
+}
+
+/// The class of a refused response query, which a host maps to its own status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseRefusal {
+    /// A field of the request is outside its domain.
+    InvalidField,
+    /// A count, size or resource bound is exceeded.
+    LimitExceeded,
+    /// The named effect does not exist.
+    NotFound,
+    /// The request is well formed and this build cannot serve it.
+    Unavailable,
+    /// The owner refused the configuration; the code is the owner's own.
+    ValidationFailed,
+    /// The query failed after it was admitted; no request change cures it.
+    Internal,
+}
+
+impl ResponseQueryError {
+    /// The one refusal table of the response query (decision 17, C13, D6): the class and the
+    /// dotted code that every host reports for this error.
+    #[must_use]
+    pub fn refusal(&self) -> (ResponseRefusal, &'static str) {
+        use ResponseRefusal::{
+            Internal, InvalidField, LimitExceeded, NotFound, Unavailable, ValidationFailed,
+        };
+        match *self {
+            Self::Points => (InvalidField, "response.points"),
+            Self::Overrides => (LimitExceeded, "response.override.count"),
+            Self::SampleRate => (InvalidField, "response.rate"),
+            Self::Preview(error) => match error {
+                ResponsePreviewError::InvalidShape => (InvalidField, "response.rate"),
+                ResponsePreviewError::InvalidGrid => (InvalidField, "response.grid"),
+                ResponsePreviewError::UnknownEffect => (NotFound, "response.effect.unknown"),
+                ResponsePreviewError::UnsupportedEffect => {
+                    (Unavailable, "response.effect.unsupported")
+                }
+                ResponsePreviewError::InvalidParameter => {
+                    (InvalidField, "response.override.control")
+                }
+                ResponsePreviewError::ConflictingChannel => {
+                    (InvalidField, "response.override.lane")
+                }
+                ResponsePreviewError::DuplicateParameter => {
+                    (InvalidField, "response.override.duplicate")
+                }
+                ResponsePreviewError::OutputShape => (Internal, "response.internal"),
+                ResponsePreviewError::Owner(error) => match error {
+                    ResponseAnalysisError::InvalidFrequencyGrid => (InvalidField, "response.grid"),
+                    ResponseAnalysisError::UnsupportedMode
+                    | ResponseAnalysisError::UnsupportedCapability => {
+                        (Unavailable, "response.effect.unsupported")
+                    }
+                    ResponseAnalysisError::Configuration(error) => (ValidationFailed, error.code),
+                    ResponseAnalysisError::Capacity | ResponseAnalysisError::ResourceLimit => {
+                        (LimitExceeded, "response.limit")
+                    }
+                    ResponseAnalysisError::Numerical => (Internal, "response.numerical"),
+                    ResponseAnalysisError::OutputShape => (Internal, "response.internal"),
+                },
+            },
+        }
+    }
+}
+
+/// The checks of a response query that need no owner, in the order every host reports them: an
+/// unsupported rate, a point count outside `2..=4096`, more than [`RESPONSE_MAXIMUM_OVERRIDES`]
+/// override rows, then the frequency axis. [`prepare_response_query`] runs them first; a host that
+/// shapes the request before calling it (the control provider folds override rows into a bypass
+/// and cutoffs) runs them before its own shaping, so the core's refusal wins whichever request
+/// word is wrong first.
+pub(crate) fn check_response_request(
+    sample_rate_hz: u32,
+    grid: ResponsePreviewGrid,
+    override_count: usize,
+) -> Result<(), ResponseQueryError> {
+    if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
+        return Err(ResponseQueryError::SampleRate);
+    }
+    if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&grid.points()) {
+        return Err(ResponseQueryError::Points);
+    }
+    if override_count > RESPONSE_MAXIMUM_OVERRIDES {
+        return Err(ResponseQueryError::Overrides);
+    }
+    // The axis rules are the query's, not the owner's: refuse a bad axis here, before any owner is
+    // prepared, so a host answers it the same way and with the same code.
+    check_response_axis(grid, sample_rate_hz).map_err(ResponseQueryError::Preview)
+}
+
+/// A response query whose owner is prepared; `curves` evaluates it.
+pub struct PreparedResponseQuery {
+    preview: PreparedResponsePreview,
+    grid: ResponsePreviewGrid,
+    channels: ResponseChannels,
+    sections: bool,
+}
+
+/// The evaluated curves of one response query.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponseCurves {
+    /// The caller's correlation identity.
+    pub configuration_id: u64,
+    /// The sample rate the owner was prepared at.
+    pub sample_rate_hz: u32,
+    /// The lowest level a curve reports, in dB.
+    pub floor_db: f32,
+    /// Effect-wide bypass as the owner holds it.
+    pub bypass: bool,
+    /// Number of owner sections.
+    pub section_count: u32,
+    /// Enabled-section mask of the left side: bit `min(index, 31)` per enabled section.
+    pub enabled_left: u32,
+    /// Enabled-section mask of the right side.
+    pub enabled_right: u32,
+    /// Owner payload bytes retained by the preparation.
+    pub retained_bytes: u64,
+    /// The engine-generated frequency axis.
+    pub frequencies_hz: Vec<f32>,
+    /// Left total, when the channels include left.
+    pub left_db: Option<Vec<f32>>,
+    /// Right total, when the channels include right.
+    pub right_db: Option<Vec<f32>>,
+    /// Left section curves, section-major, when sections are asked for and left is included.
+    pub sections_left_db: Option<Vec<f32>>,
+    /// Right section curves, section-major, when sections are asked for and right is included.
+    pub sections_right_db: Option<Vec<f32>>,
+}
+
+/// Prepare one response query: refuse an unsupported rate, point count, override count or frequency
+/// axis before any owner is prepared, then prepare the owner through [`prepare_response_preview`].
+pub fn prepare_response_query(
+    query: &ResponseQuery<'_>,
+) -> Result<PreparedResponseQuery, ResponseQueryError> {
+    let override_count = match query.target {
+        ResponsePreviewTarget::Effect { overrides, .. } => overrides.len(),
+        ResponsePreviewTarget::InputFilters { .. } => 0,
+    };
+    check_response_request(query.sample_rate_hz, query.grid, override_count)?;
+    let preview = prepare_response_preview(ResponsePreviewRequest {
+        configuration_id: query.configuration_id,
+        sample_rate_hz: query.sample_rate_hz,
+        quantum_frames: query.quantum_frames,
+        target: query.target,
+        limits: query.limits,
+    })
+    .map_err(ResponseQueryError::Preview)?;
+    Ok(PreparedResponseQuery {
+        preview,
+        grid: query.grid,
+        channels: query.channels,
+        sections: query.sections,
+    })
+}
+
+impl PreparedResponseQuery {
+    /// Number of sections the owner reports.
+    #[must_use]
+    pub fn section_count(&self) -> usize {
+        self.preview.descriptor().sections.len()
+    }
+
+    /// Number of points on the axis.
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.grid.points()
+    }
+
+    /// Evaluate the curves. An error leaves nothing behind.
+    pub fn curves(&self) -> Result<ResponseCurves, ResponseQueryError> {
+        let points = self.points();
+        let section_count = self.section_count();
+        let section_points =
+            section_count
+                .checked_mul(points)
+                .ok_or(ResponseQueryError::Preview(
+                    ResponsePreviewError::OutputShape,
+                ))?;
+        let mut frequencies = vec![0.0; points];
+        let mut left = vec![0.0; points];
+        let mut right = vec![0.0; points];
+        let mut sections_left = self.sections.then(|| vec![0.0; section_points]);
+        let mut sections_right = self.sections.then(|| vec![0.0; section_points]);
+        let summary = self
+            .preview
+            .query_into(
+                self.grid,
+                ResponsePreviewOutput {
+                    frequencies_hz: &mut frequencies,
+                    total_left_db: &mut left,
+                    total_right_db: &mut right,
+                    sections_left_db: sections_left.as_deref_mut(),
+                    sections_right_db: sections_right.as_deref_mut(),
+                },
+            )
+            .map_err(ResponseQueryError::Preview)?;
+        let configuration = self.preview.configuration();
+        let mask = |values: &[bool]| {
+            values
+                .iter()
+                .enumerate()
+                .fold(0_u32, |mask, (index, enabled)| {
+                    mask | (u32::from(*enabled) << index.min(31))
+                })
+        };
+        let want_left = self.channels.left();
+        let want_right = self.channels.right();
+        Ok(ResponseCurves {
+            configuration_id: summary.configuration_id,
+            sample_rate_hz: summary.sample_rate_hz,
+            floor_db: summary.floor_db,
+            bypass: configuration.bypass.unwrap_or(false),
+            section_count: u32::try_from(section_count).unwrap_or(0),
+            enabled_left: mask(configuration.enabled_left),
+            enabled_right: mask(configuration.enabled_right),
+            retained_bytes: u64::try_from(self.preview.retained_bytes()).unwrap_or(u64::MAX),
+            frequencies_hz: frequencies,
+            left_db: want_left.then_some(left),
+            right_db: want_right.then_some(right),
+            sections_left_db: sections_left.filter(|_| want_left),
+            sections_right_db: sections_right.filter(|_| want_right),
+        })
+    }
+}
+
+/// The frequency-axis rules of a response query, checked once and before any owner is prepared or
+/// any buffer is allocated (decision 17, C13): both endpoints are finite, the minimum is not
+/// negative and below the maximum, the maximum is at most Nyquist, a logarithmic axis starts above
+/// zero, and the axis has at least two points.
+fn check_response_axis(
+    grid: ResponsePreviewGrid,
+    sample_rate_hz: u32,
+) -> Result<(), ResponsePreviewError> {
+    let (minimum_hz, maximum_hz) = grid.endpoints();
+    if grid.points() < 2
+        || !minimum_hz.is_finite()
+        || !maximum_hz.is_finite()
+        || minimum_hz < 0.0
+        || minimum_hz >= maximum_hz
+        || maximum_hz > sample_rate_hz as f32 * 0.5
+        || (matches!(grid, ResponsePreviewGrid::Logarithmic { .. }) && minimum_hz <= 0.0)
+    {
+        return Err(ResponsePreviewError::InvalidGrid);
     }
     Ok(())
 }
@@ -643,17 +1013,10 @@ pub fn generate_response_grid(
 ) -> Result<(), ResponsePreviewError> {
     let points = grid.points();
     let (minimum_hz, maximum_hz) = grid.endpoints();
-    if points < 2
-        || output.len() != points
-        || !minimum_hz.is_finite()
-        || !maximum_hz.is_finite()
-        || minimum_hz < 0.0
-        || minimum_hz >= maximum_hz
-        || maximum_hz > sample_rate_hz as f32 * 0.5
-        || (matches!(grid, ResponsePreviewGrid::Logarithmic { .. }) && minimum_hz <= 0.0)
-    {
+    if output.len() != points {
         return Err(ResponsePreviewError::InvalidGrid);
     }
+    check_response_axis(grid, sample_rate_hz)?;
     let denominator = (points - 1) as f64;
     for index in 0..points {
         let t = index as f64 / denominator;
@@ -993,14 +1356,31 @@ mod tests {
             prepare_response_preview(request(&duplicate)).err(),
             Some(ResponsePreviewError::DuplicateParameter)
         ));
-        assert!(matches!(
+        // `both` on a per-lane parameter sets both lanes, and a `both` beside a `left` of the same
+        // parameter is a duplicate.
+        assert!(
             prepare_response_preview(request(&[ResponseParameterOverride {
                 parameter_id: id,
                 channel: ParameterChannel::Both,
                 value: 1.0,
             }]))
-            .err(),
-            Some(ResponsePreviewError::ConflictingChannel)
+            .is_ok()
+        );
+        let both_and_left = [
+            ResponseParameterOverride {
+                parameter_id: id,
+                channel: ParameterChannel::Both,
+                value: 1.0,
+            },
+            ResponseParameterOverride {
+                parameter_id: id,
+                channel: ParameterChannel::Left,
+                value: 0.0,
+            },
+        ];
+        assert!(matches!(
+            prepare_response_preview(request(&both_and_left)).err(),
+            Some(ResponsePreviewError::DuplicateParameter)
         ));
     }
 

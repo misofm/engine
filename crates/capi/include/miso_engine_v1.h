@@ -102,6 +102,25 @@ extern "C" {
  * reports revisions only, so it never reads a number above the committed revision, and it is
  * never early.
  *
+ * Response preview (issue 1573). RESPONSE_GET (message ID 0x000e, capability flag bit 14)
+ * through miso_engine_v1_submit_command asks for the frequency response of a native effect or of
+ * the input filters, for parameters the caller chooses, and answers the curves in the reply. No C
+ * symbol or struct is added. The request names one configuration (the effect, its quality and
+ * link mode, or the input filters), the axis (linear or logarithmic, 2 to 4096 points, between
+ * two frequencies up to the session's Nyquist frequency), the sides, whether the per-section
+ * curves are wanted, and any overrides: a control ID, a lane (left, right or both) and a value.
+ * Control 0 of an effect is its bypass (lane both, value exactly 0 or 1); both on a per-lane
+ * parameter sets both lanes. The reply is computed at the session's sample rate and quantum from
+ * the same core function the browser uses, so the request must not carry its own rate or quantum
+ * (response.rate.session). It is a read: it changes no session, revision or catalog. A refusal is
+ * a typed non-OK response whose one error diagnostic carries the code (for example
+ * response.points, response.grid, response.effect.unknown, response.override.control,
+ * response.limit, response.target.unavailable); a reply that would not fit the control frame
+ * limit, or the request's own maximum_reply_bytes, is refused whole as
+ * response.reply_too_large before any curve is computed. An exact replay of the request returns
+ * the same bytes and computes nothing. The address and strip targets are refused
+ * response.target.unavailable until their slices.
+ *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
  * publication and retirement credit, commits, and returns; it never waits for a render call or a

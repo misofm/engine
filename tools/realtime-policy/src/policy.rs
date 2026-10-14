@@ -155,7 +155,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 21] = [
+        const UNSAFE_ALLOWLIST: [&str; 22] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -171,6 +171,7 @@ impl Policy {
             "crates/capi/tests/resource_lifecycle.rs",
             "crates/capi/tests/design_bound_cache.rs",
             "crates/capi/tests/plan_swap_race.rs",
+            "crates/capi/tests/response_get.rs",
             "hosts/host-web/src/ffi.rs",
             "hosts/host-web/src/render_lock.rs",
             "hosts/host-web/tests/boot_transient_budget.rs",
@@ -186,10 +187,12 @@ impl Policy {
             // The floors equal the tree's counts, so a deleted marker or file fails here. They
             // carry stream B's raises (#1432's `latest_cell.rs`, #1277, #1279, #1346, #1347 and
             // #1345 D9: the awk gate's 118 regions in 27 files), #1448's `poll_meters` region and
-            // #1443's seven (three in `crates/source`, four in `spectrum.rs`). A change that adds
-            // a marker raises them in the same change.
-            marked_files_floor: 27,
-            marked_regions_floor: 126,
+            // #1443's seven (three in `crates/source`, four in `spectrum.rs`) and the spectrum
+            // service's two (`spectrum_service.rs`: the prepared captures' one-shot methods and the
+            // service's arm, read, cancel and select; #1591 fold). A change that adds a marker
+            // raises them in the same change.
+            marked_files_floor: 28,
+            marked_regions_floor: 128,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

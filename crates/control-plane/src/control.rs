@@ -1469,9 +1469,11 @@ where
     /// a cell write on every instance, the EQ's included: render reads the bypass cell first and
     /// the parameter and target cells after it (#1345 D3).
     ///
-    /// It never reserves a plan or adds a report row. It builds the committed model's control
+    /// It never reserves a plan or adds a report row. It stages the committed model's control
     /// catalog before the first write and publishes it after the commit, so the control list
-    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3), and its structure
+    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3, #1552 D3). The stage reads only
+    /// the rows of the owners whose values changed and the derived rows, unless an address, a
+    /// descriptor or a setting changed, which stages the whole catalog (#1600). The structure
     /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
     /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
@@ -1506,7 +1508,7 @@ where
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
-        let catalog = match self.live_admission(&prepared, &monitor_change.overlay) {
+        let catalog = match self.live_admission(&prepared, &monitor_change.overlay, &delta) {
             Ok(catalog) => catalog,
             Err(error) => return LiveCommit::Done(Err(error)),
         };
@@ -1804,10 +1806,10 @@ where
         // inputs, and the structure epoch advances if any descriptor changed (a `matrix_mode`
         // switch flips `active`). Nothing here allocates or fails.
         let previous_catalog = self.controller.provider().catalog_resources();
-        let committed_catalog = catalog.resources();
         self.controller
             .provider_mut()
-            .replace_session_catalog(catalog, revision);
+            .publish_staged_catalog(catalog, revision);
+        let committed_catalog = self.controller.provider().catalog_resources();
         // The newest epoch's rows follow the committed catalog (#1558 D6): it holds the catalog
         // once in its retained bytes and once in the prepared-protocol stand-in, which later
         // admissions charge, and `plan_resources` reports the retained bytes. An older epoch's row
@@ -1853,7 +1855,8 @@ where
         &self,
         prepared: &ObservedPreparedToken,
         overlay: &controls::MonitorOverlay,
-    ) -> Result<host_core::ControlCatalog, CommandError> {
+        delta: &host_core::LiveDelta<'_>,
+    ) -> Result<host_core::StagedCatalog, CommandError> {
         // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
         // function, the same diagnostic, and nothing is committed on a refusal.
         host_core::check_counts(
@@ -1873,15 +1876,25 @@ where
         // The new catalog, before anything is written. A VCA added live adds rows to it, so it
         // can outgrow the catalog the epochs were prepared with.
         let prospective = prepared.get().prospective_session().compiled();
-        let catalog = host_core::ControlCatalog::build(
-            prospective.normalized_model(),
-            overlay,
-            prospective.sample_rate().0,
-        )
-        .map_err(|_| CommandError::Internal)?;
+        let catalog = self
+            .controller
+            .provider()
+            .stage_live_catalog(
+                prospective.normalized_model(),
+                overlay,
+                prospective.sample_rate().0,
+                delta,
+            )
+            .map_err(|_| CommandError::Internal)?;
+        // A values-only stage holds no table: the catalog stays as large as it is, and only a
+        // full catalog is held beside the current one until the commit publishes it.
+        let current_catalog = self.controller.provider().catalog_resources();
         let catalog_admission = LiveCatalogAdmission::between(
-            self.controller.provider().catalog_resources(),
-            catalog.resources(),
+            current_catalog,
+            match &catalog {
+                host_core::StagedCatalog::Values(_) => current_catalog,
+                host_core::StagedCatalog::Full(full) => full.resources(),
+            },
         );
         let (current, pending) = {
             let reports = self

@@ -937,6 +937,9 @@ where
         sample_source,
         retained_capacity,
         RENDER_DIAGNOSTIC_SLOTS,
+        // A reply must fit the endpoint's frame and the replay cache's response bound, both the
+        // host's control frame limit.
+        control_bytes,
     )
     .map_err(|_| failure(ResourceFault::Allocation))?;
     let controller = ProtocolController::try_with_config_and_retained_capacity(

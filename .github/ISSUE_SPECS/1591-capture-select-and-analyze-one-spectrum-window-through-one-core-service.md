@@ -234,3 +234,93 @@ chromium, firefox and webkit.
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record
+
+Implemented 2026-10-14 on `codex/controls-batch-6k` (feature sprint mode; no mutation runs, no
+browser runs). Adaptations to the frozen decisions, each with its reason:
+
+1. **D7 applies to a select that would change the selection.** A select of the entry that is
+   already selected discards nothing, so it stays accepted (`Ok(false)`) while the caller holds an
+   arm. `selection_would_change` reports the same `Busy`, so the browser's preflight in
+   `select_spectrum_with_smoothing` sees the refusal first. Reason: the spec names `arm` followed
+   by `select` of another entry as the only changed browser sequence; refusing a no-op select would
+   change a second one.
+2. **The stream hand-off.** `PreparedSpectrumCaptures` carries the stream methods that
+   `PreparedSpectrumCapture` had (start, start with hop, restart, stop, read, cadence, epoch),
+   because the host-web stream methods still call them until #1592. `SpectrumService::captures`
+   (read-only) and `captures_mut` give host-web that access; `end_caller_arm` is called after a
+   successful stream start, which replaces a collection entry's arm. #1592 D4 replaces the three
+   accessors with the stream methods on the service.
+3. **`SpectrumPreparationRequest` stays as a `pub use` alias** of `host_core::SpectrumPreparation`
+   in host-web, so its public name and `tests.rs` do not change. The host-web `SPECTRUM_*`
+   constants are `const` re-exports of the core's, with the same values and names.
+4. **Collection staging order.** host-web checks the record words of every entry (reserved words,
+   ID length, UTF-8) before the core checks the aggregate budget and the entry kinds and masks. A
+   request that is wrong in both ways answers `RESULT_INVALID_ARGUMENT` where it answered
+   `RESULT_REFUSED_BUDGET` when the budget was zero. A valid request answers as before; the core
+   checks the budget before any entry. An empty collection with a non-zero budget keeps
+   `RESULT_INVALID_ARGUMENT` through host-web's own record check.
+5. **Read.** (a) A collection with no selection answers `RESULT_WRONG_STATE` (`NotArmed`, D3); it
+   was `RESULT_INVALID_ARGUMENT`. (b) The token advance is checked before the pop: the old code
+   popped, then refused with `RESULT_REFUSED_BUDGET` and lost the window. (c) The export no longer
+   reads the host's rate: the service stamps its own session rate on the snapshot.
+6. **`SpectrumSnapshot::validate` runs on the stream path too**, as the one place that holds the
+   kind, token, end-sample and rate checks. A stream header now needs a launch rate; the engine
+   writes one, so no producible window changes.
+7. **Analysis storage.** The staging holds `Option<SpectrumAnalysis>` and one
+   `Option<Box<SpectrumAnalysisResult>>`, made together by `ensure_analysis_storage`. Like the
+   analyzer, they are worker-owned and outside the retained-bytes report, so no budget row moves.
+   The stream analysis writes into the same result arrays.
+8. **`write_spectrum_window` keeps its signature**; the read export passes the snapshot's fields.
+   The realtime policy's reached-function list is unchanged, so `REALTIME_DEPENDENCY_POLICY.md`
+   needed no edit. No file under `crates/engine/src/realtime/` was touched.
+
+Not done, by the sprint mode: the browser qualification rows, the SDK browser evals, the one-time
+byte comparison of analyzed output against the base commit, and `hosts/host-web/MUTATIONS.md`
+(two rows still name `PreparedSpectrumCapture::channels`, now `PreparedSpectrumCaptures::channels`
+in `host-core`; that file is outside this slice's paths).
+
+Evidence: `cargo test -p host-core --all-features` (new `tests/spectrum_service.rs`: gates 1-5),
+`cargo test -p host-web --features test-support` (one new test, `select_after_the_callers_arm_is_
+backpressure_until_the_window_is_read`, gate 6), `realtime-policy`, `check-host-core-policy.sh`,
+workspace clippy and rustdoc with warnings denied, the AudioWorklet build and its static check,
+`check-sdk-headless.sh` (429 tests) and `check-browser-expected-resources.py`.
+
+**Batch 6 review fold, 2026-10-14.**
+
+- **Read-export refusals, completed.** The export that held its own checks answered four cases
+  differently from the core service it now calls. Decision-record item 5 named the first three
+  words; this is the whole list, each pinned in `hosts/host-web/src/ffi.rs` or the core's tests:
+  1. A host prepared without a spectrum: `RESULT_UNSUPPORTED` (was `RESULT_INVALID_ARGUMENT`, from
+     the old `available == 0` check). `the_read_export_answers_the_core_refusals`.
+  2. A collection with no selected entry: `RESULT_WRONG_STATE` (was `RESULT_INVALID_ARGUMENT`).
+     The same test.
+  3. A token that cannot advance: the service refuses before the pop and keeps the window (the old
+     export popped, then refused with the same `RESULT_REFUSED_BUDGET` and lost the window). No test
+     moves the token from outside the service.
+  4. The rate: the snapshot carries the service's session rate, not the host status word the export
+     read (no producible value differs).
+  A mask outside the selected one is still `RESULT_INVALID_ARGUMENT` before the pop, as before
+  (`invalid_spectrum_channel_selection_preserves_window_for_valid_retry`).
+- **Request words are the core's.** host-web no longer repeats the empty-collection budget rule or
+  the 1 to 127 identity rule: it keeps the staging bounds (transport), and `SpectrumPreparation`
+  answers the rest. One answer moves: an empty collection with a non-zero budget is now
+  `RESULT_REFUSED_BUDGET` (the core's budget refusal), where item 4 above kept
+  `RESULT_INVALID_ARGUMENT` through a host-web check; item 4's ordering is unchanged otherwise.
+  `staged_request_words_are_answered_as_the_core_answers_them`.
+- **One snapshot rule.** `write_spectrum_window` takes a `&SpectrumSnapshot` and calls
+  `SpectrumSnapshot::validate()`, so a window the analysis would refuse is not encoded either (the
+  copy it had checked a rate of zero where the core requires a launch rate).
+- **D7 amended: the headless sequence.** The sequence `subscribeSpectrum(A)`, close,
+  `armSpectrum()`, `subscribeSpectrum(B)` on a headless engine with a spectrum collection used to
+  replace the armed window and now throws typed `backpressure`: `armSpectrum()` made the arm the
+  caller's, and the managed subscription's select would change the entry. The record above said no
+  SDK path sends `arm` followed by `select`; this one does, through the managed subscription. The
+  ruling stands (a caller's acknowledged arm is never discarded without a refusal); the SDK README
+  states the sequence and the cure (read or cancel the armed window first).
+- **Realtime markers.** The prepared captures' one-shot methods and the service's `arm`, `read`,
+  `cancel`, `select` and queries carry `REALTIME_POLICY` markers in `spectrum_service.rs`; the
+  policy floors rise to 128 regions in 28 files.
+- **Storage.** The staging's boxed `SpectrumAnalysisResult` is about 12 KiB (three 1,025-bin planes);
+  it is worker-owned like the analyzer and outside the retained report, now stated at the field.

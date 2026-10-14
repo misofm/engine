@@ -226,9 +226,21 @@ fn descriptor(row: &RouteRow, route: &Route) -> ControlDescriptor {
 
 /// Append every control row of one route. `gate` is the route's effective gate, per source lane.
 pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2]) {
+    push_route_rows(out, route, gate, false);
+}
+
+/// Append only a route's derived rows (its effective gate), in listing order.
+pub(crate) fn push_derived_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2]) {
+    push_route_rows(out, route, gate, true);
+}
+
+fn push_route_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2], derived_only: bool) {
     let owner = Owner::Route(route.id.clone());
     for row in &ROWS {
         let descriptor = descriptor(row, route);
+        if derived_only && descriptor.class != ControlClass::Derived {
+            continue;
+        }
         push_control(
             out,
             &owner,

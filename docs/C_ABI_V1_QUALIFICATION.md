@@ -234,15 +234,21 @@ device 0.
 
 IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
 `host_core::SessionControlProvider`. Since #1552 the provider serves the control list
-(`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core: its
+(`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core, and since #1573 the
+response preview (`RESPONSE_GET`, capability flag bit 14; decision 17, C13) from the core's `prepare_response_query`: its
 catalog is `host_core::ControlCatalog`, built from the compiled session's `controls::list` with an
 owner header before each owner's rows and a section header before each section's, each entry at its
 handle (from 1, in list order) and its committed value beside it. The catalog holds owners, sections and the distinct control descriptors once each in three shared tables (descriptors compared by bits) and one 16-byte record per entry, and a page builds its wire entries from them (#1599). The list therefore covers every
 control of the session (strips, builtins, console slots, inserts, routes, VCAs and the session's
-own rows), and can never disagree with what `controls` validates. Every commit replaces the
-catalog with the committed model's (a live commit builds it before its first write and publishes it
-after the commit), so values are re-read through `controls::list` and a derived row follows its
-inputs. `structure_epoch` starts at 1 and
+own rows), and can never disagree with what `controls` validates. Every commit publishes the
+catalog of the committed model. A rebuild builds the whole catalog in preparation. A live commit
+stages its catalog before its first write (`ControlCatalog::stage_live`, fallible, #1600): it reads
+again only the rows of the owners whose values changed, from `controls::owner_rows_with`, and
+every derived row from one effective pass, and it stages the whole catalog instead when a setting
+(`control_smoothing`) changed, the owners differ (a VCA added or removed) or a changed owner lists
+other addresses or descriptors. The publish after the commit writes the staged values or swaps the
+staged catalog, with no allocation, so a derived row follows its inputs and the list equals what a
+full build gives. `structure_epoch` starts at 1 and
 advances by one on every commit, live or rebuild, after which the address sequence, a header or any
 control row's descriptor (every field except `value`) differs from the previous catalog (a live
 `matrix_mode` switch flips `active` and so advances it; a fader move does not); a
@@ -711,7 +717,8 @@ and compares the resolved values bit by bit.
   write.
 - **The readback follows.** After the commit, the control state (`CONTROL_STATE_GET`) and the
   control list (`CONTROL_LIST_GET`) report each live value, exactly as a rebuild's catalog would
-  (#1552: the catalog's values are re-read from the committed model). The catalog's handles and
+  (#1552, #1600: the catalog's values are refreshed from the committed model, reading again only the
+  changed owners' rows and the derived rows). The catalog's handles and
   `structure_epoch` do not change.
 - **Effects keep their state.** A live parameter edit is not bit-identical to a fresh plan of the
   edited session, because the effect's history differs; it is bit-identical to the browser's live

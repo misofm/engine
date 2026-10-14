@@ -11,9 +11,10 @@ use crate::{
     CountersRequest, DecodeError, DecodeScratch, DecodedAutomationEnqueue, DecodedCapabilities,
     DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
     EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse, OUTER_HEADER_BYTES,
-    ProtocolCodec, RequestId, ResponseHeader, SessionCommitted, SessionEdit, SessionRevision,
-    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseResult, SessionCommitted,
+    SessionEdit, SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode,
+    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub enum CommandPayload<'a> {
     DiagnosticsGet(DiagnosticsRequest),
     ControlListGet(&'a ControlListRequest),
     ControlStateGet(&'a ControlListRequest),
+    ResponseGet(&'a ResponseGetRequest),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -74,6 +76,7 @@ pub enum SuccessResponsePayload<'a> {
     DiagnosticsPage(DiagnosticsPage),
     ControlListPage(ControlListPage),
     ControlStatePage(ControlStatePage),
+    ResponseResult(ResponseResult),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -126,6 +129,7 @@ pub enum DecodedCommandPayload<'a> {
     DiagnosticsGet(DiagnosticsRequest),
     ControlListGet(ControlListRequest),
     ControlStateGet(ControlListRequest),
+    ResponseGet(ResponseGetRequest),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -149,6 +153,7 @@ pub enum DecodedSuccessResponsePayload<'a> {
     DiagnosticsPage(DiagnosticsPage),
     ControlListPage(ControlListPage),
     ControlStatePage(ControlStatePage),
+    ResponseResult(ResponseResult),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -196,6 +201,7 @@ impl<'a> CommandPayload<'a> {
             Self::DiagnosticsGet(_) => MessageId::DiagnosticsGet,
             Self::ControlListGet(_) => MessageId::ControlListGet,
             Self::ControlStateGet(_) => MessageId::ControlStateGet,
+            Self::ResponseGet(_) => MessageId::ResponseGet,
         }
     }
 }
@@ -214,6 +220,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::DiagnosticsPage(_) => MessageId::DiagnosticsGet,
             Self::ControlListPage(_) => MessageId::ControlListGet,
             Self::ControlStatePage(_) => MessageId::ControlStateGet,
+            Self::ResponseResult(_) => MessageId::ResponseGet,
         }
     }
 }
@@ -448,6 +455,9 @@ impl ProtocolCodec {
             MessageId::ControlStateGet => DecodedCommandPayload::ControlStateGet(
                 self.decode_control_list_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::ResponseGet => DecodedCommandPayload::ResponseGet(
+                self.decode_response_request(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedCommandFrame { header, payload })
@@ -507,6 +517,9 @@ impl ProtocolCodec {
             ),
             MessageId::ControlStateGet => DecodedSuccessResponsePayload::ControlStatePage(
                 self.decode_control_state_page(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ResponseGet => DecodedSuccessResponsePayload::ResponseResult(
+                self.decode_response_result(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -674,6 +687,9 @@ fn write_command_payload(
         CommandPayload::ControlListGet(value) | CommandPayload::ControlStateGet(value) => {
             crate::message_wire::write_control_request(sink, value)
         }
+        CommandPayload::ResponseGet(value) => {
+            crate::message_wire::write_response_request(sink, value)
+        }
     }
 }
 
@@ -719,6 +735,9 @@ fn write_success_payload(
         }
         SuccessResponsePayload::ControlStatePage(value) => {
             crate::message_wire::write_control_state_page(sink, value)
+        }
+        SuccessResponsePayload::ResponseResult(value) => {
+            crate::message_wire::write_response_result(sink, value)
         }
     }
 }
@@ -780,7 +799,7 @@ mod tests {
             maximum_diagnostic_page_items: 256,
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
-            supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13],
+            supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14],
             supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
             flags: crate::CapabilityFlags::B4_BASE,
         }
@@ -927,6 +946,26 @@ mod tests {
             limit: 1,
             owner: None,
         };
+        let response_request = crate::ResponseGetRequest {
+            target: crate::ResponseTarget::Configuration(
+                crate::ResponseConfiguration::InputFilters,
+            ),
+            grid: crate::ResponseGrid::Logarithmic,
+            points: 4,
+            minimum_hz: 20.0,
+            maximum_hz: 20_000.0,
+            channels: crate::ParameterChannel::Both,
+            sections: false,
+            overrides: Vec::new(),
+            configuration_id: None,
+            sample_rate_hz: None,
+            quantum_frames: None,
+            maximum_prepared_bytes: None,
+            maximum_state_bytes: None,
+            maximum_scratch_bytes: None,
+            maximum_automation_spans: None,
+            maximum_reply_bytes: None,
+        };
         let records = [crate::AutomationRecord {
             kind: crate::AutomationKind::Point,
             handle: crate::ParameterHandle(1),
@@ -1039,6 +1078,14 @@ mod tests {
                     payload: CommandPayload::ControlListGet(&control_request),
                 },
                 MessageId::ControlListGet,
+            ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Any,
+                    payload: CommandPayload::ResponseGet(&response_request),
+                },
+                MessageId::ResponseGet,
             ),
             (
                 TypedCommandFrame {
@@ -1208,6 +1255,14 @@ mod tests {
                     }),
                 },
                 MessageId::ControlStateGet,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::ResponseResult(crate::ResponseResult::Tag(9)),
+                },
+                MessageId::ResponseGet,
             ),
         ];
         for (frame, expected_id) in &responses {

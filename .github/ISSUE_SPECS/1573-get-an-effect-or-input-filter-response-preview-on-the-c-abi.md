@@ -191,3 +191,93 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 
 - Shrinks *Engine-owned analysis: EQ response, spectrum, selective SDK streams, and sample-time
   correlation* (#763): the response preview reaches the C ABI (see the amendment record).
+
+## Decision record
+
+Implemented on `codex/controls-batch-6k` (batch 5, #1600, #1572 and #1591 present). Adaptations to
+the frozen decisions; anchors moved (#1599 compact catalog, #1561 `SET_CONTROL`-only).
+
+- **D1, IDs.** As frozen: `MessageId::ResponseGet = 0x000e`, allocated commands `1..=3 | 6..=14`,
+  `ProviderFeatures::response` (in `ALL`, so the C ABI endpoint serves it), bit 14, `KNOWN` and
+  `B4_BASE` are `(1 << 15) - 1`. The capability invariants tie bit 14 to `0x000e` in both
+  directions. The capability set holds 12 command IDs.
+- **D2/D3, types.** The request and reply are typed in `crates/protocol/src/message_wire/response.rs`
+  (a child of `message_wire`, because that file is 4.9k lines): `ResponseGetRequest` with
+  `ResponseTarget::{Configuration, Address, Strip}`, `ResponseConfiguration::{Effect,
+  InputFilters}` (quality and link mode are `session::EffectQuality` and `session::LinkMode`, codes
+  1 to 3), `ResponseGrid`, `ResponseOverride`; the reply is `ResponseResult::{Tag, Curves}`
+  (`ResponseCurves`). The spec's `ResponseGetRequest<'_>` is owned (no lifetime), like
+  `ControlListRequest`, because the decoded command is owned. The reply type is `ResponseResult`,
+  not `ResponseGetReply`. A curve reply with `request_tag` is refused, as D3 says ("field 1 alone").
+  Reply values are all finite, at least 2 points. The sections arrays are also refused when
+  `section_count` is 0.
+- **Bypass rule in the codec.** Gate 1 lists "a bypass override with `left`" among the codec's
+  refusals, so the codec refuses, for an effect configuration, a control-0 override that is not lane
+  `both` or whose value is not exactly 0 or 1 (`INVALID_FIELD`, no diagnostic code). The provider
+  repeats the lane check (`response.override.lane`) and the value check
+  (`response.override.control`) for a typed caller that skips the wire. Consequence: the EQ has no
+  shared parameter, so `response.override.lane` cannot be reached by a wire request on a
+  configuration target (gate 3 asks only for codes a configuration target can reach); it is pinned
+  by the refusal table test in `crates/host-core/tests/response_query.rs`. `response.rate`,
+  `response.numerical` and `response.internal` are likewise unreachable on a session endpoint (its
+  rate is a launch rate; no EQ query fails numerically) and are pinned by the same table test.
+- **D4, lane rule.** `apply_overrides` follows the rule; the old "sentinel" duplicate test is gone
+  (pairwise overlap decides). The rows of the input filters (controls 3 and 4, found by name in
+  `BUILTIN_PARAMETER_DESCRIPTORS`) fold into the four cutoffs in the new
+  `host_core::input_filter_target`. The browser gets the effect rule through the same function
+  (`cargo test -p host-web --all-features` passes unchanged). `crates/host-core/tests/randomized.rs`'s
+  independent override law and its defect generator follow the new rule.
+- **D5, rate.** The provider reads the sample rate and quantum from the committed model the
+  controller passes (`ControlProvider::response_get(&SessionModel, &ResponseGetRequest)`), not from
+  a copy given at `try_new`, so a committed `SetSampleRateHz` can never leave a stale rate. The
+  `try_new` argument that `compile.rs` passes is therefore the reply bound
+  (`maximum_reply_bytes` = the host's control frame limit, which is both the endpoint's frame limit
+  and the replay cache's response bound there), not a rate and a quantum.
+- **D6, one table.** `ResponseQueryError::refusal` and `ResponseRefusal` are in
+  `host_core::response`; the provider maps the class to `StatusCode`. Zero `maximum_prepared_bytes`
+  is refused by the provider before preparation (`response.limit`); a count over 256 overrides is
+  refused for both kinds.
+- **D7, serving.** The controller also checks the reply it is given against the response bound
+  (`fit_response`: `LIMIT_EXCEEDED`, `response.reply_too_large`), so a provider that did not size
+  first still cannot cache an oversized reply. The provider sizes from `response_result_encoded_len`
+  (the exact frame length, header included) after the owner is prepared and before `curves()`.
+  `MockProvider` serves the configuration target with a deterministic shape and counts its calls.
+- **Test hooks.** `host_core::take_response_counts` (test-support) counts owner preparations and
+  evaluations on the thread; gate 3's size rule and gate 5's replay use it.
+- **Files outside the authorized list.** `tools/audit/src/protocol.rs` (one `RESPONSE_GET` command
+  in the allocation audit corpus), `tools/realtime-policy/src/policy.rs` and
+  `docs/REALTIME_DEPENDENCY_POLICY.md` (the new test file calls the C entries, so it joins the
+  unsafe allowlist beside `plan_swap_race.rs`), `crates/conformance/src/main.rs` and
+  `crates/conformance/tests/mutation_million.rs` (the frame count, 47 to 50),
+  `scripts/check-protocol-wasm-parity.sh` (the pin and the count in its self-test),
+  `crates/capi/src/runtime/tests.rs` (two pinned capability frames gain `0e00` and `ff7f`),
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md` and `docs/C_ABI_V1_QUALIFICATION.md`.
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `7de408612b837afd` to `cdfdb0540f093424`: the corpus gains
+  `command.response_get`, `response.response_get` and `response.response_get_tag` (50 frames), and
+  the capabilities frame lists `0x000e` with bit 14.
+- **Pre-existing, not touched.** `scripts/check-env-vocabulary.sh` fails on
+  `MISO_BLESS_FIXTURES` in `crates/protocol/tests/set_control_frames.rs` (#1563).
+
+**Batch 6 review fold, 2026-10-14.**
+
+- **Two capability frames, not three.** The record above counted three pinned capability frames in
+  `crates/capi/src/runtime/tests.rs`; two changed (each gains `0e00` and `ff7f`).
+- **The provider asks the core first.** `serve_response` used to fold the override rows (the bypass,
+  the input-filter cutoffs) and check the byte budget before the core saw the request, so a request
+  with a bad point count and a bad bypass value answered the bypass. The core's rate, point-count,
+  override-count and axis checks are now one function (`check_response_request`) that
+  `prepare_response_query` and the provider both call, and the provider calls it first, ahead of its
+  own rules (`response.rate.session`, the zero byte budget, the bypass rows). Request order of
+  refusal: the core's, then the provider's. A bypass value other than exactly 0 or 1 is
+  `response.override.bypass` (`INVALID_FIELD`), no longer the shared `response.override.control`;
+  the wire codec still refuses it earlier without a code, so only a typed caller reaches it. Pinned
+  by `response_get_asks_the_core_first_and_names_a_bad_bypass`, and listed in the registry.
+- **Tests that tell a lane swap and a hard-coded rate.** `a_one_lane_section_and_another_session_rate_reach_the_reply`
+  enables band 3 on the left lane only (the left mask has it, the right mask and curve do not move),
+  and answers sessions at 44.1 and 96 kHz with the core's curves at that rate and an axis ending at
+  that rate's Nyquist, refusing one hertz past it.
+- **Sizing.** `docs/CONTROL_PROTOCOL_SIZING.md` records the reply worst case (245,976 bytes: 4,096
+  points, both sides, the EQ's 6 sections) and the request bound (16,672 bytes plus the effect ID's
+  field; 82,216 bytes at the default string limit).
+- **Axis before preparation.** See the #1572 record: the axis rules run before any owner is prepared
+  and the request codec refuses non-finite endpoints and override values.

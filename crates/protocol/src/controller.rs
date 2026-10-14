@@ -26,14 +26,16 @@ use crate::{
     DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EditPath, EncodeError, EventPayload,
     ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterHandle,
     PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
-    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
-    SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
-    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    ReliableSlot, RequestId, ResponseGetRequest, ResponseResult, SampleTime, SessionCommitted,
+    SessionEdit, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
-use crate::{ControlBody, ControlEntry, TransportState};
+use crate::{
+    ControlBody, ControlEntry, ParameterChannel, ResponseCurves, ResponseTarget, TransportState,
+};
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +111,8 @@ fn retained_telemetry_configuration(
 pub struct ProviderFeatures {
     /// `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (capability flag bit 7).
     pub controls: bool,
+    /// `RESPONSE_GET` (capability flag bit 14).
+    pub response: bool,
     pub transport: bool,
     pub meters: bool,
     pub counters: bool,
@@ -121,6 +125,7 @@ impl ProviderFeatures {
     /// Enable every typed provider and event family.
     pub const ALL: Self = Self {
         controls: true,
+        response: true,
         transport: true,
         meters: true,
         counters: true,
@@ -131,6 +136,7 @@ impl ProviderFeatures {
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
         controls: false,
+        response: false,
         transport: false,
         meters: false,
         counters: false,
@@ -599,6 +605,14 @@ pub trait ControlProvider {
         &mut self,
         request: &ControlListRequest,
     ) -> Result<ControlStatePage, ParameterProviderError>;
+    /// Compute the frequency response a `RESPONSE_GET` asks for, against the committed model. A
+    /// read: it changes no session, revision, catalog or cell. A refusal carries its status and
+    /// its diagnostic code ([`ResponseProviderError`]).
+    fn response_get(
+        &mut self,
+        model: &session::SessionModel,
+        request: &ResponseGetRequest,
+    ) -> Result<ResponseResult, ResponseProviderError>;
     /// Borrow the descriptor of one control row for transient automation domain admission: an
     /// automatable continuous, toggle or enumeration row. A provider that shares one stored
     /// descriptor between rows lends that one (its `value` is not the row's). A row that no
@@ -631,6 +645,16 @@ pub trait ControlProvider {
         &mut self,
         configuration: TelemetryConfiguration,
     ) -> Result<TelemetryConfiguration, ParameterProviderError>;
+}
+
+/// A provider's refusal of a `RESPONSE_GET`: the status and the diagnostic code the response
+/// carries. The refusal changes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseProviderError {
+    /// The response status.
+    pub status: StatusCode,
+    /// The dotted diagnostic code, such as `response.points`.
+    pub code: &'static str,
 }
 
 /// Typed bounded provider fixture failure; providers never return raw BTLV payload bytes.
@@ -673,6 +697,8 @@ pub struct MockProvider {
     transport_position: SampleTime,
     /// Last endpoint-local complete typed telemetry configuration.
     telemetry_configuration: TelemetryConfiguration,
+    /// How many times `response_get` ran: a replayed read never runs again.
+    response_calls: usize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -698,12 +724,19 @@ impl Default for MockProvider {
                 diagnostics_enabled: false,
                 minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
             },
+            response_calls: 0,
         }
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl MockProvider {
+    /// How many `RESPONSE_GET` requests reached the provider.
+    #[must_use]
+    pub const fn response_calls(&self) -> usize {
+        self.response_calls
+    }
+
     /// The rows after the request's cursor, at most its limit, of its owner, and the page's last
     /// handle and end flag.
     fn control_window(
@@ -771,6 +804,52 @@ impl ControlProvider for MockProvider {
                 })
                 .collect(),
         })
+    }
+    fn response_get(
+        &mut self,
+        _model: &session::SessionModel,
+        request: &ResponseGetRequest,
+    ) -> Result<ResponseResult, ResponseProviderError> {
+        self.response_calls += 1;
+        let refuse = |status, code| Err(ResponseProviderError { status, code });
+        match &request.target {
+            ResponseTarget::Strip(_) | ResponseTarget::Address(_) => {
+                return refuse(StatusCode::Unavailable, "response.target.unavailable");
+            }
+            ResponseTarget::Configuration(_) => {}
+        }
+        if !(2..=4096).contains(&request.points) {
+            return refuse(StatusCode::InvalidField, "response.points");
+        }
+        let points = request.points as usize;
+        let sides = |wanted: bool| {
+            wanted.then(|| (0..points).map(|index| -(index as f32)).collect::<Vec<_>>())
+        };
+        let left = matches!(
+            request.channels,
+            ParameterChannel::Left | ParameterChannel::Both
+        );
+        let right = matches!(
+            request.channels,
+            ParameterChannel::Right | ParameterChannel::Both
+        );
+        let sections =
+            |wanted: bool| (wanted && request.sections).then(|| vec![-1.0_f32; 2 * points]);
+        Ok(ResponseResult::Curves(ResponseCurves {
+            sample_rate_hz: 48_000,
+            configuration_id: request.configuration_id.unwrap_or(0),
+            floor_db: -120.0,
+            bypass: false,
+            section_count: 2,
+            enabled_left: 0b11,
+            enabled_right: 0b01,
+            retained_bytes: 64,
+            frequencies_hz: (0..points).map(|index| 20.0 + index as f32).collect(),
+            left_db: sides(left),
+            right_db: sides(right),
+            sections_left_db: sections(left),
+            sections_right_db: sections(right),
+        }))
     }
     fn control_row(
         &mut self,
@@ -960,6 +1039,9 @@ pub enum ControlCommand<'a> {
     ControlStateGet {
         request: ControlListRequest,
     },
+    ResponseGet {
+        request: ResponseGetRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -986,6 +1068,7 @@ impl ControlCommand<'_> {
             Self::DiagnosticsGet { .. } => MessageId::DiagnosticsGet,
             Self::ControlListGet { .. } => MessageId::ControlListGet,
             Self::ControlStateGet { .. } => MessageId::ControlStateGet,
+            Self::ResponseGet { .. } => MessageId::ResponseGet,
         }
     }
 }
@@ -1018,7 +1101,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 11],
+    commands: [u16; 12],
     command_len: u8,
     events: [u16; 6],
     event_len: u8,
@@ -1036,6 +1119,7 @@ enum Body {
     TransactionApplied(TransactionApplied),
     ControlList(ControlListPage),
     ControlState(ControlStatePage),
+    Response(ResponseResult),
     AutomationEnqueued(AutomationEnqueued),
     Transport(TransportSnapshot),
     Telemetry(TelemetryConfiguration),
@@ -1576,6 +1660,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::ControlStateGet(request) => {
                 ControlCommand::ControlStateGet { request }
             }
+            DecodedCommandPayload::ResponseGet(request) => ControlCommand::ResponseGet { request },
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -2298,6 +2383,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::ControlStateGet(request) => {
                 ControlCommand::ControlStateGet { request }
             }
+            DecodedCommandPayload::ResponseGet(request) => ControlCommand::ResponseGet { request },
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -2396,6 +2482,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             (MessageId::ControlStateGet, Body::ControlState(value)) => {
                 encode_success!(SuccessResponsePayload::ControlStatePage(value))
+            }
+            (MessageId::ResponseGet, Body::Response(value)) => {
+                encode_success!(SuccessResponsePayload::ResponseResult(value))
             }
             _ => Err(EncodeError::MessageKindMismatch),
         }
@@ -2962,6 +3051,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::ControlListGet { .. } | ControlCommand::ControlStateGet { .. } => {
                 features.controls
             }
+            ControlCommand::ResponseGet { .. } => features.response,
             ControlCommand::TransportGet => features.transport,
             ControlCommand::TransportSet { .. } => features.transport && features.transport_events,
             ControlCommand::CountersGet { .. } => features.counters,
@@ -3102,6 +3192,17 @@ impl<P: ControlProvider> ProtocolController<P> {
                         Err(status) => self.non_ok(status, None),
                     },
                     Err(error) => self.provider_error_outcome(error),
+                }
+            }
+            ControlCommand::ResponseGet { request } => {
+                // A read of the committed model: nothing it touches survives the call.
+                let model = self.session.compiled().normalized_model();
+                match self.provider.response_get(model, request) {
+                    Ok(reply) => match self.fit_response(&reply) {
+                        Ok(()) => self.ok(Body::Response(reply)),
+                        Err(error) => self.response_error_outcome(error),
+                    },
+                    Err(error) => self.response_error_outcome(error),
                 }
             }
             ControlCommand::AutomationEnqueue { batch } => {
@@ -3387,6 +3488,45 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
+    /// Whether a response reply fits the endpoint's response bound. A reply that does not is
+    /// `LIMIT_EXCEEDED` (`response.reply_too_large`); a provider that checked the size first
+    /// never reaches this.
+    fn fit_response(&self, reply: &ResponseResult) -> Result<(), ResponseProviderError> {
+        let too_large = ResponseProviderError {
+            status: StatusCode::LimitExceeded,
+            code: "response.reply_too_large",
+        };
+        match self.codec.encoded_response_result_len(reply) {
+            Ok(length) if length <= self.response_payload_budget() => Ok(()),
+            Ok(_) | Err(EncodeError::LimitExceeded) => Err(too_large),
+            Err(_) => Err(ResponseProviderError {
+                status: StatusCode::Internal,
+                code: "response.internal",
+            }),
+        }
+    }
+
+    /// The outcome of a `RESPONSE_GET` refusal: its status and one error diagnostic that carries
+    /// its code.
+    fn response_error_outcome(&self, error: ResponseProviderError) -> Outcome {
+        self.non_ok_value(
+            error.status,
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: error.code.to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path: Vec::new(),
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
     /// The outcome of a provider refusal. A stale structure is a revision conflict that names
     /// itself, so a caller refetches the list from the top (`control.list.stale`); a row that no
     /// automation reaches is an invalid field that says so (`automation.target.unsupported`).
@@ -3471,9 +3611,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 11];
+        let mut commands = [0_u16; 12];
         let mut command_len = 0_usize;
-        for id in 1_u16..=13 {
+        for id in 1_u16..=14 {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -3483,6 +3623,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 10 => features.counters,
                 11 => features.diagnostics,
                 12 | 13 => features.controls,
+                14 => features.response,
                 _ => true,
             };
             if enabled {
@@ -3531,6 +3672,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.transport && features.transport_events {
             flags |= 1 << 13;
+        }
+        if features.response {
+            flags |= 1 << 14;
         }
         CapabilitySet {
             commands,

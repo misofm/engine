@@ -22,9 +22,12 @@ crate-type = ["rlib", "cdylib"]
 # the parameter descriptors an effect-addressed command is validated against are named by this
 # crate's ABI. It is the *contract* crate, not the effect compiler -- `EffectControlProducer` is
 # re-exported by `host-core`, so the compile pipeline stays where #106 F1 put it.
+# The browser's preparer implements `control_plane::RuntimePreparer` (#1400 D5), so this crate names
+# the control plane's trait and its bound-cache type.
 [dependencies]
 builtins.workspace = true
 builtins-compiler.workspace = true
+control-plane.workspace = true
 controls.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
@@ -41,10 +44,10 @@ math.workspace = true
 capi.workspace = true
 # Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060).
 lane.workspace = true
-# Dev-only: the control plane the C ABI embeds and the command frames `protocol` encodes. #1399's
-# `strip_cells_cross_host.rs`, which drove them beside the browser host, was absorbed by
-# `tests/control_parity.rs` (#1560). Neither is linked into the browser artifact.
-control-plane.workspace = true
+# The tests name `protocol` directly: its command frames drive the control plane the C ABI embeds
+# beside the browser host (`tests/control_parity.rs`, #1560, which absorbed #1399's
+# `strip_cells_cross_host.rs`). The browser artifact links `protocol` already, through the control
+# plane (a normal dependency above, #1400 D5), so this line adds nothing to it.
 protocol.workspace = true
 # Dev-only: the native leg of the #106 F4 native<->simd128 session parity gate digests its rendered
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.
