@@ -20,6 +20,9 @@ session.workspace = true
 
 [dev-dependencies]
 conformance.workspace = true
+# The integration tests name the row-by-name helpers (`control_core::row_address` and the edit
+# lists), which only `test-support` builds.
+protocol = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

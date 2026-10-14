@@ -28,7 +28,8 @@ builtins = { workspace = true, features = ["test-support"] }
 control-plane = { workspace = true, features = ["test-support"] }
 graph.workspace = true
 host-core.workspace = true
-protocol.workspace = true
+# The tests write control values by row name (`control_core::{row_address, fader_edits, ...}`).
+protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true
 source.workspace = true
 
