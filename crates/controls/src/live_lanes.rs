@@ -4,7 +4,8 @@
 use session::SessionModel;
 
 use crate::effective::MonitorOverlay;
-use crate::registry::{ControlRow, list};
+use crate::effective::effective;
+use crate::registry::{ControlRow, owner_count, owner_rows_with};
 use crate::{ControlClass, Family};
 
 /// The optional live lanes a plan attaches. A strip's fader/mute and matrix/pan lanes are always
@@ -48,12 +49,31 @@ impl LiveLanes {
 ///
 /// The result depends on the session's shape and on the row classes, and on nothing a live edit
 /// changes, so a plan and its successor of one session agree.
+///
+/// The list is walked one owner at a time through one reused buffer, so the transient is the rows
+/// of the largest owner, not every control row of the session at full size (a 192-track, 768-effect
+/// session lists 53,763 rows of 232 bytes, which `list` collects into one vector grown by
+/// doubling). The class of a row does not depend on the rate or on the overlay.
 #[must_use]
 pub fn live_lanes(model: &SessionModel) -> LiveLanes {
-    // The class of a row does not depend on the rate or on the overlay.
-    LiveLanes::of_rows(list(
-        model,
-        &MonitorOverlay::default(),
-        model.sample_rate_hz,
-    ))
+    let overlay = MonitorOverlay::default();
+    let effective = effective(model, &overlay);
+    let mut lanes = LiveLanes::default();
+    let mut rows = Vec::new();
+    for owner in 0..owner_count(model) {
+        rows.clear();
+        owner_rows_with(
+            model,
+            &effective,
+            &overlay,
+            owner,
+            model.sample_rate_hz,
+            &mut rows,
+        );
+        let owned = LiveLanes::of_rows(rows.drain(..));
+        lanes.strip_input |= owned.strip_input;
+        lanes.effects |= owned.effects;
+        lanes.routes |= owned.routes;
+    }
+    lanes
 }

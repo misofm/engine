@@ -152,3 +152,90 @@ Checked against `main` at `7feb27800`.
 - **Edit order.** After #1341a1/a2 (`live.rs`, `rack/src/lib.rs`, `effect-compiler/src/prepare.rs`)
   and before #1566 in `effect-compiler/src/prepare.rs` (different functions). After #1602 and
   before #1574 in `hosts/host-web/src/lib.rs`.
+
+## Decision record: lane shrink and the boot pin (batch 9, implementer)
+
+Measured on the branch head (main `7feb27800` + #1341a1/a2 + #1602 + batch-9 docs), x86-64 eight
+lanes, release module, 1 MiB worst document (192 tracks, 768 parametric EQs).
+
+**The cause the spec did not name.** The lane layout is not what drives the wasm high-water. A
+counting allocator on the native boot (every request of 200 KB or more, with its stack) found
+`controls::live_lanes::live_lanes`, called by `control_plane::compile::prepare_runtime`, collecting
+the whole control list (`controls::list`: 53,763 rows of 232 bytes) into one `Vec` grown by
+doubling to 15,204,352 bytes, only to read three booleans (`LiveLanes::of_rows`). On wasm, dlmalloc
+does not reuse a freed block above its mmap threshold, so the whole doubling chain (118,784 up to
+15,204,352 bytes) counts toward the growth. Evidence: D3 alone removed 1.5 MB of retained bytes and
+moved the growth by 0 pages (25,427,968 before and after); streaming `live_lanes` one owner at a
+time (the way `ControlCatalog::build` already walks the list) moved it to 20,447,232.
+
+**Boot growth (`check-web-boot-budget.mjs`, shipped simd128 module).**
+
+| Step | Growth | Pages |
+|---|---|---|
+| Before (branch head) | 25,427,968 | 388 |
+| D3 (bank windows) + shape (D2) only | 25,427,968 | 388 |
+| + `live_lanes` streamed (final) | 20,447,232 | 312 |
+
+The 20 pin plus one page is 21,037,056 bytes (321 pages); the final growth is 589,824 bytes (9
+pages) under it. The multiplier is 20 in the three places (`scripts/check-web-boot-budget.mjs`,
+`PARSE_TRANSIENT_MULTIPLIER` in `hosts/host-web/src/lib.rs` with its doc paragraph,
+`hosts/host-web/src/tests.rs`).
+
+**D2 measurement (per-field `retained_resources` and allocation sites).** One parametric EQ lane
+(target owner, 6 slots = 12 target cells): shared allocation 192; target cells 12 x 192 = 2,304
+(`LatestCell<12>`, three slots of 64 bytes); dirty word 8; readers 12 x 8 = 96; dirty reader 8;
+pending 8; staged targets 12 x 56 = 672 (lane total 3,288); writers 12 x 32 = 384; the control owner
+(`effect-compiler/src/control.rs`) holds two 720-byte parameter copies and a 60-byte dirty array
+per EQ. The 2,304 + 384 + 96 + 672 are fixed by the frozen cell protocol (one cell per
+`(slot, channel)`), so the EQ document gains nothing from a denser per-cell layout. One compressor:
+1,900 (cells 14 x 72 = 1,008, records 14 x 8 + 7 x 8 + 7 x 4 = 196). One delay: 1,068. The shape
+(`EffectLaneShape`) no longer holds a per-cell record array or a table as long as the last live
+index: one 12-byte group per live parameter, found by binary search on the control thread; a
+compressor lane loses 112 bytes, a delay lane 72, an EQ lane none.
+
+**D3.** `LiveControlEffectBankStage::new` sizes `staging` and `packed` by the widest lane's
+`parameter_cells()` (refused with `AutomationWindow` when above `automation_capacity`), not by the
+bank's capacity. A prepared-target owner holds no span storage: per EQ bank 15,840 bytes
+(staging 1,760 + packed 14,080) removed, 96 banks = 1.52 MB. The cap estimate
+(`graph-compiler/src/estimate.rs`) charges the same window. Native retained after boot for the worst
+document: 13,446,520 -> 11,907,448 bytes (-1,539,072); native peak 19,869,264 -> 19,002,476.
+
+**Ceilings.** `capi_retained_bytes` is 197,521 before and after: no re-pin (the spec's D5 bullet
+assumed it moves). The three graph rows of the reference session moved at eight lanes, so
+`resource_lifecycle.rs` re-pins them to measured + 10 % rounded up to 64: `graph_session_plus_plan_bytes`
+407,294 -> 314,918 (ceiling 421,248 -> 346,432), `graph_incremental_plan_bytes` 407,222 -> 314,846
+(421,248 -> 346,368), `graph_metadata_bytes` 199,049 -> 106,673 (203,648 -> 117,376). The four-lane
+ceilings stand until CI prints the AArch64 values. `retained_ceilings.rs` (browser fixture) did not
+move; no edit.
+
+**Gates.** `cargo test --locked` (all features) on effect-contract, effect-compiler, rack,
+graph-compiler (including `bypass_shunt_identity`, `bypass_cohorts`, `bypass_resources`), capi,
+controls, host-core, control-plane, graph and host-web: green. New test
+`a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity` (rack, red on a capacity-sized
+window: a multi-gigabyte allocation). `effect_control_resource_uses_independent_queue_and_owner_arithmetic`
+(graph-compiler) now computes the bank window from the lanes' cells, and takes its
+"largest allocation outgrows the plain plan" witness from the per-node owner (`scalar-target`,
+window of the 4,096-span capacity), because a bank's window is no longer capacity-sized.
+`check-web-audioworklet.sh`, `check-effect-runtime-fixtures.sh`, `check-console-fixtures.sh`,
+`check-cross-targets.sh`, `realtime-policy`, clippy `-D warnings` on the touched crates and
+`check-sdk-headless.sh` (527 tests): pass. The #1341a2 bank-equals-node tests are unchanged and green.
+
+**Per-block cost (descriptive, one warmup of 300 blocks, two rounds of 2,000).** The worst document
+natively, `render_next`: 103.71 and 103.72 us/block before, 105.49 and 105.81 after (+1.8 %, no
+render code changed; the stage reads a shorter window array). Not a gate.
+
+**Departures and edits outside the authorized paths (all listed for root).**
+- `crates/controls/src/live_lanes.rs` (the cause above; behaviour identical, booleans only).
+- `crates/graph-compiler/src/estimate.rs` and the arithmetic test in `crates/graph-compiler/src/lib.rs`
+  (mirror of D3, required by the charge-equals-freed tests).
+- `hosts/host-web/src/lib.rs` and `tests.rs` (the multiplier, as the amendment authorizes).
+
+**Successors found.**
+- `EffectBankProcessBlock::check_automation_window` has no production caller now (the rack was its
+  last); delete it with its row in `tools/console-workload/tests/paired_spans.rs`.
+- `graph`'s per-node `LiveControlEffect` still sizes its window by the capacity (`runtime.rs`
+  ~1273) and the estimate charges it so; the same sizing by cells applies to an unbanked EQ.
+- `EffectControlOwner` keeps `committed` and `candidate` copies and a dirty array per EQ (1,500
+  bytes, 1.15 MB on the worst document); `candidate` and `dirty` could be built at `begin`.
+- `ControlRow` is 232 bytes and `controls::list` still collects the whole list for its callers
+  (tests); the production callers now walk per owner.

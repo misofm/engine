@@ -1038,3 +1038,57 @@ fn a_bank_window_below_a_lanes_live_cells_is_refused_at_bind() {
     )
     .expect("a lane whose cells fit the window");
 }
+
+/// Issue #1611 D3: a live slot's span storage is sized by what its lanes can stage, not by the
+/// bank effect's `automation_capacity`.
+///
+/// The bank below declares `u32::MAX` spans, as the prepared-target owner of a descriptor with
+/// many parameters does while its lanes hold no parameter cell. A lane with two cells and a lane
+/// with none (a target owner's) both bind, and the two-cell lane still stages and applies its
+/// value; a window sized by the capacity would have to allocate `u32::MAX` spans per lane.
+///
+/// Red mutation: size `staging` and `packed` by `automation_capacity` again -> the bind below
+/// aborts on a multi-gigabyte allocation.
+#[test]
+fn a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity() {
+    let superseded = LiveValuesSuperseded::new();
+    let cellless = || {
+        effect_control_lane(
+            EffectLaneSpec {
+                shape: EffectLaneShape::from_live_parameters([], 0),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &superseded,
+        )
+        .expect("lane")
+        .1
+    };
+    let mut bank = MockGainBank::new(0).bound();
+    bank.metadata.program_key.automation_capacity = u32::MAX;
+    LiveControlEffectBankStage::new(
+        bank,
+        BankWidth::Four,
+        8,
+        vec![
+            Some(lane_pair(false, &superseded).1),
+            Some(cellless()),
+            None,
+            None,
+        ],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("a window of the widest lane's two cells");
+    let mut bank = MockGainBank::new(0).bound();
+    bank.metadata.program_key.automation_capacity = u32::MAX;
+    LiveControlEffectBankStage::new(
+        bank,
+        BankWidth::Four,
+        8,
+        vec![Some(cellless()), None, None, None],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("a slot whose lanes hold no parameter cell holds no span storage");
+}

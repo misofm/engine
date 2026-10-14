@@ -3212,8 +3212,17 @@ mod tests {
                 // lane's staging window, the packed window of every lane, and the AoSoA shunt.
                 let stage = size_of::<rack::LiveControlEffectBankStage>();
                 let growth = stage - size_of::<rack::EffectBankStage>();
-                let staging = capacity * span;
-                let packed = capacity * bank_width * span;
+                // #1611 D3: the window is the widest lane's live parameter cells, none for a
+                // prepared-target owner (its parameters ride its targets).
+                let window_spans = if target_staging {
+                    0
+                } else {
+                    effect_contract::EffectLaneShape::live_parameter_cells(
+                        effects.entries[0].factory.descriptor(),
+                    )
+                };
+                let staging = window_spans * span;
+                let packed = window_spans * bank_width * span;
                 let shunt = 2 * (quantum + latency) * bank_width * size_of::<f32>();
                 expected_total = expected_total
                     .checked_add((growth + staging + packed + shunt) as u64 * banks)
@@ -3367,7 +3376,11 @@ mod tests {
                 );
                 if controlled == 0 {
                     assert_eq!(expected.total, 0, "no controls retain no owner bytes");
-                } else if label == "bank-one-target" {
+                } else if label == "scalar-target" {
+                    // The per-node owner's staging window is the effect's automation capacity
+                    // (4,096 spans here), so it is the allocation that outgrows the plain plan's
+                    // largest. A bank's window is the lanes' live cells (#1611 D3) and is empty for
+                    // a prepared-target owner.
                     assert!(
                         expected.largest > plain_resource.largest_allocation_bytes,
                         "the high-cap control owner must exercise {estimate} largest-allocation \

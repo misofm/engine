@@ -192,8 +192,9 @@ pub enum RackError {
     Overflow,
     Shape,
     WidthMismatch,
-    /// A live-control slot's staging window is not exactly the bank's
-    /// `automation_capacity` spans (`EffectBankProcessBlock::check_automation_window`, issue #1012).
+    /// A live-control slot has a lane with more live parameter cells than the bank's
+    /// `automation_capacity` spans: the window that holds them would exceed the capacity the
+    /// effect cuts spans off at (issue #1012).
     AutomationWindow,
 }
 
@@ -1162,8 +1163,8 @@ pub struct LiveControlEffectBankStage {
     /// The observation queue of each lane that has one, with the lane's index, taken out of the
     /// lane at bind so that the drain loop holds each pop in its own body (decision 15, #1345 D8).
     observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]>,
-    /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
-    /// lane has a live channel (issue #1087).
+    /// One lane's staging window: the widest lane's live parameter cell count (at most the bank's
+    /// `automation_capacity`), or none when no lane has a parameter cell (issue #1087; #1611 D3).
     ///
     /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
     /// the moment it is drained, before the next lane touches the window. The bank never sees this
@@ -1210,11 +1211,10 @@ impl LiveControlEffectBankStage {
     /// # Errors
     ///
     /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
-    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if the
-    /// staging window is not exactly the bank's automation capacity -- the precondition of the
-    /// live drain's pairing rule -- or holds fewer spans than a lane has live parameter cells
-    /// (#1345 D4: a block stages every cell it reads, with no deferral), refused here, at bind,
-    /// rather than discovered on the render thread.
+    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if a
+    /// lane has more live parameter cells than the bank's automation capacity -- the window that
+    /// holds them would pass the cut-off the live drain's pairing rule depends on (issue #1012) --
+    /// refused here, at bind, rather than discovered on the render thread.
     pub fn new(
         bank: PreparedEffectBank,
         width: BankWidth,
@@ -1243,18 +1243,30 @@ impl LiveControlEffectBankStage {
         // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
         // channel-less -- session bypasses with no live controls attached -- holds no window at
         // all: its drain stages nothing into an empty one, and there is no twin pair for the
-        // pairing rule to protect. The window is the automation capacity per lane of the bank,
-        // which a caller may set as high as `u32::MAX`, so this is what keeps a live-control-free
-        // bypass from costing live-control staging.
-        let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
-        let capacity = if live {
-            metadata.program_key.automation_capacity as usize
-        } else {
-            0
-        };
+        // pairing rule to protect.
+        //
+        // #1611 D3: the window is what the lanes can stage, not the bank's `automation_capacity`.
+        // A lane stages at most one span per live parameter cell
+        // ([`EffectControlLane::parameter_cells`]), so the window is the widest lane's cell count,
+        // and the packed array holds one such window per lane. A prepared-target owner (the
+        // parametric EQ) has no parameter cell -- its parameters ride its targets -- so its slot
+        // holds no span storage at all, however many parameters its descriptor declares. The window
+        // never exceeds the capacity (checked here), so a staged twin pair is never cut off by the
+        // effect's `span_index < automation_capacity` limit (issue #1012), and a window that holds
+        // every cell drops none (#1345 D4).
+        let capacity = lanes
+            .iter()
+            .flatten()
+            .map(EffectControlLane::parameter_cells)
+            .max()
+            .unwrap_or(0);
+        if capacity > metadata.program_key.automation_capacity as usize {
+            return Err(RackError::AutomationWindow);
+        }
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
+        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
 
         let words = (quantum as usize)
             .checked_mul(lane_count)
@@ -1279,23 +1291,11 @@ impl LiveControlEffectBankStage {
         let designed = (0..lane_count)
             .map(|lane| processor.lane_channel_symmetry(lane))
             .collect();
-        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
-        // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
-        // `span_index < automation_capacity` cut-off; a window of any other size would let a
-        // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
-        if live {
-            EffectBankProcessBlock::check_automation_window(&staging, &metadata)
-                .map_err(|_| RackError::AutomationWindow)?;
-        }
-        // The window holds a span for every live parameter cell of every lane: a block stages
-        // each cell it reads, so none is deferred or dropped (#1345 D4).
-        if lanes
-            .iter()
-            .flatten()
-            .any(|lane| lane.check_window(staging.len()).is_err())
-        {
-            return Err(RackError::AutomationWindow);
-        }
+        // One window serves every lane: a lane's staged prefix is copied into `packed` the moment
+        // it is drained. It holds a span for every live parameter cell of every lane (it is the
+        // widest lane's cell count), so a block stages each cell it reads and none is deferred or
+        // dropped (#1345 D4); it is never above the capacity (checked above), so the effect's
+        // `span_index < automation_capacity` cut-off refuses none of them (issue #1012).
         let observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]> = lanes
             .iter_mut()
             .enumerate()

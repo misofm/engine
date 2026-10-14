@@ -183,20 +183,13 @@ impl BypassSwitch {
     }
 }
 
-/// Marks a parameter that has no live cell in [`EffectLaneShape::first`].
-const NOT_LIVE: u32 = u32::MAX;
-
-/// One live parameter cell: the `(parameter_index, channel)` it holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParameterCell {
-    parameter_index: u32,
-    channel: ParameterChannel,
-}
-
 /// One drain unit of the parameter cells: a `Shared` parameter's one `Both` cell, or a `PerLane`
 /// parameter's `Left` cell with its `Right` twin at `first + 1`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ParameterGroup {
+    /// The descriptor's parameter index, strictly increasing along the shape's groups.
+    parameter_index: u32,
+    /// The group's first parameter cell.
     first: u32,
     pair: bool,
 }
@@ -206,13 +199,15 @@ struct ParameterGroup {
 ///
 /// Cell indices run bypass (`0`), the parameter cells (`1..=P`), then the target cells (`1 + P ..`,
 /// slot-major, `Left` before `Right`).
+///
+/// The shape is sized by the effect's live parameters alone (#1611 D2): one 12-byte group per live
+/// parameter, found by binary search on the parameter index, with no table as long as the last live
+/// index and no record per cell. The lookup runs on the control thread; render walks the groups.
 #[derive(Debug, Eq, PartialEq)]
 pub struct EffectLaneShape {
-    cells: Box<[ParameterCell]>,
     groups: Box<[ParameterGroup]>,
-    /// The first parameter cell of each descriptor parameter up to the last live one, or
-    /// [`NOT_LIVE`].
-    first: Box<[u32]>,
+    /// The parameter cells of all groups: one per `Shared` group, two per `PerLane` one.
+    parameter_cells: u32,
     target_slots: usize,
 }
 
@@ -230,48 +225,28 @@ impl EffectLaneShape {
         live: impl IntoIterator<Item = (u32, ParameterChannelPolicy)>,
         target_slots: usize,
     ) -> Self {
-        let mut cells = Vec::new();
         let mut groups = Vec::new();
-        let mut firsts: Vec<(u32, u32)> = Vec::new();
         let mut previous: Option<u32> = None;
+        let mut parameter_cells = 0_u32;
         for (parameter_index, policy) in live {
             assert!(
                 previous.is_none_or(|previous| parameter_index > previous),
                 "live parameters are strictly increasing in the parameter index"
             );
             previous = Some(parameter_index);
-            let first = u32::try_from(cells.len()).expect("a lane's parameter cells fit u32");
-            firsts.push((parameter_index, first));
-            match policy {
-                ParameterChannelPolicy::Shared => {
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Both,
-                    });
-                    groups.push(ParameterGroup { first, pair: false });
-                }
-                ParameterChannelPolicy::PerLane => {
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Left,
-                    });
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Right,
-                    });
-                    groups.push(ParameterGroup { first, pair: true });
-                }
-            }
-        }
-        let table = firsts.last().map_or(0, |(index, _)| *index as usize + 1);
-        let mut first = vec![NOT_LIVE; table];
-        for (parameter_index, cell) in firsts {
-            first[parameter_index as usize] = cell;
+            let pair = policy == ParameterChannelPolicy::PerLane;
+            groups.push(ParameterGroup {
+                parameter_index,
+                first: parameter_cells,
+                pair,
+            });
+            parameter_cells = parameter_cells
+                .checked_add(if pair { 2 } else { 1 })
+                .expect("a lane's parameter cells fit u32");
         }
         Self {
-            cells: cells.into_boxed_slice(),
             groups: groups.into_boxed_slice(),
-            first: first.into_boxed_slice(),
+            parameter_cells,
             target_slots,
         }
     }
@@ -305,7 +280,7 @@ impl EffectLaneShape {
     /// The parameter cells this lane holds: the most spans a block stages.
     #[must_use]
     pub fn parameter_cells(&self) -> usize {
-        self.cells.len()
+        self.parameter_cells as usize
     }
 
     /// The target slots this lane holds cells for (`0` for an effect without prepared targets).
@@ -316,12 +291,12 @@ impl EffectLaneShape {
 
     /// Every cell of the lane: bypass, parameters and targets. Also the dirty bit count.
     fn cell_count(&self) -> usize {
-        1 + self.cells.len() + 2 * self.target_slots
+        1 + self.parameter_cells() + 2 * self.target_slots
     }
 
     /// The dirty bit (and cell index) of target cell `index`.
     fn target_bit(&self, index: usize) -> usize {
-        1 + self.cells.len() + index
+        1 + self.parameter_cells() + index
     }
 
     /// The parameter cell of `(parameter_index, channel)`, or why there is none.
@@ -330,13 +305,13 @@ impl EffectLaneShape {
         parameter_index: u32,
         channel: ParameterChannel,
     ) -> Result<usize, EffectWriteRefusal> {
-        let first = *self
-            .first
-            .get(parameter_index as usize)
-            .filter(|first| **first != NOT_LIVE)
-            .ok_or(EffectWriteRefusal::NotLive)? as usize;
-        let paired = self.cells[first].channel == ParameterChannel::Left;
-        match (paired, channel) {
+        let group = self
+            .groups
+            .binary_search_by_key(&parameter_index, |group| group.parameter_index)
+            .map(|position| self.groups[position])
+            .map_err(|_| EffectWriteRefusal::NotLive)?;
+        let first = group.first as usize;
+        match (group.pair, channel) {
             (false, ParameterChannel::Both) | (true, ParameterChannel::Left) => Ok(first),
             (true, ParameterChannel::Right) => Ok(first + 1),
             _ => Err(EffectWriteRefusal::Channel),
@@ -909,9 +884,7 @@ impl EffectControlLane {
         let mut resources = EffectLaneResources::default();
         if let Some(cells) = self.cells.as_deref() {
             resources.add(Layout::new::<SharedAllocation<EffectCells>>().size());
-            resources.add_array::<ParameterCell>(cells.shape.cells.len());
             resources.add_array::<ParameterGroup>(cells.shape.groups.len());
-            resources.add_array::<u32>(cells.shape.first.len());
             resources.add_array::<LatestCell<1>>(cells.parameters.len());
             resources.add_array::<LatestCell<PREPARED_EFFECT_TARGET_WORDS>>(cells.targets.len());
             resources.add_array::<DirtyWord>(cells.dirty.len());
@@ -1124,7 +1097,7 @@ impl EffectControlLane {
         let mut staged = 0_usize;
         for group in cells.shape.groups.iter() {
             let first = group.first as usize;
-            let parameter_index = cells.shape.cells[first].parameter_index;
+            let parameter_index = group.parameter_index;
             let mut applied = [None; 2];
             for (offset, slot) in applied
                 .iter_mut()

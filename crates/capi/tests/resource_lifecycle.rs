@@ -1169,23 +1169,34 @@ impl Budget {
 /// lane-independent; the new one is the engine's, and CI's `aarch64-debug` run printed the same
 /// 48,915 bytes at four lanes (PR #1607), so both widths carry the same ceiling. The ceilings are
 /// the new values plus 10 %, rounded up to 64: 216,815.5 -> 216,832 and 53,806.5 -> 53,824.
+///
+/// #1611 shrank the three graph rows at eight lanes, a structural move: a bank's live-control stage
+/// sizes its staging and packed span windows by what its lanes can stage (the widest lane's live
+/// parameter cells), not by the bank effect's `automation_capacity`, so a prepared-target owner's
+/// slot (the parametric EQ, whose parameters ride its targets) holds no span storage. The reference
+/// session's `graph_session_plus_plan_bytes` moved 407,294 -> 314,918, `graph_incremental_plan_bytes`
+/// 407,222 -> 314,846 and `graph_metadata_bytes` 199,049 -> 106,673 (x86-64, eight lanes). The
+/// ceilings are the new values plus 10 %, rounded up to 64: 346,409.8 -> 346,432, 346,330.6 ->
+/// 346,368 and 117,340.3 -> 117,376. The four-lane ceilings stand (AArch64 runs only in CI, which
+/// prints the four-lane values; the window only shrinks, so the old ceilings still bound them).
+/// `capi_retained_bytes` and the other rows did not move (197,521 before and after).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
-        eight_lanes: 421_248,
+        eight_lanes: 346_432,
         four_lanes: 375_360,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
-        eight_lanes: 421_248,
+        eight_lanes: 346_368,
         four_lanes: 375_360,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
-        eight_lanes: 203_648,
+        eight_lanes: 117_376,
         four_lanes: 182_976,
     },
     Budget {
