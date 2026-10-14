@@ -718,19 +718,10 @@ impl HostHalf {
     /// (#1557, `route_control_resources`), the plan state inventory the
     /// epoch keeps for its successor (#1273 D5), and the design-bound seed (#1471,
     /// [`Self::bound_seed_bytes`]). The prepared-protocol term is the
-    /// response buffer, the affine token, the replay cache and the parameter catalog.
+    /// response buffer, the affine token, the request copy the token keeps for the replay entry
+    /// (#1615; the token holds a plan against the committed replay cache, not a clone) and the
+    /// parameter catalog.
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
-        let replay =
-            protocol::ReplayCache::resource_report_for_config(protocol::ReplayCacheConfig {
-                entries: core::num::NonZeroUsize::new(
-                    compile_limits.maximum_replay_entries as usize,
-                )
-                .expect("replay entries"),
-                bytes: core::num::NonZeroUsize::new(compile_limits.maximum_replay_bytes as usize)
-                    .expect("replay bytes"),
-                max_response_bytes: compile_limits.maximum_control_frame_bytes as usize,
-            })
-            .unwrap_or_else(|_| panic!("replay resource report"));
         let strips = size_of_val(&*self.strips) as u64
             + self
                 .strips
@@ -751,7 +742,7 @@ impl HostHalf {
             + self.bound_seed_bytes(compile_limits);
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
             + size_of::<protocol::PreparedStructuralCommand>() as u64
-            + replay.retained_payload_bytes
+            + compile_limits.maximum_control_frame_bytes
             + self.catalog_charge();
         (epoch, prepared_protocol)
     }

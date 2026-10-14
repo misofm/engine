@@ -324,11 +324,15 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         replay.retained_payload_bytes,
         exchange.retained_payload_bytes,
     ];
+    // The affine token (#1615): the response frame it stages (the measured length, never more than
+    // a control frame), its own layout, and a copy of the request the commit writes into the
+    // replay entry (never more than a control frame). It holds a plan against the committed replay
+    // cache, not a clone of it, so no replay cache is charged here.
     let prepared_protocol_allocation_rows = [
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<protocol::PreparedStructuralCommand>(1)?,
+        checked_byte_layout(limits.maximum_control_frame_bytes)?,
     ];
-    let prepared_protocol_aggregate_rows = [replay.retained_payload_bytes];
     let epoch_retained = checked_sum(&epoch_rows)?;
     let fixed_allocations = checked_sum(&fixed_allocation_rows)?
         .checked_add(checked_sum(adapter_allocation_rows)?)
@@ -339,8 +343,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
-        .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
-        .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
+        .checked_add(provider.catalog_retained_bytes)
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     // Conservative: the strip row is the producer slice plus every `track_id`, which are separate
     // allocations, so feeding the whole row overstates the largest single allocation when that

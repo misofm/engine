@@ -1448,22 +1448,35 @@ impl ControlCatalog {
         runs.try_reserve_exact(delta.changed_owners.len())
             .map_err(|_| SessionControlProviderError)?;
         let mut capacity = 0_usize;
+        // The most rows one owner (or one owner's derived rows) makes at once: the scratch below is
+        // reserved to it, exactly, so it never grows by doubling and copying (#1615).
+        let mut longest = 0_usize;
         for &owner in &delta.changed_owners {
             let Some(run) = self.owner_run(owner) else {
                 return Ok(None);
             };
             capacity += run.len();
+            longest = longest.max(run.len());
             runs.push(run);
         }
         for owner in derived() {
-            capacity += self.derived_indices(owner).count();
+            let count = self.derived_indices(owner).count();
+            capacity += count;
+            longest = longest.max(count);
         }
         let mut writes = Vec::new();
         writes
             .try_reserve_exact(capacity)
             .map_err(|_| SessionControlProviderError)?;
+        // A run holds an owner's rows and its section headers, so it bounds the rows the owner makes
+        // (a different count is refused below). The memo holds one shape per distinct descriptor.
         let mut fresh = Vec::new();
+        fresh
+            .try_reserve_exact(longest)
+            .map_err(|_| SessionControlProviderError)?;
         let mut memo: HashMap<u32, Shape, BuildHasherDefault<DefaultHasher>> = HashMap::default();
+        memo.try_reserve(longest.min(self.descriptors.len()))
+            .map_err(|_| SessionControlProviderError)?;
 
         for (&owner, run) in delta.changed_owners.iter().zip(runs) {
             #[cfg(any(test, feature = "test-support"))]

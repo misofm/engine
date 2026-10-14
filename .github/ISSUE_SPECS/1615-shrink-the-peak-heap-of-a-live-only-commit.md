@@ -118,3 +118,113 @@ Checked against `main` at `7feb27800`.
   ack) and one test shows it. The token keeps its size; any re-pin of the C ABI token row comes
   with measured numbers.
 - **S3 (owner text): option A.** A counting writer for `owner_bytes`; no buffer.
+
+## Decision record: #1615 (batch 9)
+
+Root's rulings held: S1 option A, S2 option B, S3 option A. Measured natively with
+`hosts/host-web/tests/control_command_heap.rs` (new, committed as the gate): a thread-scoped counting
+allocator around one `native_staging::control_command`, the qualification's nine-edit live
+transaction (seven parametric-EQ edits on console slot `eq-simd1`, two left-lane input-filter
+cutoffs) on `observation-session.json`, at 1, 64 and 256 tracks. The path is `live`, the response 80
+bytes. "Requested" counts a `realloc` as its whole new size.
+
+| steady call, one track | allocations | requested bytes | peak live bytes |
+|---|---|---|---|
+| before (`7feb27800`) | 786 | 293,477 | 168,031 |
+| after S1 | 776 | 215,809 | 153,284 |
+| after S1 and S3 | 754 | 183,057 | 153,284 |
+| after S1, S3 and S2 | 753 | 101,025 | 71,252 |
+
+The first call (one track) went 844 / 280,733 / 172,790 to 833 / 121,033 / 76,011. The steady call is
+the same number at 1, 64 and 256 tracks. Debug and release builds give the same numbers once the
+debug-only stage check (`verify_stages`, which builds a full catalog as an oracle) is off for the
+test's thread. The browser's pages grown (46 to 48 before) were not measured: this box has no
+browser. The peak fell by 96,779 bytes, 1.48 wasm pages, so the first transaction needs about 1.1
+pages instead of 2.6.
+
+**What remains at the peak (71,252).** The row scratch `fresh`, 39,672 bytes (171 rows of 232
+bytes, S1's one exact allocation: the strip's rows must all exist to be compared), the `memo` map
+18,576 bytes, and about 13 KB of the rest (writes, frame, request copy, events). The scratch is the
+S1 option A; removing it needs option C (compare rows as they are made), which root did not rule.
+
+**S1, the row scratch** (`host-core/src/control_provider.rs`, `stage_values`). Before the loops the
+stage finds the longest changed-owner run and the largest derived-row count (both known before any
+row is made) and reserves `fresh` once with `try_reserve_exact`, and `memo` to
+`min(longest, descriptors.len())` (distinct descriptors cannot exceed the catalog's). The try-reserve
+in `stage_run` stays and no longer grows. No `controls` change.
+
+**S2, the replay clone** (`protocol/src/controller.rs`). `prepare_structural_plan` no longer clones the
+replay cache. `plan_structural_command` already ran the read-only `plan_preflight` on the committed
+cache and put the plan in `StructuralCommandPlan`; the token now keeps that plan (`replay_plan`,
+`evicted` and `removed_bytes`) and a copy of the request bytes (`request`, `Box<[u8]>`, request
+length). The commit applies the plan to the committed cache (`apply_preflight_plan`), `complete`s the
+entry with the final frame and returns the reply, in one call. The frame staging is sized to
+`OUTER_HEADER_BYTES + response_measure.length` (the measured length; prepare refuses with the same
+`OutputTooSmall` the old max-sized buffer gave when that exceeds `max_response_bytes`) instead of
+`max_response_bytes`; the final frame has the same length and the commit asserts it.
+`overwrite_completed_response` and the prepare-time `preflight`/`complete` on the clone are gone.
+
+*Why the commit cannot fail.* The plan is made against the committed cache in
+`plan_structural_command`; between it and the commit nothing writes that cache: the token sets the
+controller's structural generation odd and `process`, `process_command_frame_into`,
+`prepare_command_frame` and `prepare_command_frame_in_place` refuse while it is odd. So at the commit
+the cache is the one the plan saw, the eviction is the planned prefix, and `complete` finds its
+reservation, an entry slot and the bytes (the plan checked `request + max_response_bytes` fits). The
+commit `expect`s those, as `overwrite_completed_response` did.
+
+*Acked-batch rule, and the cache's guarantees.* A reply exists only after its replay entry is
+written: `CommittedCommandFrame` is built after `complete` returns, in the same call that applies the
+session commit and the event. Nothing is written to the committed cache before the commit, so a
+token dropped or refused (`WrongController`, `StaleGeneration`) leaves the cache as it was, which is
+what dropping the clone did. The entry holds the request bytes and the committed frame (the path the
+host reported), so an exact replay returns the same bytes, a changed request under the same ID is
+`RequestIdReuse`, an evicted one is `ReplayExpired`, and the eviction happens once, at the commit.
+New test `a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit` (one-entry cache:
+nothing before the commit, the dropped token changes nothing, replay is exact, eviction at the
+commit) and the existing `structural_token_cancel_owner_generation_and_serial_rules_are_affine`.
+
+*What a concurrent entry gets.* While a token is outstanding every entry point refuses: the frame
+entries return `Err(CommandFrameProcessError::PreparedCommandOutstanding)`, the compatibility
+`process` answers a `Backpressure` frame, event egress returns `ReliableQueueFull`, and
+`queues_mut` panics by design. Nothing is queued, no replay entry is made and no ack is sent; a
+replay of a cached entry is refused the same way and answered once the token is committed or dropped.
+In the hosts, prepare and commit of one transaction run in one synchronous submit, so no real second
+request meets it. The new test shows the replay refusal; the existing one shows the rest.
+
+*Token size.* The cache handle (88 bytes) became the plan (16) and the request box (16);
+`_resource_layout_reservation` grew from 24 to 80, so `size_of::<PreparedStructuralCommand>()` is
+960 before and after (new test `the_prepared_token_keeps_the_size_the_resource_row_counts`).
+
+*Departure: the resource row.* The C ABI and browser resource report charged the prepared-protocol
+term as response frame + token + the replay cache (the clone) + catalog
+(`control-plane/src/compile.rs`, mirrored in `capi/tests/resource_lifecycle.rs`). With no clone that
+term overcharged by the cache. It now charges frame + token + a control-frame-sized request copy +
+catalog (the request is bounded by the control frame). For the browser (16,384-byte frame, 64 KiB /
+32 entries cache) the term fell from 16,384 + 960 + 67,328 + catalog to 16,384 + 960 + 16,384 +
+catalog, 50,944 bytes less. The largest single allocation is unchanged (the cache's 65,536-byte
+arena is still the cache's own row). The live-peak gate takes this term; the `capi` and `control-plane`
+tests are green at the new number.
+
+**S3, the owner text** (`session/src/canonical.rs`, `value.rs`). `JsonWriter` is generic over a
+`Sink` (`String`, or `ByteCount`, which keeps a length), and `owner_bytes` counts. A number is
+spelled in a fixed 128-byte stack buffer (`Spelling`) by the same `spell_f32` the `String` path
+uses, so the length is the document writer's by construction; the unit test
+`the_counting_sink_counts_the_bytes_of_the_string_sink` walks every exponent and the extremes. The
+canonical writer corpus test holds the document bytes unchanged. The change saves 22 allocations and
+32,752 requested bytes per call (776 to 754, 215,809 to 183,057); the peak number did not move, so
+the owner text was not live at the peak.
+
+**Gates.** `cargo test`: `-p protocol --features test-support`, `-p control-plane --features
+test-support`, `-p host-core --all-features`, `-p session`, `-p capi`, `-p host-web --features
+host-web/test-support` pass. The heap gate is
+`a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size`: steady peak 71,252 against a
+ceiling of 73,000, requested 101,025 against 104,000, first call (one track) 76,011 against 78,000,
+the steady call equal at 64 and 256 tracks, at most 256 bytes left live. The #1613 differential
+(`verify_stages`, the full path as oracle) stays on in every other test and is green. `cargo clippy
+-D warnings` on the six touched crates, `scripts/run-protocol-allocation-audit.sh`, `audit protocol`
+and the four policy scripts pass. Render-locked allocations: no render-path file changed.
+
+**Successor found.** The first live commit on a larger session still grows with the session (64
+tracks: peak 196,593, 256 tracks: 663,179, against 76,011 on one track), because it builds what the
+later calls keep. It is a one-time cost, outside this slice's gate (the steady call), and worth its
+own look if a browser session of hundreds of tracks must not grow the heap on its first edit.
