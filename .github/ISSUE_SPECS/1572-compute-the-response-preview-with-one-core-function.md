@@ -131,3 +131,38 @@ Commands: `cargo test --locked -p host-core`, `cargo test --locked -p host-web`,
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record
+
+Implemented on `codex/controls-batch-6k` (batch 5 and #1600 present). Adaptations to the frozen
+decisions:
+
+- **Name clash.** `response.rs` already imported `effect_contract::ResponseQuery` (the owner's
+  query record). The import is now `ResponseQuery as OwnerResponseQuery`, so the D1 name
+  `host_core::ResponseQuery` is the new request type.
+- **`from_raw`.** `ResponseChannels::from_raw(impl Into<u32>)` takes `u8` or `u32` and returns
+  `Option<Self>`; it is not `const`.
+- **Query shape.** `ResponseQuery` is `Copy` and `prepare_response_query` takes `&ResponseQuery`.
+  `PreparedResponseQuery` wraps `PreparedResponsePreview`; `curves()` calls `query_into` once. The
+  overrides cap applies to the `Effect` target only (the input-filter target carries none).
+- **Host-web.** `run_response_query` decodes the channel bits with `ResponseChannels::from_raw`,
+  maps `ResponseQueryError` through the new `response_query_error_code` (`Points`, `Overrides`,
+  `SampleRate` to `RESULT_INVALID_ARGUMENT`; `Preview(e)` through `response_error_code`), and lays
+  out the same header. `response_buffer_budget` stays and runs between prepare and `curves()`.
+  A request for more than 4096 points now returns `RESULT_INVALID_ARGUMENT` where it returned
+  `RESULT_REFUSED_BUDGET` or a result; a sample rate outside the launch set is refused by the core
+  before preparation (it was refused through the registry tail bound).
+- **Gate 2, 256 overrides.** The EQ has fewer than 256 distinct (parameter, channel) rows, so the
+  test cycles the real rows to length 256: the cap passes (the refusal is the preview's
+  `DuplicateParameter`, not `Overrides`), and 257 rows refuse `Overrides` with zero allocator
+  events.
+- **Gate 3.** `a_request_past_the_core_point_cap_is_refused_with_a_header_only_result` in
+  `hosts/host-web/src/ffi.rs` (`response_budget_tests`). The existing host-web response tests are
+  unchanged.
+- **Budget answer for a huge request.** `sdk/test/response-evals.mjs` asks for 250000 points with
+  `maximumResultBytes: 16` and expects `refusedBudget` (the spec requires that test to pass
+  unchanged). The core now refuses that count first (`Points`), so host-web answers a `Points`
+  refusal by running `response_buffer_budget` with zero sections: if even the totals exceed the
+  caller's byte budget the answer stays `RESULT_REFUSED_BUDGET`, otherwise it is
+  `RESULT_INVALID_ARGUMENT`. A request with 4097..=N points whose totals fit the budget is
+  `RESULT_INVALID_ARGUMENT` (gate 3). #1574 deletes the layout and this branch with it.

@@ -11,7 +11,7 @@ use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PreparedPorts,
     PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput, ResponsePrepareLimits,
-    ResponseQuery, ResponseSummary, default_initial_values, normalize_zero,
+    ResponseQuery as OwnerResponseQuery, ResponseSummary, default_initial_values, normalize_zero,
 };
 use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
@@ -481,7 +481,7 @@ impl PreparedResponsePreview {
         }
         self.owner
             .query_into(
-                ResponseQuery {
+                OwnerResponseQuery {
                     configuration_id: self.configuration_id,
                     frequencies_hz: output.frequencies_hz,
                     maximum_points: points,
@@ -633,6 +633,220 @@ fn apply_overrides(
         slot.value = override_value.value;
     }
     Ok(())
+}
+
+/// The most points one response query may ask for, on every host.
+pub const RESPONSE_MAXIMUM_POINTS: usize = 4096;
+/// The most parameter overrides one effect response query may carry, on every host.
+pub const RESPONSE_MAXIMUM_OVERRIDES: usize = 256;
+
+/// Which sides of a response a query returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ResponseChannels {
+    /// The left side only.
+    Left = 1,
+    /// The right side only.
+    Right = 2,
+    /// Both sides.
+    Both = 3,
+}
+
+impl ResponseChannels {
+    /// Decode the wire bits (`1` left, `2` right, `3` both); any other value is `None`.
+    #[must_use]
+    pub fn from_raw(raw: impl Into<u32>) -> Option<Self> {
+        match raw.into() {
+            1 => Some(Self::Left),
+            2 => Some(Self::Right),
+            3 => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    const fn left(self) -> bool {
+        matches!(self, Self::Left | Self::Both)
+    }
+
+    const fn right(self) -> bool {
+        matches!(self, Self::Right | Self::Both)
+    }
+}
+
+/// One complete response query: the owner, the axis and the output shape.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseQuery<'a> {
+    /// Opaque caller correlation identity, echoed in the curves.
+    pub configuration_id: u64,
+    /// Explicit launch sample rate.
+    pub sample_rate_hz: u32,
+    /// Explicit render quantum used by native effect validation.
+    pub quantum_frames: u32,
+    /// One owner-local target.
+    pub target: ResponsePreviewTarget<'a>,
+    /// The frequency axis.
+    pub grid: ResponsePreviewGrid,
+    /// Which sides to return.
+    pub channels: ResponseChannels,
+    /// Whether to return the per-section curves as well as the totals.
+    pub sections: bool,
+    /// Preparation/resource caps.
+    pub limits: ResponsePreviewLimits,
+}
+
+/// Why a response query was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseQueryError {
+    /// The shared preview preparation or query refused it.
+    Preview(ResponsePreviewError),
+    /// The point count is outside `2..=RESPONSE_MAXIMUM_POINTS`.
+    Points,
+    /// More than `RESPONSE_MAXIMUM_OVERRIDES` overrides.
+    Overrides,
+    /// The sample rate is not a launch rate.
+    SampleRate,
+}
+
+/// A response query whose owner is prepared; `curves` evaluates it.
+pub struct PreparedResponseQuery {
+    preview: PreparedResponsePreview,
+    grid: ResponsePreviewGrid,
+    channels: ResponseChannels,
+    sections: bool,
+}
+
+/// The evaluated curves of one response query.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponseCurves {
+    /// The caller's correlation identity.
+    pub configuration_id: u64,
+    /// The sample rate the owner was prepared at.
+    pub sample_rate_hz: u32,
+    /// The lowest level a curve reports, in dB.
+    pub floor_db: f32,
+    /// Effect-wide bypass as the owner holds it.
+    pub bypass: bool,
+    /// Number of owner sections.
+    pub section_count: u32,
+    /// Enabled-section mask of the left side: bit `min(index, 31)` per enabled section.
+    pub enabled_left: u32,
+    /// Enabled-section mask of the right side.
+    pub enabled_right: u32,
+    /// Owner payload bytes retained by the preparation.
+    pub retained_bytes: u64,
+    /// The engine-generated frequency axis.
+    pub frequencies_hz: Vec<f32>,
+    /// Left total, when the channels include left.
+    pub left_db: Option<Vec<f32>>,
+    /// Right total, when the channels include right.
+    pub right_db: Option<Vec<f32>>,
+    /// Left section curves, section-major, when sections are asked for and left is included.
+    pub sections_left_db: Option<Vec<f32>>,
+    /// Right section curves, section-major, when sections are asked for and right is included.
+    pub sections_right_db: Option<Vec<f32>>,
+}
+
+/// Prepare one response query: refuse an unsupported rate, point count or override count before
+/// any owner is prepared, then prepare the owner through [`prepare_response_preview`].
+pub fn prepare_response_query(
+    query: &ResponseQuery<'_>,
+) -> Result<PreparedResponseQuery, ResponseQueryError> {
+    if !engine::is_launch_sample_rate(engine::SampleRateHz(query.sample_rate_hz)) {
+        return Err(ResponseQueryError::SampleRate);
+    }
+    let points = query.grid.points();
+    if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
+        return Err(ResponseQueryError::Points);
+    }
+    if let ResponsePreviewTarget::Effect { overrides, .. } = query.target
+        && overrides.len() > RESPONSE_MAXIMUM_OVERRIDES
+    {
+        return Err(ResponseQueryError::Overrides);
+    }
+    let preview = prepare_response_preview(ResponsePreviewRequest {
+        configuration_id: query.configuration_id,
+        sample_rate_hz: query.sample_rate_hz,
+        quantum_frames: query.quantum_frames,
+        target: query.target,
+        limits: query.limits,
+    })
+    .map_err(ResponseQueryError::Preview)?;
+    Ok(PreparedResponseQuery {
+        preview,
+        grid: query.grid,
+        channels: query.channels,
+        sections: query.sections,
+    })
+}
+
+impl PreparedResponseQuery {
+    /// Number of sections the owner reports.
+    #[must_use]
+    pub fn section_count(&self) -> usize {
+        self.preview.descriptor().sections.len()
+    }
+
+    /// Number of points on the axis.
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.grid.points()
+    }
+
+    /// Evaluate the curves. An error leaves nothing behind.
+    pub fn curves(&self) -> Result<ResponseCurves, ResponseQueryError> {
+        let points = self.points();
+        let section_count = self.section_count();
+        let section_points =
+            section_count
+                .checked_mul(points)
+                .ok_or(ResponseQueryError::Preview(
+                    ResponsePreviewError::OutputShape,
+                ))?;
+        let mut frequencies = vec![0.0; points];
+        let mut left = vec![0.0; points];
+        let mut right = vec![0.0; points];
+        let mut sections_left = self.sections.then(|| vec![0.0; section_points]);
+        let mut sections_right = self.sections.then(|| vec![0.0; section_points]);
+        let summary = self
+            .preview
+            .query_into(
+                self.grid,
+                ResponsePreviewOutput {
+                    frequencies_hz: &mut frequencies,
+                    total_left_db: &mut left,
+                    total_right_db: &mut right,
+                    sections_left_db: sections_left.as_deref_mut(),
+                    sections_right_db: sections_right.as_deref_mut(),
+                },
+            )
+            .map_err(ResponseQueryError::Preview)?;
+        let configuration = self.preview.configuration();
+        let mask = |values: &[bool]| {
+            values
+                .iter()
+                .enumerate()
+                .fold(0_u32, |mask, (index, enabled)| {
+                    mask | (u32::from(*enabled) << index.min(31))
+                })
+        };
+        let want_left = self.channels.left();
+        let want_right = self.channels.right();
+        Ok(ResponseCurves {
+            configuration_id: summary.configuration_id,
+            sample_rate_hz: summary.sample_rate_hz,
+            floor_db: summary.floor_db,
+            bypass: configuration.bypass.unwrap_or(false),
+            section_count: u32::try_from(section_count).unwrap_or(0),
+            enabled_left: mask(configuration.enabled_left),
+            enabled_right: mask(configuration.enabled_right),
+            retained_bytes: u64::try_from(self.preview.retained_bytes()).unwrap_or(u64::MAX),
+            frequencies_hz: frequencies,
+            left_db: want_left.then_some(left),
+            right_db: want_right.then_some(right),
+            sections_left_db: sections_left.filter(|_| want_left),
+            sections_right_db: sections_right.filter(|_| want_right),
+        })
+    }
 }
 
 /// Generate and validate one explicit frequency axis with portable f64 interpolation.

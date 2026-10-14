@@ -80,14 +80,14 @@ use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
-    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseSnapshot,
-    ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
+    ResponseChannels, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
+    ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
+    ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
     ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
     SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
     SpectrumSmoothingConfig, SpectrumTarget, SpectrumTargetRef, SpectrumWindow,
-    prepare_response_preview, query_response_snapshot_into,
+    prepare_response_query, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -820,6 +820,15 @@ fn response_error_code(error: ResponsePreviewError) -> u32 {
         | ResponsePreviewError::InvalidGrid
         | ResponsePreviewError::OutputShape
         | ResponsePreviewError::Owner(_) => RESULT_INVALID_ARGUMENT,
+    }
+}
+
+fn response_query_error_code(error: ResponseQueryError) -> u32 {
+    match error {
+        ResponseQueryError::Preview(error) => response_error_code(error),
+        ResponseQueryError::Points
+        | ResponseQueryError::Overrides
+        | ResponseQueryError::SampleRate => RESULT_INVALID_ARGUMENT,
     }
 }
 
@@ -2258,58 +2267,52 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         maximum_scratch_bytes: request.maximum_scratch_bytes,
         maximum_automation_spans_per_block: request.maximum_automation_spans_per_block,
     };
-    let prepared = match prepare_response_preview(ResponsePreviewRequest {
+    let Some(channels) = ResponseChannels::from_raw(request.channels) else {
+        return response_failure(staging, RESULT_INVALID_ARGUMENT);
+    };
+    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
+    let prepared = match prepare_response_query(&ResponseQuery {
         configuration_id: request.configuration_id,
         sample_rate_hz: request.sample_rate_hz,
         quantum_frames: request.quantum_frames,
         target,
+        grid,
+        channels,
+        sections: want_sections,
         limits,
     }) {
         Ok(value) => value,
-        Err(error) => return response_failure(staging, response_error_code(error)),
+        Err(ResponseQueryError::Points) => {
+            // A point count past the core cap is refused on every host. The browser keeps its
+            // earlier answer for a result that cannot fit the caller's byte budget, which needs
+            // no sections to be certain: the totals alone already exceed it.
+            let result = response_buffer_budget(
+                grid.points(),
+                0,
+                request.channels,
+                request.fields,
+                request.maximum_result_bytes as usize,
+            )
+            .err()
+            .unwrap_or(RESULT_INVALID_ARGUMENT);
+            return response_failure(staging, result);
+        }
+        Err(error) => return response_failure(staging, response_query_error_code(error)),
     };
-    let points = grid.points();
-    let section_count = prepared.descriptor().sections.len();
-    let want_left = request.channels & crate::RESPONSE_CHANNEL_LEFT != 0;
-    let want_right = request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0;
-    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
+    let points = prepared.points();
     let maximum = request.maximum_result_bytes as usize;
     if let Err(result) = response_buffer_budget(
         points,
-        section_count,
+        prepared.section_count(),
         request.channels,
         request.fields,
         maximum,
     ) {
         return response_failure(staging, result);
     }
-    let mut frequencies = vec![0.0; points];
-    let mut total_left = vec![0.0; points];
-    let mut total_right = vec![0.0; points];
-    let section_points = match section_count.checked_mul(points) {
-        Some(value) => value,
-        None => return response_failure(staging, RESULT_REFUSED_BUDGET),
-    };
-    let mut sections_left = want_sections.then(|| vec![0.0; section_points]);
-    let mut sections_right = want_sections.then(|| vec![0.0; section_points]);
-    if !want_left {
-        total_left.fill(0.0);
-    }
-    if !want_right {
-        total_right.fill(0.0);
-    }
-    let summary = match prepared.query_into(
-        grid,
-        ResponsePreviewOutput {
-            frequencies_hz: &mut frequencies,
-            total_left_db: &mut total_left,
-            total_right_db: &mut total_right,
-            sections_left_db: sections_left.as_deref_mut(),
-            sections_right_db: sections_right.as_deref_mut(),
-        },
-    ) {
+    let curves = match prepared.curves() {
         Ok(value) => value,
-        Err(error) => return response_failure(staging, response_error_code(error)),
+        Err(error) => return response_failure(staging, response_query_error_code(error)),
     };
     let mut payload = Vec::new();
     let header_size = size_of::<WebResponseResult>();
@@ -2317,58 +2320,30 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         return response_failure(staging, RESULT_REFUSED_BUDGET);
     }
     payload.resize(header_size, 0);
-    let frequencies_offset = match append_f32_values(&mut payload, &frequencies, maximum) {
+    let frequencies_offset = match append_f32_values(&mut payload, &curves.frequencies_hz, maximum)
+    {
         Ok(value) => value,
         Err(result) => return response_failure(staging, result),
     };
-    let total_left_offset = if want_left {
-        match append_f32_values(&mut payload, &total_left, maximum) {
-            Ok(value) => value,
-            Err(result) => return response_failure(staging, result),
-        }
-    } else {
-        0
+    let mut append_optional = |values: &Option<Vec<f32>>| match values {
+        Some(values) => append_f32_values(&mut payload, values, maximum),
+        None => Ok(0),
     };
-    let total_right_offset = if want_right {
-        match append_f32_values(&mut payload, &total_right, maximum) {
-            Ok(value) => value,
-            Err(result) => return response_failure(staging, result),
-        }
-    } else {
-        0
+    let total_left_offset = match append_optional(&curves.left_db) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
     };
-    let sections_left_offset = if want_left && want_sections {
-        match append_f32_values(
-            &mut payload,
-            sections_left.as_deref().unwrap_or(&[]),
-            maximum,
-        ) {
-            Ok(value) => value,
-            Err(result) => return response_failure(staging, result),
-        }
-    } else {
-        0
+    let total_right_offset = match append_optional(&curves.right_db) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
     };
-    let sections_right_offset = if want_right && want_sections {
-        match append_f32_values(
-            &mut payload,
-            sections_right.as_deref().unwrap_or(&[]),
-            maximum,
-        ) {
-            Ok(value) => value,
-            Err(result) => return response_failure(staging, result),
-        }
-    } else {
-        0
+    let sections_left_offset = match append_optional(&curves.sections_left_db) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
     };
-    let configuration = prepared.configuration();
-    let mask = |values: &[bool]| {
-        values
-            .iter()
-            .enumerate()
-            .fold(0_u32, |mask, (index, enabled)| {
-                mask | (u32::from(*enabled) << index.min(31))
-            })
+    let sections_right_offset = match append_optional(&curves.sections_right_db) {
+        Ok(value) => value,
+        Err(result) => return response_failure(staging, result),
     };
     let header = WebResponseResult {
         struct_size: RESPONSE_RESULT_BYTES,
@@ -2378,15 +2353,15 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
         channels: request.channels,
         fields: request.fields,
         points: request.points,
-        section_count: u32::try_from(section_count).unwrap_or(0),
-        sample_rate_hz: summary.sample_rate_hz,
+        section_count: curves.section_count,
+        sample_rate_hz: curves.sample_rate_hz,
         reserved0: 0,
-        configuration_id: summary.configuration_id,
-        floor_db: summary.floor_db,
-        bypass: u32::from(configuration.bypass.unwrap_or(false)),
-        enabled_left: mask(configuration.enabled_left),
-        enabled_right: mask(configuration.enabled_right),
-        retained_bytes: u64::try_from(prepared.retained_bytes()).unwrap_or(u64::MAX),
+        configuration_id: curves.configuration_id,
+        floor_db: curves.floor_db,
+        bypass: u32::from(curves.bypass),
+        enabled_left: curves.enabled_left,
+        enabled_right: curves.enabled_right,
+        retained_bytes: curves.retained_bytes,
         result_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
         frequencies_offset,
         total_left_offset,
@@ -4875,6 +4850,54 @@ mod response_budget_tests {
             ),
             Ok(()),
         );
+    }
+
+    fn input_filter_request(points: u32) -> WebResponseRequest {
+        WebResponseRequest {
+            struct_size: RESPONSE_REQUEST_BYTES,
+            abi_version: ABI_VERSION,
+            target: crate::RESPONSE_TARGET_INPUT_FILTERS,
+            grid: crate::RESPONSE_GRID_LOGARITHMIC,
+            channels: crate::RESPONSE_CHANNEL_BOTH,
+            fields: crate::RESPONSE_FIELD_TOTAL,
+            points,
+            sample_rate_hz: 48_000,
+            quantum_frames: 128,
+            minimum_hz: 20.0,
+            maximum_hz: 20_000.0,
+            left_hpf_hz: 80.0,
+            left_lpf_hz: 12_000.0,
+            right_hpf_hz: 160.0,
+            right_lpf_hz: 6_000.0,
+            maximum_prepared_bytes: 1 << 20,
+            maximum_total_state_bytes: 1 << 30,
+            maximum_scratch_bytes: 1 << 30,
+            maximum_automation_spans_per_block: 4096,
+            maximum_result_bytes: 16 << 20,
+            ..WebResponseRequest::default()
+        }
+    }
+
+    /// Test value: the core's 4096-point cap is not reached from the browser (a request past it
+    /// would allocate a megabyte-scale result), or the refusal returns more than the header.
+    #[test]
+    fn a_request_past_the_core_point_cap_is_refused_with_a_header_only_result() {
+        let mut staging = ResponseStaging::new();
+        *staging.request = input_filter_request(4096);
+        assert_eq!(run_response_query(&mut staging), RESULT_OK);
+        assert_eq!(staging.result_header.points, 4096);
+        assert!(staging.result.len() > size_of::<WebResponseResult>());
+
+        *staging.request = input_filter_request(4097);
+        assert_eq!(run_response_query(&mut staging), RESULT_INVALID_ARGUMENT);
+        assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
+        assert_eq!(staging.result_header.result, RESULT_INVALID_ARGUMENT);
+
+        let mut request = input_filter_request(250_000);
+        request.maximum_result_bytes = 16;
+        *staging.request = request;
+        assert_eq!(run_response_query(&mut staging), RESULT_REFUSED_BUDGET);
+        assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
     }
 }
 

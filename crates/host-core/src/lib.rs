@@ -162,11 +162,14 @@ pub use prepare::{
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
-    PreparedResponsePreview, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
-    ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
+    PreparedResponsePreview, PreparedResponseQuery, RESPONSE_MAXIMUM_OVERRIDES,
+    RESPONSE_MAXIMUM_POINTS, ResponseChannels, ResponseCurves, ResponseParameterOverride,
+    ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
+    ResponsePreviewRequest, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
     ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
     ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
-    generate_response_grid, prepare_response_preview, query_response_snapshot_into,
+    generate_response_grid, prepare_response_preview, prepare_response_query,
+    query_response_snapshot_into,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
