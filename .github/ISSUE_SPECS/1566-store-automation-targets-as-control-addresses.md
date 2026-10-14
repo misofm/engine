@@ -244,7 +244,7 @@ Checked against `main` at `7feb27800`.
   after #1602 (`host-core/src/prepare.rs`, `hosts/host-web/src/tests.rs`, different functions).
   Before #1567, and before #1615 (`session/src/canonical.rs`).
 
-## Ruling (root, 2026-10-14): `control.inactive`
+## Ruling (root, 2026-10-14): `control.inactive` (the stored path only)
 
 `controls::check` returns `control.inactive` for a row that is automatable but inactive (for
 example a matrix row on a pan strip). Root ruled option A: `control.inactive` is the fifth code a

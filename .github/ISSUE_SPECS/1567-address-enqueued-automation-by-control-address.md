@@ -155,7 +155,7 @@ Checked against `main` at `7feb27800`.
   structural prepare and commit; this slice edits admission). With #1574 and #1615 in
   `host-core/src/control_provider.rs`: this slice first.
 
-## Ruling (root, 2026-10-14): `control.inactive`
 
-As for #1566: an enqueued record whose address names an automatable but inactive row is refused
-`control.inactive`, the fifth code of D3's set, the same code `SET_CONTROL` uses.
+## Parked (root, 2026-10-14)
+
+Parked 2026-10-14: #1058 A9 retires AUTOMATION_ENQUEUE; close as superseded when #1058 slice 21a is filed and lands.
