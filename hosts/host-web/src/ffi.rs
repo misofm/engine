@@ -138,6 +138,10 @@ struct SpectrumStaging {
     result_len: usize,
     /// Worker-owned analysis storage: the analyzer and one result, made together, once.
     analysis: Option<SpectrumAnalysis>,
+    /// The result's three 1,025-bin planes (frequencies, left and right dBFS) and its header words:
+    /// 3 x 1,025 x 4 = 12,300 bytes plus about 50, so roughly 12 KiB, boxed so the staging moves
+    /// by pointer. Like the analyzer it is made on first use by a worker, retained after, and not
+    /// in the host's retained resource report (see `spectrum_staging_retained_bytes`).
     analysis_result: Option<Box<SpectrumAnalysisResult>>,
     /// Additive stream metadata is inline so exposing its pointer never allocates after boot.
     stream_metadata: WebSpectrumStreamMetadata,
@@ -418,8 +422,8 @@ pub(crate) const SPECTRUM_CAPTURE_PAYLOAD_BYTES: u64 = spectrum_capture_payload_
 /// Heap payload retained by the one-shot spectrum staging area.
 ///
 /// Request and target-ID staging are always available for the pre-boot write. The two PCM byte
-/// buffers are allocated only for a configured capture; the analyzer is worker-owned and is not
-/// part of the host's retained resource report.
+/// buffers are allocated only for a configured capture; the analyzer and the boxed analysis result
+/// (about 12 KiB) are worker-owned and are not part of the host's retained resource report.
 pub(crate) const fn spectrum_staging_retained_bytes(
     configured: bool,
     collection_entry_bytes: u64,
@@ -987,9 +991,11 @@ fn staged_spectrum_request(staging: &SpectrumStaging) -> Result<Option<SpectrumP
             return Err(RESULT_INVALID_ARGUMENT);
         }
     } else {
+        // The staging area bounds the slice (transport); the identity's own rule, 1 to 127 bytes,
+        // is the core's.
         let id_bytes =
             usize::try_from(request.target_id_bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
-        if id_bytes == 0 || id_bytes > staging.target_id.len() {
+        if id_bytes > staging.target_id.len() {
             return Err(RESULT_INVALID_ARGUMENT);
         }
         let id = core::str::from_utf8(&staging.target_id[..id_bytes])
@@ -1017,10 +1023,10 @@ fn staged_spectrum_request(staging: &SpectrumStaging) -> Result<Option<SpectrumP
         return Err(RESULT_REFUSED_BUDGET);
     }
     if count == 0 {
-        if collection.maximum_capture_bytes != 0 {
-            return Err(RESULT_INVALID_ARGUMENT);
-        }
-        return Ok(None);
+        // The core owns the empty-collection rule: budget 0 prepares nothing, any other budget is
+        // its budget refusal.
+        return SpectrumPreparation::collection(&[], collection.maximum_capture_bytes)
+            .map_err(spectrum_request_result);
     }
     // A collection's limit covers all of its prepared entries. The core applies the aggregate
     // rule (non-zero, no one-window cap); the host preparation path applies the checked
@@ -1036,9 +1042,6 @@ fn staged_spectrum_request(staging: &SpectrumStaging) -> Result<Option<SpectrumP
         }
         let id_bytes =
             usize::try_from(staged.target_id_bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
-        if id_bytes == 0 || id_bytes > SPECTRUM_MAXIMUM_ID_BYTES {
-            return Err(RESULT_INVALID_ARGUMENT);
-        }
         let id_end = id_start
             .checked_add(id_bytes)
             .ok_or(RESULT_INVALID_ARGUMENT)?;
@@ -1223,22 +1226,19 @@ fn append_spectrum_f32(bytes: &mut [u8], cursor: &mut usize, values: &[f32]) -> 
     Ok(offset)
 }
 
-fn write_spectrum_window(
-    staging: &mut SpectrumStaging,
-    window: &SpectrumWindow,
-    target: u32,
-    sample_rate_hz: u32,
-    token: u64,
-) -> u32 {
-    if !(SPECTRUM_TARGET_TRACK_POST_INPUT..=SPECTRUM_TARGET_OUTPUT).contains(&target)
-        || window.left.len() != SPECTRUM_WINDOW_FRAMES as usize
-        || window.right.len() != SPECTRUM_WINDOW_FRAMES as usize
-        || sample_rate_hz == 0
-        || window.end_sample().is_none()
-        || token == 0
-    {
-        return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
+fn write_spectrum_window(staging: &mut SpectrumStaging, snapshot: &SpectrumSnapshot) -> u32 {
+    // The core's one snapshot rule: a valid target kind, a representable end sample, a non-zero
+    // token and a launch sample rate.
+    if let Err(error) = snapshot.validate() {
+        return spectrum_failure(staging, spectrum_result(error));
     }
+    let SpectrumSnapshot {
+        window,
+        target_kind: target,
+        sample_rate_hz,
+        token,
+    } = snapshot;
+    let (target, sample_rate_hz, token) = (*target, *sample_rate_hz, *token);
     let Some(bytes) = staging.capture.as_mut() else {
         return RESULT_REFUSED_BUDGET;
     };
@@ -3003,13 +3003,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
                 Ok(None) => return RESULT_BACKPRESSURE,
                 Err(result) => return result,
             };
-            write_spectrum_window(
-                &mut staging,
-                &snapshot.window,
-                snapshot.target_kind,
-                snapshot.sample_rate_hz,
-                snapshot.token,
-            )
+            write_spectrum_window(&mut staging, &snapshot)
         })
     })
 }
@@ -3242,10 +3236,12 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
             };
             write_spectrum_window(
                 &mut staging,
-                &window.as_window(),
-                target,
-                cadence.sample_rate_hz(),
-                token,
+                &SpectrumSnapshot {
+                    window: window.as_window(),
+                    target_kind: target,
+                    sample_rate_hz: cadence.sample_rate_hz(),
+                    token,
+                },
             )
         })
     })
@@ -5799,6 +5795,127 @@ mod spectrum_ffi_tests {
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
+    /// Test value: the browser answers the staged request words as the core's request rules do,
+    /// not with a second copy: an empty collection takes budget 0 only (any other budget is the
+    /// core's budget refusal, `RESULT_REFUSED_BUDGET`, not an invalid argument), and an identity
+    /// of 0 or 128 bytes is the core's identity refusal, for a single and for a collection entry.
+    #[test]
+    fn staged_request_words_are_answered_as_the_core_answers_them() {
+        let staged = || with_spectrum_staging(|slot| staged_spectrum_request(&slot.borrow()));
+
+        stage_collection_request();
+        assert!(matches!(
+            staged(),
+            Ok(Some(SpectrumPreparation::Collection(_)))
+        ));
+
+        with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.collection_request.entry_count = 0;
+            staging.collection_request.maximum_capture_bytes = 0;
+        });
+        assert!(
+            matches!(staged(), Ok(None)),
+            "an empty collection prepares nothing"
+        );
+        with_spectrum_staging(|slot| {
+            slot.borrow_mut().collection_request.maximum_capture_bytes = 1
+        });
+        assert_eq!(staged().err(), Some(RESULT_REFUSED_BUDGET));
+
+        for id_bytes in [0_u32, 128] {
+            stage_collection_request();
+            with_spectrum_staging(|slot| {
+                let mut staging = slot.borrow_mut();
+                staging.collection_entries[0].target_id_bytes = id_bytes;
+                staging.collection_target_ids.resize(256, 0);
+            });
+            assert_eq!(
+                staged().err(),
+                Some(RESULT_INVALID_ARGUMENT),
+                "a collection identity of {id_bytes} bytes"
+            );
+        }
+        // A zero budget is the core's budget refusal, checked before any entry.
+        stage_collection_request();
+        with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.collection_request.maximum_capture_bytes = 0;
+            staging.collection_entries[0].target_id_bytes = 0;
+        });
+        assert_eq!(staged().err(), Some(RESULT_REFUSED_BUDGET));
+
+        for (id_bytes, expected) in [
+            (0_u32, RESULT_INVALID_ARGUMENT),
+            (1, RESULT_OK),
+            (127, RESULT_OK),
+            (128, RESULT_INVALID_ARGUMENT),
+        ] {
+            with_spectrum_staging(|slot| {
+                let mut staging = slot.borrow_mut();
+                staging.release_capture();
+                staging.release_collection_staging();
+                *staging.collection_request = WebSpectrumCollectionRequest::default();
+                *staging.request = WebSpectrumRequest {
+                    struct_size: SPECTRUM_REQUEST_BYTES,
+                    abi_version: ABI_VERSION,
+                    target: SPECTRUM_TARGET_OUTPUT,
+                    channels: SPECTRUM_CHANNEL_LEFT,
+                    target_id_bytes: id_bytes,
+                    maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                    ..WebSpectrumRequest::default()
+                };
+                staging.target_id.fill(b'x');
+            });
+            let result = staged().err().unwrap_or(RESULT_OK);
+            assert_eq!(result, expected, "a single identity of {id_bytes} bytes");
+        }
+        with_spectrum_staging(|slot| slot.borrow_mut().release_capture());
+    }
+
+    /// Test value: the read export answers the core's refusals, two of which differ from the
+    /// export that held its own checks (#1591): a host prepared without a spectrum is
+    /// `RESULT_UNSUPPORTED` (it was an invalid argument), and a collection with no selection is
+    /// `RESULT_WRONG_STATE` (it was an invalid argument). The third change, a token that cannot
+    /// advance refusing before the pop and keeping the window, is the service's read order and has
+    /// no test (the token cannot be moved from outside the service); a mask outside the selected
+    /// one leaving the window for a retry is
+    /// `invalid_spectrum_channel_selection_preserves_window_for_valid_retry`.
+    #[test]
+    fn the_read_export_answers_the_core_refusals() {
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            ..WebBootOptions::explicit_defaults()
+        };
+
+        with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.release_capture();
+            staging.release_collection_staging();
+        });
+        let unprepared = test_boot(document.as_bytes(), options);
+        assert_ne!(unprepared, 0, "a session without a spectrum boots");
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(unprepared, SPECTRUM_CHANNEL_LEFT),
+            RESULT_UNSUPPORTED
+        );
+        assert_eq!(miso_engine_web_v1_dispose(unprepared), RESULT_OK);
+
+        stage_collection_request();
+        let unselected = test_boot(document.as_bytes(), options);
+        assert_ne!(unselected, 0, "a collection session boots");
+        assert_eq!(
+            miso_engine_web_v1_spectrum_read(unselected, SPECTRUM_CHANNEL_LEFT),
+            RESULT_WRONG_STATE,
+            "no entry is selected"
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_capture_bytes(), 0);
+        assert_eq!(miso_engine_web_v1_dispose(unselected), RESULT_OK);
+        with_spectrum_staging(|slot| slot.borrow_mut().release_collection_staging());
+    }
+
     #[test]
     fn select_after_the_callers_arm_is_backpressure_until_the_window_is_read() {
         fn stage_id(id: &[u8]) {
@@ -6361,10 +6478,12 @@ mod spectrum_ffi_tests {
             assert_eq!(
                 write_spectrum_window(
                     &mut staging,
-                    &window,
-                    SPECTRUM_TARGET_OUTPUT,
-                    sample_rate_hz,
-                    token,
+                    &SpectrumSnapshot {
+                        window,
+                        target_kind: SPECTRUM_TARGET_OUTPUT,
+                        sample_rate_hz,
+                        token,
+                    },
                 ),
                 RESULT_OK
             );

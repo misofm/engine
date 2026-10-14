@@ -187,10 +187,12 @@ impl Policy {
             // The floors equal the tree's counts, so a deleted marker or file fails here. They
             // carry stream B's raises (#1432's `latest_cell.rs`, #1277, #1279, #1346, #1347 and
             // #1345 D9: the awk gate's 118 regions in 27 files), #1448's `poll_meters` region and
-            // #1443's seven (three in `crates/source`, four in `spectrum.rs`). A change that adds
-            // a marker raises them in the same change.
-            marked_files_floor: 27,
-            marked_regions_floor: 126,
+            // #1443's seven (three in `crates/source`, four in `spectrum.rs`) and the spectrum
+            // service's two (`spectrum_service.rs`: the prepared captures' one-shot methods and the
+            // service's arm, read, cancel and select; #1591 fold). A change that adds a marker
+            // raises them in the same change.
+            marked_files_floor: 28,
+            marked_regions_floor: 128,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

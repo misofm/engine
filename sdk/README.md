@@ -293,6 +293,12 @@ budgeted boundaries at engine creation. Supported targets are `trackPostInput`,
 `trackPostPan`, and `output`. A collection permits atomic managed selection among prepared
 entries, with one active spectrum producer. It does not enable simultaneous independent streams.
 
+An `armSpectrum()` that `readSpectrum()` has not returned and `cancelSpectrum()` has not ended
+belongs to the caller, and a managed `subscribeSpectrum()` that would select another entry is
+refused with typed `backpressure` until it does. A headless sequence `subscribeSpectrum(A)`, close,
+`armSpectrum()`, `subscribeSpectrum(B)` therefore throws `backpressure`: read or cancel the armed
+window first.
+
 Managed observation, response, and spectrum handles expose `readLatest()`, `update()`, and
 `close()`. Browser delivery progresses automatically; headless consumers call `pump()` between
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates

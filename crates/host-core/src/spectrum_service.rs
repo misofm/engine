@@ -215,6 +215,7 @@ pub enum PreparedSpectrumCaptures {
 }
 
 impl PreparedSpectrumCaptures {
+    // REALTIME_POLICY_BEGIN: the one-shot methods the browser's render-locked exports call.
     fn arm(&self) -> Result<(), SpectrumServiceError> {
         let armed = match self {
             Self::Single(capture) => capture.arm(),
@@ -259,6 +260,7 @@ impl PreparedSpectrumCaptures {
             Self::Collection(capture) => capture.selected_channels(),
         }
     }
+    // REALTIME_POLICY_END
 
     /// Start scheduled windows on the selected entry (the stream half; issue #1592 moves it).
     ///
@@ -506,6 +508,7 @@ impl SpectrumService {
         self.caller_armed = false;
     }
 
+    // REALTIME_POLICY_BEGIN: arm, read, cancel and select run inside render-locked exports.
     /// Arm the selected capture for its next complete window. A success makes the arm the
     /// caller's.
     ///
@@ -653,6 +656,7 @@ impl SpectrumService {
     pub fn channels(&self) -> Option<SpectrumChannels> {
         self.captures.channels()
     }
+    // REALTIME_POLICY_END
 }
 
 /// The words of one analyzed window, in caller-owned storage.
