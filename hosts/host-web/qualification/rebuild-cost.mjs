@@ -68,11 +68,10 @@ const layout = {
   abiVersion: ABI.abiVersion,
   bootOptionsBytes: ABI.structures.bootOptions.bytes,
   offsets: Object.fromEntries(["structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
     "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
   ].map((name) => [name, bootField(name)])),
   sourceRingFrames: (Math.ceil(Math.floor((RATE * stallToleranceMs) / 1000) / Q) + reserveQuanta) * Q,
-  commandQueueRecords: ABI.constants.defaultCommandQueueRecords,
   ok: constant("resultCodes", "ok"),
   bufferSourceId: constant("bufferKinds", "sourceId"),
   bufferSourcePcm: constant("bufferKinds", "sourcePcm"),
@@ -105,7 +104,7 @@ registerProcessor("rebuild-cost", class extends AudioWorkletProcessor {
     u32("requireSampleRateHz", L.rate); u32("requireQuantumFrames", L.quantum);
     u32("sourceRingFrames", L.sourceRingFrames); u32("reserved0", 0);
     u64("maximumMemoryBytes", 0n);
-    u64("liveControlCommandQueueRecords", BigInt(L.commandQueueRecords));
+    u64("reserved1", 0n);
     u64("liveControlMeterBlocks", 0n); u64("liveControlObservationTaps", 0n);
     u64("liveControlMasterTrackPlusOne", 0n);
     const doc = o.document;

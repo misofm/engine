@@ -92,16 +92,23 @@ pub(crate) fn compiled_model_admission(
     current: &CompiledSession,
     prospective: &CompiledSession,
 ) -> Result<CompiledModelAdmission, CompileFailure> {
+    compiled_model_admission_between(current.resource_estimate(), prospective.resource_estimate())
+}
+
+/// [`compiled_model_admission`] from the two models' resource estimates, for a prospective model
+/// that is not held as a compilation (#1613).
+pub(crate) fn compiled_model_admission_between(
+    current: session::ResourceEstimate,
+    prospective: session::ResourceEstimate,
+) -> Result<CompiledModelAdmission, CompileFailure> {
     Ok(CompiledModelAdmission {
         retained_bytes: current
-            .resource_estimate()
             .compiled_model_bytes
-            .checked_add(prospective.resource_estimate().compiled_model_bytes)
+            .checked_add(prospective.compiled_model_bytes)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         largest_allocation_bytes: current
-            .resource_estimate()
             .single_allocation_bytes
-            .max(prospective.resource_estimate().single_allocation_bytes),
+            .max(prospective.single_allocation_bytes),
     })
 }
 
@@ -611,6 +618,7 @@ pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
         } else {
             limits.maximum_vcas
         },
+        maximum_vca_reach_pairs: limits.maximum_vca_reach_pairs,
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
         maximum_effects: limits.maximum_effects,
@@ -664,6 +672,18 @@ pub trait RuntimePreparer: Send {
         bound_cache: &mut InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
+
+    /// The code of the diagnostic this preparer refuses a structural transaction with, or `None`
+    /// to take it (issue #1562a D9).
+    ///
+    /// A command frame whose transaction the live classifier sends to the rebuild arm asks this
+    /// first, before the revision is stamped, the successor is prepared or anything is queued, so
+    /// a refusal here leaves the model, the revision, the overlay, the cells and the plan as they
+    /// were, and no acknowledgement has gone out. The code is one whole-session diagnostic line
+    /// (`code\t$\n`). The default takes every rebuild, as the C ABI does.
+    fn refuse_rebuild(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Prepare one plan plus its source producers, and project its resource accounting.

@@ -14,12 +14,17 @@
 //! live-control channel, with eight of its sixty-four tracks each riding one control: one
 //! track per eight-lane bank, and every other four-lane bank.
 //!
-//! * **EQ band-1 gain** on `ch00`, `ch24`, `ch48`, pushed as **one owner edit on `Both`** -- the
-//!   SDK's lowering (`prepared-control.js` -> `eq_target_prepare`), which designs one `Both` target
-//!   for a symmetric edit and so keeps a mono track's collapse.
+//! * **EQ band-1 gain** on `ch00`, `ch24`, `ch48`, pushed as **one owner edit on `Both`**, which
+//!   designs one `Both` target for a symmetric edit and so keeps a mono track's collapse.
 //! * **Compressor threshold** on `ch08`, `ch32`, `ch56` and **limiter ceiling** on `ch16`, `ch40`,
-//!   pushed as a **Left then a Right `Parameter` record** with one value -- the web host's lowering
-//!   of `channel = 2` for a per-lane parameter (`into_effect_records`).
+//!   pushed as a **Left then a Right `Parameter` record** with one value -- the native row's
+//!   lowering of a both-channel edit of a per-lane parameter.
+//!
+//! The browser arm (#1565A D8) sends each control as one `SET_CONTROL` edit on lane `both` through
+//! the control plane, whatever the native lowering: the core classifies the edit, designs the EQ's
+//! one `Both` target and writes both lanes of a per-lane parameter, so the two arms apply the same
+//! values to the same parameters. The table below names each control by the identity a
+//! `ControlAddress` needs (track, [`ResolvedControl::rack`] for the section, slot id, parameter id).
 //!
 //! Every base is the value the track already holds, read from the session model, so `restated`
 //! restates exactly what is held and must render `quiet`'s bits. `automated` alternates
@@ -243,10 +248,12 @@ impl Arm {
     }
 }
 
-/// The browser `miso.command.v1` record's `rack` byte for a console slot (decision 12, issue
-/// #1096; `host_web::RACK_CONSOLE`). Spelled here because this crate does not link the web host.
+/// The `rack` code of a console slot (decision 12, issue #1096; `host_web::RACK_CONSOLE`, the ABI
+/// layout's `racks`). Spelled here because this crate does not link the web host. The browser arm
+/// reads it as the `console` section of a control address.
 pub const WIRE_RACK_CONSOLE: u8 = 3;
-/// The record's `rack` byte for an insert (`host_web::RACK_INSERTS`), the code `dynamic` had.
+/// The `rack` code of an insert (`host_web::RACK_INSERTS`), the code `dynamic` had; the `inserts`
+/// section of a control address.
 pub const WIRE_RACK_INSERTS: u8 = 1;
 
 /// One control resolved against a prepared runtime.
@@ -256,17 +263,17 @@ pub struct ResolvedControl {
     pub control: Control,
     /// The runtime's control channel for `(track_id, effect contract id)`.
     pub channel: usize,
-    /// The track's position in the session model: the web host's `trackIndex`.
+    /// The track's position in the session model.
     pub track_index: usize,
     /// The effect's session slot id.
     pub slot_id: String,
-    /// The browser record's `rack` byte (decision 12, issue #1096): [`WIRE_RACK_CONSOLE`] for a
-    /// console slot, [`WIRE_RACK_INSERTS`] for an insert.
+    /// The rack code (decision 12, issue #1096): [`WIRE_RACK_CONSOLE`] for a console slot (the
+    /// `console` section of the control address), [`WIRE_RACK_INSERTS`] for an insert (`inserts`).
     pub rack: u8,
-    /// The record's `effectIndex`: a console slot's index in the session's slot order
-    /// (`pre_insert`, then `post_insert`), or an insert's index in the track's `inserts`.
+    /// A console slot's index in the session's slot order (`pre_insert`, then `post_insert`), or an
+    /// insert's index in the track's `inserts`: where the browser arm finds the held base.
     pub effect_index: u32,
-    /// The parameter's wire id (the wire's `parameterId`).
+    /// The parameter's wire id: the control row's number in its section.
     pub parameter_id: u32,
     /// The value the track holds, which `restated` restates.
     pub base: f32,

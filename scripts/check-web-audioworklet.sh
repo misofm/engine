@@ -56,6 +56,22 @@ check_clock_policy() {
   [[ "$sites" == "$pinned" ]]
 }
 
+# Issue #1381a D6: the timers. The worklet never holds a timer, and the main-realm host holds exactly
+# one `setInterval(` site, the single-mode service tick, between the markers
+# `SERVICE_TICK_BEGIN` and `SERVICE_TICK_END`. `setTimeout` stays banned in both files. Control
+# work of the `single` mode runs in the worklet's message handler, so the worklet needs a message
+# to run on; the tick is that message, posted once per quantum, and nothing else in the main realm
+# may run on a timer. A second site, a site outside the markers or a timer in the worklet is red.
+check_timer_policy() {
+  local main=$1 worklet=$2
+  local sites pinned
+  if rg -q 'setTimeout|setInterval' "$worklet"; then return 1; fi
+  if rg -q 'setTimeout' "$main"; then return 1; fi
+  sites=$(rg -c 'setInterval' "$main" || true)
+  pinned=$(sed -n '/SERVICE_TICK_BEGIN/,/SERVICE_TICK_END/p' "$main" | rg -c 'setInterval\(' || true)
+  [[ "${sites:-0}" == 1 && "${pinned:-0}" == 1 ]]
+}
+
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
 # "scalar must contain no vector opcode" leg. No scalar wasm build is left at all: `lane` refuses
@@ -107,6 +123,59 @@ if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
     exit 1
   fi
   echo "web AudioWorklet opcode-policy mutations passed"
+  exit 0
+fi
+
+if (($# == 1)) && [[ $1 == --self-test-timers ]]; then
+  timer_dir=$(mktemp -d)
+  trap 'rm -rf -- "$timer_dir"' EXIT
+  main_ok="$timer_dir/main-ok.js"
+  worklet_ok="$timer_dir/worklet-ok.js"
+  printf '%s\n' \
+    'class Host {' \
+    '  // SERVICE_TICK_BEGIN' \
+    '  #start() { this.tick = setInterval(() => this.post(), 3); }' \
+    '  // SERVICE_TICK_END' \
+    '  #stop() { clearInterval(this.tick); }' \
+    '}' >"$main_ok"
+  printf '%s\n' 'class Processor { process() { return true; } }' >"$worklet_ok"
+  check_timer_policy "$main_ok" "$worklet_ok"
+  mutate() {
+    local name=$1 main=$2 worklet=$3
+    if check_timer_policy "$main" "$worklet"; then
+      echo "timer mutation escaped policy: $name" >&2
+      exit 1
+    fi
+  }
+  # A second site beside the pinned one.
+  main_two="$timer_dir/main-two.js"
+  { cat "$main_ok"; printf '%s\n' 'function poll() { setInterval(() => {}, 9); }'; } >"$main_two"
+  mutate "a second main-realm site" "$main_two" "$worklet_ok"
+  # The only site, but outside the markers.
+  main_outside="$timer_dir/main-outside.js"
+  printf '%s\n' \
+    'class Host {' \
+    '  // SERVICE_TICK_BEGIN' \
+    '  // SERVICE_TICK_END' \
+    '  #start() { this.tick = setInterval(() => this.post(), 3); }' \
+    '}' >"$main_outside"
+  mutate "a site outside the markers" "$main_outside" "$worklet_ok"
+  # No site at all: the tick is gone.
+  main_none="$timer_dir/main-none.js"
+  printf '%s\n' 'class Host {}' >"$main_none"
+  mutate "no service tick" "$main_none" "$worklet_ok"
+  # A timeout in the main realm.
+  main_timeout="$timer_dir/main-timeout.js"
+  { cat "$main_ok"; printf '%s\n' 'function later() { setTimeout(() => {}, 9); }'; } >"$main_timeout"
+  mutate "a main-realm timeout" "$main_timeout" "$worklet_ok"
+  # A timer in the worklet.
+  worklet_interval="$timer_dir/worklet-interval.js"
+  printf '%s\n' 'class Processor { constructor() { setInterval(() => {}, 9); } }' >"$worklet_interval"
+  mutate "a worklet interval" "$main_ok" "$worklet_interval"
+  worklet_timeout="$timer_dir/worklet-timeout.js"
+  printf '%s\n' 'class Processor { constructor() { setTimeout(() => {}, 9); } }' >"$worklet_timeout"
+  mutate "a worklet timeout" "$main_ok" "$worklet_timeout"
+  echo "web AudioWorklet timer-policy mutations passed"
   exit 0
 fi
 
@@ -183,11 +252,10 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet-host.js \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
-  miso-engine-v1-parameter-metadata.json \
-  prepared-control.js)
+  miso-engine-v1-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact seven frozen outputs" >&2
+  echo "artifact directory does not contain the exact six frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -212,30 +280,19 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
-  miso_engine_web_v1_live_control_route_count \
-  miso_engine_web_v1_live_control_route_id \
+  miso_engine_web_v1_control_allocation_count \
+  miso_engine_web_v1_control_command \
+  miso_engine_web_v1_control_event \
+  miso_engine_web_v1_control_request_ptr \
+  miso_engine_web_v1_control_response_bytes \
+  miso_engine_web_v1_control_response_ptr \
+  miso_engine_web_v1_control_revision \
   miso_engine_web_v1_live_control_submix_count \
   miso_engine_web_v1_live_control_submix_id \
   miso_engine_web_v1_live_control_track_count \
   miso_engine_web_v1_live_control_track_id \
-  miso_engine_web_v1_live_control_vca_count \
-  miso_engine_web_v1_live_control_vca_id \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
-  miso_engine_web_v1_eq_target_close \
-  miso_engine_web_v1_eq_target_config_copy \
-  miso_engine_web_v1_eq_target_config_ptr \
-  miso_engine_web_v1_eq_target_open \
-  miso_engine_web_v1_eq_target_prepare \
-  miso_engine_web_v1_eq_target_rejected_edit_index \
-  miso_engine_web_v1_eq_target_rejected_reason \
-  miso_engine_web_v1_eq_target_request_capacity \
-  miso_engine_web_v1_eq_target_request_ptr \
-  miso_engine_web_v1_eq_target_result_bytes \
-  miso_engine_web_v1_eq_target_result_capacity \
-  miso_engine_web_v1_eq_target_result_ptr \
-  miso_engine_web_v1_input_filters_config_copy \
-  miso_engine_web_v1_input_filters_prepare \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
@@ -255,9 +312,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_observation_tap_count \
   miso_engine_web_v1_observation_tap_id \
   miso_engine_web_v1_observation_track_index \
-  miso_engine_web_v1_prepared_command_submit \
-  miso_engine_web_v1_prepared_companion_capacity \
-  miso_engine_web_v1_prepared_companion_ptr \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_response_close \
@@ -272,6 +326,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_response_result_bytes \
   miso_engine_web_v1_response_result_ptr \
   miso_engine_web_v1_resource_ptr \
+  miso_engine_web_v1_service \
   miso_engine_web_v1_source_channels \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \
@@ -324,7 +379,9 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_track_response_snapshot_ptr \
   miso_engine_web_v1_track_response_snapshot_set_bytes \
   miso_engine_web_v1_track_response_track_id_capacity \
-  miso_engine_web_v1_track_response_track_id_ptr | sort)
+  miso_engine_web_v1_track_response_track_id_ptr \
+  miso_engine_web_v1_watermark_ptr \
+  miso_engine_web_v1_watermark_read | sort)
 
 # Issue #1047: the shipped ABI layout document publishes exactly these exports, every one but
 # `memory` (linear memory, not a call). It is read from the artifact, not from the generator's
@@ -482,9 +539,15 @@ fi
 # reviewed change.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
+# Issue #1381a D4: the browser renders through the plan owner, so the render closure holds
+# `RealtimePlanOwner::enter_block`, which inlines the bounded SPSC endpoints' checked slot index
+# (the retirement queue's and the mailbox's), unreachable by their cursor invariant like the one
+# `meter_poll` admits below. It is named as the one owner, and nothing the block boundary calls
+# may trap.
 printf '%s
 ' "$named_disassembly" |
-  python3 -B "$callgraph" --callgraph miso_engine_web_v1_render --render-thread || exit 1
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
+    --trap-owner 17RealtimePlanOwner11enter_block --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
@@ -502,10 +565,11 @@ printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
     --trap-owner 22AudioWorkletEngineHost11poll_meters --render-thread || exit 1
-# `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
-# reaches `math`'s vendored argument reduction, which is full of checked indices. The
-# engine's rule for the control path is "never allocate on the render thread", so the allocation
-# half is what this export is held to -- and it is held to it absolutely.
+# `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
+# the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
+# through `control_command`). The engine's rule for the control path is "never allocate on the
+# render thread", so the allocation half is what this export is held to -- and it is held to it
+# absolutely.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only \
@@ -519,17 +583,23 @@ printf '%s
 # advances by exactly one quantum per block no matter how long the render took.
 #
 # The ban therefore becomes a pinned-site rule for the worklet's `renderClock()` helper, and stays
-# a blanket ban for the main-realm host, for `setTimeout`/`setInterval`/`Worker`/`Atomics`
-# everywhere, and for every other line of the worklet. The clock is never read inside the frozen
+# a blanket ban for the main-realm host, for `Worker`/`Atomics` everywhere, and for every other
+# line of the worklet. (`setTimeout` and `setInterval` are the pinned-site rule of
+# `check_timer_policy`, issue #1381a D6.) The clock is never read inside the frozen
 # `process()` policy body -- `process_policy_re` still bans both names there.
-if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval|performance\.now|Date\.now' "$main_js"; then
+if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|performance\.now|Date\.now' "$main_js"; then
   echo "forbidden browser capability found in the main-realm host" >&2
   exit 1
 fi
-if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval' "$worklet_js"; then
+if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(' "$worklet_js"; then
   echo "forbidden browser capability found in the worklet" >&2
   exit 1
 fi
+# Issue #1381a D6: the timers are a pinned-site rule, not a blanket ban (see `check_timer_policy`).
+check_timer_policy "$main_js" "$worklet_js" || {
+  echo "a timer outside the pinned service tick, or no service tick" >&2
+  exit 1
+}
 check_clock_policy "$worklet_js" || {
   echo "a clock is read outside the pinned renderClock() helper" >&2
   exit 1

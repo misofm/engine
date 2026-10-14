@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { scriptedControl } from "./control-support.mjs";
 import { test } from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
@@ -346,8 +347,9 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   let sequence = 0n;
   let residentArmed = false;
   const host = hostWithCapture({
+    control: scriptedControl(),
     async sessionMap() {
-      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] };
+      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] };
     },
     async observationMap() {
       return {
@@ -395,7 +397,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   const engine = await browserEngine(
     host,
     () => new SpectrumWorker({ failStream: workerCount++ === 0 }),
-    { policy: { liveControls: { commandQueueRecords: 16, observationTaps: 1 } } },
+    { policy: { liveControls: { observationTaps: 1 } } },
   );
   const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
   try {

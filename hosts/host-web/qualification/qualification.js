@@ -11,9 +11,7 @@ const REQUESTED_STALL_MS = 120;
 // and a two-block meter window makes the decimated cadence observable inside it.
 const LIVE_CONTROL_BLOCKS = 130;
 const LIVE_CONTROL_FRAMES = LIVE_CONTROL_BLOCKS * QUANTUM_FRAMES;
-const LIVE_CONTROL_COMMAND_QUEUE_RECORDS = 64n;
 const LIVE_CONTROL_METER_BLOCKS = 2n;
-const COMMAND_MATRIX = 2;
 // Issue #143 E12: the observation row. Sixteen blocks is eight two-block windows -- enough for the
 // compressor's 10 ms attack to settle and for `firstSample` monotonicity to be a real sequence
 // rather than a single point.
@@ -55,7 +53,6 @@ const SIMD128_PROBE = new Uint8Array([
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
 function bootOptions(
   sourceRingFrames,
-  liveControlCommandQueueRecords = 0n,
   liveControlMeterBlocks = 0n,
   liveControlObservationTaps = 0n,
   liveControlMasterTrackPlusOne = 0n,
@@ -65,7 +62,8 @@ function bootOptions(
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
     // same one the direct oracle writes at boot-options offset 24.
     maximumMemoryBytes: 0n,
-    liveControlCommandQueueRecords,
+    // Issue #1565: offset 32 is reserved and must be zero.
+    reserved1: 0n,
     liveControlMeterBlocks,
     // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
     // the pre-#143 shape, which is what every row but the observation one keeps using.
@@ -284,10 +282,19 @@ async function diagnoseGlobals() {
   });
 }
 
+/// One matrix retarget of the qualification track as a `SET_CONTROL` transaction (#1563B). The SDK
+/// builds and sends it through `host.control()`, and this page does not repeat the SDK's encoder:
+/// the runner always builds and serves the SDK bundle for these rows. The session's track is in
+/// matrix mode, so the four coefficients are live rows of the strip.
+async function applyMatrix(host, matrix) {
+  const { applyMatrixThroughSdk } = await import("/sdk/sdk-response-client.js");
+  return applyMatrixThroughSdk(host, "track", matrix);
+}
+
 /// #137 E8: a live-control row -- one parameter change applied and one meter frame received.
 ///
-/// The command is awaited before rendering starts, so its acknowledgement names sample `0` and the
-/// whole rendered block is post-command: the browser leg proves *that* a change reached the DSP
+/// The transaction is awaited before rendering starts, so the whole rendered block is
+/// post-transaction: the browser leg proves *that* a change reached the DSP
 /// and *what* it did, while the exact-sample transition is proved bit for bit by the native and
 /// raw-Wasm command-timeline oracles. The retarget halves the left matrix coefficient, so the
 /// expected output is the submitted left plane at half gain and the right plane untouched --
@@ -299,7 +306,6 @@ async function runLiveControlQualification(createHost, sessionDocument) {
     document: sessionDocument,
     options: bootOptions(
       LIVE_CONTROL_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -342,18 +348,9 @@ async function runLiveControlQualification(createHost, sessionDocument) {
     onFrame: (frame) => telemetryFrames.push(frame),
   });
 
-  const command = await host.command({
-    commands: [{
-      kind: COMMAND_MATRIX,
-      rack: 255,
-      channel: 255,
-      trackIndex: 0,
-      effectIndex: 0,
-      parameterId: 0,
-      smoothingSamples: 0,
-      values: [0.5, 0, 0, 1],
-    }],
-  });
+  // The retarget is a SET_CONTROL transaction, built and sent by the SDK (the served bundle), and
+  // committed by the core before the first render: the whole rendered block is post-edit.
+  const command = await applyMatrix(host, { ll: 0.5, lr: 0, rl: 0, rr: 1 });
 
   const rendered = await context.startRendering();
   // Frames posted from the render thread arrive as tasks; yield until the queue is drained.
@@ -378,10 +375,9 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   return {
     tracks: map.tracks,
     metersAttached: map.metersAttached,
-    commandResult: command.result,
-    commandReason: command.reason,
-    commandAdmitted: command.admitted,
-    appliedAtSample: command.appliedAtSample.toString(),
+    commandOk: command.ok,
+    commandPath: command.path,
+    commandApplied: command.appliedOperations,
     meterLeaseResult: meterLease.result,
     telemetryLeaseResult: telemetryLease.result,
     meterFrames: meterFrames.length,
@@ -416,7 +412,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     document: sessionDocument,
     options: bootOptions(
       OBSERVATION_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
       OBSERVATION_TAPS,
       OBSERVATION_MASTER_TRACK_PLUS_ONE,
@@ -546,7 +541,6 @@ async function runStallQualification(createHost, sessionDocument) {
     // imposes -- and the frozen exact-output requirement is unchanged.
     options: bootOptions(
       DEFAULT_RING_FRAMES,
-      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -581,18 +575,7 @@ async function runStallQualification(createHost, sessionDocument) {
   // coefficient -- the stall session's pan is already the identity matrix -- so the frozen exact
   // digest still applies, while the control path, its queue and the meter fold are all live
   // across the stall.
-  const stallCommand = await host.command({
-    commands: [{
-      kind: COMMAND_MATRIX,
-      rack: 255,
-      channel: 255,
-      trackIndex: 0,
-      effectIndex: 0,
-      parameterId: 0,
-      smoothingSamples: 0,
-      values: [1, 0, 0, 1],
-    }],
-  });
+  const stallCommand = await applyMatrix(host, { ll: 1, lr: 0, rl: 0, rr: 1 });
 
   // An exact-length offline context needs no non-portable suspend point: rendering begins before
   // the main-realm fault and consumes all 40 prefilled quanta while that realm is unavailable.
@@ -617,7 +600,7 @@ async function runStallQualification(createHost, sessionDocument) {
   }
 
   return {
-    liveControlCommandResult: stallCommand.result,
+    liveControlCommandOk: stallCommand.ok,
     liveControlMeterLeaseResult: meterLease.result,
     liveControlMeterFrames: stallMeterFrames.length,
     requestedStallMs: REQUESTED_STALL_MS,
@@ -652,8 +635,7 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
     options: {
       ...bootOptions(
         STAGING_READ_FRAMES,
-        LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
-        LIVE_CONTROL_METER_BLOCKS,
+          LIVE_CONTROL_METER_BLOCKS,
         OBSERVATION_TAPS,
         OBSERVATION_MASTER_TRACK_PLUS_ONE,
       ),

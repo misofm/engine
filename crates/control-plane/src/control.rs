@@ -299,6 +299,9 @@ thread_local! {
         const { core::cell::Cell::new(([None; 2], 0)) };
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
+    static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// `(commits made from an in-place token, in-place tokens materialized)` on this thread.
+    static IN_PLACE_COUNTS: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
         const { core::cell::Cell::new(TestOwnerCounters {
             current_provider_constructed: 0,
@@ -351,6 +354,29 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+}
+
+/// Makes this thread's control commands prepare their transactions by the full path (#1613): a
+/// clone of the model with the edits applied, compiled, as before the in-place preparation. A test
+/// runs one script both ways and compares the two sessions.
+#[cfg(feature = "test-support")]
+pub fn test_force_full_preparation(force: bool) {
+    FORCE_FULL_PREPARATION.with(|state| state.set(force));
+}
+
+/// Whether a live commit on this thread checks, in a debug build, that its catalog stage equals a
+/// full build of the committed model (on by default; [`host_core::verify_stages`]). The check
+/// builds the whole catalog, so a test that counts the allocations of a command turns it off.
+#[cfg(feature = "test-support")]
+pub fn test_verify_catalog_stages(on: bool) {
+    host_core::verify_stages(on);
+}
+
+/// How many commits this thread made from a token prepared in place, and how many such tokens it
+/// had to materialize into the full preparation, since the last call (#1613), and resets both.
+#[cfg(feature = "test-support")]
+pub fn test_take_in_place_counts() -> (usize, usize) {
+    IN_PLACE_COUNTS.with(core::cell::Cell::take)
 }
 
 /// The thread's lifecycle counters.
@@ -493,6 +519,10 @@ impl ObservedPreparedToken {
         self.inner.as_deref().expect("observed token is live")
     }
 
+    pub(crate) fn get_mut(&mut self) -> &mut protocol::PreparedStructuralCommand {
+        self.inner.as_deref_mut().expect("observed token is live")
+    }
+
     /// Commit the token. `path` is how a model transaction was applied (#1313); a token of
     /// monitor writes only commits no model and takes the monitor path inside the protocol commit.
     pub(crate) fn commit(
@@ -591,6 +621,10 @@ pub(crate) enum LiveCommit {
     Done(Result<usize, CommandError>),
     /// The delta needs a plan rebuild; the token comes back untouched.
     Rebuild(ObservedPreparedToken),
+    /// The token was prepared in place (#1613) and the fast classification could not judge it:
+    /// the token comes back untouched, and the arm goes on with its full preparation. Never
+    /// returned for a token that holds a compilation, and never leaves `commit_live`.
+    NeedsFull(ObservedPreparedToken),
 }
 
 /// The EQ owners a live commit has begun (#1265 D2). Dropping it discards every owner still in
@@ -1177,14 +1211,21 @@ where
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
-        let prepared = self
-            .controller
-            .prepare_command_frame(
-                request,
-                &mut DecodeScratch::new(&mut self.decode_fields),
-                output_capacity,
-            )
-            .map_err(map_command_process_error)?;
+        // #1613: a transaction of values is prepared in place (no clone, no compile); every other
+        // command is prepared as it always was. A test can force the full preparation.
+        #[cfg(feature = "test-support")]
+        let in_place = !FORCE_FULL_PREPARATION.with(core::cell::Cell::get);
+        #[cfg(not(feature = "test-support"))]
+        let in_place = true;
+        let mut scratch = DecodeScratch::new(&mut self.decode_fields);
+        let prepared = if in_place {
+            self.controller
+                .prepare_command_frame_in_place(request, &mut scratch, output_capacity)
+        } else {
+            self.controller
+                .prepare_command_frame(request, &mut scratch, output_capacity)
+        }
+        .map_err(map_command_process_error)?;
         match prepared {
             PreparedCommandFrame::Immediate(response) => response
                 .write_into(&mut self.response_scratch)
@@ -1213,7 +1254,18 @@ where
                 let prepared = match self.commit_live(prepared) {
                     LiveCommit::Done(result) => return result,
                     LiveCommit::Rebuild(prepared) => prepared,
+                    // `commit_live` materializes an in-place token before it returns.
+                    LiveCommit::NeedsFull(_) => return Err(CommandError::Internal),
                 };
+                // #1562a D9: an adapter that cannot take a rebuild yet refuses here, with the
+                // token dropped unsent (nothing is stamped, prepared or queued, so the frame has
+                // no acknowledgement to drop). The C ABI's preparer takes every rebuild.
+                if let Some(code) = self.preparer.refuse_rebuild() {
+                    drop(prepared);
+                    return Err(CommandError::CompileRejected(crate::error::diagnostic(
+                        code,
+                    )));
+                }
                 // Issue #1042: while the atomic lags the providers, a render call has swapped plans
                 // but not yet published the epoch. The retired plan's row stays for any-thread
                 // readers, so the report table is full and no candidate could be admitted: refuse
@@ -1246,6 +1298,7 @@ where
                         .get()
                         .prospective_session()
                         .compiled()
+                        .ok_or(CommandError::Internal)?
                         .normalized_model(),
                 );
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
@@ -1255,7 +1308,11 @@ where
                 // newest seed, so a refused or abandoned rebuild leaves every seed as it was.
                 let prepared_runtime = prepare_runtime::<A>(
                     &*self.preparer,
-                    prepared.get().prospective_session().compiled(),
+                    prepared
+                        .get()
+                        .prospective_session()
+                        .compiled()
+                        .ok_or(CommandError::Internal)?,
                     self.limits,
                     Some(SuccessorBase {
                         inventory: &self.newest_providers().inventory,
@@ -1313,7 +1370,11 @@ where
                     prospective_capi,
                     compiled_model_admission(
                         self.controller.session().compiled(),
-                        prepared.get().prospective_session().compiled(),
+                        prepared
+                            .get()
+                            .prospective_session()
+                            .compiled()
+                            .ok_or(CommandError::Internal)?,
                     )
                     .map_err(CommandError::CompileRejected)?,
                     self.limits,
@@ -1476,29 +1537,104 @@ where
     /// descriptor or a setting changed, which stages the whole catalog (#1600). The structure
     /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
     /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
+    ///
+    /// **A token prepared in place (#1613).** A transaction of `SetControl`s on existing values holds
+    /// the owners it edited and no compilation (`PreparedSessionTransaction::is_in_place`). The
+    /// classification, the admission, the catalog stage and the producers' preflight read the
+    /// committed model and those owners as one view (`controls::ModelView`), and nothing writes the
+    /// committed model before the commit: the protocol commit swaps the owners in as the last write.
+    /// If the fast classification cannot judge the transaction, the token is materialized (the full
+    /// preparation of its edits) and this arm goes on as for any other token, a rebuild included.
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
+        match self.commit_live_once(prepared) {
+            LiveCommit::NeedsFull(mut prepared) => {
+                // #1613: the fast classification could not judge the in-place transaction. Its
+                // edits are prepared by the full path now (nothing was written), and the arm goes
+                // on as it always did, a rebuild included.
+                #[cfg(feature = "test-support")]
+                IN_PLACE_COUNTS.with(|counts| {
+                    let (commits, materialized) = counts.get();
+                    counts.set((commits, materialized + 1));
+                });
+                if self
+                    .controller
+                    .materialize_prepared(prepared.get_mut())
+                    .is_err()
+                {
+                    return LiveCommit::Done(Err(CommandError::Internal));
+                }
+                self.commit_live_once(prepared)
+            }
+            other => other,
+        }
+    }
+
+    /// One attempt of [`Self::commit_live`]: the live arm over the token as it is. A token prepared
+    /// in place is classified from its rows over the view of the committed model and its edited
+    /// owners; if that cannot judge, the token is handed back as [`LiveCommit::NeedsFull`].
+    fn commit_live_once(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let transaction = prepared.get().prospective_session();
-        let next = transaction.compiled().normalized_model();
+        let in_place = transaction.is_in_place();
+        let committed = self.controller.session().compiled().normalized_model();
+        // The model after the transaction, read as the committed model and the owners the
+        // transaction edited (#1613), or the prospective compilation's model, whole.
+        let view = match (transaction.edited_owners(), in_place) {
+            (Some(owners), _) => controls::ModelView::edited(committed, owners),
+            (None, true) => controls::ModelView::whole(committed),
+            (None, false) => controls::ModelView::whole(
+                transaction
+                    .compiled()
+                    .expect("a compiled transaction")
+                    .normalized_model(),
+            ),
+        };
+        let next = view.structure();
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
         let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
         let monitor_only = prepared.get().is_monitor_only();
-        let Ok(delta) = host_core::classify_live_delta_with_monitor(
-            self.controller.session().compiled().normalized_model(),
-            next,
-            host_core::LiveRamps::for_session(next),
-            transaction.edit_ramps(),
-            host_core::MonitorBase {
-                committed: &self.monitor,
-                next: &monitor_change.overlay,
-                ramp: monitor_change.ramp,
-            },
-        ) else {
-            // A monitor-only transaction never rebuilds (#1603 D7): its records are strip mute and
-            // route gate records, which every plan carries, so a rebuild verdict is a defect.
-            if monitor_only {
-                return LiveCommit::Done(Err(CommandError::Internal));
+        let monitor = host_core::MonitorBase {
+            committed: &self.monitor,
+            next: &monitor_change.overlay,
+            ramp: monitor_change.ramp,
+        };
+        let ramps = host_core::LiveRamps::for_session(next);
+        let delta = if in_place {
+            // #1613: classified from the rows the edits name over the view, with no model built.
+            let rows = transaction.set_control_rows().unwrap_or_default();
+            match host_core::classify_live_staged(
+                committed,
+                view,
+                ramps,
+                transaction.edit_ramps(),
+                monitor,
+                rows,
+            ) {
+                Some(delta) => delta,
+                None => return LiveCommit::NeedsFull(prepared),
             }
-            return LiveCommit::Rebuild(prepared);
+        } else {
+            // #1612: a transaction of `SetControl`s is classified from the rows it names, with no
+            // model clone and no canonical JSON; any other, and any row the fast path cannot
+            // judge, runs the full classifier inside this one call.
+            match host_core::classify_live_edit(
+                committed,
+                next,
+                ramps,
+                transaction.edit_ramps(),
+                monitor,
+                transaction.set_control_rows(),
+            ) {
+                Ok(delta) => delta,
+                Err(_) => {
+                    // A monitor-only transaction never rebuilds (#1603 D7): its records are strip
+                    // mute and route gate records, which every plan carries, so a rebuild verdict
+                    // is a defect.
+                    if monitor_only {
+                        return LiveCommit::Done(Err(CommandError::Internal));
+                    }
+                    return LiveCommit::Rebuild(prepared);
+                }
+            }
         };
         // Whether the commit publishes on the plan gate: every model transaction does (a delta
         // with no record is a revision render has nothing to do for), and a transaction of
@@ -1508,7 +1644,7 @@ where
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
-        let catalog = match self.live_admission(&prepared, &monitor_change.overlay, &delta) {
+        let catalog = match self.live_admission(&prepared, &monitor_change.overlay, view, &delta) {
             Ok(catalog) => catalog,
             Err(error) => return LiveCommit::Done(Err(error)),
         };
@@ -1717,6 +1853,13 @@ where
             };
             Some(stamp)
         };
+        #[cfg(feature = "test-support")]
+        if in_place {
+            IN_PLACE_COUNTS.with(|counts| {
+                let (commits, materialized) = counts.get();
+                counts.set((commits + 1, materialized));
+            });
+        }
         // The key is read into a local now, so the publication below is the stamped one.
         let key = stamp.map(|stamp| stamp.key());
         // Write the strips' cells, then each effect's cells and each EQ owner's target cells.
@@ -1855,36 +1998,39 @@ where
         &self,
         prepared: &ObservedPreparedToken,
         overlay: &controls::MonitorOverlay,
+        view: controls::ModelView<'_>,
         delta: &host_core::LiveDelta<'_>,
     ) -> Result<host_core::StagedCatalog, CommandError> {
-        // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the same
-        // function, the same diagnostic, and nothing is committed on a refusal.
-        host_core::check_counts(
-            prepared
-                .get()
-                .prospective_session()
-                .compiled()
-                .normalized_model(),
-            &prepare_caps(self.limits),
-        )
-        .map_err(|diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)))?;
-        let models = compiled_model_admission(
-            self.controller.session().compiled(),
-            prepared.get().prospective_session().compiled(),
-        )
-        .map_err(CommandError::CompileRejected)?;
+        let transaction = prepared.get().prospective_session();
+        let committed = self.controller.session().compiled();
+        let models = if transaction.is_in_place() {
+            // #1613: a transaction prepared in place changes values, never a count (the
+            // preparation proved it), so the counts a rebuild would check are those of the
+            // committed model, which passed them when it was admitted. The model charge is the one
+            // the full path would make: the committed estimate and the next one.
+            let next = transaction
+                .in_place_estimate()
+                .unwrap_or_else(|| committed.resource_estimate());
+            compiled_model_admission_between(committed.resource_estimate(), next)
+                .map_err(CommandError::CompileRejected)?
+        } else {
+            // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the
+            // same function, the same diagnostic, and nothing is committed on a refusal.
+            host_core::check_counts(view.structure(), &prepare_caps(self.limits)).map_err(
+                |diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)),
+            )?;
+            compiled_model_admission(
+                committed,
+                transaction.compiled().ok_or(CommandError::Internal)?,
+            )
+            .map_err(CommandError::CompileRejected)?
+        };
         // The new catalog, before anything is written. A VCA added live adds rows to it, so it
         // can outgrow the catalog the epochs were prepared with.
-        let prospective = prepared.get().prospective_session().compiled();
         let catalog = self
             .controller
             .provider()
-            .stage_live_catalog(
-                prospective.normalized_model(),
-                overlay,
-                prospective.sample_rate().0,
-                delta,
-            )
+            .stage_live_catalog(view, overlay, view.structure().sample_rate_hz, delta)
             .map_err(|_| CommandError::Internal)?;
         // A values-only stage holds no table: the catalog stays as large as it is, and only a
         // full catalog is held beside the current one until the commit publishes it.
@@ -2033,22 +2179,91 @@ where
             .unwrap_or(&mut self.providers)
     }
 
+    /// The committed session in its compiled form (#1381a): what the plan was prepared from. A
+    /// single-instance adapter reads its addressing tables and source shapes from it, so it keeps
+    /// no second copy of the model beside the control plane's own.
+    #[must_use]
+    pub fn committed_session(&self) -> &CompiledSession {
+        self.controller.session().compiled()
+    }
+
+    /// What the session's one control catalog holds (#1381a): the control plane's provider owns it,
+    /// and an adapter that charges its own report reads the figures here, not from a catalog of its
+    /// own.
+    #[must_use]
+    pub fn catalog_resources(&self) -> host_core::CatalogResources {
+        self.controller.provider().catalog_resources()
+    }
+
+    /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
+    /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
+    /// observation queue. The adapter reaches an effect's observation queue for the browser's
+    /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
+    /// else of a producer, so it cannot write a live value or open an owner behind the commit.
+    ///
+    /// These are the producers of the plan that renders, not a pending candidate's: a
+    /// subscription must reach the observer the active plan's readers belong to. The browser's
+    /// feature phase deletes this accessor together with those kinds.
+    #[must_use]
+    pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
+        &self.providers.effects
+    }
+
+    /// Queues one observation record on the effect producer at `position` of
+    /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
+    ///
+    /// # Errors
+    ///
+    /// `None` for a position past the list, else the producer's refusal (no queue, or full).
+    pub fn push_effect_observe(
+        &mut self,
+        position: usize,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Option<Result<(), effect_contract::ObservePushError>> {
+        self.providers
+            .effects
+            .get_mut(position)
+            .map(|producer| producer.try_push_observe(tap_index, armed, window_blocks))
+    }
+
     /// Feeds a source of the newest committed session. A source that persists across a pending
     /// structural transaction is fed through its moved producer into the ring the running plan
     /// still renders and its successor carries (issue #1273 D3).
+    ///
+    /// Runs the service step first, so it is a control-thread call: [`Self::service`] takes the
+    /// shared report lock, drops retired plans and may allocate. A call made while render is
+    /// locked uses [`Self::submit_unserviced`].
     pub fn submit(
         &mut self,
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<source::SubmitReport, SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
+        self.submit_unserviced(id, submission)
+    }
+
+    /// [`Self::submit`] without the service step: the same routing to the newest committed
+    /// session's sources, and nothing else.
+    ///
+    /// The browser's PCM feed drains its rings inside the AudioWorklet's `process()` and submits
+    /// from there, where taking the report lock, dropping a retired plan and staging a counter
+    /// snapshot are all forbidden (batch 7 review B1). The path allocates nothing and takes no
+    /// lock. The service step still runs, in the host's message handler, before the next control
+    /// call, so no state the step maintains is skipped, only deferred.
+    pub fn submit_unserviced(
+        &mut self,
+        id: &[u8],
+        submission: SourceSubmission<'_>,
+    ) -> Result<source::SubmitReport, SourceFailure> {
         self.newest_providers_mut()
             .sources
             .submit(id, submission)
             .map_err(SourceFailure::Control)
     }
 
-    /// Queues a seek on a source of the newest committed session.
+    /// Queues a seek on a source of the newest committed session, after the service step.
     pub fn seek(
         &mut self,
         id: &[u8],
@@ -2056,6 +2271,16 @@ where
         source_frame: u64,
     ) -> Result<(), SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
+        self.seek_unserviced(id, generation, source_frame)
+    }
+
+    /// [`Self::seek`] without the service step; see [`Self::submit_unserviced`].
+    pub fn seek_unserviced(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        source_frame: u64,
+    ) -> Result<(), SourceFailure> {
         self.newest_providers_mut()
             .sources
             .seek(id, generation, source_frame)

@@ -54,7 +54,8 @@ export type {
   SpectrumStreamStatus,
 } from "../core/spectrum.ts";
 export { EngineLiveControls } from "../core/live-controls.ts";
-export { ControlTransactionQueue } from "../core/control-queue.ts";
+export type { ControlEditSet, LiveControlTransport } from "../core/live-controls.ts";
+export { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 export type {
   ControlAppliedReport,
   ControlQueueOptions,
@@ -62,7 +63,12 @@ export type {
   ControlReport,
   ControlSend,
 } from "../core/control-queue.ts";
-export { decodeControlReply, encodeControlTransaction } from "../core/control-frame.ts";
+export {
+  controlCallFailure,
+  decodeControlReply,
+  encodeControlTransaction,
+  encodeRevisionProbe,
+} from "../core/control-frame.ts";
 export type {
   ControlBackpressure,
   ControlDiagnostic,
@@ -76,6 +82,7 @@ export type {
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
   CommandReport,
+  ControlEvent,
   EngineCallResult,
   EngineStatus,
   MeterFrame,

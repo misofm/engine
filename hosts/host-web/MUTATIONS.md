@@ -16,11 +16,11 @@
 | `web-audioworklet-identity.py` candidate lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record a 39-hex-digit `candidateCommit` in a release change | `--self-test`: `**FAIL** candidate-lineage` |
 | `web-audioworklet-identity.py` artifact lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record another module's `wasmSha256` in a release change | `--self-test`: `**FAIL** artifact-lineage` |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
-| `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `drain_controls` call in `LiveControlMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
-| `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted: an observation subscription never changes audio, so the flood's PCM equality could not fail, and the fader, matrix and effect values it once flooded are cells with no queue to fill (#1312, #1345). The typed backpressure of a second operation on one tap is asserted by `tests::observation_misuse_is_typed_and_all_or_nothing`, `tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit` and `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push`). Batch verdict 2 NIT, same date: the claim "arming a tap never changes audio" is now held by host-core `effect_observation.rs::every_observation_leg_renders_the_corpus_to_the_same_bytes` (E1: the armed render equals the unarmed render bit for bit) and by the browser `observation-identity` gate (armed and disarmed offline renders have one digest)* |
-| `tests::unknown_targets_are_typed_and_leave_the_engine_untouched` (#137 E4) | delete the `track >= track_count` leg in `admit_commands` | the unknown-track record is refused as `UNSUPPORTED` instead of `INVALID_ARGUMENT`/`UNKNOWN_TRACK` |
+| `tests::native_set_control_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runSetControlTimeline` (#1565A D6) | have `control_command` stage the committed frame's cells one block later (move the service step's publication after the render) | the native digest and the shipped module's digest move together and stop matching the pin |
+| `tests::set_control_frames_are_the_committed_fixtures` (#1565A D6) | change one byte of the encoder's request ID in `set_control_timeline_frames` | the committed frame fixture differs from the encoded frame |
+| `tests::every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell` (#1565A gate 1) | add one of kinds 1-6 or 9-17 back to the whitelist in `CommandRecord::decode` | the record is admitted (or refused as another reason) instead of `MALFORMED` at its index, or a valid observation record before it is armed |
+| `tests::the_boot_word_is_reserved_and_observation_staging_follows_the_taps` (#1565A gate 2) | drop the `reserved1 != 0` refusal in `validate_options`, or allocate the command staging for `live_control_observation_taps == 0` | the nonzero word boots, or the host with no taps accepts a record |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
-| `tests::native_command_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runCommandTimeline` (#137 E2) | change the matrix retarget's expected `applied_at_sample` to `2 * QUANTUM` | the native assertion fails; moving the drain in `LiveControlMatrixProcessor::process` instead moves both digests together, which is the point |
 | `tests/matrix.rs::explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted` (#137 D1) | drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over` | the second retarget runs over the prepared window of `0` instead of the requested `4` and settles on the first frame |
 | `builtins-compiler::live_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_live_controls` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
 | `host-core::live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_order` (#137 D1/D2) | drop the `bound.track_controls.len() != control_requests.len()` leg of the live-control arity check | a silently skipped channel leaves nine tracks with eight producers and the per-track walk panics |
@@ -42,7 +42,6 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| 140-11 | the free-room pass reads `ready.command_wanted[0]` instead of `ready.command_wanted[slot]`, so a fader flood is checked against the matrix queue's count | `host-web/src/lib.rs` | `tests::a_mixed_batch_is_one_transaction_across_every_queue` | RED (`not even the matrix record in the refused batch reached the engine`) *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: stale since #1312: a fader value is a latest-target cell with no room pass, so this mutation no longer checks a fader flood against a queue count; the room pass guards the observation queues only)* |
 | 140-12 | the metadata emitter hardcodes `liveUpdatable: false` for every effect parameter again | `tools/parameter-metadata/src/lib.rs` | `scripts/check-parameter-metadata-v1.py` on the emitted document | RED (`FAIL parameter metadata: effect liveUpdatable follows automatable`) |
 
 ## Issue #143 — the effect observation surface
@@ -282,10 +281,10 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | gate | mutation | observed red |
 |---|---|---|
 | `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 15;` after reason 14 (`UNKNOWN_VCA`, issue #1245; it was 14 after reason 13 under issue #1222, and 13 after reason 12 under issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 12;` after reason 11 (`OBSERVATION_UNBOUND`; reasons 12 to 14, `NOT_SOLOABLE`, `UNKNOWN_ROUTE` and `UNKNOWN_VCA`, were deleted with their value kinds in #1565 and their numbers are not reused; it was 15 after reason 14 before that) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
 | `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 14`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 14 to `15` (issue #1245; reason 13 to `14` under issue #1222, reason 12 to `13` under issue #1212, and reason 11 to `12` before that) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `12` (reason 14 to `15` before #1565 deleted reasons 12 to 14; reason 13 to `14` under issue #1222, reason 12 to `13` under issue #1212) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -304,53 +303,6 @@ run, RED was observed, and the mutation was reverted.
 | `check-session-map-shape.py` copied-tree width mutation | `readonly frames: bigint` → `number` | the gate derives JavaScript `bigint` from the Rust `u64` export and refuses the declaration drift |
 | `tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded` | reverse the normalized source list | declaration order leaks as `["zeta", "mid", "alpha"]` where canonical `["alpha", "mid", "zeta"]` is required |
 | `direct-oracle.mjs` (real module/session) | copy the canonical track ID instead of the source ID | `track` differs from `fixture-source`; the real-module oracle addresses the source by the ID introspection reports |
-
-## Issue #210 phase 1 — solo in place
-
-Solo is 100% control plane, so every pin below is either a rendered-sample assertion or an
-assertion on the one piece of host state the ABI deliberately has no readback for. Each mutation
-was performed on the working tree, run, and reverted; every one was observed red.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `tests::solo_is_bit_identically_mute_on_the_complement` (P1-1) | drop `&& !self.solo(track)` from `LiveControlSoloState::effective_mute`, so the gate silences everything | the soloed tracks silence with the rest and the first commanded block differs from the explicit-mute arm |
-| `tests::un_solo_restores_the_exact_per_lane_user_mute_set` (P1-2) | restore from the gate alone — `strip_delta` composes `any_solo && !solo(track)` instead of `effective_mute` | the session's baked `left_mute` comes back unmuted and every block after the settle differs from the never-soloed arm |
-| `tests::mute_and_solo_are_separate_states` (P1-4) | make `set_solo` clear that track's `user_mute` | a repeated solo engage un-mutes the track it re-engages, and the host mirror reads `[false, false]` where the user set `[true, true]` |
-| `tests::a_refused_solo_submission_leaves_the_live_controls_untouched` (P1-5) | delete the `ready.solo.rollback()` on `admit_commands`'s refusal path | the refused engage sticks in host state; the refused host and the untouched host diverge on the retry |
-| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `LiveControlSoloState::strip_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
-| `tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect` (the coalescing pin) | run the net-emission pass once per solo record rather than once per submission, and drop its `record_emitted` sync — per-command fan-out | a 256-record batch of alternating toggles fans out a gate record per track per transition and is refused instead of admitted |
-| `tests::a_redundant_remute_stages_no_record_and_the_plane_stays_settled` (#1560) | stage the mute record without comparing the emitted mirror | the redundant re-mute writes both mute cells and re-enters the ramp kernel, so the plane is `-0.0` until it settles — a host difference the C ABI never had |
-| `tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition` (the sizing correction) | size `command_decoded` `2 * MAXIMUM_COMMAND_RECORDS` again, without the `2 * track_count` term | 255 `channel = both` effect-parameter records (510 spans) plus one solo record on a four-track console need 513 entries; the batch is refused `malformed` by the staging bound |
-
-`host_core::solo`'s own unit tests carry the state machine's algebra — the complement
-composition, the per-lane restore, the two-record delta shape, `solo_count`'s incremental
-maintenance, and the shadow/rollback — independently of any host.
-
-## Issue #210 phase 3 — command kinds 10 (`trimDb`) and 11 (`polarityInvert`)
-
-Driver: one mutation at a time on the committed tree, `cargo test -p host-web`, tree
-restored between rows.
-
-| # | mutation | test | result |
-|---|---|---|---|
-| P3-M31 | the decode whitelist drops `COMMAND_TRIM_DB` | `trim_and_polarity_are_admitted_on_every_lane_selector` (+5) | RED — every arm refuses `malformed` |
-| P3-M32 | the admission dispatch drops the two kinds, so they fall to the `_ =>` arm | same (+5) | RED. This is the drift the kind-vocabulary gate **cannot** see: the constant still exists, the decode still admits it, and only the dispatch forgot it |
-| P3-M33 | an input record is routed to the fader band | (5 tests) | RED |
-| P3-M34 | the effect band is not moved past the new per-track band | (7 tests) | RED |
-| P3-M35 | `queue_count` is not widened for the third band | (13 tests) | RED |
-| P3-M36 | `queue_capacity` reports the fader depth for an input slot | — | **EQUIVALENT, and argued in the test**: live controls lease all three of a track's queues at one depth (`TrackControlRequest::queue_capacity` is a single field), so the wrong queue's capacity is the right number. It becomes observable the day the three depths can differ, and the line is written per band so that day is a one-line change |
-| P3-M37 | the `trim_db` domain check is dropped | `trim_and_polarity_refuse_on_the_declared_terms` | RED |
-| P3-M38 | the `polarity_invert` boolean-exact check is dropped | same | RED |
-| P3-M39 | a trim record accepts a rack byte | same | RED |
-| P3-M40 | `channel = 255` is admitted as `Both` | same (+1) | RED |
-| P3-M41 | `channel = both` lowers to a single-lane record | `a_both_lane_trim_command_is_one_record_and_one_queue_slot` | RED — the `both` arm renders the `left` arm's bits. The queue-slot half of that test does **not** catch this, and the two halves are asserted together for exactly that reason *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_both_lane_trim_command_addresses_both_lanes` (#1346), whose queue-slot half went with the input queue)* |
-| P3-M42 | a refused submission commits the solo transaction instead of rolling it back | `trim_and_polarity_leave_the_solo_transaction_closed` (+1) | RED — a solo bit survives a batch its *trim* record refused |
-| P3-M43 | the admission couples a trim record to the solo composition | `a_trim_is_not_a_mute_and_solo_does_not_move_it` | RED — a trim ride sets the strip's user mute, and clearing a solo no longer restores what the caller set |
-
-The three lane-index defects the banked drain can have -- a missed member queue, an off-by-one
-lane, a constant lane -- are **not** reachable from this file: the web host's fixtures are one and
-four tracks and the mix cannot tell identical tracks apart. They are gated end to end, per track,
-through the post-matrix meters, in `crates/host-core/tests/input_liveness_live_controls.rs`.
 
 ## Issue #240 — atomic document-owned boot
 
@@ -488,7 +440,6 @@ and the mutation was reverted.
 |---|---|---|
 | `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (segment-aware lookup, D2) | make `strip_index` one binary search over the concatenation `tracks ++ submixes` | `aaa-bus` sorts before `t0`, so its producer is never found and the boot refuses with `web.live_controls.effects` (both #1207 tests panic at boot) |
 | `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (per-strip effect tables, D3/D5) | put the K1 interim back: skip every prepared entry whose owner is not a track in `attach_effect_live_controls` and `attach_effect_observation` | the boot succeeds but `aaa-bus`'s console slot 0 has no filed producer at `dense_effect_slot(effect_base[2], rack_effects[2], ..)` |
-| `tests::a_bus_session_admits_and_renders_without_allocating` (gate 4) | allocate a copy of `effect_base` inside `ReadyOwnership::effect_slot` | `admission/render allocated`: the measured submission plus `render_next` counts one allocation |
 
 ## Issue #1209 — submix strips in the browser meter frame
 
@@ -519,183 +470,13 @@ and the mutation was reverted.
 | `test-web-audioworklet.mjs` worklet session map (#1210 D3) | stop posting `submixes` in the `miso.sessionmap.v1` reply | `the enumerated submix order` assertion fails |
 | `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
 | `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |
-| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, the moved bound) | compare the generic guard against `ready.tracks.len()` | the bus pan (index `T`) is refused `unknownTrack`: `pan (smoothing 0) at strip 3`, result 1 |
-| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, a band spelling) | `push` keeps `let tracks = self.tracks.len()` | the bus fader record misses its queue: result 255 |
-| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, `queue_count`) | size the queues `3T + effects` | the bus compressor's threshold record finds no queue: result 7 |
-| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, per-strip shadows) | build `input_filter_shadows` from the tracks only | the bus's input-filter configuration copy is unsupported (7) |
-| `tests::a_bus_mute_command_equals_the_bus_booted_muted`, `tests::a_bus_can_be_unmuted_while_a_track_is_soloed` (#1213, per-strip solo state) | seed the solo state per track only | kind 4 at the bus index is refused `unknownTrack` (no mute owner) |
-| `tests::soloing_a_track_keeps_its_bus_and_return_audible` (#1213 gate 2) | seed the submixes `solo_safe: false` | soloing `a` solo-mutes `drums` and `verb`: block 1 differs from explicit mutes |
-| `tests::a_solo_at_a_bus_index_refuses_not_soloable_and_stages_nothing` (#1213 gate 2, reason 12) | delete the `solo_safe` check before `set_solo` | the refusal reports reason 2 (`unknownTrack`), not 12 |
-| `tests::a_bus_can_be_unmuted_while_a_track_is_soloed` (#1213 gate 3, the deleted inline composition) | restore `muted \|\| (any_solo && !solo(track))` in kind 4 | the unmute stages `muted: true` and `drums` stays silent: block 4 differs |
-| `tests::a_bus_record_ahead_of_a_bad_track_record_is_never_pushed` (#1213 gate 4) | push a bus fader record during pass one | strip 3's fader queue holds a record after the refusal |
-| `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push` (#1213 gate 4) | skip the room check for bus fader slots | the push fails half-way: result 255 instead of backpressure |
 | `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`, `tests::a_bus_limiter_can_be_the_designated_master` (#1213 gates 5, 6) | restore #1207's GR-fold skip of strip indices `>= T` | the bus word stays `0` and `master_gr_present` is `0` |
 | `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (#1213, K2 verdict (a)) | `observation_selection_for_address` looks up `ready.tracks` only | the selected read at the bus's strip index is `InvalidSelection` |
 | `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
 | `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
-| `tests::bus_edits_and_a_bus_observation_admit_and_render_without_allocating` (#1213 gate 7) | allocate a `submixes.len()`-capacity `Vec` in admission | `admission/render allocated` (1) |
 | `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
-| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 MINOR-1) | spell `prepared_queue_address`'s Eq base `ready.tracks.len() * 3` | the bus EQ edit misses its owner: `submit_prepared_commands` is not `RESULT_OK` |
-| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 MINOR-1) | spell the admission's EQ owner marker `queue_slot: ready.tracks.len() * 3 + effect` | the same: the prepared submission at the bus is refused |
-| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 verdict MINOR-A) | stage the bus's band-1 gain at -6 dB while the reference track's stays -12 dB | the render comparison fails at block 2, sample 1 (band 1 is enabled, so the edit is audible) |
-| `tests::a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted` (#1213 gate 2, kind 4 lane; attempt 2 MINOR-2) | kind 4 reads `let lane = 0_usize` | the right-lane mute stages `muted: false`: the bus's right lane stays audible against the booted twin |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
 | `test-web-audioworklet.mjs` bus `observe()` binding (#1213, attempt 2 MAJOR-1) | the host reports `frameSlot: 0` or `Math.min(trackIndex, 1)` for a bus; or the mapping is read as a plain `trackGrDb` index | `frameSlot` is not `T`; the old-contract read is `undefined`, not `submixGrDb[0]` |
-
-## Issue #1222 — browser live send commands
-
-Each row was applied, its test run red, and the tree restored.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, the moved bounds check) | restore the generic `track >= strip_count` check ahead of kind dispatch for every kind | send 7 reports reason 2 (`unknownTrack`), not 13 |
-| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, reason 13) | refuse an out-of-range send with `COMMAND_REASON_UNKNOWN_TRACK` | the reason is 2, not 13 |
-| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, fewer sends than strips) | bound the send arm by the strip count and index `route_controls[track]` | send 6 of 7 (past 6 strips) is refused (result 1); on 3 sends and 4 strips, index 3 panics out of bounds |
-| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix`) | build the record from `[ll, rl, lr, rr]` | trial 0: the live output's bits differ from the fresh plan's |
-| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix` decode) | decode `values` as `[v0, v2, v1, v3]` | the mirror differs from the edited values |
-| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, the send band) | push a send's record onto the next send's queue | trial 0: the output's bits differ |
-| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, a stale mirror field) | `routeGainDb` stages its record but leaves the mirror's gain | the mirror keeps the seed gain |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the mirror committed before the room check) | `ready.routes.commit()` as each send record is staged | the domain refusal leaves the mirror at -9 dB *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347))* |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the send band's room) | `queue_available` reports `u32::MAX` for every send queue | the overfilled send queue fails half-way: result 255, not backpressure *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347); the send queue this mutation overfilled no longer exists, so the mutation cannot be applied)* |
-| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, push before validation) | push each send record in pass one | the domain refusal leaves send 0's queue at 3 of 4 *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror` (#1347); the send queue pushed to no longer exists, so the mutation cannot be applied (its counterpart is a cell write before validation))* |
-| `tests::send_records_are_shape_checked` (D1) | drop the `effect_index != 0` rule | the record with an effect word is admitted (reason 0) |
-| `tests::send_edits_admit_and_render_without_allocating` (gate 7) | allocate an 8-byte `Vec` per staged send record | `admission/render allocated` (3) |
-| `tests::the_exact_retained_budget_charges_the_send_lanes` (#1221 verdict MINOR-1) | leave `route_control_resources.total_bytes` out of the bridge rows | the retained delta between depths 8 and 64 is 0, not the lanes' |
-| K3 follow-up (verdict MINOR-1/2, V1): `tests::a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits` | `compile_ready` seeds the send mirror with `\|_, _\| false` | RED here and in #1224's `a_one_lane_mute_follows_into_its_own_source_column` |
-| K3 follow-up (V8) | the record is built with `[false; 2]`, not `next.source_lane_muted` | RED in this test only |
-| K3 follow-up (V2) | `route_slot` omits `+ self.effect_controls.len()` | RED here (inserts run), in gate 2 (refused at index 0, not 1) and in #1224's `a_delayed_send_follows_like_an_explicit_send_mute` |
-| K3 follow-up (V6): `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, admitted then refused) | `ready.routes.commit()` dropped on success | RED here and in #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_refused_send_batch_writes_nothing_and_keeps_the_mirror`, and #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` is now `a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole` (#1347))* |
-| K3 follow-up (verdict MINOR-4, V3): `tests::the_exact_retained_budget_charges_the_send_lanes` (absolute check) | the bridge rows charge `route_control_resources.queue_bytes`, not `total_bytes` | RED |
-| K3 follow-up (V4) | the mirror and shadow bytes dropped from the bridge rows | RED |
-| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 18;` after `COMMAND_VCA_MUTE = 17` (issue #1245; it was 16 after `COMMAND_ROUTE_MATRIX = 15` under issue #1222) | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
-| `check-command-kind-vocabulary.py --self-test` (the JS set gains an undecoded kind) | the host JS set ends `…, 14, 16]` | `the host JS COMMAND_KINDS set disagrees with the Rust host constants` |
-
-## Issue #1223 — live route enumeration and the SDK's send edits
-
-Each row was applied, its test run red, and the tree restored. SDK rows ran
-`node --test test/live-controls-evals.mjs` (or `tsc`) against the slice's built module; E1 rebuilt
-the module with the mutation.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `tests::live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them` (gate 4, staging) | drop `longest_route_id_bytes` from the ID staging size | `id_staging_bytes` is 2, not 63; with that assertion removed, the 63-byte copy trips `compiled ID exceeds its projected staging capacity` |
-| the same test (D1, the enumeration) | the route-ID export reads the model's routes, not the live send producers | live route 0 is 7 bytes (`bx-main`), not 6 (`send-a`) |
-| `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.routeIds].sort()` | `issue #1223: the enumerated live-route order` |
-| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `routes.every(...)` check | `the host accepted a session map with a non-string route` |
-| `test-web-audioworklet.mjs` (worklet construction) | read a route ID without the length/capacity check | `an empty route ID must fail initialization` |
-| `live-controls-evals.mjs` gate 1 (and gate 3) | `route(id)` indexes the send among every route of the session, sorted | `a send edit encodes its kind at the engine's live-route index` and `a live send gain equals the session booted at that gain` |
-| `live-controls-evals.mjs` gate 1 | `RouteEdits.matrix` writes `ll, rl, lr, rr` | the browser request's values differ |
-| `live-controls-evals.mjs` gate 1 | the browser map prepends the track IDs to `routes` | `kick-verb` encodes index 4, not 1 |
-| `live-controls-evals.mjs` gate 1 (and gates 2, 3) | `OfflineEngine.sessionMap()` reverses the engine's route list | all three #1223 evals |
-| `live-controls-evals.mjs` gate 2 | an unknown route ID falls back to index 0 | `an unknown or output route ID refuses before any record is built` |
-| `live-controls-evals.mjs` gate 2 | drop the output-route branch | the same eval: the message lists the live routes instead |
-| `live-controls-evals.mjs` gate 3 only (E1, rebuilt module) | admission pushes a send record onto route `index ^ 1`'s queue | `a live send gain equals the session booted at that gain`; gate 1 stays green (admission is `ok`) |
-| `live-controls-evals.mjs` (the vocabulary test) | drop `routeMatrix` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
-| `live-controls-types.ts` | `RouteEdits.gainDb` takes `LaneOptions` | `Unused '@ts-expect-error'` (a send has no lane) |
-| `live-controls-types.ts` | `RouteEdits` gains `faderDb` | `_RouteSurface` fails, and the `faderDb` `@ts-expect-error` is unused |
-
-## Issue #1224 — sends follow their source strip's mute
-
-Each row was applied, its test run red, and the tree restored. "Audio" rows ran with the tests'
-`follow_lanes` mirror assertions removed, so the red is the rendered output's, not the mirror's.
-
-| gate | mutation | observed red |
-|---|---|---|
-| deliverable 3 (a): `tests::a_follow_never_pushes_a_redundant_send_record` (gate 2) | `delta` yields every following route, changed or not | `solo drums` is refused: `delta` yields the unchanged `drums-verb`, whose strip staged no mute record (`malformed`); gates 3, 5, 9 and the staging test go red too. With that guard also bypassed (a missing strip record read as ramp 0), the red is `only bass-room follows`: a redundant `drums-verb` record was pushed |
-| deliverable 3 (b): `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1) | the follow pass placed before the solo coalescing pass | `solo vocal` is refused (`malformed`): no strip mute record is staged yet for the follow's ramp; gates 2, 3, 4, 9 and the staging test go red too. The red is the `malformed` guard's: gate 1 checks settled blocks only; with the guard replaced by a ramp-0 fallback, the audio red is `a_solo_follow_ramps_at_the_solo_window` (K3 follow-up row below) |
-| deliverable 3 (c): `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3) | push each follow record as it is built, before the room check | `solo: send queues`: `bass-room`'s queue lost a slot on a refused batch *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test is now `a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole` (#1347); its full-queue half was deleted with the send queue, so this mutation cannot be applied)* |
-| `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1, audio) | no follow pass (`if false && …`) | `soloed vs booted muted: block 6 sample 0: 0.031146944 vs 0.6195009` -- the measured leak |
-| gates 4, 5 and 6 (audio) | no follow pass | gate 4 `[false, false] -> [true, false]` block 4; gate 5 `bus lanes [true, true]` block 4; gate 6 `muted` block 5 sample 102 (frame 742 = the edit at 256 + 486) |
-| gate 1 and gate 6 (audio) | build the follow record with the mirror's old `source_lane_muted` | gate 1 at block 6 sample 0; gate 6 `muted` at block 5 sample 102 |
-| `tests::a_one_lane_mute_follows_into_its_own_source_column` (gate 4, audio) | `followed_lanes` returns `[lane 1, lane 0]` | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 `bus lanes [false, true]` too |
-| gate 4 (audio) | `followed_lanes` reads lane 0 for both | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 too |
-| `tests::muting_a_bus_silences_its_followed_send` (gate 5, audio) | the follow pass's effective mute is `strip < tracks.len() && …` | `bus lanes [true, true]`: block 4 sample 0 |
-| `tests::a_delayed_send_follows_like_an_explicit_send_mute` (gate 6, audio) | the ramp is the *first* strip mute record staged for the source | `un-muted`: block 13 sample 102 (200-sample ramp against 480) |
-| gate 6 (audio) | the follow record's ramp length is 0 | `muted`: block 5 sample 102 |
-| gate 3 | `ready.routes.commit()` right after the follow pass | `solo: follow lanes`: the refused batch kept the followed lanes |
-| gate 3 (the overlong window) | clamp the follow ramp to `2^22` | `overlong`: the strip mute is admitted (`0`), not `invalidArgument` |
-| gate 2 | skip `LiveRouteState::follow` after staging | `solo vocal too` is refused: the stale mirror re-yields `bass-room` in a batch that staged no `bass` mute record (`malformed`); with that guard bypassed, `no send record`: the redundant record is pushed |
-| `tests::follow_records_admit_and_render_without_allocating` (gate 9) | allocate an 8-byte `Vec` per follow record | `admission/render allocated` |
-| `tests::the_decode_staging_holds_a_full_batch_and_its_follow_records` (D4) | `command_staging_count` adds `route_count * 0` | the length pin (536 + 0, not 572); with the pin removed, the batch is refused `reason 1` (`malformed`, the staging bound) |
-| K3 follow-up (verdict MINOR-3, probe P2): `tests::each_follow_takes_its_own_source_strips_window` | the ramp lookup ignores the source strip (any strip's last mute record) | RED in this test only |
-| K3 follow-up (verdict MINOR-3, probe P1): `tests::a_follow_record_carries_the_mirrors_live_values` | the follow record drops the send's own `mute` (`entry.mute` -> `false`) | RED in this test only |
-| K3 follow-up (verdict MINOR-3, probe P1) | the follow record uses 0 dB, not the mirror's `gain_db` | RED in this test only |
-| K3 follow-up (verdict MINOR-3, probe P4): `tests::a_solo_follow_ramps_at_the_solo_window` | the ramp lookup sees only records staged before the coalescing pass, with a ramp-0 fallback for the guard (the pass-ordering defect with its guard bypassed) | RED in this test only |
-| K3 follow-up (verdict MINOR-1, probe P3): `tests::a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp` | the ramp lookup matches any strip-mute record on the source strip, changed lane or not (attempt 1's rule) | RED in this test only; it was red at `eff44271d` |
-| K3 follow-ups verdict MINOR-1 (probe V4): `tests::a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp` | the changed-lane rule's `Both` arm is `changed[0] && changed[1]` (for `\|\|`) | RED in this test only (the batch is refused, `malformed`); every other lib test stays green |
-| #1242 attempt 2 (verdict MAJOR-1, probe P1): `tests::a_both_lane_unmute_keeps_a_one_lane_vca_mute` | the `COMMAND_MUTE` arm stages one record from the first covered lane's effective mute (attempt 1) | RED: the `emitted` mirror; with that assertion removed, the render differs at block 1 sample 128 |
-| #1242 attempt 2 (verdict MAJOR-1, probe P2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | the same attempt-1 `COMMAND_MUTE` arm | RED |
-| #1242 attempt 2 (verdict MINOR-1, M2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | host-web seeds submixes with `vca_mute: [false; 2]` | RED (seed 5); the other three #1242 host-web tests stay green |
-| #1242 attempt 2 verdict MINOR-1 (M3), VCA follow-ups: P2 draws each record's smoothing from {0, 64} | the split `Both` kind 4 records are staged at `smoothing_samples: 0` | RED in `a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` only |
-| #1242 attempt 2 verdict MINOR-1 (M6), VCA follow-ups: P1 counts `drums`' and `bass`' queue records | every `Both` kind 4 splits (the `left != right` guard dropped) | RED in `a_both_lane_unmute_keeps_a_one_lane_vca_mute` only (two records on `bass`, not one) |
-
-## Issue #1245 — browser live VCA groups
-
-Each row was applied alone, the whole host-web lib suite run, the named tests observed red, and the
-tree restored (driver and log: the #1245 attempt 1 record).
-
-| gate | mutation | observed red |
-|---|---|---|
-| `tests::a_live_vca_ride_lands_on_a_fresh_plans_bits` (gate 1) and `tests::a_member_move_and_a_vca_move_compose` (gate 2) | kind 3 on a reached strip stages its own value, not the effective one | both: the live output's bits differ from the fresh plan's |
-| gate 1, gate 2, `tests::a_vca_batch_that_overfills_a_queue_is_refused_whole` (gate 4) | the VCA fader pass stages on the next strip's fader queue | all three *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted (#1347: rewritten in attempt 1 as `a_vca_batch_with_a_late_refusal_is_refused_whole`, deleted in attempt 2); the send queue it overfilled no longer exists)* |
-| `tests::a_vca_move_that_changes_no_effective_value_stages_nothing` (gate 3) | the VCA fader pass stages every reached lane, changed or not | gate 3 only: fader room moves |
-| gate 4 and `tests::vca_records_are_addressed_and_shape_checked` (gate 6) | the VCA state commits as a ride is read | both: a refused submission leaves the VCA mirror moved |
-| gate 4 | the VCA state is never committed on success | gate 4: the admitted ride is rolled back by the next refusal |
-| gates 1, 2, 4 and `tests::a_vca_mute_silences_member_sends_and_survives_solo` (gate 5) | a VCA mute does not run the coalescing pass (`if solo_seen`) | all four |
-| gates 1, 2, 4 and 5 | the follow pass ignores a VCA mute (`solo_seen \|\| mute_seen`) | all four |
-| gates 1, 2, 4 and 5 | a VCA mute never reaches the strip-mute owner | all four |
-| `tests::a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it` (D3, amendment A1) | a later kind 4 does not refresh its strip's VCA mute term first | this test only: the un-mute stages `false`, and the coalesced mute ramps over 480 samples |
-| gate 6 and the bound test | the VCA kinds are bounded by the strip count | gate 6 (VCA 5 is `unknownTrack`), and the bound test's VCA 255 is refused |
-| gate 6 | an unknown VCA is refused `unknownRoute` | gate 6 only |
-| gate 6 | the VCA shape drops the `effect_index` rule | gate 6 only |
-| `tests::the_decode_staging_holds_a_full_batch_and_its_vca_records` (gate 7) | `command_staging_count` adds `vca_reached_strips * 0` | gate 7 (the length pin; with it removed, `malformed`) and the retained-budget test |
-| `tests::vca_rides_and_mutes_admit_and_render_without_allocating` (gate 8) | allocate an 8-byte `Vec` per VCA fader record | gate 8 only |
-| `tests::the_exact_retained_budget_charges_the_vca_state` (D4) | leave the VCA state out of the bridge rows | this test only |
-| `tests::the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound` (amendment A1; renamed in the VCA follow-ups, which moved its timing half to the ignored `..._fits_a_quantum_in_release`) | the reach-pair bound is not enforced | this test only: 16,385 pairs boot |
-| the bound test | the VCA count bound is 512, not 256 | this test only: 257 VCAs boot |
-| gate 1 and the bound test | the boot-time pair count ignores nesting (a VCA's ancestors are not passed to its VCA members) | both: the boot count disagrees with the live state's reach |
-| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` | the "added last" mutations re-anchored past kind 17: the JS set `[1 … 17]` stops at 16 or gains an undecoded 18, the literal `<= 17`, the schema gate's list and the `.d.ts` enum drop `vcaMute` | every one refused (32 red mutations) |
-| `check-command-reason-vocabulary.py --self-test` | re-anchored past reason 14: `FUTURE_TAP = 15`, `UNKNOWN_TAP` renumbered to 15, the worklet's `UNSUPPORTED_KIND = 15`, `reason <= 14`, the JS table and the schema gate's list truncated | every one refused (20 red mutations) |
-| `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindsAwaitingSdk` | `the semantic methods cover the generated command vocabulary exactly` |
-| #1245 verdict MINOR-1 (S1), VCA follow-ups: `tests::a_vca_ride_and_mute_ramp_as_direct_member_moves` | the VCA fader pass stages its member records at `smoothing_samples: 0` | RED in this test and `a_split_member_move_ramps_and_the_last_ride_sets_the_window` |
-| #1245 verdict MINOR-1 (S2) | kind 17 does not set `coalesce_smoothing` | RED in `a_vca_ride_and_mute_ramp_as_direct_member_moves` and `a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` |
-| #1245 verdict MINOR-1 (S3): `tests::a_split_member_move_ramps_and_the_last_ride_sets_the_window` | the split kind 3 records on a member are staged at `smoothing_samples: 0` | RED in this test only |
-| #1245 verdict MINOR-1 (S23) | the VCA fader pass takes the first ride's ramp, not the last's | RED in `a_split_member_move_ramps_and_the_last_ride_sets_the_window` only |
-| #1245 verdict MINOR-2 (S12): `tests::a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` | kind 17 does not set `coalesce_first_wire_index` | RED in this test only (the refusal names index 0) |
-
-
-## Issue #1246 — VCA enumeration and the SDK's VCA edits
-
-Each row was applied, its test run red, and the tree restored. SDK rows ran
-`node --test test/live-controls-evals.mjs` (or `check-sdk-types.sh`) against the slice's built
-module; E1 rebuilt the module with the mutation.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `tests::live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them` (gate 3, staging) | drop `longest_vca_id_bytes` from the ID staging size | `id_staging_bytes` is not the 73-byte VCA ID's length |
-| the same test (D1, the enumeration) | `_vca_id` reads the VCAs in reverse | VCA 0 is 73 bytes, not 2 (`aa`) |
-| the same test (D1, the count) | `_vca_count` reads the model's VCA count, not the live VCA state's | the host without live controls answers 3, not 0 |
-| the same test (D1, the bound) | `_vca_id` drops its live-state bound | the host without live controls copies VCA 0 |
-| `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.vcaIds].sort()` | `issue #1246: the enumerated VCA order` |
-| `test-web-audioworklet.mjs` (the processor's session map; #1246 verdict m1: the stub enumerates three VCAs beside two routes) | the worklet reads `vcaCount` from `miso_engine_web_v1_live_control_route_count` (the route block it was cloned beside) | `issue #1246: the enumerated VCA order` (two VCAs delivered, not three) |
-| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `vcas.every(...)` check | `the host accepted a session map with a non-string VCA` |
-| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `Array.isArray(message.vcas)` check | the "no VCA list" reply throws inside the validator instead of failing the host |
-| `test-web-audioworklet.mjs` (worklet construction) | read a VCA ID without the empty-length check | `an empty VCA ID must fail initialization` |
-| `test-web-audioworklet.mjs` (worklet construction) | read a VCA ID without the capacity check | `a VCA ID longer than staging must fail initialization` |
-| `live-controls-evals.mjs` gates 1 and 2 | `vca(id)` indexes the engine's list reversed | all three #1246 evals |
-| `live-controls-evals.mjs` gate 1 | the browser map's `vcas` is `[]` | `a VCA edit encodes its kind at the engine's VCA index` (the browser transport refuses `drums`) |
-| `live-controls-evals.mjs` gates 1 and 2 | `OfflineEngine.sessionMap()` reverses the engine's VCA list | all three #1246 evals |
-| `live-controls-evals.mjs` gates 1 and 2 | `VcaEdits.mute` ignores the lane option (always both) | gate 1's channel word and gate 2's left-lane mute render |
-| `live-controls-evals.mjs` gate 1 | `VcaEdits.mute` builds kind 4 (`mute`) | gate 1's kinds; gate 2 is blind here (`fx`'s index 2 is `vox`'s strip index) |
-| `live-controls-evals.mjs` gates 1 and 2 | `VcaEdits.faderDb` writes `-db` without the domain check | gate 1's value word and gate 2's render |
-| `live-controls-evals.mjs` (the refusal eval) | an unknown VCA is refused `unknownRoute` | `an unknown VCA ID refuses with unknownVca` |
-| `live-controls-evals.mjs` (the refusal eval) | `vca(id)` falls back to a track's index | the same eval: `vca("kick")` returns edits |
-| `live-controls-evals.mjs` gate 2 only (E1, rebuilt module) | admission rides VCA `index ^ 1`'s offset | `a live VCA fader and mute equal the session booted`; gate 1 stays green (admission is `ok`) |
-| `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
-| `live-controls-types.ts` | `SessionMap.vcas` is optional | `_SdkSessionMapVcas` fails, and the missing-`vcas` `@ts-expect-error` is unused |
-| `live-controls-types.ts` | `VcaEdits` gains `solo` | `_VcaSurface` fails |
-| `live-controls-types.ts` | `VcaEdits.faderDb` accepts a `gainDb` option | `Unused '@ts-expect-error'` |
-| `live-controls-types.ts` | `VcaEdits.mute` accepts a number | `Unused '@ts-expect-error'` |
 
 ## Issue #1333 — the render-locked allocation counter and the render-thread static rules
 

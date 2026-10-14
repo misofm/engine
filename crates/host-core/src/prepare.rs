@@ -106,6 +106,14 @@ pub enum HostShapePolicy {
     },
 }
 
+/// The VCA groups a session may declare when a host bounds them the way the browser does (ruling
+/// V-Q3): the browser's `maximum_vcas`.
+pub const MAXIMUM_VCAS_BOUNDED: u64 = 256;
+
+/// The (strip, VCA) reach pairs a session may declare (ruling V-Q3): the bound on one VCA move's
+/// work, the same on every host.
+pub const MAXIMUM_VCA_REACH_PAIRS: u64 = 16_384;
+
 /// Everything one host declares it can drive, as bounds checked during preparation.
 ///
 /// Every field is a hard cap: preparation fails rather than allocating past it. Hosts spell these
@@ -128,6 +136,11 @@ pub struct HostPrepareCaps {
     /// Maximum VCA groups in the session (#1243). A configured bound of its own, never folded into
     /// `maximum_tracks` or `maximum_submixes`: a VCA is a control group, not a strip.
     pub maximum_vcas: u64,
+    /// Maximum (strip, VCA) reach pairs in the session (ruling V-Q3, batch 7 review M1). A count
+    /// of VCAs does not bound a VCA move's work, which grows with the pairs; every host applies
+    /// the same bound, [`MAXIMUM_VCA_REACH_PAIRS`], because the move composes every reached
+    /// member wherever the control plane runs.
+    pub maximum_vca_reach_pairs: u64,
     /// Maximum sources in the session.
     pub maximum_sources: u64,
     /// Maximum routes in the session.
@@ -2839,6 +2852,17 @@ pub(crate) fn fader_records(
 
 /// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
 /// records are derived from.
+/// Whether a strip's effective fader or mute differs, as bits: the one test of "this strip's level
+/// moved", for the dense diff and the local one.
+#[cfg(feature = "control-provider")]
+pub(crate) fn level_differs(
+    before: &controls::EffectiveStrip,
+    after: &controls::EffectiveStrip,
+) -> bool {
+    before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
+        || before.mute != after.mute
+}
+
 pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::DualMonoFader {
     session::DualMonoFader {
         left_db: effective.fader_db[0],
@@ -2848,99 +2872,48 @@ pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::
     }
 }
 
-/// The effective values of two models and the ramp rules that go with them (decision 17, C6 step 3
-/// and 4, C7; #1558 D1, D7): the one place a strip's level records, and the length of a route's
-/// gate record, are decided. The classifier asks it for the live path and `join_strips` asks it
-/// for a successor's carry, so a VCA move, a membership change, an own edit, a followed mute and a
-/// following send cannot be composed two ways.
-///
-/// It owns both [`controls::Effective`] values, computed once, on the control thread. Strip
-/// indices count [`SessionModel::strips`] of the model they name and route indices count
-/// `model.routes`.
-pub(crate) struct EffectiveDiff<'a> {
-    current: &'a SessionModel,
-    next: &'a SessionModel,
-    before: controls::Effective,
-    after: controls::Effective,
-    before_strips: Vec<StripRef<'a>>,
-    after_strips: Vec<StripRef<'a>>,
-    /// [`SessionModel::vca_reach`] of `next`: per strip, the reaching VCAs' indices in ascending
-    /// VCA-ID order.
-    reach: Vec<Vec<usize>>,
-    /// The same for `current`, per strip of `current`: the reach the strip had before the change.
-    reach_before: Vec<Vec<usize>>,
-    ramps: LiveRamps,
-    edit_ramps: &'a EditRamps,
-    /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
-    solo_before: Vec<bool>,
-    solo_after: Vec<bool>,
+/// The strip at `index` of [`SessionModel::strips`] order (the tracks, then the submixes), in
+/// `O(1)`.
+pub(crate) fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
+    match model.tracks.get(index) {
+        Some(track) => StripRef::track(track),
+        None => StripRef::submix(&model.submixes[index - model.tracks.len()]),
+    }
+}
+
+/// What the ramp rules of a level record read about one strip besides the models (#1558 D7): the
+/// strip's own fader in each model, its ID in `next`, the VCAs that reach it in each model and its
+/// solo term in each. A dense diff and a local one both build it, so the rules below are written
+/// once.
+#[derive(Clone, Copy)]
+pub(crate) struct StripChange<'s> {
+    pub(crate) own_before: &'s session::DualMonoFader,
+    pub(crate) own_after: &'s session::DualMonoFader,
+    pub(crate) id: &'s session::StableId,
+    /// [`SessionModel::vca_reach`] of the strip in `current`, then in `next`.
+    pub(crate) reach_before: &'s [usize],
+    pub(crate) reach: &'s [usize],
+    /// The solo term of the strip's mute ([`controls::solo_term`]) under each overlay.
+    pub(crate) solo_before: bool,
+    pub(crate) solo_after: bool,
+}
+
+/// The ramp rules of the level and gate records of two models (decision 17, C6 step 4; #1558 D7;
+/// #1559 D7): which length a record takes. Written once; [`EffectiveDiff`] (every strip) and the
+/// classifier's local diff (the strips an edit reaches) both ask it.
+#[derive(Clone, Copy)]
+pub(crate) struct LevelRules<'a> {
+    pub(crate) current: &'a SessionModel,
+    /// The model after the change, read through a view so that a transaction of values need not
+    /// build it (#1613).
+    pub(crate) next: controls::ModelView<'a>,
+    pub(crate) ramps: LiveRamps,
+    pub(crate) edit_ramps: &'a EditRamps,
     /// The ramp length of a mute record that only the overlay change produced (#1559 D7).
-    solo_ramp: Option<u32>,
+    pub(crate) solo_ramp: Option<u32>,
 }
 
-/// The solo term of every strip of `model` under `overlay`, in [`SessionModel::strips`] order.
-fn solo_terms(model: &SessionModel, overlay: &controls::MonitorOverlay) -> Vec<bool> {
-    use controls::EffectiveInputs as _;
-    let inputs = controls::ModelInputs::new(model, overlay);
-    let any_solo = controls::any_solo(&inputs);
-    (0..inputs.strip_count())
-        .map(|strip| controls::solo_term(&inputs, strip, any_solo))
-        .collect()
-}
-
-impl<'a> EffectiveDiff<'a> {
-    /// The effective values of `current` under `monitor.committed` and of `next` under
-    /// `monitor.next` (decision 17, C7; #1559 D6).
-    pub(crate) fn new(
-        current: &'a SessionModel,
-        next: &'a SessionModel,
-        ramps: LiveRamps,
-        edit_ramps: &'a EditRamps,
-        monitor: MonitorBase<'_>,
-    ) -> Self {
-        Self {
-            current,
-            next,
-            before: controls::effective(current, monitor.committed),
-            after: controls::effective(next, monitor.next),
-            before_strips: current.strips().collect(),
-            after_strips: next.strips().collect(),
-            reach: next.vca_reach(),
-            reach_before: current.vca_reach(),
-            ramps,
-            edit_ramps,
-            solo_before: solo_terms(current, monitor.committed),
-            solo_after: solo_terms(next, monitor.next),
-            solo_ramp: monitor.ramp,
-        }
-    }
-
-    #[cfg(feature = "control-provider")]
-    /// Whether the strip's effective fader or mute differs, as bits, between the two models.
-    pub(crate) fn level_changed(&self, before: usize, after: usize) -> bool {
-        let (before, after) = (&self.before.strips[before], &self.after.strips[after]);
-        before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
-            || before.mute != after.mute
-    }
-
-    /// The level records of one strip: its effective values in the two models, with the lengths
-    /// [`Self::lengths`] gives.
-    ///
-    /// # Errors
-    ///
-    /// [`OutOfDomain`] as [`fader_records`].
-    pub(crate) fn level_records(
-        &self,
-        before: usize,
-        after: usize,
-    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
-        fader_records(
-            &effective_fader(&self.before.strips[before]),
-            &effective_fader(&self.after.strips[after]),
-            self.lengths(before, after),
-        )
-    }
-
+impl LevelRules<'_> {
     /// The ramp length of each lane's `FaderDb` and `Mute` record of one strip (#1558 D7).
     ///
     /// A lane's fader length is that of the strip's own `fader_db` edit when the strip's own value
@@ -2948,17 +2921,16 @@ impl<'a> EffectiveDiff<'a> {
     /// in ascending VCA-ID order, whose offset on the lane changed (row `VcaOffset`, the VCA's
     /// edit's length); else row `VcaOffset` with no edit length (a membership change, or a VCA
     /// added or removed). The mute is the same with rows `Mute` and `VcaMute`.
-    pub(crate) fn lengths(&self, before: usize, after: usize) -> LevelLengths {
-        let (own_before, own_after) = (
-            self.before_strips[before].fader,
-            self.after_strips[after].fader,
-        );
-        let edit = StripEditRamps::of(self.edit_ramps, self.after_strips[after].id);
+    pub(crate) fn lengths(&self, strip: &StripChange<'_>) -> LevelLengths {
+        let (own_before, own_after) = (strip.own_before, strip.own_after);
+        let edit = StripEditRamps::of(self.edit_ramps, strip.id);
         let reaching = |lane: usize, mute: bool| {
-            self.reach[after]
+            strip
+                .reach
                 .iter()
-                .map(|&vca| &self.next.vcas[vca])
-                .find(|vca| self.vca_changed(vca, lane, mute))
+                .map(|&index| (index, self.next.vca(index)))
+                .find(|&(index, vca)| self.vca_changed(index, vca, lane, mute))
+                .map(|(_, vca)| vca)
                 .and_then(|vca| {
                     let row = if mute {
                         EditRampRow::VcaMute
@@ -2984,12 +2956,12 @@ impl<'a> EffectiveDiff<'a> {
         });
         // A model edit's length wins: the strip's own mute, then a reaching VCA's. A mute that
         // only the overlay moved takes the solo's (#1559 D7).
-        let solo_moved = self.solo_before[before] != self.solo_after[after];
+        let solo_moved = strip.solo_before != strip.solo_after;
         let mute = [0, 1].map(|lane| {
             let muted = |fader: &session::DualMonoFader| [fader.left_mute, fader.right_mute][lane];
             if muted(own_before) != muted(own_after) {
                 self.ramps.resolve(LiveRampRow::Mute, edit.mute)
-            } else if solo_moved && !self.vca_mute_moved(before, after, lane) {
+            } else if solo_moved && !self.vca_mute_moved(strip, lane) {
                 self.ramps.resolve(LiveRampRow::Solo, self.solo_ramp)
             } else {
                 self.ramps
@@ -3004,24 +2976,32 @@ impl<'a> EffectiveDiff<'a> {
     /// changes whether any reaching VCA holds the lane muted. Both are the model's cause (#1559
     /// D7: a change in VCA reach is the model's), so the mute record takes the model's length
     /// beside a solo with its own.
-    fn vca_mute_moved(&self, before: usize, after: usize, lane: usize) -> bool {
-        let holds = |vcas: &[session::Vca], reach: &[usize]| {
-            reach.iter().any(|&vca| {
-                let fader = &vcas[vca].fader;
-                [fader.left_mute, fader.right_mute][lane]
-            })
-        };
-        self.reach[after]
+    fn vca_mute_moved(&self, strip: &StripChange<'_>, lane: usize) -> bool {
+        let holds = |vca: &session::Vca| [vca.fader.left_mute, vca.fader.right_mute][lane];
+        strip
+            .reach
             .iter()
-            .any(|&vca| self.vca_changed(&self.next.vcas[vca], lane, true))
-            || holds(&self.current.vcas, &self.reach_before[before])
-                != holds(&self.next.vcas, &self.reach[after])
+            .any(|&vca| self.vca_changed(vca, self.next.vca(vca), lane, true))
+            || strip
+                .reach_before
+                .iter()
+                .any(|&vca| holds(&self.current.vcas[vca]))
+                != strip.reach.iter().any(|&vca| holds(self.next.vca(vca)))
     }
 
     /// Whether `vca`'s offset (or its mute) on `lane` differs from the committed model's, or the
-    /// committed model has no such VCA.
-    fn vca_changed(&self, vca: &session::Vca, lane: usize, mute: bool) -> bool {
-        let Some(prior) = self.current.vcas.iter().find(|prior| prior.id == vca.id) else {
+    /// committed model has no such VCA. `index` is the VCA's position in the model after the
+    /// change; the committed model usually holds the same VCA at the same position, which is
+    /// tried first, because a search by ID per reaching VCA is quadratic in the VCA count for a
+    /// strip that every VCA reaches.
+    fn vca_changed(&self, index: usize, vca: &session::Vca, lane: usize, mute: bool) -> bool {
+        let Some(prior) = self
+            .current
+            .vcas
+            .get(index)
+            .filter(|prior| prior.id == vca.id)
+            .or_else(|| self.current.vcas.iter().find(|prior| prior.id == vca.id))
+        else {
             return true;
         };
         if mute {
@@ -3034,6 +3014,134 @@ impl<'a> EffectiveDiff<'a> {
     }
 
     #[cfg(feature = "control-provider")]
+    /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
+    /// `follows_mute` edit when one of them changed (rows `SendMute`, `SendFollowsMute`, with
+    /// `own_edit` the route's `RouteMute` length), else the length that its source strip's `Mute`
+    /// record took, the longest of the lanes whose gate changed, so a strip and its following
+    /// sends ramp together. `source` is the route's source strip.
+    pub(crate) fn gate_length(
+        &self,
+        before: &session::Route,
+        after: &session::Route,
+        own_edit: Option<u32>,
+        source: &StripChange<'_>,
+        gates: [[bool; 2]; 2],
+    ) -> u32 {
+        if before.mute != after.mute {
+            return self.ramps.resolve(LiveRampRow::SendMute, own_edit);
+        }
+        if before.follows_mute != after.follows_mute {
+            return self.ramps.resolve(LiveRampRow::SendFollowsMute, own_edit);
+        }
+        let lengths = self.lengths(source);
+        (0..2)
+            .filter(|&lane| gates[0][lane] != gates[1][lane])
+            .map(|lane| lengths.mute[lane])
+            .max()
+            .unwrap_or_else(|| self.ramps.resolve(LiveRampRow::SendMute, own_edit))
+    }
+}
+
+/// The effective values of two models and the ramp rules that go with them (decision 17, C6 step 3
+/// and 4, C7; #1558 D1, D7): the one place a strip's level records, and the length of a route's
+/// gate record, are decided. The classifier asks it for the live path and `join_strips` asks it
+/// for a successor's carry, so a VCA move, a membership change, an own edit, a followed mute and a
+/// following send cannot be composed two ways.
+///
+/// It owns both [`controls::Effective`] values, computed once, on the control thread. Strip
+/// indices count [`SessionModel::strips`] of the model they name and route indices count
+/// `model.routes`. The classifier's fast path uses the strips-it-reaches form of the same rules
+/// (`live_delta`'s local diff), over the same [`LevelRules`].
+pub(crate) struct EffectiveDiff<'a> {
+    rules: LevelRules<'a>,
+    before: controls::Effective,
+    after: controls::Effective,
+    /// [`SessionModel::vca_reach`] of `next`: per strip, the reaching VCAs' indices in ascending
+    /// VCA-ID order.
+    reach: Vec<Vec<usize>>,
+    /// The same for `current`, per strip of `current`: the reach the strip had before the change.
+    reach_before: Vec<Vec<usize>>,
+    /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
+    solo_before: Vec<bool>,
+    solo_after: Vec<bool>,
+}
+
+/// The solo term of every strip of `model` under `overlay`, in [`SessionModel::strips`] order.
+fn solo_terms(model: &SessionModel, overlay: &controls::MonitorOverlay) -> Vec<bool> {
+    use controls::EffectiveInputs as _;
+    let inputs = controls::ModelInputs::new(model, overlay);
+    let any_solo = controls::any_solo(&inputs);
+    (0..inputs.strip_count())
+        .map(|strip| controls::solo_term(&inputs, strip, any_solo))
+        .collect()
+}
+
+impl<'a> EffectiveDiff<'a> {
+    /// The effective values of `current` under `monitor.committed` and of `next` under
+    /// `monitor.next` (decision 17, C7; #1559 D6).
+    pub(crate) fn new(
+        current: &'a SessionModel,
+        next: &'a SessionModel,
+        ramps: LiveRamps,
+        edit_ramps: &'a EditRamps,
+        monitor: MonitorBase<'_>,
+    ) -> Self {
+        Self {
+            rules: LevelRules {
+                current,
+                next: controls::ModelView::whole(next),
+                ramps,
+                edit_ramps,
+                solo_ramp: monitor.ramp,
+            },
+            before: controls::effective(current, monitor.committed),
+            after: controls::effective(next, monitor.next),
+            reach: next.vca_reach(),
+            reach_before: current.vca_reach(),
+            solo_before: solo_terms(current, monitor.committed),
+            solo_after: solo_terms(next, monitor.next),
+        }
+    }
+
+    /// What the ramp rules read about the strip at `before` in `current` and `after` in `next`.
+    fn change(&self, before: usize, after: usize) -> StripChange<'_> {
+        let after_strip = self.rules.next.strip(after);
+        StripChange {
+            own_before: strip_at(self.rules.current, before).fader,
+            own_after: after_strip.fader,
+            id: after_strip.id,
+            reach_before: &self.reach_before[before],
+            reach: &self.reach[after],
+            solo_before: self.solo_before[before],
+            solo_after: self.solo_after[after],
+        }
+    }
+
+    #[cfg(feature = "control-provider")]
+    /// Whether the strip's effective fader or mute differs, as bits, between the two models.
+    pub(crate) fn level_changed(&self, before: usize, after: usize) -> bool {
+        level_differs(&self.before.strips[before], &self.after.strips[after])
+    }
+
+    /// The level records of one strip: its effective values in the two models, with the lengths
+    /// the ramp rules give.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfDomain`] as [`fader_records`].
+    pub(crate) fn level_records(
+        &self,
+        before: usize,
+        after: usize,
+    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+        fader_records(
+            &effective_fader(&self.before.strips[before]),
+            &effective_fader(&self.after.strips[after]),
+            self.rules.lengths(&self.change(before, after)),
+        )
+    }
+
+    #[cfg(feature = "control-provider")]
     /// The effective gate of route `index`, per source lane, in `[current, next]`.
     pub(crate) fn gates(&self, index: usize) -> [[bool; 2]; 2] {
         [
@@ -3043,11 +3151,8 @@ impl<'a> EffectiveDiff<'a> {
     }
 
     #[cfg(feature = "control-provider")]
-    /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
-    /// `follows_mute` edit when one of them changed (rows `SendMute`, `SendFollowsMute`, with
-    /// `own_edit` the route's `RouteMute` length), else the length that its source strip's `Mute`
-    /// record took, the longest of the lanes whose gate changed, so a strip and its following
-    /// sends ramp together.
+    /// The ramp length of a route record whose gate changed (#1558 D7); see
+    /// [`LevelRules::gate_length`].
     pub(crate) fn gate_length(
         &self,
         before: &session::Route,
@@ -3056,18 +3161,13 @@ impl<'a> EffectiveDiff<'a> {
         source: (usize, usize),
         gates: [[bool; 2]; 2],
     ) -> u32 {
-        if before.mute != after.mute {
-            return self.ramps.resolve(LiveRampRow::SendMute, own_edit);
-        }
-        if before.follows_mute != after.follows_mute {
-            return self.ramps.resolve(LiveRampRow::SendFollowsMute, own_edit);
-        }
-        let lengths = self.lengths(source.0, source.1);
-        (0..2)
-            .filter(|&lane| gates[0][lane] != gates[1][lane])
-            .map(|lane| lengths.mute[lane])
-            .max()
-            .unwrap_or_else(|| self.ramps.resolve(LiveRampRow::SendMute, own_edit))
+        self.rules.gate_length(
+            before,
+            after,
+            own_edit,
+            &self.change(source.0, source.1),
+            gates,
+        )
     }
 
     #[cfg(feature = "control-provider")]
@@ -3078,18 +3178,21 @@ impl<'a> EffectiveDiff<'a> {
         before: &session::Route,
         after: &session::Route,
     ) -> Option<(usize, usize)> {
-        let position = |strips: &[StripRef<'_>], route: &session::Route| {
-            let id = match &route.source {
-                session::RouteSource::Track { track_id, .. } => track_id,
-                session::RouteSource::Submix { submix_id, .. } => submix_id,
-            };
-            strips.iter().position(|strip| strip.id == id)
-        };
         Some((
-            position(&self.before_strips, before)?,
-            position(&self.after_strips, after)?,
+            route_source_strip(self.rules.current, before)?,
+            route_source_strip(self.rules.next.structure(), after)?,
         ))
     }
+}
+
+/// The index in [`SessionModel::strips`] of the strip `route` takes its source from, or `None` if
+/// the model has no such strip.
+pub(crate) fn route_source_strip(model: &SessionModel, route: &session::Route) -> Option<usize> {
+    let id = match &route.source {
+        session::RouteSource::Track { track_id, .. } => track_id,
+        session::RouteSource::Submix { submix_id, .. } => submix_id,
+    };
+    controls::strip_index(model, id)
 }
 
 /// The matrix record that brings a strip's matrix/pan stage from `before`'s value to `after`'s,
@@ -3643,6 +3746,12 @@ pub fn check_counts(
     {
         return Err(resource("host.resource.count"));
     }
+    // The pairs are counted only for a session that declares VCAs, and the count stops at the cap.
+    if vca_count != 0
+        && model.vca_reach_pairs(caps.maximum_vca_reach_pairs) > caps.maximum_vca_reach_pairs
+    {
+        return Err(resource("host.resource.vca_reach_pairs"));
+    }
     Ok(())
 }
 
@@ -3909,6 +4018,7 @@ mod tests {
             maximum_tracks: u64::MAX,
             maximum_submixes: u64::MAX,
             maximum_vcas: u64::MAX,
+            maximum_vca_reach_pairs: u64::MAX,
             maximum_sources: u64::MAX,
             maximum_routes: u64::MAX,
             maximum_effects: u64::MAX,

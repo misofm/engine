@@ -20,8 +20,9 @@ they are the rules here:
   structure exactly** -- the sum of the widths equals `bytes`, so a field cannot be added, dropped
   or silently resized without the total moving;
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
-  `require_*` words and the four `liveControl*` words present under those exact spellings, because
-  the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them;
+  `require_*` words and the three `liveControl*` words present under those exact spellings, because
+  the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them.
+  The word at offset 32 is `reserved1` (slice #1565A: the command-queue word is deleted);
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -61,6 +62,7 @@ RESULT_CODES = [
     (7, "unsupported"),
     (8, "renderRejected"),
     (9, "reprepareRequired"),
+    (10, "compileRejected"),
     (255, "internal"),
 ]
 BOOT_RESULT_ALIASES = [(1, "refusedDocument"), (2, "refusedOptions"), (3, "refusedLifecycle")]
@@ -74,15 +76,14 @@ BUFFER_KINDS = [
     (6, "command"),
     (7, "meterFrame"),
 ]
-COMMAND_KINDS = [
-    "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
-]
+# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 are
+# retired -- refused `malformed` and never reallocated -- so the vocabulary is explicit about its
+# values instead of positional from 1.
+COMMAND_KINDS = [(7, "observeSubscribe"), (8, "observeUnsubscribe")]
+RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable", "unknownRoute", "unknownVca",
 ]
 RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
@@ -125,30 +126,19 @@ EXPORTS = [
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_control_allocation_count",
+    "miso_engine_web_v1_control_command",
+    "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_request_ptr",
+    "miso_engine_web_v1_control_response_bytes",
+    "miso_engine_web_v1_control_response_ptr",
+    "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_eq_target_close",
-    "miso_engine_web_v1_eq_target_config_copy",
-    "miso_engine_web_v1_eq_target_config_ptr",
-    "miso_engine_web_v1_eq_target_open",
-    "miso_engine_web_v1_eq_target_prepare",
-    "miso_engine_web_v1_eq_target_rejected_edit_index",
-    "miso_engine_web_v1_eq_target_rejected_reason",
-    "miso_engine_web_v1_eq_target_request_capacity",
-    "miso_engine_web_v1_eq_target_request_ptr",
-    "miso_engine_web_v1_eq_target_result_bytes",
-    "miso_engine_web_v1_eq_target_result_capacity",
-    "miso_engine_web_v1_eq_target_result_ptr",
-    "miso_engine_web_v1_input_filters_config_copy",
-    "miso_engine_web_v1_input_filters_prepare",
-    "miso_engine_web_v1_live_control_route_count",
-    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
-    "miso_engine_web_v1_live_control_vca_count",
-    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -168,9 +158,6 @@ EXPORTS = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
-    "miso_engine_web_v1_prepared_command_submit",
-    "miso_engine_web_v1_prepared_companion_capacity",
-    "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -185,6 +172,7 @@ EXPORTS = [
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
     "miso_engine_web_v1_source_frames",
@@ -238,6 +226,8 @@ EXPORTS = [
     "miso_engine_web_v1_track_response_snapshot_set_bytes",
     "miso_engine_web_v1_track_response_track_id_capacity",
     "miso_engine_web_v1_track_response_track_id_ptr",
+    "miso_engine_web_v1_watermark_ptr",
+    "miso_engine_web_v1_watermark_read",
 ]
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 # The dead two-phase lifecycle's vocabulary. Named so its return is a failure rather than a
@@ -250,6 +240,7 @@ STRUCTURES = {
     "resourceReport": 224,
     "meterHeader": 72,
     "commandReport": 48,
+    "planWatermark": 96,
     "observationSelection": 32,
     "observationResult": 96,
     "responseRequest": 128,
@@ -265,26 +256,17 @@ STRUCTURES = {
     "liveResponseOwner": 64,
     "liveResponseSection": 44,
     "liveResponseResult": 104,
-    "eqTargetRequest": 32,
-    "eqTargetEdit": 12,
-    "preparedEffectTarget": 56,
-    "eqTargetResult": 32,
-    "preparedEffectCompanionHeader": 24,
-    "preparedEffectCompanionRecord": 80,
-    "eqTargetConfig": 272,
-    "inputFilterEdit": 16,
-    "builtinInputConfig": 48,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
     "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
-    "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "sourceRingFrames", "maximumMemoryBytes",
     "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
@@ -292,6 +274,12 @@ ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 COMMAND_RECORD_FIELDS = [
     "kind", "rack", "channel", "reserved0", "trackIndex", "effectIndex", "parameterId",
     "smoothingSamples", "reserved1", "values", "reserved2",
+]
+# The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
+# for field and in its order (#1314 D6), without a pre-roll counter.
+PLAN_WATERMARK_FIELDS = [
+    "structSize", "reserved0", "revision", "firstSample", "outcomeFlags", "exactCount",
+    "transitionFallbackCount", "supersededCount", "reserved",
 ]
 RESPONSE_REQUEST_FIELDS = [
     "structSize", "abiVersion", "target", "grid", "channels", "fields", "quality", "linkMode",
@@ -411,12 +399,11 @@ def check_named(document: dict, group: str, expected: list[tuple[int, str]]) -> 
 
 
 def check_positional(document: dict, group: str, names: list[str]) -> None:
-    """A vocabulary whose row position stands for its value, contiguous from 1."""
+    """A vocabulary whose row position stands for its value, contiguous from 0."""
     rows = document["constants"].get(group)
     require(isinstance(rows, list), f"constants.{group} is a list")
     actual = [(row["value"], row["name"]) for row in rows]
-    require(actual == list(enumerate(names, start=1) if group == "wireCommandKinds"
-                           else enumerate(names)),
+    require(actual == list(enumerate(names)),
             f"constants.{group} is not the contiguous vocabulary {names}")
 
 
@@ -492,6 +479,7 @@ def validate(document: object) -> None:
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
     for name, expected_fields in (
+        ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("observationSelection", OBSERVATION_SELECTION_FIELDS),
         ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
@@ -502,7 +490,7 @@ def validate(document: object) -> None:
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes",
-        "diagnosticBytes", "defaultCommandQueueRecords", "defaultMeterBlocks",
+        "diagnosticBytes", "defaultMeterBlocks",
         "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
         "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
         "responseGrids", "responseChannels", "responseFields", "observationChannels",
@@ -521,7 +509,9 @@ def validate(document: object) -> None:
     check_named(document, "states", STATES)
     check_named(document, "backends", BACKENDS)
     check_named(document, "bufferKinds", BUFFER_KINDS)
-    check_positional(document, "wireCommandKinds", COMMAND_KINDS)
+    check_named(document, "wireCommandKinds", COMMAND_KINDS)
+    require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
+            "constants.wireCommandKinds reallocates a retired value-command number")
     check_positional(document, "commandReasons", COMMAND_REASONS)
     check_named(document, "responseTargets", RESPONSE_TARGETS)
     check_named(document, "responseGrids", RESPONSE_GRIDS)
@@ -560,7 +550,6 @@ def validate(document: object) -> None:
         ("maximumCommandRecords", 256),
         ("maximumDocumentBytes", 1 << 20),
         ("diagnosticBytes", 1 << 14),
-        ("defaultCommandQueueRecords", 64),
         ("defaultMeterBlocks", 12),
         ("maximumObservationTaps", 16),
         ("maximumResponseEffectIdBytes", 127),
@@ -629,6 +618,16 @@ def self_test() -> int:
     def drop_export(document: dict) -> None:
         document["exports"].pop()
 
+    def drop_service_export(document: dict) -> None:
+        export = "miso_engine_web_v1_service"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError("the service export exists in the valid fixture") from error
+
+    def drop_watermark_field(document: dict) -> None:
+        document["structures"]["planWatermark"]["fields"].pop(2)
+
     def drop_spectrum_hop_capability_export(document: dict) -> None:
         export = "miso_engine_web_v1_spectrum_hop_capability"
         try:
@@ -649,6 +648,17 @@ def self_test() -> int:
 
     def move_record_field(document: dict) -> None:
         document["commandRecord"]["fields"][6]["offset"] = 16
+
+    def retired_command_kind_returns(document: dict) -> None:
+        document["constants"]["wireCommandKinds"].insert(0, {"value": 4, "name": "mute"})
+
+    def retired_queue_word_returns(document: dict) -> None:
+        document["structures"]["bootOptions"]["fields"][7]["name"] = (
+            "liveControlCommandQueueRecords"
+        )
+
+    def retired_export_returns(document: dict) -> None:
+        document["exports"].append("miso_engine_web_v1_prepared_command_submit")
 
     def drop_ring_input(document: dict) -> None:
         del document["constants"]["sourceRing"]["reserveQuanta"]
@@ -695,11 +705,16 @@ def self_test() -> int:
         ("a status word is widened", widen_field),
         ("a structure gains a hole", hole_in_layout),
         ("an export is dropped", drop_export),
+        ("the service export is dropped", drop_service_export),
+        ("the watermark record omits a field", drop_watermark_field),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
         ("a command-record field moves", move_record_field),
+        ("a retired value-command kind returns", retired_command_kind_returns),
+        ("the retired command-queue boot word returns", retired_queue_word_returns),
+        ("a retired prepared-command export returns", retired_export_returns),
         ("a source-ring input is dropped", drop_ring_input),
         ("the source-ring reserve is wrong", wrong_ring_reserve),
         ("the 192-byte prepare config returns", prepare_config_returns),

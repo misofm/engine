@@ -1479,7 +1479,7 @@ web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" -
   sample_rate_hz: 48000, quantum_frames: 128,
   module_sha256: $b, module_matches_pin: false, pinned_sha256: $c,
   node_version: "v22.23.2", v8_version: "12.4.254.21-node.56", node_flags: ["--no-liftoff"],
-  console_command_queue_records: 64, source_ring_frames: 5120,
+  boot_reserved1: 0, source_ring_frames: 5120,
   observations: 1000, preroll_blocks: 64, pairing: "alternating_per_observation",
   arms: ["quiet","restated","automated"],
   controls: [$controls[] | . + {parameter_id: (if .effect == "miso.parametric-eq" then 4 else 1 end)}],
@@ -1566,7 +1566,7 @@ web_mutation '.input_signal = "silence"' 'a browser round claiming silence'
 # The module and the protocol.
 web_mutation '.module_matches_pin = true' 'a module claiming the pin it does not match'
 web_mutation '.node_flags = []' 'a browser round with Liftoff enabled'
-web_mutation '.console_command_queue_records = 8' 'a queue the SDK does not boot'
+web_mutation '.boot_reserved1 = 8' 'a retired boot word the SDK does not write'
 web_mutation '.source_ring_frames = 100' 'a source ring that is not whole quanta'
 web_mutation '.prepared_commit = "'"$commit_b"'"' 'a module prepared at another commit than the run'"'"'s'
 web_mutation '.candidate_commit = "HEAD"' 'a commit that is not a commit id'
@@ -1820,7 +1820,7 @@ rebuild_round=$(jq -cn --arg a "$digest_a" --arg commit "$commit_a" "$resum"'
   {schema_version: 1, issue: 1289, record: "web_rebuild_cost", round: 1, module_sha256: $a,
    module_matches_pin: false, node_version: "v22.23.2", v8_version: "12.4.254.21-node.56",
    node_flags: ["--no-liftoff"], sample_rate_hz: 48000, quantum_frames: 128,
-   quantum_budget_ns: (128 * 1e9 / 48000), live_control_command_queue_records: 64,
+   quantum_budget_ns: (128 * 1e9 / 48000), boot_reserved1: 0,
    source_ring_frames: 5120, observations_per_document: 25,
    pairing: "four documents alternated per observation; a fresh instance per boot", units: "ns",
    percentile_method: "nearest_rank",

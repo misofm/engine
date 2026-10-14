@@ -33,14 +33,24 @@
 //! are the named exceptions below, each with its reason in the table. Boot is outside the rule,
 //! as the next paragraph says.
 //!
-//! Two post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
-//! and is also the boot-failure path; and `render_allocation_count`, the reader of the count. Boot
-//! is outside the rule. The `render_lock` module header names the exports it calls, wrapped or
-//! not, among them the 28 unwrapped ones it calls after the `boot` export returns a handle.
+//! Four post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
+//! and is also the boot-failure path; `render_allocation_count`, the reader of the count; and,
+//! since issue #1381a, `service` and `control_allocation_count`. The service step is the single
+//! instance's control work: the worklet's message handler runs it after every control message,
+//! never in `process()`, and it frees every plan and attachment render displaced, so its calls are
+//! the *control* allocations that `control_allocation_count` reads. Since issue #1562a the generic
+//! command-frame entry (`control_request_ptr`, `control_command`, `control_response_ptr`,
+//! `control_response_bytes`, `control_revision`) is control work of the same kind: it runs
+//! `SessionState::command` in the message handler and is unwrapped, its allocations counted as
+//! control allocations. Since issue #1570b `control_event`, the event entry, is the same kind of
+//! control work, and the worklet's message handler drains both event lanes through it. The
+//! render-locked count stays zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
+//! wrapped or not, among them the 22 unwrapped ones it calls after the `boot` export returns a
+//! handle.
 
 #![allow(unsafe_code)]
 
-use crate::render_lock::{render_allocation_count, render_locked};
+use crate::render_lock::{control_allocation_count, render_allocation_count, render_locked};
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
@@ -527,7 +537,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     source_ring_frames: 0,
     reserved0: 0,
     maximum_memory_bytes: 0,
-    live_control_command_queue_records: 0,
+    reserved1: 0,
     live_control_meter_blocks: 0,
     live_control_observation_taps: 0,
     live_control_master_track_plus_one: 0,
@@ -3536,72 +3546,6 @@ pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
     })
 }
 
-/// Open the bounded EQ target-preparation workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_open() -> u32 {
-    crate::control_targets::open()
-}
-
-/// Return the writable EQ target request buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_request_ptr() -> u32 {
-    crate::control_targets::request_ptr()
-}
-
-/// Return the EQ target request capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_request_capacity() -> u32 {
-    crate::control_targets::request_capacity()
-}
-
-/// Prepare the staged EQ target request.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_prepare(request_bytes: u32) -> u32 {
-    crate::control_targets::prepare(request_bytes)
-}
-
-/// Return the EQ target result buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_ptr() -> u32 {
-    crate::control_targets::result_ptr()
-}
-
-/// Return the current EQ target result length.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_bytes() -> u32 {
-    crate::control_targets::result_bytes()
-}
-
-/// Return the EQ target result capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_result_capacity() -> u32 {
-    crate::control_targets::result_capacity()
-}
-
-/// Return the original edit index from the most recent refusal.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_rejected_edit_index() -> u32 {
-    crate::control_targets::rejected_edit_index()
-}
-
-/// Return the existing command reason from the most recent EQ preparation refusal.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_rejected_reason() -> u32 {
-    crate::control_targets::rejected_reason()
-}
-
-/// Close the EQ target-preparation workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_close() -> u32 {
-    crate::control_targets::close()
-}
-
-/// Prepare the staged builtin input-filter target request.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_input_filters_prepare(request_bytes: u32) -> u32 {
-    crate::control_targets::input_filter_prepare(request_bytes)
-}
-
 /// Return the frozen browser-Wasm ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
@@ -3614,6 +3558,16 @@ pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render_allocation_count() -> u32 {
     render_allocation_count()
+}
+
+/// Return how many allocator calls this instance made outside render-locked windows (issue #1381a,
+/// #1332 D1): its boot, its control messages and its service steps. In `single` mode, a page
+/// without cross-origin isolation, the worklet's message handler runs the control work, so this is
+/// the count of the one place the engine allocates on an audio thread; the host reports it as
+/// `singleModeControlAllocations`. Control side only, never `process()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_allocation_count() -> u32 {
+    control_allocation_count()
 }
 
 /// Return the module-owned, zero-default boot-options address.
@@ -3961,6 +3915,124 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
     })
 }
 
+/// Run the control plane's service step once (issue #1381a D5, #1348 D1): reclaim every plan and
+/// attachment render has displaced, in the caller's thread and never in render. Control side
+/// only: the control Worker, or in `single` mode the worklet's message handler, never `process()`.
+///
+/// It commits and acknowledges nothing and leaves the status's last result alone. Results:
+/// [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle; [`RESULT_WRONG_STATE`] for a host
+/// that is not ready; an epoch failure as [`RESULT_INTERNAL`] with the session's diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
+}
+
+/// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
+/// zero for an invalid handle, a host that is not ready, or a `len` that is zero or over the boot's
+/// `maximum_control_frame_bytes`. The page writes one command frame there, then calls
+/// [`miso_engine_web_v1_control_command`]. Control side only.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) -> u32 {
+    with_host_mut(handle, 0, |host| {
+        host.control_request_mut(len)
+            .map_or(0, |staging| pointer_u32(staging.as_ptr()))
+    })
+}
+
+/// Run the staged control command frame of `len` bytes through the control plane's
+/// `SessionState::command`, the entry the C ABI's `miso_engine_v1_submit_command` runs (issue
+/// #1562a D1). In `single` mode it runs in the worklet's message handler, never in `process()`; it
+/// is not render-locked, so its allocations are counted as the instance's control allocations.
+///
+/// Results: [`RESULT_OK`] (the response frame is at [`miso_engine_web_v1_control_response_ptr`],
+/// and a refused transaction is still an ok call with a non-ok frame); [`RESULT_INVALID_ARGUMENT`]
+/// for a wrong handle, a bad length or a frame the core cannot correlate;
+/// [`RESULT_WRONG_STATE`]; [`RESULT_BUFFER_TOO_SMALL`]; [`RESULT_BACKPRESSURE`];
+/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.rebuild_pending`);
+/// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.control_command(len)
+    })
+}
+
+/// Dequeue the next event of `lane` through the control plane's `SessionState::dequeue_event`, the
+/// entry the C ABI's `miso_engine_v1_dequeue_event` runs (issue #1570b D1). `lane` is `0` for the
+/// reliable lane and `1` for the lossy lane. On [`RESULT_OK`] the event frame is at
+/// [`miso_engine_web_v1_control_response_ptr`] with [`miso_engine_web_v1_control_response_bytes`]
+/// bytes, and zero bytes means the lane is empty. The staging is shared with
+/// [`miso_engine_web_v1_control_command`]: the frame is valid until the next `control_command` or
+/// `control_event` call. A Wasm caller cannot hand the module an output buffer, so the pointer
+/// exports are the transport and the dequeue itself is the core's.
+///
+/// Control side only: in `single` mode the worklet's message handler, never `process()`. It is not
+/// render-locked, so its allocations are control allocations, and it leaves the status's last
+/// result alone.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle or a lane other than `0`
+/// or `1` (nothing is dequeued); [`RESULT_REFUSED_LIFECYCLE`] for a host with no control half;
+/// [`RESULT_BACKPRESSURE`], [`RESULT_BUFFER_TOO_SMALL`] or [`RESULT_INTERNAL`] for the core's
+/// matching event refusal, whose text is then the session diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_event(handle: u32, lane: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.control_event(lane)
+    })
+}
+
+/// Return the address of the last control command's response (issue #1562a D1), valid until the
+/// next control call, or zero for an invalid handle or a host with nothing to read.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_response_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        let response = host.control_response();
+        if response.is_empty() {
+            0
+        } else {
+            pointer_u32(response.as_ptr())
+        }
+    })
+}
+
+/// Return the byte length of the last control command's response, zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_response_bytes(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.control_response().len()).unwrap_or(0)
+    })
+}
+
+/// Return the committed session revision (issue #1562a, carry-forward 2), zero for an invalid
+/// handle or a session never edited. The SDK's transaction queue seeds its expected revision from
+/// it after a successful boot.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_revision(handle: u32) -> u64 {
+    with_host(handle, 0, AudioWorkletEngineHost::committed_revision)
+}
+
+/// Copy the plan's applied-revision watermark into its fixed record (issue #1381a D5), found at
+/// [`miso_engine_web_v1_watermark_ptr`]. Control side only.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, which writes nothing;
+/// [`RESULT_WRONG_STATE`] for a host that is not ready; [`RESULT_BACKPRESSURE`] for a read that
+/// gave up after the watermark's bounded attempts, which leaves the record untouched: a read to
+/// retry, never a refused edit.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_watermark_read(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.read_watermark()
+    })
+}
+
+/// Return the stable address of the 96-byte watermark record or zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_watermark_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        pointer_u32(ptr::from_ref(host.watermark()))
+    })
+}
+
 /// Return the stable prepared resource-report address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
@@ -3969,88 +4041,17 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Admit one staged live-control command submission (issue #137 D1).
+/// Admit one staged observation command submission, kinds 7 and 8 (issue #137 D1; #1565A).
 ///
-/// `count` records were written into [`BUFFER_COMMAND`]. The submission is one transaction: the
-/// return value is the frozen result code, and
+/// `count` records were written into [`BUFFER_COMMAND`], which exists when the boot asked for
+/// observation taps. Every value goes through the control exports instead. The submission is one
+/// transaction: the return value is the frozen result code, and
 /// [`miso_engine_web_v1_command_report_ptr`] names the first refused record and why.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
     render_locked(|| {
         with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
             host.submit_commands(count)
-        })
-    })
-}
-
-/// Admit one semantic command batch with its opaque prepared-target companion.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_command_submit(
-    handle: u32,
-    count: u32,
-    companion_bytes: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.submit_prepared_commands(count, companion_bytes)
-        })
-    })
-}
-
-/// Return the fixed prepared companion staging address.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_companion_ptr(handle: u32) -> u32 {
-    with_host_mut(handle, 0, |host| {
-        host.prepared_companion_mut()
-            .map_or(0, |bytes| pointer_u32(bytes.as_mut_ptr()))
-    })
-}
-
-/// Return the fixed prepared companion staging capacity.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepared_companion_capacity(handle: u32) -> u32 {
-    with_host(
-        handle,
-        0,
-        AudioWorkletEngineHost::prepared_companion_capacity,
-    )
-}
-
-/// Copy one accepted EQ owner's canonical configuration into the fixed config workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_config_copy(
-    handle: u32,
-    track_index: u32,
-    rack: u32,
-    effect_index: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.copy_eq_target_config(track_index, rack, effect_index)
-        })
-    })
-}
-
-/// Return the fixed addressed EQ configuration workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.eq_target_config()
-                .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
-        })
-    })
-}
-
-/// Copy one accepted builtin input-filter configuration into the shared config workspace.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
-    handle: u32,
-    track_index: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.copy_input_filter_config(track_index)
         })
     })
 }
@@ -4117,7 +4118,7 @@ pub extern "C" fn miso_engine_web_v1_live_control_track_count(handle: u32) -> u3
 /// Copy one canonical track ID into the ID staging buffer; returns its byte length.
 ///
 /// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation already sized for the longest source, track, submix, route or VCA ID in the session.
+/// preparation already sized for the longest source, track or submix ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
@@ -4137,52 +4138,10 @@ pub extern "C" fn miso_engine_web_v1_live_control_submix_count(handle: u32) -> u
 /// D1).
 ///
 /// Zero means "no such submix". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
+/// preparation sized for the longest source, track or submix ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_submix_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_submix_id(index))
-}
-
-/// Return the number of live routes -- the routes into submixes, in canonical route-ID order -- or
-/// zero before compilation or without live controls (issue #1223 D1).
-///
-/// Live route `i` is the send a send kind's (`13`-`15`) index word `i` addresses, because this
-/// enumerates exactly the plan's live send producers, in their order.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_route_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.live_control_route_count()).unwrap_or(0)
-    })
-}
-
-/// Copy one live route ID into the ID staging buffer; returns its byte length (issue #1223 D1).
-///
-/// Zero means "no such live route". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_route_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_live_control_route_id(index))
-}
-
-/// Return the number of live VCAs -- the session's VCAs in canonical VCA-ID order -- or zero before
-/// compilation, without VCAs or without live controls (issue #1246 D1).
-///
-/// VCA `i` is the VCA a VCA kind's (`16`, `17`) index word `i` addresses: this is the count
-/// admission bounds that index by.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_vca_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.live_control_vca_count()).unwrap_or(0)
-    })
-}
-
-/// Copy one VCA ID into the ID staging buffer; returns its byte length (issue #1246 D1).
-///
-/// Zero means "no such VCA". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track, submix, route or VCA ID in the session.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_live_control_vca_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_live_control_vca_id(index))
 }
 
 /// Return the number of prepared resident observation effects in the current owner map.
@@ -4369,7 +4328,7 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                 let ObservationStaging {
                     addresses, rows, ..
                 } = &mut *staging;
-                with_host(
+                with_host_mut(
                     handle,
                     Err(ObservationReadError::InvalidSelection),
                     |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
@@ -4690,6 +4649,76 @@ pub mod native_staging {
         })
     }
 
+    /// Run one structural command frame through the control plane of the host `handle` names
+    /// (#1381a gates 2 and 4), which publishes the successor plan. The result is the control
+    /// plane's refusal rendered as its debug text, or `None` for an unknown handle.
+    #[cfg(feature = "test-support")]
+    pub fn structural_command(handle: u32, request: &[u8]) -> Option<Result<Vec<u8>, String>> {
+        super::with_host_mut(handle, None, |host| {
+            Some(
+                host.structural_command_for_test(request)
+                    .map_err(|error| format!("{error:?}")),
+            )
+        })
+    }
+
+    /// Stage one control frame as the worklet does through `miso_engine_web_v1_control_request_ptr`,
+    /// run `miso_engine_web_v1_control_command` and read the response through the response
+    /// exports' record (issue #1562a D1). Returns the export's result and the response bytes (the
+    /// response frame after an ok result, else the refusal's diagnostic), or `None` for a handle
+    /// or a frame length the staging refuses.
+    pub fn control_command(handle: u32, frame: &[u8]) -> Option<(u32, Vec<u8>)> {
+        let length = u32::try_from(frame.len()).ok()?;
+        let staged = super::with_host_mut(handle, false, |host| {
+            host.control_request_mut(length)
+                .map(|staging| staging[..frame.len()].copy_from_slice(frame))
+                .is_some()
+        });
+        if !staged {
+            return None;
+        }
+        let result = super::miso_engine_web_v1_control_command(handle, length);
+        let response =
+            super::with_host(handle, Vec::new(), |host| host.control_response().to_vec());
+        Some((result, response))
+    }
+
+    /// Run `miso_engine_web_v1_control_event` on `lane` and read the frame through the response
+    /// exports' record (issue #1570b D1), as the worklet's drain does. Returns the export's result
+    /// and the event frame (empty for an empty lane or a refusal).
+    pub fn control_event(handle: u32, lane: u32) -> (u32, Vec<u8>) {
+        let result = super::miso_engine_web_v1_control_event(handle, lane);
+        let frame = if result == super::RESULT_OK {
+            super::with_host(handle, Vec::new(), |host| host.control_response().to_vec())
+        } else {
+            Vec::new()
+        };
+        (result, frame)
+    }
+
+    /// The epoch of the plan that renders, for the host `handle` names (#1381a gates 2 and 4).
+    #[cfg(feature = "test-support")]
+    pub fn active_plan_epoch(handle: u32) -> Option<u64> {
+        super::with_host(handle, None, |host| host.active_plan_epoch_for_test())
+    }
+
+    /// The status record of the host `handle` names; `None` for an unknown handle.
+    pub fn status(handle: u32) -> Option<crate::WebStatus> {
+        super::with_host(handle, None, |host| Some(*host.status()))
+    }
+
+    /// The output planes (left, then right) the host `handle` names rendered last, as the worklet
+    /// reads them through `miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT_PCM)`.
+    pub fn output_pcm(handle: u32) -> Option<Vec<f32>> {
+        super::with_host(handle, None, |host| host.output_pcm().map(<[f32]>::to_vec))
+    }
+
+    /// The watermark record the host `handle` names last copied (#1381a gate 5), as the worklet
+    /// reads it through `miso_engine_web_v1_watermark_ptr`; `None` for an unknown handle.
+    pub fn watermark(handle: u32) -> Option<crate::WebPlanWatermark> {
+        super::with_host(handle, None, |host| Some(*host.watermark()))
+    }
+
     /// Stage live-control command records, as the worklet writes them through
     /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`.
     pub fn command_records(handle: u32, records: &[u8]) -> bool {
@@ -4697,28 +4726,6 @@ pub mod native_staging {
             host.command_staging_mut()
                 .and_then(|staging| staging.get_mut(..records.len()))
                 .map(|staging| staging.copy_from_slice(records))
-                .is_some()
-        })
-    }
-
-    /// Stage a prepared-command companion, as the worklet writes it through
-    /// `miso_engine_web_v1_prepared_companion_ptr`.
-    pub fn prepared_companion(handle: u32, companion: &[u8]) -> bool {
-        super::with_host_mut(handle, false, |host| {
-            host.prepared_companion_mut()
-                .and_then(|staging| staging.get_mut(..companion.len()))
-                .map(|staging| staging.copy_from_slice(companion))
-                .is_some()
-        })
-    }
-
-    /// Copy out the addressed configuration workspace's prefix, as the worklet reads it through
-    /// `miso_engine_web_v1_eq_target_config_ptr` after a copy export succeeds.
-    pub fn eq_target_config(handle: u32, output: &mut [u8]) -> bool {
-        super::with_host(handle, false, |host| {
-            host.eq_target_config()
-                .and_then(|config| config.get(..output.len()))
-                .map(|config| output.copy_from_slice(config))
                 .is_some()
         })
     }
@@ -7023,7 +7030,6 @@ mod observation_alias_tests {
             let options = WebBootOptions {
                 require_sample_rate_hz: 48_000,
                 require_quantum_frames: 128,
-                live_control_command_queue_records: 8,
                 live_control_meter_blocks: 1,
                 live_control_observation_taps: 4,
                 ..WebBootOptions::explicit_defaults()
@@ -7117,7 +7123,6 @@ mod observation_alias_tests {
         let options = WebBootOptions {
             require_sample_rate_hz: 48_000,
             require_quantum_frames: 128,
-            live_control_command_queue_records: 8,
             live_control_meter_blocks: 1,
             live_control_observation_taps: 4,
             ..WebBootOptions::explicit_defaults()

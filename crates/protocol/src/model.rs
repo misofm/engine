@@ -901,18 +901,86 @@ pub struct SessionCommit {
 /// and the authoritative model are committed together by [`crate::ProtocolController`].
 pub struct PreparedSessionTransaction {
     base_revision: SessionRevision,
-    compiled: CompiledSession,
+    form: TransactionForm,
     applied_operations: usize,
     edit_ramps: EditRamps,
     monitor_edits: Vec<controls::MonitorWrite>,
     monitor_only: bool,
+    set_control_rows: Option<Vec<controls::ControlAddress>>,
+}
+
+/// What a prepared transaction holds of the session it would commit.
+enum TransactionForm {
+    /// The complete prospective compilation: the clone of the model with the edits applied,
+    /// validated, normalized and written as canonical text.
+    Compiled(CompiledSession),
+    /// A transaction of `SetControl`s on existing values (#1613): the owners the edits changed and
+    /// nothing else of the model. The committed compilation is not cloned, compiled or serialized;
+    /// the commit installs the owners in it.
+    InPlace(InPlaceEdit),
+    /// A transaction of solo writes only: the model, the revision and the compilation stay as
+    /// they are (#1559 D4), and nothing of them is cloned. It keeps its edits, for
+    /// [`SessionStore::materialize`].
+    Monitor(Vec<SessionEdit>),
+}
+
+/// The owners a transaction of values changed (#1613).
+struct InPlaceEdit {
+    /// The session header and the edited owners, in ID order (`controls::OwnerEdits`).
+    owners: SessionModel,
+    /// Where each edited owner sits in `owners` and in the committed model.
+    slots: session::OwnerSlots,
+    /// The revision the commit gives the model.
+    revision: u64,
+    /// The resource estimate of the model after the commit: the committed one with the canonical
+    /// text's length moved by the change of the edited owners and of the revision's digits.
+    estimate: session::ResourceEstimate,
+    /// The transaction's edits, for [`PreparedSessionTransaction::materialize`].
+    edits: Vec<SessionEdit>,
 }
 
 impl PreparedSessionTransaction {
     /// Borrow the prospective immutable compilation without making it authoritative.
+    ///
+    /// `None` for a transaction prepared in place ([`SessionStore::prepare_transaction_in_place`]
+    /// and [`Self::is_in_place`]): it has no compilation of its own. A host that prepares in place
+    /// reads [`Self::edited_owners`] and the committed compilation instead.
     #[must_use]
-    pub const fn compiled(&self) -> &CompiledSession {
-        &self.compiled
+    pub fn compiled(&self) -> Option<&CompiledSession> {
+        match &self.form {
+            TransactionForm::Compiled(compiled) => Some(compiled),
+            TransactionForm::InPlace(_) | TransactionForm::Monitor(_) => None,
+        }
+    }
+
+    /// Whether the transaction was prepared in place (#1613): it holds no compilation of its own,
+    /// so [`Self::compiled`] is not available. Either it changes values (read
+    /// [`Self::edited_owners`] for them) or it is a transaction of solo writes only.
+    #[must_use]
+    pub const fn is_in_place(&self) -> bool {
+        !matches!(self.form, TransactionForm::Compiled(_))
+    }
+
+    /// The owners a transaction prepared in place changed: a model with the session header and the
+    /// edited tracks, submixes, VCAs and routes, in ID order. `None` for a transaction that holds a
+    /// compilation, and for one of solo writes only, which changes no owner.
+    #[must_use]
+    pub fn edited_owners(&self) -> Option<&SessionModel> {
+        match &self.form {
+            TransactionForm::InPlace(edit) => Some(&edit.owners),
+            TransactionForm::Compiled(_) | TransactionForm::Monitor(_) => None,
+        }
+    }
+
+    /// The resource estimate of the model after the commit, when the transaction was prepared in
+    /// place (the committed estimate for solo writes only); `None` for a transaction that holds a
+    /// compilation, whose own [`CompiledSession::resource_estimate`] is that estimate.
+    #[must_use]
+    pub fn in_place_estimate(&self) -> Option<session::ResourceEstimate> {
+        match &self.form {
+            TransactionForm::InPlace(edit) => Some(edit.estimate),
+            TransactionForm::Compiled(_) | TransactionForm::Monitor(_) => None,
+        }
     }
 
     /// The per-edit ramp lengths the transaction's edits carried (#1394). Transaction metadata:
@@ -925,7 +993,14 @@ impl PreparedSessionTransaction {
     /// Revision the prospective compilation will own if committed.
     #[must_use]
     pub fn revision(&self) -> SessionRevision {
-        SessionRevision(self.compiled.normalized_model().revision)
+        match &self.form {
+            TransactionForm::Compiled(compiled) => {
+                SessionRevision(compiled.normalized_model().revision)
+            }
+            TransactionForm::InPlace(edit) => SessionRevision(edit.revision),
+            // Not a mutation: the committed revision.
+            TransactionForm::Monitor(_) => self.base_revision,
+        }
     }
 
     /// The writes to monitor rows (solo) that the transaction holds, in transaction order, with
@@ -934,6 +1009,16 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub fn monitor_edits(&self) -> &[controls::MonitorWrite] {
         &self.monitor_edits
+    }
+
+    /// The addresses of the rows the transaction wrote to the model, in transaction order, when
+    /// **every** edit of the transaction is a `SetControl` (a write to a monitor row is in
+    /// [`Self::monitor_edits`], not here); `None` as soon as one edit is another kind. A host that
+    /// classifies the transaction reads the rows it names instead of comparing the two models
+    /// whole, because a `SetControl` writes its row and nothing else (#1612 D2).
+    #[must_use]
+    pub fn set_control_rows(&self) -> Option<&[controls::ControlAddress]> {
+        self.set_control_rows.as_deref()
     }
 
     /// Whether every edit of the transaction is a write to a monitor row. Such a transaction
@@ -1028,6 +1113,40 @@ impl SessionStore {
         Ok(self.commit_prepared(prepared))
     }
 
+    /// [`Self::apply_transaction`] for a host that owns a monitor overlay: the preparation is
+    /// [`Self::prepare_transaction_with_monitor`]'s. A transaction of solo writes only commits no
+    /// model: the result names the committed revision and the store is as it was.
+    pub fn apply_transaction_with_monitor(
+        &mut self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+    ) -> Result<SessionCommit, SessionStoreError> {
+        let prepared = self.prepare_transaction_with_monitor(expected_revision, edits)?;
+        Ok(self.commit_or_keep(prepared))
+    }
+
+    /// [`Self::apply_transaction_with_monitor`] with the preparation of
+    /// [`Self::prepare_transaction_in_place`]: the result, and the store after it, are those of the
+    /// full path for the same transaction, whichever form the preparation took.
+    pub fn apply_transaction_in_place(
+        &mut self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+    ) -> Result<SessionCommit, SessionStoreError> {
+        let prepared = self.prepare_transaction_in_place(expected_revision, edits)?;
+        Ok(self.commit_or_keep(prepared))
+    }
+
+    fn commit_or_keep(&mut self, prepared: PreparedSessionTransaction) -> SessionCommit {
+        if prepared.monitor_only {
+            return SessionCommit {
+                revision: prepared.base_revision,
+                applied_operations: prepared.applied_operations,
+            };
+        }
+        self.commit_prepared(prepared)
+    }
+
     /// Resolve and compile one transaction without changing the authoritative session triple.
     /// The returned affine value owns every prospective allocation and is safe to discard.
     pub fn prepare_transaction(
@@ -1035,7 +1154,7 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, false)
+        self.prepare_transaction_with(expected_revision, edits, false, false)
     }
 
     /// [`Self::prepare_transaction`] for a host that owns a monitor overlay (decision 17, C8,
@@ -1051,7 +1170,67 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, true)
+        self.prepare_transaction_with(expected_revision, edits, true, false)
+    }
+
+    /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
+    /// without a compilation (#1613).
+    ///
+    /// A transaction whose edits are all `SetControl`s on values that exist is prepared **in
+    /// place**: the owners the edits name are cloned and edited with the very `controls::set` the
+    /// full path uses, checked with the session's own value validators, and held with the exact
+    /// resource estimate and the revision the commit gives. The committed model is not cloned,
+    /// compiled or serialized, and nothing of it is written until the commit. A
+    /// transaction of solo writes only is prepared as such, with no clone of the compilation.
+    ///
+    /// Anything else, and any transaction the in-place preparation cannot prove equal to the full
+    /// one, is prepared by the full path and returned as [`Self::prepare_transaction_with_monitor`]
+    /// returns it, refusals included: that function alone decides which refusal wins. The in-place
+    /// preparation accepts a transaction only if the full path would accept it:
+    ///
+    /// - every edit is a `SetControl`, on a model row of a strip, a route or a VCA, or on a solo row;
+    /// - `controls::set` accepts each edit in order, and the edited owners pass the validators of
+    ///   `compile_session` (`session::owners_values_valid`);
+    /// - the edited owners hold as many console entries, inserts, parameter entries and members as
+    ///   the committed ones, so the resource estimate counts the same and the canonical text keeps
+    ///   its structure (a parameter entry that does not exist yet is the full path);
+    /// - no ramp is longer than a second, and the canonical text stays within its preflight bound.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_transaction_with_monitor`].
+    pub fn prepare_transaction_in_place(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(expected_revision, edits, true, true)
+    }
+
+    /// The full preparation of a transaction prepared in place: the same edits, compiled, as
+    /// [`Self::prepare_transaction_with_monitor`] gives them at the committed revision. A host that
+    /// finds the in-place transaction needs the full path (a rebuild, a classification the fast path
+    /// cannot make) calls this and goes on as it always did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_transaction_with_monitor`]; an in-place preparation accepts only what the
+    /// full one accepts, so an error here is a defect of the host or the store.
+    pub fn materialize(
+        &self,
+        prepared: PreparedSessionTransaction,
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        let edits = match &prepared.form {
+            TransactionForm::Compiled(_) => return Ok(prepared),
+            TransactionForm::InPlace(edit) => &edit.edits,
+            TransactionForm::Monitor(edits) => edits,
+        };
+        self.prepare_transaction_with(
+            ExpectedRevision::Exact(prepared.base_revision),
+            edits,
+            true,
+            false,
+        )
     }
 
     fn prepare_transaction_with(
@@ -1059,6 +1238,7 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
         monitor: bool,
+        in_place: bool,
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
@@ -1081,11 +1261,15 @@ impl SessionStore {
         if !monitor_only && current.0 >= engine::realtime::GATE_REVISION_MAX {
             return Err(SessionStoreError::RevisionExhausted);
         }
+        if in_place && let Some(prepared) = self.prepare_in_place(current, edits, monitor_only) {
+            return Ok(prepared);
+        }
         let next_revision = current.0 + 1;
         let mut candidate = self.compiled.normalized_model().clone();
         let mut edit_ramps = EditRamps::new();
         let mut control_writes = ControlRampWrites::new();
         let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
+        let mut set_control_rows: Option<Vec<controls::ControlAddress>> = Some(Vec::new());
         // #1561 D3: `SetTrackConsole` is structural, so it is accepted only after a `SetConsole`
         // of the same transaction actually changed the console: the candidate's console, with the
         // earlier edits applied, must differ from the committed one.
@@ -1120,6 +1304,10 @@ impl SessionStore {
                 }
             }
             apply_session_edit(&mut candidate, edit).map_err(refused)?;
+            match (edit, &mut set_control_rows) {
+                (SessionEdit::SetControl { address, .. }, Some(rows)) => rows.push(address.clone()),
+                _ => set_control_rows = None,
+            }
             record_edit_ramps(&mut edit_ramps, &mut control_writes, edit)
                 .map_err(|error| refused(SessionEditError::Control(error)))?;
         }
@@ -1149,16 +1337,19 @@ impl SessionStore {
         }
         Ok(PreparedSessionTransaction {
             base_revision: current,
-            compiled,
+            form: TransactionForm::Compiled(compiled),
             applied_operations: edits.len(),
             edit_ramps,
             monitor_edits,
             monitor_only,
+            set_control_rows,
         })
     }
 
     /// Install a preparation whose base revision was checked by the controller immediately
-    /// before this call.  Moving the complete compilation is allocation-free and non-fallible.
+    /// before this call.  Moving the complete compilation is allocation-free and non-fallible; so
+    /// is installing the owners of a transaction prepared in place, which is the first write of the
+    /// committed model (#1613): a swap of each edited owner, then the revision and the estimate.
     pub(crate) fn commit_prepared(
         &mut self,
         prepared: PreparedSessionTransaction,
@@ -1170,11 +1361,129 @@ impl SessionStore {
         );
         let revision = prepared.revision();
         let applied_operations = prepared.applied_operations;
-        self.compiled = prepared.compiled;
+        match prepared.form {
+            TransactionForm::Compiled(compiled) => self.compiled = compiled,
+            TransactionForm::InPlace(mut edit) => {
+                self.compiled.swap_owners(&mut edit.owners, &edit.slots);
+                self.compiled.finish_in_place(edit.revision, edit.estimate);
+            }
+            TransactionForm::Monitor(_) => {
+                unreachable!("a monitor-only transaction commits no model")
+            }
+        }
         SessionCommit {
             revision,
             applied_operations,
         }
+    }
+
+    /// The in-place preparation of [`Self::prepare_transaction_in_place`]: `None` unless it can
+    /// prove the transaction is a change of values the full path would accept.
+    fn prepare_in_place(
+        &self,
+        current: SessionRevision,
+        edits: &[SessionEdit],
+        monitor_only: bool,
+    ) -> Option<PreparedSessionTransaction> {
+        let committed = self.compiled.normalized_model();
+        let rate = committed.sample_rate_hz;
+        // The full path bounds every ramp by one second at the rate the transaction commits; the
+        // rate is the committed one, which a `SetControl` cannot change.
+        if edits
+            .iter()
+            .any(|edit| edit.ramp_samples().is_some_and(|ramp| ramp > rate))
+        {
+            return None;
+        }
+        let mut owners = controls::OwnerEdits::new(committed);
+        let mut edit_ramps = EditRamps::new();
+        let mut control_writes = ControlRampWrites::new();
+        let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
+        let mut rows: Vec<controls::ControlAddress> = Vec::new();
+        for edit in edits {
+            let SessionEdit::SetControl {
+                address,
+                value,
+                ramp_samples,
+            } = edit
+            else {
+                return None;
+            };
+            // The monitor sort of #1559 D3, as the full path makes it.
+            if let Some(write) =
+                controls::check_monitor(committed, address, *value, *ramp_samples, rate).ok()?
+            {
+                monitor_edits.retain(|earlier| earlier.strip != write.strip);
+                monitor_edits.push(write);
+                continue;
+            }
+            if !controls::writes_only_its_row(address) {
+                return None;
+            }
+            owners.set(address, *value, *ramp_samples, rate).ok()?;
+            rows.push(address.clone());
+            record_edit_ramps(&mut edit_ramps, &mut control_writes, edit).ok()?;
+        }
+        if monitor_only {
+            return Some(PreparedSessionTransaction {
+                base_revision: current,
+                form: TransactionForm::Monitor(edits.to_vec()),
+                applied_operations: edits.len(),
+                edit_ramps,
+                monitor_edits,
+                monitor_only: true,
+                set_control_rows: Some(rows),
+            });
+        }
+        let (owners, slots) = owners.finish();
+        if !session::owners_values_valid(slots.in_owners(&owners))
+            || !session::owners_counts_equal(
+                slots.in_committed(committed),
+                slots.in_owners(&owners),
+            )
+        {
+            return None;
+        }
+        let estimate = self.compiled.resource_estimate();
+        let before = session::canonical_owner_bytes(slots.in_committed(committed));
+        let after = session::canonical_owner_bytes(slots.in_owners(&owners));
+        let digits = |revision: u64| u64::from(revision.checked_ilog10().unwrap_or(0)) + 1;
+        let revision = current.0 + 1;
+        let canonical_bytes = estimate
+            .canonical_bytes
+            .checked_sub(u64::try_from(before).ok()?)?
+            .checked_add(u64::try_from(after).ok()?)?
+            .checked_sub(digits(current.0))?
+            .checked_add(digits(revision))?;
+        // The full path refuses a canonical text over its preflight bound.
+        if canonical_bytes > estimate.canonical_upper_bound_bytes {
+            return None;
+        }
+        let compiled_model_bytes = estimate
+            .compiled_model_bytes
+            .checked_sub(estimate.canonical_bytes)?
+            .checked_add(canonical_bytes)?;
+        let estimate = session::ResourceEstimate {
+            canonical_bytes,
+            compiled_model_bytes,
+            estimated_bytes: compiled_model_bytes.checked_add(estimate.requested_runtime_bytes)?,
+            ..estimate
+        };
+        Some(PreparedSessionTransaction {
+            base_revision: current,
+            form: TransactionForm::InPlace(InPlaceEdit {
+                owners,
+                slots,
+                revision,
+                estimate,
+                edits: edits.to_vec(),
+            }),
+            applied_operations: edits.len(),
+            edit_ramps,
+            monitor_edits,
+            monitor_only: false,
+            set_control_rows: Some(rows),
+        })
     }
 }
 
@@ -1388,6 +1697,182 @@ mod tests {
             value,
             None,
         )
+    }
+
+    /// #1613. A transaction of values is prepared in place, holds the edited owners and no
+    /// compilation, commits to the session the full path commits to, and is materialized into the
+    /// full preparation on demand; a transaction of solo writes only holds nothing; a structural edit
+    /// and a refusal are the full path's.
+    ///
+    /// Red if the in-place commit differs from the full one in model, snapshot, estimate or revision,
+    /// if materializing gives another revision or model, or if an edit the in-place form cannot prove
+    /// is not handed to the full path.
+    #[test]
+    fn a_transaction_of_values_is_prepared_in_place_and_commits_as_the_full_path_does() {
+        let mut fast = store();
+        let mut full = store();
+        let revision = ExpectedRevision::Exact(fast.revision());
+        let gain = route_row("to-main", "gain_db", -3.123_456);
+        let mute = route_row("to-main", "mute", 1.0);
+        let edits = [gain.clone(), mute];
+        let prepared = fast
+            .prepare_transaction_in_place(revision, &edits)
+            .expect("prepares");
+        assert!(prepared.is_in_place());
+        assert_eq!(
+            prepared.edited_owners().expect("owners").routes.len(),
+            1,
+            "one route is edited, not the model"
+        );
+        assert_eq!(prepared.revision().0, fast.revision().0 + 1);
+        let materialized = fast.materialize(prepared).expect("materializes");
+        assert!(!materialized.is_in_place());
+        let oracle = full
+            .prepare_transaction_with_monitor(revision, &edits)
+            .expect("prepares");
+        assert_eq!(materialized.revision(), oracle.revision());
+        assert_eq!(
+            materialized
+                .compiled()
+                .expect("materialized")
+                .normalized_model(),
+            oracle.compiled().expect("compiled").normalized_model()
+        );
+        assert_eq!(
+            fast.apply_transaction_in_place(revision, &edits),
+            full.apply_transaction_with_monitor(revision, &edits)
+        );
+        assert_eq!(fast.canonical_snapshot(), full.canonical_snapshot());
+        assert_eq!(
+            fast.compiled().resource_estimate(),
+            full.compiled().resource_estimate()
+        );
+        assert_eq!(
+            fast.compiled().normalized_model(),
+            full.compiled().normalized_model()
+        );
+        assert_eq!(fast.revision(), full.revision());
+
+        // Solo writes alone: no compilation, no owner, no commit.
+        let track = fast.compiled().normalized_model().tracks[0].id.clone();
+        let solo = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Own,
+                control: 2,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        let revision = ExpectedRevision::Exact(fast.revision());
+        let prepared = fast
+            .prepare_transaction_in_place(revision, std::slice::from_ref(&solo))
+            .expect("prepares");
+        assert!(prepared.is_in_place() && prepared.is_monitor_only());
+        assert!(prepared.edited_owners().is_none());
+        assert_eq!(prepared.revision(), fast.revision());
+        let before = fast.revision();
+        fast.apply_transaction_in_place(revision, std::slice::from_ref(&solo))
+            .expect("applies");
+        assert_eq!(fast.revision(), before, "a solo is no mutation");
+
+        // What the in-place form cannot prove is the full path's.
+        let upsert = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: id("extra"),
+                fader: session::DualMonoFader {
+                    left_db: 0.0,
+                    right_db: 0.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: Vec::new(),
+            },
+        };
+        assert!(
+            !fast
+                .prepare_transaction_in_place(revision, &[gain, upsert])
+                .expect("prepares")
+                .is_in_place()
+        );
+        let refused = route_row("to-main", "gain_db", 400.0);
+        assert_eq!(
+            fast.prepare_transaction_in_place(revision, std::slice::from_ref(&refused))
+                .err(),
+            fast.prepare_transaction_with_monitor(revision, std::slice::from_ref(&refused))
+                .err()
+        );
+    }
+
+    /// #1612 D2. `set_control_rows` names the rows a transaction of `SetControl`s wrote, in
+    /// transaction order, and is `None` as soon as one edit is another kind. A write to a monitor
+    /// row is not a model write, so it is not in the list, and a transaction of such writes alone
+    /// has an empty list.
+    ///
+    /// Red if a structural edit leaves the list `Some` (a host would then classify the transaction
+    /// from the rows and miss the structure), or a row of the transaction is missing from it.
+    #[test]
+    fn set_control_rows_name_the_rows_of_a_transaction_of_set_controls() {
+        let store = store();
+        let revision = ExpectedRevision::Exact(store.revision());
+        let rows = |edits: &[SessionEdit]| {
+            store
+                .prepare_transaction_with_monitor(revision, edits)
+                .expect("prepares")
+                .set_control_rows()
+                .map(<[_]>::to_vec)
+        };
+        let mute = route_row("to-main", "mute", 1.0);
+        let gain = route_row("to-main", "gain_db", -3.0);
+        let wanted = |edit: &SessionEdit| match edit {
+            SessionEdit::SetControl { address, .. } => address.clone(),
+            _ => unreachable!("a SetControl"),
+        };
+        assert_eq!(
+            rows(&[mute.clone(), gain.clone()]),
+            Some(vec![wanted(&mute), wanted(&gain)])
+        );
+        let track = store.compiled().normalized_model().tracks[0].id.clone();
+        let solo = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Own,
+                control: 2,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        assert_eq!(rows(std::slice::from_ref(&solo)), Some(Vec::new()));
+        assert_eq!(
+            rows(&[solo.clone(), gain.clone()]),
+            Some(vec![wanted(&gain)])
+        );
+        let structural = SessionEdit::RemoveVca {
+            vca_id: id("nobody"),
+        };
+        // A structural edit among them is refused by its own resolution here (no such VCA), so the
+        // case that matters is a structural edit that applies: an upsert.
+        assert!(
+            store
+                .prepare_transaction_with_monitor(revision, &[structural])
+                .is_err()
+        );
+        let upsert = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: id("extra"),
+                fader: session::DualMonoFader {
+                    left_db: 0.0,
+                    right_db: 0.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: Vec::new(),
+            },
+        };
+        assert_eq!(rows(&[gain.clone(), upsert.clone()]), None);
+        assert_eq!(rows(&[upsert, gain]), None);
     }
 
     #[test]

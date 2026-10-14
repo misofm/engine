@@ -43,8 +43,13 @@ row carries `plane`:
 So the #140 invariant survives verbatim -- every declared kind is applied -- and the schema gate
 additionally pins *which* plane each kind is applied on, in both directions.
 
-Every source must yield the same ordered `value -> camelCase name` mapping, contiguous from `1`,
-and the two planes must partition it identically wherever a source spells the split.
+**Slice #1565A.** The browser's value kinds 1-6 and 9-17 are deleted: every value goes through a
+control transaction, and the command record carries only the two observation kinds, 7 and 8. Their
+numbers are retired and never reallocated, so the vocabulary no longer starts at 1. Every source
+must yield the same ordered `value -> camelCase name` mapping, contiguous from the *first declared*
+kind (`7`), and no declared kind may take a number in `RETIRED_KIND_NUMBERS` below. The two planes
+must partition it identically wherever a source spells the split; `render` stays a declared plane
+that no kind uses today.
 
 `--self-test` mutates in-memory copies of every source and requires each mutation to be caught, so
 the gate is proved to discriminate before it is trusted.
@@ -79,6 +84,11 @@ REASON_PREFIX = "REASON_"
 
 PLANE_RENDER = "render"
 PLANE_OBSERVATION = "observation"
+
+# The numbers of the deleted value kinds (#1565A D1). A declared kind that takes one of them would
+# let an old caller's record mean something new, so the list is spelled here, independently of the
+# Rust constants it polices.
+RETIRED_KIND_NUMBERS = frozenset(range(1, 7)) | frozenset(range(9, 18))
 
 
 class Invalid(Exception):
@@ -195,13 +205,15 @@ def generator_planes(text: str) -> dict[str, str]:
     return planes
 
 
-def metadata_generator_table(text: str) -> tuple[list[tuple[int, str]], list[str]]:
+def metadata_generator_table(
+    text: str, first: int
+) -> tuple[list[tuple[int, str]], list[str]]:
     """The generator's `commandKinds` rows, and the names it puts on the observation plane.
 
-    Row position stands for value here, exactly as it does in the shipped document (the schema gate
-    requires `commandKinds[i]["value"] == i + 1`). The values themselves are the Rust constants --
-    the generator interpolates them rather than writing numbers -- so the JSON's own value column,
-    checked under `--artifacts`, is what closes the loop.
+    Row position stands for value here, counted from the first declared kind, exactly as it does in
+    the shipped document (the schema gate requires `commandKinds[i]["value"] == first + i`). The
+    values themselves are the Rust constants -- the generator interpolates them rather than writing
+    numbers -- so the JSON's own value column, checked under `--artifacts`, is what closes the loop.
     """
     block = block_after(text, "let kinds = ", "[", "]")
     # Whitespace-tolerant on purpose: rustfmt explodes a row whose contents exceed `fn_call_width`
@@ -238,15 +250,17 @@ def metadata_generator_table(text: str) -> tuple[list[tuple[int, str]], list[str
         len(observation) + len(render) == len(rows),
         "a generator row is on neither the render nor the observation plane",
     )
-    return list(enumerate([emitted for _, emitted, _, _ in rows], start=1)), observation
+    return list(enumerate([emitted for _, emitted, _, _ in rows], start=first)), observation
 
 
 def schema_gate_list(text: str) -> list[tuple[int, str]]:
-    """The schema gate's independent list. Position stands for value, which is its own rule."""
+    """The schema gate's independent list. Position stands for value, counted from its first kind."""
     block = block_after(text, "\nCOMMAND_KINDS = ", "[", "]")
     names = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
     require(names, "the schema gate's COMMAND_KINDS list is empty")
-    return list(enumerate(names, start=1))
+    first = re.search(r"^COMMAND_KIND_FIRST = (\d+)$", text, re.MULTILINE)
+    require(first, "the schema gate declares no COMMAND_KIND_FIRST")
+    return list(enumerate(names, start=int(first.group(1))))
 
 
 def schema_gate_observation_plane(text: str) -> list[str]:
@@ -269,9 +283,9 @@ def metadata_document_rows(document: dict) -> tuple[list[tuple[int, str]], list[
 def check_no_literal_bound(js: str, schema_gate: str) -> None:
     """Neither downstream spelling may write the vocabulary's size as a number again.
 
-    The host JS asks the set; the schema gate derives its value range from the list's length. The
-    literal `range(1, 7)` is exactly how the shipped document was allowed to stop two kinds short
-    of the wire without any gate noticing.
+    The host JS asks the set; the schema gate derives its value range from the first declared kind
+    and the list's length. The literal `range(1, 7)` is exactly how the shipped document was allowed
+    to stop two kinds short of the wire without any gate noticing.
     """
     require(
         "COMMAND_KINDS.has(command.kind)" in js,
@@ -280,10 +294,10 @@ def check_no_literal_bound(js: str, schema_gate: str) -> None:
     stray = re.findall(r"command\.kind\s*(?:<=|<|>=|>|===|!==)\s*\d+", js)
     require(not stray, f"a hand-written numeric bound on command.kind is back: {stray}")
     require(
-        "list(range(1, len(COMMAND_KINDS) + 1))" in schema_gate,
+        "list(range(COMMAND_KIND_FIRST, COMMAND_KIND_FIRST + len(COMMAND_KINDS)))" in schema_gate,
         "the schema gate no longer derives its command-kind value range from COMMAND_KINDS",
     )
-    literal = re.findall(r"list\(range\(1,\s*\d+\)\)", schema_gate)
+    literal = re.findall(r"list\(range\(\d+,\s*\d+\)\)", schema_gate)
     require(
         not literal,
         f"the schema gate wrote a literal command-kind bound again: {literal}",
@@ -294,9 +308,12 @@ def check_no_literal_bound(js: str, schema_gate: str) -> None:
 
 
 def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> None:
-    generator_rows, generator_observation = metadata_generator_table(texts[METADATA_GENERATOR])
+    authority = rust_constants(texts[RUST_CONSTANTS])
+    generator_rows, generator_observation = metadata_generator_table(
+        texts[METADATA_GENERATOR], authority[0][0]
+    )
     spellings = {
-        "rust host constants": rust_constants(texts[RUST_CONSTANTS]),
+        "rust host constants": authority,
         ".d.ts MisoCommandKind": host_dts_enum(texts[HOST_DTS]),
         "metadata generator rows": generator_rows,
         "schema gate list": schema_gate_list(texts[SCHEMA_GATE]),
@@ -311,10 +328,16 @@ def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> No
         spellings["shipped metadata JSON"] = document_rows
         planes["shipped metadata JSON"] = document_observation
 
-    authority = spellings["rust host constants"]
+    first = authority[0][0]
     require(
-        [value for value, _ in authority] == list(range(1, len(authority) + 1)),
-        f"the Rust kind constants are not contiguous from 1: {authority}",
+        [value for value, _ in authority] == list(range(first, first + len(authority))),
+        f"the Rust kind constants are not contiguous from their first kind, {first}: {authority}",
+    )
+    reallocated = sorted(RETIRED_KIND_NUMBERS & {value for value, _ in authority})
+    require(
+        not reallocated,
+        f"the Rust kind constants reuse retired value-command numbers (never reallocated): "
+        f"{reallocated}",
     )
     for name, rows in spellings.items():
         require(
@@ -383,17 +406,15 @@ def self_test() -> int:
 
     mutations: list[tuple[str, object]] = [
         # The brief's named red mutation: a kind added to the Rust authority alone, after the last
-        # kind that ships. It names the next unclaimed value, so it stays the "added and not
-        # threaded" shape -- red because the other spellings lack it -- rather than a duplicate of
-        # a shipped value, which would go red through the contiguity rule instead. Kinds 1-17
-        # ship (`inputFilters` is 12; issue #1222 spent 13-15 on the route kinds and issue #1245
-        # 16-17 on the VCA kinds), so it is 18.
+        # kind that ships. It names a value no kind ever held, 18, so it stays the "added and not
+        # threaded" shape -- red because the other spellings lack it -- rather than a reuse of a
+        # retired number, which the retired rule catches (below).
         (
             "a Rust kind is added without the other spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_VCA_MUTE: u32 = 17;",
-                "pub const COMMAND_VCA_MUTE: u32 = 17;\n"
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;",
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;\n"
                 "pub const COMMAND_SOLO_MODE: u32 = 18;",
             ),
         ),
@@ -401,54 +422,66 @@ def self_test() -> int:
             "a Rust kind is renumbered out of the contiguous run",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_MUTE: u32 = 4;",
-                "pub const COMMAND_MUTE: u32 = 9;",
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;",
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 10;",
+            ),
+        ),
+        (
+            "a Rust kind takes a retired value-command number",
+            mutate(
+                RUST_CONSTANTS,
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;",
+                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;\n"
+                "pub const COMMAND_SOLO_MODE: u32 = 9;",
             ),
         ),
         (
             "a Rust kind is renamed",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_FADER_DB: u32 = 3;",
-                "pub const COMMAND_FADER_GAIN: u32 = 3;",
+                "pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;",
+                "pub const COMMAND_OBSERVE_ARM: u32 = 7;",
             ),
         ),
         (
             "the decode whitelist drops a kind the constants declare",
-            mutate(RUST_CONSTANTS, "                | COMMAND_OBSERVE_UNSUBSCRIBE\n", ""),
+            mutate(
+                RUST_CONSTANTS,
+                "            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE\n",
+                "            COMMAND_OBSERVE_SUBSCRIBE\n",
+            ),
         ),
         (
             "the decode whitelist admits something that is not a kind",
             mutate(
                 RUST_CONSTANTS,
-                "                | COMMAND_OBSERVE_UNSUBSCRIBE\n",
-                "                | COMMAND_OBSERVE_UNSUBSCRIBE\n"
-                "                | COMMAND_RECORD_BYTES\n",
+                "            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE\n",
+                "            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE | COMMAND_RECORD_BYTES\n",
             ),
         ),
         # The #210 drift class itself: present in Rust, missing from the JS set.
         (
-            "the host JS set stops at effectBypass",
-            mutate(
-                HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);",
-            ),
-        ),
-        (
             "the host JS set stops one kind short of the wire",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);",
+                "const COMMAND_KINDS = new Set([7, 8]);",
+                "const COMMAND_KINDS = new Set([7]);",
             ),
         ),
         (
             "the host JS set gains a kind the wire does not decode",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18]);",
+                "const COMMAND_KINDS = new Set([7, 8]);",
+                "const COMMAND_KINDS = new Set([7, 8, 18]);",
+            ),
+        ),
+        (
+            "the host JS set readmits a deleted value kind",
+            mutate(
+                HOST_JS,
+                "const COMMAND_KINDS = new Set([7, 8]);",
+                "const COMMAND_KINDS = new Set([4, 7, 8]);",
             ),
         ),
         (
@@ -456,7 +489,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "COMMAND_KINDS.has(command.kind)",
-                "command.kind >= 1 && command.kind <= 17",
+                "command.kind >= 7 && command.kind <= 8",
             ),
         ),
         (
@@ -472,6 +505,10 @@ def self_test() -> int:
             mutate(HOST_DTS, "  ObserveSubscribe = 7,", "  ObserveArm = 7,"),
         ),
         (
+            "the .d.ts enum declares a deleted value kind again",
+            mutate(HOST_DTS, "  ObserveSubscribe = 7,", "  Mute = 4,\n  ObserveSubscribe = 7,"),
+        ),
+        (
             "the .d.ts stops marking an observation kind as observation-plane",
             mutate(
                 HOST_DTS,
@@ -479,15 +516,6 @@ def self_test() -> int:
                 "subscription map. The\n  /// metadata JSON reports it as "
                 '`"plane": "observation"`.\n',
                 "",
-            ),
-        ),
-        (
-            "the .d.ts marks a DSP kind as observation-plane",
-            mutate(
-                HOST_DTS,
-                "  /// Set a lane mute, as a fader endpoint over the same window. "
-                "Applied (issue #140 B).",
-                "  /// Set a lane mute. Applied on the `miso.observe.v1` plane.",
             ),
         ),
         (
@@ -507,8 +535,8 @@ def self_test() -> int:
             "a metadata generator row emits the wrong name for its constant",
             mutate(
                 METADATA_GENERATOR,
-                '(COMMAND_FADER_DB, "faderDb", true, PLANE_RENDER)',
-                '(COMMAND_FADER_DB, "faderGain", true, PLANE_RENDER)',
+                '            "observeSubscribe",\n',
+                '            "observeArm",\n',
             ),
         ),
         (
@@ -538,82 +566,23 @@ def self_test() -> int:
             ),
         ),
         (
-            "the schema gate's list stops at effectBypass",
+            "the schema gate's list drops the last kind",
             mutate(
                 SCHEMA_GATE,
-                '    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",'
-                "\n",
-                "",
+                'COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]',
+                'COMMAND_KINDS = ["observeSubscribe"]',
             ),
         ),
         (
-            "the schema gate's list drops the render kind added last",
+            "the schema gate's first kind number moves back to 1",
+            mutate(SCHEMA_GATE, "COMMAND_KIND_FIRST = 7", "COMMAND_KIND_FIRST = 1"),
+        ),
+        (
+            "the schema gate reinstates a literal range",
             mutate(
                 SCHEMA_GATE,
-                '"routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",',
-                '"routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb",',
-            ),
-        ),
-        (
-            "the .d.ts enum drops the render kind added last",
-            mutate(HOST_DTS, "  VcaMute = 17,\n", ""),
-        ),
-        (
-            "the .d.ts enum drops the first of the two phase-3 kinds",
-            mutate(HOST_DTS, "  TrimDb = 10,\n", ""),
-        ),
-        (
-            "the metadata generator puts solo on the observation plane",
-            mutate(
-                METADATA_GENERATOR,
-                '(COMMAND_SOLO, "solo", true, PLANE_RENDER)',
-                '(COMMAND_SOLO, "solo", true, PLANE_OBSERVATION)',
-            ),
-        ),
-        (
-            "the metadata generator puts trimDb on the observation plane",
-            mutate(
-                METADATA_GENERATOR,
-                '(COMMAND_TRIM_DB, "trimDb", true, PLANE_RENDER)',
-                '(COMMAND_TRIM_DB, "trimDb", true, PLANE_OBSERVATION)',
-            ),
-        ),
-        (
-            "the metadata generator emits the wrong name for the polarity constant",
-            mutate(
-                METADATA_GENERATOR,
-                '            "polarityInvert",\n',
-                '            "polarity",\n',
-            ),
-        ),
-        (
-            "the decode whitelist drops solo",
-            mutate(RUST_CONSTANTS, "                | COMMAND_SOLO\n", ""),
-        ),
-        (
-            "the decode whitelist drops trimDb",
-            mutate(RUST_CONSTANTS, "                | COMMAND_TRIM_DB\n", ""),
-        ),
-        (
-            "the decode whitelist drops polarityInvert",
-            mutate(RUST_CONSTANTS, "                | COMMAND_POLARITY_INVERT\n", ""),
-        ),
-        (
-            "the .d.ts marks the live polarity kind as observation-plane",
-            mutate(
-                HOST_DTS,
-                "  /// Set or clear a lane's input polarity inversion. Applied (issue 210 "
-                "phase 3).",
-                "  /// Set or clear a lane's input polarity inversion. Applied on the "
-                "`miso.observe.v1` plane.",
-            ),
-        ),
-        (
-            "the schema gate reinstates the literal range(1, 7)",
-            mutate(
-                SCHEMA_GATE,
-                "list(range(1, len(COMMAND_KINDS) + 1))",
-                "list(range(1, 7))",
+                "list(range(COMMAND_KIND_FIRST, COMMAND_KIND_FIRST + len(COMMAND_KINDS)))",
+                "list(range(7, 9))",
             ),
         ),
         (

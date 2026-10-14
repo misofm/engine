@@ -31,7 +31,7 @@ resource row belongs to exactly one class:
   `hosts/host-web/tests/retained_ceilings.rs`.
 
 Everything else in the printed document -- the status snapshots, the result transcripts, the
-command and observation timelines and the three PCM digests, which `direct-oracle.mjs` has already
+SET_CONTROL and observation timelines and the three PCM digests, which `direct-oracle.mjs` has already
 asserted equal to the native digests before printing -- must equal `expected.json` exactly.
 
 `--self-test` proves the comparator discriminates before it is trusted: it fabricates a green
@@ -120,7 +120,7 @@ CEILINGS_KEY = "resourceCeilings"
 # failure rather than a silently skipped comparison.
 DIGEST_PATHS = (
     ("simd128", "pcmF32leSha256"),
-    ("commandTimeline", "pcmF32leSha256"),
+    ("setControlTimeline", "pcmF32leSha256"),
     ("observationTimeline", "pcmF32leSha256"),
 )
 
@@ -582,7 +582,7 @@ def self_test() -> int:
         ("the module is not the simd128 backend", printed_row("backend", "0"), None),
         # The digests and the transcript, which this gate asserts did not move.
         ("the identity-session digest moves", move_digest("simd128"), None),
-        ("the command-timeline digest moves", move_digest("commandTimeline"), None),
+        ("the SET_CONTROL-timeline digest moves", move_digest("setControlTimeline"), None),
         ("the observation-timeline digest moves", move_digest("observationTimeline"), None),
         ("the render transcript moves", move_status("nextAbsoluteSample"), None),
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),

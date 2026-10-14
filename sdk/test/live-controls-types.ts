@@ -1,8 +1,17 @@
 /** Issue #322 compile-time red probes for the catalog-derived live controls. */
 
 import { LiveControlEdits } from "../src/core/live-controls.ts";
-import type { RouteEdits, SubmixEdits, TrackEdits, VcaEdits } from "../src/core/live-controls.ts";
-import type { SessionMap } from "../src/core/boundary.ts";
+import type {
+  ControlEditSet,
+  EngineLiveControls,
+  RouteEdits,
+  SubmixEdits,
+  TrackEdits,
+  VcaEdits,
+} from "../src/core/live-controls.ts";
+import type { CommandReport, SessionMap } from "../src/core/boundary.ts";
+import type { ControlFrameEdit } from "../src/core/control-frame.ts";
+import type { ControlAppliedReport, ControlReport } from "../src/core/control-queue.ts";
 import type {
   MisoCommandAck,
   MisoCommandRequest,
@@ -68,8 +77,6 @@ const edits = new LiveControlEdits({
   sources: [],
   metersAttached: true,
   submixes: [],
-  routes: [],
-  vcas: [],
 });
 const track = edits.track("t");
 
@@ -141,8 +148,6 @@ const busEdits = new LiveControlEdits({
   sources: [],
   metersAttached: false,
   submixes: ["bus"],
-  routes: ["t-bus"],
-  vcas: [],
 });
 const bus = busEdits.submix("bus");
 bus.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -160,8 +165,7 @@ busEdits.strip("bus").effect("inserts", 0, "miso.compressor").observe("Gain Redu
 // Issue #1223 D4/D5: a send's live edits are exactly its gain, mute and matrix. A send has no lane
 // (its record's channel is not applicable), no effects and no solo, and route() says so in its type.
 type _RouteReturn = Assert<Exact<ReturnType<LiveControlEdits["route"]>, RouteEdits>>;
-type _RouteSurface = Assert<Exact<keyof RouteEdits, "gainDb" | "mute" | "matrix">>;
-type _SessionMapRoutes = Assert<Exact<MisoSessionMap["routes"], readonly string[]>>;
+type _RouteSurface = Assert<Exact<keyof RouteEdits, "gainDb" | "mute" | "matrix" | "followsMute">>;
 const send = busEdits.route("t-bus");
 send.gainDb(-12, { smoothingSamples: 480 });
 send.mute(true);
@@ -179,18 +183,14 @@ send.faderDb(-6);
 
 // Issue #1246 D3/D4: a VCA's live edits are exactly its lane-selectable fader offset and mute. A
 // VCA has no audio path, so it has no pan, matrix, trim, effect or solo, and vca() says so in its
-// type. Both session maps carry the VCA list, and neither may leave it out.
+// type. The session maps carry no route or VCA list: a value edit names its target by stable ID.
 type _VcaReturn = Assert<Exact<ReturnType<LiveControlEdits["vca"]>, VcaEdits>>;
 type _VcaSurface = Assert<Exact<keyof VcaEdits, "faderDb" | "mute">>;
-type _SessionMapVcas = Assert<Exact<MisoSessionMap["vcas"], readonly string[]>>;
-type _SdkSessionMapVcas = Assert<Exact<SessionMap["vcas"], readonly string[]>>;
 const vcaEdits = new LiveControlEdits({
   tracks: ["t"],
   sources: [],
   metersAttached: false,
   submixes: [],
-  routes: [],
-  vcas: ["drums"],
 });
 const drums = vcaEdits.vca("drums");
 drums.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -205,6 +205,21 @@ drums.pan(-1, 1);
 drums.effect("inserts", 0, "miso.compressor");
 // @ts-expect-error a VCA's options are a lane and smoothing only
 drums.faderDb(-6, { gainDb: 0 });
-// @ts-expect-error a session map always carries its VCA list
-const noVcas: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [] };
-void noVcas;
+// @ts-expect-error a session map has no VCA or route list any more
+const staleMap: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] };
+void staleMap;
+
+// #1563B D6: a value edit resolves with the core's ControlReport, and only observation records
+// resolve with a CommandReport.
+declare const liveControls: EngineLiveControls;
+const applied: Promise<ControlAppliedReport> = liveControls.submit(track.faderDb(-6));
+const observed: Promise<CommandReport> = liveControls.submit(compressor.observe("Gain Reduction", true, 4));
+// @ts-expect-error a value edit does not resolve with a CommandReport
+const wrongValueReport: Promise<CommandReport> = liveControls.submit(track.faderDb(-6));
+// @ts-expect-error an observation edit does not resolve with a ControlReport
+const wrongObservationReport: Promise<ControlReport> = liveControls.submit(compressor.observe("Gain Reduction", true, 4));
+void [applied, observed, wrongValueReport, wrongObservationReport];
+// A builder returns the SET_CONTROL edits of one transaction, with the ramp as `rampSamples`.
+const faderEdits: ControlEditSet = track.faderDb(-6, { smoothingSamples: 32 });
+const firstEdit: ControlFrameEdit | undefined = faderEdits.edits[0];
+void firstEdit;

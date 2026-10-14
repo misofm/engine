@@ -5,10 +5,11 @@ import { before, describe, test } from "node:test";
 
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { createEngine } from "../src/browser/engine.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { scriptedControl } from "./control-support.mjs";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 let asset;
@@ -134,7 +135,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("shares bindings, preserves owned rows, guards manual edits, and closes last owner", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     const compLeft = selection("comp", "left");
     const gateRight = selection("gate", "right");
@@ -195,7 +196,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("a window change on a one-tap effect is one re-arm record and lands", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     const submitted = [];
     const submitCommands = engine.submitCommands.bind(engine);
@@ -231,7 +232,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("a submission naming one observation tap twice is refused whole as malformed", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     try {
       const liveControls = engine.liveControls();
@@ -271,7 +272,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("an awaited close before any render is refused with typed backpressure; a render and a retry succeed", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     try {
       const handle = await engine.subscribeObservations({
@@ -296,7 +297,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("a subscribe or update before the slot is drained is refused with typed backpressure and changes nothing", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     const comp = selection("comp", "both");
     try {
@@ -329,7 +330,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("invalidates a handle at headless replacement", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 2 },
+      liveControls: { observationTaps: 2 },
     });
     const sub = await engine.subscribeObservations({ selections: [selection("comp")], windowBlocks: 1 });
     try {
@@ -493,10 +494,11 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       appliedAtSample: rendered * 128n, records: new Uint8Array(0),
     });
     const host = {
+      control: scriptedControl(),
       async sessionMap() {
         return {
           tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"],
-          sources: [], metersAttached: false, submixes: [], routes: [], vcas: [],
+          sources: [], metersAttached: false, submixes: [],
         };
       },
       async command(request) {
@@ -549,7 +551,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
         audioWorklet: { async addModule() {} }, async close() {},
       }),
       createHost: async () => rig.host,
-      policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 0, observationTaps: 4, masterTrackPlusOne: 0 } },
+      policy: { liveControls: { meterBlocks: 0, observationTaps: 4, masterTrackPlusOne: 0 } },
       ...extra,
     });
   }
@@ -567,6 +569,24 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       // Subscribe, the refused close, and the same close sent again after the render.
       assert.deepEqual(rig.log.commands.map((entry) => entry.at), [0n, 0n, 1n]);
       assert.equal(rig.log.commands[1].kinds[0], rig.log.commands[2].kinds[0]);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("a browser engine booted with no observation taps refuses a subscription without a command", async () => {
+    // The host stages observation records only when `observationTaps` is nonzero, and no other
+    // boot word attaches them any more. Red if the browser engine sends the record anyway.
+    const rig = slotHost();
+    const engine = await browserEngine(rig, {
+      policy: { liveControls: { meterBlocks: 0, observationTaps: 0, masterTrackPlusOne: 0 } },
+    });
+    try {
+      await assert.rejects(
+        engine.subscribeObservations(request),
+        (error) => error instanceof MisoUsageError && error.message.includes("observationTaps"),
+      );
+      assert.deepEqual(rig.log.commands, []);
     } finally {
       await engine.close();
     }

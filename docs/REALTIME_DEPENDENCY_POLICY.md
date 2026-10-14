@@ -245,8 +245,9 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    calls the exports that the table `tools/realtime-policy/render-thread-exports.json` lists.
    The table is the one list of set 1. Each entry names an export without its
    `miso_engine_web_v1_` prefix, the worklet handlers that call it after boot, and whether its
-   body is one `render_locked` call (`wrapped`). It has two `wrapped: false` entries, `dispose`
-   and `render_allocation_count`, each with its reason. `tools/realtime-policy` proves that every
+   body is one `render_locked` call (`wrapped`). It has four `wrapped: false` entries, `dispose`,
+   `render_allocation_count` and, since #1381a, `service` and `control_allocation_count`, and
+   since #1562a the five control-frame exports and since #1570b `control_event`, each with its reason. `tools/realtime-policy` proves that every
    `wrapped` entry's body is that call. The harnesses `scripts/test-web-audioworklet.mjs` and
    `sdk/test/browser-pcm-evals.mjs` fail when a worklet calls an export that the table does not
    list. This document does not repeat the names, so that they cannot drift from the table.
@@ -255,18 +256,35 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`) calls `source_submit` (`:386`)
    and `source_seek` (`:445`) at the top of its `process()` (`:306-328`) before it renders, and
    `source_seek` again from its attach node's `prepare-seek` handler (`:539`).
+   Since batch 7 review B1 the two exports reach the sources through
+   `SessionState::submit_unserviced` and `seek_unserviced`, which run no service step: the step
+   takes the report lock, drops retired plans and stages counter snapshots, so it belongs to the
+   message handler alone (`render_locked_source.rs` measures both exports after a render with
+   counter telemetry configured: zero allocations).
 2. **The exports whose bodies run inside `render_locked`.** Every export of set 1 except
-   `dispose` and `render_allocation_count`, and also eleven staging accessors that the engine
+   `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also eleven staging accessors that the engine
    worklet calls only during boot: `observation_id_ptr`, `observation_id_capacity`,
    `observation_selection_ptr`, `observation_selection_bytes`, `observation_selection_capacity`,
    `track_response_request_ptr`, `track_response_request_bytes`,
    `track_response_snapshot_ptr`, `track_response_snapshot_capacity`,
    `track_response_track_id_ptr` and `track_response_track_id_capacity`.
 
-Since #1488 the two sets are equal for the worklets' post-boot calls, apart from two named
+Since #1488 the two sets are equal for the worklets' post-boot calls, apart from the named
 exceptions, as the `ffi` module header (`hosts/host-web/src/ffi.rs:14-39`) and
 `render_lock.rs:5-11` state: `dispose`, which is teardown and frees the host by design (it is also
-the boot-failure path), and `render_allocation_count`, the reader of the count. The spectrum
+the boot-failure path), `render_allocation_count`, the reader of the count, and, since #1381a,
+`service` and `control_allocation_count`. The service step is the single-instance mode's control
+work (decision 15 D15-10): the worklet's message handler runs it after every control message, never
+in `process()`, and its allocations and frees (it frees every plan and attachment render has
+displaced) count in the control counter `CONTROL_ALLOCATIONS` of `render_lock.rs`, which
+`control_allocation_count` reads and the host status reports as `singleModeControlAllocations`.
+Since #1562a the generic command-frame entry (`control_request_ptr`, `control_command`,
+`control_response_ptr`, `control_response_bytes` and `control_revision`) is the same kind of
+export: `control_command` runs `SessionState::command` in the message handler, which allocates and
+frees, so its allocations are control allocations too. Since #1570b the event entry `control_event`
+is the same kind: the worklet's message handler drains the reliable lane and then the lossy lane
+through it, after every message and service step, and posts each frame to the page. The
+render-locked count stays exactly zero. The spectrum
 request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
 sets: the worklet calls them only during boot, before the `boot` export, where the collection
 staging is sized and allocated by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside
@@ -345,7 +363,8 @@ Approved unsafe code that runs on a render thread, per entry:
 - `render_lock.rs`: its allocator methods run on every allocator call the browser module makes. They
   count a call exactly when it is made inside a render-locked window, at boot or after it; the count
   runs from instantiation and is never reset. Calls outside every window are not counted: the boot
-  exports themselves, the unwrapped boot accessors, `dispose` and `render_allocation_count`. The
+  exports themselves, the unwrapped boot accessors, `dispose`, `render_allocation_count`, `service`
+  and `control_allocation_count` (the control counter counts every call outside a window, #1381a). The
   worklet calls render-locked exports during boot too: the eleven staging accessors of set 2, and
   `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
   before the boot export. Those calls are counted, and today they make no allocator call: the

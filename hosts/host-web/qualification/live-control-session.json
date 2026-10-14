@@ -92,9 +92,11 @@
         "left_mute": false,
         "right_mute": false
       },
-      "pan": {
-        "left": -1.0,
-        "right": 1.0,
+      "matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0,
         "smoothing_samples": 0
       }
     }

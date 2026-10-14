@@ -23,7 +23,7 @@ History. This gate began as #243 S1's deletion gate for the pre-boot-v1 SDK's re
 (`sessionHeader`, `PrepareLimits`, a `limits` key, the `"config"`/`"prepared"` states, per-source
 rates, retired error phases, the TOML session surface, the literal `192`). #1050 retired those
 bans: they caught only exact re-adds of deleted code, and in 73 CI runs they fired four times, each
-time on new, legitimate code (`"prepared"` in `prepared-control.js` and `pcm-feed`, and a
+time on new, legitimate code (`"prepared"` in `pcm-feed`, and a
 `limits:` key in `live-response.ts` and `response.ts`). The numeric-offset rule is the one that
 guards a live defect class, and it is what remains. The file keeps its name because the CI router
 and its policy checker route on it.

@@ -1,13 +1,16 @@
 //! The control list and the one read and write path: [`list`], [`get`], [`set`].
 
-use session::{SessionModel, StripRef};
+use session::{SessionModel, StableId, StripRef};
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
-use crate::effective::{Effective, EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
+use crate::effective::{
+    Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorWrite, effective,
+};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
+use crate::view::ModelView;
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
 
 /// One control of a session: where it is, what it is, and its committed value.
@@ -88,11 +91,9 @@ pub fn owner_count(model: &SessionModel) -> usize {
 pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
     let strips = model.tracks.len() + model.submixes.len();
     match owner {
-        Owner::Strip(id) => model.strips().position(|strip| strip.id == id),
-        Owner::Route(id) => model
-            .routes
-            .iter()
-            .position(|route| route.id == *id)
+        Owner::Strip(id) => strip_index(model, id),
+        Owner::Route(id) => search(&model.routes, id, |route| &route.id)
+            .or_else(|| model.routes.iter().position(|route| route.id == *id))
             .map(|index| strips + index),
         Owner::Vca(id) => model
             .vcas
@@ -101,6 +102,25 @@ pub fn owner_index(model: &SessionModel, owner: &Owner) -> Option<usize> {
             .map(|index| strips + model.routes.len() + index),
         Owner::Session => Some(owner_count(model) - 1),
     }
+}
+
+/// The index of the strip `id` in [`SessionModel::strips`] order (the tracks, then the submixes),
+/// or `None` when the model has no such strip: the same answer as a scan, in `O(log n)` on a model
+/// whose tracks and submixes are in ID order (a compiled session's normalized model), and by a scan
+/// on any other.
+#[must_use]
+pub fn strip_index(model: &SessionModel, id: &StableId) -> Option<usize> {
+    search(&model.tracks, id, |track| &track.id)
+        .or_else(|| {
+            search(&model.submixes, id, |submix| &submix.id).map(|at| model.tracks.len() + at)
+        })
+        .or_else(|| model.strips().position(|strip| strip.id == id))
+}
+
+/// A binary search for the item whose ID is `id`. Right when `items` are in ID order; on any other
+/// slice it may miss, and the caller then scans.
+fn search<T>(items: &[T], id: &StableId, id_of: impl Fn(&T) -> &StableId) -> Option<usize> {
+    items.binary_search_by(|item| id_of(item).cmp(id)).ok()
 }
 
 /// Which kind of owner an index of [`list`]'s owner order names, and where in its table.
@@ -132,7 +152,7 @@ fn owner_slot(model: &SessionModel, owner: usize) -> OwnerSlot {
 }
 
 /// The strip at `index` of [`SessionModel::strips`] order: the tracks, then the submixes.
-fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
+pub(crate) fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
     match model.tracks.get(index) {
         Some(track) => StripRef::track(track),
         None => StripRef::submix(&model.submixes[index - model.tracks.len()]),
@@ -155,22 +175,44 @@ pub fn owner_rows_with(
     sample_rate: u32,
     out: &mut Vec<ControlRow>,
 ) {
+    owner_rows_in(
+        ModelView::whole(model),
+        effective,
+        overlay,
+        owner,
+        sample_rate,
+        out,
+    );
+}
+
+/// [`owner_rows_with`] over a [`ModelView`] and any source of effective values: the rows of owner
+/// number `owner` of the model the view stands for, read from the committed model and the owners the
+/// view holds edited, with the effective values of `effective` (#1613). The one body of both.
+pub fn owner_rows_in(
+    view: ModelView<'_>,
+    effective: &impl EffectiveSource,
+    overlay: &MonitorOverlay,
+    owner: usize,
+    sample_rate: u32,
+    out: &mut Vec<ControlRow>,
+) {
+    let model = view.structure();
     match owner_slot(model, owner) {
         OwnerSlot::Strip(index) => {
-            let strip = strip_at(model, index);
+            let strip = view.strip(index);
             strip::push_rows(
                 out,
                 &model.console,
                 &strip,
-                &effective.strips[index],
+                &effective.strip(index),
                 overlay.is_soloed(strip.id),
                 sample_rate,
             );
         }
         OwnerSlot::Route(index) => {
-            route::push_rows(out, &model.routes[index], effective.routes[index].gate);
+            route::push_rows(out, view.route(index), effective.route_gate(index));
         }
-        OwnerSlot::Vca(index) => vca::push_rows(out, &model.vcas[index]),
+        OwnerSlot::Vca(index) => vca::push_rows(out, view.vca(index)),
         OwnerSlot::Session => session_rows::push_rows(out, model),
         OwnerSlot::None => {}
     }
@@ -188,12 +230,22 @@ pub fn derived_rows_with(
     owner: usize,
     out: &mut Vec<ControlRow>,
 ) {
-    match owner_slot(model, owner) {
+    derived_rows_in(ModelView::whole(model), effective, owner, out);
+}
+
+/// [`derived_rows_with`] over a [`ModelView`] and any source of effective values (#1613).
+pub fn derived_rows_in(
+    view: ModelView<'_>,
+    effective: &impl EffectiveSource,
+    owner: usize,
+    out: &mut Vec<ControlRow>,
+) {
+    match owner_slot(view.structure(), owner) {
         OwnerSlot::Strip(index) => {
-            strip::push_derived_rows(out, &strip_at(model, index), &effective.strips[index]);
+            strip::push_derived_rows(out, &view.strip(index), &effective.strip(index));
         }
         OwnerSlot::Route(index) => {
-            route::push_derived_rows(out, &model.routes[index], effective.routes[index].gate);
+            route::push_derived_rows(out, view.route(index), effective.route_gate(index));
         }
         OwnerSlot::Vca(_) | OwnerSlot::Session | OwnerSlot::None => {}
     }
@@ -303,7 +355,7 @@ impl Resolved {
 }
 
 /// Find the row at `address` (its owner, section and control, on any lane).
-fn resolve(
+pub(crate) fn resolve(
     model: &SessionModel,
     address: &ControlAddress,
     sample_rate: u32,

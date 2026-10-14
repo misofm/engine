@@ -398,6 +398,7 @@ test("actual Wasm control-port preparation releases full stale SAB before exact 
       this.sourcePcm = new Float32Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourcePcm")), 256);
       this.ready = true; this.disposed = false; this.stickyResult = 0;
     }
+    rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
     process() { first = boundary.render(128); return true; }
   }
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
@@ -526,6 +527,7 @@ function runPrelude(source, { tracking = false, mutate = false, capacity = 2, in
       this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
       this.exports = recordFeedCalls({ memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return seekResult; }, miso_engine_web_v1_source_submit: (_h, _id, generation, start, channels, frames, end) => { submissions.push({ generation, start, channels, frames, end, pcm: [...this.sourcePcm] }); return typeof submitResult === "function" ? submitResult() : submitResult; } });
     }
+    rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
     process() { return true; }
   }
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
@@ -576,6 +578,22 @@ test("full shared runways fill each internal queue gradually within the per-sour
   assert.ok(pressure > 0, "real capacity backpressure retains pending shared PCM");
   assert.ok(run.writers.every((writer) => writer.occupancy > 0));
   assert.ok(run.ringControls.every((control) => control[MSB1_CONTROL.UNDERRUNS] === 0 && control[MSB1_CONTROL.REFUSED] === 0));
+});
+
+test("a memory growth is re-bound between blocks: the rings' id views follow and the drain resumes", async () => {
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = runPrelude(source);
+  const memory = run.engine.exports.memory;
+  const grown = new ArrayBuffer(memory.buffer.byteLength * 2);
+  new Uint8Array(grown).set(new Uint8Array(memory.buffer));
+  memory.buffer = grown; // a control call grew the module's memory
+  run.process();
+  assert.equal(run.submissions.length, 0, "a drain on a detached view submits nothing (and never re-binds in process())");
+  assert.ok(run.engine.sabRings.every((ring) => ring.idTargetBuffer !== grown), "process() cut no view");
+  run.engine.rebindMemoryViews(); // what the message handler does at its end
+  assert.ok(run.engine.sabRings.every((ring) => ring.idTargetBuffer === grown && ring.idTarget.buffer === grown), "every ring's id view is re-cut against the grown memory");
+  run.process();
+  assert.equal(run.submissions.length, 3, "the drain resumes through the re-bound views");
 });
 
 test("moved prelude drains odd mono/stereo rings and allocation mutation turns red", async () => {

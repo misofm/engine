@@ -18,7 +18,6 @@ const LAYOUT_ARTIFACT = "miso-engine-v1-abi-layout.json";
 const COMPANION_SOURCE_PATHS = Object.freeze({
   "miso-engine-v1-audio-worklet-host.js": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-host.js"),
   "miso-engine-v1-audio-worklet.js": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet.js"),
-  "prepared-control.js": path.join(HOST_WEB, "web", "prepared-control.js"),
   "miso-engine-v1-audio-worklet-host.d.ts": path.join(HOST_WEB, "web", "miso-engine-v1-audio-worklet-host.d.ts"),
   "miso-engine-v1-parameter-metadata.json": path.join(ROOT, "sdk", "assets", "miso-engine-v1-parameter-metadata.json"),
 });
@@ -43,7 +42,7 @@ const FACTORY_FIELDS = [
   "context", "document", "options", "simd128ModuleUrl", "workletModuleUrl",
 ];
 const BOOT_OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
   "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ];
 const execFileAsync = promisify(execFile);
@@ -424,7 +423,7 @@ async function runSuspendedFixture(urls) {
     "context", "document", "options", "simd128ModuleUrl", "workletModuleUrl",
   ];
   const BOOT_OPTION_FIELDS_IN_ORDER = [
-    "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+    "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
     "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
   ];
   const STAGE_TIMEOUT = 15_000;
@@ -574,7 +573,7 @@ async function runSuspendedFixture(urls) {
   const bootOptions = () => ({
     sourceRingFrames: 0,
     maximumMemoryBytes: 67_108_864n,
-    liveControlCommandQueueRecords: 0n,
+    reserved1: 0n,
     liveControlMeterBlocks: 0n,
     liveControlObservationTaps: 0n,
     liveControlMasterTrackPlusOne: 0n,
@@ -734,7 +733,7 @@ async function runSuspendedFixture(urls) {
     factory: {
       sourceRingFrames: 0,
       maximumMemoryBytes: "67108864",
-      liveControlCommandQueueRecords: "0",
+      reserved1: "0",
       liveControlMeterBlocks: "0",
       liveControlObservationTaps: "0",
       liveControlMasterTrackPlusOne: "0",

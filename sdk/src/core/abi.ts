@@ -115,11 +115,10 @@ export interface BootOptions {
   /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
-   * The four live-control words. Absent attaches no live controls at all. `masterTrackPlusOne` is
+   * The three live-control words. Absent attaches no live controls at all. `masterTrackPlusOne` is
    * the designated master's strip index (tracks first, then submixes) plus one, or `0` for none.
    */
   readonly liveControls?: {
-    readonly commandQueueRecords?: number;
     readonly meterBlocks?: number;
     readonly observationTaps?: number;
     readonly masterTrackPlusOne?: number;
@@ -141,7 +140,6 @@ export interface BootOptions {
 export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
-  "liveControlCommandQueueRecords",
   "liveControlMeterBlocks",
   "liveControlObservationTaps",
   "liveControlMasterTrackPlusOne",
@@ -186,7 +184,7 @@ export function writeBootOptions(
   u32("requireQuantumFrames", options.requireQuantumFrames ?? 0);
   u32("sourceRingFrames", options.sourceRingFrames ?? 0);
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
-  u64("liveControlCommandQueueRecords", BigInt(options.liveControls?.commandQueueRecords ?? 0));
+  u64("reserved1", 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
   u64("liveControlObservationTaps", BigInt(options.liveControls?.observationTaps ?? 0));
   u64("liveControlMasterTrackPlusOne", BigInt(options.liveControls?.masterTrackPlusOne ?? 0));

@@ -1218,6 +1218,17 @@ impl PreparedImmediateCommandFrame {
     }
 }
 
+/// How a command's transaction is prepared (#1613).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Preparation {
+    /// The one-call path: no host monitor overlay, a compilation always.
+    Whole,
+    /// A host with a monitor overlay: a compilation always.
+    Monitor,
+    /// A host that commits a transaction of values without a compilation.
+    InPlace,
+}
+
 struct StructuralCommandPlan {
     request_id: RequestId,
     previous_revision: SessionRevision,
@@ -1694,7 +1705,13 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         // The one-call path has no host to apply a monitor write to: it refuses solo, as it always
         // did, rather than acknowledge a write nobody applies.
-        match self.plan_structural_command(input, scratch, output.len(), header, false)? {
+        match self.plan_structural_command(
+            input,
+            scratch,
+            output.len(),
+            header,
+            Preparation::Whole,
+        )? {
             StructuralCommandDisposition::Legacy => {
                 self.process_command_frame_into_legacy(input, scratch, output)
             }
@@ -1724,7 +1741,79 @@ impl<P: ControlProvider> ProtocolController<P> {
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         // The prepared path hands the token to a host that owns a monitor overlay (#1559).
-        match self.plan_structural_command(input, scratch, output_capacity, header, true)? {
+        self.prepare_command_frame_with(
+            input,
+            scratch,
+            output_capacity,
+            header,
+            Preparation::Monitor,
+        )
+    }
+
+    /// [`Self::prepare_command_frame`] for a host that commits a transaction of values without a
+    /// compilation (#1613): a `SESSION_TRANSACTION_APPLY` whose edits are all `SetControl`s on
+    /// existing values is prepared with [`SessionStore::prepare_transaction_in_place`], so its token
+    /// holds the edited owners and no compilation ([`PreparedSessionTransaction::is_in_place`]).
+    /// Every other command, and every transaction the in-place preparation cannot prove equal to
+    /// the full one, is prepared exactly as [`Self::prepare_command_frame`] prepares it, and its
+    /// refusals are its refusals.
+    ///
+    /// A host that cannot commit an in-place token calls [`Self::materialize_prepared`] first.
+    pub fn prepare_command_frame_in_place(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        self.prepare_command_frame_with(
+            input,
+            scratch,
+            output_capacity,
+            header,
+            Preparation::InPlace,
+        )
+    }
+
+    /// Replace an in-place token's prospective session by the full preparation of its edits
+    /// ([`SessionStore::materialize`]), so the host can go on with the compiled transaction as
+    /// [`Self::prepare_command_frame`] gives it. A token that holds a compilation is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// The store's refusal, which cannot happen for a token the store prepared in place: an
+    /// in-place preparation accepts only what the full one accepts.
+    pub fn materialize_prepared(
+        &self,
+        prepared: &mut PreparedStructuralCommand,
+    ) -> Result<(), SessionStoreError> {
+        let Some(session) = prepared.prospective_session.take() else {
+            return Ok(());
+        };
+        match self.session.materialize(session) {
+            Ok(session) => {
+                prepared.prospective_session = Some(session);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prepare_command_frame_with(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        header: CommandHeader,
+        preparation: Preparation,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        match self.plan_structural_command(input, scratch, output_capacity, header, preparation)? {
             StructuralCommandDisposition::Legacy => {
                 self.process_immediate_command(input, scratch, output_capacity)
             }
@@ -1821,8 +1910,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
-        monitor: bool,
+        preparation: Preparation,
     ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
+        let monitor = preparation != Preparation::Whole;
         if header.message_id != MessageId::SessionTransactionApply {
             return Ok(StructuralCommandDisposition::Legacy);
         }
@@ -1923,12 +2013,16 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
-        let prepared_transaction = if monitor {
-            self.session
-                .prepare_transaction_with_monitor(header.expected_revision, &edits)
-        } else {
-            self.session
-                .prepare_transaction(header.expected_revision, &edits)
+        let prepared_transaction = match preparation {
+            Preparation::Whole => self
+                .session
+                .prepare_transaction(header.expected_revision, &edits),
+            Preparation::Monitor => self
+                .session
+                .prepare_transaction_with_monitor(header.expected_revision, &edits),
+            Preparation::InPlace => self
+                .session
+                .prepare_transaction_in_place(header.expected_revision, &edits),
         };
         let prospective_session = match prepared_transaction {
             Ok(value) => value,

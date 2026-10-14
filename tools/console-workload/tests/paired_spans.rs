@@ -716,7 +716,8 @@ fn record(
 }
 
 /// A both-channel write in the product's shape: one `Both` owner edit on the EQ, a `Left` then a
-/// `Right` record on the compressor and the limiter (`into_effect_records`'s `(PerLane, 2)` arm).
+/// `Right` record on the compressor and the limiter (the shape the browser's `into_effect_records`,
+/// deleted by #1565, made of a `Both` command on a `PerLane` parameter).
 fn both_channel(
     scenario: &mut Scenario,
     block: u64,
@@ -1521,7 +1522,8 @@ fn every_order_of_a_mixed_drain_keeps_the_collapse_exactly_where_the_rule_does()
                     }
                     for (slot, parameter, channel, value) in &span_order {
                         // A `PerLane` parameter has no `Both` cell: a both-channel command is a
-                        // `Left` and a `Right` write, as `into_effect_records` makes of one.
+                        // `Left` and a `Right` write, as the browser's `into_effect_records` (deleted by #1565) made
+                        // of one.
                         let sides: &[ParameterChannel] = if *channel == ParameterChannel::Both {
                             &[ParameterChannel::Left, ParameterChannel::Right]
                         } else {

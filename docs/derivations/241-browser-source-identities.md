@@ -91,12 +91,13 @@ blake3 = 0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea
 `valid_source_content_identity` tests `^blake3:[0-9a-f]{64}$` and nothing reads the value
 afterwards. The browser and raw-Wasm legs both push PCM through
 `miso_engine_web_v1_source_submit`; no resolver ever fetches by identity here. Each edit also
-substitutes 64 hex characters for 64 hex characters in place, so
-`hosts/host-web/tests/browser-v1/session.toml` stays exactly **1,265 bytes** and the
-`sessionTomlBytes = 1265` row of `expected.json` — the one resource row that is a byte count of
-this document — is unchanged. `direct-oracle.mjs` re-derives and re-asserts all three PCM digests
-(`pcmF32leSha256`, `nativeCommandTimelinePcmF32leSha256`,
-`nativeObservationPcmF32leSha256`) against `expected.json` on every `--check`, and they pass.
+substitutes 64 hex characters for 64 hex characters in place, so the session document stays
+exactly the same length and the one resource row of `expected.json` that is a byte count of it is
+unchanged. (At #241 that was `hosts/host-web/tests/browser-v1/session.toml`, **1,265 bytes**, row
+`sessionTomlBytes`; the sessions are canonical JSON now, and the row is `sessionDocumentBytes`, 2,021
+bytes for `session.json`.) `direct-oracle.mjs` re-derives and re-asserts the PCM digests against
+`expected.json` on every `--check` (today `pcmF32leSha256`, `setControlTimeline.pcmF32leSha256` and
+`observationTimeline.pcmF32leSha256`, with the three native ones), and they pass.
 
 ## Frozen pins in the browser-v1 gate
 

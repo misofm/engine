@@ -111,7 +111,7 @@ describe("issue 777 -- selected resident observations", () => {
     const engine = await createOfflineEngine(largeObservationDocument(), {
       asset,
       maximumMemoryBytes: 64n << 20n,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     try {
       const map = engine.observationMap();
@@ -134,7 +134,7 @@ describe("issue 777 -- selected resident observations", () => {
   test("headless reads two effects, preserves exact windows, and suppresses a re-arm", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { observationTaps: 4 },
     });
     try {
       const comp = selection("comp");

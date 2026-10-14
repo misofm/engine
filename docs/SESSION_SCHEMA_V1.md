@@ -294,9 +294,10 @@ section is not live-addressable until #1213.
 shift the session asked for, so it contributes zero to any node's declared latency and does not
 appear in the compiled plan's route timings or inserted delays. Its rings are charged to the
 plan's existing `graph_delay_bytes` row. It is prepared-only, changed through the ordinary
-transactional session edit. Issue #210 phase 3 made trim and polarity live through
-command kinds 10 and 11. Issue #808 adds live HPF/LPF targets through command kind12,
-including an atomic pair edit. Filter coefficients use fixed 64 current-then-advance
+transactional session edit. Issue #210 phase 3 made trim and polarity live, and issue #808
+added live HPF/LPF targets (first through command kinds 10, 11 and 12, deleted by #1565;
+today the strip's builtin rows, set by `SET_CONTROL`, with an atomic pair edit as one
+transaction). Filter coefficients use fixed 64 current-then-advance
 updates after off-render preparation; trim retains its existing smoothing law.
 `delay_samples` is the only lane key that remains prepared-only. The liveness ruling
 is `docs/rulings/builtins-input-liveness-d2.md`; these commands do not add a session

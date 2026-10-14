@@ -693,6 +693,17 @@ impl RealtimePlanOwner {
     pub fn active_plan_id(&self) -> u64 {
         self.active.1.program().plan_id()
     }
+    /// The active plan's host attachment as a `T` (issue #1381 D3), or `None` when the plan
+    /// carries none or carries another type.
+    ///
+    /// It is a downcast of the attachment [`PreparedRenderPlan::set_host_attachment`] stored before
+    /// publication: no allocation, no lock and no drop, so a render-side reader may call it. The
+    /// attachment becomes the active one at the same block as its plan, because it is part of
+    /// the plan; a block whose swap decision returned [`SwapOutcome::Applied`] therefore reads the
+    /// successor's attachment.
+    pub fn active_attachment_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.active.1.host_attachment_mut::<T>()
+    }
     /// Saturating count of applied swaps whose incoming plan took state from its predecessor.
     #[must_use]
     pub const fn carried_count(&self) -> u64 {
@@ -859,6 +870,40 @@ impl RealtimePlanOwner {
     }
 }
 // REALTIME_POLICY_END
+/// The active plan's exclusive-owner operations between blocks (issue #1381a).
+///
+/// A host that renders on one thread, and runs its control work on that thread between blocks,
+/// calls these on the owner of the plan: they are the plan's own operations, forwarded to the plan
+/// the owner holds. Each one does what the same-named method of [`PreparedRenderPlan`] documents.
+/// None renders, advances the clock or changes the plan's topology, and none is called inside a
+/// render call.
+impl RealtimePlanOwner {
+    /// [`PreparedRenderPlan::can_prepare_source_seek`] on the active plan.
+    #[must_use]
+    pub fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        self.active.1.can_prepare_source_seek(source_index)
+    }
+
+    /// [`PreparedRenderPlan::prepare_source_seek`] on the active plan.
+    pub fn prepare_source_seek(
+        &mut self,
+        source_index: usize,
+        generation: u64,
+        frame: u64,
+    ) -> bool {
+        self.active
+            .1
+            .prepare_source_seek(source_index, generation, frame)
+    }
+
+    /// [`PreparedRenderPlan::copy_response_snapshot`] on the active plan.
+    pub fn copy_response_snapshot(
+        &mut self,
+        request: super::ResponseSnapshotRequest<'_>,
+    ) -> Result<super::ResponseSnapshotCapture, super::ResponseSnapshotError> {
+        self.active.1.copy_response_snapshot(request)
+    }
+}
 impl PlanRetirer {
     /// Reclaim one displaced plan on the control/retirement owner. The plan's slot is free before
     /// its retirement credit returns.

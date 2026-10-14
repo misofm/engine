@@ -1,5 +1,8 @@
 import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
 import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
+import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
+import { createBrowserLiveControls } from "../../../sdk/src/browser/live-controls.ts";
+import type { MisoAudioWorkletHost } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
@@ -13,6 +16,12 @@ import { createEngine } from "../../../sdk/src/browser/engine.ts";
 import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
 
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
+/**
+ * The sample a transaction submitted before any render applies from. A `SET_CONTROL` transaction
+ * takes effect in the first block that begins after its submit returns, so an edit sent before the
+ * first quantum is in force from sample 0.
+ */
+const APPLIED_BEFORE_FIRST_SAMPLE = 0;
 const OBSERVATION_FRAMES = 2_048;
 const SPECTRUM_FRAMES = 2_048;
 const CONTINUOUS_FRAMES = 6_144;
@@ -98,14 +107,54 @@ function sdkFailureObject(error: unknown): object {
     : new Error(`non-object error: ${String(error)}`, { cause: error });
 }
 
-function attachSdkFailure(failure: object, key: "renderAllocationReadFailures" | "sdkCleanupFailures", message: string) {
-  const record = failure as Record<string, unknown>;
-  const list = Array.isArray(record[key]) ? record[key] as string[] : (record[key] = []) as string[];
-  list.push(message);
+type SdkFailureKey = "renderAllocationReadFailures" | "sdkCleanupFailures";
+
+/**
+ * The read and cleanup failures that followed a thrown value. A thrown value is never written to:
+ * the SDK's own errors are frozen, and a write to one throws and hides the failure being reported.
+ */
+const sdkFailureAttachments = new WeakMap<object, Record<SdkFailureKey, string[]>>();
+
+function attachSdkFailure(failure: object, key: SdkFailureKey, message: string) {
+  let attached = sdkFailureAttachments.get(failure);
+  if (attached === undefined) {
+    attached = { renderAllocationReadFailures: [], sdkCleanupFailures: [] };
+    sdkFailureAttachments.set(failure, attached);
+  }
+  attached[key].push(message);
+}
+
+/**
+ * The value to throw for `failure`: itself when nothing followed it, else a new `Error` that keeps
+ * its message and name, carries it as `cause` (and its stack as `causeStack`, since the report
+ * spreads own properties) and lists what followed. Call it once, after every instance has closed.
+ */
+function reportSdkFailure(failure: object): object {
+  const attached = sdkFailureAttachments.get(failure);
+  if (attached === undefined) return failure;
+  const wrapper = new Error(sdkErrorMessage(failure), { cause: failure });
+  const name = (failure as { name?: unknown }).name;
+  wrapper.name = name === undefined ? "Error" : String(name);
+  const stack = (failure as { stack?: unknown }).stack;
+  return Object.assign(wrapper, {
+    causeStack: typeof stack === "string" ? stack : undefined,
+    renderAllocationReadFailures: attached.renderAllocationReadFailures,
+    sdkCleanupFailures: attached.sdkCleanupFailures,
+  });
 }
 
 function sdkErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (typeof message === "string") return message;
+  if (error !== null && typeof error === "object") {
+    try {
+      return JSON.stringify(error, (_key, value) => typeof value === "bigint" ? `${value}n` : value) ?? String(error);
+    } catch {
+      return Object.prototype.toString.call(error);
+    }
+  }
+  return String(error);
 }
 
 /**
@@ -535,7 +584,7 @@ async function createContinuousSpectrumBrowser(
     spectrum: query,
     policy: {
       sourceRingFrames: frames,
-      liveControls: { commandQueueRecords: 64, meterBlocks: 16 },
+      liveControls: { meterBlocks: 16 },
       ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
     },
     scratchBoot: async () => ({
@@ -1296,7 +1345,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   const browser = await createSdkEngine("track-response-subscription", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -1333,10 +1382,14 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   )).arrayBuffer());
   const headless = await WasmBoundary.boot(asset, document, {
     sourceRingFrames: OBSERVATION_FRAMES,
-    liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    liveControls: { observationTaps: 4 },
   });
-  const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), (edits) =>
-    headless.submitCommands(encodeLaneEdits(edits), edits.length));
+  const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
+    queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
+      initialRevision: headless.controlRevision(),
+    }),
+    observe: (edits) => headless.submitCommands(encodeLaneEdits(edits), edits.length),
+  });
   const request = {
     trackId: "track",
     grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
@@ -1371,9 +1424,8 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const liveControls = await browser.liveControls();
     const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
     const edits = (owner: EngineLiveControls) => {
-      // The raw document gives no builder to resolve `eq-simd1` against, so its live address:
-      // console slot 0.
-      const eq = owner.edit.track("track").effect("console", 0, "miso.parametric-eq");
+      // A value edit names the console slot by its stable ID, which needs no builder.
+      const eq = owner.edit.track("track").console("eq-simd1", "miso.parametric-eq");
       return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
         eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
         eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
@@ -1381,10 +1433,12 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     };
     const command = await liveControls.submit(...edits(liveControls));
     const headlessCommand = await headlessLiveControls.submit(...edits(headlessLiveControls));
-    if (!headlessCommand.ok || command.appliedAtSample !== headlessCommand.appliedAtSample) {
+    if (!headlessCommand.ok || command.path !== headlessCommand.path
+        || command.revision !== headlessCommand.revision) {
       throw new Error("browser/headless live EQ and builtin-filter acknowledgements disagree");
     }
-    if (!command.ok || command.admitted !== 8 || headlessCommand.admitted !== 8) {
+    // Seven EQ parameter edits and the two input-filter cutoffs: nine edits in one transaction.
+    if (!command.ok || command.appliedOperations !== 9 || headlessCommand.appliedOperations !== 9) {
       throw new Error("queued response subscription EQ and builtin-filter edits were refused or split");
     }
     const beforeRender = subscription.readLatest();
@@ -1413,7 +1467,9 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const rendered = await browser.context.startRendering();
     let postRampMaximumDifference = 0;
     let postRampComparedFrames = 0;
-    const settledAt = Number(command.appliedAtSample) + 64;
+    // Both transactions were committed before the first render, so every block is post-edit; the
+    // comparison starts after the 64-sample parameter ramp.
+    const settledAt = APPLIED_BEFORE_FIRST_SAMPLE + 64;
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const expected = headless.render(128);
       for (let frame = 0; frame < 128; frame += 1) {
@@ -1506,18 +1562,19 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     }
     return {
       liveEq: {
-        appliedAtSample: command.appliedAtSample.toString(),
+        appliedAtSample: APPLIED_BEFORE_FIRST_SAMPLE.toString(),
         capturedSample: afterRender.capturedSample.toString(),
         postRampComparedFrames,
         postRampMaximumDifference,
       },
       liveInputFilters: {
-        appliedAtSample: command.appliedAtSample.toString(),
+        appliedAtSample: APPLIED_BEFORE_FIRST_SAMPLE.toString(),
         hpfHz: builtinPair.hpfHz,
         lpfHz: builtinPair.lpfHz,
         channel: "left",
-        mixedBatchAdmitted: command.admitted === 8 && headlessCommand.admitted === 8,
-        browserHeadlessAckParity: command.appliedAtSample === headlessCommand.appliedAtSample,
+        mixedBatchAdmitted: command.appliedOperations === 9 && headlessCommand.appliedOperations === 9,
+        browserHeadlessAckParity: command.path === headlessCommand.path
+          && command.revision === headlessCommand.revision,
       },
       initial: serializeTrackResponse(initial),
       afterRender: serializeTrackResponse(afterRender),
@@ -1589,7 +1646,7 @@ async function createResidentObservationBrowser(
     ...(residentOptions.requestDeadlineMs === undefined
       ? {} : { requestDeadlineMs: residentOptions.requestDeadlineMs }),
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -1939,7 +1996,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   const browser = await createSdkEngine("sdk-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      commandQueueRecords: 64, observationTaps: 4,
+      observationTaps: 4,
     } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
@@ -2176,10 +2233,10 @@ function liveBypassWorkload(
 async function renderLiveBypass(
   bypassed: "desk-hi" | "ins-mid" | undefined,
   live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
-): Promise<{ digest: string; energy: number; address?: readonly number[]; appliedAtSample?: string }> {
+): Promise<{ digest: string; energy: number; section?: string; path?: string }> {
   const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), {
     document: liveBypassSession(bypassed),
-    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: { commandQueueRecords: 16 } },
+    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: {} },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -2203,8 +2260,8 @@ async function renderLiveBypass(
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
   try {
-    let address: readonly number[] | undefined;
-    let appliedAtSample: string | undefined;
+    let section: string | undefined;
+    let path: string | undefined;
     if (live !== undefined) {
       const controls = await browser.liveControls();
       const track = controls.edit.track("track");
@@ -2212,11 +2269,12 @@ async function renderLiveBypass(
         ? track.console("desk-hi", "miso.parametric-eq").bypass(live.bypass)
         : track.insert("ins-mid", "miso.parametric-eq").bypass(live.bypass);
       const report = await controls.submit(edit);
-      if (!report.ok || report.admitted !== 1) {
-        throw new Error(`live bypass ${live.target} was refused: ${report.reasonName}`);
+      if (!report.ok || report.appliedOperations !== 1) {
+        throw new Error(`live bypass ${live.target} was not applied`);
       }
-      address = [edit.rack, edit.effectIndex];
-      appliedAtSample = report.appliedAtSample.toString();
+      const address = edit.edits[0]!.address;
+      section = `${address.section.kind}:${"slot" in address.section ? address.section.slot : "effect" in address.section ? address.section.effect : ""}:${address.control}`;
+      path = report.path;
     }
     for (let block = 0; block < LIVE_BYPASS_FRAMES / 128; block += 1) {
       const acknowledgement = await browser.host.submitSource({
@@ -2237,8 +2295,8 @@ async function renderLiveBypass(
     return {
       digest: await sha256Hex(planes),
       energy,
-      ...(address === undefined ? {} : { address }),
-      ...(appliedAtSample === undefined ? {} : { appliedAtSample }),
+      ...(section === undefined ? {} : { section }),
+      ...(path === undefined ? {} : { path }),
     };
   } catch (error) {
     throw sdkEngineFailed(browser, error);
@@ -2270,13 +2328,28 @@ async function runSdkLiveBypassQualification(): Promise<Record<string, unknown>>
     insertOffLive: insertOffLive.digest,
     consoleOnLive: consoleOnLive.digest,
     insertOnLive: insertOnLive.digest,
-    consoleAddress: consoleOffLive.address,
-    insertAddress: insertOffLive.address,
-    liftAddresses: [consoleOnLive.address, insertOnLive.address],
-    appliedAtSamples: [consoleOffLive, insertOffLive, consoleOnLive, insertOnLive]
-      .map((render) => render.appliedAtSample),
+    consoleAddress: consoleOffLive.section,
+    insertAddress: insertOffLive.section,
+    liftAddresses: [consoleOnLive.section, insertOnLive.section],
+    paths: [consoleOffLive, insertOffLive, consoleOnLive, insertOnLive].map((render) => render.path),
     baseEnergy: base.energy,
   };
+}
+
+/**
+ * The raw qualification rows' live edit (#1563B): one matrix retarget of `trackId` as a `SET_CONTROL`
+ * transaction, built and sent by the SDK through `host.control()` with the explicit ramp `0`, and
+ * the core's report. `qualification.js` imports this from the served bundle so that it carries no
+ * encoder of its own.
+ */
+export async function applyMatrixThroughSdk(
+  host: MisoAudioWorkletHost,
+  trackId: string,
+  matrix: { readonly ll: number; readonly lr: number; readonly rl: number; readonly rr: number },
+): Promise<{ ok: boolean; path: string; appliedOperations: number }> {
+  const controls = await createBrowserLiveControls(host);
+  const report = await controls.submit(controls.edit.track(trackId).matrix(matrix, { smoothingSamples: 0 }));
+  return { ok: report.ok, path: report.path, appliedOperations: report.appliedOperations };
 }
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
@@ -2349,12 +2422,22 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
     };
   } catch (error) {
     runFailure = sdkFailureObject(error);
-    throw runFailure;
-  } finally {
     try {
       await closeOpenSdkEngines(runFailure);
     } finally {
       await preview.close();
+    }
+    throw reportSdkFailure(runFailure);
+  } finally {
+    // The success path; a failed run closed its instances above, once its error was recorded.
+    if (runFailure === undefined) {
+      try {
+        await closeOpenSdkEngines(undefined);
+      } catch (error) {
+        throw reportSdkFailure(sdkFailureObject(error));
+      } finally {
+        await preview.close();
+      }
     }
   }
 }

@@ -60,7 +60,7 @@ for (const [subpath, module] of Object.entries(imported)) {
     `${subpath} must not expose the internal serializer test hook`,
   );
   // The encoder's ramp rules and the builder's shared validators live in `src/internal/` and are
-  // not API on any subpath (only `SESSION_DEFAULT_RAMP` is public, through the writer module).
+  // not API on any subpath.
   for (const internal of [
     "checkedRampLength", "laneEditSmoothingWord", "normalizeControlSmoothing",
     "knownKeys", "nameList", "f32", "CODE", "fail", "freeze",
@@ -81,7 +81,6 @@ assert.deepEqual(
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet.simd128.wasm",
     "miso-engine-v1-parameter-metadata.json",
-    "prepared-control.js",
   ],
   "the package manifest declares exactly the Engine artifact closure",
 );
@@ -290,27 +289,11 @@ const sibling = await imported["./headless"].createOfflineEngine(
 );
 try {
   const controls = engine.liveControls();
-  await assert.rejects(controls.submit(controls.edit.track("track").faderDb(-6)), error =>
-    error.name === "MisoUsageError" && error.message.includes("no live controls attached") &&
-    error.message.includes("liveControls.commandQueueRecords"));
-  const browser = await imported["./browser"].createEngine({
-    document: builtDocument,
-    scratchBoot: async () => engine.shape(),
-    createContext: () => ({ sampleRate: 48000, state: "running",
-      audioWorklet: { async addModule() {} }, async close() {} }),
-    createHost: async () => ({
-      async sessionMap() { assert.fail("no-live-control access must not request sessionMap"); },
-      async command() { assert.fail("no-live-control access must not send commands"); },
-      async dispose() {},
-    }),
-  });
-  try {
-    let pending;
-    assert.doesNotThrow(() => { pending = browser.liveControls(); });
-    assert.ok(pending instanceof Promise);
-    await assert.rejects(pending, error => error.name === "MisoUsageError" &&
-      error.message.includes("policy.liveControls.commandQueueRecords"));
-  } finally { await browser.close(); }
+  // A value edit is a SET_CONTROL transaction to the core, so it needs no command staging; only
+  // the observation records do.
+  const applied = await controls.submit(controls.edit.track("track").faderDb(-6));
+  assert.equal(applied.ok, true);
+  assert.equal(applied.path, "live");
   assert.equal(engine.asset.sha256?.length, 64);
   assert.equal(engine.asset, sibling.asset, "default engines share one verified compilation");
   assert.equal(engine.shape().sampleRateHz, 48_000);
@@ -597,7 +580,7 @@ document.querySelector('#meter').onclick = async () => {
       stop = undefined;
       window.resolveMeter = resolve;
     });
-    engine = await createEngine({ document: meterDocument, policy: { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } } });
+    engine = await createEngine({ document: meterDocument, policy: { liveControls: { meterBlocks: 1 } } });
     stop = await engine.subscribeMeters(update => {
       if (window.meterCandidate) return;
       const track = update.tracks.get('track');

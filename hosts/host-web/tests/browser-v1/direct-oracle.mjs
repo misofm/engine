@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { createPreparedControl } from "../../web/prepared-control.js";
 
 const ABI_LAYOUT = JSON.parse(await readFile(
   new URL("../../../../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url),
@@ -15,17 +14,10 @@ const SAMPLE_RATE = 48000;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
-// Issue #137 D1: the live-control command path.
+// Issue #137 D1: the command record path, which since #1565A carries only the observation kinds.
+// Every value goes through the control exports (`SET_CONTROL`).
 const BUFFER_COMMAND = 6;
 const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
-const COMMAND_QUEUE_RECORDS = 4;
-const COMMAND_PAN = 1;
-const COMMAND_MATRIX = 2;
-// Issue #140: every declared kind is live now.
-const COMMAND_FADER_DB = 3;
-const COMMAND_MUTE = 4;
-const COMMAND_EFFECT_PARAM = 5;
-const COMMAND_EFFECT_BYPASS = 6;
 // Issue #143: the observation subscribe/unsubscribe kinds and the meter frame's shape.
 const COMMAND_OBSERVE_SUBSCRIBE = 7;
 const COMMAND_OBSERVE_UNSUBSCRIBE = 8;
@@ -115,13 +107,6 @@ const commandField = (name) => ABI_LAYOUT.commandRecord.fields
   .find((field) => field.name === name).offset;
 const structureField = (structure, name) => ABI_LAYOUT.structures[structure].fields
   .find((field) => field.name === name).offset;
-const resultCode = (name) => ABI_LAYOUT.constants.resultCodes.find((row) => row.name === name).value;
-const commandReason = (name) => ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name).value;
-// The effect racks (#1096): `inserts` and `console`. Every other code, the retired ones among them,
-// is an unknown rack.
-const EFFECT_RACKS = new Set(ABI_LAYOUT.constants.racks
-  .filter((row) => row.name !== "notApplicable").map((row) => row.value));
-
 /// Encode only the generated wire record. Preparation and admission stay in the shared helper.
 function encodeCommands(records) {
   const bytes = new Uint8Array(records.length * COMMAND_RECORD_BYTES);
@@ -142,7 +127,7 @@ function encodeCommands(records) {
   return bytes;
 }
 
-function commandAck(exports, handle, result, records) {
+function commandAck(exports, handle, result) {
   const report = new DataView(
     exports.memory.buffer,
     exports.miso_engine_web_v1_command_report_ptr(handle),
@@ -156,73 +141,23 @@ function commandAck(exports, handle, result, records) {
     reason: report.getUint32(structureField("commandReport", "reason"), true),
     rejectedIndex: report.getUint32(structureField("commandReport", "rejectedIndex"), true),
     admitted: report.getUint32(structureField("commandReport", "admitted"), true),
-    appliedAtSample: report.getBigUint64(structureField("commandReport", "appliedAtSample"), true),
-    records: records.slice(),
+    appliedAtSample: report.getBigUint64(structureField("commandReport", "appliedAtSample"), true).toString(),
   };
 }
 
-function preparedControl(exports, handle) {
-  const configBytes = ABI_LAYOUT.structures.eqTargetConfig.bytes;
-  const configCopySync = (address) => {
-    const result = exports.miso_engine_web_v1_eq_target_config_copy(
-      handle, address.trackIndex, address.rack, address.effectIndex,
-    );
-    if (result === resultCode("ok")) {
-      const pointer = exports.miso_engine_web_v1_eq_target_config_ptr(handle);
-      assert.ok(pointer > 0 && pointer + configBytes <= exports.memory.buffer.byteLength);
-      return { result, reason: commandReason("none"),
-        config: new Uint8Array(exports.memory.buffer, pointer, configBytes).slice() };
-    }
-    const reason = result === resultCode("invalidArgument")
-      ? address.trackIndex >= exports.miso_engine_web_v1_live_control_track_count(handle)
-        ? commandReason("unknownTrack")
-        : !EFFECT_RACKS.has(address.rack)
-          ? commandReason("unknownRack")
-          : commandReason("unknownEffect")
-      : commandReason("none");
-    return { result, reason, config: new Uint8Array(0) };
-  };
-  const stageRecords = (records, count) => {
+/// Stage the records into the command buffer and submit them. A boot with no observation taps has
+/// no command staging (capacity 0): the submission is made with nothing staged, and the host
+/// refuses it as unsupported.
+function submitCommands(exports, handle, records) {
+  const bytes = encodeCommands(records);
+  const capacity = exports.miso_engine_web_v1_buffer_capacity(handle, BUFFER_COMMAND);
+  if (capacity > 0) {
+    assert.ok(bytes.byteLength <= capacity);
     const pointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND);
-    const capacity = exports.miso_engine_web_v1_buffer_capacity(handle, BUFFER_COMMAND);
-    assert.equal(records.byteLength, count * COMMAND_RECORD_BYTES);
-    assert.ok(records.byteLength <= capacity);
-    new Uint8Array(exports.memory.buffer, pointer, records.byteLength).set(records);
-  };
-  const ordinarySubmitSync = (records, count) => {
-    stageRecords(records, count);
-    return commandAck(exports, handle,
-      exports.miso_engine_web_v1_command_submit(handle, count), records);
-  };
-  const preparedSubmitSync = (records, companion, count) => {
-    stageRecords(records, count);
-    const pointer = exports.miso_engine_web_v1_prepared_companion_ptr(handle);
-    const capacity = exports.miso_engine_web_v1_prepared_companion_capacity(handle);
-    assert.ok(pointer > 0 && companion.byteLength <= capacity);
-    new Uint8Array(exports.memory.buffer, pointer, companion.byteLength).set(companion);
-    return commandAck(exports, handle,
-      exports.miso_engine_web_v1_prepared_command_submit(handle, count, companion.byteLength), records);
-  };
-  const refusal = (records, _count, reason, rejectedIndex, result) => ({
-    result, reason, rejectedIndex: rejectedIndex ?? 0, admitted: 0, appliedAtSample: 0n,
-    records: records.slice(),
-  });
-  return createPreparedControl({
-    instance: exports, abiLayout: ABI_LAYOUT, sampleRateHz: SAMPLE_RATE,
-    configCopySync, ordinarySubmitSync, preparedSubmitSync, preparedRefusalSync: refusal,
-  });
-}
-
-/// Lower the generated command records through the same prepared helper used by the SDK.
-function submitCommands(control, records) {
-  const reply = control.submitSync(encodeCommands(records), records.length);
-  return {
-    result: reply.result,
-    reason: reply.reason,
-    rejectedIndex: reply.rejectedIndex,
-    admitted: reply.admitted,
-    appliedAtSample: reply.appliedAtSample.toString(),
-  };
+    new Uint8Array(exports.memory.buffer, pointer, bytes.byteLength).set(bytes);
+  }
+  const result = exports.miso_engine_web_v1_command_submit(handle, records.length);
+  return commandAck(exports, handle, result);
 }
 
 function blockPlanes(description) {
@@ -360,30 +295,29 @@ async function runBackend(modulePath, expectedBackend, sessionDocument, source) 
   };
 }
 
-/// #137 E2, extended by #140 C: the same session, source feed and command timeline the native
-/// twin runs, rendered through the shipped artifact.
+/// Decision 17 D6 (#1565A): the `SET_CONTROL` timeline, the cross-target owner of the browser's
+/// control path. The same session, source feed and control frames the native twin
+/// (`tests::native_set_control_timeline_digest_pins_the_wasm_parity`) runs, rendered through the
+/// shipped artifact.
 ///
 /// Its digest is asserted equal to the native twin's before anything is printed, so the pin can
 /// only ever be the value two independent implementations already agree on.
 ///
-/// The fixture is identity apart from one dynamic-rack parametric EQ whose band 1 is a low shelf,
-/// so a constant input renders to that same constant until a command moves it. Ten blocks; one
-/// matrix retarget, two refusals, a smoothed pan, a windowed fader move, a windowed mute, an
-/// effect parameter on both lanes, a live bypass, and one batch that releases the mute and the
-/// bypass together across two different destination queues. The digest is a statement about
-/// *when* each of those took effect, not merely that they did.
-async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
+/// The fixture is identity apart from one parametric EQ insert whose band 1 is a low shelf, so a
+/// constant input renders to that same constant until a control moves it. Ten blocks; the four
+/// frames are the committed `set-control-frames/frame-N.bin` (a fader move, a pan move, the EQ band
+/// gain and one refused out-of-domain value), each sent through
+/// `control_request_ptr`/`control_command` before block N. The digest is a statement about *when*
+/// each took effect, not merely that it did.
+async function runSetControlTimeline(modulePath, sessionDocument, sourceId, frames) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = boot(
-    exports,
-    sessionDocument,
-    [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n],
-  );
+  const handle = boot(exports, sessionDocument);
   assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
-  const control = preparedControl(exports, handle);
+  assert.equal(exports.miso_engine_web_v1_control_revision(handle), 1n);
 
-  const memoryBuffer = exports.memory.buffer;
+  // `control_command` is control work: its allocations are the instance's counted control
+  // allocations and may grow the memory, so the buffer is re-read at every use.
   const feed = (block) => {
     const id = new TextEncoder().encode(sourceId);
     const idPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
@@ -395,64 +329,40 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
       handle, id.byteLength, 1n, BigInt(block * QUANTUM), 2, QUANTUM, 0,
     );
   };
-  const matrix = { kind: COMMAND_MATRIX, trackIndex: 0, values: [0.5, 0, 0, 1] };
-  const pan = { kind: COMMAND_PAN, trackIndex: 0, smoothingSamples: QUANTUM, values: [-1, 1, 0, 0] };
-  const fader = {
-    kind: COMMAND_FADER_DB, rack: 255, channel: 2, trackIndex: 0,
-    smoothingSamples: QUANTUM, values: [-6, 0, 0, 0],
-  };
-  const muteOn = {
-    kind: COMMAND_MUTE, rack: 255, channel: 2, trackIndex: 0,
-    smoothingSamples: QUANTUM, values: [1, 0, 0, 0],
-  };
-  const muteOff = {
-    kind: COMMAND_MUTE, rack: 255, channel: 2, trackIndex: 0, values: [0, 0, 0, 0],
-  };
-  const bandGain = {
-    kind: COMMAND_EFFECT_PARAM, rack: 1, channel: 2, trackIndex: 0,
-    effectIndex: 0, parameterId: 4, values: [-12, 0, 0, 0],
-  };
-  const unknownParameter = { ...bandGain, parameterId: 4242, values: [0, 0, 0, 0] };
-  const bypassOn = {
-    kind: COMMAND_EFFECT_BYPASS, rack: 1, channel: 255, trackIndex: 0,
-    effectIndex: 0, values: [1, 0, 0, 0],
-  };
-  const bypassOff = { ...bypassOn, values: [0, 0, 0, 0] };
-  const reports = {};
   const blocks = [];
   const step = (block) => {
     assert.equal(feed(block), 0);
     blocks.push(render(exports, handle));
   };
+  const send = (frame) => {
+    const pointer = exports.miso_engine_web_v1_control_request_ptr(handle, frame.byteLength);
+    assert.notEqual(pointer, 0);
+    new Uint8Array(exports.memory.buffer, pointer, frame.byteLength).set(frame);
+    const result = exports.miso_engine_web_v1_control_command(handle, frame.byteLength);
+    const responseBytes = exports.miso_engine_web_v1_control_response_bytes(handle);
+    // A commit queues its reliable events; drain both lanes the way the worklet does.
+    for (const lane of [0, 1]) {
+      for (let guard = 0; guard < 16; guard += 1) {
+        assert.equal(exports.miso_engine_web_v1_control_event(handle, lane), 0);
+        if (exports.miso_engine_web_v1_control_response_bytes(handle) === 0) break;
+      }
+    }
+    return { result, responseBytes };
+  };
 
+  const reports = [];
   step(0);
-  reports.matrix = submitCommands(control, [matrix]);
-  step(1);
-  reports.unknownTrack = submitCommands(control, [{ ...matrix, trackIndex: 5 }]);
-  // No flood: every matrix, fader, input, send and effect value is a latest-target cell with no
-  // room to overfill (#1312, #1345, #1346, #1347), and this fixture's EQ declares no tap for a
-  // subscription queue to hold.
-  reports.unknownParameter = submitCommands(control, [unknownParameter]);
-  step(2);
-  reports.pan = submitCommands(control, [pan]);
-  step(3);
-  reports.fader = submitCommands(control, [fader]);
-  step(4);
-  reports.mute = submitCommands(control, [muteOn]);
-  step(5);
-  reports.effectParam = submitCommands(control, [bandGain]);
-  step(6);
-  reports.effectBypass = submitCommands(control, [bypassOn]);
-  step(7);
-  reports.mixedBatch = submitCommands(control, [muteOff, bypassOff]);
-  step(8);
-  step(9);
+  frames.forEach((frame, index) => {
+    reports.push(send(frame));
+    step(index + 1);
+  });
+  for (let block = frames.length + 1; block < 10; block += 1) step(block);
+  assert.equal(exports.miso_engine_web_v1_control_revision(handle), 4n,
+    "three frames commit and the refused fourth does not");
   const beforeDisposeStatus = status(exports, handle);
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
-  assert.equal(exports.memory.buffer, memoryBuffer, "a command timeline never grows memory");
-  control.close();
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
-  return { reports, beforeDisposeStatus, pcmF32leSha256: pcmSha256(pcm) };
+  return { frames: reports, beforeDisposeStatus, pcmF32leSha256: pcmSha256(pcm) };
 }
 
 /// Issue #143 E1/E4/E12: the observation timeline, through the shipped artifact.
@@ -463,14 +373,13 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
 ///
 /// `taps` of `0n` is the level-1 zero leg: no lane, no accumulator, no conflating cell, and
 /// `observationRetainedBytes` is `0`. The subscription it still sends is refused with the typed
-/// `observationUnbound` reason rather than silently ignored.
+/// `unsupportedKind` reason rather than silently ignored (a boot without taps has no command staging).
 async function runObservationTimeline(modulePath, sessionDocument, sourceId, taps) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
   const handle = boot(exports, sessionDocument, [
-    BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
+    0n, BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
-  const control = preparedControl(exports, handle);
   assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
   const resourceReport = resources(exports, handle);
   assert.equal(
@@ -519,15 +428,15 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
 
   const reports = {};
-  reports.unknownTap = submitCommands(control, [{ ...subscribe, parameterId: 9 }]);
-  reports.subscribe = submitCommands(control, [subscribe]);
+  reports.unknownTap = submitCommands(exports, handle, [{ ...subscribe, parameterId: 9 }]);
+  reports.subscribe = submitCommands(exports, handle, [subscribe]);
   for (let block = 0; block < 8; block += 1) step(block);
   const armed = {
     trackGrDb: frame[4],
     masterGrDb: header.getUint32(44, true) === 1 ? frame[5] : null,
     windowSamples: (header.getBigUint64(24, true) - header.getBigUint64(16, true)).toString(),
   };
-  reports.unsubscribe = submitCommands(control, [unsubscribe]);
+  reports.unsubscribe = submitCommands(exports, handle, [unsubscribe]);
   for (let block = 8; block < 12; block += 1) step(block);
   const disarmed = {
     trackGrDb: frame[4],
@@ -535,7 +444,6 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
   assert.equal(exports.memory.buffer, memoryBuffer, "an observation timeline never grows memory");
-  control.close();
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
   return {
     observationRetainedBytesIsZero: resourceReport.observationRetainedBytes === "0",
@@ -583,23 +491,28 @@ async function main() {
     native,
     "native and simd128 must render this session to identical bits",
   );
-  // #137 E2: the command-timeline leg, pinned the same way and asserted before any print.
-  actual.commandTimeline = await runCommandTimeline(
+  // Decision 17 D6: the `SET_CONTROL` timeline leg, pinned the same way and asserted before any
+  // print. The frames are the committed fixtures the native twin sends.
+  const frames = await Promise.all([1, 2, 3, 4].map(
+    (index) => readFile(path.join(fixtureDirectory, "set-control-frames", `frame-${index}.bin`)),
+  ));
+  actual.setControlTimeline = await runSetControlTimeline(
     path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm"),
     await readFile(path.join(fixtureDirectory, "command-session.json")),
     source.sourceId,
+    frames,
   );
-  const nativeTimeline = expected.directOracle?.nativeCommandTimelinePcmF32leSha256;
+  const nativeTimeline = expected.directOracle?.nativeSetControlTimelinePcmF32leSha256;
   assert.equal(
     typeof nativeTimeline,
     "string",
-    "expected.json must carry the native command-timeline digest pin",
+    "expected.json must carry the native SET_CONTROL-timeline digest pin",
   );
-  actual.nativeCommandTimelinePcmF32leSha256 = nativeTimeline;
+  actual.nativeSetControlTimelinePcmF32leSha256 = nativeTimeline;
   assert.equal(
-    actual.commandTimeline.pcmF32leSha256,
+    actual.setControlTimeline.pcmF32leSha256,
     nativeTimeline,
-    "native and simd128 must render this command timeline to identical bits",
+    "native and simd128 must render this SET_CONTROL timeline to identical bits",
   );
   // Issue #143 E1/E4/E12: the observation timeline. Both legs render the *same* eleven blocks;
   // only the observation capacity and the subscription differ. Their PCM digests are compared to
@@ -621,11 +534,11 @@ async function main() {
   assert.equal(observed.observationRetainedBytesIsZero, false);
   assert.equal(unobserved.observationRetainedBytesIsZero, true);
   // A tap the effect does not declare is `unknownTap` (10), never `unknownParameter` (5); a
-  // subscription against a session with no capacity is `observationUnbound` (11), never silence.
+  // subscription against a boot with no taps is `unsupportedKind` (7), never silence.
   assert.equal(observed.reports.unknownTap.reason, 10);
   assert.equal(observed.reports.subscribe.result, 0);
   assert.equal(unobserved.reports.subscribe.result, 7);
-  assert.equal(unobserved.reports.subscribe.reason, 11);
+  assert.equal(unobserved.reports.subscribe.reason, 7);
   assert.ok(observed.armed.trackGrDb > 0, "an armed tap publishes a positive magnitude");
   assert.equal(observed.armed.masterGrDb, observed.armed.trackGrDb);
   assert.equal(observed.disarmed.trackGrDb, 0, "an unsubscribed tap publishes nothing");

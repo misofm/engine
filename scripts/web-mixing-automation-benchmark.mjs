@@ -7,11 +7,14 @@
 //   runner builds it and states its digest beside the release pin, the digest of the module the
 //   last release shipped, issue #1061);
 // * booted from the checked-in mono fixture, its one source stretched so the tone never ends;
-// * every block's control traffic submitted as one command batch through `prepared-control.js`
-//   and `miso_engine_web_v1_command_submit` / `miso_engine_web_v1_prepared_command_submit`,
-//   exactly as the SDK's headless boundary does (`sdk/src/core/boundary.ts`);
-// * `channel = 2` on every record. The SDK lowers the EQ's to one prepared `Both` target and the
-//   host lowers the compressor's and the limiter's to a Left and a Right record;
+// * every block's control traffic submitted as one `SESSION_TRANSACTION_APPLY` frame of `SET_CONTROL`
+//   edits through `miso_engine_web_v1_control_request_ptr` / `miso_engine_web_v1_control_command`,
+//   the calls the worklet's `control` message makes, encoded by the SDK's own encoder
+//   (`sdk/src/core/control-frame.ts`) and followed by the event drain the worklet runs after every
+//   message (#1565A D8: the browser has no value command of its own any more);
+// * lane `both` on every edit. The core classifies the EQ's as one owner edit and splits the
+//   compressor's and the limiter's per-lane parameters across the two lanes, as the native row's
+//   lowerings do (`Lowering`);
 // * only `miso_engine_web_v1_render` inside the clock.
 //
 // The controls, their held bases and their per-block values are the native row's, read from the
@@ -61,7 +64,7 @@ import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { createPreparedControl } from "../hosts/host-web/web/prepared-control.js";
+import { decodeControlReply, encodeControlTransaction } from "../sdk/src/core/control-frame.ts";
 
 const ROOT = new URL("../", import.meta.url);
 const ABI_LAYOUT = JSON.parse(readFileSync(new URL("sdk/assets/miso-engine-v1-abi-layout.json", ROOT)));
@@ -92,16 +95,15 @@ const field = (structure, name) => {
   assert.ok(row, `missing ABI field ${structure}.${name}`);
   return row.offset;
 };
-const commandField = (name) => ABI_LAYOUT.commandRecord.fields.find((item) => item.name === name).offset;
 const constant = (group, name) => ABI_LAYOUT.constants[group].find((item) => item.name === name).value;
 const RESULT_OK = constant("resultCodes", "ok");
-const COMMAND_EFFECT_PARAM = constant("wireCommandKinds", "effectParam");
 const BUFFER_SOURCE_ID = constant("bufferKinds", "sourceId");
 const BUFFER_SOURCE_PCM = constant("bufferKinds", "sourcePcm");
 const BUFFER_OUTPUT = constant("bufferKinds", "outputPcm");
-const BUFFER_COMMAND = constant("bufferKinds", "command");
-const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
-const COMMAND_QUEUE_RECORDS = ABI_LAYOUT.constants.defaultCommandQueueRecords;
+// The two event lanes in the worklet's drain order (the C ABI's lane codes: reliable, lossy) and the
+// most `control_event` calls one drain makes on a lane (`MAXIMUM_CONTROL_EVENTS_PER_LANE`).
+const CONTROL_EVENT_LANES = [0, 1];
+const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
 // The SDK's default ring (`defaultSourceRingFrames`): the stall tolerance in quanta plus the
 // reserve.
 const SOURCE_RING_FRAMES = (() => {
@@ -120,8 +122,8 @@ const SOURCE_RING_FRAMES = (() => {
 // the proxy this measures (decision D1) for four documents: the nine-track EQ session and the three
 // sixty-four-track console documents. Each timed boot is on a fresh instance of the shipped module
 // (its linear memory grows inside the clock, as a first boot in the worklet does), with the
-// browser's live-control boot options: the SDK's default command queue and no meters, observation
-// taps, master or spectrum. Only the boot export is inside the clock; the dispose that follows is
+// browser's boot options: no meters, observation taps, master or spectrum (and the retired
+// command-queue word, `reserved1`, zero). Only the boot export is inside the clock; the dispose that follows is
 // timed on its own and stated beside it, and after every timed boot the session is fed and must
 // render an audible block, outside the clock.
 //
@@ -280,8 +282,9 @@ function rebuildInstance(wasmModule) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The browser's live controls: the SDK's default command queue, nothing else attached.
-  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  // The browser's boot: the retired command-queue word is `reserved1` and must be zero, and
+  // nothing else is attached.
+  u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
   u64("liveControlObservationTaps", 0n);
   u64("liveControlMasterTrackPlusOne", 0n);
@@ -383,7 +386,7 @@ function rebuildRound(modulePath, roundName, count) {
     sample_rate_hz: RATE,
     quantum_frames: Q,
     quantum_budget_ns: REBUILD_BUDGET_NS,
-    live_control_command_queue_records: COMMAND_QUEUE_RECORDS,
+    boot_reserved1: 0,
     source_ring_frames: SOURCE_RING_FRAMES,
     observations_per_document: count,
     preflight: premise,
@@ -701,60 +704,51 @@ const DOCUMENTS = table.documents.map((doc) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// One booted engine, and the SDK's prepared-control owner on it.
+// One booted engine, and the control frames it takes.
 // ---------------------------------------------------------------------------------------------
 
-// Every pointer is read before `memory.buffer`: an export that grows memory detaches the buffer a
-// view was taken on.
-function commandReport(e, handle, result, records) {
-  const pointer = e.miso_engine_web_v1_command_report_ptr(handle);
-  const report = new DataView(e.memory.buffer, pointer, ABI_LAYOUT.structures.commandReport.bytes);
-  return {
-    result,
-    reason: report.getUint32(field("commandReport", "reason"), true),
-    rejectedIndex: report.getUint32(field("commandReport", "rejectedIndex"), true),
-    admitted: report.getUint32(field("commandReport", "admitted"), true),
-    appliedAtSample: report.getBigUint64(field("commandReport", "appliedAtSample"), true),
-    records: records.slice(),
-  };
+// The worklet's `readControlCommand`: stage the frame, run it, copy the response out. Every pointer
+// is read before `memory.buffer`: an export that grows memory detaches the buffer a view was taken
+// on, and a control allocation may grow it.
+function controlCommand(e, handle, frame) {
+  const pointer = e.miso_engine_web_v1_control_request_ptr(handle, frame.byteLength);
+  assert.notEqual(pointer, 0, "control request staging");
+  new Uint8Array(e.memory.buffer, pointer, frame.byteLength).set(frame);
+  const result = e.miso_engine_web_v1_control_command(handle, frame.byteLength);
+  const responsePointer = e.miso_engine_web_v1_control_response_ptr(handle);
+  const responseBytes = e.miso_engine_web_v1_control_response_bytes(handle);
+  const response = new Uint8Array(responsePointer === 0 ? 0 : responseBytes);
+  if (responsePointer !== 0) response.set(new Uint8Array(e.memory.buffer, responsePointer, responseBytes));
+  return { result, response };
 }
 
-// The same five callbacks `boundary.ts` hands `createPreparedControl`.
-function preparedControl(e, handle) {
-  const configBytes = ABI_LAYOUT.structures.eqTargetConfig.bytes;
-  const stage = (records) => {
-    const pointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND);
-    new Uint8Array(e.memory.buffer, pointer, records.byteLength).set(records);
-  };
-  return createPreparedControl({
-    instance: e,
-    abiLayout: ABI_LAYOUT,
-    sampleRateHz: RATE,
-    configCopySync: (address) => {
-      const result = e.miso_engine_web_v1_eq_target_config_copy(
-        handle, address.trackIndex, address.rack, address.effectIndex,
-      );
-      const none = constant("commandReasons", "none");
-      if (result !== RESULT_OK) return { result, reason: none, config: new Uint8Array(0) };
-      const pointer = e.miso_engine_web_v1_eq_target_config_ptr(handle);
-      return { result, reason: none, config: new Uint8Array(e.memory.buffer, pointer, configBytes).slice() };
-    },
-    ordinarySubmitSync: (records, count) => {
-      stage(records);
-      return commandReport(e, handle, e.miso_engine_web_v1_command_submit(handle, count), records);
-    },
-    preparedSubmitSync: (records, companion, count) => {
-      stage(records);
-      const pointer = e.miso_engine_web_v1_prepared_companion_ptr(handle);
-      new Uint8Array(e.memory.buffer, pointer, companion.byteLength).set(companion);
-      return commandReport(e, handle,
-        e.miso_engine_web_v1_prepared_command_submit(handle, count, companion.byteLength), records);
-    },
-    preparedRefusalSync: (records, _count, reason, rejectedIndex, result) => ({
-      result, reason, rejectedIndex: rejectedIndex ?? 0, admitted: 0, appliedAtSample: 0n,
-      records: records.slice(),
-    }),
+// The worklet's `drainControlEvents`: a commit's reliable events are what keeps the next commit
+// from backpressure, so every control call is followed by the drain, outside the clock.
+function drainControlEvents(e, handle) {
+  for (const lane of CONTROL_EVENT_LANES) {
+    for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
+      assert.equal(e.miso_engine_web_v1_control_event(handle, lane), RESULT_OK, `control event lane ${lane}`);
+      if (e.miso_engine_web_v1_control_response_bytes(handle) === 0) break;
+    }
+  }
+}
+
+// One transaction of `SET_CONTROL` edits at the revision the last reply named. Returns the decoded
+// reply; a transport failure throws.
+function controlTransaction(engine, edits) {
+  const { e, handle } = engine;
+  const frame = encodeControlTransaction({
+    requestId: engine.requestId,
+    expectedRevision: engine.revision,
+    edits,
   });
+  engine.requestId += 1n;
+  const { result, response } = controlCommand(e, handle, frame);
+  assert.equal(result, RESULT_OK, `control call: ${new TextDecoder().decode(response)}`);
+  const reply = decodeControlReply(response);
+  if (reply.status === "ok") engine.revision = reply.revision;
+  drainControlEvents(e, handle);
+  return reply;
 }
 
 const wasmModule = new WebAssembly.Module(moduleBytes);
@@ -774,9 +768,9 @@ function boot(document = mixingDocument) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The live controls with the default command queue, and no meters, observation or master, as
-  // the native row prepares its plan (`control: true`, nothing else).
-  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  // No meters, observation or master, as the native row prepares its plan (`control: true`,
+  // nothing else); the control plane is always attached, and `reserved1` must be zero.
+  u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
   u64("liveControlObservationTaps", 0n);
   u64("liveControlMasterTrackPlusOne", 0n);
@@ -788,16 +782,9 @@ function boot(document = mixingDocument) {
     throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(
       new Uint8Array(e.memory.buffer, pointer, bytes))}`);
   }
-  // The wire's track index is the booted live controls' track order; check the table addresses it.
-  // The console-strip documents carry no control traffic, so only the mixing document is checked.
-  for (const control of document === mixingDocument ? table.controls : []) {
-    const length = e.miso_engine_web_v1_live_control_track_id(handle, control.track_index);
-    const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
-    const id = new TextDecoder().decode(new Uint8Array(e.memory.buffer, idPointer, length));
-    assert.equal(id, control.track_id, `${control.track_id}: live-control track index`);
-  }
   return {
-    e, handle, control: preparedControl(e, handle), frame: 0n, block: 0, sourceId: document.sourceId,
+    e, handle, requestId: 1n, revision: e.miso_engine_web_v1_control_revision(handle),
+    frame: 0n, block: 0, sourceId: document.sourceId,
     outputPointer: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT),
     left: new Float32Array(Q), right: new Float32Array(Q),
   };
@@ -827,21 +814,21 @@ function feed(engine) {
   engine.frame += BigInt(Q);
 }
 
-function encode(records) {
-  const bytes = new Uint8Array(records.length * COMMAND_RECORD_BYTES);
-  const view = new DataView(bytes.buffer);
-  records.forEach((record, index) => {
-    const o = index * COMMAND_RECORD_BYTES;
-    view.setUint8(o + commandField("kind"), COMMAND_EFFECT_PARAM);
-    view.setUint8(o + commandField("rack"), record.rack);
-    view.setUint8(o + commandField("channel"), 2);
-    view.setUint32(o + commandField("trackIndex"), record.track_index, true);
-    view.setUint32(o + commandField("effectIndex"), record.effect_index, true);
-    view.setUint32(o + commandField("parameterId"), record.parameter_id, true);
-    view.setUint32(o + commandField("smoothingSamples"), 0, true);
-    view.setFloat32(o + commandField("values"), record.value, true);
-  });
-  return bytes;
+// One `SET_CONTROL` edit per control, lane `both`, with the core's default ramp: the strip is the
+// owner, the section is the insert or the console slot the table names, and the row is the
+// parameter's wire id.
+function edits(records) {
+  return records.map((record) => ({
+    address: {
+      owner: { kind: "strip", id: record.track_id },
+      section: record.rack === RACK_CONSOLE
+        ? { kind: "console", slot: record.slot_id }
+        : { kind: "inserts", effect: record.slot_id },
+      control: record.parameter_id,
+      lane: "both",
+    },
+    value: record.value,
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -869,7 +856,7 @@ function makeArm(arm, effect) {
   return state;
 }
 
-// One block's traffic, as one batch: what an app hands the SDK for a mixing gesture.
+// One block's traffic, as one transaction: what an app hands the SDK for a mixing gesture.
 function submit(state, arm = state.arm) {
   if (arm === "quiet" || state.controls.length === 0) return;
   const block = state.engine.block;
@@ -881,10 +868,13 @@ function submit(state, arm = state.arm) {
       assert.equal(record.value, Math.fround(record.base), `${record.track_id}: restated value`);
     }
   }
-  const reply = state.engine.control.submitSync(encode(records), records.length);
+  const reply = controlTransaction(state.engine, edits(records));
   state.submitted += records.length;
-  if (reply.result === RESULT_OK) state.admitted += reply.admitted;
-  else state.refusals += 1;
+  if (reply.status === "ok" && reply.applied?.appliedOperations === records.length) {
+    state.admitted += records.length;
+  } else {
+    state.refusals += 1;
+  }
 }
 
 function render(state) {
@@ -902,9 +892,8 @@ function armName(arm, effect) {
 }
 
 // One console-strip document (#1085): booted as written, the tone fed, the pre-roll rendered, and
-// no control traffic, ever. The engine must report one live route per route into a submix, and the
-// sends document must have some (#1228): live and static routes render the same bits, so no digest
-// would show a document booted without live controls, the native row's static path.
+// no control traffic, ever. The sends document must have routes into a submix (#1228), which the
+// control plane addresses like any other row.
 const SENDS_KIND = "sixty_four_track_console_sends";
 function makeDocument({ doc, loaded }) {
   const engine = boot(loaded);
@@ -912,8 +901,6 @@ function makeDocument({ doc, loaded }) {
     .filter((route) => route.destination.kind === "submix_input").length;
   assert.ok(doc.workload_kind !== SENDS_KIND || submixRoutes > 0,
     `${doc.workload_kind}: routes into a submix`);
-  assert.equal(engine.e.miso_engine_web_v1_live_control_route_count(engine.handle), submixRoutes,
-    `${doc.workload_kind}: one live route per route into a submix`);
   const state = { doc, engine, audible: false };
   for (let i = 0; i < LEAD_BLOCKS; i++) feed(engine);
   for (let i = 0; i < PREROLL; i++) {
@@ -1085,7 +1072,7 @@ const record = {
   node_version: process.version,
   v8_version: process.versions.v8,
   node_flags: process.execArgv,
-  console_command_queue_records: COMMAND_QUEUE_RECORDS,
+  boot_reserved1: 0,
   source_ring_frames: SOURCE_RING_FRAMES,
   observations: OBSERVATIONS,
   preroll_blocks: PREROLL,

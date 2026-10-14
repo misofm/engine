@@ -19,10 +19,6 @@ node "$repo_root/scripts/test-web-audioworklet.mjs"
 host_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
 safe_host="$host_test_dir/safe-host.mjs"
 unchecked_host="$host_test_dir/unchecked-host.mjs"
-# The transformed host remains a real ES module and therefore keeps its sibling helper import.
-# Keep the copy beside both transformed modules so this red-path test cannot pass by accidentally
-# exercising a missing or stale prepared-control asset.
-cp "$repo_root/hosts/host-web/web/prepared-control.js" "$host_test_dir/prepared-control.js"
 sed 's/#lastRequestId = 0;/#lastRequestId = Number.MAX_SAFE_INTEGER - 1;/' \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >"$safe_host"
 MISO_ENGINE_WEB_HOST_TEST_MODULE="$safe_host" MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=1 \
@@ -44,6 +40,7 @@ fi
 worklet="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$worklet"
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-opcodes
+"$repo_root/scripts/check-web-audioworklet.sh" --self-test-timers
 python3 -B "$repo_root/scripts/check-web-audioworklet-callgraph.py" --self-test
 mutation_dir=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-mutation.XXXXXX")
 
@@ -244,7 +241,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$vocabulary_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$vocabulary_dir/tools/parameter-metadata/src/"
-sed 's/^pub const COMMAND_REASON_UNKNOWN_VCA: u32 = 14;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 15;/' \
+sed 's/^pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 15;/' \
   "$repo_root/hosts/host-web/src/lib.rs" \
   >"$vocabulary_dir/hosts/host-web/src/lib.rs"
 if diff -q "$repo_root/hosts/host-web/src/lib.rs" \
@@ -276,7 +273,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
   "$kind_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$kind_dir/tools/parameter-metadata/src/"
-sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
+sed 's/^const COMMAND_KINDS = new Set(\[7, 8\]);$/const COMMAND_KINDS = new Set([7]);/' \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   >"$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js"
 if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
@@ -289,14 +286,13 @@ if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>
   exit 1
 fi
 # The class every later kind risks, on disk: a kind added to the Rust authority alone, after the
-# last kind that ships. Kinds 1-17 ship (`inputFilters` is 12, issue #1222 spent 13-15 on
-# `routeGainDb`, `routeMute` and `routeMatrix`, and issue #1245 16-17 on `vcaFaderDb` and
-# `vcaMute`), so the mutation names the next free value, 18: it stays red because the other six
-# spellings lack it, not through the contiguity rule a shipped value would trip. Every real new
-# kind has to land in all seven spellings or fail here.
+# last kind that ships. Kinds 7 and 8 ship (issue #1565 deleted the value kinds 1-6 and 9-17 and
+# their numbers are never reallocated), so the mutation names a value no kind ever held, 18: it
+# stays red because the other six spellings lack it. Every real new kind has to land in all seven
+# spellings or fail here.
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$kind_dir/hosts/host-web/web/"
-sed 's/^pub const COMMAND_VCA_MUTE: u32 = 17;/&\npub const COMMAND_SOLO_MODE: u32 = 18;/' \
+sed 's/^pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;/&\npub const COMMAND_SOLO_MODE: u32 = 18;/' \
   "$repo_root/hosts/host-web/src/lib.rs" \
   >"$kind_dir/hosts/host-web/src/lib.rs"
 if diff -q "$repo_root/hosts/host-web/src/lib.rs" \

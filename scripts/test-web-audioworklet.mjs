@@ -14,8 +14,7 @@ if (qualificationModuleIndex !== -1 && typeof commandArguments[qualificationModu
   throw new TypeError("--qualification-module requires a file path");
 }
 
-await import("./test-prepared-control.mjs");
-const preparedAbiLayout = JSON.parse(await readFile(
+const abiLayout = JSON.parse(await readFile(
   new URL("../sdk/assets/miso-engine-v1-abi-layout.json", import.meta.url), "utf8",
 ));
 // Issue #1496 D1/D3: the exports either AudioWorklet calls after construction are one table,
@@ -39,7 +38,7 @@ const unsupportedPreparationModuleBytes = Uint8Array.from([
   5, 3, 1, 0, 1,
   7, 46, 2, 6, 109, 101, 109, 111, 114, 121, 2, 0,
   33, 109, 105, 115, 111, 95, 101, 110, 103, 105, 110, 101, 95, 119, 101, 98,
-  95, 118, 49, 95, 101, 113, 95, 116, 97, 114, 103, 101, 116, 95, 111, 112, 101, 110, 0, 0,
+  95, 118, 49, 95, 99, 111, 109, 109, 97, 110, 100, 95, 115, 117, 98, 109, 105, 116, 0, 0,
   10, 6, 1, 4, 0, 65, 7, 11,
 ]);
 // Issue #151: the host module is overridable for exactly the reason the worklet module already is
@@ -57,10 +56,10 @@ const qualificationUrl = qualificationModuleIndex === -1
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2 and #143 D3/D6: the four live-control words. All zero is "default
-  // command-queue depth, no meter observers, no observation capacity, no master designation"; the
-  // live-control tests below override them.
-  liveControlCommandQueueRecords: 4n,
+  // Issue #137 D1/D2 and #143 D3/D6: the live-control words. `reserved1` (offset 32) must be zero
+  // (issue #1565). All zero is "no meter observers, no observation capacity, no master
+  // designation"; the live-control tests below override them.
+  reserved1: 0n,
   liveControlMeterBlocks: 2n,
   liveControlObservationTaps: 2n,
   liveControlMasterTrackPlusOne: 1n,
@@ -119,6 +118,18 @@ async function testMainRealm() {
     AudioWorkletNode: globalThis.AudioWorkletNode,
     validate: WebAssembly.validate,
     compile: WebAssembly.compile,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+  };
+  // Issue #1381a D6: the host's one timer, the single-mode service tick, is driven by hand, so a
+  // test posts exactly the ticks it means to and no real interval keeps the process alive.
+  const intervals = [];
+  globalThis.setInterval = (callback, delay) => {
+    intervals.push({ callback, delay, cleared: false });
+    return intervals.length;
+  };
+  globalThis.clearInterval = (id) => {
+    if (intervals[id - 1] !== undefined) intervals[id - 1].cleared = true;
   };
   const events = [];
   let fetchCount = 0;
@@ -130,6 +141,7 @@ async function testMainRealm() {
   let readyMutation = null;
   let statusMutation = null;
   let renderAllocationsMutation = null;
+  let controlMutation = null;
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
@@ -138,7 +150,6 @@ async function testMainRealm() {
   let compileGate = null;
   let addModuleGate = null;
   let readyGate = null;
-  let abiJsonGate = null;
 
   const snapshotGate = () => {
     let release;
@@ -157,8 +168,13 @@ async function testMainRealm() {
       this.closeCount += 1;
     }
 
-    postMessage(message, transfer) {
+    postMessage(message, transfer = []) {
       const received = structuredClone(message, { transfer });
+      if (received.tag === "miso.service.v1") {
+        // The service tick is no request: it carries no request ID and gets no reply.
+        events.push(["service"]);
+        return;
+      }
       events.push(["request", received.tag, received.requestId, transfer.length]);
       const respond = () => {
         let response;
@@ -176,7 +192,7 @@ async function testMainRealm() {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
             lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
-            memoryBytes: 65536,
+            memoryBytes: 65536, singleModeControlAllocations: 3, staleViewQuanta: 0,
           };
           if (statusMutation !== null) response = statusMutation(response);
         } else if (received.tag === "miso.renderallocations.v1") {
@@ -184,6 +200,16 @@ async function testMainRealm() {
             tag: "miso.renderallocations.v1", requestId: received.requestId, result: 0, count: 0,
           };
           if (renderAllocationsMutation !== null) response = renderAllocationsMutation(response);
+        } else if (received.tag === "miso.control.v1") {
+          // Issue #1562a D1: the frame comes back reversed as the response, so the test can see
+          // that the host sent the caller's bytes and returns the engine's unchanged.
+          const frame = received.frame;
+          response = {
+            tag: "miso.control.v1", requestId: received.requestId, result: 0,
+            response: new Uint8Array([...frame].reverse()), revision: 2n,
+          };
+          if (controlMutation !== null) response = controlMutation(response);
+          responseTransfer = response.response instanceof Uint8Array ? [response.response.buffer] : [];
         } else if (received.tag === "miso.command.v1") {
           response = {
             tag: "miso.ack.v1",
@@ -209,8 +235,6 @@ async function testMainRealm() {
             ],
             metersAttached: true,
             submixes: ["aaa-bus", "zzz-bus"],
-            routes: ["zz-send", "aa-send"],
-            vcas: ["zz-vca", "aa-vca"],
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
@@ -286,15 +310,7 @@ async function testMainRealm() {
     return {
       ok: true,
       arrayBuffer: async () => new TextEncoder().encode(String(url)).buffer,
-      json: async () => {
-        if (abiJsonGate !== null) {
-          const gate = abiJsonGate;
-          abiJsonGate = null;
-          gate.start();
-          await gate.promise;
-        }
-        return preparedAbiLayout;
-      },
+      json: async () => abiLayout,
     };
   };
   const unsupportedPreparationModule = await original.compile(unsupportedPreparationModuleBytes);
@@ -847,11 +863,9 @@ async function testMainRealm() {
         ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
         ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
-        ["command queue bound", plainOptions({ liveControlCommandQueueRecords: 257n })],
+        ["reserved1 nonzero", plainOptions({ reserved1: 1n })],
+        ["reserved1 type", plainOptions({ reserved1: 0 })],
         ["observation taps bound", plainOptions({ liveControlObservationTaps: 17n })],
-        ["observation taps dependency", plainOptions({
-          liveControlCommandQueueRecords: 0n, liveControlObservationTaps: 1n,
-        })],
         ["master dependency", plainOptions({ liveControlObservationTaps: 0n })],
         ["spectrum hop unsupported", plainOptions({
           spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
@@ -1018,14 +1032,13 @@ async function testMainRealm() {
       {
         const addGate = snapshotGate();
         const readyPause = snapshotGate();
-        const abiPause = snapshotGate();
         const spectrum = {
           target: "trackPostPan", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
         };
         const options = {
           sourceRingFrames: 0,
           maximumMemoryBytes: 0n,
-          liveControlCommandQueueRecords: 0n,
+          reserved1: 0n,
           liveControlMeterBlocks: 7n,
           liveControlObservationTaps: 0n,
           liveControlMasterTrackPlusOne: 0n,
@@ -1059,13 +1072,11 @@ async function testMainRealm() {
         try {
           addModuleGate = addGate;
           readyGate = readyPause;
-          abiJsonGate = abiPause;
           boot = createMisoAudioWorkletHost(factory);
           await addGate.started;
           spectrum.targetId = "mutated-spectrum-before-construction";
           options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 128;
-          options.liveControlCommandQueueRecords = 8n;
           options.liveControlMeterBlocks = 99n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
           factory.context = replacementContext;
@@ -1080,22 +1091,9 @@ async function testMainRealm() {
           spectrum.targetId = "mutated-spectrum-while-ready";
           options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 256;
-          options.liveControlCommandQueueRecords = 4n;
           options.liveControlMeterBlocks = 101n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
           readyPause.release();
-          await abiPause.started;
-          spectrum.targetId = "mutated-spectrum-while-abi";
-          options.spectrumHopFrames = 1024;
-          options.sourceRingFrames = 64;
-          options.liveControlCommandQueueRecords = 2n;
-          options.liveControlMeterBlocks = 103n;
-          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
-          factory.context = { ...replacementContext, sampleRate: 96000 };
-          factory.preparedModule = replacementModule;
-          factory.simd128ModuleUrl = "mutated-simd-while-abi.wasm";
-          factory.workletModuleUrl = "mutated-processor-while-abi.js";
-          abiPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
           const captured = node.options.processorOptions.options;
@@ -1154,20 +1152,23 @@ async function testMainRealm() {
           assert.equal(nextSourceAck.requestId, sourceAcks.at(-1).requestId + 1,
             "source capacity refusal did not burn an ID");
 
+          // Issue #1565: the in-flight bound is the fixed `maximumCommandRecords` (256), not a boot
+          // word, so 256 commands hold and the 257th is refused locally.
           const localCommand = {
-            kind: 1, rack: 255, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 0,
-            smoothingSamples: 64, values: [0, 0, 0, 0],
+            kind: 7, rack: 1, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 1,
+            smoothingSamples: 0, values: [0, 0, 0, 0],
           };
           holdAll = true;
-          const heldCommand = hostValue.command({ commands: [localCommand] });
+          const heldCommands = Array.from({ length: 256 }, () =>
+            hostValue.command({ commands: [localCommand] }));
           const beforeCommandOverflow = events.length;
           await localErrorResult(hostValue.command({ commands: [localCommand] }), 6);
           assert.equal(events.length, beforeCommandOverflow, "command capacity refusal posted no event");
           holdAll = false;
           for (const respond of heldAll.splice(0)) respond();
-          const commandAck = await heldCommand;
+          const commandAcks = await Promise.all(heldCommands);
           const nextCommand = await hostValue.command({ commands: [localCommand] });
-          assert.equal(nextCommand.requestId, commandAck.requestId + 1,
+          assert.equal(nextCommand.requestId, commandAcks.at(-1).requestId + 1,
             "command capacity refusal did not burn an ID");
           const observeAck = await hostValue.observe({
             subscriptions: [{
@@ -1180,10 +1181,8 @@ async function testMainRealm() {
         } finally {
           addGate.release();
           readyPause.release();
-          abiPause.release();
           if (addModuleGate === addGate) addModuleGate = null;
           if (readyGate === readyPause) readyGate = null;
-          if (abiJsonGate === abiPause) abiJsonGate = null;
           holdAll = false;
           for (const respond of heldAll.splice(0)) respond();
           mixedSuccess = previousMixedSuccess;
@@ -1328,6 +1327,66 @@ async function testMainRealm() {
     assert.equal(status.tag, "miso.status.v1");
     assert.equal(status.memoryBytes, host.memoryBytes);
     assert.equal(status.liveValuesSuperseded, 7n, "the status reply carries the superseded count");
+    assert.equal(
+      status.singleModeControlAllocations,
+      3,
+      "the status reply carries the single-mode control allocation count",
+    );
+    assert.equal(status.staleViewQuanta, 0, "the status reply carries the stale-view quantum count");
+
+    // Issue #1562a D1, gate 7's host half: a control frame is copied, posted whole as one
+    // `miso.control.v1` message with its buffer transferred, and the reply is the engine's
+    // response bytes unchanged with the committed revision. The host decodes nothing in the frame.
+    {
+      const frame = new Uint8Array([1, 2, 3]);
+      const reply = await host.control(frame);
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.result, 0);
+      assert.deepEqual([...reply.response], [3, 2, 1]);
+      assert.equal(reply.revision, 2n);
+      assert.equal(frame.byteLength, 3, "the caller keeps its frame: the host sends a copy");
+      const posted = events.filter((event) => event[1] === "miso.control.v1");
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0][3], 1, "the frame's buffer is transferred");
+      await localErrorResult(host.control(new Uint8Array(0)), 1);
+      await localErrorResult(host.control(new Uint8Array(16385)), 1);
+      await localErrorResult(host.control([1, 2]), 1);
+      assert.equal(
+        events.filter((event) => event[1] === "miso.control.v1").length,
+        1,
+        "a refused frame never reaches the port",
+      );
+      const largest = await host.control(new Uint8Array(16384));
+      assert.equal(largest.response.byteLength, 16384, "the largest frame is sent");
+    }
+
+    // Issue #1570b D5, gate 4's host half: an engine event reaches every listener as
+    // `{ lane, frame }` in arrival order; a frame that arrives with no listener is dropped and
+    // counted, and unsubscribing stops delivery.
+    {
+      const deliver = (lane, bytes) => host.node.port.onmessage({
+        data: { tag: "miso.control-event.v1", lane, frame: new Uint8Array(bytes) },
+      });
+      assert.equal(host.discardedControlEvents, 0);
+      deliver(0, [1]);
+      deliver(1, [2]);
+      assert.equal(host.discardedControlEvents, 2, "each frame with no listener is counted");
+      const seen = [];
+      const other = [];
+      const off = host.onControlEvent((event) => seen.push([event.lane, [...event.frame]]));
+      host.onControlEvent((event) => other.push(event.lane));
+      deliver(1, [3, 4]);
+      deliver(0, [5]);
+      assert.deepEqual(seen, [[1, [3, 4]], [0, [5]]], "events arrive in order with their lane");
+      assert.deepEqual(other, [1, 0], "every listener is called");
+      off();
+      deliver(0, [6]);
+      assert.equal(seen.length, 2, "an unsubscribed listener hears nothing more");
+      assert.equal(other.length, 3);
+      assert.equal(host.discardedControlEvents, 2, "a frame with a listener left is not a drop");
+      assert.throws(() => host.onControlEvent("not a function"));
+    }
+
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -1376,6 +1435,30 @@ async function testMainRealm() {
     await errorResult(schemaHost.status(), 255);
     statusMutation = null;
     await schemaHost.dispose();
+
+    // Issue #1562a D1: a malformed control reply is a schema failure, sticky for the host.
+    for (const mutate of [
+      (reply) => ({ ...reply, revision: -1n }),
+      (reply) => ({ ...reply, revision: 1 }),
+      (reply) => ({ ...reply, response: [1] }),
+      (reply) => ({ ...reply, result: 11 }),
+      (reply) => ({ ...reply, extra: 1 }),
+    ]) {
+      const controlHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      controlMutation = (reply) => {
+        const mutated = mutate(reply);
+        return mutated;
+      };
+      await errorResult(controlHost.control(new Uint8Array([1])), 255);
+      controlMutation = null;
+      await controlHost.dispose().catch(() => undefined);
+    }
 
     // #1536: concurrent status calls share one read and are never refused for being in flight.
     const sharedStatusHost = async () => createMisoAudioWorkletHost({
@@ -1538,6 +1621,11 @@ async function testMainRealm() {
       (reply) => ({ ...reply, liveValuesSuperseded: 7 }),
       (reply) => ({ ...reply, liveValuesSuperseded: -1n }),
       (reply) => ({ ...reply, liveValuesSuperseded: 1n << 64n }),
+      // The stale-view count: absent, negative, and a memory smaller than the boot size (memory
+      // only grows, so a shrink is a corrupt reply).
+      ({ staleViewQuanta: _dropped, ...rest }) => rest,
+      (reply) => ({ ...reply, staleViewQuanta: -1 }),
+      (reply) => ({ ...reply, memoryBytes: 32768 }),
     ]) {
       const refused = await countHost();
       statusMutation = mutation;
@@ -1548,6 +1636,9 @@ async function testMainRealm() {
     const wide = await countHost();
     statusMutation = (reply) => ({ ...reply, liveValuesSuperseded: (1n << 64n) - 1n });
     assert.equal((await wide.status()).liveValuesSuperseded, (1n << 64n) - 1n);
+    // A memory a control call grew since boot is a valid status, not a corrupt reply.
+    statusMutation = (reply) => ({ ...reply, memoryBytes: 131072 });
+    assert.equal((await wide.status()).memoryBytes, 131072);
     statusMutation = null;
     await wide.dispose();
 
@@ -1615,16 +1706,10 @@ async function testMainRealm() {
       ["a submix list that is not an array", (map) => ({ ...map, submixes: "aaa-bus" })],
       ["a non-string submix", (map) => ({ ...map, submixes: ["aaa-bus", 7] })],
       ["an empty submix ID", (map) => ({ ...map, submixes: ["aaa-bus", ""] })],
-      // Issue #1223 D3: the live-route list is held to the same rules.
-      ["no route list", ({ routes: _dropped, ...rest }) => rest],
-      ["a route list that is not an array", (map) => ({ ...map, routes: "zz-send" })],
-      ["a non-string route", (map) => ({ ...map, routes: ["zz-send", 7] })],
-      ["an empty route ID", (map) => ({ ...map, routes: ["zz-send", ""] })],
-      // Issue #1246 D3: the VCA list is held to the same rules.
-      ["no VCA list", ({ vcas: _dropped, ...rest }) => rest],
-      ["a VCA list that is not an array", (map) => ({ ...map, vcas: "zz-vca" })],
-      ["a non-string VCA", (map) => ({ ...map, vcas: ["zz-vca", 7] })],
-      ["an empty VCA ID", (map) => ({ ...map, vcas: ["zz-vca", ""] })],
+      // Issue #1565: the route and VCA lists are deleted from the exact field set, so a reply
+      // that still carries one fails the whole host.
+      ["a deleted route list", (map) => ({ ...map, routes: ["zz-send"] })],
+      ["a deleted VCA list", (map) => ({ ...map, vcas: ["zz-vca"] })],
     ]) {
       const mapHost = await createMisoAudioWorkletHost({
         context,
@@ -1780,12 +1865,13 @@ async function testMainRealm() {
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
     assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
-    assert.deepEqual(map.routes, ["zz-send", "aa-send"], "issue #1223: the live-route order is delivered");
-    assert.deepEqual(map.vcas, ["zz-vca", "aa-vca"], "issue #1246: the VCA order is delivered");
+    assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: the route list is deleted");
+    assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: the VCA list is deleted");
 
-    const pan = {
-      kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
-      smoothingSamples: 64, values: [-0.5, 0.5, 0, 0],
+    // Issue #1565: the only kinds `command()` carries are the two observation kinds.
+    const sub = {
+      kind: 7, rack: 1, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 1,
+      smoothingSamples: 64, values: [0, 0, 0, 0],
     };
     // Issue #393: one real host fixture owns every request ID across interleaved request classes.
     // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
@@ -1796,7 +1882,7 @@ async function testMainRealm() {
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
     };
     for (let round = 0; round < 25; round += 1) {
-      mixedAcks.push((await liveControlHost.command({ commands: [pan] })).requestId);
+      mixedAcks.push((await liveControlHost.command({ commands: [sub] })).requestId);
       mixedAcks.push((await liveControlHost.observe({ subscriptions: [mixedSubscription] })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: true, onFrame: null })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: false, onFrame: null })).requestId);
@@ -1846,7 +1932,12 @@ async function testMainRealm() {
     const { createBrowserLiveControls } = await import(new URL("./sdk/src/browser/live-controls.ts", root));
     const browserLiveControls = await createBrowserLiveControls(liveControlHost);
     await liveControlHost.meters({ enabled: true, onFrame: null });
-    const sdkReport = await browserLiveControls.submit(browserLiveControls.edit.track("kick").faderDb(-1));
+    // Issue #1565: the host's own command path carries observation records only, so the SDK edit
+    // that rides it is an observation subscription; a value edit goes through `control()`.
+    const sdkReport = await browserLiveControls.submit(
+      browserLiveControls.edit.track("kick").effect("console", 0, "miso.compressor")
+        .observe("Gain Reduction", true, 1),
+    );
     assert.equal(sdkReport.ok, true, "SDK live controls submit through the real host after direct meters");
     // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
     // request exactly one ID later. Hold each class independently so the fake port cannot answer.
@@ -1877,7 +1968,7 @@ async function testMainRealm() {
       () => liveControlHost.telemetry({ enabled: true, onFrame: null }),
       () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
     );
-    const commandAck = await liveControlHost.command({ commands: [pan] });
+    const commandAck = await liveControlHost.command({ commands: [sub] });
     assert.equal(commandAck.tag, "miso.ack.v1");
     assert.equal(commandAck.result, 0);
     assert.equal(commandAck.admitted, 1);
@@ -1890,32 +1981,36 @@ async function testMainRealm() {
       commandAck.records.byteOffset,
       commandAck.records.byteLength,
     );
-    assert.equal(decoded.getUint8(0), 1, "kind");
-    assert.equal(decoded.getUint8(1), 255, "rack is not applicable to a pan");
+    assert.equal(decoded.getUint8(0), 7, "kind");
+    assert.equal(decoded.getUint8(1), 1, "rack");
     assert.equal(decoded.getUint32(4, true), 1, "track index");
-    assert.equal(decoded.getUint32(16, true), 64, "smoothing samples");
-    assert.equal(decoded.getFloat32(24, true), -0.5, "value0");
-    assert.equal(decoded.getFloat32(28, true), 0.5, "value1");
+    assert.equal(decoded.getUint32(12, true), 1, "tap id");
+    assert.equal(decoded.getUint32(16, true), 64, "window blocks");
+    assert.equal(decoded.getFloat32(24, true), 0, "value0");
 
     // A malformed command never reaches the port.
     const beforeMalformed = events.length;
     await errorResult(
-      liveControlHost.command({ commands: [{ ...pan, kind: 99 }] }),
+      liveControlHost.command({ commands: [{ ...sub, kind: 99 }] }),
       1,
     );
+    // Issue #1565: every deleted value kind is an unknown kind to the host's own gate.
+    for (const kind of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17]) {
+      await errorResult(liveControlHost.command({ commands: [{ ...sub, kind }] }), 1);
+    }
     await errorResult(
-      liveControlHost.command({ commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
+      liveControlHost.command({ commands: [{ ...sub, values: [0, 0, 0, NaN] }] }),
       1,
     );
     await errorResult(liveControlHost.command({ commands: [] }), 1);
     // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
     for (const rack of [0, 2, 4]) {
       await errorResult(
-        liveControlHost.command({ commands: [{ ...pan, kind: 5, rack, effectIndex: 0 }] }),
+        liveControlHost.command({ commands: [{ ...sub, rack, effectIndex: 0 }] }),
         1,
       );
     }
-    await localErrorResult(liveControlHost.command({ requestId: 999, commands: [pan] }), 1);
+    await localErrorResult(liveControlHost.command({ requestId: 999, commands: [sub] }), 1);
     await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
     }] }), 1);
@@ -1934,25 +2029,25 @@ async function testMainRealm() {
 
     // Engine backpressure is a resolved acknowledgement that admits nothing.
     commandResult = 6;
-    const refused = await liveControlHost.command({ commands: [pan] });
+    const refused = await liveControlHost.command({ commands: [sub] });
     assert.equal(refused.result, 6);
     assert.equal(refused.admitted, 0);
     assert.equal(refused.reason, 8);
     commandResult = 0;
 
-    // Local backpressure: the worklet-side queue depth is 4, so a fifth unsettled batch is
-    // refused here, before any transfer, and the caller keeps its records.
+    // Local backpressure: the in-flight bound is `maximumCommandRecords` (256, issue #1565), so a
+    // 257th unsettled batch is refused here, before any transfer, and the caller keeps its records.
     holdAll = true;
     const commandEventsBefore = events.length;
-    const held4 = Array.from({ length: 4 }, () => liveControlHost.command({ commands: [pan] }));
-    await localErrorResult(liveControlHost.command({ commands: [pan] }), 6);
+    const held4 = Array.from({ length: 256 }, () => liveControlHost.command({ commands: [sub] }));
+    await localErrorResult(liveControlHost.command({ commands: [sub] }), 6);
     await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 6);
-    assert.equal(events.length, commandEventsBefore + 4, "command/observe saturation posts no refusal");
+    assert.equal(events.length, commandEventsBefore + 256, "command/observe saturation posts no refusal");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
     const heldCommandAcks = await Promise.all(held4);
-    const commandAfterBound = await liveControlHost.command({ commands: [pan] });
+    const commandAfterBound = await liveControlHost.command({ commands: [sub] });
     assert.equal(
       commandAfterBound.requestId,
       Math.max(...heldCommandAcks.map((ack) => ack.requestId)) + 1,
@@ -2175,9 +2270,6 @@ async function testMainRealm() {
       // The tap is declared and correctly addressed; this preparation bound no observation
       // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
       { reason: 11, result: 7, what: "a session that bound no observation capacity" },
-      // Issue #1212: reason 12 (`notSoloable`) is in the host's vocabulary before anything emits
-      // it, so the kind-9 solo refusal #1213 adds is a typed refusal, never the sticky 255.
-      { reason: 12, result: 1, what: "a strip that cannot be soloed" },
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
@@ -2202,7 +2294,7 @@ async function testMainRealm() {
       // have failed with `{tag: "miso.error.v1", result: 255}`.
       assert.equal((await liveControlHost.status()).result, 0, `${what}: status still answers`);
       const laterCommand = await liveControlHost.command({
-        commands: [pan],
+        commands: [sub],
       });
       assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
       assert.equal(laterCommand.admitted, 1);
@@ -2246,6 +2338,27 @@ async function testMainRealm() {
       assert.deepEqual(undo.bindings, mapBeforeRefusal, "the map returns to where it started");
     }
 
+    // Issue #1565: reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) left the
+    // vocabulary with the value kinds. An acknowledgement that still carries one is a malformed
+    // reply and fails the whole host, as any reason outside the table does.
+    for (const reason of [12, 13, 14]) {
+      const reasonHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      commandResult = 1;
+      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
+      await errorResult(reasonHost.command({ commands: [sub] }), 255).catch((error) => {
+        throw new Error(`the host accepted deleted command reason ${reason}`, { cause: error });
+      });
+      commandMutation = null;
+      commandResult = 0;
+      await reasonHost.dispose();
+    }
+
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
     await liveControlHost.meters({ enabled: false, onFrame: null });
@@ -2277,7 +2390,7 @@ async function testMainRealm() {
     await liveControlHost.dispose();
     const disposedEvents = events.length;
     await localErrorResult(liveControlHost.status(), 3);
-    await localErrorResult(liveControlHost.command({ commands: [pan] }), 3);
+    await localErrorResult(liveControlHost.command({ commands: [sub] }), 3);
     await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 3);
     await localErrorResult(liveControlHost.sessionMap(), 3);
     await localErrorResult(liveControlHost.meters({ enabled: false, onFrame: null }), 3);
@@ -2366,15 +2479,46 @@ async function testMainRealm() {
     });
     assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
     assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
-    assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
+    assert.equal((await afterEdit.command({ commands: [sub] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
+    // Issue #1381a D6, gate 6: the host's one timer is the single-mode service tick. It starts
+    // with the host, once per quantum, and each tick is the bare `miso.service.v1` message: no
+    // request ID, so the tick takes no place in the request sequence and never makes a status read
+    // follow another; and it gets no reply. A dispose stops it before the dispose request.
+    {
+      const tickHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const timer = intervals.at(-1);
+      assert.equal(timer.cleared, false, "the tick runs while the host does");
+      assert.equal(timer.delay, 1, "one quantum of 64 frames at 48 kHz, rounded to a millisecond");
+      const before = events.length;
+      timer.callback();
+      timer.callback();
+      assert.deepEqual(events.slice(before), [["service"], ["service"]], "a tick posts the message");
+      const read = tickHost.status();
+      timer.callback();
+      assert.equal((await read).requestId, (await tickHost.status()).requestId - 1,
+        "a tick consumes no request ID");
+      await tickHost.dispose();
+      assert.equal(timer.cleared, true, "dispose stops the tick");
+      const afterDispose = events.length;
+      timer.callback();
+      assert.equal(events.length, afterDispose, "a tick after dispose posts nothing");
+    }
     await runPlainDataMatrix();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;
     WebAssembly.validate = original.validate;
     WebAssembly.compile = original.compile;
+    globalThis.setInterval = original.setInterval;
+    globalThis.clearInterval = original.clearInterval;
   }
 }
 
@@ -2385,7 +2529,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
-  const status = new DataView(memory.buffer, statusPointer, 80);
+  let status = new DataView(memory.buffer, statusPointer, 80);
   status.setUint32(0, 80, true);
   status.setUint32(4, 0x00010000, true);
   status.setUint32(8, 2, true);
@@ -2405,26 +2549,28 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
     spectrumHopCapabilityResult: 1,
+    // Issue #1381a: the service step's handles and result, and the control counter's value.
+    service: [], serviceResult: 0, controlAllocations: 5,
+    // Issue #1562a D1: the control frames the fake received, the result it answers with, the
+    // response it leaves, the committed revision, and whether it grows its memory under a command.
+    control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
+    controlGrowsMemory: false, controlRequestRefusals: 0, growths: 0,
+    // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
+    // `control_event` call the fake received, and the result it answers with.
+    events: [[], []], eventCalls: [], eventResult: 0,
   };
+  // What `control_response_*` reads now: the last control command's response, or the event frame
+  // the last `control_event` dequeued (empty for an empty lane), as the real exports share their
+  // staging (issue #1570b D1).
+  let currentEvent = null;
+  const controlRequestPointer = 50000;
+  const controlResponsePointer = 56000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
-  // Assignment 8's opaque prepared companion staging is present in the real worklet even while
-  // the default semantic command route remains ordinary. Keep the hermetic processor fixture's
-  // shape aligned so construction exercises the same bounded prewarm checks.
-  const preparedCompanionPointer = 23000;
-  const preparedCompanionCapacity = 24 + 2 * 256 * 80;
   const meterFramePointer = 40000;
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
-  // Issue #1223 D3: the live route IDs, deliberately not in sorted order, so a worklet that sorts
-  // or otherwise reorders the engine's enumeration (the order send commands index) is visible.
-  const routeIds = ["zz-send", "aa-send"];
-  // Issue #1246 D3: the VCA IDs, deliberately not in sorted order, so a worklet that sorts or
-  // otherwise reorders the engine's enumeration (the order VCA commands index) is visible. There
-  // are three, one more than the routes, so a worklet that reads the VCA count from another
-  // export (the route count it was cloned beside) is visible too.
-  const vcaIds = ["zz-vca", "mm-vca", "aa-vca"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
   // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
@@ -2449,7 +2595,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   meterHeader.setBigUint64(24, 768n, true);
   meterHeader.setBigUint64(48, 1n, true);
   meterHeader.setBigUint64(56, 0xbn, true);
-  const report = new DataView(memory.buffer, reportPointer, 48);
+  let report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
@@ -2487,6 +2633,16 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     }
     calls.bootResult = 0;
     return 1;
+  };
+  // A real linear-memory growth: the old buffer is detached in a browser, the new one holds the
+  // same bytes at the same addresses, and the fake's own views follow it.
+  const growMemory = () => {
+    const grown = new ArrayBuffer(memory.buffer.byteLength * 2);
+    new Uint8Array(grown).set(new Uint8Array(memory.buffer));
+    memory.buffer = grown;
+    status = new DataView(grown, statusPointer, 80);
+    report = new DataView(grown, reportPointer, 48);
+    calls.growths += 1;
   };
   const exports = {
     memory,
@@ -2529,12 +2685,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 0;
     },
     miso_engine_web_v1_command_report_ptr: () => reportPointer,
-    miso_engine_web_v1_prepared_companion_ptr: () => (
-      liveControlsAttached ? preparedCompanionPointer : 0
-    ),
-    miso_engine_web_v1_prepared_companion_capacity: () => (
-      liveControlsAttached ? preparedCompanionCapacity : 0
-    ),
     miso_engine_web_v1_command_submit: (_handle, count) => {
       calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 48).slice());
       report.setUint32(8, calls.commandResult, true);
@@ -2582,22 +2732,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
       return id.length;
     },
-    miso_engine_web_v1_live_control_route_count: () => routeIds.length,
-    miso_engine_web_v1_live_control_route_id: (_handle, index) => {
-      const id = routeIds[index];
-      if (id === undefined) return 0;
-      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
-      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
-      return id.length;
-    },
-    miso_engine_web_v1_live_control_vca_count: () => vcaIds.length,
-    miso_engine_web_v1_live_control_vca_id: (_handle, index) => {
-      const id = vcaIds[index];
-      if (id === undefined) return 0;
-      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
-      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
-      return id.length;
-    },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
@@ -2638,13 +2772,53 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     miso_engine_web_v1_track_response_result_ptr: () => trackResponseSnapshotPointer,
     miso_engine_web_v1_track_response_result_bytes: () => 0,
     miso_engine_web_v1_track_response_close: () => 0,
+    miso_engine_web_v1_service: (handle) => {
+      calls.service.push(handle);
+      return calls.serviceResult;
+    },
+    miso_engine_web_v1_control_allocation_count: () => calls.controlAllocations,
+    miso_engine_web_v1_control_request_ptr: (_handle, length) => {
+      if (calls.controlRequestRefusals > 0 || length === 0 || length > 16384) {
+        calls.controlRequestRefusals = Math.max(0, calls.controlRequestRefusals - 1);
+        return 0;
+      }
+      return controlRequestPointer;
+    },
+    miso_engine_web_v1_control_command: (handle, length) => {
+      calls.control.push({
+        handle,
+        frame: new Uint8Array(memory.buffer, controlRequestPointer, length).slice(),
+      });
+      new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
+        .set(calls.controlResponse);
+      if (calls.controlGrowsMemory) growMemory();
+      currentEvent = null;
+      return calls.controlResult;
+    },
+    miso_engine_web_v1_control_event: (handle, lane) => {
+      calls.eventCalls.push({ handle, lane });
+      currentEvent = new Uint8Array(0);
+      if (calls.eventResult !== 0) return calls.eventResult;
+      const frame = calls.events[lane]?.shift();
+      if (frame !== undefined) {
+        currentEvent = frame;
+        new Uint8Array(memory.buffer, controlResponsePointer, frame.length).set(frame);
+      }
+      return 0;
+    },
+    miso_engine_web_v1_control_response_ptr: () => {
+      const response = currentEvent ?? calls.controlResponse;
+      return response.length === 0 ? 0 : controlResponsePointer;
+    },
+    miso_engine_web_v1_control_response_bytes: () => (currentEvent ?? calls.controlResponse).length,
+    miso_engine_web_v1_control_revision: () => calls.controlRevision,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
     },
   };
   return {
-    exports, calls, trackIds, submixIds, routeIds, vcaIds, sourceRows, meterFrameFloats, meterHeader,
+    exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader, growMemory,
   };
 }
 
@@ -2770,8 +2944,8 @@ async function testQualificationBoot({
   // the worklet misses is red here. The identity decoder keeps a leading U+FEFF, as the bridge's
   // `core::str::from_utf8` does.
   const identityDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  const collectionRequestLayout = preparedAbiLayout.structures.spectrumCollectionRequest;
-  const collectionEntryLayout = preparedAbiLayout.structures.spectrumCollectionEntry;
+  const collectionRequestLayout = abiLayout.structures.spectrumCollectionRequest;
+  const collectionEntryLayout = abiLayout.structures.spectrumCollectionEntry;
   const layoutField = (layout, name) => {
     const field = layout.fields.find((candidate) => candidate.name === name);
     assert.ok(field, `qualification boot contract: the generated layout has no field ${name}`);
@@ -2869,7 +3043,7 @@ async function testQualificationBoot({
       this.fake = withSpectrumCollectionStaging(makeFake(
         context.renderQuantumSize,
         1,
-        processorOptions?.liveControlCommandQueueRecords !== 0n,
+        processorOptions?.liveControlObservationTaps !== 0n,
       ));
       setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
@@ -2902,7 +3076,7 @@ async function testQualificationBoot({
     return {
       ok: true,
       arrayBuffer: async () => new Uint8Array([0]).buffer,
-      json: async () => preparedAbiLayout,
+      json: async () => abiLayout,
     };
   };
   WebAssembly.compile = async () => Object.freeze({ qualification: true });
@@ -3036,26 +3210,26 @@ async function testQualificationBoot({
     assert.equal(sentinelStops, 5, "qualification boot contract: every non-attestation path must stop its sentinel");
     const plain = observed.filter(({ label }) =>
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
-    assert(plain.every(({ options }) => options.options.liveControlCommandQueueRecords === 0n
+    assert(plain.every(({ options }) => options.options.reserved1 === 0n
       && options.options.liveControlMeterBlocks === 0n
       && options.options.liveControlObservationTaps === 0n
       && options.options.liveControlMasterTrackPlusOne === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
-    assert.equal(liveControlOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(liveControlOptions.reserved1, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
     assert.equal(liveControlOptions.liveControlObservationTaps, 0n);
     assert.equal(liveControlOptions.liveControlMasterTrackPlusOne, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
-    assert.equal(observationOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(observationOptions.reserved1, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
     assert.equal(observationOptions.liveControlObservationTaps, 4n);
     assert.equal(observationOptions.liveControlMasterTrackPlusOne, 1n);
     // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields with
     // no fixed spectrum target and the two-entry collection, in order.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
-    assert.equal(stagingReadOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(stagingReadOptions.reserved1, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
     assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
     assert.equal(stagingReadOptions.liveControlMasterTrackPlusOne, 1n);
@@ -3074,7 +3248,7 @@ async function testQualificationBoot({
     // bridge refuses unless zero) come from the generated layout; the entries and the budget come
     // from the witnessed options.
     const wireCodes = (table) => Object.fromEntries(
-      preparedAbiLayout.constants[table].map(({ name, value }) => [name, value]));
+      abiLayout.constants[table].map(({ name, value }) => [name, value]));
     const spectrumTargetCodes = wireCodes("spectrumTargets");
     const spectrumChannelCodes = wireCodes("spectrumChannels");
     const zeroReserved = (layout) => Object.fromEntries(layout.fields
@@ -3090,7 +3264,7 @@ async function testQualificationBoot({
         request: {
           ...zeroReserved(collectionRequestLayout),
           structSize: collectionRequestLayout.bytes,
-          abiVersion: preparedAbiLayout.abiVersion,
+          abiVersion: abiLayout.abiVersion,
           entryCount: stagingReadCollection.entries.length,
           maximumCaptureBytes: BigInt(stagingReadCollection.maximumCaptureBytes),
         },
@@ -3253,29 +3427,6 @@ async function testProcessor() {
       });
       return { processor, fake };
     };
-
-    // Issue #1213 D5a (attempt 2, verdict MINOR-3): the worklet's eq-config refusal classifier
-    // bounds the index by every strip -- this processor has 2 tracks and 1 submix -- so a bad rack
-    // or effect at the bus index `T + 0` reports that, and only `T + S` is an unknown track.
-    // Red mutation: revert the classifier to `message.trackIndex >= this.trackCount` -> the bus
-    // assertions fail with `2` (unknownTrack).
-    {
-      const { processor, fake } = makeProcessor();
-      fake.exports.miso_engine_web_v1_eq_target_config_copy = () => 1;
-      fake.exports.miso_engine_web_v1_input_filters_config_copy = () => 1;
-      const classify = (trackIndex, rack) => {
-        processor.port.posts.length = 0;
-        processor.receiveEqTargetConfig({ requestId: 7, trackIndex, rack, effectIndex: 9 });
-        const reply = processor.port.posts.at(-1).message;
-        assert.equal(reply.tag, "miso.eq-target-config.v1");
-        assert.equal(reply.result, 1);
-        return reply.reason;
-      };
-      assert.equal(classify(1, 1), 4, "a track's missing insert is unknownEffect");
-      assert.equal(classify(2, 1), 4, "the bus (T + 0) missing insert is unknownEffect");
-      assert.equal(classify(2, 0), 3, "the bus with a retired rack is unknownRack");
-      assert.equal(classify(3, 1), 2, "T + S is unknownTrack");
-    }
 
     const explicitHopOptions = (spectrumHopFrames) => ({
       ...limits,
@@ -3463,6 +3614,282 @@ async function testProcessor() {
       const status = processor.port.posts.at(-1).message;
       assert.equal(status.memoryBytes, 65536);
       assert.equal(status.nextAbsoluteSample, 64n);
+      assert.equal(
+        status.singleModeControlAllocations,
+        5,
+        "the status carries the control allocation count",
+      );
+    }
+
+    // Issue #1381a D6, gate 4's worklet half: the control handler runs one service step after
+    // every message it handles, the main realm's `miso.service.v1` tick included, and never in
+    // `process()`. The tick is no request: it has no request ID, takes no place in the request
+    // sequence and gets no reply. A step commits and acknowledges nothing, so a good one posts
+    // nothing.
+    {
+      const { processor, fake } = makeProcessor();
+      const posts = processor.port.posts.length;
+      assert.equal(fake.calls.service.length, 0, "construction runs no service step");
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.equal(fake.calls.service.length, 0, "process() never services");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(fake.calls.service, [1], "the tick services once, on the host's handle");
+      assert.equal(processor.port.posts.length, posts, "the tick gets no reply");
+      assert.equal(processor.lastRequestId, 0, "the tick takes no request ID");
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      assert.equal(fake.calls.service.length, 2, "a request is followed by one service step");
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.status.v1");
+      // A tick with an extra field is not the tick: it is an unknown message, which is sticky.
+      processor.port.onmessage({ data: { tag: "miso.service.v1", requestId: 2 } });
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+      assert.equal(processor.ready, false);
+      const stepsAtFailure = fake.calls.service.length;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(
+        fake.calls.service.length,
+        stepsAtFailure,
+        "a failed worklet runs no further service step",
+      );
+    }
+    {
+      // An epoch failure of the service step is sticky, with the export's result.
+      const { processor, fake } = makeProcessor();
+      fake.calls.serviceResult = 255;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1");
+      assert.equal(failure.result, 255);
+      assert.equal(processor.ready, false);
+      const left = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, new Float32Array(64)]]), true);
+      assert(left.every((sample) => sample === 0), "a failed worklet renders silence");
+    }
+    {
+      // A dispose stops the service steps: the handle is gone.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+      assert.equal(fake.calls.dispose, 1);
+      const steps = fake.calls.service.length;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.service.length, steps, "no service step after dispose");
+    }
+
+    // Issue #1562a D1, gate 7's worklet half: a `miso.control.v1` message stages its frame,
+    // runs the control command in the message handler and replies with the response frame
+    // unchanged and the committed revision. The worklet decodes nothing in the frame.
+    {
+      const { processor, fake } = makeProcessor();
+      const frame = new Uint8Array([1, 2, 3, 4, 5]);
+      processor.port.onmessage({ data: { tag: "miso.control.v1", requestId: 1, frame } });
+      assert.equal(fake.calls.control.length, 1);
+      assert.deepEqual([...fake.calls.control[0].frame], [1, 2, 3, 4, 5], "the frame is staged as is");
+      const reply = processor.port.posts.at(-1).message;
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.requestId, 1);
+      assert.equal(reply.result, 0);
+      assert.deepEqual([...reply.response], [9, 8, 7], "the response frame comes back unchanged");
+      assert.equal(reply.revision, 4n, "the reply carries the committed revision");
+      assert.equal(
+        fake.calls.service.length, 1,
+        "the control message is followed by one service step, and process() runs none",
+      );
+      // A refusal carries its result and diagnostic bytes, and leaves the worklet ready.
+      fake.calls.controlResult = 10;
+      fake.calls.controlResponse = Uint8Array.from(
+        "web.apply.rebuild_pending\t$\n", (character) => character.charCodeAt(0),
+      );
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([7]) },
+      });
+      const refused = processor.port.posts.at(-1).message;
+      assert.equal(refused.tag, "miso.control.v1");
+      assert.equal(refused.result, 10);
+      assert.equal(
+        String.fromCharCode(...refused.response),
+        "web.apply.rebuild_pending\t$\n",
+      );
+      assert.equal(processor.ready, true, "a typed refusal is not sticky");
+      // A frame the staging buffer refuses is a typed result with no response, not sticky.
+      fake.calls.controlRequestRefusals = 1;
+      // The previous command's response is still in the module; a refused staging has none.
+      fake.calls.controlResponse = new Uint8Array([9, 9, 9]);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([7]) },
+      });
+      const oversize = processor.port.posts.at(-1).message;
+      assert.equal(oversize.tag, "miso.control.v1");
+      assert.equal(oversize.result, 1);
+      assert.equal(oversize.response.byteLength, 0);
+      assert.equal(fake.calls.control.length, 2, "a refused staging runs no command");
+      assert.equal(processor.ready, true);
+    }
+    {
+      // A malformed control message is a protocol error, like a malformed command, and sticky.
+      for (const bad of [
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array(0) },
+        { tag: "miso.control.v1", requestId: 1, frame: [1, 2] },
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]), extra: 1 },
+        { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array(new ArrayBuffer(8), 2, 4) },
+      ]) {
+        const { processor, fake } = makeProcessor();
+        processor.port.onmessage({ data: bad });
+        assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.equal(fake.calls.control.length, 0, "a malformed message reaches no export");
+        assert.equal(processor.ready, false);
+      }
+    }
+    {
+      // Root ruling A (#1332 D5, "growth is not a fault"): the module's memory moving under a
+      // command detaches every cached view, and the handler re-cuts them all before it ends. The
+      // reply is posted whole, the worklet stays ready, a later request is served, and the next
+      // `process()` renders the engine's output through the new views.
+      const { processor, fake } = makeProcessor();
+      const before = fake.exports.memory.buffer;
+      fake.calls.controlGrowsMemory = true;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      assert.equal(fake.calls.growths, 1);
+      assert.notEqual(fake.exports.memory.buffer, before, "the fake really grew its memory");
+      const posts = processor.port.posts.map((post) => post.message);
+      const reply = posts.at(-1);
+      assert.equal(reply.tag, "miso.control.v1");
+      assert.equal(reply.requestId, 1);
+      assert.deepEqual([...reply.response], [9, 8, 7], "the reply was read from the new buffer");
+      assert(!posts.some((post) => post.tag === "miso.error.v1"), "a growth posts no error");
+      assert.equal(processor.ready, true);
+      assert.equal(processor.stickyResult, 0);
+      // Every view the instance holds is cut against the new buffer, the feed's too.
+      for (const spec of processor.viewSpecs) {
+        assert.equal(
+          processor[spec.field].buffer,
+          fake.exports.memory.buffer,
+          `${spec.field} is re-bound to the grown memory`,
+        );
+      }
+      assert(processor.viewSpecs.length >= 12, "every persistent view is registered");
+      const left = new Float32Array(64).fill(1);
+      const right = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.deepEqual(fake.calls.render, [64], "the next quantum renders");
+      assert(left.every((sample) => sample === 0.25), "non-silent output through the new views");
+      assert(right.every((sample) => sample === -0.25));
+      // A later request is served: another control call (growing again) and the status.
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([2]) },
+      });
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.control.v1");
+      assert.equal(processor.port.posts.at(-1).message.requestId, 2);
+      assert.equal(processor.ready, true);
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 3 } });
+      const status = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.status.v1").at(-1);
+      assert.equal(status.result, 0);
+      assert.equal(status.memoryBytes, 65536 * 4, "the status reports the grown memory");
+      assert.equal(status.renderedQuanta, 1n, "the status reads the grown memory");
+      assert.equal(status.staleViewQuanta, 0, "no quantum ran on a detached view");
+      assert.equal(processor.process([], [[left.fill(1), right.fill(1)]]), true);
+      assert(left.every((sample) => sample === 0.25));
+      assert.deepEqual(fake.calls.render, [64, 64]);
+    }
+    {
+      // A typed refusal keeps its behaviour when the same call also grew the memory: replied
+      // whole, not sticky. Only the growth stopped being a fault.
+      const { processor, fake } = makeProcessor();
+      fake.calls.controlGrowsMemory = true;
+      fake.calls.controlResult = 10;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      assert.equal(processor.port.posts.at(-1).message.result, 10, "the refusal is replied whole");
+      assert.equal(processor.ready, true, "a typed refusal is not sticky, grown or not");
+    }
+
+    // Issue #1570b D4, gate 4's worklet half: after a `control` message and after a service tick
+    // the control half drains the reliable lane until `control_event` returns 0 bytes, then the
+    // lossy lane, and posts each frame as a `control-event` message in that order. It stops at 16
+    // calls per lane, and `process()` never calls `control_event`.
+    {
+      const { processor, fake } = makeProcessor();
+      const events = (lane) => processor.port.posts
+        .map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1" && message.lane === lane);
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.deepEqual(fake.calls.eventCalls, [], "process() never dequeues an event");
+      // A service tick drains: two reliable frames, then one lossy frame, in dequeue order.
+      fake.calls.events[0].push(new Uint8Array([1, 1]), new Uint8Array([2, 2, 2]));
+      fake.calls.events[1].push(new Uint8Array([9]));
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(
+        fake.calls.eventCalls.map((call) => [call.handle, call.lane]),
+        [[1, 0], [1, 0], [1, 0], [1, 1], [1, 1]],
+        "the reliable lane is read until empty, then the lossy lane until empty",
+      );
+      const posted = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1");
+      assert.deepEqual(
+        posted.map((message) => [message.lane, [...message.frame]]),
+        [[0, [1, 1]], [0, [2, 2, 2]], [1, [9]]],
+        "each frame is posted whole, reliable lane first, in dequeue order",
+      );
+      assert(posted.every((message) => Object.keys(message).length === 3));
+      assert(
+        processor.port.posts.filter((post) => post.message.tag === "miso.control-event.v1")
+          .every((post) => post.transferCount === 1),
+        "each frame's buffer is transferred",
+      );
+      // A control message drains after its own reply, never before it.
+      fake.calls.events[0].push(new Uint8Array([7]));
+      const before = processor.port.posts.length;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      const tags = processor.port.posts.slice(before).map((post) => post.message.tag);
+      assert.deepEqual(tags, ["miso.control.v1", "miso.control-event.v1"]);
+      assert.equal(events(0).length, 3);
+      assert.equal(events(1).length, 1);
+      assert.equal(processor.ready, true);
+    }
+    {
+      // At most 16 calls per lane per drain: the rest waits for the next drain.
+      const { processor, fake } = makeProcessor();
+      for (let index = 0; index < 20; index += 1) fake.calls.events[0].push(new Uint8Array([index]));
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(
+        fake.calls.eventCalls.filter((call) => call.lane === 0).length,
+        16,
+        "a drain makes 16 reliable calls",
+      );
+      assert.equal(
+        fake.calls.eventCalls.filter((call) => call.lane === 1).length, 1,
+        "the lossy lane is read after the bounded reliable lane",
+      );
+      assert.equal(fake.calls.events[0].length, 4);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.events[0].length, 0, "the next drain takes the rest");
+      const frames = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.control-event.v1");
+      assert.deepEqual(frames.map((message) => message.frame[0]), [...Array(20).keys()]);
+    }
+    {
+      // A refused dequeue stops the drain, takes the error path once and is not retried.
+      const { processor, fake } = makeProcessor();
+      fake.calls.events[0].push(new Uint8Array([5]));
+      fake.calls.eventResult = 6;
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.eventCalls.length, 1, "a refusal ends the drain");
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1");
+      assert.equal(failure.result, 6);
+      assert.equal(processor.ready, false);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.eventCalls.length, 1, "a failed worklet drains no more");
+    }
+    {
+      // A dispose drains nothing: the handle is gone.
+      const { processor, fake } = makeProcessor();
+      processor.port.onmessage({ data: { tag: "miso.dispose.v1", requestId: 1 } });
+      assert.deepEqual(fake.calls.eventCalls, []);
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply
@@ -3512,15 +3939,37 @@ async function testProcessor() {
     }
 
     {
+      // Root ruling A: `process()` never re-binds. A memory that moved with no handler since
+      // renders silence for the quantum, counts it, and is no fault; the next message handler
+      // re-binds and the quantum after renders again.
       const { processor, fake } = makeProcessor();
-      fake.exports.memory.buffer = new ArrayBuffer(65536);
+      fake.growMemory();
       const left = new Float32Array(64).fill(1);
       const right = new Float32Array(64).fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
-      assert.deepEqual(fake.calls.render, []);
+      assert.deepEqual(fake.calls.render, [], "no render on a detached view");
       assert(left.every((sample) => sample === 0 && !Object.is(sample, -0)));
       assert(right.every((sample) => sample === 0 && !Object.is(sample, -0)));
-      assert.equal(processor.stickyResult, 9);
+      assert.equal(processor.stickyResult, 0, "a moved memory is not sticky");
+      assert.equal(processor.ready, true);
+      assert.equal(processor.staleViewQuanta, 1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.staleViewQuanta, 2, "every silenced quantum is counted");
+      assert.equal(
+        processor.outputLeft.buffer === fake.exports.memory.buffer,
+        false,
+        "process() did not re-bind",
+      );
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      const status = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.status.v1").at(-1);
+      assert.equal(status.staleViewQuanta, 2, "the status reports the silenced quanta");
+      assert.equal(status.memoryBytes, 131072);
+      left.fill(1);
+      right.fill(1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.deepEqual(fake.calls.render, [64], "the handler re-bound and render resumed");
+      assert(left.every((sample) => sample === 0.25));
     }
 
     {
@@ -3797,8 +4246,8 @@ async function testProcessor() {
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
       assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
-      assert.deepEqual(map.routes, fake.routeIds, "issue #1223: the enumerated live-route order");
-      assert.deepEqual(map.vcas, fake.vcaIds, "issue #1246: the enumerated VCA order");
+      assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: no route list");
+      assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: no VCA list");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
@@ -3822,14 +4271,6 @@ async function testProcessor() {
         ["an empty submix ID", (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 0; }],
         ["a submix ID longer than staging",
           (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 65; }],
-        // Issue #1223 D3: the live route IDs are read under the same rules.
-        ["an empty route ID", (e) => { e.miso_engine_web_v1_live_control_route_id = () => 0; }],
-        ["a route ID longer than staging",
-          (e) => { e.miso_engine_web_v1_live_control_route_id = () => 65; }],
-        // Issue #1246 D3: the VCA IDs are read under the same rules.
-        ["an empty VCA ID", (e) => { e.miso_engine_web_v1_live_control_vca_id = () => 0; }],
-        ["a VCA ID longer than staging",
-          (e) => { e.miso_engine_web_v1_live_control_vca_id = () => 65; }],
         ["a submix count the meter header disagrees with",
           (e) => {
             const read = e.miso_engine_web_v1_live_control_submix_id;

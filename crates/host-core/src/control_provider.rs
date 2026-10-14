@@ -125,6 +125,7 @@ thread_local! {
     static STAGED_OWNERS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static FULL_STAGES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static STAGE_FAILURES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static VERIFY_STAGES: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
     static RESPONSE_PREPARATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static RESPONSE_EVALUATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
@@ -157,6 +158,14 @@ pub fn take_stage_counts() -> (usize, usize) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn fail_next_stages(count: usize) {
     STAGE_FAILURES.with(|failures| failures.set(count));
+}
+
+/// Whether a values-only [`ControlCatalog::stage_live`] on this thread checks, in a debug build,
+/// that it equals a full build of the model it stages (on by default). The check builds the whole
+/// catalog, so a test that counts the allocations of a live commit turns it off for its own thread.
+#[cfg(any(test, feature = "test-support"))]
+pub fn verify_stages(on: bool) {
+    VERIFY_STAGES.with(|verify| verify.set(on));
 }
 
 /// What a catalog row is.
@@ -457,7 +466,7 @@ impl SessionControlProvider {
     /// [`SessionControlProviderError`] as [`ControlCatalog::stage_live`].
     pub fn stage_live_catalog(
         &self,
-        next: &SessionModel,
+        next: controls::ModelView<'_>,
         overlay: &MonitorOverlay,
         sample_rate: u32,
         delta: &crate::LiveDelta<'_>,
@@ -1297,7 +1306,7 @@ impl ControlCatalog {
     /// indices.
     pub fn stage_live(
         &self,
-        next: &SessionModel,
+        next: controls::ModelView<'_>,
         overlay: &MonitorOverlay,
         sample_rate: u32,
         delta: &crate::LiveDelta<'_>,
@@ -1312,8 +1321,9 @@ impl ControlCatalog {
         }
         if let Some(staged) = self.stage_values(next, overlay, sample_rate, delta)? {
             #[cfg(any(test, feature = "test-support"))]
-            if cfg!(debug_assertions) {
-                let full = Self::build(next, overlay, sample_rate)?;
+            if cfg!(debug_assertions) && VERIFY_STAGES.with(core::cell::Cell::get) {
+                let dense = dense(next);
+                let full = Self::build(&dense, overlay, sample_rate)?;
                 assert!(
                     self.same_structure(&full),
                     "a values-only stage must keep every address, header and descriptor"
@@ -1335,27 +1345,51 @@ impl ControlCatalog {
         }
         #[cfg(any(test, feature = "test-support"))]
         FULL_STAGES.with(|count| count.set(count.get() + 1));
-        Self::build(next, overlay, sample_rate).map(StagedCatalog::Full)
+        Self::build(&dense(next), overlay, sample_rate).map(StagedCatalog::Full)
     }
 
     /// The writes that bring `self` to the catalog of `next`, or `None` when a values-only
     /// refresh cannot (a setting changed, the owners differ, or a changed owner lists other
     /// addresses or descriptors).
+    ///
+    /// A delta classified from the rows the edits name (`derived_owners` is `Some`) says which
+    /// derived rows its edits reach, and the model keeps its owners: the stage then reads the
+    /// effective values of the owners it stages only (`controls::LocalEffective`) and the derived
+    /// rows of the owners the delta names, and none of the others. Without it, every derived row
+    /// is read again.
     fn stage_values(
         &self,
-        next: &SessionModel,
+        next: controls::ModelView<'_>,
         overlay: &MonitorOverlay,
         sample_rate: u32,
         delta: &crate::LiveDelta<'_>,
     ) -> Result<Option<StagedValues>, SessionControlProviderError> {
-        if delta.settings_changed || !self.lists_owners_of(next) {
+        let model = next.structure();
+        let reached = delta.derived_owners.as_deref();
+        // A delta that names the derived owners it reached was made from rows, which cannot add or
+        // remove an owner; the catalog must still list the owners the model has.
+        let owners_agree = if reached.is_some() {
+            self.owners.len() == controls::owner_count(model)
+        } else {
+            self.lists_owners_of(model)
+        };
+        if delta.settings_changed || !owners_agree {
             return Ok(None);
         }
-        let effective = controls::effective(next, overlay);
-        let ramps = LiveRamps::for_session(next);
-        let strip_count = next.tracks.len() + next.submixes.len();
+        let effective = match reached {
+            Some(_) => StageEffective::Local(controls::LocalEffective::new(next, overlay)),
+            None => StageEffective::Dense(controls::effective(model, overlay)),
+        };
+        let ramps = LiveRamps::for_session(model);
+        let strip_count = model.tracks.len() + model.submixes.len();
         // The derived rows sit in the first section of a strip and of a route.
-        let derived_owners = strip_count + next.routes.len();
+        let derived_owners = strip_count + model.routes.len();
+        let derived = || -> Box<dyn Iterator<Item = usize> + '_> {
+            match reached {
+                Some(owners) => Box::new(owners.iter().copied()),
+                None => Box::new(0..derived_owners),
+            }
+        };
 
         // The runs of the rows to read again, and a bound of the writes, before any is made.
         let mut runs = Vec::new();
@@ -1369,7 +1403,7 @@ impl ControlCatalog {
             capacity += run.len();
             runs.push(run);
         }
-        for owner in 0..derived_owners {
+        for owner in derived() {
             capacity += self.derived_indices(owner).count();
         }
         let mut writes = Vec::new();
@@ -1383,15 +1417,12 @@ impl ControlCatalog {
             #[cfg(any(test, feature = "test-support"))]
             STAGED_OWNERS.with(|count| count.set(count.get() + 1));
             fresh.clear();
-            controls::owner_rows_with(next, &effective, overlay, owner, sample_rate, &mut fresh);
+            controls::owner_rows_in(next, &effective, overlay, owner, sample_rate, &mut fresh);
             // The strip order is the tracks then the submixes; index them directly rather than
             // walking the chained iterator once per changed owner.
-            let strip = match owner.checked_sub(next.tracks.len()) {
-                None => next.tracks.get(owner).map(session::StripRef::track),
-                Some(submix) => next.submixes.get(submix).map(session::StripRef::submix),
-            };
+            let strip = (owner < strip_count).then(|| next.strip(owner));
             if !self.stage_run(
-                next,
+                model,
                 strip.as_ref(),
                 owner,
                 run,
@@ -1403,9 +1434,9 @@ impl ControlCatalog {
                 return Ok(None);
             }
         }
-        for owner in 0..derived_owners {
+        for owner in derived() {
             fresh.clear();
-            controls::derived_rows_with(next, &effective, owner, &mut fresh);
+            controls::derived_rows_in(next, &effective, owner, &mut fresh);
             let indices = self.derived_indices(owner);
             if indices.clone().count() != fresh.len() {
                 return Ok(None);
@@ -1573,6 +1604,38 @@ impl ControlCatalog {
         (0..self.rows.len())
             .map(|index| self.entry(index))
             .collect()
+    }
+}
+
+/// The effective values a stage reads: every strip's and send's, built once (the full stage), or
+/// computed for the owners asked for (a stage from the rows an edit names).
+enum StageEffective<'a> {
+    Dense(controls::Effective),
+    Local(controls::LocalEffective<'a>),
+}
+
+impl controls::EffectiveSource for StageEffective<'_> {
+    fn strip(&self, index: usize) -> controls::EffectiveStrip {
+        match self {
+            Self::Dense(effective) => controls::EffectiveSource::strip(effective, index),
+            Self::Local(effective) => controls::EffectiveSource::strip(effective, index),
+        }
+    }
+
+    fn route_gate(&self, index: usize) -> [bool; 2] {
+        match self {
+            Self::Dense(effective) => controls::EffectiveSource::route_gate(effective, index),
+            Self::Local(effective) => controls::EffectiveSource::route_gate(effective, index),
+        }
+    }
+}
+
+/// The dense model a view stands for, without a copy when the view reads one whole model.
+fn dense<'a>(view: controls::ModelView<'a>) -> std::borrow::Cow<'a, SessionModel> {
+    if view.is_whole() {
+        std::borrow::Cow::Borrowed(view.structure())
+    } else {
+        std::borrow::Cow::Owned(view.to_model())
     }
 }
 
@@ -3161,7 +3224,7 @@ mod tests {
         .expect("a live delta");
         take_stage_counts();
         let staged = provider
-            .stage_live_catalog(&next, left, RATE, &delta)
+            .stage_live_catalog(controls::ModelView::whole(&next), left, RATE, &delta)
             .expect("staged");
         let (owners_read, full_stages) = take_stage_counts();
         assert_eq!(
@@ -3448,13 +3511,23 @@ mod tests {
         fail_next_stages(1);
         assert!(
             provider
-                .stage_live_catalog(&next, &MonitorOverlay::default(), RATE, &delta)
+                .stage_live_catalog(
+                    controls::ModelView::whole(&next),
+                    &MonitorOverlay::default(),
+                    RATE,
+                    &delta,
+                )
                 .is_err()
         );
         assert_eq!(whole_list(&mut provider, 256), before);
         assert_eq!(provider.revision, 1);
         provider
-            .stage_live_catalog(&next, &MonitorOverlay::default(), RATE, &delta)
+            .stage_live_catalog(
+                controls::ModelView::whole(&next),
+                &MonitorOverlay::default(),
+                RATE,
+                &delta,
+            )
             .expect("the failure was one-shot");
     }
 }

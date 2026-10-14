@@ -28,8 +28,7 @@ export const PROVENANCE = deepFreeze(
     "miso-engine-v1-audio-worklet-host.js",
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet.simd128.wasm",
-    "miso-engine-v1-parameter-metadata.json",
-    "prepared-control.js"
+    "miso-engine-v1-parameter-metadata.json"
   ],
   "stagingSequence": [
     "miso_engine_web_v1_abi_version",

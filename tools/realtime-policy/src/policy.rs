@@ -8,7 +8,32 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 
 /// The exports of that table that are not wrapped in `render_locked`, each with its reason in the
 /// table: `docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked allocator".
-const UNWRAPPED_EXPORTS: [&str; 2] = ["dispose", "render_allocation_count"];
+///
+/// Issue #1381a adds the two control exports of the single-instance mode: the service step and the
+/// control allocation counter. The worklet's message handler calls them outside `process()` and
+/// outside every render-locked window, because their allocations and frees are the control
+/// counter's (`render_lock.rs`).
+///
+/// Issue #1562a adds the five control exports of the generic command entry (D1): the request
+/// staging address, the command, the response address and length, and the committed revision. They
+/// run in the message handler too, and `SessionState::command` allocates and frees, so they are
+/// never inside a render-locked window.
+///
+/// Issue #1570b adds `control_event` (D1), the event entry: the worklet's message handler dequeues
+/// both event lanes through it after each message, and `SessionState::dequeue_event` runs the
+/// service step and encodes the frame, so it is control work of the same kind.
+const UNWRAPPED_EXPORTS: [&str; 10] = [
+    "dispose",
+    "render_allocation_count",
+    "service",
+    "control_allocation_count",
+    "control_request_ptr",
+    "control_command",
+    "control_event",
+    "control_response_ptr",
+    "control_response_bytes",
+    "control_revision",
+];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a
 /// control, teardown or harness thread, never inside a product render callback.
@@ -155,7 +180,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 22] = [
+        const UNSAFE_ALLOWLIST: [&str; 23] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -176,6 +201,7 @@ impl Policy {
             "hosts/host-web/src/render_lock.rs",
             "hosts/host-web/tests/boot_transient_budget.rs",
             "hosts/host-web/tests/control_parity.rs",
+            "hosts/host-web/tests/protocol_cross_host.rs",
             "tools/bench-support/src/alloc.rs",
             "tools/audit/src/capi.rs",
         ];

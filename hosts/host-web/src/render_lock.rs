@@ -5,8 +5,9 @@
 //! sits behind `Box<dyn PreparedPlanExecutor>` and is reached by a `call_indirect`. This module is
 //! the runtime proof: every export the engine worklet or the SDK's PCM-feed worklet calls on its
 //! render thread after boot runs inside [`render_locked`] (the set is the table
-//! `tools/realtime-policy/render-thread-exports.json`; its two named exceptions are `dispose`
-//! and `render_allocation_count`), and the module's global allocator counts each allocator call
+//! `tools/realtime-policy/render-thread-exports.json`; its named exceptions are the entries with
+//! `wrapped: false` that the worklets call after boot: `dispose`, `render_allocation_count`,
+//! `service`, `control_allocation_count`, the control-frame exports and `control_event`), and the module's global allocator counts each allocator call
 //! made while the flag is set. Browser qualification reads the count through
 //! `miso_engine_web_v1_render_allocation_count` and asserts it is exactly zero.
 //!
@@ -20,12 +21,10 @@
 //!   collection accessors (`spectrum_request_*`, `spectrum_collection_*`) and `document_ptr`.
 //!   None of them is wrapped, and neither is the `boot` export: there the collection staging is
 //!   sized and allocated by design.
-//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 28:
+//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 22:
 //!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `command_report_ptr`,
-//!   `prepared_companion_ptr`, `prepared_companion_capacity`, `live_control_track_count`,
-//!   `live_control_track_id`, `live_control_submix_count`, `live_control_submix_id`,
-//!   `live_control_route_count`, `live_control_route_id`, `live_control_vca_count`,
-//!   `live_control_vca_id`, `source_count`, `source_id`, `source_channels`, `source_frames`,
+//!   `live_control_track_count`, `live_control_track_id`, `live_control_submix_count`,
+//!   `live_control_submix_id`, `source_count`, `source_id`, `source_channels`, `source_frames`,
 //!   `observation_count`, `observation_track_index`, `observation_rack`,
 //!   `observation_effect_index`, `observation_effect_slot_id`, `observation_native_effect_id`,
 //!   `observation_tap_count`, `observation_tap_id` and `meter_header_ptr`.
@@ -38,6 +37,16 @@
 //!   `track_response_request_ptr`, `track_response_request_bytes`, `track_response_track_id_ptr`,
 //!   `track_response_track_id_capacity`, `track_response_snapshot_ptr` and
 //!   `track_response_snapshot_capacity`.
+//!
+//! # The control counter (issue #1381a, #1332 D1)
+//!
+//! Every allocator call made while the flag is *clear* counts in a second counter,
+//! `CONTROL_ALLOCATIONS`: boot, the control messages and the service step. In `single` mode, the
+//! browser's page without cross-origin isolation, that is the one place this engine allocates on
+//! an audio thread (decision 15 D15-10): the instance's control work runs in the worklet's message
+//! handler, outside `process()`. The host reports the count as `singleModeControlAllocations`
+//! through `miso_engine_web_v1_control_allocation_count`, so the allocation is counted and reported
+//! and not hidden. The render-locked count stays exactly zero.
 //!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it
 //! registers nothing with std: it is a plain static on today's non-atomic module and an
@@ -52,7 +61,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 thread_local! {
     static RENDER_LOCKED: Cell<bool> = const { Cell::new(false) };
@@ -60,8 +69,13 @@ thread_local! {
 
 static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
 
-/// A global allocator that counts every call made while the current thread is render-locked, then
-/// forwards it unchanged to the wrapped allocator.
+/// The allocator calls made while no render-locked window was open (#1381a). Wide, so that a long
+/// session cannot wrap it to a small number; the export that reports it is 32 bits and saturates
+/// (batch 7 review).
+static CONTROL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// A global allocator that counts every call made while the current thread is render-locked, and
+/// every other call in the control counter, then forwards it unchanged to the wrapped allocator.
 ///
 /// `alloc`, `alloc_zeroed`, `realloc` and `dealloc` each count one call, whatever their outcome:
 /// the claim is "render calls no allocator", not "render obtains no memory".
@@ -77,9 +91,11 @@ fn locked() -> bool {
 }
 
 #[inline]
-fn count_if_locked() {
+fn count_call() {
     if locked() {
         RENDER_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        CONTROL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -87,25 +103,25 @@ fn count_if_locked() {
 // counter observes calls and never alters a pointer, layout, size or lifetime.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for RenderLockedAllocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::alloc` is forwarded unchanged.
         unsafe { self.0.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::alloc_zeroed` is forwarded unchanged.
         unsafe { self.0.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::realloc` is forwarded unchanged.
         unsafe { self.0.realloc(pointer, layout, new_size) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        count_if_locked();
+        count_call();
         // SAFETY: the caller's contract for `GlobalAlloc::dealloc` is forwarded unchanged.
         unsafe { self.0.dealloc(pointer, layout) }
     }
@@ -136,6 +152,13 @@ pub(crate) fn render_allocation_count() -> u32 {
     RENDER_ALLOCATIONS.load(Ordering::Relaxed)
 }
 
+/// The number of allocator calls made outside render-locked windows since this instance started
+/// (#1381a): its boot, control messages and service steps. It saturates at `u32::MAX` and never
+/// wraps.
+pub(crate) fn control_allocation_count() -> u32 {
+    u32::try_from(CONTROL_ALLOCATIONS.load(Ordering::Relaxed)).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,11 +169,11 @@ mod tests {
     static WRAPPER: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 
     /// Every allocator entry point, called once each through the wrapper, in one window or none.
-    /// Returns how far the shared counter moved.
-    fn exercise(lock: bool) -> u32 {
+    /// Returns how far the render counter and the control counter moved.
+    fn exercise(lock: bool) -> (u32, u32) {
         let layout = Layout::from_size_align(64, 16).expect("valid layout");
         let run = || {
-            let before = render_allocation_count();
+            let before = (render_allocation_count(), control_allocation_count());
             // SAFETY: each pointer comes from the wrapper with `layout` and goes back to it with
             // the matching layout or size; nothing reads uninitialised memory.
             unsafe {
@@ -167,7 +190,10 @@ mod tests {
                 );
                 WRAPPER.dealloc(zeroed, layout);
             }
-            render_allocation_count().wrapping_sub(before)
+            (
+                render_allocation_count().wrapping_sub(before.0),
+                control_allocation_count().wrapping_sub(before.1),
+            )
         };
         if lock { render_locked(run) } else { run() }
     }
@@ -178,14 +204,23 @@ mod tests {
     #[test]
     fn render_lock_counts_each_entry_point_only_inside_its_own_window() {
         assert!(!locked(), "a fresh thread starts unlocked");
-        assert_eq!(exercise(false), 0, "an unlocked thread counts nothing");
+        assert_eq!(
+            exercise(false),
+            (0, 5),
+            "an unlocked thread counts in the control counter only"
+        );
         assert_eq!(
             exercise(true),
-            5,
-            "alloc, alloc_zeroed, realloc and two deallocs each count once in the window"
+            (5, 0),
+            "alloc, alloc_zeroed, realloc and two deallocs each count once in the window, and \
+             the window counts nothing in the control counter"
         );
         assert!(!locked(), "the window clears the flag when it returns");
-        assert_eq!(exercise(false), 0, "nothing counts after the window");
+        assert_eq!(
+            exercise(false),
+            (0, 5),
+            "nothing counts in the render counter after the window"
+        );
         assert_eq!(
             render_locked(|| 7_u8),
             7,
@@ -204,6 +239,15 @@ mod tests {
                     .expect("thread joins")
             })
         });
-        assert_eq!(moved, 0, "a window on another thread counts nothing here");
+        assert_eq!(
+            moved.0, 0,
+            "a window on another thread counts nothing in the render counter"
+        );
+        // The control counter is wide and its reader saturates: past `u32::MAX` calls it reads
+        // `u32::MAX` and never wraps to a small number.
+        CONTROL_ALLOCATIONS.store(u64::from(u32::MAX) - 1, Ordering::Relaxed);
+        exercise(false);
+        assert_eq!(control_allocation_count(), u32::MAX);
+        CONTROL_ALLOCATIONS.store(0, Ordering::Relaxed);
     }
 }

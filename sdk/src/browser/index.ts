@@ -1,6 +1,17 @@
 /** Package-owned browser boot, with independent context, scratch and host overrides. */
 export * from "./engine.ts";
 export * from "./live-controls.ts";
+export { EngineLiveControls } from "../core/live-controls.ts";
+export type { ControlEditSet, LiveControlTransport } from "../core/live-controls.ts";
+export { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
+export type {
+  ControlAppliedReport,
+  ControlQueueOptions,
+  ControlRefusedReport,
+  ControlReport,
+  ControlSend,
+} from "../core/control-queue.ts";
+export { MisoControlRefusal } from "../core/errors.ts";
 export type {
   MasterMeter,
   MeterListener,

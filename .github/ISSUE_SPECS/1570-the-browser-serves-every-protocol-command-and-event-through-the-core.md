@@ -279,3 +279,55 @@ head: `pcm_digest` `76525e7ef9e78cf4` on both (`cargo run --locked --release -p 
 `total_violations` 0). PR evidence, not a committed test. The fold also makes `control-plane` own
 every command refusal text: `CommandError::diagnostic` beside `EventError::diagnostic`, which the
 C ABI calls (#1562a needs it).
+
+## Decision record (#1570b, flip batch 6W, 2026-10-14)
+
+What shipped: D1 (`miso_engine_web_v1_control_event`, `AudioWorkletEngineHost::control_event`), D3's
+browser call (`render_next` calls `PlanState::observe_rendered_block` after every good render, inside
+the render-locked region, indexed with `get`), D4 (the drain in the worklet's message handler), D5
+(`onControlEvent`, `discardedControlEvents`, the `.d.ts` and its SDK copy), D6 (test-support
+`control_limits_for_test`) and D7 (the mirrors). Gates 1 to 3 are `hosts/host-web/tests/protocol_cross_host.rs`,
+gate 4 is in `scripts/test-web-audioworklet.mjs`, gate 5 is `audit capi` (`pcm_digest`
+`76525e7ef9e78cf4`, `total_violations` 0, equal to the batch 4 value).
+
+Adaptations from the filed text:
+
+1. **Drain placement.** The handler runs the service step after every message (#1381a D6), so one
+   drain at the end of `port.onmessage` (`receive`, then `serviceControl`, then `drainControlEvents`)
+   covers both D4 triggers (a `control` message and a service tick) and drains after the control
+   reply has been posted, never before it. Frames go out as `miso.control-event.v1`
+   `{ tag, lane, frame }` (the file's `miso.*.v1` spelling for the internal `control-event`), the
+   frame in a new transferred `Uint8Array`.
+2. **A refused dequeue is sticky.** D4 says "reported once in the host wrapper's error path". The
+   worklet takes its existing error path (`sticky`, one `miso.error.v1` with the export's result)
+   and drains no more; it does not retry. Any of the three refusals does this, `BACKPRESSURE`
+   included: `dequeue_event` refuses with it only when the service step cannot synchronize, which
+   `serviceControl` already treats as fatal.
+3. **`control_event` leaves the status's last result alone**, like `service`: a periodic drain must
+   not overwrite a refusal the page has yet to read. A wrong lane returns `RESULT_INVALID_ARGUMENT`;
+   a host that is not ready (or has no control half) returns `RESULT_REFUSED_LIFECYCLE`, which is
+   `RESULT_WRONG_STATE`.
+4. **The test-support drain is gone.** #1562a's `drain_reliable_events_for_test` and
+   `native_staging::drain_reliable_events` are deleted. The Rust tests (`common::drain_events`, the
+   realtime test) drain through `control_event` in D4's order, so every test commits through the
+   shipped drain.
+5. **Gate 2's "BACKPRESSURE".** The third undrained transaction is an ok call whose response frame is
+   the core's `protocol.backpressure` refusal at the unchanged revision, as on the C ABI (a refused
+   transaction is an ok call with a non-ok frame). The test checks the frame, not the call result.
+6. **No `bench-support` dev-dependency.** `scripts/check-bench-policy.sh` bans the crate under
+   `hosts/` ("a host adapter is an artifact that ships"), and its file is not in this slice's paths.
+   Gate 3 counts allocations and frees with a thread-scoped counting `GlobalAlloc` in the test
+   (`boot_transient_budget.rs` is the precedent), with its own `assert_installed`. `Cargo.toml` and
+   `Cargo.lock` are unchanged. The test binary is added to `realtime-policy`'s unsafe allowlist
+   (`tools/realtime-policy/src/policy.rs`, a path the filed text does not name).
+7. **Gate 1's failure rows.** For a failed call (steps 12, 13, 15 if refused) the C ABI leg's compared
+   bytes are `miso_engine_v1_last_error`, the browser leg's the diagnostic it stages: both are the
+   core's `CommandError::diagnostic`. Request IDs come from one counter per script.
+8. **Docs.** `docs/REALTIME_DEPENDENCY_POLICY.md` names `control_event` beside the #1562a exports.
+
+Evidence: boot growth of the 1 MiB worst document is 25,427,968 bytes (24.25 MiB), unchanged from
+#1381a; the multiplier-25 gate passes. `check-sdk-headless.sh target/ci/qa` still fails the same 25
+command-driven subtests as at #1381a: they drive the old `command()` path, and #1563B (the SDK's live
+controls through `host.control()`) restores them. `parameter-metadata`'s
+`every_metadata_id_resolves_through_a_command_acknowledgement` fails on the batch base as well and
+is #1565A's. `check-sdk-types.sh` was not run (it needs `npm ci`, which needs the network).

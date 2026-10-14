@@ -10,14 +10,8 @@ import {
 } from "./abi.ts";
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
+import { controlCallFailure } from "./control-frame.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
-import { createPreparedControl } from "../assets/prepared-control.js";
-import type {
-  PreparedAck,
-  PreparedAddress,
-  PreparedConfigReply,
-  PreparedControl,
-} from "../assets/prepared-control.js";
 import { TrackResponseModule } from "./live-response.ts";
 import type {
   TrackResponseObservedState,
@@ -202,13 +196,11 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
   }
   const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
     const {
-      commandQueueRecords,
       meterBlocks,
       observationTaps,
       masterTrackPlusOne,
     } = options.liveControls!;
     return Object.freeze({
-      ...(commandQueueRecords === undefined ? {} : { commandQueueRecords }),
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
       ...(observationTaps === undefined ? {} : { observationTaps }),
       ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
@@ -260,17 +252,6 @@ export interface SessionMap {
    * sections. Submix `j` is strip `tracks.length + j`.
    */
   readonly submixes: readonly string[];
-  /**
-   * The live routes (issue #1223 D3): the routes into submixes, in canonical route-ID order, as
-   * the engine enumerates them. A send edit's index word `i` addresses `routes[i]`. A route into
-   * the output is not live and is not listed.
-   */
-  readonly routes: readonly string[];
-  /**
-   * The VCA IDs (issue #1246 D3), in canonical VCA-ID order, as the engine enumerates them. A VCA
-   * edit's index word `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
-   */
-  readonly vcas: readonly string[];
 }
 
 interface ObservationLayoutField {
@@ -332,6 +313,9 @@ export interface MeterFrame {
 export class WasmBoundary {
   readonly #exports: ExportTable;
   #handle: number;
+  readonly #controlListeners = new Set<(event: ControlEvent) => void>();
+  #discardedControlEvents = 0;
+  #controlListenerFailures = 0;
   #optionBytes: Uint8Array;
   #metersAttached: boolean;
   #trackResponse: TrackResponseModule | undefined;
@@ -339,7 +323,6 @@ export class WasmBoundary {
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
   #spectrumActiveQuery: SpectrumQuery | undefined;
-  #preparedControl: PreparedControl | undefined;
 
   private constructor(
     exports: ExportTable,
@@ -569,8 +552,8 @@ export class WasmBoundary {
   }
 
   /**
-   * The canonical track/source/submix order, the live routes and the VCAs in the engine's own
-   * order, and whether meter observers were prepared.
+   * The canonical track/source/submix order in the engine's own order, and whether meter
+   * observers were prepared.
    */
   sessionMap(): SessionMap {
     const shape = this.shape();
@@ -579,33 +562,7 @@ export class WasmBoundary {
       sources: shape.sources,
       metersAttached: this.#metersAttached,
       submixes: shape.submixes,
-      routes: this.#liveRoutes(),
-      vcas: this.#liveVcas(),
     });
-  }
-
-  /** The VCA IDs, read from the engine's enumeration, never sorted here (issue #1246). */
-  #liveVcas(): readonly string[] {
-    const handle = this.#live();
-    const vcaCount = Number(this.#exports.miso_engine_web_v1_live_control_vca_count(handle));
-    const vcas: string[] = [];
-    for (let index = 0; index < vcaCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_vca_id(handle, index));
-      vcas.push(this.#readIdBuffer(idBytes));
-    }
-    return Object.freeze(vcas);
-  }
-
-  /** The live route IDs, read from the engine's enumeration, never sorted here (issue #1223). */
-  #liveRoutes(): readonly string[] {
-    const handle = this.#live();
-    const routeCount = Number(this.#exports.miso_engine_web_v1_live_control_route_count(handle));
-    const routes: string[] = [];
-    for (let index = 0; index < routeCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_route_id(handle, index));
-      routes.push(this.#readIdBuffer(idBytes));
-    }
-    return Object.freeze(routes);
   }
 
   /** Read the current prepared owner's stable resident-observation bindings. */
@@ -1254,37 +1211,138 @@ export class WasmBoundary {
     }
     new Uint8Array(memory.buffer, staging, frame.length).set(frame);
     const result = Number(command(handle, frame.length));
-    if (result !== constantValue("resultCodes", "ok")) {
-      throw new MisoEngineError("the engine refused a control frame", {
-        phase: "lifecycle",
-        code: resultName(result, "call"),
-        result,
-      });
-    }
     const pointer = Number(responsePointer(handle));
     const length = Number(responseBytes(handle));
-    if (pointer === 0 || pointer + length > memory.buffer.byteLength) {
+    const inBounds = pointer !== 0 && pointer + length <= memory.buffer.byteLength;
+    // The reply is copied out before anything else touches the staging: the event drain below
+    // reuses it.
+    const reply = inBounds ? new Uint8Array(memory.buffer, pointer, length).slice() : undefined;
+    // A commit queues a reliable event, and the queue holds two: the next commit is refused with
+    // backpressure until the host reads them. A control call is therefore followed by the drain, as
+    // the browser worklet's message handler does (#1570b D4).
+    this.#drainControlEvents(handle);
+    if (result !== constantValue("resultCodes", "ok")) {
+      // A failed call leaves the refusal's diagnostic text where a success leaves the response.
+      throw controlCallFailure(result, reply ?? new Uint8Array(0));
+    }
+    if (reply === undefined) {
       throw new MisoEngineError("the engine returned a malformed control reply buffer", {
         phase: "lifecycle",
         code: "internal",
         result: constantValue("resultCodes", "internal"),
       });
     }
-    return new Uint8Array(memory.buffer, pointer, length).slice();
+    return reply;
   }
 
-  /** Stage `count` already-encoded 48-byte command records and submit them as one transaction. */
+  /**
+   * Subscribe to the protocol events of the engine's control plane (#1570b): every listener gets
+   * `{ lane, frame }` for each event the engine queued, in arrival order, where `lane` is `0` for the
+   * reliable lane and `1` for the lossy lane and `frame` is the event frame the engine encoded,
+   * unchanged. Events are read after each control frame; one that arrives while no listener is
+   * subscribed is dropped and counted in `discardedControlEvents`. An event is not the ack of a
+   * command (its reply is), so a drop changes no engine state. Returns the unsubscribe function.
+   */
+  onControlEvent(listener: (event: ControlEvent) => void): () => void {
+    if (typeof listener !== "function") {
+      throw new MisoUsageError("a control event listener must be a function");
+    }
+    this.#controlListeners.add(listener);
+    return () => {
+      this.#controlListeners.delete(listener);
+    };
+  }
+
+  /** The number of times a control event listener threw. The throw never reaches the caller of a control frame. */
+  get controlListenerFailures(): number {
+    return this.#controlListenerFailures;
+  }
+
+  /** The number of control events dropped because no listener was subscribed. */
+  get discardedControlEvents(): number {
+    return this.#discardedControlEvents;
+  }
+
+  #drainControlEvents(handle: number): void {
+    const event = optionalExport(this.#exports, "miso_engine_web_v1_control_event");
+    const responsePointer = optionalExport(this.#exports, "miso_engine_web_v1_control_response_ptr");
+    const responseBytes = optionalExport(this.#exports, "miso_engine_web_v1_control_response_bytes");
+    if (event === undefined || responsePointer === undefined || responseBytes === undefined) return;
+    const memory = this.#exports.memory;
+    for (const lane of [0, 1]) {
+      // The queues hold two reliable events, two render diagnostics and one telemetry event, so
+      // the bound is never the limit.
+      for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
+        const result = Number(event(handle, lane));
+        if (result !== constantValue("resultCodes", "ok")) {
+          throw new MisoEngineError("the engine refused to read a control event", {
+            phase: "lifecycle",
+            code: resultName(result, "call"),
+            result,
+          });
+        }
+        const length = Number(responseBytes(handle));
+        if (length === 0) break;
+        const pointer = Number(responsePointer(handle));
+        if (pointer === 0 || pointer + length > memory.buffer.byteLength) {
+          throw new MisoEngineError("the engine returned a malformed control event buffer", {
+            phase: "lifecycle",
+            code: "internal",
+            result: constantValue("resultCodes", "internal"),
+          });
+        }
+        if (this.#controlListeners.size === 0) {
+          this.#discardedControlEvents += 1;
+          continue;
+        }
+        const frame = new Uint8Array(memory.buffer, pointer, length).slice();
+        const delivered = Object.freeze({ lane: lane as 0 | 1, frame });
+        // A listener that throws loses nothing: the reply the core committed is still returned. The
+        // failure is counted and reported outside this call.
+        for (const listener of [...this.#controlListeners]) {
+          try {
+            listener(delivered);
+          } catch (error: unknown) {
+            this.#controlListenerFailures += 1;
+            reportAsynchronously(error);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * The committed session revision of the core's control plane, as the next `SET_CONTROL`
+   * transaction must expect it (#1562a). A transaction queue seeds from it after every successful
+   * boot, so it never assumes a session starts at `0`.
+   */
+  controlRevision(): bigint {
+    const handle = this.#live();
+    const revision = optionalExport(this.#exports, "miso_engine_web_v1_control_revision");
+    if (revision === undefined) {
+      throw new MisoEngineError("the engine module has no control entry", {
+        phase: "asset",
+        code: "unsupported",
+        result: constantValue("resultCodes", "unsupported"),
+        diagnostics: [{ code: "sdk.asset.export", path: "miso_engine_web_v1_control_revision" }],
+      });
+    }
+    return BigInt(revision(handle));
+  }
+
+  /**
+   * Stage `count` already-encoded 48-byte command records and submit them as one transaction.
+   *
+   * Only the observation records (kinds 7 and 8) are command records any more; a value edit is a
+   * `SET_CONTROL` transaction (`controlFrame`).
+   */
   submitCommands(records: Uint8Array, count: number): CommandReport {
-    return this.#submitPreparedCommands(records, count);
-  }
-
-  #submitOrdinaryCommands(records: Uint8Array, count: number): CommandReport {
     const handle = this.#live();
     const recordBytes = ABI_LAYOUT.commandRecord.bytes;
     const staging = this.#buffer("command");
     if (staging.pointer === 0 || staging.capacity === 0) {
       throw new MisoUsageError(
-        "this engine booted with no live controls attached; set liveControls.commandQueueRecords",
+        "this engine booted with no observation taps attached; set liveControls.observationTaps",
       );
     }
     if (records.byteLength !== count * recordBytes) {
@@ -1300,111 +1358,6 @@ export class WasmBoundary {
     new Uint8Array(this.#exports.memory.buffer, staging.pointer, records.byteLength).set(records);
     const result = Number(this.#exports.miso_engine_web_v1_command_submit(handle, count));
     return this.#readCommandReport(handle, result);
-  }
-
-  /** Lower semantic EQ edits through the shared off-render preparation owner. */
-  #submitPreparedCommands(records: Uint8Array, count: number): CommandReport {
-    const control = this.#preparedControl ??= createPreparedControl({
-      instance: this.#exports,
-      abiLayout: ABI_LAYOUT,
-      sampleRateHz: this.#status().u32("sampleRateHz"),
-      configCopySync: (address) => this.#preparedConfigCopy(address),
-      ordinarySubmitSync: (bytes, batchCount) => this.#submitPreparedOrdinary(bytes, batchCount),
-      preparedSubmitSync: (bytes, companion, batchCount) =>
-        this.#submitPreparedBatch(bytes, companion, batchCount),
-      preparedRefusalSync: (bytes, batchCount, reason, rejectedIndex, result) =>
-        this.#preparedRefusal(bytes, batchCount, reason, rejectedIndex, result),
-    });
-    const reply = control.submitSync(records, count);
-    return this.#publicCommandReport(reply);
-  }
-
-  #preparedConfigCopy(address: PreparedAddress): PreparedConfigReply {
-    const handle = this.#live();
-    const builtin = address.rack === 255 && address.effectIndex === 0;
-    const result = builtin
-      ? Number(this.#exports.miso_engine_web_v1_input_filters_config_copy(handle, address.trackIndex))
-      : Number(this.#exports.miso_engine_web_v1_eq_target_config_copy(
-        handle, address.trackIndex, address.rack, address.effectIndex,
-      ));
-    const ok = constantValue("resultCodes", "ok");
-    if (result === ok) {
-      const pointer = Number(this.#exports.miso_engine_web_v1_eq_target_config_ptr(handle));
-      const bytes = structBytes(builtin ? "builtinInputConfig" : "eqTargetConfig");
-      if (pointer === 0 || pointer + bytes > this.#exports.memory.buffer.byteLength) {
-        throw new MisoEngineError(
-          `the engine returned a malformed prepared ${builtin ? "builtin input-filter" : "EQ"} configuration`,
-          {
-            phase: "asset",
-            code: "abiMismatch",
-            result: constantValue("resultCodes", "abiMismatch"),
-            diagnostics: [{ code: "sdk.prepared.config", path: builtin ? "builtinInputConfig" : "eqTargetConfig" }],
-          },
-        );
-      }
-      return { result, reason: commandReasonValue("none"), config: new Uint8Array(
-        this.#exports.memory.buffer, pointer, bytes,
-      ).slice() };
-    }
-    let reason = commandReasonValue("none");
-    if (result === constantValue("resultCodes", "invalidArgument")) {
-      // Issue #1213 D5a: the index is a strip index (tracks, then submixes), so the bound is the
-      // strip count; a bad rack or effect on a bus is not an unknown track.
-      const stripCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle))
-        + Number(this.#exports.miso_engine_web_v1_live_control_submix_count(handle));
-      // An effect lives in an insert (`1`) or a console slot (`3`); anything else, the retired
-      // `0` and `2` included, is an unknown rack, as the worklet classifies it (#1096).
-      const effectRack = address.rack === constantValue("racks", "inserts")
-        || address.rack === constantValue("racks", "console");
-      reason = address.trackIndex >= stripCount
-        ? commandReasonValue("unknownTrack")
-        : !effectRack
-          ? commandReasonValue("unknownRack")
-          : commandReasonValue("unknownEffect");
-    }
-    return { result, reason, config: new Uint8Array(0) };
-  }
-
-  #submitPreparedOrdinary(records: Uint8Array, count: number): PreparedAck {
-    return { ...this.#submitOrdinaryCommands(records, count), records: records.slice() };
-  }
-
-  #submitPreparedBatch(records: Uint8Array, companion: Uint8Array, count: number): PreparedAck {
-    const handle = this.#live();
-    const staging = this.#buffer("command");
-    const pointer = Number(this.#exports.miso_engine_web_v1_prepared_companion_ptr(handle));
-    const capacity = Number(this.#exports.miso_engine_web_v1_prepared_companion_capacity(handle));
-    if (records.byteLength > staging.capacity || records.byteLength !== count * ABI_LAYOUT.commandRecord.bytes
-        || pointer === 0 || companion.byteLength > capacity
-        || pointer + companion.byteLength > this.#exports.memory.buffer.byteLength) {
-      throw new MisoUsageError("prepared command staging is too small");
-    }
-    new Uint8Array(this.#exports.memory.buffer, staging.pointer, records.byteLength).set(records);
-    new Uint8Array(this.#exports.memory.buffer, pointer, companion.byteLength).set(companion);
-    const result = Number(this.#exports.miso_engine_web_v1_prepared_command_submit(
-      handle, count, companion.byteLength,
-    ));
-    return { ...this.#readCommandReport(handle, result), records: records.slice() };
-  }
-
-  #preparedRefusal(
-    records: Uint8Array,
-    _count: number,
-    reason: number,
-    rejectedIndex: number | undefined,
-    result: number,
-  ): PreparedAck {
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-      reason,
-      reasonName: commandReasonName(reason),
-      rejectedIndex: rejectedIndex ?? 0,
-      admitted: 0,
-      appliedAtSample: 0n,
-      records: records.slice(),
-    });
   }
 
   #readCommandReport(handle: number, result: number): CommandReport {
@@ -1426,19 +1379,6 @@ export class WasmBoundary {
     });
   }
 
-  #publicCommandReport(reply: PreparedAck): CommandReport {
-    return Object.freeze({
-      ok: reply.result === constantValue("resultCodes", "ok"),
-      result: reply.result,
-      code: resultName(reply.result, "call"),
-      reason: reply.reason,
-      reasonName: commandReasonName(reply.reason),
-      rejectedIndex: reply.rejectedIndex,
-      admitted: reply.admitted,
-      appliedAtSample: reply.appliedAtSample,
-    });
-  }
-
   /**
    * Release the session.
    *
@@ -1447,8 +1387,6 @@ export class WasmBoundary {
    * (issue #243 S2(a)).
    */
   dispose(): void {
-    this.#preparedControl?.close();
-    this.#preparedControl = undefined;
     if (this.#handle === 0) return;
     this.#trackResponse?.close();
     this.#trackResponse = undefined;
@@ -1466,6 +1404,32 @@ export class WasmBoundary {
         result,
       });
     }
+  }
+}
+
+/** One protocol event of the engine's control plane, as the engine encoded it. */
+export interface ControlEvent {
+  /** `0` the reliable lane, `1` the lossy lane. */
+  readonly lane: 0 | 1;
+  readonly frame: Uint8Array;
+}
+
+/** The most `control_event` calls one drain makes on a lane (#1570b D4). */
+const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
+
+/**
+ * Report an error outside the current call, as an event target does for a listener that throws:
+ * `reportError` where the global has one (browsers and workers), otherwise an uncaught throw from a
+ * microtask, which Node surfaces as `uncaughtException`.
+ */
+function reportAsynchronously(error: unknown): void {
+  const report = (globalThis as { reportError?: (error: unknown) => void }).reportError;
+  if (typeof report === "function") {
+    queueMicrotask(() => report.call(globalThis, error));
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
   }
 }
 
@@ -1487,14 +1451,6 @@ export function commandReasonName(value: number): CommandReasonName {
     throw new MisoUsageError(`the engine reported an unknown command reason ${value}`);
   }
   return name;
-}
-
-function commandReasonValue(name: CommandReasonName): number {
-  const value = ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name)?.value;
-  if (value === undefined) {
-    throw new MisoUsageError(`the generated ABI has no command reason ${name}`);
-  }
-  return value;
 }
 
 /**

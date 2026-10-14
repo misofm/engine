@@ -20,42 +20,6 @@ export const CATALOG = deepFreeze(
   "maximumCommandRecords": 256,
   "commandKinds": [
     {
-      "value": 1,
-      "name": "pan",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 2,
-      "name": "matrix",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 3,
-      "name": "faderDb",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 4,
-      "name": "mute",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 5,
-      "name": "effectParam",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 6,
-      "name": "effectBypass",
-      "applied": true,
-      "plane": "render"
-    },
-    {
       "value": 7,
       "name": "observeSubscribe",
       "applied": true,
@@ -66,60 +30,6 @@ export const CATALOG = deepFreeze(
       "name": "observeUnsubscribe",
       "applied": true,
       "plane": "observation"
-    },
-    {
-      "value": 9,
-      "name": "solo",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 10,
-      "name": "trimDb",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 11,
-      "name": "polarityInvert",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 12,
-      "name": "inputFilters",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 13,
-      "name": "routeGainDb",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 14,
-      "name": "routeMute",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 15,
-      "name": "routeMatrix",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 16,
-      "name": "vcaFaderDb",
-      "applied": true,
-      "plane": "render"
-    },
-    {
-      "value": 17,
-      "name": "vcaMute",
-      "applied": true,
-      "plane": "render"
     }
   ],
   "commandReasons": [
@@ -170,18 +80,6 @@ export const CATALOG = deepFreeze(
     {
       "value": 11,
       "name": "observationUnbound"
-    },
-    {
-      "value": 12,
-      "name": "notSoloable"
-    },
-    {
-      "value": 13,
-      "name": "unknownRoute"
-    },
-    {
-      "value": 14,
-      "name": "unknownVca"
     }
   ],
   "observationVocabularies": {

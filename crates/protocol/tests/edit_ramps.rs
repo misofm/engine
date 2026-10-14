@@ -785,6 +785,7 @@ fn set_control_writes_exactly_the_field_its_address_names() {
             .prepare_transaction(ExpectedRevision::Exact(store.revision()), &[edit])
             .expect("prepares")
             .compiled()
+            .expect("a compiled transaction")
             .normalized_model()
             .clone()
     };

@@ -203,6 +203,7 @@ through `test_spectrum_mut()`.
 - *Swap and retire browser plans through the Worker's service loop* (#1381) and #1562 (the browser
   path of gate 8).
 - `crates/capi` is stream B's: rebase after stream B's open edits.
+- #1609 (make the spectrum one-shot handoff safe across threads), root 2026-10-14.
 
 ## Supersedes and shrinks
 

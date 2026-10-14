@@ -34,31 +34,37 @@ mod lane;
 mod live_lanes;
 mod live_ramps;
 mod mask;
+mod owner_edits;
 mod registry;
 mod route;
 mod session_rows;
 mod strip;
 mod tables;
 mod vca;
+mod view;
 
 pub use address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use descriptor::{Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check};
-pub use diff::{ChangedControl, changed_controls};
+pub use diff::{ChangedControl, changed_controls, changed_rows, writes_only_its_row};
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
 };
 pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
-    EffectiveStrip, ModelInputs, MonitorChange, MonitorOverlay, MonitorWrite, any_solo, effective,
-    effective_follow, effective_gate, effective_into, effective_strip, solo_term,
+    EffectiveSource, EffectiveStrip, LocalEffective, LocalInputs, ModelInputs, MonitorChange,
+    MonitorOverlay, MonitorWrite, any_solo, any_solo_in, effective, effective_follow,
+    effective_gate, effective_into, effective_strip, solo_term,
 };
 pub use error::ControlError;
 pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
+pub use owner_edits::{OwnerEditError, OwnerEdits};
 pub use registry::{
-    ControlRow, check_monitor, derived_rows_with, get, list, owner_count, owner_index,
-    owner_rows_with, row_descriptor, row_motion, row_scope, set,
+    ControlRow, check_monitor, derived_rows_in, derived_rows_with, get, list, owner_count,
+    owner_index, owner_rows_in, owner_rows_with, row_descriptor, row_motion, row_scope, set,
+    strip_index,
 };
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};
+pub use view::ModelView;

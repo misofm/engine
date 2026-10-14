@@ -220,6 +220,8 @@ impl From<CompileLimits> for ControlLimits {
             maximum_replay_entries: limits.maximum_replay_entries,
             maximum_submixes: limits.maximum_submixes,
             maximum_vcas: limits.maximum_vcas,
+            // The compile limits carry no word for it: the same bound as every host.
+            maximum_vca_reach_pairs: host_core::MAXIMUM_VCA_REACH_PAIRS,
         }
     }
 }

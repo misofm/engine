@@ -341,9 +341,9 @@ pub(crate) fn resolve(
     control: u32,
     sample_rate: u32,
 ) -> Result<Resolved, ControlError> {
-    let strip = model
-        .strips()
-        .find(|strip| strip.id == id)
+    // A binary search on a compiled session's model, a scan on any other (`strip_index`).
+    let strip = crate::registry::strip_index(model, id)
+        .map(|index| crate::registry::strip_at(model, index))
         .ok_or(ControlError::AddressUnknown)?;
     let unknown = ControlError::AddressUnknown;
     match section {

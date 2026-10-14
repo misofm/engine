@@ -8,8 +8,8 @@ mod common;
 
 use common::{RATE, effects_fixture, id};
 use controls::{
-    ControlClass, ControlKind, ControlRow, ControlScope, Lane, MonitorOverlay, changed_controls,
-    list, mask_values, set,
+    ControlClass, ControlKind, ControlRow, ControlScope, Lane, MonitorOverlay, Owner, Section,
+    changed_controls, changed_rows, list, mask_values, set,
 };
 use session::SessionModel;
 
@@ -186,4 +186,73 @@ fn the_vca_set_and_its_members_are_values() {
     let changes = changed_controls(&base, &moved, RATE).expect("same addresses");
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0].address.owner, controls::Owner::Vca(_)));
+}
+
+/// #1612 D4. Red if `changed_rows` differs from the row's share of `changed_controls` for any
+/// writable row of the model, or answers for a row whose write moves more than the row (the
+/// session's ramp lengths, a strip's `matrix_mode`), where the caller needs the full diff.
+#[test]
+fn a_rows_changes_are_its_share_of_the_diff() {
+    let base = effects_fixture();
+    let rate = RATE;
+    let mut local = 0;
+    for row in writable(&base) {
+        let mut edited = base.clone();
+        set(&mut edited, &row.address, probe(&row), None, rate).expect("set");
+        let named = |change: &controls::ChangedControl| {
+            let (left, right) = (&change.address, &row.address);
+            left.owner == right.owner
+                && left.section == right.section
+                && left.control == right.control
+        };
+        let expected: Vec<_> = changed_controls(&base, &edited, rate)
+            .expect("same addresses")
+            .into_iter()
+            .filter(named)
+            .collect();
+        let moves_more = matches!(row.address.owner, Owner::Session)
+            || (matches!(row.address.owner, Owner::Strip(_))
+                && row.address.section == Section::Own
+                && row.descriptor.name == "matrix_mode");
+        let got = changed_rows(&base, &edited, &row.address, rate);
+        if moves_more {
+            assert_eq!(got, None, "{:?}", row.address);
+        } else {
+            assert_eq!(got, Some(expected), "{:?}", row.address);
+            local += 1;
+        }
+    }
+    assert!(local > 500, "the fixture covers the rows: {local}");
+
+    // Unchanged, derived, host-held and unresolvable rows.
+    let strip = |name: &str, section, control, lane| controls::ControlAddress {
+        owner: Owner::Strip(id(name)),
+        section,
+        control,
+        lane,
+    };
+    let fader = strip("vocal", Section::Builtins, 5, Lane::Both);
+    assert_eq!(changed_rows(&base, &base, &fader, rate), Some(Vec::new()));
+    for address in [
+        strip("vocal", Section::Own, 64, Lane::Left),
+        strip("vocal", Section::Own, 2, Lane::Both),
+        strip("nobody", Section::Builtins, 5, Lane::Both),
+        strip("vocal", Section::Builtins, 999, Lane::Both),
+    ] {
+        assert_eq!(
+            changed_rows(&base, &base, &address, rate),
+            None,
+            "{address:?}"
+        );
+    }
+    // The lane of the address does not matter: a `both` write is judged on both lanes.
+    let mut louder = base.clone();
+    set(&mut louder, &fader, -9.0, None, rate).expect("set");
+    let left = strip("vocal", Section::Builtins, 5, Lane::Left);
+    let lanes: Vec<_> = changed_rows(&base, &louder, &left, rate)
+        .expect("local")
+        .into_iter()
+        .map(|change| change.address.lane)
+        .collect();
+    assert_eq!(lanes, [Lane::Left, Lane::Right]);
 }

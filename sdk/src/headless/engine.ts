@@ -4,6 +4,7 @@ import { MisoEngineAsset } from "../core/asset.ts";
 import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
 import type {
   CommandReport,
+  ControlEvent,
   EngineCallResult,
   EngineStatus,
   MeterFrame,
@@ -32,7 +33,8 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import { ControlTransactionQueue } from "../core/control-queue.ts";
+import { decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
+import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -272,8 +274,10 @@ export class OfflineEngine {
    * addressable by their stable IDs; otherwise use `withSession()` or address them by index.
    */
   liveControls(): EngineLiveControls {
-    return new EngineLiveControls(this.sessionMap(), (edits) =>
-      this.submitCommands(encodeLaneEdits(edits), edits.length),
+    return new EngineLiveControls(this.sessionMap(), {
+      queue: this.controlTransactions(),
+      observe: (edits) => this.submitCommands(encodeLaneEdits(edits), edits.length),
+    },
       (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
       this.#session,
       this.#booted);
@@ -284,13 +288,67 @@ export class OfflineEngine {
    *
    * Every `SET_CONTROL` transaction this engine sends goes through it, one in flight at a time, each
    * with the committed revision the last reply reported. The queue calls the core in process through
-   * the module's control entry; a module without that entry refuses the first transaction with
-   * `unsupported`. It starts over at the booted session's revision on `loadSession()` and closes on
-   * `dispose()`.
+   * the module's control entry, and starts from the core's own committed revision
+   * (`miso_engine_web_v1_control_revision`); a module without those exports refuses here with
+   * `unsupported`. It starts over at the revision of the session that replaces the booted one on
+   * `loadSession()`, and closes on `dispose()`.
    */
   controlTransactions(): ControlTransactionQueue {
-    return this.#controlQueue ??= new ControlTransactionQueue((frame) =>
-      this.#boundary.controlFrame(frame));
+    if (this.#controlQueue === undefined) {
+      const requestIds = new ControlRequestIds();
+      // The core reports its own frame ceiling, which the queue holds every transaction under.
+      const limits = decodeControlLimits(
+        this.#boundary.controlFrame(encodeRevisionProbe(requestIds.next())),
+      );
+      this.#controlQueue = new ControlTransactionQueue(
+        (frame) => this.#boundary.controlFrame(frame),
+        {
+          initialRevision: this.#boundary.controlRevision(),
+          requestIds,
+          limits,
+          readRevision: () => this.#boundary.controlRevision(),
+        },
+      );
+    }
+    return this.#controlQueue;
+  }
+
+  /**
+   * Send one command frame to the core and return its reply frame: the entry the C ABI's
+   * `miso_engine_v1_submit_command` runs. Nothing in the frame is decoded here. The engine's
+   * replay cache refuses a reused request ID, so a frame sent this way draws its ID from
+   * `controlTransactions().requestIds`, the one allocator that serves this endpoint.
+   */
+  controlFrame(frame: Uint8Array): Uint8Array {
+    return this.#boundary.controlFrame(frame);
+  }
+
+  /** The committed session revision the core reports (`miso_engine_web_v1_control_revision`). */
+  controlRevision(): bigint {
+    return this.#boundary.controlRevision();
+  }
+
+  /**
+   * Subscribe to the protocol events of the engine's control plane (#1570b): `{ lane, frame }` for
+   * each event, in arrival order, `lane` `0` for the reliable lane and `1` for the lossy lane. The
+   * engine is read for events after every control frame, because a commit queues two and the next
+   * commit waits for them to be read; an event that arrives with no listener is dropped and counted
+   * in `discardedControlEvents`. A listener that throws never loses the reply of the frame that
+   * produced the event: the throw is counted in `controlListenerFailures` and reported
+   * asynchronously. Returns the unsubscribe function.
+   */
+  onControlEvent(listener: (event: ControlEvent) => void): () => void {
+    return this.#boundary.onControlEvent(listener);
+  }
+
+  /** The number of control events dropped because no listener was subscribed. */
+  get discardedControlEvents(): number {
+    return this.#boundary.discardedControlEvents;
+  }
+
+  /** The number of times a control event listener threw; the throw is reported outside the control call. */
+  get controlListenerFailures(): number {
+    return this.#boundary.controlListenerFailures;
   }
 
   nextAbsoluteSample(): bigint {
@@ -355,12 +413,20 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
-    this.#controlQueue?.reset();
     // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
     this.#session = undefined;
     this.#booted = undefined;
     const bytes = documentBytes(document);
-    this.#boundary.reboot(bytes, options);
+    // The queue starts over at the revision the core reports for the new session, never at an
+    // assumed `0`. A refused reboot disposed the old session, so the queue only drops what was
+    // staged for it; its next send finds a disposed engine and refuses.
+    let revision = 0n;
+    try {
+      this.#boundary.reboot(bytes, options);
+      revision = this.#boundary.controlRevision();
+    } finally {
+      this.#controlQueue?.reset(revision);
+    }
     this.#session = builtSession(document);
     this.#booted = bytes.slice();
   }

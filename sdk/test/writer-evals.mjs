@@ -18,13 +18,13 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { LiveControlWriter } from "../src/core/writer.ts";
-import { MisoUsageError } from "../src/core/errors.ts";
+import { CONTROL_TRANSACTION_HEADER_BYTES, controlEditBytes } from "../src/core/control-frame.ts";
+import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
-const QUEUE_RECORDS = ABI_LAYOUT.constants.defaultCommandQueueRecords;
 
 const EQ_PARAMS = [
   { id: 1, unit: "linear", value: 1.0 },
@@ -81,31 +81,31 @@ const GAIN_IDS = CATALOG.effects
   .filter((row) => row.name.endsWith("-gain") && row.liveUpdatable)
   .map((row) => row.id);
 
-/** A band-gain edit on one lane. `parameterId` varies so edits address distinct controls. */
-function gainEdit(parameterId, channel, value) {
+const LANES = ["left", "right", "both"];
+
+/** A band-gain edit on one lane (`0` left, `1` right) of console slot `eq0`. */
+function gainEdit(parameterId, channel, value, slot = "eq0") {
   return {
-    kind: "effectParam",
-    trackIndex: 0,
-    rack: 3, // console: the EQs are console slots
-    channel,
-    effectIndex: 0,
-    parameterId,
-    smoothingSamples: 0,
-    values: [value, 0, 0, 0],
+    address: {
+      owner: { kind: "strip", id: "t" },
+      section: { kind: "console", slot },
+      control: parameterId,
+      lane: LANES[channel],
+    },
+    value,
   };
 }
 
 /** A fader edit, which addresses the strip rather than an effect. */
 function faderEdit(channel, db) {
   return {
-    kind: "faderDb",
-    trackIndex: 0,
-    rack: 255,
-    channel,
-    effectIndex: 0,
-    parameterId: 0,
-    smoothingSamples: 0,
-    values: [db, 0, 0, 0],
+    address: {
+      owner: { kind: "strip", id: "t" },
+      section: { kind: "builtins" },
+      control: 5,
+      lane: LANES[channel],
+    },
+    value: db,
   };
 }
 
@@ -116,17 +116,14 @@ before(async () => {
 });
 
 async function pausedEngine(instances = 1) {
-  return createOfflineEngine(liveControlDocument(instances), {
-    asset,
-    liveControls: { commandQueueRecords: QUEUE_RECORDS },
-  });
+  return createOfflineEngine(liveControlDocument(instances), { asset });
 }
 
 /** A paused engine whose compressors each declare one tap, so each has a one-slot queue. */
 async function observedEngine(count = 1) {
   return createOfflineEngine(compressorsDocument(count), {
     asset,
-    liveControls: { commandQueueRecords: QUEUE_RECORDS, observationTaps: 4 },
+    liveControls: { observationTaps: 4 },
   });
 }
 
@@ -158,14 +155,13 @@ describe("the writer contract -- paused", () => {
     // The cell contract (#1345): effect parameters are latest-target cells, so a paused transport
     // has no queue to fill. Two hundred flushes of eight non-coalescing addresses (four bands, both
     // lanes) are all admitted, and one block renders as the twin that was sent only the last values.
+    // The transaction queue reads the engine's events after every frame, which is what keeps the
+    // core's two-event reliable queue from refusing the third commit.
     const many = await pausedEngine();
     const last = await pausedEngine();
     try {
       const final = 200;
-      const writer = new LiveControlWriter({
-        submit: (records, count) => many.submitCommands(records, count),
-        maximumBatch: 8,
-      });
+      const writer = new LiveControlWriter({ queue: many.controlTransactions(), maximumBatch: 8 });
       for (let flush = 1; flush <= final; flush += 1) {
         for (const parameterId of GAIN_IDS) {
           writer.stage(gainEdit(parameterId, 0, -0.01 * flush));
@@ -176,13 +172,10 @@ describe("the writer contract -- paused", () => {
       }
       assert.equal(writer.stats.refusals, 0);
       assert.equal(writer.stats.escalations, 0);
-      assert.equal(writer.pending, 0, "every flush took all eight records");
+      assert.equal(writer.pending, 0, "every flush took all eight edits");
       assert.equal(writer.stats.admitted, final * GAIN_IDS.length * 2);
 
-      const twin = new LiveControlWriter({
-        submit: (records, count) => last.submitCommands(records, count),
-        maximumBatch: 8,
-      });
+      const twin = new LiveControlWriter({ queue: last.controlTransactions(), maximumBatch: 8 });
       for (const parameterId of GAIN_IDS) {
         twin.stage(gainEdit(parameterId, 0, -0.01 * final));
         twin.stage(gainEdit(parameterId, 1, 0.01 * final));
@@ -323,7 +316,7 @@ describe("the writer contract -- paused", () => {
 describe("the writer contract -- coalescing and escalation", () => {
   test("a hundred positions of one control collapse to one pending record", () => {
     const writer = new LiveControlWriter({
-      submit: () => { throw new Error("not reached"); },
+      queue: { submit: () => { throw new Error("not reached"); } },
       maximumBatch: 4,
     });
     for (let position = 0; position < 100; position += 1) {
@@ -335,7 +328,7 @@ describe("the writer contract -- coalescing and escalation", () => {
 
   test("distinct addresses do not coalesce into each other", () => {
     const writer = new LiveControlWriter({
-      submit: () => { throw new Error("not reached"); },
+      queue: { submit: () => { throw new Error("not reached"); } },
       maximumBatch: 4,
     });
     // Same parameter, different lanes, and a different kind entirely: three addresses.
@@ -351,17 +344,55 @@ describe("the writer contract -- coalescing and escalation", () => {
     // retrying it silently would be an infinite loop wearing the costume of resilience.
     const engine = await pausedEngine();
     try {
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 4,
-      });
-      writer.stage({ ...gainEdit(GAIN_IDS[0], 2, -1), trackIndex: 99 });
-      await assert.rejects(() => writer.flush(), MisoUsageError);
+      const writer = new LiveControlWriter({ queue: engine.controlTransactions(), maximumBatch: 4 });
+      const edit = gainEdit(GAIN_IDS[0], 2, -1);
+      writer.stage({ ...edit, address: { ...edit.address, owner: { kind: "strip", id: "ghost" } } });
+      const refusal = await writer.flush().catch((error) => error);
+      assert.ok(refusal instanceof MisoControlRefusal);
+      assert.equal(refusal.code, "control.address.unknown");
       assert.equal(writer.stats.escalations, 1);
-      assert.equal(writer.stats.refusals, 0, "an unknown track is not flow control");
+      assert.equal(writer.stats.refusals, 0, "an unknown strip is not flow control");
     } finally {
       engine.dispose();
     }
+  });
+
+  test("backpressure from the core is flow control: nothing is dropped and nothing escalates", async () => {
+    // The core answers a full control queue with the `backpressure` status. The writer halves its
+    // batch and keeps every edit pending, exactly as for a full observation queue.
+    const calls = [];
+    const full = {
+      async submit(edits) {
+        calls.push(edits.length);
+        if (calls.length === 1) {
+          throw new MisoControlRefusal({
+            code: "protocol.backpressure", status: "backpressure", revision: 3n,
+            editIndex: undefined, diagnostics: [],
+          });
+        }
+        return { ok: true, revision: 4n, path: "live", appliedOperations: edits.length };
+      },
+    };
+    const writer = new LiveControlWriter({ queue: full, maximumBatch: 8 });
+    for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
+    const refused = await writer.flush();
+    assert.equal(refused.refused, true);
+    assert.equal(refused.reason, "backpressure");
+    assert.equal(refused.pending, GAIN_IDS.length, "a refusal drops nothing");
+    assert.equal(refused.nextBatch, 2, "the four that were submitted halve to two");
+    assert.equal(writer.stats.escalations, 0);
+    const outcome = await writer.drain();
+    assert.equal(outcome.refused, false);
+    assert.equal(writer.pending, 0);
+  });
+
+  test("one writer sends one kind of edit", () => {
+    const control = new LiveControlWriter({ queue: { submit: () => assert.fail("not reached") } });
+    assert.throws(() => control.stage({ kind: "observeSubscribe", trackIndex: 0, rack: 1, channel: 255, values: [0, 0, 0, 0] }), MisoUsageError);
+    const records = new LiveControlWriter({ submit: () => assert.fail("not reached") });
+    assert.throws(() => records.stage(faderEdit(0, -1)), MisoUsageError);
+    assert.throws(() => control.stage({ ...faderEdit(0, -1), rampSamples: 1.5 }), MisoUsageError);
+    assert.equal(control.pending, 0);
   });
 });
 
@@ -434,14 +465,7 @@ describe("the writer contract -- the async submit boundary", () => {
     // The failure this guards is a torn batch: the second flush picking its keys out of the
     // pending map while the first is still awaiting its report, so both submit the SAME edits --
     // admitted twice in the stats, and still pending afterwards.
-    const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-    const decode = (records, count) => {
-      const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
-      return Array.from({ length: count }, (_unused, index) => {
-        const base = index * ABI_LAYOUT.commandRecord.bytes;
-        return `${view.getUint8(base + at("channel"))}/${view.getUint32(base + at("parameterId"), true)}`;
-      });
-    };
+    const decode = (edits) => edits.map((edit) => `${edit.address.lane}/${edit.address.control}`);
 
     const engine = await pausedEngine();
     try {
@@ -449,17 +473,19 @@ describe("the writer contract -- the async submit boundary", () => {
       let inFlight = 0;
       let concurrent = 0;
       const writer = new LiveControlWriter({
-        submit: async (records, count) => {
-          inFlight += 1;
-          concurrent = Math.max(concurrent, inFlight);
-          submitted.push(decode(records, count));
-          // Two hops, so a second flush entered synchronously after the first has ample room to
-          // race in if nothing is serializing them.
-          await Promise.resolve();
-          await Promise.resolve();
-          const report = engine.submitCommands(records, count);
-          inFlight -= 1;
-          return report;
+        queue: {
+          submit: async (edits) => {
+            inFlight += 1;
+            concurrent = Math.max(concurrent, inFlight);
+            submitted.push(decode(edits));
+            // Two hops, so a second flush entered synchronously after the first has ample room to
+            // race in if nothing is serializing them.
+            await Promise.resolve();
+            await Promise.resolve();
+            const report = await engine.controlTransactions().submit(edits);
+            inFlight -= 1;
+            return report;
+          },
         },
         maximumBatch: 4,
       });
@@ -509,21 +535,7 @@ describe("the writer contract -- the async submit boundary", () => {
  * gap is a round trip, and each of these probes lives inside it.
  */
 describe("the writer contract -- races the async boundary opens", () => {
-  const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-
-  /** The addressed control and its first value, read back out of the bytes actually submitted. */
-  const decode = (records, count) => {
-    const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
-    return Array.from({ length: count }, (_unused, index) => {
-      const base = index * ABI_LAYOUT.commandRecord.bytes;
-      return {
-        address: `${view.getUint8(base + at("channel"))}/${view.getUint32(base + at("parameterId"), true)}`,
-        value: view.getFloat32(base + at("values"), true),
-      };
-    });
-  };
-
-  for (const semantic of [false, true]) test(`an edit staged while its own batch is in flight is not deleted by that batch's success (${semantic ? "semantic" : "encoded"})`, async () => {
+  test("an edit staged while its own batch is in flight is not deleted by that batch's success", async () => {
     // The drag-during-round-trip case, which is the case the widening exists for. The hand does
     // not stop moving while a batch crosses the port: a newer value for an address already in
     // flight is staged before the report comes back.
@@ -542,15 +554,13 @@ describe("the writer contract -- races the async boundary opens", () => {
       let held = false;
 
       const writer = new LiveControlWriter({
-        ...(semantic ? { submitEdits: async edits => {
-          submissions.push(edits.map(edit => ({ address: `${edit.channel}/${edit.parameterId}`, value: edit.values[0] })));
-          if (!held) { held = true; announceEntry(); await gate; }
-          return engine.liveControls().submit(...edits);
-        } } : { submit: async (records, count) => {
-          submissions.push(decode(records, count));
-          if (!held) { held = true; announceEntry(); await gate; }
-          return engine.submitCommands(records, count);
-        } }),
+        queue: {
+          submit: async (edits) => {
+            submissions.push(edits.map((edit) => ({ address: `${edit.address.lane}/${edit.address.control}`, value: edit.value })));
+            if (!held) { held = true; announceEntry(); await gate; }
+            return engine.controlTransactions().submit(edits);
+          },
+        },
         maximumBatch: 4,
       });
 
@@ -561,13 +571,13 @@ describe("the writer contract -- races the async boundary opens", () => {
 
       // The hand keeps moving while the batch is out.
       writer.stage(gainEdit(address, 0, -9.9));
-      const queued = semantic ? writer.flush() : undefined;
+      const queued = writer.flush();
       assert.equal(submissions.length, 1, "a second flush cannot submit before the first report");
       openGate();
 
       const first = await inFlight;
       assert.equal(first.admitted, 1, "the batch that was submitted was admitted");
-      assert.deepEqual(submissions[0], [{ address: `0/${address}`, value: -1 }]);
+      assert.deepEqual(submissions[0], [{ address: `left/${address}`, value: -1 }]);
       assert.equal(
         first.pending,
         1,
@@ -575,10 +585,10 @@ describe("the writer contract -- races the async boundary opens", () => {
       );
       assert.equal(writer.pending, 1);
 
-      const second = await (queued ?? writer.flush());
+      const second = await queued;
       assert.deepEqual(
         submissions[1],
-        [{ address: `0/${address}`, value: semantic ? -9.9 : Math.fround(-9.9) }],
+        [{ address: `left/${address}`, value: -9.9 }],
         "the value the hand actually reached goes out on the next flush",
       );
       assert.equal(second.admitted, 1);
@@ -599,44 +609,41 @@ describe("the writer contract -- races the async boundary opens", () => {
     }
   });
 
-  for (const semantic of [false, true]) test(`an escalation rejects its own caller and does not poison later flushes (${semantic ? "semantic" : "encoded"})`, async () => {
+  test("an escalation rejects its own caller and does not poison later flushes", async () => {
     // The chain that serializes flushes is a promise, and a promise that is left rejected
     // propagates to everything chained behind it. An escalation must reject the call that caused
     // it and nothing else: the writer is as usable afterwards as a synchronous one, which throws
     // to one caller and leaves the next alone.
     //
-    // The escalation is real rather than stubbed: the stub corrupts the bytes on the way past, so
-    // the ENGINE refuses an unknown track, while the writer's staged edit stays lawful and can be
+    // The escalation is real rather than stubbed: the stub renames the strip on the way past, so
+    // the CORE refuses an unknown strip, while the writer's staged edit stays lawful and can be
     // resubmitted unmodified.
     const engine = await pausedEngine();
     try {
       let calls = 0;
       const corrupt = new Set([1, 3]);
       const writer = new LiveControlWriter({
-        ...(semantic ? { submitEdits: async edits => {
-          await Promise.resolve();
-          calls += 1;
-          const submitted = corrupt.has(calls)
-            ? edits.map((edit, index) => index === 0 ? { ...edit, trackIndex: 99 } : edit)
-            : edits;
-          return engine.liveControls().submit(...submitted);
-        } } : { submit: async (records, count) => {
-          await Promise.resolve();
-          calls += 1;
-          if (corrupt.has(calls)) {
-            new DataView(records.buffer, records.byteOffset, records.byteLength)
-              .setUint32(at("trackIndex"), 99, true);
-          }
-          return engine.submitCommands(records, count);
-        } }),
+        queue: {
+          submit: async (edits) => {
+            await Promise.resolve();
+            calls += 1;
+            const submitted = corrupt.has(calls)
+              ? edits.map((edit, index) => index === 0
+                ? { ...edit, address: { ...edit.address, owner: { kind: "strip", id: "ghost" } } }
+                : edit)
+              : edits;
+            return engine.controlTransactions().submit(submitted);
+          },
+        },
         maximumBatch: 1,
       });
 
       writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
-      await assert.rejects(() => writer.flush(), MisoUsageError);
+      await assert.rejects(() => writer.flush(), MisoControlRefusal);
       assert.equal(writer.stats.escalations, 1);
-      assert.equal(writer.pending, 1, "an escalated batch admits nothing and drops nothing");
+      assert.equal(writer.pending, 0, "the refused edit is removed, so it is never resent");
 
+      writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
       const recovered = await writer.flush();
       assert.equal(recovered.refused, false, "the next flush is a fresh attempt, not an inheritance");
       assert.equal(recovered.admitted, 1);
@@ -648,7 +655,7 @@ describe("the writer contract -- races the async boundary opens", () => {
       writer.stage(gainEdit(GAIN_IDS[2], 0, -3));
       const escalating = writer.flush();
       const behind = writer.flush();
-      await assert.rejects(() => escalating, MisoUsageError);
+      await assert.rejects(() => escalating, MisoControlRefusal);
       const survived = await behind;
       assert.equal(survived.refused, false, "a flush chained behind a rejected one must still run");
       assert.equal(survived.admitted, 1);
@@ -706,9 +713,153 @@ describe("the writer contract -- races the async boundary opens", () => {
 
 test("writer construction requires exactly one callable submission path", () => {
   const submit = () => { throw new Error("constructor must not submit"); };
-  for (const options of [{}, { submit, submitEdits: submit }, { submit: 1 }, { submitEdits: null }]) {
+  for (const options of [
+    {}, { submit, submitEdits: submit }, { submit: 1 }, { submitEdits: null },
+    { queue: { submit }, submit }, { queue: {} }, { queue: null },
+  ]) {
     assert.throws(() => new LiveControlWriter(options), MisoUsageError);
   }
   assert.doesNotThrow(() => new LiveControlWriter({ submit }));
   assert.doesNotThrow(() => new LiveControlWriter({ submitEdits: submit }));
+  assert.doesNotThrow(() => new LiveControlWriter({ queue: { submit } }));
+});
+
+describe("the writer does not get stuck on a refusal (batch 7 M3)", () => {
+  const ghost = (edit) => ({ ...edit, address: { ...edit.address, owner: { kind: "strip", id: "ghost" } } });
+
+  test("a refusal that names an edit removes that edit alone, whatever it was refused for", async () => {
+    // Plausible defect: the refused edit stays staged, the batch is one atomic submit, and every
+    // later flush resends it and is refused again: the writer is stuck for good.
+    const engine = await pausedEngine();
+    try {
+      const writer = new LiveControlWriter({ queue: engine.controlTransactions() });
+      const good = [gainEdit(GAIN_IDS[0], 2, -1), gainEdit(GAIN_IDS[1], 2, -2)];
+      // An unknown ID, between two lawful edits.
+      writer.stage(good[0]);
+      writer.stage(ghost(gainEdit(GAIN_IDS[2], 2, -3)));
+      writer.stage(good[1]);
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoControlRefusal && error.code === "control.address.unknown" && error.editIndex === 1);
+      assert.equal(writer.pending, 2, "only the edit the core named is gone");
+      assert.equal((await writer.flush()).admitted, 2, "the others go out on the next flush");
+      assert.equal(writer.pending, 0);
+
+      // A value outside its domain, first in the batch.
+      writer.stage(faderEdit(2, 1.0e9));
+      writer.stage(gainEdit(GAIN_IDS[0], 2, -4));
+      await assert.rejects(writer.flush(), (error) =>
+        error instanceof MisoControlRefusal && error.editIndex === 0);
+      assert.equal(writer.pending, 1);
+      assert.equal((await writer.flush()).admitted, 1);
+      assert.equal(writer.stats.escalations, 2);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a newer value staged while the refused batch was in flight stays", async () => {
+    const engine = await pausedEngine();
+    try {
+      const queue = engine.controlTransactions();
+      const writer = new LiveControlWriter({
+        queue: {
+          submit: async (edits) => {
+            await Promise.resolve();
+            // The hand moves while the refusal is on its way back.
+            writer.stage(ghost(gainEdit(GAIN_IDS[0], 2, -9)));
+            return queue.submit(edits);
+          },
+        },
+      });
+      writer.stage(ghost(gainEdit(GAIN_IDS[0], 2, -1)));
+      await assert.rejects(writer.flush(), MisoControlRefusal);
+      assert.equal(writer.pending, 1, "cleared by identity: the newer edit of that address is still staged");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a whole-batch refusal clears the batch; a call-level failure of the plan does too", async () => {
+    // Plausible defect: a refusal or a call failure that names no edit (rebuild pending) keeps the
+    // whole batch staged, and it is resent forever.
+    const wholeBatch = [
+      new MisoControlRefusal({
+        code: "control.domain", status: "validation_failed", revision: 3n,
+        editIndex: undefined, diagnostics: [],
+      }),
+      new MisoEngineError("the engine refused a control frame", {
+        phase: "lifecycle",
+        code: "compileRejected",
+        diagnostics: [{ code: "web.apply.rebuild_pending", path: "$" }],
+      }),
+      new MisoUsageError("the control transaction queue was closed"),
+    ];
+    for (const failure of wholeBatch) {
+      const writer = new LiveControlWriter({ queue: { submit: async () => { throw failure; } } });
+      for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
+      await assert.rejects(writer.flush(), (error) => error === failure);
+      assert.equal(writer.pending, 0, failure.name);
+      assert.equal(writer.stats.escalations, 1);
+      assert.equal(writer.stats.refusals, 0);
+    }
+  });
+
+  test("backpressure of the plan, and an error that is not the SDK's, are not terminal", async () => {
+    // Plausible defect: plan backpressure (a MisoEngineError, not a refusal frame) is thrown as an
+    // escalation and loses the hand's position, or a lost port empties the pending edits.
+    const calls = [];
+    const full = new MisoEngineError("the plan is full", { phase: "lifecycle", code: "backpressure" });
+    const lost = new Error("port closed");
+    const failures = [full, lost];
+    const writer = new LiveControlWriter({
+      queue: {
+        submit: async (edits) => {
+          calls.push(edits.length);
+          const failure = failures.shift();
+          if (failure !== undefined) throw failure;
+          return { ok: true, revision: 1n, path: "live", appliedOperations: edits.length };
+        },
+      },
+    });
+    for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
+    const refused = await writer.flush();
+    assert.equal(refused.refused, true);
+    assert.equal(refused.reason, "backpressure");
+    assert.equal(writer.pending, GAIN_IDS.length);
+    await assert.rejects(writer.flush(), (error) => error === lost);
+    assert.equal(writer.pending, GAIN_IDS.length, "nothing says these edits are at fault");
+    assert.equal(writer.stats.escalations, 0);
+    assert.equal((await writer.drain()).refused, false);
+    assert.equal(writer.pending, 0);
+  });
+});
+
+describe("the writer sizes a batch by bytes (batch 7 M4)", () => {
+  test("no submit is larger than the host's frame, and every edit still lands", async () => {
+    // Plausible defect: the default batch of 256 edits (~160 bytes each) is one frame over the
+    // host's 4 KiB or 16 KiB ceiling, which fails on every send and is resent forever.
+    const edits = GAIN_IDS.flatMap((parameterId) => [0, 1, 2].map((lane) => gainEdit(parameterId, lane, -1)));
+    const each = controlEditBytes(edits[0]);
+    const ceiling = CONTROL_TRANSACTION_HEADER_BYTES + 4 * each + 1;
+    const sent = [];
+    const writer = new LiveControlWriter({
+      queue: {
+        maximumFrameBytes: ceiling,
+        maximumTransactionEdits: 1000,
+        submit: async (batch) => {
+          const bytes = CONTROL_TRANSACTION_HEADER_BYTES
+            + batch.reduce((total, edit) => total + controlEditBytes(edit), 0);
+          sent.push(bytes);
+          assert.ok(bytes <= ceiling, `a ${bytes} byte submit is over the ${ceiling} byte ceiling`);
+          return { ok: true, revision: 1n, path: "live", appliedOperations: batch.length };
+        },
+      },
+    });
+    for (const edit of edits) writer.stage(edit);
+    const outcome = await writer.drain(edits.length);
+    assert.equal(writer.pending, 0);
+    assert.equal(writer.stats.admitted, edits.length);
+    assert.ok(sent.length >= Math.ceil(edits.length / 4), "cut into frames of four");
+    assert.ok(outcome.admitted > 0);
+  });
 });

@@ -48,16 +48,19 @@ pub struct CompileCaps {
 /// publisher, DSP state, or plan exchange capability.
 #[derive(Clone, Debug)]
 pub struct CompiledSession {
-    normalized: NormalizedSession,
-    canonical_json: String,
+    pub(crate) normalized: NormalizedSession,
+    /// The canonical text of the model. The compile writes it. A commit of values only
+    /// ([`Self::finish_in_place`]) drops it, and the next read writes it again from the model, so a
+    /// commit that changes no structure costs no serialization of the session (#1613).
+    pub(crate) canonical_json: std::sync::OnceLock<String>,
     sample_rate: SampleRateHz,
     quantum: QuantumFrames,
     output_shape: OutputShape,
     source_indexes: BTreeMap<StableId, u64>,
-    resource_estimate: ResourceEstimate,
+    pub(crate) resource_estimate: ResourceEstimate,
 }
 #[derive(Clone, Debug)]
-struct NormalizedSession(SessionModel);
+pub(crate) struct NormalizedSession(pub(crate) SessionModel);
 
 /// Planar PCM output shape retained by a compiled session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +73,8 @@ impl CompiledSession {
     /// Borrow the canonical JSON snapshot.
     #[must_use]
     pub fn canonical_json(&self) -> &str {
-        &self.canonical_json
+        self.canonical_json
+            .get_or_init(|| write_canonical(&self.normalized.0))
     }
     /// Consume this control-plane artifact and move its validated canonical JSON snapshot.
     ///
@@ -78,7 +82,10 @@ impl CompiledSession {
     /// thread.
     #[must_use]
     pub fn into_canonical_json(self) -> String {
-        self.canonical_json
+        match self.canonical_json.into_inner() {
+            Some(text) => text,
+            None => write_canonical(&self.normalized.0),
+        }
     }
     /// Explicit session sample rate in hertz.
     #[must_use]
@@ -196,7 +203,7 @@ pub fn compile_session(
     )?;
     Ok(CompiledSession {
         normalized: NormalizedSession(normalized),
-        canonical_json,
+        canonical_json: canonical_json.into(),
         sample_rate: SampleRateHz(session.sample_rate_hz),
         quantum: QuantumFrames(session.quantum_frames),
         output_shape: OutputShape {

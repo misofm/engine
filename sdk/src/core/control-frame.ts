@@ -1,6 +1,6 @@
 import { CONTROLS } from "../generated/controls.ts";
 import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
-import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 
 /**
  * The SDK's one encoder of `SESSION_TRANSACTION_APPLY` frames of `SET_CONTROL` edits, and its one
@@ -28,7 +28,10 @@ const PROTOCOL_MAJOR = 1;
 const PROTOCOL_MINOR = 0;
 const KIND_COMMAND = 1;
 const KIND_RESPONSE = 2;
+const MESSAGE_CAPABILITIES_GET = 0x0001;
 const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+/** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
+const FLAG_REVISION_ANY = 1;
 const EDIT_SET_CONTROL = 0x0800;
 const U32_MAXIMUM = 0xffff_ffff;
 const U64_MAXIMUM = 0xffff_ffff_ffff_ffffn;
@@ -218,6 +221,47 @@ function editField(edit: ControlFrameEdit): Uint8Array {
 }
 
 /**
+ * The error a control call that did not return `ok` is, on either transport. The core answers a
+ * failed call with the refusal's diagnostic text (`code\tpath\n` lines, for example
+ * `web.apply.rebuild_pending`) where a successful call answers with the response frame; a refused
+ * transaction is still an `ok` call with a refusal frame. Browser and headless build the same error
+ * from the same bytes.
+ */
+export function controlCallFailure(result: number, response: Uint8Array): MisoEngineError {
+  const text = new TextDecoder("utf-8").decode(response);
+  return new MisoEngineError("the engine refused a control frame", {
+    phase: "lifecycle",
+    code: resultName(result, "call"),
+    result,
+    diagnostics: parseDiagnostics(text),
+  });
+}
+
+/** The bytes of a `SESSION_TRANSACTION_APPLY` frame before its first edit. */
+export const CONTROL_TRANSACTION_HEADER_BYTES = HEADER_BYTES;
+
+/**
+ * The bytes one edit adds to a transaction frame. It throws `MisoUsageError` for an edit that cannot
+ * be encoded, as `validateControlEdit` does.
+ */
+export function controlEditBytes(edit: ControlFrameEdit): number {
+  return editField(edit).length;
+}
+
+/** The address an edit writes: two edits with one key write the same lane of the same control. */
+export function controlEditKey(edit: ControlFrameEdit): string {
+  const { owner, section, control, lane } = edit.address;
+  return JSON.stringify([
+    owner.kind,
+    "id" in owner ? owner.id : "",
+    section.kind,
+    section.kind === "console" ? section.slot : section.kind === "inserts" ? section.effect : "",
+    control,
+    lane,
+  ]);
+}
+
+/**
  * Refuse, with `MisoUsageError`, an edit that cannot be encoded, before it is staged anywhere. It is
  * the same check `encodeControlTransaction` makes, and nothing about the value's domain.
  */
@@ -257,6 +301,66 @@ export function encodeControlTransaction(request: ControlTransactionRequest): Ui
   view.setUint32(44, 0, true);
   out.set(payload, HEADER_BYTES);
   return out;
+}
+
+/**
+ * Encode a `CAPABILITIES_GET` command: a header and no fields, which takes any revision. The reply
+ * to it reports the core's committed revision, which is how an endpoint that cannot read the
+ * revision directly (the browser host) seeds its queue after boot. The caller draws `requestId`
+ * from the endpoint's one allocator.
+ */
+export function encodeRevisionProbe(requestId: bigint): Uint8Array {
+  const id = requireU64(requestId, "requestId");
+  if (id === 0n) throw new MisoUsageError("requestId must not be zero");
+  const out = new Uint8Array(HEADER_BYTES);
+  const view = new DataView(out.buffer);
+  out.set(MAGIC, 0);
+  view.setUint16(8, PROTOCOL_MAJOR, true);
+  view.setUint16(10, PROTOCOL_MINOR, true);
+  view.setUint16(12, HEADER_BYTES, true);
+  out[14] = KIND_COMMAND;
+  out[15] = FLAG_REVISION_ANY;
+  view.setUint16(16, MESSAGE_CAPABILITIES_GET, true);
+  view.setBigUint64(24, id, true);
+  return out;
+}
+
+/** The limits a `CAPABILITIES_GET` reply reports that bound what one transaction may hold. */
+export interface ControlLimits {
+  /** The most bytes one command frame may hold, header included. */
+  readonly maximumFrameBytes: number;
+  /** The most edits one transaction may hold. */
+  readonly maximumTransactionEdits: number;
+}
+
+/**
+ * Read the frame limits out of the reply to `encodeRevisionProbe`. A reply that is not a
+ * `CAPABILITIES_GET` response at all (a scripted host that answers a probe with a blank frame)
+ * reports `undefined`, which leaves a queue unbounded by bytes. A response that is one but does not
+ * hold the limits raises `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
+ */
+export function decodeControlLimits(bytes: Uint8Array): ControlLimits | undefined {
+  if (bytes.length < HEADER_BYTES) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let index = 0; index < MAGIC.length; index += 1) {
+    if (bytes[index] !== MAGIC[index]) return undefined;
+  }
+  if (bytes[14] !== KIND_RESPONSE || view.getUint16(16, true) !== MESSAGE_CAPABILITIES_GET) {
+    return undefined;
+  }
+  if (view.getUint16(18, true) !== 0) throw malformed("the capabilities reply is not ok");
+  if (HEADER_BYTES + view.getUint32(20, true) !== bytes.length) throw malformed("the payload length is wrong");
+  const fields = readFields(bytes.subarray(HEADER_BYTES), view.getUint32(40, true));
+  const frame = scalar(fields, 5, WIRE_U64, 8)?.getBigUint64(0, true);
+  const edits = scalar(fields, 24, WIRE_U32, 4)?.getUint32(0, true);
+  if (frame === undefined || edits === undefined || frame === 0n || edits === 0) {
+    throw malformed("the capabilities reply holds no frame or transaction limit");
+  }
+  const cap = BigInt(Number.MAX_SAFE_INTEGER);
+  return Object.freeze({
+    maximumFrameBytes: Number(frame > cap ? cap : frame),
+    maximumTransactionEdits: edits,
+  });
 }
 
 /** How the core applied a committed transaction (`TransactionApplied.edit_path`). */

@@ -2,11 +2,12 @@
 
 use session::SessionModel;
 
-use crate::ControlClass;
-use crate::address::{ControlAddress, Owner};
-use crate::descriptor::ControlDescriptor;
+use crate::address::{ControlAddress, Owner, Section};
+use crate::descriptor::{ControlDescriptor, ControlScope};
 use crate::effective::MonitorOverlay;
-use crate::registry::{ControlRow, list};
+use crate::lane::Side;
+use crate::registry::{ControlRow, Source, list, resolve};
+use crate::{ControlClass, strip};
 
 /// One control whose committed value differs between two models.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,4 +75,73 @@ pub fn changed_controls(
         });
     }
     Some(changed)
+}
+
+/// Whether a write to the row at `address` changes that row alone: the session's rows do not (a ramp
+/// length changes every owner's descriptors) and a strip's `matrix_mode` does not (the switch flips
+/// which rows are active and rewrites the pan or the matrix). A host that applies a transaction of
+/// single-row writes in place, and [`changed_rows`], need exactly this rule (#1612, #1613).
+#[must_use]
+pub fn writes_only_its_row(address: &ControlAddress) -> bool {
+    !match (&address.owner, &address.section) {
+        (Owner::Session, _) => true,
+        (Owner::Strip(_), Section::Own) => address.control == strip::MATRIX_MODE,
+        _ => false,
+    }
+}
+
+/// The controls of the one row `address` names whose value bits differ between `current` and `next`,
+/// one change per listed lane, exactly as [`changed_controls`] gives them for that row (#1612 D4).
+/// The lane of `address` does not matter: the row's lanes are all compared.
+///
+/// It resolves the row in each model and reads its committed value, so its cost is the size of the
+/// row, not of the model.
+///
+/// `None` when the row cannot be judged on its own, and a caller then runs [`changed_controls`]:
+/// the address does not resolve in a model, the row is derived, the row is held by the host (solo),
+/// the row's descriptor differs between the models in its class or its `active` flag, or a write to
+/// the row moves more than the row. The last holds for the session's rows (a ramp length changes
+/// every owner's descriptors) and for a strip's `matrix_mode` (the switch flips which rows are
+/// active and rewrites the pan or the matrix).
+#[must_use]
+pub fn changed_rows(
+    current: &SessionModel,
+    next: &SessionModel,
+    address: &ControlAddress,
+    sample_rate: u32,
+) -> Option<Vec<ChangedControl>> {
+    if !writes_only_its_row(address) {
+        return None;
+    }
+    let before = resolve(current, address, sample_rate).ok()?;
+    let after = resolve(next, address, sample_rate).ok()?;
+    let descriptor = after.descriptor;
+    if descriptor.class == ControlClass::Derived
+        || descriptor.scope == ControlScope::Monitor
+        || before.descriptor.class != descriptor.class
+        || before.descriptor.active != descriptor.active
+    {
+        return None;
+    }
+    let (Source::Stored(old), Source::Stored(new)) = (before.source, after.source) else {
+        return None;
+    };
+    Some(
+        descriptor
+            .lanes
+            .listed()
+            .iter()
+            .filter(|&&lane| {
+                let side = Side::of(lane);
+                side.pick(old[0], old[1]).to_bits() != side.pick(new[0], new[1]).to_bits()
+            })
+            .map(|&lane| ChangedControl {
+                address: ControlAddress {
+                    lane,
+                    ..address.clone()
+                },
+                descriptor,
+            })
+            .collect(),
+    )
 }

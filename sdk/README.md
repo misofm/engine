@@ -160,7 +160,7 @@ export async function startMix(
 ) {
   const engine = await createEngine({
     document,
-    policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 12 } },
+    policy: { liveControls: { meterBlocks: 12 } },
   });
   try {
     await prepareSources(engine);
@@ -190,12 +190,15 @@ The npm hosts both execute Wasm. Native and mobile applications must integrate t
 Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
 mobile audio-device adapter.
 
-## Change a mix and correlate the acknowledgement
+## Change a mix and read the core's answer
 
-Prepare a positive `liveControls.commandQueueRecords` capacity at boot: pass `liveControls` directly
-to `createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid
-without it. `engine.liveControls()` is synchronous headlessly and asynchronous in the browser;
-`await` works for either. With the `vocal` track and `eq` console slot built above:
+A value edit (a fader, a mute, a pan or matrix, a trim, a filter, a send, a VCA, an effect
+parameter or a bypass) is a `SET_CONTROL` transaction sent to the core, on the browser and on the
+headless engine alike. The builders keep one engine-wide transaction queue: one transaction is in
+flight at a time, each carries the committed revision the last reply reported, and edits staged
+meanwhile coalesce by address into the next transaction. `engine.liveControls()` is synchronous
+headlessly and asynchronous in the browser; `await` works for either. With the `vocal` track and
+`eq` console slot built above:
 
 ```ts
 import type { EngineLiveControls } from "@misofm/engine";
@@ -208,53 +211,69 @@ export async function adjustVocal(controls: EngineLiveControls) {
       .parameter({ key: "band-1-gain", value: 6, channel: "both" }),
     vocal.insert("echo", "miso.delay").bypass(true),
   );
-  if (!report.ok) throw new Error(`${report.code}: ${report.reasonName}`);
-  return report.appliedAtSample;
+  return report.revision;
 }
 ```
 
-An edit that gives no `smoothingSamples` ramps over the session's length for that kind of edit
-(its `controlSmoothing`, or the default table), so a drag never steps by omission. An explicit
-`smoothingSamples` overrides it for that edit, and `smoothingSamples: 0` is a hard step. In the
-example above the fader moves over 64 samples; the parameter edit and the bypass carry no session
-ramp (the parameter edit writes the length it is given, or `0`, and the bypass always writes `0`).
-A hand-written `LaneEdit` (a plain object passed to `submit`) follows the same rule: the encoder
-resolves an absent `smoothingSamples` by the edit's kind, so a fader, mute, pan, matrix, solo, trim,
-polarity, route or VCA edit ramps over the session's length, while bypass, input-filter,
-effect-parameter and observation edits carry no session ramp and keep an absent value as `0`.
-`4294967295` is the engine's session-default marker, not a length, and a ramped kind refuses it
-with a `MisoUsageError`; the encoder does not check an unramped kind's word against the marker.
+`submit()` resolves with the core's report of the transaction that carried the edits,
+`{ ok: true, revision, path, appliedOperations }`, where `path` is how the core applied it: `live`
+(on the running plan), `model_only` (the committed value changed and nothing was audible),
+`rebuild` or `monitor` (a solo). The transaction is atomic: the core applies every edit or none. A
+refusal rejects with `MisoControlRefusal`, which carries the core's report
+(`{ ok: false, revision, code, editIndex? }`) as `report`; its `code` is the core's own
+(`control.domain`, `control.address.unknown`, `control.inactive`, `control.lane`,
+`control.ramp.fixed`, ...), the same on the browser and on the headless engine. A refused
+transaction is not retried and changes nothing. If several callers' edits were coalesced into one
+transaction, the queue rejects only the submit that owns the edit the core named, indexes
+`editIndex` into that submit's own edits, and sends the others again. Correlate a report with the
+mix through `revision`; the core converges every committed value no later than the first block that
+begins after the submit returns.
+
+The SDK checks no value: a fader of 30 dB, a pan of 2, a `NaN` trim, an unknown strip, send or VCA
+ID, or a lane a control does not allow are built as given and refused by the core. It refuses only
+what cannot be encoded (a value that is not a number, a ramp that is not an integer in
+`[0, 4294967295]`, a lane other than `left`, `right` or `both`, an ID that is not a string), with a
+`MisoUsageError` before any byte is sent.
+
+An edit that gives no `smoothingSamples` sends no ramp, and the core ramps over the session's
+length for that control (its `controlSmoothing`, or the default table), so a drag never steps by
+omission. An explicit `smoothingSamples` is the edit's `ramp_samples`, and `smoothingSamples: 0` is
+a hard step. A control whose ramp is fixed (an input filter, a bypass) refuses an explicit one with
+`control.ramp.fixed`. `pan(left, right)` writes the strip's two pan lanes and `matrix(...)` its
+four coefficients; a strip in the other shape is refused with `control.inactive`. Routes also take
+`followsMute(enabled)`.
 
 `controls.edit.submix(id)` addresses a submix strip (a bus) the same way, with every edit a track
 offers except `solo` (a bus is solo-safe), and `controls.edit.strip(id)` resolves either kind by
 ID. `console(slot, effectId)` addresses a session console slot by its slot ID and `insert(id or
-index, effectId)` one of the strip's inserts; `effect("console" | "inserts", index, effectId)` takes the
-live address directly (a console slot's index in `preInsert`-then-`postInsert` order). IDs resolve
-against the session the engine booted when it was booted from a `session(...)` builder; for a
-document booted from text, call `controls.withSession(builder)` first, because the SDK never parses
-a document. `withSession()` holds the builder to the booted document byte for byte: its `toJson()`
-must be exactly the booted text, so any other session (a reordered console, a renamed slot, another
-insert chain) throws a `MisoUsageError` rather than resolve IDs to addresses that name other
-instances. Boot the builder's `toJson()`, or the engine's canonical text of it.
+index, effectId)` one of the strip's inserts. A value edit names the instance by its stable ID, so
+`console()` and `insert(id)` need no session; an index (`insert(index)`, or
+`effect("console" | "inserts", index, effectId)`) resolves to its ID against the session the engine
+booted when it was booted from a `session(...)` builder, and for a document booted from text, call
+`controls.withSession(builder)` first, because the SDK never parses a document. `withSession()`
+holds the builder to the booted document byte for byte: its `toJson()` must be exactly the booted
+text, so any other session (a reordered console, a renamed slot, another insert chain) throws a
+`MisoUsageError` rather than resolve IDs to addresses that name other instances. Boot the
+builder's `toJson()`, or the engine's canonical text of it.
 
-A live `bypass(true)` or `bypass(false)` is a latency-preserving shunt, and it can lift a bypass the
-session authored, except on the delay and the multiband compressor (`PREPARED_BYPASS_EFFECTS`):
-they keep a session bypass as a prepared one, and the engine acknowledges a live un-bypass of either
-and renders nothing different. So when the SDK has the session, `bypass(false)` on a
-session-bypassed delay or multiband throws a `MisoUsageError` before anything is sent; author it
-unbypassed and reload the session to hear it. Addressed by index with no session, the SDK cannot
-know, and that lift is acknowledged and changes nothing. Setting a bypass on either works.
+The core reads every committed transaction's events from a lane with two slots, and refuses the
+next commit with backpressure until they are read. The headless engine therefore reads them after
+every control frame; `engine.onControlEvent(listener)` receives each as `{ lane, frame }`, and an
+event with no listener is dropped and counted in `engine.discardedControlEvents`. A frame sent
+through `engine.controlFrame(frame)` draws its request ID from `engine.controlTransactions().requestIds`,
+the one allocator that serves the endpoint.
 
-One `submit()` is one atomic admission: all edits are accepted or none are. A successful report's
-`appliedAtSample` is the absolute engine sample at which the edits take effect, at the start of
-the next rendered block. It is not a wall-clock time or proof that playback has already reached
-that block. Smoothing may continue after that boundary. Refusals carry typed result/reason names;
-queue saturation must be handled, and acknowledged batches are not silently dropped.
+Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })` sets both
+builtin cutoffs in one transaction; zero disables a filter. `controls.writer()` returns a
+`LiveControlWriter` that stages edits by address, coalesces latest values and flushes bounded
+batches through the queue, for gesture loops; the core's `backpressure` status is flow control and
+never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
+agent-facing controls.
 
-Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })` changes both
-builtin cutoffs atomically; zero disables a filter. `LiveControlWriter` adds bounded batch
-submission and latest-value coalescing for gesture loops. The root entry's `parameter()` helper
-provides exact decimal/lattice edits for agent-facing controls.
+Observation subscriptions (`effect(...).observe(...)`) are the one edit that is still a 48-byte
+command record: they resolve with a `CommandReport` and need a positive
+`liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
+`policy` to `createEngine`. Value edits are `SET_CONTROL` transactions and need no boot word.
 
 ## Observe the rendered mix
 
@@ -310,7 +329,7 @@ operation rejects at once: render, then retry. In a browser engine it waits for 
 again, up to `requestDeadlineMs` and at most 8 resends (one render drains the tap, so more means
 another writer keeps refilling it), and then ends in typed `backpressure`. Prepare `liveControls.observationTaps` for resident effect taps.
 
-Use the recorded sample spans to compare observations with `appliedAtSample`. A window crossing
+Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling
 or smoothing history. Response subscriptions suppress unchanged state and retain its original
 capture timestamp; a new polling callback does not imply a new capture. These APIs do not promise
@@ -337,8 +356,8 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
-artifacts, including Wasm, host, processor, metadata, ABI layout, and prepared-control helper.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the six engine
+artifacts, including Wasm, host, processor, host declaration, metadata, and ABI layout.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;

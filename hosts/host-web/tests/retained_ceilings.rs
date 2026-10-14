@@ -85,18 +85,32 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// allocation joins the largest-bridge-allocation row. Ceilings are the new beyond-capture part
 /// plus 10 %, rounded up to 64: 112,058 * 1.1 = 123,263.8 gives 123,264, and 132,669 * 1.1 =
 /// 145,935.9 gives 145,984. The four-lane figure is inferred as before.
+///
+/// **Re-pinned: the bridge rows and `builtin_retained_bytes` (#1381a).** The browser's session is
+/// now the control plane's `SessionState` (D1): the bridge rows charge everything the control plane
+/// keeps for the session, which the browser did not hold before -- the control catalog, the
+/// protocol queues, the replay cache, the control frame scratch, the plan exchange and the strip,
+/// effect and send producers. For this one-strip fixture the control plane's row is 427,534 bytes
+/// (x86-64; the catalog's 9,556 bytes, charged on their own since batch 6, are inside it and no longer
+/// a separate term), and the rest of each bridge row grew from about 100 KB to 535,489 (metadata) and
+/// 556,100 (retained), measured on x86-64. The ceilings are those values plus 10 %, rounded up to
+/// 64 bytes: 589,056 and 611,712 (after the rebase onto batch 6's final head the rows measure 535,497 and
+/// 556,108, 8 bytes more; the ceilings stand). `builtin_retained_bytes` rose from 2,887 to 4,041
+/// because the plan's lanes are the control plane's (decision 17 C6), which attaches the strips'
+/// input lanes (trim, polarity and filters) where the browser's no-commands options attached none:
+/// 4,041 * 1.1 = 4,445.1, so 4,480. The four-lane values are inferred, as before.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
         value: |report| report.bridge_metadata_bytes,
-        eight_lanes: CAPTURE + 123_264,
-        four_lanes: CAPTURE + 123_264,
+        eight_lanes: CAPTURE + 589_056,
+        four_lanes: CAPTURE + 589_056,
     },
     Budget {
         row: "bridge_retained_bytes",
         value: |report| report.bridge_retained_bytes,
-        eight_lanes: CAPTURE + 145_984,
-        four_lanes: CAPTURE + 145_984,
+        eight_lanes: CAPTURE + 611_712,
+        four_lanes: CAPTURE + 611_712,
     },
     Budget {
         row: "source_total_bytes",
@@ -113,8 +127,8 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "builtin_retained_bytes",
         value: |report| report.builtin_retained_bytes,
-        eight_lanes: 3_200,
-        four_lanes: 3_200,
+        eight_lanes: 4_480,
+        four_lanes: 4_480,
     },
     Budget {
         row: "graph_session_plus_plan_bytes",

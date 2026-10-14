@@ -52,17 +52,12 @@ use core::mem::offset_of;
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
     BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_INPUT_FILTERS,
-    COMMAND_MATRIX, COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE,
-    COMMAND_PAN, COMMAND_POLARITY_INVERT, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_NOT_SOLOABLE,
+    COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_BACKPRESSURE,
+    COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE,
     COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_ROUTE,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNKNOWN_VCA,
-    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES,
-    COMMAND_REPORT_BYTES, COMMAND_ROUTE_GAIN_DB, COMMAND_ROUTE_MATRIX, COMMAND_ROUTE_MUTE,
-    COMMAND_SOLO, COMMAND_TRIM_DB, COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE,
-    DEFAULT_COMMAND_QUEUE_RECORDS, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
+    COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
     DIAGNOSTIC_BYTES, LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES,
     LIVE_RESPONSE_MAXIMUM_OWNERS, LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
     LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
@@ -78,8 +73,8 @@ use host_web::{
     RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
     RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT,
     RESPONSE_TARGET_INPUT_FILTERS, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
+    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES,
     SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
@@ -91,11 +86,9 @@ use host_web::{
     SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING,
     SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN,
     SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WebBootOptions, WebBuiltinInputConfig, WebCommandReport,
-    WebEqTargetConfig, WebEqTargetEdit, WebEqTargetRequest, WebEqTargetResult, WebInputFilterEdit,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport,
     WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection,
-    WebPreparedEffectCompanionHeader, WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
+    WebMeterHeader, WebObservationResult, WebObservationSelection, WebPlanWatermark,
     WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
     WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
     WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
@@ -132,7 +125,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 123] = [
+pub const EXPORTS: [&str; 112] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -143,30 +136,19 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_control_allocation_count",
+    "miso_engine_web_v1_control_command",
+    "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_request_ptr",
+    "miso_engine_web_v1_control_response_bytes",
+    "miso_engine_web_v1_control_response_ptr",
+    "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_eq_target_close",
-    "miso_engine_web_v1_eq_target_config_copy",
-    "miso_engine_web_v1_eq_target_config_ptr",
-    "miso_engine_web_v1_eq_target_open",
-    "miso_engine_web_v1_eq_target_prepare",
-    "miso_engine_web_v1_eq_target_rejected_edit_index",
-    "miso_engine_web_v1_eq_target_rejected_reason",
-    "miso_engine_web_v1_eq_target_request_capacity",
-    "miso_engine_web_v1_eq_target_request_ptr",
-    "miso_engine_web_v1_eq_target_result_bytes",
-    "miso_engine_web_v1_eq_target_result_capacity",
-    "miso_engine_web_v1_eq_target_result_ptr",
-    "miso_engine_web_v1_input_filters_config_copy",
-    "miso_engine_web_v1_input_filters_prepare",
-    "miso_engine_web_v1_live_control_route_count",
-    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
-    "miso_engine_web_v1_live_control_vca_count",
-    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -186,9 +168,6 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
-    "miso_engine_web_v1_prepared_command_submit",
-    "miso_engine_web_v1_prepared_companion_capacity",
-    "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -203,6 +182,7 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_response_request_ptr",
     "miso_engine_web_v1_response_result_bytes",
     "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
     "miso_engine_web_v1_source_frames",
@@ -256,6 +236,8 @@ pub const EXPORTS: [&str; 123] = [
     "miso_engine_web_v1_track_response_snapshot_set_bytes",
     "miso_engine_web_v1_track_response_track_id_capacity",
     "miso_engine_web_v1_track_response_track_id_ptr",
+    "miso_engine_web_v1_watermark_ptr",
+    "miso_engine_web_v1_watermark_read",
 ];
 
 /// The boot staging sequence, by export name, in call order.
@@ -293,11 +275,7 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, maximum_memory_bytes),
             "u64",
         ),
-        (
-            "liveControlCommandQueueRecords",
-            offset_of!(WebBootOptions, live_control_command_queue_records),
-            "u64",
-        ),
+        ("reserved1", offset_of!(WebBootOptions, reserved1), "u64"),
         (
             "liveControlMeterBlocks",
             offset_of!(WebBootOptions, live_control_meter_blocks),
@@ -524,6 +502,45 @@ fn meter_header_fields() -> [Field; 12] {
             offset_of!(WebMeterHeader, reserved_pad),
             "u32",
         ),
+    ]
+}
+
+/// The watermark record (issue #1381a D5), in the order of the C ABI's `miso_engine_v1_watermark`.
+fn plan_watermark_fields() -> [Field; 9] {
+    [
+        (
+            "structSize",
+            offset_of!(WebPlanWatermark, struct_size),
+            "u32",
+        ),
+        ("reserved0", offset_of!(WebPlanWatermark, reserved0), "u32"),
+        ("revision", offset_of!(WebPlanWatermark, revision), "u64"),
+        (
+            "firstSample",
+            offset_of!(WebPlanWatermark, first_sample),
+            "u64",
+        ),
+        (
+            "outcomeFlags",
+            offset_of!(WebPlanWatermark, outcome_flags),
+            "u64",
+        ),
+        (
+            "exactCount",
+            offset_of!(WebPlanWatermark, exact_count),
+            "u64",
+        ),
+        (
+            "transitionFallbackCount",
+            offset_of!(WebPlanWatermark, transition_fallback_count),
+            "u64",
+        ),
+        (
+            "supersededCount",
+            offset_of!(WebPlanWatermark, superseded_count),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebPlanWatermark, reserved), "u64[5]"),
     ]
 }
 
@@ -1474,260 +1491,6 @@ fn live_response_result_fields() -> [Field; 22] {
     ]
 }
 
-fn eq_target_request_fields() -> [Field; 6] {
-    [
-        (
-            "structSize",
-            offset_of!(WebEqTargetRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebEqTargetRequest, abi_version),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebEqTargetRequest, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "seedCount",
-            offset_of!(WebEqTargetRequest, seed_count),
-            "u32",
-        ),
-        (
-            "editCount",
-            offset_of!(WebEqTargetRequest, edit_count),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebEqTargetRequest, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-fn eq_target_edit_fields() -> [Field; 3] {
-    [
-        (
-            "parameterId",
-            offset_of!(WebEqTargetEdit, parameter_id),
-            "u32",
-        ),
-        ("channel", offset_of!(WebEqTargetEdit, channel), "u32"),
-        ("value", offset_of!(WebEqTargetEdit, value), "f32"),
-    ]
-}
-fn input_filter_edit_fields() -> [Field; 4] {
-    [
-        (
-            "parameterId",
-            offset_of!(WebInputFilterEdit, parameter_id),
-            "u32",
-        ),
-        ("channel", offset_of!(WebInputFilterEdit, channel), "u32"),
-        ("value0", offset_of!(WebInputFilterEdit, value0), "f32"),
-        ("value1", offset_of!(WebInputFilterEdit, value1), "f32"),
-    ]
-}
-fn prepared_target_fields() -> [Field; 3] {
-    [
-        ("slot", offset_of!(WebPreparedEffectTarget, slot), "u32"),
-        (
-            "channel",
-            offset_of!(WebPreparedEffectTarget, channel),
-            "u32",
-        ),
-        (
-            "words",
-            offset_of!(WebPreparedEffectTarget, words),
-            "u32[12]",
-        ),
-    ]
-}
-fn eq_target_result_fields() -> [Field; 6] {
-    [
-        (
-            "structSize",
-            offset_of!(WebEqTargetResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebEqTargetResult, abi_version),
-            "u32",
-        ),
-        (
-            "valueCount",
-            offset_of!(WebEqTargetResult, value_count),
-            "u32",
-        ),
-        (
-            "targetCount",
-            offset_of!(WebEqTargetResult, target_count),
-            "u32",
-        ),
-        (
-            "workspaceRetainedBytes",
-            offset_of!(WebEqTargetResult, workspace_retained_bytes),
-            "u64",
-        ),
-        (
-            "workspaceLargestAllocationBytes",
-            offset_of!(WebEqTargetResult, workspace_largest_allocation_bytes),
-            "u64",
-        ),
-    ]
-}
-fn companion_header_fields() -> [Field; 5] {
-    [
-        (
-            "structSize",
-            offset_of!(WebPreparedEffectCompanionHeader, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebPreparedEffectCompanionHeader, abi_version),
-            "u32",
-        ),
-        (
-            "hostGeneration",
-            offset_of!(WebPreparedEffectCompanionHeader, host_generation),
-            "u64",
-        ),
-        (
-            "targetCount",
-            offset_of!(WebPreparedEffectCompanionHeader, target_count),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebPreparedEffectCompanionHeader, reserved),
-            "u32",
-        ),
-    ]
-}
-fn companion_record_fields() -> [Field; 8] {
-    [
-        (
-            "trackIndex",
-            offset_of!(WebPreparedEffectCompanionRecord, track_index),
-            "u32",
-        ),
-        (
-            "rack",
-            offset_of!(WebPreparedEffectCompanionRecord, rack),
-            "u32",
-        ),
-        (
-            "effectIndex",
-            offset_of!(WebPreparedEffectCompanionRecord, effect_index),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebPreparedEffectCompanionRecord, reserved),
-            "u32",
-        ),
-        (
-            "baseRevision",
-            offset_of!(WebPreparedEffectCompanionRecord, base_revision),
-            "u64",
-        ),
-        (
-            "slot",
-            offset_of!(WebPreparedEffectCompanionRecord, slot),
-            "u32",
-        ),
-        (
-            "channel",
-            offset_of!(WebPreparedEffectCompanionRecord, channel),
-            "u32",
-        ),
-        (
-            "words",
-            offset_of!(WebPreparedEffectCompanionRecord, words),
-            "u32[12]",
-        ),
-    ]
-}
-fn eq_target_config_fields() -> [Field; 7] {
-    [
-        (
-            "structSize",
-            offset_of!(WebEqTargetConfig, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebEqTargetConfig, abi_version),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebEqTargetConfig, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "valueCount",
-            offset_of!(WebEqTargetConfig, value_count),
-            "u32",
-        ),
-        (
-            "hostGeneration",
-            offset_of!(WebEqTargetConfig, host_generation),
-            "u64",
-        ),
-        (
-            "ownerRevision",
-            offset_of!(WebEqTargetConfig, owner_revision),
-            "u64",
-        ),
-        ("values", offset_of!(WebEqTargetConfig, values), "f32[60]"),
-    ]
-}
-fn builtin_input_config_fields() -> [Field; 7] {
-    [
-        (
-            "structSize",
-            offset_of!(WebBuiltinInputConfig, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebBuiltinInputConfig, abi_version),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebBuiltinInputConfig, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "valueCount",
-            offset_of!(WebBuiltinInputConfig, value_count),
-            "u32",
-        ),
-        (
-            "hostGeneration",
-            offset_of!(WebBuiltinInputConfig, host_generation),
-            "u64",
-        ),
-        (
-            "ownerRevision",
-            offset_of!(WebBuiltinInputConfig, owner_revision),
-            "u64",
-        ),
-        (
-            "values",
-            offset_of!(WebBuiltinInputConfig, values),
-            "f32[4]",
-        ),
-    ]
-}
-
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -1742,6 +1505,7 @@ pub fn render() -> String {
         (RESULT_UNSUPPORTED, "unsupported"),
         (RESULT_RENDER_REJECTED, "renderRejected"),
         (RESULT_REPREPARE_REQUIRED, "reprepareRequired"),
+        (RESULT_COMPILE_REJECTED, "compileRejected"),
         (RESULT_INTERNAL, "internal"),
     ];
     // Scoped to `miso_engine_web_v1_boot`'s return value. Transcribed from the alias constants, so
@@ -1766,23 +1530,8 @@ pub fn render() -> String {
         (BUFFER_METER_FRAME, "meterFrame"),
     ];
     let wire_command_kinds = [
-        (COMMAND_PAN, "pan"),
-        (COMMAND_MATRIX, "matrix"),
-        (COMMAND_FADER_DB, "faderDb"),
-        (COMMAND_MUTE, "mute"),
-        (COMMAND_EFFECT_PARAM, "effectParam"),
-        (COMMAND_EFFECT_BYPASS, "effectBypass"),
         (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe"),
         (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe"),
-        (COMMAND_SOLO, "solo"),
-        (COMMAND_TRIM_DB, "trimDb"),
-        (COMMAND_POLARITY_INVERT, "polarityInvert"),
-        (COMMAND_INPUT_FILTERS, "inputFilters"),
-        (COMMAND_ROUTE_GAIN_DB, "routeGainDb"),
-        (COMMAND_ROUTE_MUTE, "routeMute"),
-        (COMMAND_ROUTE_MATRIX, "routeMatrix"),
-        (COMMAND_VCA_FADER_DB, "vcaFaderDb"),
-        (COMMAND_VCA_MUTE, "vcaMute"),
     ];
     let command_reasons = [
         (COMMAND_REASON_NONE, "none"),
@@ -1797,9 +1546,6 @@ pub fn render() -> String {
         (COMMAND_REASON_WRONG_STATE, "wrongState"),
         (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
-        (COMMAND_REASON_NOT_SOLOABLE, "notSoloable"),
-        (COMMAND_REASON_UNKNOWN_ROUTE, "unknownRoute"),
-        (COMMAND_REASON_UNKNOWN_VCA, "unknownVca"),
     ];
 
     let mut out = String::with_capacity(1 << 14);
@@ -1869,6 +1615,13 @@ pub fn render() -> String {
         "commandReport",
         COMMAND_REPORT_BYTES,
         &command_report_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "planWatermark",
+        WATERMARK_BYTES,
+        &plan_watermark_fields(),
         true,
     );
     render_structure(
@@ -1974,63 +1727,6 @@ pub fn render() -> String {
         "liveResponseResult",
         LIVE_RESPONSE_RESULT_BYTES,
         &live_response_result_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "eqTargetRequest",
-        32,
-        &eq_target_request_fields(),
-        true,
-    );
-    render_structure(&mut out, "eqTargetEdit", 12, &eq_target_edit_fields(), true);
-    render_structure(
-        &mut out,
-        "inputFilterEdit",
-        16,
-        &input_filter_edit_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "preparedEffectTarget",
-        56,
-        &prepared_target_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "eqTargetResult",
-        32,
-        &eq_target_result_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "preparedEffectCompanionHeader",
-        24,
-        &companion_header_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "preparedEffectCompanionRecord",
-        80,
-        &companion_record_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "eqTargetConfig",
-        272,
-        &eq_target_config_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "builtinInputConfig",
-        48,
-        &builtin_input_config_fields(),
         false,
     );
     out.push_str("  },\n");
@@ -2169,10 +1865,6 @@ pub fn render() -> String {
         "    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"
     );
     append!(&mut out, "    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n");
-    append!(
-        &mut out,
-        "    \"defaultCommandQueueRecords\": {DEFAULT_COMMAND_QUEUE_RECORDS},\n"
-    );
     append!(
         &mut out,
         "    \"defaultMeterBlocks\": {DEFAULT_METER_BLOCKS},\n"

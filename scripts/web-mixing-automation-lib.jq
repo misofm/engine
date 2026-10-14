@@ -7,8 +7,8 @@
 # The browser record is descriptive, like every record in the console stream, but it states claims
 # a later edit could quietly drop, so they are refused here rather than trusted:
 #
-# * the row: the mono fixture, the eight controls in the host's lowerings (the native row's pin),
-#   the traffic every arm was admitted, and the digest rules the harness asserted in-run --
+# * the row: the mono fixture, the eight controls in the native row's lowerings (the browser sends
+#   each as one `SET_CONTROL` edit on lane `both`, #1565A D8), the edits every arm was applied, and the digest rules the harness asserted in-run --
 #   `quiet == restated`, `restated != automated`, and, in the preflight, every effect moving bits
 #   on its own and the EQ-only restatement rendering `quiet`'s bits;
 # * the input: this arm streams one continuous tone, in phase on every track, where the native row
@@ -23,7 +23,7 @@
 #   other document's, that both rounds agree on.
 include "console-benchmark-record-lib";
 
-def web_mixing_keys: ["arms","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","bank_collapse_counters_exported","bit_identity","candidate_commit","command_records_per_block","console_command_queue_records","controls","cpu_affinity","descriptive_only","documents","fixture_id","input_feed","input_signal","issue","loadavg_end","loadavg_start","measurement_control","module_matches_pin","module_sha256","native_input_feed","node_flags","node_version","observations","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","percentile_method","pinned_sha256","preflight_output_sha256","prepared_commit","preroll_blocks","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","records_admitted","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","sample_rate_hz","schema_version","source_frames","source_ring_frames","statistical_method","tracks","units","v8_version","workload_kind"];
+def web_mixing_keys: ["arms","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","bank_collapse_counters_exported","bit_identity","boot_reserved1","candidate_commit","command_records_per_block","controls","cpu_affinity","descriptive_only","documents","fixture_id","input_feed","input_signal","issue","loadavg_end","loadavg_start","measurement_control","module_matches_pin","module_sha256","native_input_feed","node_flags","node_version","observations","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","percentile_method","pinned_sha256","preflight_output_sha256","prepared_commit","preroll_blocks","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","records_admitted","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","sample_rate_hz","schema_version","source_frames","source_ring_frames","statistical_method","tracks","units","v8_version","workload_kind"];
 def web_feed_keys: ["amplitude","block_frames","continuous_across_blocks","delivery","radians_per_frame","track_phase_radians","waveform"];
 def commit_id: type == "string" and test("^[0-9a-f]{40}$");
 
@@ -83,7 +83,7 @@ def web_mixing_record_claims: [
   claim("host"; (.node_version | type == "string" and startswith("v")) and
     (.v8_version | type == "string" and length > 0) and
     (.node_flags | type == "array" and any(.[]; . == "--no-liftoff")) and
-    .console_command_queue_records == 64 and
+    .boot_reserved1 == 0 and
     (.source_ring_frames | positive_integer) and (.source_ring_frames % .quantum_frames) == 0),
   # The row.
   claim("row"; .observations == 1000 and .preroll_blocks == 64 and

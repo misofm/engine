@@ -238,6 +238,46 @@ impl<A: ControlAdapter> PlanState<A> {
         self.fp_env_attested.set(true);
     }
 
+    /// The active plan's host attachment as a `T` (#1381a D3), or `None` when the plan carries
+    /// none or carries another type. Render side: a downcast of the attachment that
+    /// [`RealtimePlanOwner::active_attachment_mut`] reaches, allocating and dropping nothing.
+    pub fn active_attachment_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.owner.active_attachment_mut::<T>()
+    }
+
+    /// Prevalidate source preparation before a single-instance host admits the producer-side seek
+    /// (#1381a): the active plan's [`RealtimePlanOwner::can_prepare_source_seek`].
+    #[must_use]
+    pub fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        self.owner.can_prepare_source_seek(source_index)
+    }
+
+    /// Prepare an admitted seek on the active plan between blocks (#1381a): the owner's
+    /// [`RealtimePlanOwner::prepare_source_seek`].
+    pub fn prepare_source_seek(
+        &mut self,
+        source_index: usize,
+        generation: u64,
+        frame: u64,
+    ) -> bool {
+        self.owner
+            .prepare_source_seek(source_index, generation, frame)
+    }
+
+    /// Copy one track's retained response owners at the current completed block boundary
+    /// (#1381a): the owner's [`RealtimePlanOwner::copy_response_snapshot`].
+    ///
+    /// # Errors
+    ///
+    /// The plan's typed refusal.
+    pub fn copy_response_snapshot(
+        &mut self,
+        request: engine::realtime::ResponseSnapshotRequest<'_>,
+    ) -> Result<engine::realtime::ResponseSnapshotCapture, engine::realtime::ResponseSnapshotError>
+    {
+        self.owner.copy_response_snapshot(request)
+    }
+
     /// Clones the any-thread query projection the adapter installs beside the plan.
     pub fn queries(&self) -> PlanQueries<A> {
         PlanQueries {
