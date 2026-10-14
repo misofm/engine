@@ -713,7 +713,7 @@ Chromium leg of `qualification/run.mjs`.
 | `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
 | same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
 | same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
-| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCapture::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 6 (re-measured by #1492: #1488 wrapped `spectrum_stream_start`, which also reads the channel mask, so its 2 calls now count too) |
+| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCaptures::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 6 (re-measured by #1492: #1488 wrapped `spectrum_stream_start`, which also reads the channel mask, so its 2 calls now count too) |
 | `tests/render_locked_staging.rs` phase 2 select legs (#1492) | `SpectrumCaptureCollection::select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | `the first select allocated`: 2 |
 | same | `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | `the first select allocated`: 2 |
 | same, control | the first mutation kept, and both select exports unwrapped from `render_locked` | green: the count sees a select's allocation only through the wrap |
@@ -725,7 +725,7 @@ Chromium leg of `qualification/run.mjs`.
 | same, (h1d) | `unhashed` keeps the mangling hash | both (h1d) schemes |
 | same, (h4) | `closure` takes no exact-name root | (h4): `miso_engine_web_v1_render` is ambiguous with `_render_allocation_count` |
 | `qualification/run.mjs` `render-allocations` | a `Vec::with_capacity(1)` planted in `render_next` (rebuilt module) | every instance reads more than 0 (corpus 2 and 4, live control 260, stall 80, ...) and the gate fails |
-| same | `PreparedSpectrumCapture::channels` back to the clone (rebuilt module, no `--sdk-root`) | `staging-reads-one-shot` reads 4 and `staging-reads-stream` reads 2; every other instance reads 0 |
+| same | `PreparedSpectrumCaptures::channels` back to the clone (rebuilt module, no `--sdk-root`) | `staging-reads-one-shot` reads 4 and `staging-reads-stream` reads 2; every other instance reads 0 |
 | `qualification/run.mjs --self-test-mutations` `render-allocations` | one instance's count set to 1 | `<browser>: render-allocations` fails |
 | `qualification/run.mjs --self-test-mutations` `staging-reads` | the one-shot spectrum read's result set to backpressure (6) | `<browser>: staging-reads` fails |
 | `qualification/run.mjs` `sdk-render-allocations` (#1476) | `drop(Vec::<u8>::with_capacity(1))` planted in `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (rebuilt module); no raw workload submits a bypass record | the four live-bypass SDK instances that submit one read 2 each and the gate fails naming them; `render-allocations` stays green (all ten raw rows 0) |
