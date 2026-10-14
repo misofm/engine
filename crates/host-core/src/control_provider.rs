@@ -1382,9 +1382,12 @@ impl ControlCatalog {
             STAGED_OWNERS.with(|count| count.set(count.get() + 1));
             fresh.clear();
             controls::owner_rows_with(next, &effective, overlay, owner, sample_rate, &mut fresh);
-            let strip = (owner < strip_count)
-                .then(|| next.strips().nth(owner))
-                .flatten();
+            // The strip order is the tracks then the submixes; index them directly rather than
+            // walking the chained iterator once per changed owner.
+            let strip = match owner.checked_sub(next.tracks.len()) {
+                None => next.tracks.get(owner).map(session::StripRef::track),
+                Some(submix) => next.submixes.get(submix).map(session::StripRef::submix),
+            };
             if !self.stage_run(
                 next,
                 strip.as_ref(),

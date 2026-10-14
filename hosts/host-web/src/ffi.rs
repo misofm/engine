@@ -1390,7 +1390,7 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging, continuous: bool) -> u32
     {
         return spectrum_failure(staging, RESULT_INVALID_ARGUMENT);
     }
-    let window = snapshot.window;
+    let window = &snapshot.window;
     let analysis = staging
         .analysis
         .as_ref()

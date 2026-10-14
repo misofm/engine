@@ -1208,10 +1208,9 @@ impl Budget {
 /// allocation 253,504 -> 48,915, which is now the engine's (its graph and bank allocations, not
 /// the catalog). capi retained is lane-independent, so its four-lane ceiling moves with the
 /// eight-lane one. The largest named allocation is no longer the catalog's, which was
-/// lane-independent; the new one is the engine's and its four-lane size is printed only by
-/// CI's `aarch64-debug` run, so that row's four-lane ceiling stays at its previous value until
-/// that run prints it. The eight-lane ceilings are the new values plus 10 %, rounded up to 64:
-/// 216,815.5 -> 216,832 and 53,806.5 -> 53,824.
+/// lane-independent; the new one is the engine's, and CI's `aarch64-debug` run printed the same
+/// 48,915 bytes at four lanes (PR #1607), so both widths carry the same ceiling. The ceilings are
+/// the new values plus 10 %, rounded up to 64: 216,815.5 -> 216,832 and 53,806.5 -> 53,824.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",

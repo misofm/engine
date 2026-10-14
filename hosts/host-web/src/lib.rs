@@ -7351,7 +7351,9 @@ fn prepare_web_host(
 /// The browser renders its plan directly until it renders through the plan owner (#1381), which
 /// reads them there; #1381 adds its own bookkeeping to this struct.
 ///
-/// Field order is the drop order: the capture, then the consumers, as in `ReadyOwnership`.
+/// Field order is the drop order: the spectrum capture, then the meter consumers, then the effect
+/// observation handles, the relative order the same three fields have in `ReadyOwnership`. No one
+/// of them reads another while it drops; the order is kept so the two owners release alike.
 pub struct RenderCompanions {
     spectrum_capture: Option<PreparedSpectrumCaptures>,
     /// One consumer per selected meter, in strip order; empty when metering is off.
@@ -7377,11 +7379,18 @@ impl RenderCompanions {
     /// allocation: the box, and the buffers of the two vectors. What the consumers, the handles
     /// and the capture own is host-core's report's, which already counts it; `None` on overflow.
     fn retained_bytes(&self) -> Option<(u64, u64)> {
+        // Every field is named, so a field added to the struct fails to compile here until its
+        // heap is charged (or declared host-core's, as the capture is).
+        let Self {
+            spectrum_capture: _,
+            meters,
+            effect_observations,
+        } = self;
         let shell = u64::try_from(size_of::<Self>()).ok()?;
-        let meters = u64::try_from(self.meters.capacity())
+        let meters = u64::try_from(meters.capacity())
             .ok()?
             .checked_mul(u64::try_from(size_of::<MeterConsumer>()).ok()?)?;
-        let observations = u64::try_from(self.effect_observations.capacity())
+        let observations = u64::try_from(effect_observations.capacity())
             .ok()?
             .checked_mul(u64::try_from(size_of::<EffectObservationHandle>()).ok()?)?;
         let total = shell.checked_add(meters)?.checked_add(observations)?;
@@ -7455,19 +7464,57 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         let (retained, largest) = companions.retained_bytes().ok_or_else(|| {
             PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic")
         })?;
-        let report = &mut host.report;
-        let charged = |row: u64| {
-            row.checked_add(retained).ok_or_else(|| {
-                PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic")
-            })
-        };
-        report.graph_session_plus_plan_bytes = charged(report.graph_session_plus_plan_bytes)?;
-        report.graph_incremental_plan_bytes = charged(report.graph_incremental_plan_bytes)?;
-        report.largest_engine_allocation_bytes =
-            report.largest_engine_allocation_bytes.max(largest);
+        charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
         Ok((host, handles))
     }
+}
+
+/// Charge the render companions' own heap to the plan's rows, after checking the charged total
+/// against the caps the plan was prepared under, so a plan that fits only without its companions is
+/// refused before they are boxed.
+///
+/// The cap on `graph_session_plus_plan_bytes` governs the graph, the plan and the compiled model
+/// together (`HostPrepareCaps`), and the report's graph row leaves the model out, so the model is
+/// added for the comparison. Host-core's own admission also counts the effect and route controls,
+/// which neither row holds, so it refuses first for a session it would refuse; this is the check
+/// of what only the browser adds. A refusal leaves the report as it was.
+fn charge_attachment(
+    report: &mut host_core::HostPrepareReport,
+    caps: &HostPrepareCaps,
+    retained: u64,
+    largest: u64,
+) -> Result<(), PrepareDiagnostics> {
+    let arithmetic =
+        || PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic");
+    let graph_session_plus_plan = report
+        .graph_session_plus_plan_bytes
+        .checked_add(retained)
+        .ok_or_else(arithmetic)?;
+    let graph_incremental_plan = report
+        .graph_incremental_plan_bytes
+        .checked_add(retained)
+        .ok_or_else(arithmetic)?;
+    let governed = graph_session_plus_plan
+        .checked_add(report.session_model_bytes)
+        .ok_or_else(arithmetic)?;
+    if governed > caps.maximum_graph_session_plus_plan_bytes {
+        return Err(PrepareDiagnostics::fixed(
+            PrepareRejection::Resource,
+            "host.graph.resource.limit",
+        ));
+    }
+    let largest_allocation = report.largest_engine_allocation_bytes.max(largest);
+    if largest_allocation > caps.maximum_named_allocation_bytes {
+        return Err(PrepareDiagnostics::fixed(
+            PrepareRejection::Resource,
+            "host.resource.limit",
+        ));
+    }
+    report.graph_session_plus_plan_bytes = graph_session_plus_plan;
+    report.graph_incremental_plan_bytes = graph_incremental_plan;
+    report.largest_engine_allocation_bytes = largest_allocation;
+    Ok(())
 }
 
 /// Run the shared pipeline, then fold its engine-owned report into the frozen browser report.

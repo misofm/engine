@@ -44,9 +44,10 @@ math.workspace = true
 capi.workspace = true
 # Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060).
 lane.workspace = true
-# Dev-only: the command frames `protocol` encodes drive the control plane the C ABI embeds beside the
-# browser host (`tests/control_parity.rs`, #1560, which absorbed #1399's `strip_cells_cross_host.rs`).
-# The control plane itself is a normal dependency above (#1400 D5). Not linked into the browser artifact.
+# The tests name `protocol` directly: its command frames drive the control plane the C ABI embeds
+# beside the browser host (`tests/control_parity.rs`, #1560, which absorbed #1399's
+# `strip_cells_cross_host.rs`). The browser artifact links `protocol` already, through the control
+# plane (a normal dependency above, #1400 D5), so this line adds nothing to it.
 protocol.workspace = true
 # Dev-only: the native leg of the #106 F4 native<->simd128 session parity gate digests its rendered
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.

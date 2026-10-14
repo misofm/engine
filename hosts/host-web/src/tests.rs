@@ -2678,34 +2678,6 @@ fn live_control_host_at_rate(
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("live-control boot")
 }
 
-#[cfg(feature = "test-support")]
-fn paired_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
-    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
-        .expect("accepted identity fixture");
-    model.quantum_frames = quantum;
-    model.sources[0].frames = u64::from(quantum) * 2;
-    let template = model.tracks[0].clone();
-    model.tracks.clear();
-    for index in 0..9 {
-        let mut track = template.clone();
-        track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
-        model.tracks.push(track);
-    }
-    model.routes[0].source = session::RouteSource::Track {
-        track_id: session::StableId::parse("track-0").expect("route track"),
-        tap: session::SendTap::PostPan,
-    };
-    let document = canonical_session_json(&model).expect("canonical paired fixture");
-    let options = WebBootOptions {
-        require_sample_rate_hz: 48_000,
-        require_quantum_frames: quantum,
-        source_ring_frames: quantum,
-        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        ..WebBootOptions::explicit_defaults()
-    };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired live-control boot")
-}
-
 fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost {
     meter_tail_host_for_blocks(sample_rate_hz, quantum, 1, 4)
 }
@@ -3364,8 +3336,15 @@ fn the_status_reports_the_sessions_superseded_count() {
 #[test]
 fn acknowledged_pair_render_records_the_same_live_dispatch() {
     const QUANTUM: u32 = 128;
-    let mut host = paired_live_control_host(QUANTUM);
+    let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, 1, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.5);
+    assert_eq!(host.poll_meters(), 1, "the first block's window");
+    assert_eq!(
+        &host.meter_frame()[16..18],
+        &[0.5, 0.5],
+        "track 8 before the commands"
+    );
     stage_command(
         &mut host,
         0,
@@ -3411,6 +3390,22 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     assert_eq!(witness.fader_values_applied, 1);
     assert_eq!(witness.matrix_values_applied, 1);
     assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+    // The acknowledged values reached track 8's lanes, whatever form its banks take: its
+    // post-matrix peak over the acknowledged block is the source at -6 dB through [0.5, 0, 0, 1].
+    assert_eq!(host.poll_meters(), 1, "the acknowledged block's window");
+    assert_eq!(host.meter_header().first_sample, u64::from(QUANTUM));
+    let frame = host.meter_frame();
+    assert!(
+        frame[..16].iter().all(|peak| *peak == 0.5),
+        "the other eight tracks are untouched: {:?}",
+        &frame[..16]
+    );
+    let (selected_left, selected_right) = (frame[16], frame[17]);
+    assert!(
+        selected_left > 0.11 && selected_left < 0.14,
+        "the acknowledged records reached track 8: {selected_left}"
+    );
+    assert_eq!(selected_right.to_bits(), (selected_left * 2.0).to_bits());
     let output = host.output_pcm().expect("output");
     let quantum = QUANTUM as usize;
     let expected_left = output[0];
@@ -17787,6 +17782,88 @@ fn companion_request(capture: CompanionCapture) -> Option<SpectrumPreparationReq
             },
         )),
     }
+}
+
+/// The attachment's charge is checked against the plan caps before the attachment is boxed. The
+/// rows the cap governs are the graph, the plan and the compiled model together, so the check adds
+/// the model to the graph row; one byte under the charged total refuses with host-core's own
+/// graph code, and one byte under the largest allocation with its allocation code. Host-core's
+/// admission already counts effect and route controls, which these rows leave out, so for a
+/// session it admitted this check is a backstop; it is tested on the report's own figures.
+///
+/// Red if the charge is added without a cap check, or the check leaves the model out, so a plan
+/// that fits only without its companions is boxed and published.
+#[test]
+fn the_attachment_charge_is_checked_against_the_caps() {
+    let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+    let options = WebBootOptions {
+        source_ring_frames: 512,
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: 128,
+        ..WebBootOptions::live_control_defaults()
+    };
+    let parsed = parse_host_session(document).expect("nine-track parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("nine-track compile");
+    let caps = prepare_caps(&compiled, options, 512, u64::MAX);
+    let (host, _, _) = prepare_web_host(
+        &compiled,
+        &caps,
+        &live_control_request(options, 128).expect("request"),
+        None,
+        controls::live_lanes(compiled.normalized_model()).into(),
+        &host_core::LiveValuesSuperseded::new(),
+        None,
+    )
+    .expect("reference preparation");
+    let base = host.report;
+    let (retained, largest) = (808_u64, base.largest_engine_allocation_bytes + 1);
+    let total = base.graph_session_plus_plan_bytes + retained + base.session_model_bytes;
+    let limit = |graph: u64, named: u64| HostPrepareCaps {
+        maximum_graph_session_plus_plan_bytes: graph,
+        maximum_named_allocation_bytes: named,
+        ..caps
+    };
+    let diagnostic = |code: &str| PrepareDiagnostics::fixed(PrepareRejection::Resource, code);
+
+    let mut report = base;
+    assert_eq!(
+        charge_attachment(&mut report, &limit(total - 1, u64::MAX), retained, largest),
+        Err(diagnostic("host.graph.resource.limit"))
+    );
+    assert_eq!(
+        charge_attachment(
+            &mut report,
+            &limit(u64::MAX, largest - 1),
+            retained,
+            largest
+        ),
+        Err(diagnostic("host.resource.limit"))
+    );
+    assert_eq!(report, base, "a refusal charges nothing");
+    assert_eq!(
+        charge_attachment(&mut report, &limit(total, largest), retained, largest),
+        Ok(())
+    );
+    assert_eq!(
+        report.graph_session_plus_plan_bytes,
+        base.graph_session_plus_plan_bytes + retained
+    );
+    assert_eq!(
+        report.graph_incremental_plan_bytes,
+        base.graph_incremental_plan_bytes + retained
+    );
+    assert_eq!(report.largest_engine_allocation_bytes, largest);
 }
 
 /// Gate 4. Red if one branch drops its capture or leaves a meter consumer or an observation
