@@ -289,3 +289,10 @@ Checked against `12d4a4f9d`.
 - **Dependencies.** #1279, #1312 and #1345 are closed. #1341a1 and #1341a2 landed in batch 9.
   #1622 (open) edits the same bypass write in `live.rs` and `live_delta.rs`: if both are in one
   batch, #1622 lands before #1280c.
+
+## Ruling (root, 2026-10-14)
+
+The batch-10 split is approved: #1280a (D2 with #1341 D7, D5, the live-stage carry, the console and
+banked-insert join, `add_carried`; gates 1-4, 6 and #1341's gate 6), #1280c (D4, gate 5), #1280b
+(D3, gate 8). #1341 closes when #1280a lands. #1622 follows #1280a in batch 10 lane K and rebases
+on it.

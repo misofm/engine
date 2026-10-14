@@ -236,3 +236,13 @@ Checked against `12d4a4f9d`.
   the pinned indirect-site table of `scripts/check-web-audioworklet-callgraph.py` (#1333 D4) gains
   it in the same slice, with #1381 D3's reason; that script joins this slice's authorized paths for
   that row only.
+
+## Ruling (root, 2026-10-14): one plan.rs edit
+
+#1327a makes the one combined edit to `crates/engine/src/realtime/plan.rs` the chain needs: the
+observer carries of #1327 (`ObserverCarry`, `ObserverKind`, `observer_carries`), the
+`ObserverKind::Spectrum` variant of #1395 and `HostAttachment::adopt_predecessor` with its call in
+`PreparedRenderPlan::carry_from` for #1381b, with the callgraph pin in
+`scripts/check-web-audioworklet-callgraph.py`. One attempt; if the permission system refuses it,
+the slice stops and root is told at once. #1395 and #1381b make no edit of their own in
+`crates/engine/src/realtime`.

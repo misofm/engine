@@ -444,3 +444,8 @@ Checked against `12d4a4f9d`.
   and there is no input twin of #1277 D5's retarget. It is not a #1562b blocker (the C ABI does the
   same). Proposed successor: *Carry, then retarget a strip input section across a plan swap*
   (lane K, `prepare.rs` and `live_delta.rs`), after #1280c.
+
+## Ruling (root, 2026-10-14): #1562b order
+
+#1562b-W lands first, then #1562b-K, with the dependencies in the batch-10 amendment (#1290 d+e,
+#1280a, #1280c, #1281, #1282).

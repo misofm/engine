@@ -312,3 +312,9 @@ Checked against `12d4a4f9d`.
 - **Anchors moved** in `hosts/host-web/src/lib.rs`: `AudioWorkletEngineHost` `:1598`,
   `boot_with_spectrum_config` `:1655`, `render_next` `:2904`, `compile_ready` `:4982`. #1349 is
   closed; the watermark is in the browser status (D5).
+
+## Ruling (root, 2026-10-14): gate 6
+
+Gate 6 is restated on what is still bound to boot-time indices: after adoption, the observation
+catalog exports (until #1590) and the source table describe the successor. D4 step 3's prepared
+commands no longer exist (#1565A) and leave the gate.
