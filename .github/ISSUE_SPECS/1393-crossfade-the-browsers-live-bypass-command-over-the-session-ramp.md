@@ -133,3 +133,28 @@ toggles, the browser and the C ABI render the same bits.
   `LiveRamps` host-web keeps, and the parity test this slice extends.
 
 **Decision 17 amendment (2026-10-13).** Superseded by #1563. The SDK's `bypass` becomes a `SET_CONTROL` on the effect section's control `0`, which the core crossfades on both hosts (#1341). `COMMAND_EFFECT_BYPASS` is deleted by #1565. Order note: if #1341 lands before #1563, the cross-host parity test (#1560) shows the browser's step against the C ABI's crossfade; root orders #1341 accordingly.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`, and against #1341a1 and #1341a2 on `codex/controls-batch-9k`
+(`3b6e63354`, `4108ed463`).
+
+- **No work is left. This issue closes with #1341a1** (batch 9), with #1341a2 for the banked case.
+- **Why.** #1563B and #1565A deleted the browser's own bypass path: `COMMAND_EFFECT_BYPASS`,
+  `into_effect_records` and the shipped-host `EffectBypass` kind are not on `main`. The SDK's
+  `bypass(enabled)` is a `SET_CONTROL` on control `0` (`sdk/src/generated/control-builders.ts:963-969`),
+  and its doc already says that the core crossfades it on both hosts. The browser sends that frame to
+  the core's `SessionState`, and #1341a1's control plane writes `BypassSwitch { bypassed,
+  ramp_samples }` with the session's mute ramp for every host. So D1-D3 have no browser code to
+  change, and D2's command word no longer exists.
+- **The gates are met by #1341a1/a2.** Gate 1: host-core `tests/live_delta.rs` (the record's ramp is
+  the session's `mute_ms`; a ramp above the law's bound is refused). Gate 2:
+  `hosts/host-web/tests/control_parity.rs` `a_live_bypass_crossfades_alike_on_both_hosts` (the C ABI
+  and the browser host, bit for bit per block, at 44.1, 48, 88.2 and 96 kHz) and the scripted insert
+  and console-slot bypass rows of the same file; the reversal is pinned per node and banked in
+  `bypass_shunt_identity.rs`, and both hosts run that one core path. Gate 3: #1341a1's capi test
+  asserts no allocation in a ramp block; the host-web allocation gate and gate 4's commands run in
+  batch 9's gates.
+  Gate 5: no checked-in digest moved (#1341a2's record). D4's docs: the command and the shipped-host
+  kind are deleted, and the SDK builder's doc states the crossfade.
+- The coordinator closes #1393 as completed by #1341a1 when batch 9 is upstream.

@@ -160,3 +160,38 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
 ## Supersedes and shrinks
 
 - None beyond #1573's amendment of #763.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **#1610 landed (batch 8) with a different shape from D1's text.** The core function is
+  `pub(crate) fn serve_response_at(sample_rate_hz: u32, quantum_frames: u32, maximum_reply_bytes:
+  usize, request: &ResponseGetRequest, session: bool) -> Result<ResponseResult,
+  ResponseProviderError>` in `crates/host-core/src/control_provider.rs:672` (typed request in, typed
+  result out). It runs the preflight (target, then the core's checks) and, when `session` is true,
+  the `response.rate.session` rule. D1's `serve_response_frame` therefore lives in
+  `control_provider.rs`, not in `response.rs`: it decodes the frame, checks the target and then that
+  `sample_rate_hz` and `quantum_frames` are present (D1's order), calls
+  `serve_response_at(rate, quantum, bound, &request, false)`, and encodes the reply.
+- **D1 does not name the reply bound.** Proposal: a host-core constant equal to today's browser bound,
+  16 MiB (`RESPONSE_MAXIMUM_RESULT_BYTES = 16 << 20`, which D3 deletes from host-web), narrowed by the
+  request's `maximum_reply_bytes` (field 18), as `serve_checked` already does. Then no request that
+  the browser serves today is refused for its size.
+- **Anchors moved.** `hosts/host-web/src/lib.rs`: `RESPONSE_*` constants `:178-204`,
+  `WebResponseRequest` `:535`, `WebResponseParameter` `:569`, `WebResponseResult` `:580`, sizes
+  `:607-611`. `hosts/host-web/src/ffi.rs`: `ResponseStaging` `:123`,
+  `live_response_staging_retained_bytes` `:400`, the helpers `:838-910`, `response_buffer_budget`
+  `:2078`, `response_failure` `:2139`, `run_response_query` `:2150`, the eleven exports `:2339-2432`.
+  D3 also deletes `mod response_budget_tests` (`ffi.rs:4531`), which tests only the deleted budget.
+  `abi_layout.rs`: export names `:170-180`, field lists `:722`, `:830`, `:847`, structure rows
+  `:1653-1669`. `typed_frame.rs`: `encode_success_response_frame_into` `:284`,
+  `encode_non_ok_response_frame_into` `:323`, `decode_typed_command` `:374`. The SDK anchors held.
+- **Dependencies.** #1572, #1573, #1563 and #1610 are closed. #1562 is open, but the part this slice
+  needs is on `main`: host-web links `control-plane`, which builds `host-core` with
+  `control-provider`. Host-web's `Cargo.toml` names that feature itself rather than rely on feature
+  unification (an authorized path).
+- **The browser's rebuild refusal does not apply.** The preview has no session and sends no
+  transaction.
+- **Edit order.** In `host-core/src/control_provider.rs`: after #1341a1 (batch 9) and #1567; before
+  #1615. In `hosts/host-web/src/lib.rs`: after #1602 and #1611 (each changes one line there).
