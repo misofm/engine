@@ -278,3 +278,48 @@ fn tables_are_self_consistent() {
         }
     }
 }
+
+/// The control catalog is built one owner at a time (#1400b): every owner of `owner_count` lists
+/// one contiguous run under one owner address, the runs follow `list`'s owner order and add up to
+/// exactly `list`, and an index past the last owner appends nothing. Red if `owner_count` miscounts
+/// the owners (a streamed build would skip or repeat an owner's rows) or an owner's run mixes
+/// owners (the catalog opens an owner header only at a run's first row).
+#[test]
+fn owners_stream_one_run_each_in_list_order() {
+    use controls::{MonitorOverlay, effective, owner_count, owner_rows_with};
+
+    let model = fixture();
+    let overlay = MonitorOverlay::with_soloed([id("vocal")]);
+    let effective = effective(&model, &overlay);
+    let listed: Vec<ControlRow> = list(&model, &overlay, RATE).collect();
+    let mut streamed = Vec::new();
+    let mut owners_seen = Vec::<Owner>::new();
+    for owner in 0..owner_count(&model) {
+        let before = streamed.len();
+        owner_rows_with(&model, &effective, &overlay, owner, RATE, &mut streamed);
+        let run = &streamed[before..];
+        if let Some(first) = run.first() {
+            assert!(
+                run.iter()
+                    .all(|row| row.address.owner == first.address.owner),
+                "owner {owner}: one owner address per run"
+            );
+            assert!(
+                !owners_seen.contains(&first.address.owner),
+                "owner {owner}: no owner is listed twice"
+            );
+            owners_seen.push(first.address.owner.clone());
+        }
+    }
+    assert_eq!(streamed, listed);
+    let mut past = Vec::new();
+    owner_rows_with(
+        &model,
+        &effective,
+        &overlay,
+        owner_count(&model),
+        RATE,
+        &mut past,
+    );
+    assert!(past.is_empty());
+}

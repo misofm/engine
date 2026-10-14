@@ -672,19 +672,31 @@ impl ControlCatalog {
         overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
-        let listed = controls::list(model, overlay, sample_rate).collect::<Vec<_>>();
+        // The list is walked one owner at a time through one reused buffer, twice: once to size
+        // every table, once to fill them. No pass holds the whole list, so the transient is one
+        // owner's rows, not every control of the session's rows at full size (#1400b).
+        let effective = controls::effective(model, overlay);
+        let owner_total = controls::owner_count(model);
+        let mut scratch: Vec<controls::ControlRow> = Vec::new();
+        let mut listed_count = 0_usize;
         // Every owner opens with a header and every section of it with another.
         let mut owner_count = 0_usize;
         let mut section_count = 0_usize;
-        let mut previous: Option<&controls::ControlAddress> = None;
-        for row in &listed {
-            let (owner_opens, section_opens) = openings(previous, &row.address);
-            owner_count += usize::from(owner_opens);
-            section_count += usize::from(section_opens);
-            previous = Some(&row.address);
+        for owner in 0..owner_total {
+            scratch.clear();
+            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            // An owner's rows are contiguous and no two owners share an address, so the first row
+            // of an owner's run is the one that opens it.
+            let mut previous: Option<&controls::ControlAddress> = None;
+            for row in &scratch {
+                let (owner_opens, section_opens) = openings(previous, &row.address);
+                owner_count += usize::from(owner_opens);
+                section_count += usize::from(section_opens);
+                previous = Some(&row.address);
+            }
+            listed_count += scratch.len();
         }
-        let total = listed
-            .len()
+        let total = listed_count
             .checked_add(owner_count)
             .and_then(|total| total.checked_add(section_count))
             .filter(|total| u32::try_from(*total).is_ok())
@@ -713,127 +725,136 @@ impl ControlCatalog {
         let mut routes = model.routes.iter();
         let mut vcas = model.vcas.iter();
         let mut effect: Option<&'static EffectDescriptor> = None;
-        let mut previous: Option<&controls::ControlAddress> = None;
-        for row in &listed {
-            let address = &row.address;
-            let (owner_opens, section_opens) = openings(previous, address);
-            previous = Some(address);
-            if owner_opens {
-                let (header, route) = match &address.owner {
-                    Owner::Session => {
-                        strip = None;
-                        (ControlOwnerHeaderKind::Session, None)
-                    }
-                    Owner::Strip(id) => {
-                        let found = strips
-                            .by_ref()
-                            .find(|candidate| candidate.id == id)
-                            .ok_or(SessionControlProviderError)?;
-                        strip = Some(found);
-                        (
-                            match found.kind {
-                                StripKind::Track(_) => ControlOwnerHeaderKind::Track,
-                                StripKind::Submix(_) => ControlOwnerHeaderKind::Submix,
-                            },
-                            None,
-                        )
-                    }
-                    Owner::Route(id) => {
-                        let found = routes
-                            .by_ref()
-                            .find(|candidate| candidate.id == *id)
-                            .ok_or(SessionControlProviderError)?;
-                        let (source, tap) = match &found.source {
-                            session::RouteSource::Track { track_id, tap } => (track_id, *tap),
-                            session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
-                        };
-                        let destination = match &found.destination {
-                            session::RouteDestination::SubmixInput { submix_id } => submix_id,
-                            session::RouteDestination::OutputInput { output_id } => output_id,
-                        };
-                        (
-                            ControlOwnerHeaderKind::Route,
-                            Some(ControlRouteEnds {
-                                source: try_string(source.as_str())?,
-                                destination: try_string(destination.as_str())?,
-                                tap,
-                            }),
-                        )
-                    }
-                    Owner::Vca(id) => {
-                        vcas.by_ref()
-                            .find(|candidate| candidate.id == *id)
-                            .ok_or(SessionControlProviderError)?;
-                        (ControlOwnerHeaderKind::Vca, None)
-                    }
-                };
-                // The owner's wire kind and ID are the protocol's one address conversion's.
-                let owner_address = wire_address(address)?;
+        for owner in 0..owner_total {
+            scratch.clear();
+            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            let mut previous: Option<&controls::ControlAddress> = None;
+            for row in &scratch {
+                let address = &row.address;
+                let (owner_opens, section_opens) = openings(previous, address);
+                previous = Some(address);
+                if owner_opens {
+                    let (header, route) = match &address.owner {
+                        Owner::Session => {
+                            strip = None;
+                            (ControlOwnerHeaderKind::Session, None)
+                        }
+                        Owner::Strip(id) => {
+                            let found = strips
+                                .by_ref()
+                                .find(|candidate| candidate.id == id)
+                                .ok_or(SessionControlProviderError)?;
+                            strip = Some(found);
+                            (
+                                match found.kind {
+                                    StripKind::Track(_) => ControlOwnerHeaderKind::Track,
+                                    StripKind::Submix(_) => ControlOwnerHeaderKind::Submix,
+                                },
+                                None,
+                            )
+                        }
+                        Owner::Route(id) => {
+                            let found = routes
+                                .by_ref()
+                                .find(|candidate| candidate.id == *id)
+                                .ok_or(SessionControlProviderError)?;
+                            let (source, tap) = match &found.source {
+                                session::RouteSource::Track { track_id, tap } => (track_id, *tap),
+                                session::RouteSource::Submix { submix_id, tap } => {
+                                    (submix_id, *tap)
+                                }
+                            };
+                            let destination = match &found.destination {
+                                session::RouteDestination::SubmixInput { submix_id } => submix_id,
+                                session::RouteDestination::OutputInput { output_id } => output_id,
+                            };
+                            (
+                                ControlOwnerHeaderKind::Route,
+                                Some(ControlRouteEnds {
+                                    source: try_string(source.as_str())?,
+                                    destination: try_string(destination.as_str())?,
+                                    tap,
+                                }),
+                            )
+                        }
+                        Owner::Vca(id) => {
+                            vcas.by_ref()
+                                .find(|candidate| candidate.id == *id)
+                                .ok_or(SessionControlProviderError)?;
+                            (ControlOwnerHeaderKind::Vca, None)
+                        }
+                    };
+                    // The owner's wire kind and ID are the protocol's one address conversion's.
+                    let owner_address = wire_address(address)?;
+                    rows.push(RowRecord {
+                        parent: index_of(owners.len())?,
+                        control: 0,
+                        descriptor: 0,
+                        kind: RowKind::Owner,
+                        lane: ParameterChannel::Both,
+                    });
+                    owners.push(OwnerRecord {
+                        kind: owner_address.owner_kind,
+                        header,
+                        id: owner_address.owner_id,
+                        route,
+                    });
+                    values.push(0.0);
+                }
+                if section_opens {
+                    let identity = match &address.section {
+                        Section::Console(slot) => model
+                            .console
+                            .slots()
+                            .find(|candidate| candidate.slot == *slot)
+                            .map(|candidate| &candidate.identity),
+                        Section::Inserts(id) => strip.and_then(|strip| {
+                            strip
+                                .inserts
+                                .effects
+                                .iter()
+                                .find(|candidate| candidate.id == *id)
+                                .map(|candidate| &candidate.identity)
+                        }),
+                        Section::Own | Section::Builtins => None,
+                    };
+                    effect = identity.and_then(contract);
+                    let effect_identity = match identity {
+                        Some(EffectIdentity::Native { effect_id })
+                            if matches!(
+                                address.section,
+                                Section::Console(_) | Section::Inserts(_)
+                            ) =>
+                        {
+                            Some(effect_id.as_str())
+                        }
+                        _ => None,
+                    };
+                    let section_address = wire_address(address)?;
+                    rows.push(RowRecord {
+                        parent: index_of(sections.len())?,
+                        control: 0,
+                        descriptor: 0,
+                        kind: RowKind::Section,
+                        lane: ParameterChannel::Both,
+                    });
+                    sections.push(SectionRecord {
+                        owner: index_of(owners.len() - 1)?,
+                        section: section_address.section,
+                        slot_id: section_address.slot_id,
+                        effect: effect_identity.map(try_string).transpose()?,
+                    });
+                    values.push(0.0);
+                }
                 rows.push(RowRecord {
-                    parent: index_of(owners.len())?,
-                    control: 0,
-                    descriptor: 0,
-                    kind: RowKind::Owner,
-                    lane: ParameterChannel::Both,
+                    parent: index_of(sections.len() - 1)?,
+                    control: address.control,
+                    descriptor: shapes.intern(Shape::of(row, ramps, effect))?,
+                    kind: RowKind::Control,
+                    lane: ParameterChannel::from(address.lane),
                 });
-                owners.push(OwnerRecord {
-                    kind: owner_address.owner_kind,
-                    header,
-                    id: owner_address.owner_id,
-                    route,
-                });
-                values.push(0.0);
+                values.push(row.value);
             }
-            if section_opens {
-                let identity = match &address.section {
-                    Section::Console(slot) => model
-                        .console
-                        .slots()
-                        .find(|candidate| candidate.slot == *slot)
-                        .map(|candidate| &candidate.identity),
-                    Section::Inserts(id) => strip.and_then(|strip| {
-                        strip
-                            .inserts
-                            .effects
-                            .iter()
-                            .find(|candidate| candidate.id == *id)
-                            .map(|candidate| &candidate.identity)
-                    }),
-                    Section::Own | Section::Builtins => None,
-                };
-                effect = identity.and_then(contract);
-                let effect_identity = match identity {
-                    Some(EffectIdentity::Native { effect_id })
-                        if matches!(address.section, Section::Console(_) | Section::Inserts(_)) =>
-                    {
-                        Some(effect_id.as_str())
-                    }
-                    _ => None,
-                };
-                let section_address = wire_address(address)?;
-                rows.push(RowRecord {
-                    parent: index_of(sections.len())?,
-                    control: 0,
-                    descriptor: 0,
-                    kind: RowKind::Section,
-                    lane: ParameterChannel::Both,
-                });
-                sections.push(SectionRecord {
-                    owner: index_of(owners.len() - 1)?,
-                    section: section_address.section,
-                    slot_id: section_address.slot_id,
-                    effect: effect_identity.map(try_string).transpose()?,
-                });
-                values.push(0.0);
-            }
-            rows.push(RowRecord {
-                parent: index_of(sections.len() - 1)?,
-                control: address.control,
-                descriptor: shapes.intern(Shape::of(row, ramps, effect))?,
-                kind: RowKind::Control,
-                lane: ParameterChannel::from(address.lane),
-            });
-            values.push(row.value);
         }
         let descriptors = shapes.into_rows()?;
         let resources = CatalogResources::of(&owners, &sections, &descriptors, &rows, &values)?;

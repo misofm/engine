@@ -1,11 +1,11 @@
 //! The control list and the one read and write path: [`list`], [`get`], [`set`].
 
-use session::SessionModel;
+use session::{SessionModel, StripRef};
 
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
-use crate::effective::{EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
+use crate::effective::{Effective, EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
@@ -65,25 +65,62 @@ pub fn list(
 ) -> impl Iterator<Item = ControlRow> + use<> {
     let effective = effective(model, overlay);
     let mut rows = Vec::new();
-    for (index, strip) in model.strips().enumerate() {
-        let soloed = overlay.is_soloed(strip.id);
+    for owner in 0..owner_count(model) {
+        owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut rows);
+    }
+    rows.into_iter()
+}
+
+/// How many owners [`list`] walks: the strips, the routes, the VCAs, then the session. An owner
+/// can list no row; [`owner_rows_with`] then appends nothing.
+#[must_use]
+pub fn owner_count(model: &SessionModel) -> usize {
+    model.strips().count() + model.routes.len() + model.vcas.len() + 1
+}
+
+/// Append the rows of owner number `owner` of [`list`]'s order to `out`, from the effective values
+/// the caller computed once with [`effective`] for the same `model` and `overlay`. [`list`] is this
+/// function for every owner in turn, so a caller that streams an owner at a time (to compact each
+/// into a smaller form, reusing one `out`) gets the very rows `list` gives, in the same order,
+/// without the whole list ever being held.
+///
+/// Appends nothing for an `owner` of `owner_count(model)` or more.
+pub fn owner_rows_with(
+    model: &SessionModel,
+    effective: &Effective,
+    overlay: &MonitorOverlay,
+    owner: usize,
+    sample_rate: u32,
+    out: &mut Vec<ControlRow>,
+) {
+    let strips = effective.strips.len();
+    if owner < strips {
+        // `strips()` order is the effective order: the tracks, then the submixes.
+        let strip = match model.tracks.get(owner) {
+            Some(track) => StripRef::track(track),
+            None => StripRef::submix(&model.submixes[owner - model.tracks.len()]),
+        };
         strip::push_rows(
-            &mut rows,
+            out,
             &model.console,
             &strip,
-            &effective.strips[index],
-            soloed,
+            &effective.strips[owner],
+            overlay.is_soloed(strip.id),
             sample_rate,
         );
+        return;
     }
-    for (index, route) in model.routes.iter().enumerate() {
-        route::push_rows(&mut rows, route, effective.routes[index].gate);
+    let owner = owner - strips;
+    if owner < model.routes.len() {
+        route::push_rows(out, &model.routes[owner], effective.routes[owner].gate);
+        return;
     }
-    for vca in &model.vcas {
-        vca::push_rows(&mut rows, vca);
+    let owner = owner - model.routes.len();
+    if let Some(vca) = model.vcas.get(owner) {
+        vca::push_rows(out, vca);
+    } else if owner == model.vcas.len() {
+        session_rows::push_rows(out, model);
     }
-    session_rows::push_rows(&mut rows, model);
-    rows.into_iter()
 }
 
 /// How the non-effect row `control` of `section` of `owner` moves, with no sample rate: the
