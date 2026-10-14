@@ -612,21 +612,20 @@ fn contract_channel(lane: ParameterChannel) -> effect_contract::ParameterChannel
     }
 }
 
-/// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
-/// model's, the target is a configuration (the address and strip targets are served by later
-/// slices), the curves come from the core's response query, and the reply is sized before any
-/// curve is computed.
-fn serve_response(
-    maximum_reply_bytes: usize,
-    model: &SessionModel,
+/// The checks every `RESPONSE_GET` meets first, whatever the endpoint: the target is a
+/// configuration (the address and strip targets are served by later slices), then the core's own
+/// checks in the core's order (rate, points, override count, axis), so the refusal of a request
+/// that is wrong in several ways is the same on every host. It returns the grid the request names.
+fn response_preflight(
+    sample_rate_hz: u32,
     request: &ResponseGetRequest,
-) -> Result<ResponseResult, ResponseProviderError> {
-    let ResponseTarget::Configuration(configuration) = &request.target else {
+) -> Result<ResponsePreviewGrid, ResponseProviderError> {
+    if !matches!(request.target, ResponseTarget::Configuration(_)) {
         return Err(refuse(
             StatusCode::Unavailable,
             "response.target.unavailable",
         ));
-    };
+    }
     let points = request.points as usize;
     let grid = match request.grid {
         ResponseGrid::Linear => ResponsePreviewGrid::Linear {
@@ -640,15 +639,71 @@ fn serve_response(
             maximum_hz: request.maximum_hz,
         },
     };
-    // The core's checks come first, in the core's order (rate, points, override count, axis), so
-    // the refusal of a request that is wrong in several ways is the same on every host. The
-    // provider's own rules follow.
-    check_response_request(model.sample_rate_hz, grid, request.overrides.len())
-        .map_err(query_refusal)?;
+    check_response_request(sample_rate_hz, grid, request.overrides.len()).map_err(query_refusal)?;
+    Ok(grid)
+}
+
+/// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
+/// model's, a request that names its own is refused, and everything else is the endpoint-free
+/// serving of [`serve_checked`].
+fn serve_response(
+    maximum_reply_bytes: usize,
+    model: &SessionModel,
+    request: &ResponseGetRequest,
+) -> Result<ResponseResult, ResponseProviderError> {
+    let grid = response_preflight(model.sample_rate_hz, request)?;
     // A session endpoint has one rate and one quantum, the session's.
     if request.sample_rate_hz.is_some() || request.quantum_frames.is_some() {
         return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
     }
+    serve_checked(
+        model.sample_rate_hz,
+        model.quantum_frames,
+        maximum_reply_bytes,
+        request,
+        grid,
+    )
+}
+
+/// Serve one `RESPONSE_GET` for an endpoint that has no session: the caller resolves the rate and
+/// the quantum, and this function reads neither `request.sample_rate_hz` nor
+/// `request.quantum_frames`. The refusals and the curves are the session endpoint's.
+// The caller is #1574's session-less preview; until it lands only the tests reach this function.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the session-less preview (#1574) is the caller")
+)]
+pub(crate) fn serve_response_at(
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    maximum_reply_bytes: usize,
+    request: &ResponseGetRequest,
+) -> Result<ResponseResult, ResponseProviderError> {
+    let grid = response_preflight(sample_rate_hz, request)?;
+    serve_checked(
+        sample_rate_hz,
+        quantum_frames,
+        maximum_reply_bytes,
+        request,
+        grid,
+    )
+}
+
+/// Everything after the rate rules: the limits, the bypass rows, the preparation, the reply bound
+/// and the curves. The request has passed [`response_preflight`], so its target is a configuration.
+fn serve_checked(
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    maximum_reply_bytes: usize,
+    request: &ResponseGetRequest,
+    grid: ResponsePreviewGrid,
+) -> Result<ResponseResult, ResponseProviderError> {
+    let ResponseTarget::Configuration(configuration) = &request.target else {
+        return Err(refuse(
+            StatusCode::Unavailable,
+            "response.target.unavailable",
+        ));
+    };
     let defaults = ResponsePreviewLimits::default();
     let maximum_prepared_bytes = request
         .maximum_prepared_bytes
@@ -735,8 +790,8 @@ fn serve_response(
     RESPONSE_PREPARATIONS.with(|count| count.set(count.get() + 1));
     let prepared = prepare_response_query(&ResponseQuery {
         configuration_id: request.configuration_id.unwrap_or(0),
-        sample_rate_hz: model.sample_rate_hz,
-        quantum_frames: model.quantum_frames,
+        sample_rate_hz,
+        quantum_frames,
         target,
         grid,
         channels,
@@ -2263,6 +2318,106 @@ mod tests {
         assert_eq!(
             refusal(&unknown),
             (StatusCode::InvalidField, "response.override.control")
+        );
+    }
+
+    /// The core serves with the rate and quantum its caller resolves, and refuses as the session
+    /// endpoint does: the curves at 44,100 Hz and 128 frames are the response query's own, and a
+    /// 44,100 Hz session gives the same curves for the request without the rate field; a target
+    /// that is no configuration, one point and a NaN axis are the session's three codes.
+    ///
+    /// Red if the core reads `request.sample_rate_hz` (here 48,000) instead of its argument, takes
+    /// its rate or quantum from anywhere but its arguments, or skips the target or core checks
+    /// that only the session wrapper ran before.
+    #[test]
+    fn the_core_serves_without_a_session_and_refuses_as_the_session_does() {
+        const SESSION_RATE: u32 = 44_100;
+        const SESSION_QUANTUM: u32 = 128;
+        const BOUND: usize = 1 << 20;
+        let mut request = response_request();
+        request.configuration_id = Some(0x5eed_1610);
+
+        let expected = prepare_response_query(&ResponseQuery {
+            configuration_id: 0x5eed_1610,
+            sample_rate_hz: SESSION_RATE,
+            quantum_frames: SESSION_QUANTUM,
+            target: ResponsePreviewTarget::Effect {
+                effect_id: "miso.parametric-eq",
+                overrides: &[],
+                quality: effect_contract::EffectQuality::Normal,
+                bypass: false,
+                link_mode: effect_contract::LinkMode::DualMono,
+            },
+            grid: ResponsePreviewGrid::Logarithmic {
+                points: 64,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+            },
+            channels: ResponseChannels::Both,
+            sections: false,
+            limits: ResponsePreviewLimits::default(),
+        })
+        .expect("the core prepares it")
+        .curves()
+        .expect("the core evaluates it");
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let same = |result: ResponseResult| {
+            let ResponseResult::Curves(curves) = result else {
+                panic!("expected curves");
+            };
+            assert_eq!(curves.sample_rate_hz, SESSION_RATE);
+            assert_eq!(curves.configuration_id, 0x5eed_1610);
+            assert_eq!(bits(&curves.frequencies_hz), bits(&expected.frequencies_hz));
+            assert_eq!(
+                bits(curves.left_db.as_deref().expect("left")),
+                bits(expected.left_db.as_deref().expect("left"))
+            );
+            assert_eq!(
+                bits(curves.right_db.as_deref().expect("right")),
+                bits(expected.right_db.as_deref().expect("right"))
+            );
+        };
+
+        // The request names another rate; the core serves at its argument.
+        let mut other_rate = request.clone();
+        other_rate.sample_rate_hz = Some(RATE);
+        other_rate.quantum_frames = Some(64);
+        same(
+            serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate)
+                .expect("the core serves"),
+        );
+
+        // A session at the same rate and quantum gives the same curves for the bare request.
+        let mut model = nine_track();
+        model.sample_rate_hz = SESSION_RATE;
+        model.quantum_frames = SESSION_QUANTUM;
+        same(serve_response(BOUND, &model, &request).expect("the session serves"));
+
+        // The core's refusals are the session's, in the session's codes.
+        let refusal = |request: &ResponseGetRequest| {
+            let error = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, request)
+                .expect_err("refused");
+            let session = serve_response(BOUND, &model, request).expect_err("refused");
+            assert_eq!((error.status, error.code), (session.status, session.code));
+            (error.status, error.code)
+        };
+        let mut address = request.clone();
+        address.target = ResponseTarget::Strip("track-1".to_owned());
+        assert_eq!(
+            refusal(&address),
+            (StatusCode::Unavailable, "response.target.unavailable")
+        );
+        let mut one_point = request.clone();
+        one_point.points = 1;
+        assert_eq!(
+            refusal(&one_point),
+            (StatusCode::InvalidField, "response.points")
+        );
+        let mut nan_axis = request;
+        nan_axis.minimum_hz = f32::NAN;
+        assert_eq!(
+            refusal(&nan_axis),
+            (StatusCode::InvalidField, "response.grid")
         );
     }
 
