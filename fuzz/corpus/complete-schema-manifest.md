@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
 The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
-session transaction contains all 48 allocated `SessionEditOpcode` values), all 11 successful
+session transaction contains all 35 allocated `SessionEditOpcode` values), all 11 successful
 responses, all 18 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`a19a779439660743`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`0433af905dc618bc`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -44,6 +44,10 @@ Issue #1553 (decision 17, C5) re-pinned it from `0902357f75bdddcd`: #1553 append
 Issue #1313 re-pinned it from `9f13a06993efa99e`: `TransactionApplied` gains the required field 2,
 `edit_path` (`live` 1, `model_only` 2, `rebuild` 3), so the transaction response frame carries it;
 the frame count is unchanged.
+Issue #1561 (decision 17, C5) re-pinned it from `a19a779439660743`: the thirteen per-kind value ops
+(`0x0008`, `0x0203`, `0x020a`, `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507`, `0x0702`) are retired
+and never reallocated, so the transaction carries 35 edits, one per allocated opcode; the frame
+count is unchanged.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

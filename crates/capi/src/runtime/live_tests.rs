@@ -416,28 +416,86 @@ fn window(latency_samples: u32, smoothing_samples: u32, quantum: usize) -> u64 {
     u64::from(latency_samples + smoothing_samples).div_ceil(quantum as u64) + 1
 }
 
-fn fader_edit(track_id: &str, fader: DualMonoFader) -> SessionEdit {
-    SessionEdit::SetTrackFader {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        fader,
-        ramp_samples: None,
-    }
+/// The `SET_CONTROL`s that give strip `track_id` the whole fader `fader` (decision 17, #1561).
+fn fader_edit(track_id: &str, fader: DualMonoFader) -> Vec<SessionEdit> {
+    protocol::control_core::fader_edits(&StableId::parse(track_id).expect("track ID"), &fader)
+}
+
+/// The two `SET_CONTROL`s that set the fader dB of strip `track_id` (left, right).
+fn db_edits(track_id: &str, left_db: f32, right_db: f32) -> Vec<SessionEdit> {
+    [
+        (protocol::control_core::Lane::Left, left_db),
+        (protocol::control_core::Lane::Right, right_db),
+    ]
+    .into_iter()
+    .map(|(lane, db)| {
+        SessionEdit::set_control(
+            protocol::control_core::row_address(
+                protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+                protocol::control_core::Section::Builtins,
+                "fader_db",
+                lane,
+            )
+            .expect("the fader row"),
+            db,
+            None,
+        )
+    })
+    .collect()
+}
+
+/// One `SET_CONTROL` that sets the mute of both lanes of strip `track_id`. A `SET_CONTROL` is about
+/// 160 bytes, so a transaction over ten strips stays inside the test limit's 4 KiB frame only when
+/// it writes the rows that change.
+fn mute_edit(track_id: &str, muted: bool) -> SessionEdit {
+    SessionEdit::set_control(
+        protocol::control_core::row_address(
+            protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+            protocol::control_core::Section::Builtins,
+            "mute",
+            protocol::control_core::Lane::Both,
+        )
+        .expect("the mute row"),
+        f32::from(u8::from(muted)),
+        None,
+    )
+}
+
+/// The `SET_CONTROL`s that give strip `track_id` the whole pan or matrix `shape`.
+fn matrix_edit(track_id: &StableId, shape: MatrixOrPan) -> Vec<SessionEdit> {
+    protocol::control_core::matrix_or_pan_edits(track_id, &shape)
+}
+
+/// The `SET_CONTROL`s of the three session rows that give `control_smoothing` the explicit
+/// `lengths`. Since #1561 no transaction writes the `default` arm back.
+fn smoothing_edits(lengths: ControlSmoothing) -> Vec<SessionEdit> {
+    [
+        ("fader_ms", lengths.fader_ms),
+        ("mute_ms", lengths.mute_ms),
+        ("pan_ms", lengths.pan_ms),
+    ]
+    .into_iter()
+    .map(|(row, value)| {
+        SessionEdit::set_control(
+            protocol::control_core::row_address(
+                protocol::control_core::Owner::Session,
+                protocol::control_core::Section::Own,
+                row,
+                protocol::control_core::Lane::Both,
+            )
+            .expect("a session row"),
+            value,
+            None,
+        )
+    })
+    .collect()
 }
 
 fn mute_all(model: &SessionModel, muted: bool) -> Vec<SessionEdit> {
     model
         .tracks
         .iter()
-        .map(|track| {
-            fader_edit(
-                track.id.as_str(),
-                DualMonoFader {
-                    left_mute: muted,
-                    right_mute: muted,
-                    ..track.fader.clone()
-                },
-            )
-        })
+        .map(|track| mute_edit(track.id.as_str(), muted))
         .collect()
 }
 
@@ -549,28 +607,25 @@ fn live_pcm_shape(
     let matrix_track = model.tracks[model.tracks.len() - 1].id.as_str();
     let smoothing = 16;
     assert!(smoothing as usize <= quantum);
-    let edits = [
-        fader_edit(
-            fader_track,
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: 3.0,
-                left_mute: false,
-                right_mute: false,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse(matrix_track).expect("matrix track"),
-            matrix_or_pan: MatrixOrPan::Matrix {
-                ll: 0.75,
-                lr: 0.125,
-                rl: -0.25,
-                rr: 0.5,
-                smoothing_samples: smoothing,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        fader_track,
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: 3.0,
+            left_mute: false,
+            right_mute: false,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse(matrix_track).expect("matrix track"),
+        MatrixOrPan::Matrix {
+            ll: 0.75,
+            lr: 0.125,
+            rl: -0.25,
+            rr: 0.5,
+            smoothing_samples: smoothing,
+        },
+    ));
     let (revision, _, epoch, _) = rig.summary();
     assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
     let (after, _, after_epoch, after_pending) = rig.summary();
@@ -768,7 +823,7 @@ fn with_ramp(edits: Vec<SessionEdit>, ramp: Option<u32>) -> Vec<SessionEdit> {
     edits
         .into_iter()
         .map(|mut edit| {
-            let SessionEdit::SetTrackFader { ramp_samples, .. } = &mut edit else {
+            let SessionEdit::SetControl { ramp_samples, .. } = &mut edit else {
                 panic!("a fader edit");
             };
             *ramp_samples = ramp;
@@ -958,7 +1013,12 @@ fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
     let mut rig = Rig::new(document);
     let model = parse_session_json(document).expect("model");
     let muted: Vec<SessionEdit> = with_ramp(
-        mute_all(&model, true).into_iter().step_by(2).collect(),
+        model
+            .tracks
+            .iter()
+            .step_by(2)
+            .map(|track| mute_edit(track.id.as_str(), true))
+            .collect(),
         ramp,
     );
     for _ in 0..3 {
@@ -1068,45 +1128,28 @@ fn control_smoothing_rebuild_run(
     }
     let mut edits = Vec::new();
     if in_transaction {
-        edits.push(SessionEdit::SetControlSmoothing {
-            control_smoothing: Some(smoothing),
-        });
+        edits.extend(smoothing_edits(smoothing));
     }
     edits.push(content_edit(&model));
     let last = model.tracks.len() - 1;
     for (index, track) in model.tracks.iter().enumerate() {
         let id = track.id.as_str();
         if index % 2 == 0 {
-            edits.push(fader_edit(
-                id,
-                DualMonoFader {
-                    left_mute: true,
-                    right_mute: true,
-                    ..track.fader.clone()
-                },
-            ));
+            edits.push(mute_edit(id, true));
         } else {
-            edits.push(fader_edit(
-                id,
-                DualMonoFader {
-                    left_db: -6.0,
-                    right_db: 3.0,
-                    ..track.fader.clone()
-                },
-            ));
+            edits.extend(db_edits(id, -6.0, 3.0));
         }
     }
-    edits.push(SessionEdit::SetTrackMatrixOrPan {
-        track_id: model.tracks[last].id.clone(),
-        matrix_or_pan: MatrixOrPan::Matrix {
+    edits.extend(matrix_edit(
+        &model.tracks[last].id,
+        MatrixOrPan::Matrix {
             ll: 0.75,
             lr: 0.125,
             rl: -0.25,
             rr: 0.5,
             smoothing_samples: 0,
         },
-        ramp_samples: None,
-    });
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "a content edit prepares a candidate");
     let (_, swap_used) = rig.render_counted();
@@ -1170,15 +1213,18 @@ fn a_control_smoothing_edit_governs_the_retargets_of_its_own_rebuild() {
     );
 }
 
+/// A `SET_CONTROL` of the left fader dB of strip `track_id`.
 fn left_db_edit(track_id: &str, left_db: f32) -> SessionEdit {
-    fader_edit(
-        track_id,
-        DualMonoFader {
-            left_db,
-            right_db: 0.0,
-            left_mute: false,
-            right_mute: false,
-        },
+    SessionEdit::set_control(
+        protocol::control_core::row_address(
+            protocol::control_core::Owner::Strip(StableId::parse(track_id).expect("track ID")),
+            protocol::control_core::Section::Builtins,
+            "fader_db",
+            protocol::control_core::Lane::Left,
+        )
+        .expect("the fader row"),
+        left_db,
+        None,
     )
 }
 
@@ -1256,13 +1302,13 @@ fn forty_fader_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
     let last = -1.0 - 39.0 * 0.25;
     for edit in 0..40 {
         assert_eq!(
-            rig.apply(&[both(-1.0 - edit as f32 * 0.25)]),
+            rig.apply(&both(-1.0 - edit as f32 * 0.25)),
             crate::RESULT_OK,
             "edit {edit}"
         );
     }
     assert_eq!(rig.writes(Epoch::Current, "eq0"), (80, 0));
-    assert_eq!(twin.apply(&[both(last)]), crate::RESULT_OK);
+    assert_eq!(twin.apply(&both(last)), crate::RESULT_OK);
     // The counter is the render side's: nothing has been read yet.
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
     // The plan's latency delays the first audible block; render past it.
@@ -1320,7 +1366,7 @@ fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
             right_mute: false,
         };
         assert_eq!(
-            rig.apply(&[fader_edit("eq0", fader)]),
+            rig.apply(&fader_edit("eq0", fader)),
             crate::RESULT_OK,
             "edit {edit}"
         );
@@ -1385,26 +1431,23 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     assert_eq!(rig.summary().3, 1, "a candidate is pending");
     assert_eq!(rig.writes(Epoch::Pending, "eq3"), (0, 0));
 
-    let edits = [
-        fader_edit(
-            "eq3",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: 3.0,
-                left_mute: false,
-                right_mute: true,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq3").expect("eq3"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.5,
-                right: 0.75,
-                smoothing_samples: 8,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        "eq3",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: 3.0,
+            left_mute: false,
+            right_mute: true,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse("eq3").expect("eq3"),
+        MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.75,
+            smoothing_samples: 8,
+        },
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "still the one candidate");
     // Two fader cells (left and right dB differ), one mute cell (right only), one matrix cell.
@@ -1500,7 +1543,7 @@ fn a_live_edit_on_a_pending_candidate_completes_at_the_swap() {
             right_mute: false,
         },
     );
-    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&edit), crate::RESULT_OK);
     let r2 = rig.summary().0;
     assert_eq!((r1, r2), (initial + 1, initial + 2));
     assert_eq!(
@@ -1562,7 +1605,7 @@ fn a_live_edit_completes_in_the_next_block() {
             right_mute: false,
         },
     );
-    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&edit), crate::RESULT_OK);
     let r = rig.summary().0;
     assert_eq!(rig.summary().3, 0, "the edit was live");
     assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
@@ -1600,14 +1643,14 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
     assert_eq!((fader.left_db, fader.right_db), (0.0, 0.0));
     let document = session::canonical_session_json(&model).expect("canonical");
     let structural = super::tests::add_muted_track(&model, "a-muted");
-    let live = [fader_edit(
+    let live = fader_edit(
         "eq0",
         DualMonoFader {
             left_db: -6.0,
             right_db: -6.0,
             ..fader
         },
-    )];
+    );
     let mut rig = Rig::new(&document);
     for _ in 0..4 {
         rig.step();
@@ -1822,7 +1865,7 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
     ] {
         let mut rig = Rig::new(document);
         rig.step();
-        assert_eq!(rig.apply(&[edit]), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.apply(&edit), crate::RESULT_OK, "{label}");
         assert_eq!(rig.summary().3, 0, "{label} is live");
     }
     let unfollowed = submix_session(false);
@@ -1832,32 +1875,37 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
         &unfollowed,
         &[
             fader_edit("eq0", quiet.clone()),
-            content_edit(&parse_session_json(&unfollowed).expect("model")),
-        ],
+            vec![content_edit(
+                &parse_session_json(&unfollowed).expect("model"),
+            )],
+        ]
+        .concat(),
         "a live fader beside a source content edit",
     );
 
     let model = parse_session_json(&base).expect("model");
     assert_rebuilds(&base, &[content_edit(&model)], "a source content edit");
 
-    // A fader outside the setter's domain is today's compile rejection, and writes nothing.
+    // A fader outside the control's domain is refused at its own edit by the control validator
+    // (`control.domain`, a protocol refusal under `RESULT_OK`), and writes nothing.
     let mut rig = Rig::new(&base);
     rig.step();
     let before = refusal_state(&rig);
     assert_eq!(
-        rig.apply(&[left_db_edit("eq0", 30.0)]),
-        crate::RESULT_COMPILE_REJECTED
+        set_control::refusal(&mut rig, &[left_db_edit("eq0", 30.0)]),
+        (
+            protocol::StatusCode::ValidationFailed,
+            vec![("control.domain".to_owned(), 0)]
+        )
     );
-    let rejected = with_model(&base, |model| model.tracks[0].fader.left_db = 30.0);
-    let Err(failure) = compile_children(&rejected, limits(), None) else {
-        panic!("a 30 dB fader does not prepare")
-    };
+    // The revision, the snapshot and the event lane are as they were; the refusal itself is the one
+    // answer the replay cache keeps.
+    let after = refusal_state(&rig);
     assert_eq!(
-        rig.last_error(),
-        failure.diagnostics,
-        "the live arm reports today's preparation diagnostic"
+        (after.0, &after.1, after.3),
+        (before.0, &before.1, before.3)
     );
-    assert_eq!(refusal_state(&rig), before);
+    assert_eq!(after.2, before.2 + 1);
     assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0));
     assert_eq!(rig.summary().3, 0);
 }
@@ -1879,18 +1927,15 @@ fn a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone() {
     let before = refusal_state(&rig);
     let cells = rig.current_cells();
     // A fader edit and a pan edit: two lanes, three cells.
-    let refused = [
-        left_db_edit("eq0", -9.0),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq3").expect("eq3"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: -0.75,
-                right: 0.25,
-                smoothing_samples: 0,
-            },
-            ramp_samples: None,
+    let mut refused = vec![left_db_edit("eq0", -9.0)];
+    refused.extend(matrix_edit(
+        &StableId::parse("eq3").expect("eq3"),
+        MatrixOrPan::Pan {
+            left: -0.75,
+            right: 0.25,
+            smoothing_samples: 0,
         },
-    ];
+    ));
     crate::ffi::test_set_structural_faults(
         rig.session,
         [Some(TestStructuralFaultPhase::BeforeLivePush), None],
@@ -1939,18 +1984,15 @@ fn a_refused_rebuild_with_a_carry_retarget_is_never_reused() {
     let fader = model.tracks[0].fader.clone();
     let document = session::canonical_session_json(&model).expect("canonical");
     let structural = super::tests::add_muted_track(&model, "a-muted");
-    let retargeted = [
-        structural[0].clone(),
-        structural[1].clone(),
-        fader_edit(
-            "eq0",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: -6.0,
-                ..fader
-            },
-        ),
-    ];
+    let mut retargeted = vec![structural[0].clone(), structural[1].clone()];
+    retargeted.extend(fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            ..fader
+        },
+    ));
     let mut rig = Rig::new(&document);
     let mut twin = Rig::new(&document);
     let mut accepted = Rig::new(&document);
@@ -2012,26 +2054,23 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
 
     // The last track sits right before the submix in the strip table; eq0 feeds the submix.
     let smoothing = 12;
-    let edits = [
-        fader_edit(
-            "eq9",
-            DualMonoFader {
-                left_db: -6.0,
-                right_db: -6.0,
-                left_mute: false,
-                right_mute: false,
-            },
-        ),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq0").expect("eq0"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.25,
-                right: 0.875,
-                smoothing_samples: smoothing,
-            },
-            ramp_samples: None,
+    let mut edits = fader_edit(
+        "eq9",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            left_mute: false,
+            right_mute: false,
         },
-    ];
+    );
+    edits.extend(matrix_edit(
+        &StableId::parse("eq0").expect("eq0"),
+        MatrixOrPan::Pan {
+            left: 0.25,
+            right: 0.875,
+            smoothing_samples: smoothing,
+        },
+    ));
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the edit is live");
     assert_eq!(rig.writes(Epoch::Current, "eq9"), (2, 0));
@@ -2078,18 +2117,15 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_n
     let cells = crate::ffi::test_transaction_snapshot(rig.session).strip_cells;
     let (revision, ..) = rig.summary();
 
-    let edits = [
-        left_db_edit("eq1", -3.0),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq2").expect("eq2"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.5,
-                right: 0.25,
-                smoothing_samples: 16,
-            },
-            ramp_samples: None,
+    let mut edits = vec![left_db_edit("eq1", -3.0)];
+    edits.extend(matrix_edit(
+        &StableId::parse("eq2").expect("eq2"),
+        MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.25,
+            smoothing_samples: 16,
         },
-    ];
+    ));
     let bytes = rig.transaction(&edits);
     let (result, response) = command_c(rig.session, &bytes);
     assert_eq!(result, crate::RESULT_OK, "a protocol refusal is RESULT_OK");
@@ -2353,13 +2389,13 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
         ),
         (
             "control smoothing",
-            SessionEdit::SetControlSmoothing {
-                control_smoothing: Some(ControlSmoothing {
-                    mute_ms: 1.0,
-                    fader_ms: 2.0,
-                    pan_ms: 3.0,
-                }),
-            },
+            // The first write turns the `default` arm into the explicit lengths (#1561 D4a).
+            smoothing_edits(ControlSmoothing {
+                mute_ms: 1.0,
+                fader_ms: 2.0,
+                pan_ms: 3.0,
+            })
+            .remove(0),
         ),
     ]
 }
@@ -2499,15 +2535,15 @@ fn each_transactions_response_names_its_edit_path() {
     assert_eq!(rig.summary().3, 1);
 }
 
-/// `SetControlSmoothing` with the given `mute_ms` and the default table's other two lengths.
+/// A `SET_CONTROL` of the session's `mute_ms` row: the given `mute_ms` and the default table's
+/// other two lengths (the first write makes the lengths explicit, #1561 D4a).
 fn mute_smoothing_edit(mute_ms: f32) -> SessionEdit {
-    SessionEdit::SetControlSmoothing {
-        control_smoothing: Some(ControlSmoothing {
-            mute_ms,
-            fader_ms: 20.0,
-            pan_ms: 20.0,
-        }),
-    }
+    smoothing_edits(ControlSmoothing {
+        mute_ms,
+        fader_ms: 20.0,
+        pan_ms: 20.0,
+    })
+    .remove(1)
 }
 
 /// Gate 4 (#1365), the step. Under the default table (a 10 ms mute ramp), `mute_ms` set to 0 by a
@@ -2697,20 +2733,27 @@ fn upsert(
     effect_id: &str,
     parameter_id: u32,
     channel: session::ParameterChannel,
-    unit: session::ParameterUnit,
+    _unit: session::ParameterUnit,
     value: f32,
 ) -> SessionEdit {
-    SessionEdit::UpsertEffectParam {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        rack_name,
-        effect_id: StableId::parse(effect_id).expect("effect ID"),
-        param: session::EffectParam {
-            parameter_id,
-            channel,
-            unit,
-            value,
+    let effect = StableId::parse(effect_id).expect("effect ID");
+    let section = match rack_name {
+        session::RackName::Console => protocol::control_core::Section::Console(effect),
+        _ => protocol::control_core::Section::Inserts(effect),
+    };
+    // The unit is the effect descriptor's (decision 17): a `SET_CONTROL` names only the value.
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: parameter_id,
+            lane: channel,
         },
-    }
+        value,
+        None,
+    )
 }
 
 /// A `host_core` plan of one document prepared with every live lane, as the browser prepares,
@@ -2943,8 +2986,8 @@ fn control_readback(rig: &mut Rig) -> (Vec<String>, Vec<(u32, u32)>) {
 }
 
 /// #1264 gate 3, over the control list (#1552). Red if the readback keeps the old value after a
-/// live edit, or reports a value a rebuild's catalog would not: a set, a lane split and a removal
-/// back to the default.
+/// live edit, or reports a value a rebuild's catalog would not: a set, a lane split and a write
+/// of the default.
 #[test]
 fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
     use session::{ParameterChannel, ParameterUnit, RackName};
@@ -2976,13 +3019,16 @@ fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
             ParameterUnit::Db,
             -30.0,
         ),
-        SessionEdit::RemoveEffectParam {
-            track_id: StableId::parse(first).expect("track"),
-            rack_name: RackName::Inserts,
-            effect_id: StableId::parse("comp").expect("comp"),
-            parameter_id: 2,
-            channel: ParameterChannel::Both,
-        },
+        // The ratio goes back to its default (4), the value a removed entry reads as.
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            2,
+            ParameterChannel::Both,
+            ParameterUnit::Ratio,
+            4.0,
+        ),
         upsert(
             last,
             RackName::Console,
@@ -3425,13 +3471,16 @@ fn the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
             ParameterUnit::Hz,
             300.0,
         ),
-        SessionEdit::RemoveEffectParam {
-            track_id: StableId::parse(last).expect("track"),
-            rack_name: RackName::Inserts,
-            effect_id: StableId::parse("eq-insert").expect("EQ insert"),
-            parameter_id: 4,
-            channel: ParameterChannel::Both,
-        },
+        // Band 1's gain goes back to its default (0 dB), the value a removed entry reads as.
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            4,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            0.0,
+        ),
     ];
 
     let mut live = Rig::new(&document);
@@ -3459,12 +3508,23 @@ fn bypass_edit(
     effect_id: &str,
     bypass: bool,
 ) -> SessionEdit {
-    SessionEdit::SetEffectBypass {
-        track_id: StableId::parse(track_id).expect("track ID"),
-        rack_name,
-        effect_id: StableId::parse(effect_id).expect("effect ID"),
-        bypass,
-    }
+    let effect = StableId::parse(effect_id).expect("effect ID");
+    let section = match rack_name {
+        session::RackName::Console => protocol::control_core::Section::Console(effect),
+        _ => protocol::control_core::Section::Inserts(effect),
+    };
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: protocol::control_core::BYPASS_CONTROL,
+            lane: protocol::control_core::Lane::Both,
+        },
+        f32::from(u8::from(bypass)),
+        None,
+    )
 }
 
 /// #1266 gate 2 for one session: bypass the first track's compressor insert and the last track's
@@ -4435,11 +4495,10 @@ fn a_structural_commit_advances_the_epoch_and_a_value_only_rebuild_keeps_it() {
     builtins.left.delay_samples = 4;
     builtins.right.delay_samples = 4;
     assert_eq!(
-        rig.apply(&[SessionEdit::SetTrackBuiltins {
-            track_id: model.tracks[0].id.clone(),
-            builtins,
-            ramp_samples: None,
-        }]),
+        rig.apply(&protocol::control_core::builtins_edits(
+            &model.tracks[0].id,
+            &builtins
+        )),
         crate::RESULT_OK
     );
     assert_eq!(rig.summary().3, 1, "a delay rebuilds");
@@ -4522,17 +4581,16 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
         panic!("the fixture's tracks pan");
     };
     assert_eq!(
-        rig.apply(&[SessionEdit::SetTrackMatrixOrPan {
-            track_id: model.tracks[0].id.clone(),
-            matrix_or_pan: MatrixOrPan::Matrix {
+        rig.apply(&matrix_edit(
+            &model.tracks[0].id,
+            MatrixOrPan::Matrix {
                 ll: 1.0,
                 lr: 0.0,
                 rl: 0.0,
                 rr: 1.0,
                 smoothing_samples,
             },
-            ramp_samples: None,
-        }]),
+        )),
         crate::RESULT_OK
     );
     assert_eq!(rig.summary().3, 0, "a mode switch is live");
@@ -4582,7 +4640,6 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
 mod set_control {
     use super::*;
     use protocol::control_core::{ControlAddress, Lane, Owner, Section};
-    use session::{ParameterChannel, ParameterUnit, RackName};
 
     /// The builtin IDs the addresses name (`BUILTIN_PARAMETER_DESCRIPTORS`).
     const POLARITY_INVERT: u32 = 1;
@@ -4656,14 +4713,15 @@ mod set_control {
         model
     }
 
-    /// Two rigs of one document: one takes `by_address`, the other `per_kind`. Both commit one
-    /// revision with the plan epoch unchanged and no candidate, and their next 8 blocks are
-    /// bit-identical, and differ from an untouched third rig (the edit is heard). Returns the 8
-    /// blocks.
+    /// Two rigs of one document: one takes `by_row`, the edits of the rows that change, the other
+    /// `whole`, the same change written as the whole fader, pan or matrix that holds it (every
+    /// row of the struct, the unchanged ones at their committed values). Both commit one revision
+    /// with the plan epoch unchanged and no candidate, and their next 8 blocks are bit-identical,
+    /// and differ from an untouched third rig (the edit is heard). Returns the 8 blocks.
     fn live_twin(
         document: &str,
-        by_address: &[SessionEdit],
-        per_kind: &[SessionEdit],
+        by_row: &[SessionEdit],
+        whole: &[SessionEdit],
         label: &str,
     ) -> Vec<Vec<f32>> {
         let mut address = Rig::new(document);
@@ -4675,8 +4733,8 @@ mod set_control {
             assert_eq!(bits(&kind.step()), expected, "{label}: warm-up {block}");
         }
         let (revision, _, epoch, _) = address.summary();
-        assert_eq!(address.apply(by_address), crate::RESULT_OK, "{label}");
-        assert_eq!(kind.apply(per_kind), crate::RESULT_OK, "{label}");
+        assert_eq!(address.apply(by_row), crate::RESULT_OK, "{label}");
+        assert_eq!(kind.apply(whole), crate::RESULT_OK, "{label}");
         for rig in [&address, &kind] {
             let (after, _, after_epoch, pending) = rig.summary();
             assert_eq!(
@@ -4702,15 +4760,42 @@ mod set_control {
         blocks
     }
 
-    /// Gate 1: each value the old classifier makes live is as live through `SET_CONTROL`, and
-    /// renders the bits of the per-kind edit on a second rig.
+    /// One rig of one document takes `edits`: one revision, the plan epoch unchanged, no candidate,
+    /// and the next blocks are heard to differ from an untouched second rig. The effect rows'
+    /// render bits are pinned against the browser's lane by
+    /// `live_effect_parameter_edits_render_like_the_browsers_lane` and
+    /// `live_effect_bypass_edits_render_like_a_rebuild`.
+    fn live_alone(document: &str, edits: &[SessionEdit], label: &str) {
+        let mut rig = Rig::new(document);
+        let mut untouched = Rig::new(document);
+        for block in 0..window(rig.latency(), 0, rig.quantum) {
+            assert_eq!(
+                bits(&rig.step()),
+                bits(&untouched.step()),
+                "{label}: warm-up {block}"
+            );
+        }
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(rig.apply(edits), crate::RESULT_OK, "{label}");
+        let (after, _, after_epoch, pending) = rig.summary();
+        assert_eq!(
+            (after, after_epoch, pending),
+            (revision + 1, epoch, 0),
+            "{label}: one revision, the same plan, no candidate"
+        );
+        let heard = (0..8).any(|_| bits(&rig.step()) != bits(&untouched.step()));
+        assert!(heard, "{label}: the edit changes the output");
+    }
+
+    /// Gate 1: each value the classifier makes live is live through `SET_CONTROL`, and a write of
+    /// its one row renders the bits of the same change written as the whole struct that holds it.
     ///
-    /// Red if `SET_CONTROL` writes a different field, lane or value than the per-kind op (the
-    /// left lane for a both-lane write, the mute in place of the fader, a matrix coefficient
-    /// written without its mode switch), or reaches the plan through a path the per-kind op does
+    /// Red if a row write touches another field, lane or value than the one it names (the left
+    /// lane for a both-lane write, the mute in place of the fader, a matrix coefficient written
+    /// without its mode switch), or reaches the plan through a path the whole-struct write does
     /// not.
     #[test]
-    fn a_set_control_on_a_live_value_is_live_and_renders_like_the_per_kind_edit() {
+    fn a_set_control_on_a_live_value_is_live_and_renders_like_the_whole_struct_write() {
         let document = long_session(10, 48_000);
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
@@ -4725,32 +4810,32 @@ mod set_control {
         live_twin(
             &document,
             &[set(builtin(name, FADER_DB, Lane::Left), -6.0, None)],
-            &[fader_edit(
+            &fader_edit(
                 name,
                 DualMonoFader {
                     left_db: -6.0,
                     ..track.fader.clone()
                 },
-            )],
+            ),
             "fader, left lane",
         );
         live_twin(
             &document,
             &[set(builtin(name, FADER_DB, Lane::Both), -3.0, None)],
-            &[fader_edit(name, fader(-3.0, -3.0, false))],
+            &fader_edit(name, fader(-3.0, -3.0, false)),
             "fader, both lanes",
         );
         live_twin(
             &document,
             &[set(builtin(name, MUTE, Lane::Both), 1.0, None)],
-            &[fader_edit(
+            &fader_edit(
                 name,
                 DualMonoFader {
                     left_mute: true,
                     right_mute: true,
                     ..track.fader.clone()
                 },
-            )],
+            ),
             "mute",
         );
 
@@ -4761,11 +4846,7 @@ mod set_control {
         live_twin(
             &document,
             &[pan_edit],
-            &[SessionEdit::SetTrackMatrixOrPan {
-                track_id: id(name),
-                matrix_or_pan: panned,
-                ramp_samples: None,
-            }],
+            &matrix_edit(&id(name), panned),
             "pan",
         );
 
@@ -4779,11 +4860,7 @@ mod set_control {
         live_twin(
             &document,
             &matrix,
-            &[SessionEdit::SetTrackMatrixOrPan {
-                track_id: id(name),
-                matrix_or_pan: switched,
-                ramp_samples: None,
-            }],
+            &matrix_edit(&id(name), switched),
             "matrix after a mode switch",
         );
 
@@ -4792,60 +4869,26 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let first = model.tracks[0].id.as_str();
         let last = model.tracks[model.tracks.len() - 1].id.as_str();
-        live_twin(
+        live_alone(
             &document,
             &[
                 set(insert(first, "comp", 1, Lane::Left), -30.0, None),
                 set(insert(first, "comp", 6, Lane::Both), 6.0, None),
                 set(console(last, "clip", 1, Lane::Both), 12.0, None),
             ],
-            &[
-                upsert(
-                    first,
-                    RackName::Inserts,
-                    "comp",
-                    1,
-                    ParameterChannel::Left,
-                    ParameterUnit::Db,
-                    -30.0,
-                ),
-                upsert(
-                    first,
-                    RackName::Inserts,
-                    "comp",
-                    6,
-                    ParameterChannel::Both,
-                    ParameterUnit::Db,
-                    6.0,
-                ),
-                upsert(
-                    last,
-                    RackName::Console,
-                    "clip",
-                    1,
-                    ParameterChannel::Both,
-                    ParameterUnit::Db,
-                    12.0,
-                ),
-            ],
             "effect parameters",
         );
-        live_twin(
+        live_alone(
             &document,
             &[
                 set(insert(first, "comp", 0, Lane::Both), 1.0, None),
                 set(console(last, "clip", 0, Lane::Both), 1.0, None),
             ],
-            &[
-                bypass_edit(first, RackName::Inserts, "comp", true),
-                bypass_edit(last, RackName::Console, "clip", true),
-            ],
             "effect bypass",
         );
     }
 
-    /// Gate 2: a value the old classifier leaves to a rebuild is a rebuild through `SET_CONTROL`,
-    /// exactly as the per-kind op is.
+    /// Gate 2: a value the classifier leaves to a rebuild is a rebuild through `SET_CONTROL`.
     ///
     /// Red if a rebuild-only value is acked as live (a candidate not prepared, a cell written).
     #[test]
@@ -4854,75 +4897,61 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
-        let builtins = |change: &dyn Fn(&mut session::ChannelBuiltins)| {
-            let mut builtins = track.builtins.clone();
-            change(&mut builtins.left);
-            change(&mut builtins.right);
-            SessionEdit::SetTrackBuiltins {
-                track_id: id(name),
-                builtins,
-                ramp_samples: None,
-            }
-        };
-        let by_address = set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None);
-        let per_kind = builtins(&|lane| lane.delay_samples = 64);
         assert_rebuilds(
             &document,
-            core::slice::from_ref(&by_address),
+            &[set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None)],
             "delay by address",
         );
+        // The whole builtin section with the same delay is the same rebuild.
+        let mut builtins = track.builtins.clone();
+        builtins.left.delay_samples = 64;
+        builtins.right.delay_samples = 64;
         assert_rebuilds(
             &document,
-            core::slice::from_ref(&per_kind),
-            "delay per kind",
+            &protocol::control_core::builtins_edits(&track.id, &builtins),
+            "delay in the whole builtin section",
         );
         let route_id = model.routes[0].id.clone();
         assert_rebuilds(
             &document,
             &[set(
-                address(Owner::Route(route_id.clone()), Section::Own, 1, Lane::Both),
+                address(Owner::Route(route_id), Section::Own, 1, Lane::Both),
                 -6.0,
                 None,
             )],
             "send gain by address",
         );
-        assert_rebuilds(
-            &document,
-            &[SessionEdit::SetRouteGainDb {
-                route_id,
-                gain_db: -6.0,
-                ramp_samples: None,
-            }],
-            "send gain per kind",
-        );
     }
 
-    /// Gate 3: the ramp of an address edit is the per-kind edit's. Absent, 0 and 480 are the
-    /// session default, a step and 480 samples, and are three different renders.
+    /// Gate 3: the ramp of a row edit is the ramp of the same change written as the whole fader.
+    /// Absent, 0 and 480 are the session default, a step and 480 samples, and are three different
+    /// renders.
     ///
     /// Red if an absent ramp is read as 0 or 480 is ignored, or the length is applied to another
     /// row.
     #[test]
-    fn a_set_control_ramp_is_the_per_kind_ramp() {
+    fn a_set_control_ramp_is_the_whole_struct_ramp() {
         let document = long_session(10, 48_000);
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
         let mut renders = Vec::new();
         for ramp in [None, Some(0), Some(480)] {
-            let per_kind = SessionEdit::SetTrackFader {
-                track_id: id(name),
-                fader: DualMonoFader {
-                    left_db: -12.0,
-                    right_db: -12.0,
-                    ..track.fader.clone()
-                },
-                ramp_samples: ramp,
-            };
+            let whole = with_ramp(
+                fader_edit(
+                    name,
+                    DualMonoFader {
+                        left_db: -12.0,
+                        right_db: -12.0,
+                        ..track.fader.clone()
+                    },
+                ),
+                ramp,
+            );
             renders.push(live_twin(
                 &document,
                 &[set(builtin(name, FADER_DB, Lane::Both), -12.0, ramp)],
-                &[per_kind],
+                &whole,
                 &format!("fader ramp {ramp:?}"),
             ));
         }
@@ -5336,7 +5365,10 @@ mod set_control {
     }
 
     /// The status and the `(code, operation index)` of each diagnostic of a refused transaction.
-    fn refusal(rig: &mut Rig, edits: &[SessionEdit]) -> (protocol::StatusCode, Vec<(String, u32)>) {
+    pub(super) fn refusal(
+        rig: &mut Rig,
+        edits: &[SessionEdit],
+    ) -> (protocol::StatusCode, Vec<(String, u32)>) {
         let bytes = rig.transaction(edits);
         let (result, response) = command_c(rig.session, &bytes);
         assert_eq!(result, crate::RESULT_OK, "a protocol refusal is RESULT_OK");

@@ -3778,6 +3778,7 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
                 }
                 crate::SessionEditError::ConsoleSlotFixed => "session.edit.console_slot_fixed",
                 crate::SessionEditError::RampOutOfRange => "session.edit.ramp_out_of_range",
+                crate::SessionEditError::ValueOpRetired => "session.edit.value_op_retired",
                 // The control core's own code (`control.domain`, ...), unprefixed.
                 crate::SessionEditError::Control(error) => error.code(),
             }

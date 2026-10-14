@@ -93,14 +93,6 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             console,
             ramp_samples: None,
         },
-        // #1365: three different lengths, so a field cannot be read as its neighbour.
-        SessionEdit::SetControlSmoothing {
-            control_smoothing: Some(session::ControlSmoothing {
-                mute_ms: 5.0,
-                fader_ms: 15.0,
-                pan_ms: 25.0,
-            }),
-        },
         SessionEdit::UpsertSource {
             source: source.clone(),
         },
@@ -125,11 +117,6 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             source_id: source.id.clone(),
             left_source_channel: 0,
             right_source_channel: 1,
-        },
-        SessionEdit::SetTrackBuiltins {
-            track_id: track_id.clone(),
-            builtins: track.builtins.clone(),
-            ramp_samples: None,
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
@@ -164,47 +151,11 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             effect_id: effect_id.clone(),
             quality: effect.quality,
         },
-        SessionEdit::SetEffectBypass {
-            track_id: track_id.clone(),
-            rack_name: RackName::Inserts,
-            effect_id: effect_id.clone(),
-            bypass: effect.bypass,
-        },
-        SessionEdit::SetEffectLinkMode {
-            track_id: track_id.clone(),
-            rack_name: RackName::Inserts,
-            effect_id: effect_id.clone(),
-            link_mode: effect.link_mode,
-            ramp_samples: None,
-        },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
             rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             sidechain: effect.sidechain.clone(),
-        },
-        SessionEdit::UpsertEffectParam {
-            track_id: track_id.clone(),
-            rack_name: RackName::Inserts,
-            effect_id: effect_id.clone(),
-            param: effect.params[0].clone(),
-        },
-        SessionEdit::RemoveEffectParam {
-            track_id: track_id.clone(),
-            rack_name: RackName::Inserts,
-            effect_id: effect_id.clone(),
-            parameter_id: effect.params[0].parameter_id,
-            channel: effect.params[0].channel,
-        },
-        SessionEdit::SetTrackFader {
-            track_id: track_id.clone(),
-            fader: track.fader.clone(),
-            ramp_samples: Some(480),
-        },
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: track_id.clone(),
-            matrix_or_pan: track.matrix_or_pan.clone(),
-            ramp_samples: None,
         },
         SessionEdit::SetTrackConsole {
             track_id: track_id.clone(),
@@ -240,29 +191,6 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             route_id: route.id.clone(),
             destination: route.destination.clone(),
         },
-        SessionEdit::SetRouteChannelMatrix {
-            route_id: route.id.clone(),
-            channel_matrix: route.channel_matrix.clone(),
-            ramp_samples: None,
-        },
-        SessionEdit::SetRouteGainDb {
-            route_id: route.id.clone(),
-            gain_db: route.gain_db,
-            ramp_samples: None,
-        },
-        // #1216: the route's on/off switch, encoded on (the upserted route carries field 6 off).
-        SessionEdit::SetRouteMute {
-            route_id: route.id.clone(),
-            mute: true,
-            ramp_samples: None,
-        },
-        // #1218: the follow switch, encoded on (the upserted route carries field 7 off). A codec
-        // value: a store would refuse it on this output route, and the corpus is never applied.
-        SessionEdit::SetRouteFollowsMute {
-            route_id: route.id.clone(),
-            follows_mute: true,
-            ramp_samples: None,
-        },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
         },
@@ -294,16 +222,6 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         },
         SessionEdit::RemoveVca {
             vca_id: id("drums-vca"),
-        },
-        SessionEdit::SetVcaFader {
-            vca_id: id("drums-vca"),
-            fader: session::DualMonoFader {
-                left_db: 3.0,
-                right_db: -1.5,
-                left_mute: true,
-                right_mute: false,
-            },
-            ramp_samples: None,
         },
         // #1553: the first fader of the track by its stable address, with a ramp of 240 samples.
         SessionEdit::SetControl {
@@ -397,6 +315,12 @@ pub struct RetiredCodeRow {
 ///   and optional (`MALFORMED_FRAME`, never skipped as an unknown optional field);
 /// - each structural or declaration edit addressed at `console` (`VALIDATION_FAILED`,
 ///   `session.edit.console_slot_fixed`);
+/// - the thirteen value ops that decision 17 (C5, #1561) retired, `0x0008`, `0x0203`, `0x020a`,
+///   `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507` and `0x0702`, spliced into a frame that
+///   otherwise carries a `SET_CONTROL` payload: an unallocated opcode, refused at decode
+///   (`MALFORMED_FRAME`) whatever the payload holds;
+/// - a `SetTrackConsole` in a transaction with no `SetConsole` before it (`VALIDATION_FAILED`,
+///   `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
 ///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
 ///   C4): `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
@@ -461,15 +385,6 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         }
     }
     for (name, edit) in rack_addressed_edits(&track.id, RackName::Console, &slot_effect) {
-        if matches!(
-            edit,
-            SessionEdit::SetEffectBypass { .. }
-                | SessionEdit::UpsertEffectParam { .. }
-                | SessionEdit::RemoveEffectParam { .. }
-        ) {
-            // A track's console knobs: edited, not refused.
-            continue;
-        }
         rows.push(RetiredCodeRow {
             name: format!("refused.console.{name}"),
             bytes: transaction_frame(edit),
@@ -477,6 +392,26 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             diagnostic: Some("session.edit.console_slot_fixed"),
         });
     }
+    for opcode in RETIRED_VALUE_OPCODES {
+        let mut bytes = transaction_frame(retired_value_probe(&track.id));
+        patch_opcode(&mut bytes, opcode);
+        rows.push(RetiredCodeRow {
+            name: format!("retired.value_op_{opcode:#06x}"),
+            bytes,
+            status: MALFORMED_FRAME,
+            diagnostic: DECODE_REFUSAL,
+        });
+    }
+    rows.push(RetiredCodeRow {
+        name: "refused.set_track_console_without_set_console".to_owned(),
+        bytes: transaction_frame(SessionEdit::SetTrackConsole {
+            track_id: track.id.clone(),
+            console: session.tracks[0].console.clone(),
+            ramp_samples: None,
+        }),
+        status: VALIDATION_FAILED,
+        diagnostic: Some("session.edit.value_op_retired"),
+    });
     for retired in [0x0004_u16, 0x0005] {
         let mut bytes = vec![0; OUTER_HEADER_BYTES];
         ProtocolCodec::default()
@@ -506,7 +441,41 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
     rows
 }
 
-/// The eleven rack-addressed session edits, `0x0204`-`0x020e`, each naming `rack_name` and
+/// The value ops decision 17 retired (C5, #1561). Their codes are refused at decode and never
+/// reallocated.
+const RETIRED_VALUE_OPCODES: [u16; 13] = [
+    0x0008, 0x0203, 0x020a, 0x020b, 0x020d, 0x020e, 0x020f, 0x0210, 0x0504, 0x0505, 0x0506, 0x0507,
+    0x0702,
+];
+
+/// A `SET_CONTROL` of the track's first fader: the payload a retired-opcode row carries, which the
+/// decoder must refuse for its opcode alone.
+fn retired_value_probe(track_id: &StableId) -> SessionEdit {
+    SessionEdit::set_control(
+        control_core::ControlAddress {
+            owner: control_core::Owner::Strip(track_id.clone()),
+            section: control_core::Section::Builtins,
+            control: 5,
+            lane: control_core::Lane::Left,
+        },
+        -3.0,
+        None,
+    )
+}
+
+/// Overwrite the opcode of the one edit of a transaction frame with `opcode`.
+fn patch_opcode(bytes: &mut [u8], opcode: u16) {
+    let prefixes = tlv_path(bytes, &[1, 1]);
+    let field = *prefixes.last().expect("a nonempty path");
+    assert_eq!(
+        (bytes[field + 2], bytes[field + 3], u32_at(bytes, field + 4)),
+        (2, 1, 2),
+        "the patched field must be the mandatory U16 opcode"
+    );
+    bytes[field + 8..field + 10].copy_from_slice(&opcode.to_le_bytes());
+}
+
+/// The seven rack-addressed structural and declaration session edits, each naming `rack_name` and
 /// `effect` on `track_id`.
 fn rack_addressed_edits(
     track_id: &StableId,
@@ -515,12 +484,6 @@ fn rack_addressed_edits(
 ) -> Vec<(&'static str, SessionEdit)> {
     let track_id = track_id.clone();
     let effect_id = effect.id.clone();
-    let param = session::EffectParam {
-        parameter_id: 1,
-        channel: session::ParameterChannel::Both,
-        unit: session::ParameterUnit::Db,
-        value: -1.0,
-    };
     vec![
         (
             "set_track_rack",
@@ -576,50 +539,12 @@ fn rack_addressed_edits(
             },
         ),
         (
-            "set_effect_bypass",
-            SessionEdit::SetEffectBypass {
-                track_id: track_id.clone(),
-                rack_name,
-                effect_id: effect_id.clone(),
-                bypass: true,
-            },
-        ),
-        (
-            "set_effect_link_mode",
-            SessionEdit::SetEffectLinkMode {
-                track_id: track_id.clone(),
-                rack_name,
-                effect_id: effect_id.clone(),
-                link_mode: LinkMode::Maximum,
-                ramp_samples: None,
-            },
-        ),
-        (
             "set_effect_sidechain",
             SessionEdit::SetEffectSidechain {
-                track_id: track_id.clone(),
-                rack_name,
-                effect_id: effect_id.clone(),
-                sidechain: session::SidechainDeclaration::None,
-            },
-        ),
-        (
-            "upsert_effect_param",
-            SessionEdit::UpsertEffectParam {
-                track_id: track_id.clone(),
-                rack_name,
-                effect_id: effect_id.clone(),
-                param: param.clone(),
-            },
-        ),
-        (
-            "remove_effect_param",
-            SessionEdit::RemoveEffectParam {
                 track_id,
                 rack_name,
                 effect_id,
-                parameter_id: param.parameter_id,
-                channel: param.channel,
+                sidechain: session::SidechainDeclaration::None,
             },
         ),
     ]
@@ -809,7 +734,11 @@ pub enum ConformanceDecoder {
 /// Issue #1313 repinned it from `9f13a06993efa99e`: `TransactionApplied` gains the required field
 /// 2, `edit_path` (`live` 1, `model_only` 2, `rebuild` 3), so the `SESSION_TRANSACTION_APPLY`
 /// response frame carries it. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xa19a_7794_3966_0743;
+/// Issue #1561 (decision 17, C5) repinned it from `a19a779439660743`: the thirteen per-kind value
+/// ops (`0x0008`, `0x0203`, `0x020a`, `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507`, `0x0702`) are
+/// retired and never reallocated, so the transaction carries 35 edits, one per allocated opcode.
+/// The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x0433_af90_5dc6_18bc;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

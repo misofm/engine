@@ -1987,17 +1987,16 @@ fn fader_variant(left_db: f32, content: Option<&str>) -> String {
 }
 
 /// The first track's fader with `left_db` on the left lane, as the live cap edits set it.
-fn eq0_fader_edit(left_db: f32) -> SessionEdit {
-    SessionEdit::SetTrackFader {
-        track_id: StableId::parse("eq0").expect("eq0"),
-        fader: session::DualMonoFader {
+fn eq0_fader_edit(left_db: f32) -> Vec<SessionEdit> {
+    protocol::control_core::fader_edits(
+        &StableId::parse("eq0").expect("eq0"),
+        &session::DualMonoFader {
             left_db,
             right_db: 0.0,
             left_mute: false,
             right_mute: false,
         },
-        ramp_samples: None,
-    }
+    )
 }
 
 /// The structural edit of the pending-candidate case: a new content string on the source.
@@ -2157,7 +2156,7 @@ fn live_edits_are_admitted_at_their_exact_graph_and_capi_peaks_and_refused_one_b
             let (session, plan, revision) = live_cap_session(&at_peak, pending);
             let (code, header) = submit_header(
                 session,
-                &transaction(901, revision, &[eq0_fader_edit(-6.0123)]),
+                &transaction(901, revision, &eq0_fader_edit(-6.0123)),
             );
             assert_eq!(code, RESULT_OK, "{row}: admitted at the peak");
             let header = header.expect("a header");
@@ -2184,7 +2183,7 @@ fn live_edits_are_admitted_at_their_exact_graph_and_capi_peaks_and_refused_one_b
             request_id += 1;
             let (result, _) = submit_header(
                 session,
-                &transaction(request_id, revision, &[eq0_fader_edit(-6.0123)]),
+                &transaction(request_id, revision, &eq0_fader_edit(-6.0123)),
             );
             assert_eq!(result, RESULT_COMPILE_REJECTED, "{row}: one byte below");
             assert_eq!(
@@ -2808,7 +2807,7 @@ impl RaceEdits {
     /// Edit `index`. A fader or pan edit takes a value no earlier edit of the same kind on the
     /// same track used, and a mute edit mostly flips its track's left mute, so a lost edit leaves
     /// its track's value wrong unless a later edit overwrites it.
-    fn edit(&mut self, index: u64) -> (Kind, SessionEdit) {
+    fn edit(&mut self, index: u64) -> (Kind, Vec<SessionEdit>) {
         if index % 8 == 7 {
             let digits = if (index / 8).is_multiple_of(2) {
                 "ab"
@@ -2817,22 +2816,22 @@ impl RaceEdits {
             };
             return (
                 Kind::Structural,
-                SessionEdit::SetSourceContent {
+                vec![SessionEdit::SetSourceContent {
                     source_id: self.source.id.clone(),
                     content: format!("blake3:{}", digits.repeat(32)),
                     channels: self.source.channels,
                     bit_depth: self.source.bit_depth,
                     frames: self.source.frames,
-                },
+                }],
             );
         }
         // Every fourth live edit is a VCA, membership or follow edit (#1558).
         if index % 8 == 3 {
-            return (Kind::Live, self.vca_edit(index / 8));
+            return (Kind::Live, vec![self.vca_edit(index / 8)]);
         }
         // And every eighth, between them, a solo or an unsolo (#1559).
         if index % 8 == 5 {
-            return (Kind::Monitor, self.solo_edit(index / 8));
+            return (Kind::Monitor, vec![self.solo_edit(index / 8)]);
         }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
@@ -2842,21 +2841,16 @@ impl RaceEdits {
                 let fader = &mut self.faders[track];
                 fader.left_db = -0.5 - 0.25 * (index % 37) as f32;
                 fader.right_db = fader.left_db - 1.5;
-                SessionEdit::SetTrackFader {
-                    track_id,
-                    fader: fader.clone(),
-                    ramp_samples: None,
-                }
+                protocol::control_core::fader_edits(&track_id, fader)
             }
-            1 => SessionEdit::SetTrackMatrixOrPan {
-                track_id,
-                matrix_or_pan: session::MatrixOrPan::Pan {
+            1 => protocol::control_core::matrix_or_pan_edits(
+                &track_id,
+                &session::MatrixOrPan::Pan {
                     left: 0.25 + 0.0625 * ((index * 7) % 11) as f32,
                     right: 1.0 - 0.0625 * ((index * 5) % 13) as f32,
                     smoothing_samples: 16 * (1 + (index % 8) as u32),
                 },
-                ramp_samples: None,
-            },
+            ),
             _ => {
                 let fader = &mut self.faders[track];
                 // Mute edits flip the left lane of each track in turn (alternating with each
@@ -2865,11 +2859,7 @@ impl RaceEdits {
                 let mute = (step / 3 + track as u64).is_multiple_of(2);
                 fader.left_mute = mute;
                 fader.right_mute = false;
-                SessionEdit::SetTrackFader {
-                    track_id,
-                    fader: fader.clone(),
-                    ramp_samples: None,
-                }
+                protocol::control_core::fader_edits(&track_id, fader)
             }
         };
         (Kind::Live, edit)
@@ -2966,10 +2956,10 @@ impl RaceControl<'_> {
 
     /// Submits `edit` once under a new request ID; any outcome but a commit or a typed
     /// backpressure is an error.
-    fn submit_once(&mut self, edit: &SessionEdit, kind: Kind) -> Result<Submitted, String> {
+    fn submit_once(&mut self, edits: &[SessionEdit], kind: Kind) -> Result<Submitted, String> {
         use core::sync::atomic::Ordering;
         self.request_id += 1;
-        let request = transaction(self.request_id, self.revision, core::slice::from_ref(edit));
+        let request = transaction(self.request_id, self.revision, edits);
         let overlapping = self.in_render.load(Ordering::SeqCst);
         // SAFETY: This thread is the session's only control caller.
         let (code, header) = unsafe { submit_header(self.session, &request) };
@@ -3039,11 +3029,11 @@ impl RaceControl<'_> {
 
     /// Commits `edit`, retrying a refusal under a new request ID once a block has rendered, until
     /// [`RACE_WEDGE_BLOCKS`] blocks after its first refusal.
-    fn commit(&mut self, edit: &SessionEdit, kind: Kind) -> Result<(), String> {
+    fn commit(&mut self, edits: &[SessionEdit], kind: Kind) -> Result<(), String> {
         use core::sync::atomic::Ordering;
         let mut first_refusal = None;
         loop {
-            if let Submitted::Committed = self.submit_once(edit, kind)? {
+            if let Submitted::Committed = self.submit_once(edits, kind)? {
                 return Ok(());
             }
             let now = self.rendered.load(Ordering::Acquire);
@@ -3174,7 +3164,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
             if let Some(track) = edits.soloed {
                 let edit = edits.solo(track, false);
                 control
-                    .commit(&edit, Kind::Monitor)
+                    .commit(&[edit], Kind::Monitor)
                     .map_err(|error| format!("final unsolo: {error}"))?;
             }
             let track = edits
@@ -3184,7 +3174,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
                 .ok_or_else(|| "every track ended left-muted".to_owned())?;
             let edit = edits.solo(track, true);
             control
-                .commit(&edit, Kind::Monitor)
+                .commit(&[edit], Kind::Monitor)
                 .map_err(|error| format!("final solo: {error}"))?;
             Ok(())
         };
@@ -3327,11 +3317,7 @@ fn paused_bursts(
     let track_id = edits.tracks[0].clone();
     for step in 0..PAUSED_LIVE_EDITS {
         edits.faders[0].left_db = -20.0 - 0.25 * step as f32;
-        let edit = SessionEdit::SetTrackFader {
-            track_id: track_id.clone(),
-            fader: edits.faders[0].clone(),
-            ramp_samples: None,
-        };
+        let edit = protocol::control_core::fader_edits(&track_id, &edits.faders[0]);
         match control.submit_once(&edit, Kind::Live)? {
             Submitted::Committed => {}
             _ => return Err(format!("paused live edit {step}: refused for room")),
@@ -3344,7 +3330,7 @@ fn paused_bursts(
         bit_depth: edits.source.bit_depth,
         frames: edits.source.frames,
     };
-    let (first, second) = (structural("ef"), structural("01"));
+    let (first, second) = ([structural("ef")], [structural("01")]);
     if !matches!(
         control.submit_once(&first, Kind::Structural)?,
         Submitted::Committed

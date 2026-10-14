@@ -362,8 +362,7 @@ delivers fader, mute and pan edits through them (next section).
 
 The strip input section's `trim_db`, `polarity_invert`, `hpf_hz` and `lpf_hz` are live rows of the
 control list (decision 17, S5). `miso_engine_v1_submit_command` commits a change of them as a live
-revision, on tracks and submixes, per lane and on both, through `SET_CONTROL` or the per-kind
-edits; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
+revision, on tracks and submixes, per lane and on both, through `SET_CONTROL`; no plan is prepared and the plan epoch does not move. `delay_samples` stays rebuild-only (it
 needs new memory). The core chooses the lanes from the rows (`controls::live_lanes`), so **every C
 ABI plan carries an input lane per strip**: the trim, polarity and filter cells of
 `TrackControlProducer::input`, charged in `builtin_retained_payload_bytes` (31,424 -> 36,153 on the
@@ -424,7 +423,7 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
 
 A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
 the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
-live revision through `SET_CONTROL` or the per-kind route edits; no plan is prepared and the plan
+live revision through `SET_CONTROL`; no plan is prepared and the plan
 epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
 for decision 14's fold reason, at any tap. **A
 route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
@@ -459,8 +458,8 @@ A plan with no route into a submix attaches none and renders as before.
 
 A VCA's offset and mute, a VCA's members, a VCA added or removed, a mute that a send follows, and a
 send's `follows_mute` are value-only (decision 17, S7a). `miso_engine_v1_submit_command` commits a
-change of them as a live revision through `SET_CONTROL` or the per-kind edits (`UpsertVca`,
-`RemoveVca`, `SetTrackFader`, ...); no plan is prepared and the plan epoch does not move. A VCA has
+change of them as a live revision through `SET_CONTROL` or the structural edits (`UpsertVca`,
+`RemoveVca`, ...); no plan is prepared and the plan epoch does not move. A VCA has
 no render cell: a change reaches render as its members' effective fader and mute records, and a
 follow as the route's record, because the classifier diffs the effective values of the committed
 and the prospective model (`controls::effective`, the function preparation reads), never the raw
@@ -503,8 +502,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   `pan_ms`, or the researched default table (20, 10 and 20 ms) when the session says `default`,
   rounded at the session's sample rate; an explicit 0 is a step. A pan or matrix record whose
   committed model carries its own non-zero `smoothing_samples` uses that window instead. A live
-  edit may carry its own length (#1394): the optional `ramp_samples` of `SetTrackFader` and
-  `SetTrackMatrixOrPan` overrides the session's length for the records that edit writes -- the
+  edit may carry its own length (#1394): the optional `ramp_samples` of `SET_CONTROL` on a
+  fader, mute, pan or matrix row overrides the session's length for the records that edit writes -- the
   fader and mute records, or the matrix record, which it also puts ahead of a model window --
   and an explicit 0 steps that edit only. An edit with no length uses the session's. A length
   above one second at the session rate refuses the whole transaction with
@@ -515,8 +514,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   Editing `control_smoothing` itself is a model-only delta (#1365): see the next item.
 - **Model-only (#1260, #1365).** A delta that changes only fields no prepared plan reads -- the
   session ID, the render profile's `id`, the output profile's `id`, the stored `automation` table
-  and `control_smoothing` (the `SetControlSmoothing` edit, which sets the lengths or clears them
-  to the default table) -- is live with no records: it commits through the same admission and
+  and `control_smoothing` (`SET_CONTROL` of the session rows `fader_ms`, `mute_ms` and `pan_ms`;
+  only a document replace writes the default table back, #1561) -- is live with no records: it commits through the same admission and
   protocol predicates, emits the same response and `SESSION_COMMITTED`, and the running plan, its
   source rings and its effect state continue untouched. It may ride with fader, mute and pan
   edits, and the records of the same transaction ramp over the new `control_smoothing` lengths; a

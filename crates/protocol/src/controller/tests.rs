@@ -314,11 +314,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     let mut limited = controller(8, 1);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
-    // `SetTrackConsole`, #1216 appended `SetRouteMute`, #1218 `SetRouteFollowsMute`, #1241 the
-    // three VCA edits, #1365 `SetControlSmoothing` and #1553 `SetControl`, so the boundary this
-    // row exists to probe is now 47. A smaller number still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 48);
-    limited.config.maximum_transaction_edits = 47;
+    // `SetTrackConsole`, #1241 the VCA edits and #1553 `SetControl`, and decision 17 (#1561)
+    // retired thirteen value ops, so the boundary this row exists to probe is now 34. A smaller
+    // number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 35);
+    limited.config.maximum_transaction_edits = 34;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,
@@ -1330,6 +1330,27 @@ fn response_revision(frame: &[u8]) -> SessionRevision {
     }
 }
 
+/// A `SET_CONTROL` of the builtin row `row` of `strip`, on `lane`.
+fn builtin_edit(
+    strip: &str,
+    row: &str,
+    lane: crate::control_core::Lane,
+    value: f32,
+    ramp: Option<u32>,
+) -> SessionEdit {
+    SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Strip(session::StableId::parse(strip).expect("ID")),
+            crate::control_core::Section::Builtins,
+            row,
+            lane,
+        )
+        .expect("a builtin row"),
+        value,
+        ramp,
+    )
+}
+
 fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionEdit {
     SessionEdit::SetControl {
         address: crate::control_core::ControlAddress {
@@ -1749,21 +1770,17 @@ fn session_diagnostic_path_segments_preserve_field_index_and_stable_id_variants(
 fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
     let mut controller = controller(4, 1);
     controller.config.maximum_response_diagnostics = 1;
-    let mut fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
-    fader.left_db = f32::NAN;
-    fader.right_db = f32::INFINITY;
+    // A structural upsert can carry a bad value to the final validation; `SET_CONTROL` refuses a
+    // non-finite value at its own edit instead.
+    let mut track = controller.session().compiled().normalized_model().tracks[0].clone();
+    track.fader.left_db = f32::NAN;
+    track.fader.right_db = f32::INFINITY;
     let request = ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
         canonical_bytes: b"two-validation-diagnostics",
         command: ControlCommand::SessionTransactionApply {
-            edits: &[SessionEdit::SetTrackFader {
-                track_id: session::StableId::parse("vocal").expect("stable ID"),
-                fader,
-                ramp_samples: None,
-            }],
+            edits: &[SessionEdit::UpsertTrack { track }],
         },
     };
 
@@ -1842,9 +1859,6 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
 #[test]
 fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
     let mut controller = controller(4, 1);
-    let fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
     let response = controller.process(ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -1854,11 +1868,13 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
                 SessionEdit::SetSessionId {
                     session_id: session::StableId::parse("renamed").expect("stable ID"),
                 },
-                SessionEdit::SetTrackFader {
-                    track_id: session::StableId::parse("vocal").expect("stable ID"),
-                    fader,
-                    ramp_samples: Some(u32::MAX),
-                },
+                builtin_edit(
+                    "vocal",
+                    "fader_db",
+                    crate::control_core::Lane::Left,
+                    -2.0,
+                    Some(u32::MAX),
+                ),
             ],
         },
     });
@@ -1893,7 +1909,7 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 24 + 4 + 8 + 2 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 2 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
@@ -2417,15 +2433,13 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
 #[test]
 fn decoded_track_edit_reaches_same_atomic_session_store() {
     let mut controller = controller(4, 1);
-    let mut fader = controller.session().compiled().normalized_model().tracks[0]
-        .fader
-        .clone();
-    fader.left_db = -2.0;
-    let edits = [SessionEdit::SetTrackFader {
-        track_id: session::StableId::parse("vocal").expect("ID"),
-        fader,
-        ramp_samples: None,
-    }];
+    let edits = [builtin_edit(
+        "vocal",
+        "fader_db",
+        crate::control_core::Lane::Left,
+        -2.0,
+        None,
+    )];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -2456,11 +2470,17 @@ fn decoded_track_edit_reaches_same_atomic_session_store() {
 #[test]
 fn decoded_route_edit_reaches_same_atomic_session_store() {
     let mut controller = controller(4, 1);
-    let edits = [SessionEdit::SetRouteGainDb {
-        route_id: session::StableId::parse("to-main").expect("ID"),
-        gain_db: -1.0,
-        ramp_samples: None,
-    }];
+    let edits = [SessionEdit::set_control(
+        crate::control_core::row_address(
+            crate::control_core::Owner::Route(session::StableId::parse("to-main").expect("ID")),
+            crate::control_core::Section::Own,
+            "gain_db",
+            crate::control_core::Lane::Both,
+        )
+        .expect("a route row"),
+        -1.0,
+        None,
+    )];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),

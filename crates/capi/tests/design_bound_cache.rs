@@ -260,9 +260,9 @@ impl Compiled {
     }
 }
 
-/// The edit that sets track `index`'s builtins to `document`'s own, with both HPF cutoffs at
+/// The edits that set track `index`'s builtins to `document`'s own, with both HPF cutoffs at
 /// `hpf_hz` when given.
-fn builtins_edit(document: &str, index: usize, hpf_hz: Option<f32>) -> SessionEdit {
+fn builtins_edit(document: &str, index: usize, hpf_hz: Option<f32>) -> Vec<SessionEdit> {
     let model = session::parse_session_json(document).expect("the document");
     let track = &model.tracks[index];
     let mut builtins = track.builtins.clone();
@@ -270,11 +270,7 @@ fn builtins_edit(document: &str, index: usize, hpf_hz: Option<f32>) -> SessionEd
         builtins.left.hpf_hz = hpf_hz;
         builtins.right.hpf_hz = hpf_hz;
     }
-    SessionEdit::SetTrackBuiltins {
-        track_id: track.id.clone(),
-        builtins,
-        ramp_samples: None,
-    }
+    protocol::control_core::builtins_edits(&track.id, &builtins)
 }
 
 impl Drop for Compiled {
@@ -314,7 +310,7 @@ fn a_c_abi_plan_bounds_no_input_design() {
     );
     session.settle(0);
     let (code, status, live) = session.submit(
-        &[builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0))],
+        &builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0)),
         revision + 1,
         0x12,
     );

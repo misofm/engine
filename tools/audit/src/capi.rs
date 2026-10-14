@@ -32,10 +32,7 @@ use protocol::{
     CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
     RequestId, SessionEdit, SessionRevision, StatusCode, TypedCommandFrame,
 };
-use session::{
-    DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit,
-    RackName, StableId,
-};
+use session::{EffectIdentity, StableId};
 
 const CALLS: u64 = 100_000;
 /// Every this many render calls, one live edit precedes the call (#1258 D3).
@@ -306,88 +303,92 @@ impl LiveEditor {
 
     /// The next edit, in a cycle of [`LIVE_EDIT_KINDS`]: a mute toggle on `eq0`, a pan move on
     /// `eq1`, the compressor's threshold on `eq2`'s left lane, band 1's left gain on `eq0`'s
-    /// console EQ (an enabled band, so it designs a target), the compressor's bypass, and a
-    /// `SET_CONTROL` on `eq1`'s fader (left lane, by its stable address). Every
-    /// edit changes its value, so each one writes a value or a target to a lane's cells.
+    /// console EQ (an enabled band, so it designs a target), the compressor's bypass, and `eq1`'s
+    /// fader (left lane). Each is one `SET_CONTROL` by its stable address (decision 17, #1561).
+    /// Every edit changes its value, so each one writes a value or a target to a lane's cells.
     fn next_edit(&mut self) -> SessionEdit {
         let track = |id: &str| StableId::parse(id).expect("fixture track");
+        let strip = |id: &str, section, control, lane, value| {
+            SessionEdit::set_control(
+                protocol::control_core::ControlAddress {
+                    owner: protocol::control_core::Owner::Strip(track(id)),
+                    section,
+                    control,
+                    lane,
+                },
+                value,
+                None,
+            )
+        };
         let edit = match self.edits % LIVE_EDIT_KINDS {
             0 => {
                 self.muted = !self.muted;
-                SessionEdit::SetTrackFader {
-                    track_id: track("eq0"),
-                    fader: DualMonoFader {
-                        left_db: 0.0,
-                        right_db: 0.0,
-                        left_mute: self.muted,
-                        right_mute: self.muted,
-                    },
-                    ramp_samples: None,
-                }
+                // The builtin `mute` row, both lanes.
+                strip(
+                    "eq0",
+                    protocol::control_core::Section::Builtins,
+                    6,
+                    protocol::control_core::Lane::Both,
+                    f32::from(u8::from(self.muted)),
+                )
             }
             1 => {
                 self.panned = !self.panned;
-                let left = if self.panned { 0.5 } else { 1.0 };
-                SessionEdit::SetTrackMatrixOrPan {
-                    track_id: track("eq1"),
-                    matrix_or_pan: MatrixOrPan::Pan {
-                        left,
-                        right: 1.0,
-                        smoothing_samples: 16,
-                    },
-                    ramp_samples: None,
-                }
+                // The builtin `pan` row, left lane.
+                strip(
+                    "eq1",
+                    protocol::control_core::Section::Builtins,
+                    12,
+                    protocol::control_core::Lane::Left,
+                    if self.panned { 0.5 } else { 1.0 },
+                )
             }
             2 => {
                 self.thresholded = !self.thresholded;
-                SessionEdit::UpsertEffectParam {
-                    track_id: track(COMPRESSOR_TRACK),
-                    rack_name: RackName::Inserts,
-                    effect_id: StableId::parse(COMPRESSOR).expect("compressor instance"),
-                    param: EffectParam {
-                        parameter_id: 1,
-                        channel: ParameterChannel::Left,
-                        unit: ParameterUnit::Db,
-                        value: if self.thresholded { -30.0 } else { -20.0 },
-                    },
-                }
+                strip(
+                    COMPRESSOR_TRACK,
+                    protocol::control_core::Section::Inserts(
+                        StableId::parse(COMPRESSOR).expect("compressor instance"),
+                    ),
+                    1,
+                    protocol::control_core::Lane::Left,
+                    if self.thresholded { -30.0 } else { -20.0 },
+                )
             }
             3 => {
                 self.boosted = !self.boosted;
-                SessionEdit::UpsertEffectParam {
-                    track_id: track("eq0"),
-                    rack_name: RackName::Console,
-                    effect_id: StableId::parse("eq").expect("console EQ slot"),
-                    param: EffectParam {
-                        parameter_id: 4,
-                        channel: ParameterChannel::Left,
-                        unit: ParameterUnit::Db,
-                        value: if self.boosted { 3.0 } else { -3.0 },
-                    },
-                }
+                strip(
+                    "eq0",
+                    protocol::control_core::Section::Console(
+                        StableId::parse("eq").expect("console EQ slot"),
+                    ),
+                    4,
+                    protocol::control_core::Lane::Left,
+                    if self.boosted { 3.0 } else { -3.0 },
+                )
             }
             5 => {
                 self.faded = !self.faded;
-                SessionEdit::SetControl {
-                    address: protocol::control_core::ControlAddress {
-                        owner: protocol::control_core::Owner::Strip(track("eq1")),
-                        section: protocol::control_core::Section::Builtins,
-                        // The builtin `fader_db` row.
-                        control: 5,
-                        lane: protocol::control_core::Lane::Left,
-                    },
-                    value: if self.faded { -3.0 } else { 0.0 },
-                    ramp_samples: None,
-                }
+                // The builtin `fader_db` row, left lane.
+                strip(
+                    "eq1",
+                    protocol::control_core::Section::Builtins,
+                    5,
+                    protocol::control_core::Lane::Left,
+                    if self.faded { -3.0 } else { 0.0 },
+                )
             }
             _ => {
                 self.bypassed = !self.bypassed;
-                SessionEdit::SetEffectBypass {
-                    track_id: track(COMPRESSOR_TRACK),
-                    rack_name: RackName::Inserts,
-                    effect_id: StableId::parse(COMPRESSOR).expect("compressor instance"),
-                    bypass: self.bypassed,
-                }
+                strip(
+                    COMPRESSOR_TRACK,
+                    protocol::control_core::Section::Inserts(
+                        StableId::parse(COMPRESSOR).expect("compressor instance"),
+                    ),
+                    protocol::control_core::BYPASS_CONTROL,
+                    protocol::control_core::Lane::Both,
+                    f32::from(u8::from(self.bypassed)),
+                )
             }
         };
         self.edits += 1;

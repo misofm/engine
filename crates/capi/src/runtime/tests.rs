@@ -4353,13 +4353,12 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
-            protocol::CommandPayload::SessionTransactionApply(&[
-                protocol::SessionEdit::SetTrackFader {
-                    track_id: session::StableId::parse(&track_id).expect("track ID"),
-                    fader: fader.clone(),
-                    ramp_samples: None,
-                },
-            ]),
+            protocol::CommandPayload::SessionTransactionApply(
+                &protocol::control_core::fader_edits(
+                    &session::StableId::parse(&track_id).expect("track ID"),
+                    fader,
+                ),
+            ),
         )
     };
     let status = |response: &[u8]| {

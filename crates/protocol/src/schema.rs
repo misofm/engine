@@ -1238,26 +1238,6 @@ pub(crate) mod session {
             fields: &[VALUE, RAMP_SAMPLES],
         };
     }
-    pub(crate) mod control_smoothing {
-        use super::*;
-        pub(crate) const MUTE_MS: FieldSpec = FieldSpec::req(1, Wire::F32);
-        pub(crate) const FADER_MS: FieldSpec = FieldSpec::req(2, Wire::F32);
-        pub(crate) const PAN_MS: FieldSpec = FieldSpec::req(3, Wire::F32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "ControlSmoothing",
-            fields: &[MUTE_MS, FADER_MS, PAN_MS],
-        };
-    }
-    pub(crate) mod set_control_smoothing {
-        use super::*;
-        /// #1365: the lengths, absent to clear the key so the default table applies.
-        pub(crate) const VALUE: FieldSpec =
-            FieldSpec::msg(1, false, false, &control_smoothing::SPEC);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetControlSmoothing",
-            fields: &[VALUE],
-        };
-    }
     pub(crate) mod upsert_source {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &source::SPEC);
@@ -1311,17 +1291,6 @@ pub(crate) mod session {
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetTrackSourceAssignment",
             fields: &[TRACK_ID, SOURCE_ID, LEFT_CHANNEL, RIGHT_CHANNEL],
-        };
-    }
-    pub(crate) mod set_track_builtins {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const BUILTINS: FieldSpec = FieldSpec::msg(2, true, false, &builtins::SPEC);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetTrackBuiltins",
-            fields: &[TRACK_ID, BUILTINS, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_track_rack {
@@ -1393,30 +1362,6 @@ pub(crate) mod session {
             fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE],
         };
     }
-    pub(crate) mod set_effect_bypass {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const RACK_NAME: FieldSpec = FieldSpec::req(2, Wire::U8);
-        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::req(4, Wire::Bool);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetEffectBypass",
-            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE],
-        };
-    }
-    pub(crate) mod set_effect_link {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const RACK_NAME: FieldSpec = FieldSpec::req(2, Wire::U8);
-        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::req(4, Wire::U8);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(5, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetEffectLinkMode",
-            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE, RAMP_SAMPLES],
-        };
-    }
     pub(crate) mod set_effect_sidechain {
         use super::*;
         pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
@@ -1426,51 +1371,6 @@ pub(crate) mod session {
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetEffectSidechain",
             fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE],
-        };
-    }
-    pub(crate) mod upsert_effect_param {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const RACK_NAME: FieldSpec = FieldSpec::req(2, Wire::U8);
-        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(4, true, false, &param::SPEC);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "UpsertEffectParam",
-            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE],
-        };
-    }
-    pub(crate) mod remove_effect_param {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const RACK_NAME: FieldSpec = FieldSpec::req(2, Wire::U8);
-        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
-        pub(crate) const PARAMETER_ID: FieldSpec = FieldSpec::req(4, Wire::U32);
-        pub(crate) const CHANNEL: FieldSpec = FieldSpec::req(5, Wire::U8);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "RemoveEffectParam",
-            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, PARAMETER_ID, CHANNEL],
-        };
-    }
-    pub(crate) mod set_track_fader {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetTrackFader",
-            fields: &[TRACK_ID, VALUE, RAMP_SAMPLES],
-        };
-    }
-    pub(crate) mod set_track_matrix {
-        use super::*;
-        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &matrix_or_pan::KNOWN);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetTrackMatrixOrPan",
-            fields: &[TRACK_ID, VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_track_console {
@@ -1551,50 +1451,6 @@ pub(crate) mod session {
             fields: &[ROUTE_ID, VALUE],
         };
     }
-    pub(crate) mod set_route_matrix {
-        use super::*;
-        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &channel_matrix::SPEC);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetRouteChannelMatrix",
-            fields: &[ROUTE_ID, VALUE, RAMP_SAMPLES],
-        };
-    }
-    pub(crate) mod set_route_gain {
-        use super::*;
-        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const GAIN_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetRouteGainDb",
-            fields: &[ROUTE_ID, GAIN_DB, RAMP_SAMPLES],
-        };
-    }
-    pub(crate) mod set_route_mute {
-        use super::*;
-        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetRouteMute",
-            fields: &[ROUTE_ID, MUTE, RAMP_SAMPLES],
-        };
-    }
-    pub(crate) mod set_route_follows_mute {
-        use super::*;
-        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const FOLLOWS_MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetRouteFollowsMute",
-            fields: &[ROUTE_ID, FOLLOWS_MUTE, RAMP_SAMPLES],
-        };
-    }
     pub(crate) mod upsert_automation {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &automation::SPEC);
@@ -1647,17 +1503,6 @@ pub(crate) mod session {
             fields: &[ID],
         };
     }
-    pub(crate) mod set_vca_fader {
-        use super::*;
-        pub(crate) const VCA_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
-        /// #1394: this edit's own ramp length in samples, absent for the session default.
-        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetVcaFader",
-            fields: &[VCA_ID, VALUE, RAMP_SAMPLES],
-        };
-    }
 
     /// `SET_CONTROL` (decision 17, C5): any control by its stable address (#1553 D2). The address is
     /// the control address message of the control list; a set requires its `control` and `lane`.
@@ -1680,16 +1525,7 @@ pub(crate) mod session {
         use crate::SessionEditOpcode::*;
         match opcode {
             SetConsole => Some(set_console::RAMP_SAMPLES),
-            SetTrackBuiltins => Some(set_track_builtins::RAMP_SAMPLES),
-            SetEffectLinkMode => Some(set_effect_link::RAMP_SAMPLES),
-            SetTrackFader => Some(set_track_fader::RAMP_SAMPLES),
-            SetTrackMatrixOrPan => Some(set_track_matrix::RAMP_SAMPLES),
             SetTrackConsole => Some(set_track_console::RAMP_SAMPLES),
-            SetRouteChannelMatrix => Some(set_route_matrix::RAMP_SAMPLES),
-            SetRouteGainDb => Some(set_route_gain::RAMP_SAMPLES),
-            SetRouteMute => Some(set_route_mute::RAMP_SAMPLES),
-            SetRouteFollowsMute => Some(set_route_follows_mute::RAMP_SAMPLES),
-            SetVcaFader => Some(set_vca_fader::RAMP_SAMPLES),
             SetControl => Some(set_control::RAMP_SAMPLES),
             // Listed one by one on purpose, with no wildcard: a new opcode must be classified here,
             // as in `SessionEdit::ramp_samples`, or the build fails.
@@ -1698,7 +1534,6 @@ pub(crate) mod session {
             | SetQuantumFrames
             | SetRenderProfile
             | SetOutputProfile
-            | SetControlSmoothing
             | UpsertSource
             | RemoveSource
             | SetSourceContent
@@ -1711,10 +1546,7 @@ pub(crate) mod session {
             | SetTrackEffectOrder
             | SetEffectIdentity
             | SetEffectQuality
-            | SetEffectBypass
             | SetEffectSidechain
-            | UpsertEffectParam
-            | RemoveEffectParam
             | UpsertSubmix
             | RemoveSubmix
             | UpsertOutput
@@ -1741,27 +1573,19 @@ pub(crate) mod session {
             SetRenderProfile => &set_render_profile::SPEC,
             SetOutputProfile => &set_output_profile::SPEC,
             SetConsole => &set_console::SPEC,
-            SetControlSmoothing => &set_control_smoothing::SPEC,
             UpsertSource => &upsert_source::SPEC,
             RemoveSource => &remove_source::SPEC,
             SetSourceContent => &set_source_content::SPEC,
             UpsertTrack => &upsert_track::SPEC,
             RemoveTrack => &remove_track::SPEC,
             SetTrackSourceAssignment => &set_track_source::SPEC,
-            SetTrackBuiltins => &set_track_builtins::SPEC,
             SetTrackRack => &set_track_rack::SPEC,
             PutTrackEffect => &put_track_effect::SPEC,
             RemoveTrackEffect => &remove_track_effect::SPEC,
             SetTrackEffectOrder => &set_track_effect_order::SPEC,
             SetEffectIdentity => &set_effect_identity::SPEC,
             SetEffectQuality => &set_effect_quality::SPEC,
-            SetEffectBypass => &set_effect_bypass::SPEC,
-            SetEffectLinkMode => &set_effect_link::SPEC,
             SetEffectSidechain => &set_effect_sidechain::SPEC,
-            UpsertEffectParam => &upsert_effect_param::SPEC,
-            RemoveEffectParam => &remove_effect_param::SPEC,
-            SetTrackFader => &set_track_fader::SPEC,
-            SetTrackMatrixOrPan => &set_track_matrix::SPEC,
             SetTrackConsole => &set_track_console::SPEC,
             UpsertSubmix => &upsert_submix::SPEC,
             RemoveSubmix => &remove_submix::SPEC,
@@ -1771,17 +1595,12 @@ pub(crate) mod session {
             RemoveRoute => &remove_route::SPEC,
             SetRouteSource => &set_route_source::SPEC,
             SetRouteDestination => &set_route_destination::SPEC,
-            SetRouteChannelMatrix => &set_route_matrix::SPEC,
-            SetRouteGainDb => &set_route_gain::SPEC,
-            SetRouteMute => &set_route_mute::SPEC,
-            SetRouteFollowsMute => &set_route_follows_mute::SPEC,
             UpsertAutomation => &upsert_automation::SPEC,
             RemoveAutomation => &remove_automation::SPEC,
             SetAutomationTarget => &set_automation_target::SPEC,
             SetAutomationSegments => &set_automation_segments::SPEC,
             UpsertVca => &upsert_vca::SPEC,
             RemoveVca => &remove_vca::SPEC,
-            SetVcaFader => &set_vca_fader::SPEC,
             SetControl => &set_control::SPEC,
         }
     }

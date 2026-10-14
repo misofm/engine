@@ -5,6 +5,7 @@
 //! browser-message, and C ABI adapters without retaining any caller pointer.
 
 mod btlv;
+mod control_rows;
 mod controller;
 mod message_wire;
 mod model;
@@ -32,8 +33,10 @@ pub use message_wire::{
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {
+    pub use crate::control_rows::{builtins_edits, fader_edits, matrix_or_pan_edits, row_address};
     pub use controls::{
-        ControlAddress, ControlError, Lane, MonitorOverlay, MonitorWrite, Owner, Section,
+        BYPASS_CONTROL, ControlAddress, ControlError, LINK_MODE_CONTROL, Lane, MonitorOverlay,
+        MonitorWrite, Owner, Section,
     };
 }
 pub use model::{
