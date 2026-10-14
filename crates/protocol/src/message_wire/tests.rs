@@ -3058,7 +3058,7 @@ fn response_get_round_trips_every_target_reply_and_optional_field() {
 /// Gate 1: each shape rule of the request is refused as `INVALID_FIELD` on decode, and on encode
 /// where the typed value can say it: two targets, no target, a strip with `sections` or an
 /// override, a strip ID that is not a stable ID, a bypass override on one lane or with a value
-/// that is not 0 or 1, and a code outside its table (grid, channels, lane, kind, quality, link
+/// that is not 0 or 1, a NaN or infinite axis endpoint or override value, and a code outside its table (grid, channels, lane, kind, quality, link
 /// mode).
 ///
 /// Red if the codec admits a request the provider could not read, or only one direction checks.
@@ -3073,7 +3073,7 @@ fn response_get_request_shape_rules_are_refused_both_ways() {
     type Typed = fn(&mut ResponseGetRequest);
     type Wire = fn(&mut Vec<Tlv>);
     // (name, base, typed mutation if representable, wire edit)
-    let rules: [(&str, bool, Option<Typed>, Wire); 14] = [
+    let rules: [(&str, bool, Option<Typed>, Wire); 17] = [
         ("no target", true, None, |f| remove(f, 1)),
         ("two targets", true, None, |f| {
             insert(f, leaf(3, 9, b"vocal"))
@@ -3127,6 +3127,24 @@ fn response_get_request_shape_rules_are_refused_both_ways() {
             true,
             Some(|r| r.overrides[0].value = 0.5),
             |f| set(nth(f, 10, 0), 3, &0.5_f32.to_le_bytes()),
+        ),
+        (
+            "a NaN minimum frequency",
+            true,
+            Some(|r| r.minimum_hz = f32::NAN),
+            |f| set(f, 6, &f32::NAN.to_le_bytes()),
+        ),
+        (
+            "an infinite maximum frequency",
+            true,
+            Some(|r| r.maximum_hz = f32::INFINITY),
+            |f| set(f, 7, &f32::INFINITY.to_le_bytes()),
+        ),
+        (
+            "a NaN override value",
+            true,
+            Some(|r| r.overrides[1].value = f32::NAN),
+            |f| set(nth(f, 10, 1), 3, &f32::NAN.to_le_bytes()),
         ),
         ("a grid code outside the table", true, None, |f| {
             set(f, 4, &[3])

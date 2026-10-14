@@ -166,3 +166,19 @@ decisions:
   caller's byte budget the answer stays `RESULT_REFUSED_BUDGET`, otherwise it is
   `RESULT_INVALID_ARGUMENT`. A request with 4097..=N points whose totals fit the budget is
   `RESULT_INVALID_ARGUMENT` (gate 3). #1574 deletes the layout and this branch with it.
+
+**Batch 6 review fold, 2026-10-14 (root decision A2).**
+
+- **The axis is refused before any work.** The frequency-axis rules (finite endpoints, `min < max`,
+  `min >= 0`, `max <= Nyquist`, a logarithmic minimum above zero) ran only in
+  `generate_response_grid`, after the owner was prepared and the buffers allocated. One helper now
+  holds them, `prepare_response_query` calls it after the rate, point and override checks and before
+  `prepare_response_preview`, and `generate_response_grid` calls the same helper. Both hosts refuse a
+  bad axis with `response.grid` (`InvalidField`) before any preparation. The request codec
+  (`response_request_is_valid`) also refuses a non-finite `minimum_hz`, `maximum_hz` or override value
+  in both directions, as `INVALID_FIELD`.
+- **Tests.** `bounds_pass_at_the_limit_and_refuse_one_past_it` refuses eleven bad axes with zero
+  allocator events, at 44.1, 48 and 96 kHz, and shows an unknown effect on a bad axis answers the
+  axis; `response_get_request_shape_rules_are_refused_both_ways` gains the three non-finite rules;
+  capi's refusal table gains two axis cases; host-web's `a_bad_frequency_axis_is_refused_with_a_header_only_result`
+  runs ten bad axes and two good ones.

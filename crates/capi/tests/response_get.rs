@@ -526,6 +526,21 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
             "response.grid",
         ),
         (
+            "a negative minimum",
+            eq(&|r| r.minimum_hz = -1.0),
+            StatusCode::InvalidField,
+            "response.grid",
+        ),
+        (
+            "a logarithmic axis from zero",
+            eq(&|r| {
+                r.grid = ResponseGrid::Logarithmic;
+                r.minimum_hz = 0.0;
+            }),
+            StatusCode::InvalidField,
+            "response.grid",
+        ),
+        (
             "an unknown effect",
             ResponseGetRequest {
                 target: ResponseTarget::Configuration(ResponseConfiguration::Effect {

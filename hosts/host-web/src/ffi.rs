@@ -4870,6 +4870,54 @@ mod response_budget_tests {
         }
     }
 
+    /// Test value: the browser refuses a bad frequency axis through the core's one axis check, as
+    /// `RESPONSE_GET` does, with the same status and a header-only result: a NaN or infinite
+    /// endpoint, a negative or non-increasing axis, a maximum past the rate's own Nyquist (44.1 and
+    /// 96 kHz as well as 48), and a logarithmic axis from zero. A browser that kept the check
+    /// after preparation, or only for finite values, answers one of them with a prepared owner.
+    #[test]
+    fn a_bad_frequency_axis_is_refused_with_a_header_only_result() {
+        let mut staging = ResponseStaging::new();
+        let with = |rate: u32, grid: u32, minimum_hz: f32, maximum_hz: f32| {
+            let mut request = input_filter_request(64);
+            request.sample_rate_hz = rate;
+            request.grid = grid;
+            request.minimum_hz = minimum_hz;
+            request.maximum_hz = maximum_hz;
+            request
+        };
+        let linear = crate::RESPONSE_GRID_LINEAR;
+        let logarithmic = crate::RESPONSE_GRID_LOGARITHMIC;
+        let bad = [
+            with(48_000, linear, f32::NAN, 1_000.0),
+            with(48_000, linear, 20.0, f32::NAN),
+            with(48_000, linear, 20.0, f32::INFINITY),
+            with(48_000, linear, -1.0, 1_000.0),
+            with(48_000, linear, 1_000.0, 1_000.0),
+            with(48_000, linear, 2_000.0, 20.0),
+            with(48_000, linear, 20.0, 24_001.0),
+            with(44_100, linear, 20.0, 22_051.0),
+            with(96_000, logarithmic, 20.0, 48_001.0),
+            with(48_000, logarithmic, 0.0, 1_000.0),
+        ];
+        for request in bad {
+            *staging.request = request;
+            assert_eq!(
+                run_response_query(&mut staging),
+                RESULT_INVALID_ARGUMENT,
+                "{request:?}"
+            );
+            assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
+        }
+        for request in [
+            with(44_100, linear, 0.0, 22_050.0),
+            with(96_000, logarithmic, 20.0, 48_000.0),
+        ] {
+            *staging.request = request;
+            assert_eq!(run_response_query(&mut staging), RESULT_OK, "{request:?}");
+        }
+    }
+
     /// Test value: the core's 4096-point cap is not reached from the browser (a request past it
     /// would allocate a megabyte-scale result), or the refusal returns more than the header.
     #[test]

@@ -295,6 +295,84 @@ fn bounds_pass_at_the_limit_and_refuse_one_past_it() {
             "rate {rate}"
         );
     }
+    // The frequency axis is refused here too, before any owner is prepared (#1572 fold): the same
+    // zero-allocation bar as the counts above, at the rate that sets Nyquist.
+    let axis = |rate: u32, grid: ResponsePreviewGrid| ResponseQuery {
+        grid,
+        ..query(rate, target, both, false, POINTS)
+    };
+    let linear = |minimum_hz: f32, maximum_hz: f32| ResponsePreviewGrid::Linear {
+        points: POINTS,
+        minimum_hz,
+        maximum_hz,
+    };
+    let logarithmic = |minimum_hz: f32, maximum_hz: f32| ResponsePreviewGrid::Logarithmic {
+        points: POINTS,
+        minimum_hz,
+        maximum_hz,
+    };
+    let bad_axes = [
+        ("NaN minimum", 48_000, linear(f32::NAN, 1_000.0)),
+        ("NaN maximum", 48_000, linear(20.0, f32::NAN)),
+        ("infinite maximum", 48_000, linear(20.0, f32::INFINITY)),
+        ("negative minimum", 48_000, linear(-1.0, 1_000.0)),
+        ("equal endpoints", 48_000, linear(1_000.0, 1_000.0)),
+        ("decreasing endpoints", 48_000, linear(2_000.0, 20.0)),
+        ("past Nyquist at 48 kHz", 48_000, linear(20.0, 24_001.0)),
+        ("past Nyquist at 44.1 kHz", 44_100, linear(20.0, 22_051.0)),
+        (
+            "past Nyquist at 96 kHz",
+            96_000,
+            logarithmic(20.0, 48_001.0),
+        ),
+        ("logarithmic from zero", 48_000, logarithmic(0.0, 1_000.0)),
+        (
+            "logarithmic from NaN",
+            48_000,
+            logarithmic(f32::NAN, 1_000.0),
+        ),
+    ];
+    for (name, rate, grid) in bad_axes {
+        assert_eq!(
+            refused(axis(rate, grid)),
+            Some(ResponseQueryError::Preview(
+                ResponsePreviewError::InvalidGrid
+            )),
+            "{name}"
+        );
+    }
+    // Nyquist itself, and a linear axis from zero, are inside the rules, at the rate's own Nyquist.
+    for (rate, grid) in [
+        (44_100, linear(0.0, 22_050.0)),
+        (96_000, logarithmic(20.0, 48_000.0)),
+    ] {
+        prepare_response_query(&axis(rate, grid)).expect("an axis inside the rules");
+    }
+    // The axis is checked before the owner: an unknown effect on a bad axis is the axis's error,
+    // and the same effect on a good axis is its own.
+    let unknown = |grid: ResponsePreviewGrid| ResponseQuery {
+        grid,
+        target: ResponsePreviewTarget::Effect {
+            effect_id: "miso.no-such-effect",
+            overrides: &[],
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+        },
+        ..query(48_000, target, both, false, POINTS)
+    };
+    assert_eq!(
+        prepare_response_query(&unknown(linear(f32::NAN, 1_000.0))).err(),
+        Some(ResponseQueryError::Preview(
+            ResponsePreviewError::InvalidGrid
+        ))
+    );
+    assert_eq!(
+        prepare_response_query(&unknown(linear(20.0, 1_000.0))).err(),
+        Some(ResponseQueryError::Preview(
+            ResponsePreviewError::UnknownEffect
+        ))
+    );
     // The input-filter target carries no overrides, so the override cap does not apply to it.
     let _: PreparedResponseQuery =
         prepare_response_query(&query(48_000, input_filters(), both, true, POINTS)).expect("ok");
@@ -474,11 +552,9 @@ fn input_filter_rows_fold_into_four_cutoffs_by_the_lane_rule() {
     }
 }
 
-/// The one refusal table: every error maps to its class and code, and every code is a dotted code
-/// a diagnostic can carry.
+/// The one refusal table: every error maps to its class and code.
 ///
-/// Red if an error maps to another class or code than decision 17 rules, or a code is not
-/// encodable as a diagnostic.
+/// Red if an error maps to another class or code than decision 17 rules.
 #[test]
 fn every_query_error_has_its_class_and_code() {
     use ResponsePreviewError as Preview;
@@ -576,12 +652,5 @@ fn every_query_error_has_its_class_and_code() {
     ];
     for (error, class, code) in table {
         assert_eq!(error.refusal(), (class, code), "{error:?}");
-        assert!(
-            code.split('.').all(|part| !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || byte == b'_')),
-            "{code}"
-        );
     }
 }

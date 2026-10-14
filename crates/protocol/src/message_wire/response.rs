@@ -214,6 +214,12 @@ fn response_request_is_valid(limits: crate::ProtocolLimits, value: &ResponseGetR
             stable_id_fits(limits, id) && !value.sections && value.overrides.is_empty()
         }
     };
+    // Nothing the request carries as a number is NaN or infinite: the axis endpoints and every
+    // override value are finite before any host looks at them, so a host never prepares an owner
+    // for a request whose axis or values cannot be meant.
+    let finite = value.minimum_hz.is_finite()
+        && value.maximum_hz.is_finite()
+        && value.overrides.iter().all(|row| row.value.is_finite());
     // The bypass is the effect-wide switch: lane `both`, value exactly 0 or 1.
     let overrides_ok = value.overrides.iter().all(|row| {
         let effect = matches!(
@@ -225,7 +231,7 @@ fn response_request_is_valid(limits: crate::ProtocolLimits, value: &ResponseGetR
                 && (row.value.to_bits() == 0.0_f32.to_bits()
                     || row.value.to_bits() == 1.0_f32.to_bits()))
     });
-    target_ok && overrides_ok
+    target_ok && overrides_ok && finite
 }
 
 /// A reply's own rules, shared by both directions.

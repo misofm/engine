@@ -862,8 +862,8 @@ pub struct ResponseCurves {
     pub sections_right_db: Option<Vec<f32>>,
 }
 
-/// Prepare one response query: refuse an unsupported rate, point count or override count before
-/// any owner is prepared, then prepare the owner through [`prepare_response_preview`].
+/// Prepare one response query: refuse an unsupported rate, point count, override count or frequency
+/// axis before any owner is prepared, then prepare the owner through [`prepare_response_preview`].
 pub fn prepare_response_query(
     query: &ResponseQuery<'_>,
 ) -> Result<PreparedResponseQuery, ResponseQueryError> {
@@ -879,6 +879,9 @@ pub fn prepare_response_query(
     {
         return Err(ResponseQueryError::Overrides);
     }
+    // The axis rules are the query's, not the owner's: refuse a bad axis here, before any owner is
+    // prepared, so a host answers it the same way and with the same code.
+    check_response_axis(query.grid, query.sample_rate_hz).map_err(ResponseQueryError::Preview)?;
     let preview = prepare_response_preview(ResponsePreviewRequest {
         configuration_id: query.configuration_id,
         sample_rate_hz: query.sample_rate_hz,
@@ -965,16 +968,16 @@ impl PreparedResponseQuery {
     }
 }
 
-/// Generate and validate one explicit frequency axis with portable f64 interpolation.
-pub fn generate_response_grid(
+/// The frequency-axis rules of a response query, checked once and before any owner is prepared or
+/// any buffer is allocated (decision 17, C13): both endpoints are finite, the minimum is not
+/// negative and below the maximum, the maximum is at most Nyquist, a logarithmic axis starts above
+/// zero, and the axis has at least two points.
+fn check_response_axis(
     grid: ResponsePreviewGrid,
     sample_rate_hz: u32,
-    output: &mut [f32],
 ) -> Result<(), ResponsePreviewError> {
-    let points = grid.points();
     let (minimum_hz, maximum_hz) = grid.endpoints();
-    if points < 2
-        || output.len() != points
+    if grid.points() < 2
         || !minimum_hz.is_finite()
         || !maximum_hz.is_finite()
         || minimum_hz < 0.0
@@ -984,6 +987,21 @@ pub fn generate_response_grid(
     {
         return Err(ResponsePreviewError::InvalidGrid);
     }
+    Ok(())
+}
+
+/// Generate and validate one explicit frequency axis with portable f64 interpolation.
+pub fn generate_response_grid(
+    grid: ResponsePreviewGrid,
+    sample_rate_hz: u32,
+    output: &mut [f32],
+) -> Result<(), ResponsePreviewError> {
+    let points = grid.points();
+    let (minimum_hz, maximum_hz) = grid.endpoints();
+    if output.len() != points {
+        return Err(ResponsePreviewError::InvalidGrid);
+    }
+    check_response_axis(grid, sample_rate_hz)?;
     let denominator = (points - 1) as f64;
     for index in 0..points {
         let t = index as f64 / denominator;
