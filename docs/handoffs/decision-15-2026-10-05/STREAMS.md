@@ -687,7 +687,7 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
   - #1313 lands before #1559.
   - #1341 lands with #1563 or after #1562; #1560 (S8) is not weakened.
   - #1352 is not implemented; it closes as superseded when #1587 merges.
-  - #1570 (S14's event drain) lands in the same batch as #1562.
+  - #1570a lands in batch 4 (lane K); #1570b (S14's event drain) lands in 6W with #1562a.
   - #1165 lands before #1592 (row `crates/host-core/src/spectrum.rs`).
   - #1547, #1548 and #1555 land before H #1332, by named exception (row `hosts/host-web/src/lib.rs`).
   - #1524 and #1525 are not implemented; they close as superseded when #1565 merges (Q6).
@@ -710,7 +710,7 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
 
   | Batch | Lane | Slices, in merge order | Hot-file order |
   |---|---|---|---|
-  | 4 | C | #1603, #1559, #1560, #1561 | (fixed) |
+  | 4 | C | #1603, #1559, #1560, #1561 | K before C on shared files |
   | 4 | K | #1570a, #1401, #1351, #1165 | (fixed) |
   | 5 | W | #1400a -> #1400b; #1536, #1534, #1530 | `lib.rs`: #1534 then #1400b; host.js (#1536); qualification `run.mjs` (#1530); engine `plan.rs` and control-plane (#1400a, K-type code carried by W) |
   | 5 | K | #1532 -> #1563A; #1280a, #1280b | sdk `engine.ts`/`errors.ts`: #1532 then #1563A; `live.rs`, rack, host-core `prepare.rs`/`live_delta.rs` (#1280) |

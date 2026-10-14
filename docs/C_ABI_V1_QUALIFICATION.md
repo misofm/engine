@@ -263,10 +263,9 @@ counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all 
 any of them is never `NOT_FOUND`. `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
-event (`0x8021`) reports, for each configured ID in order, the same value `COUNTERS_GET` returns for it
-at that call. The service step reads the provider after its first refresh, so a counter that render
-changed since the previous call reaches the snapshot that the next call stages, whichever control
-call that is. A snapshot is staged once render has completed at least `counter_period_blocks` blocks
+event (`0x8021`) reports, for each configured ID in order, the value after the service step's first
+refresh. A counter that render changed since the previous call therefore reaches the snapshot that
+the next call stages, whichever control call that is. A snapshot is staged once render has completed at least `counter_period_blocks` blocks
 since the last one (a configuration counts its period from the call that accepted it), with the render
 sample at that point; blocks rendered with no control call between them yield one snapshot at the
 next call, and skipped periods are not replayed. The lane is lossy: the lossy queue may keep only part
