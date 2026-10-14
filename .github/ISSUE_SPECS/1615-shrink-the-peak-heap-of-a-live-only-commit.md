@@ -2,7 +2,7 @@
 
 Successor of #1613 and #1562, decision 17. Code anchors verified on the flip branch after
 `be71c6097`.
-Issue number: assigned at filing (written here as TBD11). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1615). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review.
 
 ## Product outcome

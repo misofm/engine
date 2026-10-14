@@ -398,7 +398,7 @@ The cause is not one line. Reserving the scratch to the owner's previous row cou
 doubling (the strip's rows are ~46 KB at their final size, not 59 KB, and the 52 KB of intermediate
 sizes and the copy peak go), but the replay clone and the response staging are 80 KB of the peak on
 their own, so the peak stays near 125 KB and the first transaction can still grow the heap. It is
-filed as `TBD11-shrink-the-peak-heap-of-a-live-only-commit.md`; the flip does not wait for it, because
+filed as #1615 (`.github/ISSUE_SPECS/1615-shrink-the-peak-heap-of-a-live-only-commit.md`); the flip does not wait for it, because
 growth is re-bound and counted on the control side.
 
 ### What stays linear (batch 7 review)
