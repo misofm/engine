@@ -363,3 +363,5 @@ The Worker deployment of D1-D6 is #1332 and #1387. It adds no logic: the same ex
 Worker.
 
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+**Catalog held once (batch 6 review fold, root 2026-10-14).** The browser holds its control catalog in `PreparedHost.control_catalog`, which `ReadyOwnership.host` keeps for the session, and the browser report charges it (#1400 amendment). #1381a must not hold the catalog twice: when `SessionState` (through `SessionControlProvider`) takes the session's catalog, `ReadyOwnership` stops holding the prepared one, and the report charges one catalog, not two.

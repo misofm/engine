@@ -77,18 +77,26 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// through unseen. Both lane widths carry that ceiling, but only the eight-lane value is measured
 /// (x86-64); the four-lane one is inferred, because AArch64 runs only in CI: the cells are words,
 /// not lanes, so the figure should match, and the 10 % headroom covers a small difference.
+///
+/// **Re-pinned: `bridge_metadata_bytes` and `bridge_retained_bytes` (#1400 amendment, batch 6
+/// fold).** The control catalog (decision 17, C4) is retained for the whole session, and the
+/// browser report charged none of it. It now does: 9,556 bytes for this fixture on both rows
+/// (x86-64; 1,151,078 to 1,160,634 metadata, 1,171,689 to 1,181,245 retained), and its largest
+/// allocation joins the largest-bridge-allocation row. Ceilings are the new beyond-capture part
+/// plus 10 %, rounded up to 64: 112,058 * 1.1 = 123,263.8 gives 123,264, and 132,669 * 1.1 =
+/// 145,935.9 gives 145,984. The four-lane figure is inferred as before.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
         value: |report| report.bridge_metadata_bytes,
-        eight_lanes: CAPTURE + 111_808,
-        four_lanes: CAPTURE + 111_808,
+        eight_lanes: CAPTURE + 123_264,
+        four_lanes: CAPTURE + 123_264,
     },
     Budget {
         row: "bridge_retained_bytes",
         value: |report| report.bridge_retained_bytes,
-        eight_lanes: CAPTURE + 134_400,
-        four_lanes: CAPTURE + 134_400,
+        eight_lanes: CAPTURE + 145_984,
+        four_lanes: CAPTURE + 145_984,
     },
     Budget {
         row: "source_total_bytes",

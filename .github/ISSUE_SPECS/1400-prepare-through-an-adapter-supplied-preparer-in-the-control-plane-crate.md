@@ -317,3 +317,18 @@ the same digest as the base (PR evidence, not a committed pin).
   host-web has no control-side allocation counter beyond the render-locked one
   (`render_lock.rs`, which counts only render windows). #1381's service step drops the retired
   plan, attachment included, and must count those frees under the AGENTS.md non-isolated exception.
+
+**Batch 6 review fold, 2026-10-14 (root decision A1).**
+
+- **The catalog is retained, not transient.** The decision record above says the browser builds a
+  `ControlCatalog` it does not read before the flip, and treats it as a boot-time high-water. That
+  is half right. Because `control-plane` is a normal dependency of host-web, feature unification
+  turns on host-core's `control-provider` in the browser artifact; every prepare builds
+  `PreparedHost.control_catalog`, and `ReadyOwnership.host` holds it for the whole session. No
+  `WebResourceReport` row counted it. `compile_ready` now charges `host.control_catalog.resources()`:
+  its retained bytes join the bridge metadata and bridge retained rows (so the exact retained check
+  against `memory_budget` sees them before the commit), and its largest allocation joins the largest
+  bridge allocation row. For `browser-v1/session.json` the charge is 9,556 bytes (bridge metadata
+  1,151,078 to 1,160,634; bridge retained 1,171,689 to 1,181,245), and the ceilings in
+  `hosts/host-web/tests/retained_ceilings.rs` are re-pinned with those numbers. The boot budget
+  pin (20,971,520) does not move.

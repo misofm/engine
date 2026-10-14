@@ -973,6 +973,10 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
         // from the inventory itself rather than read from the report row.
         let inventory_bytes = engine.inventory.retained_bytes();
         assert!(inventory_bytes > 0, "{name}: the inventory holds its rows");
+        // The control catalog the preparation builds and `ReadyOwnership.host` keeps (#1400
+        // amendment).
+        let catalog_bytes = engine.control_catalog.resources().retained_bytes;
+        assert!(catalog_bytes > 0, "{name}: the catalog holds its rows");
 
         let host =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -1019,6 +1023,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(inventory_bytes))
             .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
+            .and_then(|bytes| bytes.checked_add(catalog_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
@@ -1030,6 +1035,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(inventory_bytes))
             .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
+            .and_then(|bytes| bytes.checked_add(catalog_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .and_then(|bytes| bytes.checked_add(ramp_table_bytes))
@@ -3630,7 +3636,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let ready_metadata = source_control_bytes
             + session_model_bytes
             + engine.inventory.retained_bytes()
-            + host_core::LiveValuesSuperseded::retained_bytes();
+            + host_core::LiveValuesSuperseded::retained_bytes()
+            + engine.control_catalog.resources().retained_bytes;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
@@ -12550,6 +12557,32 @@ fn send_edits_admit_and_render_without_allocating() {
     }
 }
 
+/// The retained bytes of the control catalog an independent build makes for `document`: the part
+/// of the browser's retained rows that follows the session's controls (#1400 amendment).
+fn catalog_retained_bytes(document: &str) -> u64 {
+    let parsed = parse_host_session(document).expect("catalog session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("catalog session compile");
+    host_core::ControlCatalog::build(
+        compiled.normalized_model(),
+        &controls::MonitorOverlay::default(),
+        compiled.sample_rate().0,
+    )
+    .expect("catalog build")
+    .resources()
+    .retained_bytes
+}
+
 /// The report of an independent host-core preparation of `document` at `queue_records`: its
 /// `route_control_resources` are `graph::route_control_resources` of the attached producers.
 fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPrepareReport {
@@ -12641,14 +12674,15 @@ fn the_exact_retained_budget_charges_the_send_lanes() {
     let lanes = lanes_64.total_bytes - twin_deep.route_control_resources.total_bytes;
     let model = deep.session_model_bytes - twin_deep.session_model_bytes;
     let mirror = 2 * size_of::<host_core::LiveRoute>() as u64;
+    let catalog = catalog_retained_bytes(&document) - catalog_retained_bytes(&twin);
     assert_eq!(
         resources.bridge_retained_bytes - without.bridge_retained_bytes,
-        document_rows + model + lanes + mirror,
+        document_rows + model + lanes + mirror + catalog,
         "one send's whole retained share"
     );
     assert_eq!(
         resources.bridge_metadata_bytes - without.bridge_metadata_bytes,
-        size_of::<StagedCommand>() as u64 + model + lanes + mirror,
+        size_of::<StagedCommand>() as u64 + model + lanes + mirror + catalog,
         "one send's whole metadata share"
     );
 
@@ -15741,16 +15775,17 @@ fn the_exact_retained_budget_charges_the_vca_state() {
     let staging = 2 * 3 * size_of::<StagedCommand>() as u64;
     let model = send_prepare_report(&with, 16).session_model_bytes
         - send_prepare_report(&without, 16).session_model_bytes;
+    let catalog = catalog_retained_bytes(&with) - catalog_retained_bytes(&without);
     let document_rows = (with_rows.session_document_bytes - without_rows.session_document_bytes)
         + (with_rows.id_staging_bytes - without_rows.id_staging_bytes);
     assert_eq!(
         with_rows.bridge_retained_bytes - without_rows.bridge_retained_bytes,
-        document_rows + model + vca + staging,
+        document_rows + model + vca + staging + catalog,
         "the VCA state's whole retained share"
     );
     assert_eq!(
         with_rows.bridge_metadata_bytes - without_rows.bridge_metadata_bytes,
-        model + vca + staging,
+        model + vca + staging + catalog,
         "the VCA state's whole metadata share"
     );
     assert!(with_rows.largest_bridge_allocation_bytes >= state.largest_allocation_bytes());

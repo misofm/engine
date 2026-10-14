@@ -7512,13 +7512,18 @@ fn compile_ready(
     // Charged because the browser bridge retains them: the facade's control table and ID arena
     // (`control_retained_bytes` is exactly those two), the compiled session model, and the
     // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor,
-    // and the session's `live_values_superseded` count (#1399), the one allocation every plan of
-    // the session shares and host-core's graph row therefore leaves out.
+    // the session's `live_values_superseded` count (#1399), the one allocation every plan of
+    // the session shares and host-core's graph row therefore leaves out, and the control catalog
+    // (decision 17, C4): the control-plane dependency turns host-core's `control-provider` on for
+    // this artifact, so every preparation builds it, `PreparedHost` keeps it, and `ReadyOwnership`
+    // holds it for the whole session (#1400 amendment). No host-core row counts it.
+    let catalog = host.control_catalog.resources();
     let ready_metadata = checked_sum_prepare([
         engine.control_retained_bytes,
         engine.session_model_bytes,
         engine.inventory_retained_bytes,
         host_core::LiveValuesSuperseded::retained_bytes(),
+        catalog.retained_bytes,
     ])?;
     let mut bridge_metadata = report
         .bridge_metadata_bytes
@@ -7532,6 +7537,7 @@ fn compile_ready(
         .largest_bridge_allocation_bytes
         .max(control_table)
         .max(id_arena)
+        .max(catalog.largest_allocation_bytes)
         .max(engine.session_largest_allocation_bytes);
     // One input-filter shadow per strip, the tracks then the submixes (issue #1213 D1): the order
     // of `handles.strips`, so a bus's prepared input-filter owner is its strip index.
