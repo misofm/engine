@@ -75,8 +75,9 @@ phase moves into the core (ruling C9, C13).
   `BOOT_OPTIONS_BYTES`, every other offset and `ABI_VERSION` do not change. The SDK's
   `policy.liveControls.commandQueueRecords` option is deleted; `host-mirror.ts` writes 0.
 - **D5. Deleted mirrors.** `LiveVcaState`, `LiveVcaFaderDelta`, `LiveControlSoloState`,
-  `LiveControlMuteDelta`, `StripMuteSeed`, `LiveRoute`, `LiveRouteState`, `LiveRouteStateError`
-  and `LiveRouteMuteFollow` are removed from host-core with their modules' code and
+  `LiveControlMuteDelta`, `StripMuteSeed`, `LiveRoute`, `LiveRouteState`, `LiveRouteStateError`,
+  `LiveRouteMuteFollow` and (batch 4 review fold, #1560's browser fix) `LiveStripValues` with its
+  module `strip_values.rs` and `StripValues` are removed from host-core with their modules' code and
   `crates/host-core/tests/vca_live.rs`. Doc comments elsewhere that point at them point at
   `controls::effective` instead.
 - **D6. Tests.** Each host-web test that used a deleted kind is either rewritten to send
@@ -105,7 +106,7 @@ phase moves into the core (ruling C9, C13).
 
 - `hosts/host-web/src/`, `hosts/host-web/web/`, `hosts/host-web/tests/`,
   `hosts/host-web/qualification/`, `hosts/host-web/MUTATIONS.md`, `hosts/host-web/DEPLOYMENT.md`.
-- `crates/host-core/src/{vca.rs,solo.rs,live_route_state.rs,lib.rs}`,
+- `crates/host-core/src/{vca.rs,solo.rs,live_route_state.rs,strip_values.rs,lib.rs}`,
   `crates/host-core/tests/{vca_live.rs,MUTATIONS.md}`.
 - `scripts/check-web-audioworklet.sh`, `scripts/check-web-audioworklet-callgraph.py`,
   `scripts/test-web-audioworklet.mjs`, `scripts/check-abi-layout-v1.py`,

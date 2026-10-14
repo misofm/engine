@@ -16,12 +16,16 @@
 //! fader from `LiveVcaState`, whose emitted value is the effective one; the fader kept here is
 //! that of a strip no VCA reaches, where the own value is the effective one.
 //!
+//! This module is temporary: #1565 (D5) deletes it with the other mirrors when the browser's own
+//! live-command path goes and the browser admits its edits through the committed model.
+//!
 //! # The transaction
 //!
 //! Like its siblings it carries a shadow: the first mutation of a transaction copies the entries
 //! aside, [`LiveStripValues::rollback`] restores them on a refusal, and
 //! [`LiveStripValues::commit`] closes the transaction. Every array is allocated at preparation;
-//! nothing here allocates afterwards, and nothing runs on a render thread.
+//! nothing here allocates afterwards, and the host-web `command_submit` that drives it runs on the
+//! worklet thread between quanta, never inside `process()`.
 
 use std::collections::TryReserveError;
 

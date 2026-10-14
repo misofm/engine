@@ -99,11 +99,15 @@ today's command records; #1562 switches it to `SET_CONTROL` and adds the list an
   `hosts/host-web/tests/strip_cells_cross_host.rs` (deleted).
 - `hosts/host-web/Cargo.toml` (the dev-dependency comments that name the deleted tests).
 - Fixture files under `hosts/host-web/tests/` that the new test needs.
+- Added by the coordinator, 2026-10-14 (decision record): `hosts/host-web/MUTATIONS.md`,
+  `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`,
+  `crates/host-core/src/{strip_values.rs,lib.rs,vca.rs}`.
 
 ## Non-goals
 
-- No production code change. If the test finds a divergence, the fix goes into the core under its
-  own issue, and this slice waits for it.
+- No production code change, except the one fix of the decision record (the browser repeat-value
+  fix `4abd7b9c0`, which lands with the parity test that found it). Any other divergence the test
+  finds goes into the core under its own issue, and this slice waits for it.
 - No lane-width parity (G5 corpus), no browser artifact run (#1564 adds a control script to the
   direct-oracle digest).
 - No control-list or snapshot bytes yet (#1562).
@@ -189,3 +193,8 @@ and the adaptation is here.
   only the browser retargets it over the mute's ramp. The scripted rows are not affected, because
   each scripted write changes its value. The fix goes into the core under its own issue.
 - **The send-record difference above is fixed on the browser (batch 4c).** A browser strip or send command that repeats the committed value writes no cell, as the core's classifier writes no record for it (strip fader, mute, matrix and pan, trim, polarity and all three send fields had the defect; VCA offset and mute, solo, effect parameters and bypass, and input filters did not render differently, and `follows_mute` has no command). The repeat rows are in the script (`unchanged`: the C ABI answers `model_only`); the first write of a cell in a batch is the only one that can be dropped, so a batch's last ramp still wins, and a batch that changes a value and puts it back (A to B to A) still writes both records, which the core would not, until #1562 sends the browser's edits through the core.
+- **Coordinator, 2026-10-14, under decision 17 C1 (a behaviour on one host only is a defect):** the
+  browser fix `4abd7b9c0` lands with the parity test that found it. The authorized paths gain
+  `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`, `hosts/host-web/MUTATIONS.md` and
+  `crates/host-core/src/{strip_values.rs,lib.rs,vca.rs}` (the files that commit touched).
+  `strip_values.rs` is temporary: #1565 D5 deletes it with the other mirrors.
