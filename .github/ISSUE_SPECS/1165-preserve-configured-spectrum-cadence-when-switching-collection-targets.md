@@ -51,3 +51,7 @@ collection (two prepared targets, as in `collection_cancel_except_drains_every_c
 observer (as `collect_planar_ramp_windows`, `:2960`) and asserts that successive published windows
 start `hop` frames apart. Gate 2: record it red with D1 reverted (every explicit hop fails; the
 default case passes).
+
+## Decision record (attempt, 2026-10-14)
+
+Implemented D1-D4 as frozen: `select` now passes the old entry's `SpectrumCadence` value to `begin_continuous(cadence, false)`; the error mapping is unchanged (the `Cadence` arm is now unreachable but kept so the match stays exhaustive without a catch-all). Test `collection_select_keeps_the_cadence_on_the_new_entry` covers every `SpectrumHop::SUPPORTED` value plus the default cadence. Gate 2: with D1 reverted it fails at hop 256 (the replacement reports hop 2048). Adaptation: the default cadence's hop is 2048 frames, which is also a supported hop, so the explicit 2048 case and the default case pass on the revert; hops 256, 512 and 1024 are the red ones.
