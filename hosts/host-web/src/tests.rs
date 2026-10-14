@@ -1,6 +1,8 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
-use host_core::prepare_host_runtime_with_selected_meters_between_render_calls;
+use host_core::{
+    SpectrumSmoothingConfig, prepare_host_runtime_with_selected_meters_between_render_calls,
+};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -4888,11 +4890,13 @@ fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
         Some(single_hop),
     )
     .expect("single explicit-hop boot");
-    assert_eq!(single.spectrum_hop, Some(single_hop));
+    single
+        .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+        .expect("single explicit-hop start");
     assert_eq!(
         single
-            .start_spectrum_stream()
-            .expect("single explicit-hop start")
+            .spectrum_stream_cadence()
+            .expect("single stream cadence")
             .hop_frames(),
         single_hop.get()
     );
@@ -4917,11 +4921,13 @@ fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
         collection.select_spectrum(target.as_ref(), SpectrumChannels::Stereo),
         RESULT_OK
     );
-    assert_eq!(collection.spectrum_hop, Some(collection_hop));
+    collection
+        .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+        .expect("collection explicit-hop start");
     assert_eq!(
         collection
-            .start_spectrum_stream()
-            .expect("collection explicit-hop start")
+            .spectrum_stream_cadence()
+            .expect("collection stream cadence")
             .hop_frames(),
         collection_hop.get()
     );
@@ -4940,9 +4946,10 @@ fn ordinary_spectrum_omitted_hop_keeps_default_cadence() {
         })),
     )
     .expect("default-hop boot");
-    assert_eq!(host.spectrum_hop, None);
+    host.start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+        .expect("default-hop start");
     assert_eq!(
-        host.start_spectrum_stream().expect("default-hop start"),
+        host.spectrum_stream_cadence().expect("stream cadence"),
         SpectrumCadence::new(48_000, 128).expect("default cadence")
     );
 }
