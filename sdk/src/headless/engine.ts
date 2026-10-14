@@ -35,6 +35,13 @@ import type {
 } from "../core/observation-subscriptions.ts";
 import { decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
+import { readControlList, readControlState } from "../core/control-list.ts";
+import type {
+  ControlList,
+  ControlListFilter,
+  ControlListTransport,
+  ControlState,
+} from "../core/control-list.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -311,6 +318,35 @@ export class OfflineEngine {
       );
     }
     return this.#controlQueue;
+  }
+
+  /**
+   * Every control of the running session, with its descriptor and committed value (decision 17, C4;
+   * #1564 D1): `CONTROL_LIST_GET` pages read through this engine's control endpoint until `eof`.
+   * The core decides the rows, their order and their values; this call only pages.
+   *
+   * A page refused `control.list.stale` (the structure changed between two pages) restarts the read
+   * from the first page, and after three restarts rejects with `MisoEngineError` `control.list.stale`.
+   * `filter.owner` restricts the list to one owner, `filter.pageLimit` sets the rows per request.
+   */
+  controls(filter?: ControlListFilter): Promise<ControlList> {
+    return readControlList(this.#controlListTransport(), filter);
+  }
+
+  /**
+   * The committed values of `list`'s control rows (`CONTROL_STATE_GET`), by handle. A structure that
+   * changed since `list` was read rejects with `MisoEngineError` `control.list.stale`: list again.
+   */
+  controlState(list: ControlList, options?: Pick<ControlListFilter, "pageLimit">): Promise<ControlState> {
+    return readControlState(this.#controlListTransport(), list, options);
+  }
+
+  #controlListTransport(): ControlListTransport {
+    return {
+      send: (frame) => this.#boundary.controlFrame(frame),
+      // The one allocator of this endpoint: the engine's replay cache refuses a reused ID.
+      requestIds: this.controlTransactions().requestIds,
+    };
   }
 
   /**

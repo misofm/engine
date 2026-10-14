@@ -200,3 +200,75 @@ Checked against `main` at `32cee58d0`.
   its own.
 - **#1565B** still needs (C): it deletes the `live_control_{track,submix}_{count,id}` exports after
   D5.
+
+## Decision record: piece A, list and set (batch 8)
+
+**Shipped.** `engine.controls(filter?)` and `engine.controlState(list, options?)` on the headless
+engine and on `BrowserEngine`, and `liveControls().edit.set(address, value, { rampSamples? })`.
+The codec is `sdk/src/core/control-list.ts` (request encoder, page decoders, `readControlList`,
+`readControlState`); it reuses the frame readers of `control-frame.ts`, which now exports them
+(`@internal`) together with a `decodeResponseEnvelope` / `decodeRefusalBody` pair that
+`decodeControlReply` is built on and one `commandFrame` builder that both existing encoders use.
+`src/index.ts` exports `control-frame.ts` by name now (it was `export *`), so the internal readers
+do not reach the barrel. The list and state reads use the endpoint's transport and its one
+`ControlRequestIds`, not the batching queue. The browser transport is
+`createBrowserControlListTransport(host)`, which shares the queue's allocator.
+
+**Departures from the text.**
+
+- `ControlList` also carries `owner`, the filter the list was read with, so `controlState(list)`
+  reads the same rows (a state request takes the same owner filter). `ControlListFilter` carries
+  `pageLimit` (1 to 256, default 256): gate 1 needs limit 1 and 256 from the public call.
+- `revision` of a list and of a state is the revision of the first page (revisions only grow, so it
+  is the oldest value read).
+- Other refusals of a page (not `control.list.stale`) reject with `MisoControlRefusal`; stale
+  rejects with `MisoEngineError`, `code: "control.list.stale"`, as the spec says. The error-code
+  union gained `SdkControlCode = "control.list.stale"`.
+- `edit.set` returns a `ControlEditSet` (what the builders return), per the batch-8 amendment. It
+  accepts a generated `ControlAddress` or a `ControlWireAddress` (a list entry's `address`). A row
+  of an insert or console slot named by machine name needs the effect it runs, which only a session
+  the SDK built tells the SDK (`withSession()`); otherwise it throws `MisoUsageError` that points to
+  the numeric address. This is encodability, not a core decision: the name has no numeric ID
+  without the effect.
+- The Rust fixture writer is a new test outside the spec's authorized paths:
+  `hosts/host-web/tests/control_list_fixture.rs` writes `hosts/host-web/tests/fixtures/control-list.json`
+  (canonical parity session at 48 kHz, 397 native rows with address, class, descriptor facts and
+  value bits). It lists the parse of the canonical document, not the builder's model: the booted
+  model has its routes in ID order, and a first draft that listed the builder's model was red on
+  route order. Rewrite with `MISO_ENGINE_BLESS_FIXTURES=1`.
+
+**Finding for later slices.** The core takes request IDs in ascending order per endpoint
+(`replay_expired`, diagnostic `protocol.failure`, for a lower one) and refuses a reused one. Two SDK
+allocators on one core therefore collide (a second `ControlRequestIds` starts at 1 again): one
+endpoint, one allocator. Tests that change the structure mid-read do it inside `requestIds.next()`.
+
+**Gates and tests** (`sdk/test/control-list-evals.mjs`, 31 tests):
+
+- Gate 1: `headless: engine.controls() yields the rows of the native controls::list, in order`
+  (397 rows against the fixture), `paging with limit 1 and with 256 gives the same list` (also 7 and
+  the default), `the headers open every owner...`, `an owner filter...`, `a row's descriptor is
+  decoded from the wire...`, `the browser transport lists the same rows as the headless one, through
+  a real BrowserEngine`. Rust: `control_list_fixture::the_control_list_fixture_is_the_native_list_of_the_parity_session`.
+- Gate 2: `a transaction that advances the structure epoch makes the read restart and return the new
+  list` (a live `matrix_mode` switch of `t3` between pages 1 and 2), `a transport that is stale on
+  every continuation rejects after three restarts` (4 first pages, then `control.list.stale`),
+  `a state read of a list from another structure rejects control.list.stale`, `a reply that makes no
+  progress ends the read instead of looping`.
+- Gate 4: `edit.set reaches any row`: a strip builtin (fader by name, one-lane mute, fixed-ramp
+  high-pass), a strip own row (solo, `matrix_mode`), a route own row (`t1-b` gain), a VCA own row,
+  the session's own `fader_ms`, an insert parameter, a console parameter and an insert bypass.
+  Each builder-backed case renders bit-identically to the typed builder on a second core and
+  leaves an identical list. `headless` and `browser`: `set on a derived row rejects control.read_only`;
+  `set on a rebuild-only row passes the core's web.apply.rebuild_pending through` (delay_samples,
+  nothing committed). Also: every live row of the list accepts a write of its own value; an
+  out-of-domain value reaches the core (`control.domain`) and an unknown strip is
+  `control.address.unknown`; `set` refuses only unencodable input.
+- Run: `bash scripts/check-sdk-types.sh`, `check-sdk-headless.sh` (493 tests, 492 pass, 1 todo from
+  before), `check-sdk-generated.sh`, `sdk-package.sh check`, `check-sdk-deletions.py`,
+  `check-workspace-policy.sh`, `cargo clippy -p host-web --all-targets --all-features -D warnings`,
+  the Rust fixture test; all with the artifacts of this tree.
+
+**Left for B and C.** D4 (generated builders; `set` is the call they use, and the effect parameter
+names of the control tables, such as `threshold_db`, differ from the catalog's builder names, such
+as `threshold`), D5 (strip order from `controls().headers`: owner headers of kind `track`, then
+`submix`, in list order, and a re-read when a reply's `structureEpoch` differs).

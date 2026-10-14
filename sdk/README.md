@@ -275,6 +275,51 @@ command record: they resolve with a `CommandReport` and need a positive
 `liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
 `policy` to `createEngine`. Value edits are `SET_CONTROL` transactions and need no boot word.
 
+### List every control, read their values, and set any of them
+
+The control list is the core's, not a table the SDK holds: it names every control of the running
+session (strips, routes, VCAs, console slots, inserts and the session's own rows), in the core's
+order, with each control's descriptor and committed value.
+
+```ts
+const list = await engine.controls();          // headless: Promise; browser: Promise
+const state = await engine.controlState(list); // { revision, structureEpoch, values: Map<handle, number> }
+const fader = list.controls.find((row) => row.name === "fader_db"
+  && row.address.owner.kind === "strip" && row.address.lane === "left");
+
+const controls = await engine.liveControls();
+await controls.submit(controls.edit.set(fader.address, -6, { rampSamples: 64 }));
+```
+
+`engine.controls(filter?)` resolves with `{ revision, structureEpoch, headers, controls }`. Each
+`controls` entry (`ControlListEntry`) carries its `address` (stable owner, section, the numeric row
+`control` and the lane), the descriptor (`name`, `displayName`, `unit`, `kind`, `minimum`,
+`maximum`, `default`, `taper`, `step`, `choices`, `class`, `reason`, `reopen`, `scope`,
+`automatable`, `family`, `active`, ...) and the committed `value`. `headers` holds the owner and
+section header rows in list order; the owners come in strip order (tracks, then submixes), then
+routes, VCAs and the session. `filter.owner` restricts the list to one owner and `filter.pageLimit`
+(1 to 256) sets the rows requested per page. A `class` of `rebuildOnly` or `derived` tells you
+before you write that the core will not apply the edit live.
+
+The list is read in pages. Every page names the `structureEpoch` its handles belong to; if the
+structure changes between two pages (a `matrix_mode` switch changes which rows a strip uses), the
+core refuses the next page `control.list.stale` and the read starts over from the first page. After
+three restarts it rejects with `MisoEngineError` code `control.list.stale`. `engine.controlState(list)`
+reads the values of that list's handles and rejects `control.list.stale` the same way when the
+structure moved on; list again. `revision` is the revision of the first page. The list and state
+reads draw their request IDs from the same allocator as value edits.
+
+`edit.set(address, value, { rampSamples? })` stages one edit for any row, in the same transaction
+as the typed builders (`faderDb`, `gainDb`, `parameter`, ...) and returns it for `submit()` or a
+writer. `address` is either a generated `ControlAddress` (owner, section, the row's machine name,
+lane) or the `address` of a list entry, which names the row by its numeric `control`. A row of an
+insert or console slot depends on the effect it runs, so name it by its machine name only for a
+session the SDK built (`withSession()`); the list entry's numeric address always works. `set`
+checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
+row can be set are the core's: an edit of a derived row rejects `control.read_only`, and one of a
+rebuild-only row is refused with the core's own code (on the browser host today,
+`web.apply.rebuild_pending`).
+
 ## Observe the rendered mix
 
 Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery

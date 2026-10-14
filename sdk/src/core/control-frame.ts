@@ -31,18 +31,33 @@ const KIND_RESPONSE = 2;
 const MESSAGE_CAPABILITIES_GET = 0x0001;
 const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
 /** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
-const FLAG_REVISION_ANY = 1;
+/** @internal */
+export const FLAG_REVISION_ANY = 1;
 const EDIT_SET_CONTROL = 0x0800;
 const U32_MAXIMUM = 0xffff_ffff;
 const U64_MAXIMUM = 0xffff_ffff_ffff_ffffn;
 
-const WIRE_U8 = 1;
-const WIRE_U16 = 2;
-const WIRE_U32 = 3;
-const WIRE_U64 = 4;
-const WIRE_F32 = 6;
-const WIRE_UTF8 = 9;
-const WIRE_MESSAGE = 11;
+// The protocol's wire type codes (`crates/protocol/src/schema.rs`, `Wire`).
+/** @internal */
+export const WIRE_U8 = 1;
+/** @internal */
+export const WIRE_U16 = 2;
+/** @internal */
+export const WIRE_U32 = 3;
+/** @internal */
+export const WIRE_U64 = 4;
+/** @internal */
+export const WIRE_F32 = 6;
+/** @internal */
+export const WIRE_BOOL = 8;
+/** @internal */
+export const WIRE_UTF8 = 9;
+/** @internal */
+export const WIRE_BYTES = 10;
+/** @internal */
+export const WIRE_MESSAGE = 11;
+/** @internal */
+export const WIRE_PACKED_F32 = 15;
 
 /** The stable address of one lane of one control, by the row's numeric ID. */
 export interface ControlWireAddress {
@@ -77,7 +92,8 @@ export interface ControlTransactionRequest {
   readonly edits: readonly ControlFrameEdit[];
 }
 
-const OWNER_CODES = new Map<string, number>(
+/** @internal */
+export const OWNER_CODES = new Map<string, number>(
   CONTROLS.address.ownerKinds.map((row) => [row.name, row.code] as const),
 );
 const SECTION_CODES = new Map<string, number>(
@@ -88,14 +104,17 @@ const LANE_CODES = new Map<string, number>(
 );
 
 const ENCODER = new TextEncoder();
-const DECODER = new TextDecoder("utf-8", { fatal: true });
+/** @internal */
+export const DECODER = new TextDecoder("utf-8", { fatal: true });
 
-function pad(length: number): number {
+/** @internal */
+export function pad(length: number): number {
   return (8 - (length & 7)) & 7;
 }
 
 /** A field: its 8-byte prefix, the value, and zero padding to the next multiple of 8. */
-function field(id: number, wire: number, mandatory: boolean, value: Uint8Array): Uint8Array {
+/** @internal */
+export function field(id: number, wire: number, mandatory: boolean, value: Uint8Array): Uint8Array {
   const out = new Uint8Array(8 + value.length + pad(value.length));
   const view = new DataView(out.buffer);
   view.setUint16(0, id, true);
@@ -106,7 +125,8 @@ function field(id: number, wire: number, mandatory: boolean, value: Uint8Array):
   return out;
 }
 
-function concat(parts: readonly Uint8Array[]): Uint8Array {
+/** @internal */
+export function concat(parts: readonly Uint8Array[]): Uint8Array {
   let total = 0;
   for (const part of parts) total += part.length;
   const out = new Uint8Array(total);
@@ -129,7 +149,8 @@ function nested(id: number, mandatory: boolean, fields: readonly Uint8Array[]): 
   return field(id, WIRE_MESSAGE, mandatory, messageBody(fields));
 }
 
-function u8(value: number): Uint8Array {
+/** @internal */
+export function u8(value: number): Uint8Array {
   return Uint8Array.of(value);
 }
 
@@ -139,7 +160,8 @@ function u16(value: number): Uint8Array {
   return out;
 }
 
-function u32(value: number): Uint8Array {
+/** @internal */
+export function u32(value: number): Uint8Array {
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, value, true);
   return out;
@@ -151,32 +173,37 @@ function f32(value: number): Uint8Array {
   return out;
 }
 
-function text(value: string): Uint8Array {
+/** @internal */
+export function text(value: string): Uint8Array {
   return ENCODER.encode(value);
 }
 
-function requireId(value: unknown, what: string): string {
+/** @internal */
+export function requireId(value: unknown, what: string): string {
   if (typeof value !== "string") {
     throw new MisoUsageError(`${what} must be a string`);
   }
   return value;
 }
 
-function requireU32(value: unknown, what: string): number {
+/** @internal */
+export function requireU32(value: unknown, what: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > U32_MAXIMUM) {
     throw new MisoUsageError(`${what} must be an integer in [0, ${U32_MAXIMUM}]`);
   }
   return value;
 }
 
-function requireU64(value: unknown, what: string): bigint {
+/** @internal */
+export function requireU64(value: unknown, what: string): bigint {
   if (typeof value !== "bigint" || value < 0n || value > U64_MAXIMUM) {
     throw new MisoUsageError(`${what} must be a bigint in [0, 2^64 - 1]`);
   }
   return value;
 }
 
-function lookup(table: ReadonlyMap<string, number>, name: unknown, what: string): number {
+/** @internal */
+export function lookup(table: ReadonlyMap<string, number>, name: unknown, what: string): number {
   const code = typeof name === "string" ? table.get(name) : undefined;
   if (code === undefined) {
     throw new MisoUsageError(`${what} ${String(name)} is not one of ${[...table.keys()].join(", ")}`);
@@ -284,6 +311,28 @@ export function encodeControlTransaction(request: ControlTransactionRequest): Ui
     throw new MisoUsageError("a control transaction needs at least one edit");
   }
   const payload = concat(request.edits.map(editField));
+  return commandFrame(
+    MESSAGE_SESSION_TRANSACTION_APPLY,
+    0,
+    requestId,
+    expectedRevision,
+    request.edits.length,
+    payload,
+  );
+}
+
+/**
+ * One command frame: the 48-byte header, then `payload`, which holds `fieldCount` top-level fields.
+ * @internal
+ */
+export function commandFrame(
+  message: number,
+  flags: number,
+  requestId: bigint,
+  expectedRevision: bigint,
+  fieldCount: number,
+  payload: Uint8Array,
+): Uint8Array {
   const out = new Uint8Array(HEADER_BYTES + payload.length);
   const view = new DataView(out.buffer);
   out.set(MAGIC, 0);
@@ -291,13 +340,13 @@ export function encodeControlTransaction(request: ControlTransactionRequest): Ui
   view.setUint16(10, PROTOCOL_MINOR, true);
   view.setUint16(12, HEADER_BYTES, true);
   out[14] = KIND_COMMAND;
-  out[15] = 0;
-  view.setUint16(16, MESSAGE_SESSION_TRANSACTION_APPLY, true);
+  out[15] = flags;
+  view.setUint16(16, message, true);
   view.setUint16(18, 0, true);
   view.setUint32(20, payload.length, true);
   view.setBigUint64(24, requestId, true);
   view.setBigUint64(32, expectedRevision, true);
-  view.setUint32(40, request.edits.length, true);
+  view.setUint32(40, fieldCount, true);
   view.setUint32(44, 0, true);
   out.set(payload, HEADER_BYTES);
   return out;
@@ -312,17 +361,7 @@ export function encodeControlTransaction(request: ControlTransactionRequest): Ui
 export function encodeRevisionProbe(requestId: bigint): Uint8Array {
   const id = requireU64(requestId, "requestId");
   if (id === 0n) throw new MisoUsageError("requestId must not be zero");
-  const out = new Uint8Array(HEADER_BYTES);
-  const view = new DataView(out.buffer);
-  out.set(MAGIC, 0);
-  view.setUint16(8, PROTOCOL_MAJOR, true);
-  view.setUint16(10, PROTOCOL_MINOR, true);
-  view.setUint16(12, HEADER_BYTES, true);
-  out[14] = KIND_COMMAND;
-  out[15] = FLAG_REVISION_ANY;
-  view.setUint16(16, MESSAGE_CAPABILITIES_GET, true);
-  view.setBigUint64(24, id, true);
-  return out;
+  return commandFrame(MESSAGE_CAPABILITIES_GET, FLAG_REVISION_ANY, id, 0n, 0, new Uint8Array(0));
 }
 
 /** The limits a `CAPABILITIES_GET` reply reports that bound what one transaction may hold. */
@@ -452,21 +491,23 @@ export interface ControlReply {
   readonly backpressure: ControlBackpressure | undefined;
 }
 
-function malformed(why: string): MisoEngineError {
+/** @internal The error every decoder of a core reply raises for bytes that are not a valid reply. */
+export function malformed(why: string): MisoEngineError {
   return new MisoEngineError(`the control reply is malformed: ${why}`, {
     phase: "lifecycle",
     code: "internal",
   });
 }
 
-interface RawField {
+/** @internal One decoded field of a message level. */
+export interface RawField {
   readonly id: number;
   readonly wire: number;
   readonly value: Uint8Array;
 }
 
-/** Read `count` fields of one message level: ascending IDs, zero padding, nothing left over. */
-function readFields(bytes: Uint8Array, count: number): RawField[] {
+/** @internal Read `count` fields of one message level: ascending IDs, zero padding, nothing left over. */
+export function readFields(bytes: Uint8Array, count: number): RawField[] {
   const fields: RawField[] = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let cursor = 0;
@@ -495,14 +536,16 @@ function readFields(bytes: Uint8Array, count: number): RawField[] {
   return fields;
 }
 
-function nestedFields(value: Uint8Array): RawField[] {
+/** @internal The fields of a nested message. */
+export function nestedFields(value: Uint8Array): RawField[] {
   if (value.length < 8) throw malformed("a nested message has no header");
   const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
   if (view.getUint32(4, true) !== 0) throw malformed("a nested message reserved word is not zero");
   return readFields(value.subarray(8), view.getUint32(0, true));
 }
 
-function scalar(fields: readonly RawField[], id: number, wire: number, width: number): DataView | undefined {
+/** @internal The one fixed-width field `id` of a message, or `undefined`; a repeat or a wrong type is malformed. */
+export function scalar(fields: readonly RawField[], id: number, wire: number, width: number): DataView | undefined {
   const found = fields.filter((row) => row.id === id);
   if (found.length > 1) throw malformed(`field ${id} repeats`);
   const row = found[0];
@@ -527,14 +570,22 @@ function decodeDiagnostic(value: Uint8Array): ControlDiagnostic {
   });
 }
 
+/** A response frame's header and its top-level fields, before the message-specific reading. @internal */
+export interface ResponseEnvelope {
+  readonly requestId: bigint;
+  readonly status: ControlStatusName;
+  /** The session revision the header reports. */
+  readonly revision: bigint;
+  readonly fields: readonly RawField[];
+}
+
 /**
- * Decode the reply to a `SESSION_TRANSACTION_APPLY` command.
- *
- * A reply the core sent is always decodable, refusals included: a refusal is a value (its `status`,
- * `diagnostics` and the `revision` the core observed), not an exception. Bytes that are not a valid
- * reply to this command raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
+ * Read a response frame to command `message`: its header checks and its top-level fields.
+ * Bytes that are not a valid response to that command raise `MisoEngineError`
+ * (`phase: "lifecycle"`, `code: "internal"`).
+ * @internal
  */
-export function decodeControlReply(bytes: Uint8Array): ControlReply {
+export function decodeResponseEnvelope(bytes: Uint8Array, message: number): ResponseEnvelope {
   if (bytes.length < HEADER_BYTES) throw malformed("the frame is shorter than its header");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let index = 0; index < MAGIC.length; index += 1) {
@@ -543,7 +594,7 @@ export function decodeControlReply(bytes: Uint8Array): ControlReply {
   if (view.getUint16(8, true) !== PROTOCOL_MAJOR) throw malformed("the protocol major version is not 1");
   if (view.getUint16(12, true) !== HEADER_BYTES) throw malformed("the header length is not 48");
   if (bytes[14] !== KIND_RESPONSE || bytes[15] !== 0) throw malformed("the frame is not a response");
-  if (view.getUint16(16, true) !== MESSAGE_SESSION_TRANSACTION_APPLY) {
+  if (view.getUint16(16, true) !== message) {
     throw malformed("the response is for another command");
   }
   const status = STATUS_NAMES[view.getUint16(18, true)];
@@ -554,26 +605,18 @@ export function decodeControlReply(bytes: Uint8Array): ControlReply {
   if (requestId === 0n) throw malformed("the request ID is zero");
   if (view.getUint32(44, true) !== 0) throw malformed("the reserved word is not zero");
   const fields = readFields(bytes.subarray(HEADER_BYTES), view.getUint32(40, true));
-  const revision = view.getBigUint64(32, true);
+  return { requestId, status, revision: view.getBigUint64(32, true), fields };
+}
 
-  if (status === "ok") {
-    const appliedOperations = scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true);
-    const code = scalar(fields, 2, WIRE_U8, 1)?.getUint8(0);
-    const editPath = code === undefined ? undefined : EDIT_PATHS.get(code);
-    if (appliedOperations === undefined || editPath === undefined) {
-      throw malformed("a successful reply holds no applied-operations count and known edit path");
-    }
-    return Object.freeze({
-      requestId,
-      status,
-      revision,
-      applied: Object.freeze({ appliedOperations, editPath }),
-      diagnostics: Object.freeze([]),
-      omittedDiagnostics: 0,
-      backpressure: undefined,
-    });
-  }
+/** The common body of a refusal: the leading diagnostics, the omitted count and any backpressure. @internal */
+export interface ControlRefusalBody {
+  readonly diagnostics: readonly ControlDiagnostic[];
+  readonly omittedDiagnostics: number;
+  readonly backpressure: ControlBackpressure | undefined;
+}
 
+/** Read the non-`ok` body every command shares. @internal */
+export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBody {
   const diagnostics = fields
     .filter((row) => row.id === 1)
     .map((row) => {
@@ -595,12 +638,47 @@ export function decodeControlReply(bytes: Uint8Array): ControlReply {
     }
     backpressure = Object.freeze({ queueKind, capacity, occupancy });
   }
+  return { diagnostics: Object.freeze(diagnostics), omittedDiagnostics, backpressure };
+}
+
+/**
+ * Decode the reply to a `SESSION_TRANSACTION_APPLY` command.
+ *
+ * A reply the core sent is always decodable, refusals included: a refusal is a value (its `status`,
+ * `diagnostics` and the `revision` the core observed), not an exception. Bytes that are not a valid
+ * reply to this command raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
+ */
+export function decodeControlReply(bytes: Uint8Array): ControlReply {
+  const { requestId, status, revision, fields } = decodeResponseEnvelope(
+    bytes,
+    MESSAGE_SESSION_TRANSACTION_APPLY,
+  );
+
+  if (status === "ok") {
+    const appliedOperations = scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true);
+    const code = scalar(fields, 2, WIRE_U8, 1)?.getUint8(0);
+    const editPath = code === undefined ? undefined : EDIT_PATHS.get(code);
+    if (appliedOperations === undefined || editPath === undefined) {
+      throw malformed("a successful reply holds no applied-operations count and known edit path");
+    }
+    return Object.freeze({
+      requestId,
+      status,
+      revision,
+      applied: Object.freeze({ appliedOperations, editPath }),
+      diagnostics: Object.freeze([]),
+      omittedDiagnostics: 0,
+      backpressure: undefined,
+    });
+  }
+
+  const { diagnostics, omittedDiagnostics, backpressure } = decodeRefusalBody(fields);
   return Object.freeze({
     requestId,
     status,
     revision,
     applied: undefined,
-    diagnostics: Object.freeze(diagnostics),
+    diagnostics,
     omittedDiagnostics,
     backpressure,
   });

@@ -94,5 +94,27 @@ export type {
   StepDeclaration as LatticeStepDeclaration,
   StepSizeName as LatticeStepSizeName,
 } from "./core/lattice.ts";
-export * from "./core/control-frame.ts";
+export {
+  CONTROL_TRANSACTION_HEADER_BYTES,
+  controlCallFailure,
+  controlEditBytes,
+  controlEditKey,
+  decodeControlLimits,
+  decodeControlReply,
+  encodeControlTransaction,
+  encodeRevisionProbe,
+  validateControlEdit,
+} from "./core/control-frame.ts";
+export type {
+  ControlBackpressure,
+  ControlDiagnostic,
+  ControlEditPath,
+  ControlFrameEdit,
+  ControlLimits,
+  ControlReply,
+  ControlStatusName,
+  ControlTransactionRequest,
+  ControlWireAddress,
+} from "./core/control-frame.ts";
+export * from "./core/control-list.ts";
 export * from "./core/control-queue.ts";

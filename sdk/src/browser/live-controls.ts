@@ -3,6 +3,7 @@ import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
+import type { ControlListTransport } from "../core/control-list.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
@@ -32,6 +33,26 @@ function browserCommand(edit: LaneEdit): MisoCommand {
     smoothingSamples: laneEditWord(edit),
     values: [...edit.values],
   };
+}
+
+/** Post one command frame to the host's `control` message; a call that failed throws. */
+function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
+  return async (frame) => {
+    const reply = await host.control(frame);
+    if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+    return reply.response;
+  };
+}
+
+/**
+ * How the browser engine reads the control list (#1564 D1): the host's `control` message, with the
+ * request IDs of the host's one allocator (the transaction queue's), so no two frames share an ID.
+ */
+export async function createBrowserControlListTransport(
+  host: MisoAudioWorkletHost,
+): Promise<ControlListTransport> {
+  const queue = await createBrowserControlQueue(host);
+  return { send: hostControlSend(host), requestIds: queue.requestIds };
 }
 
 const hostQueues = new WeakMap<object, Promise<ControlTransactionQueue>>();
@@ -70,11 +91,7 @@ async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<Cont
     return reply;
   };
   const first = await probe();
-  return new ControlTransactionQueue(async (frame) => {
-    const reply = await host.control(frame);
-    if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
-    return reply.response;
-  }, {
+  return new ControlTransactionQueue(hostControlSend(host), {
     initialRevision: first.revision,
     requestIds,
     limits: decodeControlLimits(first.response),

@@ -1,7 +1,7 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import { CONTROLS } from "../generated/controls.ts";
-import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
+import type { ControlAddress, ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
 import type {
   EffectId,
   EffectDescriptor,
@@ -10,7 +10,8 @@ import type {
   TapName,
 } from "../generated/catalog.ts";
 import type { CommandReport, SessionMap } from "./boundary.ts";
-import type { ControlFrameEdit } from "./control-frame.ts";
+import { validateControlEdit } from "./control-frame.ts";
+import type { ControlFrameEdit, ControlWireAddress } from "./control-frame.ts";
 import type { ControlAppliedReport, ControlTransactionQueue } from "./control-queue.ts";
 import { MisoUsageError } from "./errors.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
@@ -117,6 +118,16 @@ export type LiveEffectParameterEdit<E extends EffectId> = LiveParameter<E> exten
     } & ParameterOptions<P>
     : never
   : never;
+
+/** What `edit.set` takes besides the address and the value. */
+export interface SetControlOptions {
+  /**
+   * The edit's own ramp in samples, an integer in `[0, 4294967295]`; `0` is a hard step. Omitted,
+   * the core ramps over the session's own length for the row. A row whose ramp is fixed refuses an
+   * explicit one with the core's `control.ramp.fixed`.
+   */
+  readonly rampSamples?: number;
+}
 
 export interface MatrixValues {
   readonly ll: number;
@@ -446,6 +457,112 @@ export class LiveControlEdits {
     const trackCount = map.tracks.length;
     this.#submixes = new Map(map.submixes.map((submixId, index) => [submixId, trackCount + index] as const));
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
+  }
+
+  /**
+   * Set any control of the running session: one edit for one lane of one row, the sugar every typed
+   * builder (`faderDb`, `gainDb`, an effect's `parameter`, ...) is built on. Returns the edit to pass
+   * to `submit()` or a writer, in the same transaction as the typed builders' edits.
+   *
+   * `address` is either a {@link ControlAddress} (the owner, the section, the row's machine name and
+   * the lane) or a {@link ControlWireAddress} whose `control` is the row's numeric ID, which is what
+   * every row of `engine.controls()` carries as its `address`. A row of a console slot or an insert
+   * is named by its machine name only when the effect it runs is known, which it is for a session
+   * the SDK built (`withSession()`); otherwise name it by its numeric ID.
+   *
+   * It checks only that the edit can be encoded (a name that is a row, an ID that is a string, a
+   * ramp that is a `u32`). The value's domain, the lane, the owner and whether the row can be set
+   * are the core's to say, and its refusal (`control.domain`, `control.read_only`,
+   * `control.address.unknown`, `web.apply.rebuild_pending`, ...) comes back from `submit()`.
+   */
+  set(
+    address: ControlAddress | ControlWireAddress,
+    value: number,
+    options: SetControlOptions = {},
+  ): ControlEditSet {
+    if (address === null || typeof address !== "object") {
+      throw new MisoUsageError("set() needs a control address");
+    }
+    const rampSamples = options.rampSamples === undefined
+      ? undefined
+      : requireU32(options.rampSamples, "rampSamples");
+    const edit = controlEdit(
+      address.owner,
+      address.section,
+      typeof address.control === "number" ? address.control : this.#rowId(address),
+      value,
+      address.lane,
+      rampSamples,
+    );
+    validateControlEdit(edit);
+    return editSet(edit);
+  }
+
+  /** The numeric ID of the row a named address names. */
+  #rowId(address: ControlAddress): number {
+    const { owner, section, control: name } = address;
+    const table = (
+      rows: readonly { readonly control: number; readonly name: string }[],
+    ): number => ownRow(rows, name);
+    switch (section.kind) {
+      case "own":
+        switch (owner.kind) {
+          case "session":
+            return table(CONTROLS.sessionOwn);
+          case "strip":
+            return table(CONTROLS.stripOwn);
+          case "route":
+            return table(CONTROLS.routeOwn);
+          case "vca":
+            return table(CONTROLS.vcaOwn);
+        }
+        break;
+      case "builtins":
+        return table(CONTROLS.builtins);
+      case "console":
+      case "inserts":
+        return this.#effectRowId(owner, section, name);
+    }
+    // Only a caller outside the types reaches here: the owner or section kind is not one the
+    // protocol has.
+    throw new MisoUsageError(
+      `cannot name a control of owner '${String((owner as { kind?: unknown }).kind)}' `
+        + `section '${String((section as { kind?: unknown }).kind)}'`,
+    );
+  }
+
+  #effectRowId(owner: ControlOwner, section: ControlSection, name: string): number {
+    const instance = owner.kind === "strip" && this.#layout !== undefined
+      ? this.#instanceOf(this.#layout, owner.id, section)
+      : undefined;
+    if (instance === undefined) {
+      throw new MisoUsageError(
+        `the control '${name}' of ${section.kind === "console" ? `console slot '${section.slot}'` : section.kind === "inserts" ? `insert '${section.effect}'` : section.kind}`
+          + " is named, and its numeric ID depends on the effect it runs, which is known only for a "
+          + "session the SDK built (liveControls().withSession(session)); address it by its numeric "
+          + "row ID instead (the `address` of its row in engine.controls())",
+      );
+    }
+    const effect = CONTROLS.effects[instance.effectId as EffectId];
+    if (effect === undefined) {
+      throw new MisoUsageError(`the effect '${instance.effectId}' has no control table`);
+    }
+    if (name === effect.bypass.name) return effect.bypass.control;
+    if (effect.linkMode !== null && effect.linkMode !== undefined && name === effect.linkMode.name) {
+      return effect.linkMode.control;
+    }
+    return ownRow(effect.parameters, name);
+  }
+
+  #instanceOf(
+    layout: LiveControlLayout,
+    stripId: string,
+    section: ControlSection,
+  ): LayoutRow | undefined {
+    const instances = layout.tracks.get(stripId) ?? layout.submixes.get(stripId);
+    if (section.kind === "console") return instances?.console.find((row) => row.id === section.slot);
+    if (section.kind === "inserts") return instances?.inserts.find((row) => row.id === section.effect);
+    return undefined;
   }
 
   /**

@@ -11,7 +11,7 @@ export type { ErrorPhase, ResultCodeName, BootResultAliasName };
  * rejected the options block -- so the vocabulary a caller sees is the union of both spellings and
  * the SDK chooses by context. Adopted ruling 5462139867 finding 2.
  */
-export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCode;
+export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCode | SdkControlCode;
 
 /**
  * A code the SDK itself raises when a bounded wait does not settle. It comes from the SDK, not
@@ -23,6 +23,14 @@ export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCod
  *   context closes).
  */
 export type SdkTimeoutCode = "spectrumCloseTimeout" | "hostDisposeTimeout" | "contextCloseTimeout";
+
+/**
+ * The core's own code for a control list or control state read that named a structure that is no
+ * longer current (`control.list.stale`). The core sent it as a diagnostic of a refusal; the SDK
+ * raises it as the error's `code` after a list read has restarted its allowed number of times, or
+ * when a state read names a stale list. The caller lists again.
+ */
+export type SdkControlCode = "control.list.stale";
 
 const RESULT_NAMES: ReadonlyMap<number, ResultCodeName> = new Map(
   ABI_LAYOUT.constants.resultCodes.map((row) => [row.value, row.name] as const),
