@@ -118,6 +118,8 @@ pub enum MessageId {
     ControlListGet = 0x000c,
     /// `CONTROL_STATE_GET` (decision 17, C4).
     ControlStateGet = 0x000d,
+    /// `RESPONSE_GET` (decision 17, C13).
+    ResponseGet = 0x000e,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
     /// `AUTOMATION_CANCELED`.
@@ -176,6 +178,7 @@ impl MessageId {
             0x000b => Self::DiagnosticsGet,
             0x000c => Self::ControlListGet,
             0x000d => Self::ControlStateGet,
+            0x000e => Self::ResponseGet,
             0x8001 => Self::SessionCommitted,
             0x8002 => Self::AutomationCanceled,
             0x8010 => Self::TransportState,

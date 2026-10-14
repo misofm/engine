@@ -742,7 +742,11 @@ pub enum ConformanceDecoder {
 /// `response.session_transaction_monitor`, a `TransactionApplied` with `edit_path` `monitor` (4),
 /// so the response frame for the fourth path is covered by the typed decoders and the Wasm
 /// golden. The frame count is 47.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x7de4_0861_2b83_7afd;
+/// Issue #1573 (decision 17, C13) repinned it from `7de408612b837afd`: `RESPONSE_GET` (`0x000e`)
+/// appends one command frame (every optional field of an effect configuration, three overrides)
+/// and two response frames (a curve reply with sections on both sides, and a lone tag), the
+/// capability registry lists `0x000e` and sets bit 14. The frame count is 50.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xcdfd_b054_0f09_3424;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -761,6 +765,44 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             kind: ControlOwnerKind::Strip,
             id: Some("vocal".to_owned()),
         }),
+    };
+    let response_request = ResponseGetRequest {
+        target: ResponseTarget::Configuration(ResponseConfiguration::Effect {
+            effect: "miso.parametric-eq".to_owned(),
+            quality: session::EffectQuality::High,
+            link_mode: session::LinkMode::DualMono,
+        }),
+        grid: ResponseGrid::Logarithmic,
+        points: 3,
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: ParameterChannel::Both,
+        sections: true,
+        overrides: vec![
+            ResponseOverride {
+                control: RESPONSE_BYPASS_CONTROL,
+                lane: ParameterChannel::Both,
+                value: 0.0,
+            },
+            ResponseOverride {
+                control: 5,
+                lane: ParameterChannel::Left,
+                value: 3.5,
+            },
+            ResponseOverride {
+                control: 5,
+                lane: ParameterChannel::Right,
+                value: -2.0,
+            },
+        ],
+        configuration_id: Some(42),
+        sample_rate_hz: Some(48_000),
+        quantum_frames: Some(128),
+        maximum_prepared_bytes: Some(1 << 20),
+        maximum_state_bytes: Some(1 << 24),
+        maximum_scratch_bytes: Some(1 << 24),
+        maximum_automation_spans: Some(4096),
+        maximum_reply_bytes: Some(65_536),
     };
     let automation = [AutomationRecord {
         kind: AutomationKind::Point,
@@ -796,6 +838,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                             | CommandPayload::SessionSnapshotGet(_)
                             | CommandPayload::ControlListGet(_)
                             | CommandPayload::ControlStateGet(_)
+                            | CommandPayload::ResponseGet(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -828,6 +871,10 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     command!(
         "command.control_state_get",
         CommandPayload::ControlStateGet(&control_request)
+    );
+    command!(
+        "command.response_get",
+        CommandPayload::ResponseGet(&response_request)
     );
     command!(
         "command.automation_enqueue",
@@ -883,7 +930,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13],
+        supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
@@ -936,6 +983,28 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     success!(
         "response.control_state",
         SuccessResponsePayload::ControlStatePage(state_page)
+    );
+    success!(
+        "response.response_get",
+        SuccessResponsePayload::ResponseResult(ResponseResult::Curves(ResponseCurves {
+            sample_rate_hz: 48_000,
+            configuration_id: 42,
+            floor_db: -120.0,
+            bypass: false,
+            section_count: 2,
+            enabled_left: 0b11,
+            enabled_right: 0b01,
+            retained_bytes: 512,
+            frequencies_hz: vec![20.0, 632.455_5, 20_000.0],
+            left_db: Some(vec![0.0, 1.5, -3.0]),
+            right_db: Some(vec![0.0, 0.5, -1.0]),
+            sections_left_db: Some(vec![0.0, 1.0, -2.0, 0.0, 0.5, -1.0]),
+            sections_right_db: Some(vec![0.0, 0.25, -0.5, 0.0, 0.25, -0.5]),
+        }))
+    );
+    success!(
+        "response.response_get_tag",
+        SuccessResponsePayload::ResponseResult(ResponseResult::Tag(77))
     );
     success!(
         "response.automation",

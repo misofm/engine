@@ -126,7 +126,7 @@ pub use control_provider::{
     SessionControlProviderError, SessionControlProviderResources, StagedCatalog, StagedValues,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
-pub use control_provider::{fail_next_stages, take_stage_counts};
+pub use control_provider::{fail_next_stages, take_response_counts, take_stage_counts};
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
@@ -167,10 +167,10 @@ pub use response::{
     RESPONSE_MAXIMUM_POINTS, ResponseChannels, ResponseCurves, ResponseParameterOverride,
     ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewOutput,
     ResponsePreviewRequest, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
-    ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
-    ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
-    generate_response_grid, prepare_response_preview, prepare_response_query,
-    query_response_snapshot_into,
+    ResponseRefusal, ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode,
+    ResponseSnapshotOutput, ResponseSnapshotOwner, ResponseSnapshotQueryError,
+    ResponseSnapshotQuerySummary, generate_response_grid, input_filter_target,
+    prepare_response_preview, prepare_response_query, query_response_snapshot_into,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,

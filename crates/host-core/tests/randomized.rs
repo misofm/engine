@@ -1091,9 +1091,9 @@ fn overrides(effect: &Effect, descriptor: &EffectDescriptor) -> Vec<ResponsePara
     rows
 }
 
-/// What an override list must answer: the first unknown parameter, the first channel that
-/// contradicts its parameter's policy, the first repeat of a parameter and channel -- in list
-/// order -- or nothing.
+/// What an override list must answer: the first unknown parameter, the first lane that
+/// contradicts its parameter's policy (a lane on a shared parameter), the first repeat of a
+/// parameter on an overlapping lane (`both` overlaps every lane) -- in list order -- or nothing.
 fn override_law(
     rows: &[ResponseParameterOverride],
     descriptor: &EffectDescriptor,
@@ -1107,11 +1107,14 @@ fn override_law(
             return Some(ResponsePreviewError::InvalidParameter);
         };
         let both = row.channel == effect_contract::ParameterChannel::Both;
-        if both != (parameter.channel_policy == ParameterChannelPolicy::Shared) {
+        if parameter.channel_policy == ParameterChannelPolicy::Shared && !both {
             return Some(ResponsePreviewError::ConflictingChannel);
         }
         if rows[..index].iter().any(|earlier| {
-            earlier.parameter_id == row.parameter_id && earlier.channel == row.channel
+            earlier.parameter_id == row.parameter_id
+                && (earlier.channel == row.channel
+                    || earlier.channel == effect_contract::ParameterChannel::Both
+                    || both)
         }) {
             return Some(ResponsePreviewError::DuplicateParameter);
         }
@@ -1191,12 +1194,10 @@ fn response_probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Respon
         let at = draw.below(rows.len());
         match draw.below(3) {
             0 => rows[at].parameter_id = u32::MAX - draw.below(3) as u32,
-            1 => {
-                rows[at].channel = if rows[at].channel == effect_contract::ParameterChannel::Both {
-                    effect_contract::ParameterChannel::Left
-                } else {
-                    effect_contract::ParameterChannel::Both
-                };
+            // A shared parameter's row moved to one lane contradicts its policy. A per-lane row
+            // moved to another lane would only change what the list means, so it is a repeat.
+            1 if rows[at].channel == effect_contract::ParameterChannel::Both => {
+                rows[at].channel = effect_contract::ParameterChannel::Left;
             }
             _ => {
                 let copy = rows[at];

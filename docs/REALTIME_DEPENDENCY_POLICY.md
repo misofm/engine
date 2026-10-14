@@ -198,6 +198,11 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   plan-swapping render calls, both through the exported C entries. Its unsafe is the C calls
   themselves, each with the handle and storage contract stated beside it; the allocator it runs
   under is `bench_support::alloc`'s.
+- `crates/capi/tests/response_get.rs` (#1573): sends `RESPONSE_GET` through the exported
+  `miso_engine_v1_submit_command` and compares the curves with the core's own. Its unsafe is the
+  C calls themselves (engine create and destroy, compile, command submit, session and plan
+  destroy), each with the handle and storage contract stated beside it; it installs no allocator
+  and calls no render entry.
 - `crates/capi/tests/resource_lifecycle.rs` (issue 119): the exported-C retained-allocation and
   disposal evidence. It calls the C entries, including the render entry, and owns
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged

@@ -1745,11 +1745,11 @@ fn retired_message_ids_are_never_reused_or_advertised() {
     }
     assert!(!allocated_id(0x0004, false) && !allocated_id(0x0005, false));
     assert!(
-        [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13]
+        [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14]
             .into_iter()
             .all(|id| allocated_id(id, false))
     );
-    assert!(!allocated_id(0, false) && !allocated_id(14, false));
+    assert!(!allocated_id(0, false) && !allocated_id(15, false));
 }
 
 fn automation_record(sample: u64, handle: u32, value: f32) -> crate::AutomationRecord {
@@ -2867,4 +2867,486 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
     old[4..8].copy_from_slice(&4_u32.to_le_bytes());
     old[8..12].copy_from_slice(&3_u32.to_le_bytes());
     assert!(codec.decode_transaction_applied(&old, 1).is_err());
+}
+
+// --- RESPONSE_GET (decision 17, C13) ---
+
+/// A required field's TLV.
+fn required(id: u16, wire: u8, value: &[u8]) -> Tlv {
+    Tlv {
+        mandatory: 1,
+        ..leaf(id, wire, value)
+    }
+}
+
+fn response_request(target: ResponseTarget) -> ResponseGetRequest {
+    ResponseGetRequest {
+        target,
+        grid: ResponseGrid::Logarithmic,
+        points: 64,
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: ParameterChannel::Both,
+        sections: false,
+        overrides: Vec::new(),
+        configuration_id: None,
+        sample_rate_hz: None,
+        quantum_frames: None,
+        maximum_prepared_bytes: None,
+        maximum_state_bytes: None,
+        maximum_scratch_bytes: None,
+        maximum_automation_spans: None,
+        maximum_reply_bytes: None,
+    }
+}
+
+fn effect_target() -> ResponseTarget {
+    ResponseTarget::Configuration(ResponseConfiguration::Effect {
+        effect: "miso.parametric-eq".to_owned(),
+        quality: session::EffectQuality::High,
+        link_mode: session::LinkMode::Maximum,
+    })
+}
+
+/// A request with every optional field of the effect target.
+fn full_effect_request() -> ResponseGetRequest {
+    ResponseGetRequest {
+        sections: true,
+        overrides: vec![
+            ResponseOverride {
+                control: RESPONSE_BYPASS_CONTROL,
+                lane: ParameterChannel::Both,
+                value: 1.0,
+            },
+            ResponseOverride {
+                control: 9,
+                lane: ParameterChannel::Left,
+                value: -6.5,
+            },
+            ResponseOverride {
+                control: 9,
+                lane: ParameterChannel::Right,
+                value: 2.0,
+            },
+        ],
+        configuration_id: Some(0x0102_0304_0506_0708),
+        sample_rate_hz: Some(48_000),
+        quantum_frames: Some(128),
+        maximum_prepared_bytes: Some(1 << 20),
+        maximum_state_bytes: Some(1 << 30),
+        maximum_scratch_bytes: Some(1 << 29),
+        maximum_automation_spans: Some(4096),
+        maximum_reply_bytes: Some(65_536),
+        ..response_request(effect_target())
+    }
+}
+
+fn encode_response_request(codec: &ProtocolCodec, value: &ResponseGetRequest) -> Vec<u8> {
+    let mut bytes = vec![0; codec.encoded_response_request_len(value).expect("length")];
+    codec
+        .encode_response_request(value, &mut bytes)
+        .expect("encode");
+    bytes
+}
+
+/// A curve reply of the given shape, with a distinct finite value in every position.
+fn response_curves(
+    points: usize,
+    channels: ParameterChannel,
+    section_count: u32,
+    sections: bool,
+) -> ResponseCurves {
+    let curve = |seed: f32, length: usize| -> Vec<f32> {
+        (0..length)
+            .map(|index| seed - index as f32 * 0.25)
+            .collect()
+    };
+    let left = matches!(channels, ParameterChannel::Left | ParameterChannel::Both);
+    let right = matches!(channels, ParameterChannel::Right | ParameterChannel::Both);
+    let section_points = section_count as usize * points;
+    ResponseCurves {
+        sample_rate_hz: 48_000,
+        configuration_id: 42,
+        floor_db: -120.0,
+        bypass: false,
+        section_count,
+        enabled_left: 0b101,
+        enabled_right: 0b001,
+        retained_bytes: 1024,
+        frequencies_hz: (0..points)
+            .map(|index| 20.0 + index as f32 * 10.0)
+            .collect(),
+        left_db: left.then(|| curve(1.0, points)),
+        right_db: right.then(|| curve(2.0, points)),
+        sections_left_db: (left && sections).then(|| curve(3.0, section_points)),
+        sections_right_db: (right && sections).then(|| curve(4.0, section_points)),
+    }
+}
+
+fn encode_response_result(codec: &ProtocolCodec, value: &ResponseResult) -> Vec<u8> {
+    let mut bytes = vec![0; codec.encoded_response_result_len(value).expect("length")];
+    codec
+        .encode_response_result(value, &mut bytes)
+        .expect("encode");
+    bytes
+}
+
+/// Gate 1: a configuration request of both kinds with every optional field, an address request, a
+/// strip request, and a curve reply with and without sections, on one side and on both, and a lone
+/// tag, all round-trip exactly, and every strict prefix is refused.
+///
+/// Red if an optional field is dropped, a code table is renumbered, or a reply shape does not
+/// survive one pass through the codec.
+#[test]
+fn response_get_round_trips_every_target_reply_and_optional_field() {
+    let codec = ProtocolCodec::default();
+    let address = ControlAddress {
+        owner_kind: ControlOwnerKind::Strip,
+        owner_id: Some("vocal".to_owned()),
+        section: ControlSection::Inserts,
+        slot_id: Some("eq".to_owned()),
+        control: None,
+        lane: None,
+    };
+    for request in [
+        full_effect_request(),
+        response_request(effect_target()),
+        response_request(ResponseTarget::Configuration(
+            ResponseConfiguration::InputFilters,
+        )),
+        ResponseGetRequest {
+            grid: ResponseGrid::Linear,
+            channels: ParameterChannel::Right,
+            sections: true,
+            ..response_request(ResponseTarget::Address(address))
+        },
+        response_request(ResponseTarget::Strip("vocal".to_owned())),
+    ] {
+        let bytes = encode_response_request(&codec, &request);
+        let count = top_level_count(&bytes);
+        assert_eq!(codec.decode_response_request(&bytes, count), Ok(request));
+        for end in 0..bytes.len() {
+            assert!(codec.decode_response_request(&bytes[..end], count).is_err());
+        }
+        let mut short = vec![0xa5; bytes.len() - 1];
+        assert_eq!(
+            codec.encode_response_request(&full_effect_request(), &mut short),
+            Err(EncodeError::OutputTooSmall {
+                required: encode_response_request(&codec, &full_effect_request()).len()
+            })
+        );
+    }
+    for (channels, sections) in [
+        (ParameterChannel::Both, true),
+        (ParameterChannel::Both, false),
+        (ParameterChannel::Left, true),
+        (ParameterChannel::Right, false),
+    ] {
+        let value = ResponseResult::Curves(response_curves(5, channels, 3, sections));
+        let bytes = encode_response_result(&codec, &value);
+        let count = top_level_count(&bytes);
+        assert_eq!(codec.decode_response_result(&bytes, count), Ok(value));
+        for end in 0..bytes.len() {
+            assert!(codec.decode_response_result(&bytes[..end], count).is_err());
+        }
+    }
+    let tag = ResponseResult::Tag(u64::MAX);
+    let bytes = encode_response_result(&codec, &tag);
+    assert_eq!(codec.decode_response_result(&bytes, 1), Ok(tag));
+}
+
+/// Gate 1: each shape rule of the request is refused as `INVALID_FIELD` on decode, and on encode
+/// where the typed value can say it: two targets, no target, a strip with `sections` or an
+/// override, a strip ID that is not a stable ID, a bypass override on one lane or with a value
+/// that is not 0 or 1, and a code outside its table (grid, channels, lane, kind, quality, link
+/// mode).
+///
+/// Red if the codec admits a request the provider could not read, or only one direction checks.
+#[test]
+fn response_get_request_shape_rules_are_refused_both_ways() {
+    let codec = ProtocolCodec::default();
+    let effect = full_effect_request();
+    let strip = response_request(ResponseTarget::Strip("vocal".to_owned()));
+    let effect_bytes = encode_response_request(&codec, &effect);
+    let strip_bytes = encode_response_request(&codec, &strip);
+
+    type Typed = fn(&mut ResponseGetRequest);
+    type Wire = fn(&mut Vec<Tlv>);
+    // (name, base, typed mutation if representable, wire edit)
+    let rules: [(&str, bool, Option<Typed>, Wire); 14] = [
+        ("no target", true, None, |f| remove(f, 1)),
+        ("two targets", true, None, |f| {
+            insert(f, leaf(3, 9, b"vocal"))
+        }),
+        (
+            "a strip with sections",
+            false,
+            Some(|r| r.sections = true),
+            |f| set(f, 9, &[1]),
+        ),
+        (
+            "a strip with an override",
+            false,
+            Some(|r| {
+                r.overrides.push(ResponseOverride {
+                    control: 3,
+                    lane: ParameterChannel::Both,
+                    value: 1.0,
+                });
+            }),
+            |f| {
+                insert(
+                    f,
+                    Tlv {
+                        id: 10,
+                        wire: 11,
+                        mandatory: 0,
+                        node: Node::Message(vec![
+                            required(1, 3, &3_u32.to_le_bytes()),
+                            required(2, 1, &[3]),
+                            required(3, 6, &1.0_f32.to_le_bytes()),
+                        ]),
+                    },
+                );
+            },
+        ),
+        (
+            "a strip ID that is not a stable ID",
+            false,
+            Some(|r| r.target = ResponseTarget::Strip("Not A Stable ID".to_owned())),
+            |f| set(f, 3, b"Not A Stable ID"),
+        ),
+        (
+            "a bypass override on the left lane",
+            true,
+            Some(|r| r.overrides[0].lane = ParameterChannel::Left),
+            |f| set(nth(f, 10, 0), 2, &[1]),
+        ),
+        (
+            "a bypass value of one half",
+            true,
+            Some(|r| r.overrides[0].value = 0.5),
+            |f| set(nth(f, 10, 0), 3, &0.5_f32.to_le_bytes()),
+        ),
+        ("a grid code outside the table", true, None, |f| {
+            set(f, 4, &[3])
+        }),
+        ("a channels code outside the table", true, None, |f| {
+            set(f, 8, &[4])
+        }),
+        ("an override lane outside the table", true, None, |f| {
+            set(nth(f, 10, 1), 2, &[0])
+        }),
+        ("a configuration kind outside the table", true, None, |f| {
+            set(nth(f, 1, 0), 1, &[3])
+        }),
+        ("a quality outside the table", true, None, |f| {
+            set(nth(f, 1, 0), 3, &[4])
+        }),
+        ("a link mode outside the table", true, None, |f| {
+            set(nth(f, 1, 0), 4, &[0])
+        }),
+        ("an effect kind without its effect", true, None, |f| {
+            remove(nth(f, 1, 0), 2)
+        }),
+    ];
+    for (name, effect_base, typed, wire) in rules {
+        let (base_bytes, base) = if effect_base {
+            (&effect_bytes, &effect)
+        } else {
+            (&strip_bytes, &strip)
+        };
+        if let Some(typed) = typed {
+            let mut request = base.clone();
+            typed(&mut request);
+            assert_eq!(
+                codec.encoded_response_request_len(&request),
+                Err(EncodeError::InvalidField),
+                "{name}: encode"
+            );
+        }
+        let (patched, count) = edited(base_bytes, wire);
+        assert_eq!(
+            codec.decode_response_request(&patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+    }
+    // An input-filters configuration that names an effect is refused too.
+    let filters = encode_response_request(
+        &codec,
+        &response_request(ResponseTarget::Configuration(
+            ResponseConfiguration::InputFilters,
+        )),
+    );
+    let (patched, count) = edited(&filters, |f| insert(nth(f, 1, 0), leaf(2, 9, b"x")));
+    assert_eq!(
+        codec.decode_response_request(&patched, count),
+        Err(DecodeError::InvalidField)
+    );
+}
+
+/// Gate 1: each shape rule of the reply is refused on encode and on decode: a curve reply with
+/// neither side, a side of the wrong length, section curves without their side's total, section
+/// curves of the wrong length, a lone tag with any curve field, and a curve reply without its
+/// fields.
+///
+/// Red if the codec admits a reply whose arrays do not match its declared shape.
+#[test]
+fn response_get_reply_shape_rules_are_refused_both_ways() {
+    let codec = ProtocolCodec::default();
+    let base = response_curves(4, ParameterChannel::Both, 2, true);
+    let bytes = encode_response_result(&codec, &ResponseResult::Curves(base.clone()));
+
+    type Typed = fn(&mut ResponseCurves);
+    type Wire = fn(&mut Vec<Tlv>);
+    let rules: [(&str, Typed, Wire); 8] = [
+        (
+            "neither side",
+            |c| {
+                c.left_db = None;
+                c.right_db = None;
+                c.sections_left_db = None;
+                c.sections_right_db = None;
+            },
+            |f| {
+                remove(f, 11);
+                remove(f, 12);
+                remove(f, 13);
+                remove(f, 14);
+            },
+        ),
+        (
+            "a total of the wrong length",
+            |c| {
+                c.left_db
+                    .as_mut()
+                    .expect("left")
+                    .pop()
+                    .map(drop)
+                    .unwrap_or(())
+            },
+            |f| set(f, 11, &[0; 12]),
+        ),
+        (
+            "section curves without their total",
+            |c| c.left_db = None,
+            |f| remove(f, 11),
+        ),
+        (
+            "section curves of the wrong length",
+            |c| c.sections_right_db.as_mut().expect("right").truncate(7),
+            |f| set(f, 14, &[0; 28]),
+        ),
+        (
+            "section curves with no sections declared",
+            |c| c.section_count = 0,
+            |f| set(f, 6, &0_u32.to_le_bytes()),
+        ),
+        (
+            "a single point",
+            |c| {
+                c.frequencies_hz.truncate(1);
+                c.left_db.as_mut().expect("left").truncate(1);
+                c.right_db.as_mut().expect("right").truncate(1);
+                c.sections_left_db.as_mut().expect("left").truncate(2);
+                c.sections_right_db.as_mut().expect("right").truncate(2);
+            },
+            |f| {
+                set(f, 10, &[0; 4]);
+                set(f, 11, &[0; 4]);
+                set(f, 12, &[0; 4]);
+                set(f, 13, &[0; 8]);
+                set(f, 14, &[0; 8]);
+            },
+        ),
+        (
+            "a floor that is not finite",
+            |c| c.floor_db = f32::NAN,
+            |f| set(f, 4, &f32::NAN.to_le_bytes()),
+        ),
+        (
+            "a total that is not finite",
+            |c| c.right_db.as_mut().expect("right")[1] = f32::INFINITY,
+            |f| {
+                let mut values = vec![0_u8; 16];
+                values[4..8].copy_from_slice(&f32::INFINITY.to_le_bytes());
+                set(f, 12, &values);
+            },
+        ),
+    ];
+    for (name, typed, wire) in rules {
+        let mut curves = base.clone();
+        typed(&mut curves);
+        assert_eq!(
+            codec.encoded_response_result_len(&ResponseResult::Curves(curves)),
+            Err(EncodeError::InvalidField),
+            "{name}: encode"
+        );
+        let (patched, count) = edited(&bytes, wire);
+        assert_eq!(
+            codec.decode_response_result(&patched, count),
+            Err(DecodeError::InvalidField),
+            "{name}: decode"
+        );
+    }
+    // A tag beside curve fields, and a packed array whose length is not a whole number of floats.
+    let (patched, count) = edited(&bytes, |f| insert(f, leaf(1, 4, &7_u64.to_le_bytes())));
+    assert_eq!(
+        codec.decode_response_result(&patched, count),
+        Err(DecodeError::InvalidField)
+    );
+    let (patched, count) = edited(&bytes, |f| set(f, 10, &[0; 15]));
+    assert_eq!(
+        codec.decode_response_result(&patched, count),
+        Err(DecodeError::InvalidValueLength)
+    );
+    // A curve reply with a required field missing is not a reply.
+    let (patched, count) = edited(&bytes, |f| remove(f, 2));
+    assert!(codec.decode_response_result(&patched, count).is_err());
+}
+
+/// `response_result_encoded_len` is the exact frame length of the reply the codec writes.
+///
+/// Red if the arithmetic drifts from the encoder (a provider would then admit a reply that does
+/// not fit, or refuse one that does).
+#[test]
+fn response_result_encoded_len_is_the_exact_frame_length() {
+    let codec = ProtocolCodec::default();
+    for points in [2_usize, 3, 4, 5, 63, 64, 1000] {
+        for channels in [
+            ParameterChannel::Left,
+            ParameterChannel::Right,
+            ParameterChannel::Both,
+        ] {
+            for (section_count, sections) in [(1_u32, false), (1, true), (3, true), (7, true)] {
+                let value = ResponseResult::Curves(response_curves(
+                    points,
+                    channels,
+                    section_count,
+                    sections,
+                ));
+                let mut frame = vec![0_u8; 1 << 20];
+                let written = codec
+                    .encode_success_response_frame_into(
+                        &crate::TypedSuccessResponseFrame {
+                            request_id: crate::RequestId::new(1).expect("request"),
+                            revision: crate::SessionRevision(7),
+                            payload: crate::SuccessResponsePayload::ResponseResult(value),
+                        },
+                        &mut frame,
+                    )
+                    .expect("frame");
+                assert_eq!(
+                    response_result_encoded_len(points, channels, section_count as usize, sections),
+                    Some(written),
+                    "{points} points, {channels:?}, {section_count} sections, {sections}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        response_result_encoded_len(usize::MAX / 2, ParameterChannel::Both, 4, true),
+        None
+    );
 }

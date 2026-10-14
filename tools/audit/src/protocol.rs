@@ -153,6 +153,26 @@ fn prepare_corpus() -> Corpus {
         limit: 1,
         owner: None,
     };
+    let response_request = protocol::ResponseGetRequest {
+        target: protocol::ResponseTarget::Configuration(
+            protocol::ResponseConfiguration::InputFilters,
+        ),
+        grid: protocol::ResponseGrid::Logarithmic,
+        points: 64,
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: protocol::ParameterChannel::Both,
+        sections: false,
+        overrides: Vec::new(),
+        configuration_id: None,
+        sample_rate_hz: None,
+        quantum_frames: None,
+        maximum_prepared_bytes: None,
+        maximum_state_bytes: None,
+        maximum_scratch_bytes: None,
+        maximum_automation_spans: None,
+        maximum_reply_bytes: None,
+    };
     let automation_record = [AutomationRecord {
         kind: protocol::AutomationKind::Point,
         handle: protocol::ParameterHandle(1),
@@ -189,6 +209,11 @@ fn prepare_corpus() -> Corpus {
         request_id: request_id(5),
         expected_revision: ExpectedRevision::Any,
         payload: CommandPayload::ControlStateGet(&control_request),
+    });
+    corpus.push_command(TypedCommandFrame {
+        request_id: request_id(14),
+        expected_revision: ExpectedRevision::Any,
+        payload: CommandPayload::ResponseGet(&response_request),
     });
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(6),

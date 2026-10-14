@@ -28,9 +28,11 @@ pub use message_wire::{
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticSeverity,
     DiagnosticsPage, DiagnosticsRequest, EditPath, EnumChoice, MeterBatch, MeterComponent,
     MeterRecord, NonOkResponse, ParameterChannel, ParameterRack, ParameterUnit, PathSegment,
-    SessionCommitted, SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
-    TransportStateEvent,
+    RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
+    ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget, SessionCommitted,
+    SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration, TransactionApplied,
+    TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
+    response_result_encoded_len,
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {
@@ -89,5 +91,5 @@ pub use controller::{
     PreparedCommandCommitError, PreparedCommandFrame, PreparedImmediateCommandFrame,
     PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
-    ReplayHit,
+    ReplayHit, ResponseProviderError,
 };

@@ -234,7 +234,8 @@ device 0.
 
 IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
 `host_core::SessionControlProvider`. Since #1552 the provider serves the control list
-(`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core: its
+(`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core, and since #1573 the
+response preview (`RESPONSE_GET`, capability flag bit 14; decision 17, C13) from the core's `prepare_response_query`: its
 catalog is `host_core::ControlCatalog`, built from the compiled session's `controls::list` with an
 owner header before each owner's rows and a section header before each section's, each entry at its
 handle (from 1, in list order) and its committed value beside it. The catalog holds owners, sections and the distinct control descriptors once each in three shared tables (descriptors compared by bits) and one 16-byte record per entry, and a page builds its wire entries from them (#1599). The list therefore covers every

@@ -16,10 +16,18 @@ use protocol::{
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
     EnumChoice, ParameterChannel, ParameterHandle, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, SampleTime, TelemetryConfiguration, TelemetryCounters,
-    TransportSetRequest, TransportSnapshot, TransportState,
+    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
+    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
+    TelemetryConfiguration, TelemetryCounters, TransportSetRequest, TransportSnapshot,
+    TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
+
+use crate::response::{
+    RESPONSE_MAXIMUM_OVERRIDES, ResponseChannels, ResponseParameterOverride, ResponsePreviewError,
+    ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery,
+    ResponseQueryError, ResponseRefusal, input_filter_target, prepare_response_query,
+};
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, the canceled-automation count, `live_values_superseded` (#1312 D8) and
@@ -117,6 +125,20 @@ thread_local! {
     static STAGED_OWNERS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static FULL_STAGES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static STAGE_FAILURES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static RESPONSE_PREPARATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static RESPONSE_EVALUATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// How many response owners [`SessionControlProvider`] has prepared, and how many it has gone on
+/// to evaluate, on this thread since the last call; resets both (#1573 gates 3 and 5). A test
+/// shows that a replayed `RESPONSE_GET` prepares none and that a reply too large for the frame is
+/// refused before any curve is computed.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_response_counts() -> (usize, usize) {
+    (
+        RESPONSE_PREPARATIONS.with(|count| count.replace(0)),
+        RESPONSE_EVALUATIONS.with(|count| count.replace(0)),
+    )
 }
 
 /// How many changed owners [`ControlCatalog::stage_live`] has read on this thread since the last
@@ -307,6 +329,9 @@ pub struct SessionControlProvider {
     transport_state: TransportState,
     transport_position: SampleTime,
     telemetry_configuration: TelemetryConfiguration,
+    /// The most reply frame bytes a `RESPONSE_GET` may answer: the smaller of the endpoint's
+    /// frame bound and the replay cache's response bound.
+    maximum_reply_bytes: usize,
 }
 
 impl SessionControlProvider {
@@ -357,6 +382,7 @@ impl SessionControlProvider {
         sample_source: Arc<dyn PlanSampleSource>,
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
+        maximum_reply_bytes: usize,
     ) -> Result<Self, SessionControlProviderError> {
         let mut provider = Self {
             sample_source,
@@ -369,6 +395,7 @@ impl SessionControlProvider {
             transport_state: TransportState::Stopped,
             transport_position: SampleTime(0),
             telemetry_configuration: retained_telemetry(retained)?,
+            maximum_reply_bytes,
         };
         provider
             .counter_snapshot
@@ -550,6 +577,201 @@ impl SessionControlProvider {
     }
 }
 
+fn refuse(status: StatusCode, code: &'static str) -> ResponseProviderError {
+    ResponseProviderError { status, code }
+}
+
+/// A query refusal as the provider reports it, by the one refusal table of the core.
+fn query_refusal(error: ResponseQueryError) -> ResponseProviderError {
+    let (class, code) = error.refusal();
+    let status = match class {
+        ResponseRefusal::InvalidField => StatusCode::InvalidField,
+        ResponseRefusal::LimitExceeded => StatusCode::LimitExceeded,
+        ResponseRefusal::NotFound => StatusCode::NotFound,
+        ResponseRefusal::Unavailable => StatusCode::Unavailable,
+        ResponseRefusal::ValidationFailed => StatusCode::ValidationFailed,
+        ResponseRefusal::Internal => StatusCode::Internal,
+    };
+    refuse(status, code)
+}
+
+fn contract_channel(lane: ParameterChannel) -> effect_contract::ParameterChannel {
+    match lane {
+        ParameterChannel::Left => effect_contract::ParameterChannel::Left,
+        ParameterChannel::Right => effect_contract::ParameterChannel::Right,
+        ParameterChannel::Both => effect_contract::ParameterChannel::Both,
+    }
+}
+
+/// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
+/// model's, the target is a configuration (the address and strip targets are served by later
+/// slices), the curves come from the core's response query, and the reply is sized before any
+/// curve is computed.
+fn serve_response(
+    maximum_reply_bytes: usize,
+    model: &SessionModel,
+    request: &ResponseGetRequest,
+) -> Result<ResponseResult, ResponseProviderError> {
+    let ResponseTarget::Configuration(configuration) = &request.target else {
+        return Err(refuse(
+            StatusCode::Unavailable,
+            "response.target.unavailable",
+        ));
+    };
+    // A session endpoint has one rate and one quantum, the session's.
+    if request.sample_rate_hz.is_some() || request.quantum_frames.is_some() {
+        return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
+    }
+    if request.overrides.len() > RESPONSE_MAXIMUM_OVERRIDES {
+        return Err(query_refusal(ResponseQueryError::Overrides));
+    }
+    let defaults = ResponsePreviewLimits::default();
+    let maximum_prepared_bytes = request
+        .maximum_prepared_bytes
+        .map_or(defaults.maximum_prepared_bytes, |bytes| {
+            usize::try_from(bytes).unwrap_or(usize::MAX)
+        });
+    if maximum_prepared_bytes == 0 {
+        return Err(refuse(StatusCode::LimitExceeded, "response.limit"));
+    }
+    let limits = ResponsePreviewLimits {
+        maximum_prepared_bytes,
+        maximum_total_state_bytes: request
+            .maximum_state_bytes
+            .unwrap_or(defaults.maximum_total_state_bytes),
+        maximum_scratch_bytes: request
+            .maximum_scratch_bytes
+            .unwrap_or(defaults.maximum_scratch_bytes),
+        maximum_automation_spans_per_block: request
+            .maximum_automation_spans
+            .unwrap_or(defaults.maximum_automation_spans_per_block),
+    };
+    // The bypass (control 0) is the effect-wide switch; every other row is a parameter row.
+    let mut bypass = None;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(request.overrides.len())
+        .map_err(|_| refuse(StatusCode::Internal, "response.internal"))?;
+    for row in &request.overrides {
+        let is_bypass = matches!(configuration, ResponseConfiguration::Effect { .. })
+            && row.control == protocol::RESPONSE_BYPASS_CONTROL;
+        if !is_bypass {
+            rows.push(ResponseParameterOverride {
+                parameter_id: row.control,
+                channel: contract_channel(row.lane),
+                value: row.value,
+            });
+            continue;
+        }
+        if row.lane != ParameterChannel::Both {
+            return Err(query_refusal(ResponseQueryError::Preview(
+                ResponsePreviewError::ConflictingChannel,
+            )));
+        }
+        if bypass.is_some() {
+            return Err(query_refusal(ResponseQueryError::Preview(
+                ResponsePreviewError::DuplicateParameter,
+            )));
+        }
+        bypass = Some(if row.value.to_bits() == 1.0_f32.to_bits() {
+            true
+        } else if row.value.to_bits() == 0.0_f32.to_bits() {
+            false
+        } else {
+            return Err(query_refusal(ResponseQueryError::Preview(
+                ResponsePreviewError::InvalidParameter,
+            )));
+        });
+    }
+    let target = match configuration {
+        ResponseConfiguration::Effect {
+            effect,
+            quality,
+            link_mode,
+        } => ResponsePreviewTarget::Effect {
+            effect_id: effect,
+            overrides: &rows,
+            quality: match quality {
+                session::EffectQuality::Draft => effect_contract::EffectQuality::Draft,
+                session::EffectQuality::Normal => effect_contract::EffectQuality::Normal,
+                session::EffectQuality::High => effect_contract::EffectQuality::High,
+            },
+            bypass: bypass.unwrap_or(false),
+            link_mode: match link_mode {
+                session::LinkMode::DualMono => effect_contract::LinkMode::DualMono,
+                session::LinkMode::Maximum => effect_contract::LinkMode::Maximum,
+                session::LinkMode::Average => effect_contract::LinkMode::Average,
+            },
+        },
+        ResponseConfiguration::InputFilters => input_filter_target(&rows)
+            .map_err(|error| query_refusal(ResponseQueryError::Preview(error)))?,
+    };
+    let points = request.points as usize;
+    let grid = match request.grid {
+        ResponseGrid::Linear => ResponsePreviewGrid::Linear {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        },
+        ResponseGrid::Logarithmic => ResponsePreviewGrid::Logarithmic {
+            points,
+            minimum_hz: request.minimum_hz,
+            maximum_hz: request.maximum_hz,
+        },
+    };
+    let channels = ResponseChannels::from_raw(request.channels as u8)
+        .ok_or_else(|| refuse(StatusCode::Internal, "response.internal"))?;
+    #[cfg(any(test, feature = "test-support"))]
+    RESPONSE_PREPARATIONS.with(|count| count.set(count.get() + 1));
+    let prepared = prepare_response_query(&ResponseQuery {
+        configuration_id: request.configuration_id.unwrap_or(0),
+        sample_rate_hz: model.sample_rate_hz,
+        quantum_frames: model.quantum_frames,
+        target,
+        grid,
+        channels,
+        sections: request.sections,
+        limits,
+    })
+    .map_err(query_refusal)?;
+    // The reply is sized from its shape, before any curve is computed.
+    let bound = request
+        .maximum_reply_bytes
+        .map_or(maximum_reply_bytes, |bytes| {
+            maximum_reply_bytes.min(usize::try_from(bytes).unwrap_or(usize::MAX))
+        });
+    let fits = protocol::response_result_encoded_len(
+        prepared.points(),
+        request.channels,
+        prepared.section_count(),
+        request.sections,
+    )
+    .is_some_and(|length| length <= bound);
+    if !fits {
+        return Err(refuse(
+            StatusCode::LimitExceeded,
+            "response.reply_too_large",
+        ));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    RESPONSE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+    let curves = prepared.curves().map_err(query_refusal)?;
+    Ok(ResponseResult::Curves(ResponseCurves {
+        sample_rate_hz: curves.sample_rate_hz,
+        configuration_id: curves.configuration_id,
+        floor_db: curves.floor_db,
+        bypass: curves.bypass,
+        section_count: curves.section_count,
+        enabled_left: curves.enabled_left,
+        enabled_right: curves.enabled_right,
+        retained_bytes: curves.retained_bytes,
+        frequencies_hz: curves.frequencies_hz,
+        left_db: curves.left_db,
+        right_db: curves.right_db,
+        sections_left_db: curves.sections_left_db,
+        sections_right_db: curves.sections_right_db,
+    }))
+}
+
 impl ControlProvider for SessionControlProvider {
     fn current_sample(&mut self) -> SampleTime {
         SampleTime(self.sample_source.next_absolute_sample())
@@ -600,6 +822,14 @@ impl ControlProvider for SessionControlProvider {
             eof,
             records,
         })
+    }
+
+    fn response_get(
+        &mut self,
+        model: &SessionModel,
+        request: &ResponseGetRequest,
+    ) -> Result<ResponseResult, ResponseProviderError> {
+        serve_response(self.maximum_reply_bytes, model, request)
     }
 
     fn control_row(
@@ -1898,6 +2128,7 @@ mod tests {
                 counter_ids: 0,
             },
             2,
+            1 << 20,
         )
         .expect("provider");
         (provider, clock)

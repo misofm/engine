@@ -57,10 +57,10 @@ impl CapabilityFlags {
     /// Canonical BTLV, caller-buffer, replay, revisioned-edit, and snapshot support.
     pub const B1B_BASE: Self = Self((1 << 5) - 1);
     /// Complete issue-005 typed provider, telemetry, and reliable-event registry.
-    pub const B4_BASE: Self = Self((1 << 14) - 1);
+    pub const B4_BASE: Self = Self((1 << 15) - 1);
     /// Reliable session-committed event support.
     pub const SESSION_EVENT_STREAM: Self = Self(1 << 12);
-    const KNOWN: u64 = (1 << 14) - 1;
+    const KNOWN: u64 = (1 << 15) - 1;
 }
 
 /// All 27 fields of a successful `CAPABILITIES_GET` response.
@@ -397,6 +397,13 @@ macro_rules! control_code_table {
         }
     };
 }
+
+mod response;
+pub use response::{
+    RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
+    ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget, response_result_encoded_len,
+};
+pub(crate) use response::{write_response_request, write_response_result};
 
 control_code_table! {
     /// Which kind of owner a control, or a control request, names.
@@ -4355,6 +4362,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
+        || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
         || (has_command(0x0003) != has_event(0x8001))
         || (has_event(0x8001) != has_event(0x8002))
         || (has_command(0x000c) != has_command(0x000d))
@@ -4371,7 +4379,7 @@ fn allocated_id(id: u16, event: bool) -> bool {
         matches!(id, 0x8001 | 0x8002 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
     } else {
         // `0x0004` and `0x0005` are retired: never allocated again, never advertised.
-        matches!(id, 1..=13) && !crate::wire::is_retired_message_id(id)
+        matches!(id, 1..=14) && !crate::wire::is_retired_message_id(id)
     }
 }
 

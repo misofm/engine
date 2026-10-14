@@ -6,7 +6,7 @@ This freezes the semantic registry referenced by [the wire specification](CONTRO
 
 | Commands and echoed response IDs | Events |
 | --- | --- |
-| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
+| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
 
 Message IDs `0004` (parameter metadata get) and `0005` (parameter state get) are **retired** by decision 17 (C4, #1551): the decoder refuses them as `UNSUPPORTED_MESSAGE`, no capability registry lists them, and they are never reallocated (`RETIRED_MESSAGE_IDS`; a conformance row pins each). `CONTROL_LIST_GET` and `CONTROL_STATE_GET` replace them.
 
@@ -35,6 +35,7 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 | `000b` | after-sequence `1:U64 R`, limit `2:U16 R`, minimum severity `3:U8 R` | last sequence `1:U64 R`, eof `2:BOOL R`, diagnostic `3:MESSAGE R*` |
 | `000c` | control list request below | `1:revision U64 R`, `2:structure-epoch U64 R`, `3:last-handle U32 R`, `4:eof BOOL R`, `5:ControlEntry MESSAGE R*` |
 | `000d` | control list request below | `1:revision U64 R`, `2:structure-epoch U64 R`, `3:last-handle U32 R`, `4:eof BOOL R`, count `5:U16 R`, stride `6:U16=8 R`, records `7:BYTES R` |
+| `000e` | response request below, revision-any | response result below |
 
 Snapshot continuations and diagnostic pages use an exact revision after an any-revision first page. Control pages (`000c`, `000d`) are guarded by `structure-epoch`, not by the session revision: a control page request is sent with revision `Any`, and the page reports the revision it was read at. Counter values are `1:id U32 R`, `2:value U64 R`, ascending and non-resetting. Counter IDs run 1 to 17; `16` is `LIVE_VALUES_SUPERSEDED`, the writes to adopted plans that a later write to the same live cell replaced before a block read them (#1312); `17` is `TRANSITION_REPREPARE_REFUSALS`, the transition re-preparations that were refused anyway and retried at the next service step (#1351 D6, written by #1360). A control-state record is `{handle:u32, value:f32}`; a meter record is `{handle:u32, component:u16, flags:u16, value:f32, reserved:u32}`. Both fixed arrays are validated schema fields, not opaque bytes.
 
@@ -51,6 +52,36 @@ Snapshot continuations and diagnostic pages use an exact revision after an any-r
 A control row's own rules: all numbers are finite and `minimum <= maximum`; choices are present exactly for an enumeration, unique, and hold the default and the value; `reason` and `reopen` are present exactly when the class is rebuild-only, and `reason-issue` exactly with reason `8`; a control is automatable only if it is live, in the model scope and not a setting.
 
 **Pages.** The list page is `1:revision U64`, `2:structure-epoch U64`, `3:last-handle U32` (the last row's handle, or the request's cursor on an empty page), `4:eof BOOL`, `5:ControlEntry MESSAGE R*` (at most 256, ascending). The state page has the same first four fields, then count `5:U16`, stride `6:U16=8` and records `7:BYTES`: `{handle:u32, value:f32}` per control row of the covered handles, ascending; `last-handle` is the cursor for the next request and may follow the last record (a header row is covered and has no record). A record array whose width, count, order or values break these rules is refused. Handles are revision-scoped; a record's state flags no longer exist, because a value is always valid.
+
+## The response preview (decision 17, C13, #1573)
+
+`RESPONSE_GET` (`000e`, capability flag bit 14) asks for the frequency response of one native effect or of the input filters, for parameters the caller chooses. It is a read: it writes no session, revision, catalog or cell, it is sent with revision `Any`, and its reply is cached for exact replay like every reply.
+
+**Request** (`ResponseRequest`): exactly one target of `1:configuration MESSAGE O`, `2:address MESSAGE O` (a `ControlAddress` with `control` and `lane` absent) and `3:strip-id UTF8 O` (a stable ID); `4:grid U8 R` (linear `1`, logarithmic `2`), `5:points U32 R`, `6:minimum-hz F32 R`, `7:maximum-hz F32 R`, `8:channels U8 R` (left `1`, right `2`, both `3`), `9:sections BOOL R`, `10:override MESSAGE O*`, `11:configuration-id U64 O`, `12:sample-rate-hz U32 O`, `13:quantum-frames U32 O`, `14:maximum-prepared-bytes U64 O`, `15:maximum-state-bytes U64 O`, `16:maximum-scratch-bytes U64 O`, `17:maximum-automation-spans U32 O`, `18:maximum-reply-bytes U32 O`. A configuration is `1:kind U8 R` (effect `1`, input filters `2`), `2:effect UTF8 O`, `3:quality U8 O` (draft `1`, normal `2`, high `3`), `4:link-mode U8 O` (dual mono `1`, maximum `2`, average `3`); fields 2 to 4 are present exactly for kind `1`. An override is `1:control U32 R`, `2:lane U8 R` (left `1`, right `2`, both `3`), `3:value F32 R`. The codec refuses with `INVALID_FIELD`: not exactly one target, a code outside its table, a `strip-id` that is not a stable ID, for a strip target `sections` true or any override, and for an effect configuration a bypass override (control `0`) that is not lane `both` with a value of exactly `0` or `1`.
+
+**Overrides** follow the lane rule of decision 17. For an effect, control `0` is the effect-wide bypass; any other control is a descriptor parameter ID. For the input filters, control `3` is `hpf_hz` and `4` is `lpf_hz` (the builtin parameter IDs); an absent lane takes the row's default. `both` on a per-lane parameter sets both lanes; `left` or `right` on a shared parameter is refused. A (control, lane) pair given twice, or `both` beside `left` or `right` of the same control, is a duplicate. At most 256 overrides.
+
+**Result** (`ResponseResult`), all fields optional on the wire and shaped as one of two forms. The tag form is `1:request-tag U64 O` alone (the strip target, served by #1578). The curve form is `2:sample-rate-hz U32`, `3:configuration-id U64`, `4:floor-db F32`, `5:bypass BOOL`, `6:section-count U32`, `7:enabled-left U32`, `8:enabled-right U32`, `9:retained-bytes U64`, `10:frequencies-hz PACKED_F32`, with at least one of `11:left-db PACKED_F32` and `12:right-db PACKED_F32`, and `13:sections-left-db`, `14:sections-right-db` (`PACKED_F32`, section-major) each present only with its side's total. Fields 11 and 12 have the length of field 10 (at least 2 points); fields 13 and 14 have `section-count` times that length. The enabled masks hold bit `min(index, 31)` per enabled section. All values are finite. The codec refuses every other shape, on encode and on decode. `protocol::response_result_encoded_len(points, channels, section_count, sections)` is the exact frame length of a curve reply.
+
+**Refusals** carry one error diagnostic whose `code` is the table below. Overrides, owner and axis codes come from one table in `host_core` (`ResponseQueryError::refusal`).
+
+| Status | Code | Cause |
+| --- | --- | --- |
+| `INVALID_FIELD` | `response.points` | points outside `2..=4096` |
+| `INVALID_FIELD` | `response.grid` | an axis that is not finite, increasing and inside Nyquist |
+| `INVALID_FIELD` | `response.rate` | a rate or quantum that is not a launch value (a session endpoint cannot reach it) |
+| `INVALID_FIELD` | `response.rate.session` | `sample-rate-hz` or `quantum-frames` present on a session endpoint |
+| `INVALID_FIELD` | `response.override.control` | a control that is no parameter of the target |
+| `INVALID_FIELD` | `response.override.lane` | a lane on a shared parameter |
+| `INVALID_FIELD` | `response.override.duplicate` | a (control, lane) pair twice, or `both` beside a lane |
+| `LIMIT_EXCEEDED` | `response.override.count` | more than 256 overrides |
+| `LIMIT_EXCEEDED` | `response.limit` | the owner cannot be prepared within the byte, state, scratch or span bounds |
+| `LIMIT_EXCEEDED` | `response.reply_too_large` | the reply frame would exceed the smaller of the endpoint's frame limit, the replay cache's response bound and `maximum-reply-bytes`; refused before any curve is computed |
+| `NOT_FOUND` | `response.effect.unknown` | no such native effect |
+| `UNAVAILABLE` | `response.effect.unsupported` | the effect has no response |
+| `UNAVAILABLE` | `response.target.unavailable` | an address or strip target (#1575, #1578) |
+| `VALIDATION_FAILED` | the owner's code | the owner refused the configuration |
+| `INTERNAL` | `response.numerical`, `response.internal` | the query failed after it was admitted |
 
 ## Events and automation
 

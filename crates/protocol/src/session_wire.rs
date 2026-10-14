@@ -227,14 +227,14 @@ fn transaction_header(frame: DecodedFrame<'_>) -> Result<CommandHeader, DecodeEr
     Ok(header)
 }
 
-const fn enum_quality(value: EffectQuality) -> u8 {
+pub(crate) const fn enum_quality(value: EffectQuality) -> u8 {
     match value {
         EffectQuality::Draft => 1,
         EffectQuality::Normal => 2,
         EffectQuality::High => 3,
     }
 }
-const fn enum_link(value: session::LinkMode) -> u8 {
+pub(crate) const fn enum_link(value: session::LinkMode) -> u8 {
     match value {
         session::LinkMode::DualMono => 1,
         session::LinkMode::Maximum => 2,
@@ -1762,7 +1762,7 @@ fn parse_track_effect_ref(
         stable_id(one_spec!(message, fields[2])?)?,
     ))
 }
-fn parse_quality(value: u8) -> Result<EffectQuality, DecodeError> {
+pub(crate) fn parse_quality(value: u8) -> Result<EffectQuality, DecodeError> {
     match value {
         1 => Ok(EffectQuality::Draft),
         2 => Ok(EffectQuality::Normal),
@@ -1770,7 +1770,7 @@ fn parse_quality(value: u8) -> Result<EffectQuality, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
+pub(crate) fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
     match value {
         1 => Ok(session::LinkMode::DualMono),
         2 => Ok(session::LinkMode::Maximum),

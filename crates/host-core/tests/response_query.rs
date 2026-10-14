@@ -299,3 +299,289 @@ fn bounds_pass_at_the_limit_and_refuse_one_past_it() {
     let _: PreparedResponseQuery =
         prepare_response_query(&query(48_000, input_filters(), both, true, POINTS)).expect("ok");
 }
+
+fn curves_of(overrides: &[ResponseParameterOverride]) -> host_core::ResponseCurves {
+    prepare_response_query(&query(
+        48_000,
+        effect(overrides),
+        ResponseChannels::Both,
+        true,
+        POINTS,
+    ))
+    .expect("prepared")
+    .curves()
+    .expect("curves")
+}
+
+fn curve_bits(curves: &host_core::ResponseCurves) -> Vec<Vec<u32>> {
+    [
+        Some(&curves.frequencies_hz),
+        curves.left_db.as_ref(),
+        curves.right_db.as_ref(),
+        curves.sections_left_db.as_ref(),
+        curves.sections_right_db.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|values| bits(values))
+    .collect()
+}
+
+/// Decision 17's lane rule: `both` on a per-lane parameter sets both lanes, so it gives the same
+/// curves as a `left` row and a `right` row of the same value, and a `both` beside a `left` or a
+/// `right` of the same parameter (in either order), or a lane given twice, is a duplicate.
+///
+/// Red if `both` on a per-lane parameter is refused (the lane rule before decision 17), sets one
+/// lane only, or lets two rows write the same lane.
+#[test]
+fn both_on_a_per_lane_parameter_is_a_left_and_a_right_row() {
+    let (gain, policy) = parameter_id("band_1_gain_db");
+    assert_eq!(policy, ParameterChannelPolicy::PerLane);
+    let (enabled, _) = parameter_id("band_1_enabled");
+    let row = |parameter_id, channel, value| ResponseParameterOverride {
+        parameter_id,
+        channel,
+        value,
+    };
+    let both = [
+        row(enabled, ParameterChannel::Both, 1.0),
+        row(gain, ParameterChannel::Both, 9.0),
+    ];
+    let pair = [
+        row(enabled, ParameterChannel::Left, 1.0),
+        row(enabled, ParameterChannel::Right, 1.0),
+        row(gain, ParameterChannel::Left, 9.0),
+        row(gain, ParameterChannel::Right, 9.0),
+    ];
+    let flat = curves_of(&[]);
+    let from_both = curves_of(&both);
+    assert_eq!(curve_bits(&from_both), curve_bits(&curves_of(&pair)));
+    assert_ne!(
+        curve_bits(&from_both),
+        curve_bits(&flat),
+        "the override took effect"
+    );
+    // One lane only changes one side.
+    let left_only = curves_of(&[
+        row(enabled, ParameterChannel::Both, 1.0),
+        row(gain, ParameterChannel::Left, 9.0),
+    ]);
+    assert_eq!(
+        bits(left_only.left_db.as_ref().unwrap()),
+        bits(from_both.left_db.as_ref().unwrap())
+    );
+    assert_ne!(
+        bits(left_only.right_db.as_ref().unwrap()),
+        bits(from_both.right_db.as_ref().unwrap())
+    );
+
+    let refused = |overrides: &[ResponseParameterOverride]| {
+        prepare_response_query(&query(
+            48_000,
+            effect(overrides),
+            ResponseChannels::Both,
+            false,
+            POINTS,
+        ))
+        .err()
+    };
+    for overrides in [
+        vec![
+            row(gain, ParameterChannel::Both, 1.0),
+            row(gain, ParameterChannel::Left, 2.0),
+        ],
+        vec![
+            row(gain, ParameterChannel::Right, 1.0),
+            row(gain, ParameterChannel::Both, 2.0),
+        ],
+        vec![
+            row(gain, ParameterChannel::Left, 1.0),
+            row(gain, ParameterChannel::Left, 2.0),
+        ],
+        vec![
+            row(gain, ParameterChannel::Both, 1.0),
+            row(gain, ParameterChannel::Both, 2.0),
+        ],
+    ] {
+        assert_eq!(
+            refused(&overrides),
+            Some(ResponseQueryError::Preview(
+                ResponsePreviewError::DuplicateParameter
+            )),
+            "{overrides:?}"
+        );
+    }
+    assert_eq!(
+        refused(&[row(u32::MAX, ParameterChannel::Both, 1.0)]),
+        Some(ResponseQueryError::Preview(
+            ResponsePreviewError::InvalidParameter
+        ))
+    );
+}
+
+/// The input-filter rows are the builtin `hpf_hz` and `lpf_hz`: an absent lane keeps the row's
+/// default, `both` sets both lanes, a `left` and a `right` row are different cutoffs, and any
+/// other builtin parameter, or a repeat, is refused.
+///
+/// Red if a lane is dropped or swapped, an absent lane stops taking the default, or a parameter
+/// that is not an input filter is admitted.
+#[test]
+fn input_filter_rows_fold_into_four_cutoffs_by_the_lane_rule() {
+    let row = |parameter_id, channel, value| ResponseParameterOverride {
+        parameter_id,
+        channel,
+        value,
+    };
+    let target = host_core::input_filter_target(&[
+        row(3, ParameterChannel::Both, 80.0),
+        row(4, ParameterChannel::Left, 12_000.0),
+    ])
+    .expect("target");
+    let ResponsePreviewTarget::InputFilters {
+        left_hpf_hz,
+        left_lpf_hz,
+        right_hpf_hz,
+        right_lpf_hz,
+    } = target
+    else {
+        panic!("input filters");
+    };
+    assert_eq!(
+        (left_hpf_hz, left_lpf_hz, right_hpf_hz, right_lpf_hz),
+        (80.0, 12_000.0, 80.0, 0.0)
+    );
+    for (rows, expected) in [
+        (
+            vec![row(2, ParameterChannel::Both, 0.0)],
+            ResponsePreviewError::InvalidParameter,
+        ),
+        (
+            vec![row(0, ParameterChannel::Both, 0.0)],
+            ResponsePreviewError::InvalidParameter,
+        ),
+        (
+            vec![
+                row(3, ParameterChannel::Left, 80.0),
+                row(3, ParameterChannel::Both, 90.0),
+            ],
+            ResponsePreviewError::DuplicateParameter,
+        ),
+    ] {
+        assert!(
+            matches!(host_core::input_filter_target(&rows), Err(error) if error == expected),
+            "{rows:?}"
+        );
+    }
+}
+
+/// The one refusal table: every error maps to its class and code, and every code is a dotted code
+/// a diagnostic can carry.
+///
+/// Red if an error maps to another class or code than decision 17 rules, or a code is not
+/// encodable as a diagnostic.
+#[test]
+fn every_query_error_has_its_class_and_code() {
+    use ResponsePreviewError as Preview;
+    use effect_contract::{EffectPrepareError, ResponseAnalysisError as Owner};
+    use host_core::ResponseRefusal::{
+        Internal, InvalidField, LimitExceeded, NotFound, Unavailable, ValidationFailed,
+    };
+    let preview = ResponseQueryError::Preview;
+    let table = [
+        (ResponseQueryError::Points, InvalidField, "response.points"),
+        (
+            ResponseQueryError::Overrides,
+            LimitExceeded,
+            "response.override.count",
+        ),
+        (
+            ResponseQueryError::SampleRate,
+            InvalidField,
+            "response.rate",
+        ),
+        (
+            preview(Preview::InvalidShape),
+            InvalidField,
+            "response.rate",
+        ),
+        (preview(Preview::InvalidGrid), InvalidField, "response.grid"),
+        (
+            preview(Preview::Owner(Owner::InvalidFrequencyGrid)),
+            InvalidField,
+            "response.grid",
+        ),
+        (
+            preview(Preview::UnknownEffect),
+            NotFound,
+            "response.effect.unknown",
+        ),
+        (
+            preview(Preview::UnsupportedEffect),
+            Unavailable,
+            "response.effect.unsupported",
+        ),
+        (
+            preview(Preview::Owner(Owner::UnsupportedMode)),
+            Unavailable,
+            "response.effect.unsupported",
+        ),
+        (
+            preview(Preview::Owner(Owner::UnsupportedCapability)),
+            Unavailable,
+            "response.effect.unsupported",
+        ),
+        (
+            preview(Preview::InvalidParameter),
+            InvalidField,
+            "response.override.control",
+        ),
+        (
+            preview(Preview::ConflictingChannel),
+            InvalidField,
+            "response.override.lane",
+        ),
+        (
+            preview(Preview::DuplicateParameter),
+            InvalidField,
+            "response.override.duplicate",
+        ),
+        (
+            preview(Preview::Owner(Owner::Configuration(EffectPrepareError {
+                code: "effect.quality.unsupported",
+            }))),
+            ValidationFailed,
+            "effect.quality.unsupported",
+        ),
+        (
+            preview(Preview::Owner(Owner::Capacity)),
+            LimitExceeded,
+            "response.limit",
+        ),
+        (
+            preview(Preview::Owner(Owner::ResourceLimit)),
+            LimitExceeded,
+            "response.limit",
+        ),
+        (
+            preview(Preview::Owner(Owner::Numerical)),
+            Internal,
+            "response.numerical",
+        ),
+        (preview(Preview::OutputShape), Internal, "response.internal"),
+        (
+            preview(Preview::Owner(Owner::OutputShape)),
+            Internal,
+            "response.internal",
+        ),
+    ];
+    for (error, class, code) in table {
+        assert_eq!(error.refusal(), (class, code), "{error:?}");
+        assert!(
+            code.split('.').all(|part| !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'_')),
+            "{code}"
+        );
+    }
+}

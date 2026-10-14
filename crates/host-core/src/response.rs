@@ -11,7 +11,7 @@ use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PreparedPorts,
     PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput, ResponsePrepareLimits,
-    ResponseQuery as OwnerResponseQuery, ResponseSummary, default_initial_values, normalize_zero,
+    ResponseQuery as OwnerResponseQuery, ResponseSummary, default_initial_values,
 };
 use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
@@ -585,6 +585,15 @@ pub fn prepare_response_preview(
     })
 }
 
+/// Whether two lanes of one parameter are the same storage: equal lanes, or `both` against any.
+/// A (parameter, lane) pair given twice, or `both` beside `left` or `right`, is a duplicate.
+fn lanes_overlap(first: ParameterChannel, second: ParameterChannel) -> bool {
+    first == second || first == ParameterChannel::Both || second == ParameterChannel::Both
+}
+
+/// Apply the numeric overrides over the descriptor defaults, by the decision-17 lane rule: `both`
+/// on a per-lane parameter sets both lanes, `left` or `right` sets one, and a shared parameter
+/// takes `both` only.
 fn apply_overrides(
     descriptor: &'static effect_contract::EffectDescriptor,
     initial_values: &mut [InitialParameterValue],
@@ -597,42 +606,85 @@ fn apply_overrides(
             .position(|parameter| parameter.id.0 == override_value.parameter_id)
             .ok_or(ResponsePreviewError::InvalidParameter)?;
         let parameter = &descriptor.parameters[parameter_index];
-        let expected_channel = match parameter.channel_policy {
+        let lanes: &[ParameterChannel] = match parameter.channel_policy {
             effect_contract::ParameterChannelPolicy::Shared => {
                 if override_value.channel != ParameterChannel::Both {
                     return Err(ResponsePreviewError::ConflictingChannel);
                 }
-                ParameterChannel::Both
+                &[ParameterChannel::Both]
             }
-            effect_contract::ParameterChannelPolicy::PerLane => {
-                if override_value.channel == ParameterChannel::Both {
-                    return Err(ResponsePreviewError::ConflictingChannel);
-                }
-                override_value.channel
-            }
+            effect_contract::ParameterChannelPolicy::PerLane => match override_value.channel {
+                ParameterChannel::Both => &[ParameterChannel::Left, ParameterChannel::Right],
+                ParameterChannel::Left => &[ParameterChannel::Left],
+                ParameterChannel::Right => &[ParameterChannel::Right],
+            },
         };
-        let Some(slot) = initial_values.iter_mut().find(|value| {
-            value.parameter_index == parameter_index as u32 && value.channel == expected_channel
-        }) else {
-            return Err(ResponsePreviewError::InvalidParameter);
-        };
-        if slot.value.to_bits() != parameter.default_value.to_bits()
-            && slot.value.to_bits() != normalize_zero(parameter.default_value).to_bits()
-        {
-            return Err(ResponsePreviewError::DuplicateParameter);
-        }
-        // The exact slot is still marked below; a separate bitset is not needed because a
-        // duplicate is detected by the sentinel's original default value for every descriptor.
-        // Defaults can be repeated, so use the preceding rows to make duplicate detection exact.
         if overrides[..index].iter().any(|previous| {
             previous.parameter_id == override_value.parameter_id
-                && previous.channel == override_value.channel
+                && lanes_overlap(previous.channel, override_value.channel)
         }) {
             return Err(ResponsePreviewError::DuplicateParameter);
         }
-        slot.value = override_value.value;
+        for lane in lanes {
+            let slot = initial_values
+                .iter_mut()
+                .find(|value| {
+                    value.parameter_index == parameter_index as u32 && value.channel == *lane
+                })
+                .ok_or(ResponsePreviewError::InvalidParameter)?;
+            slot.value = override_value.value;
+        }
     }
     Ok(())
+}
+
+/// The input-filter target of a list of override rows over the rows' defaults: the builtin
+/// `hpf_hz` and `lpf_hz` parameters, each per lane. An absent lane keeps the row's default;
+/// `both` sets both lanes; any other builtin parameter is not part of the input filters.
+pub fn input_filter_target(
+    overrides: &[ResponseParameterOverride],
+) -> Result<ResponsePreviewTarget<'static>, ResponsePreviewError> {
+    let default_of = |name: &str| {
+        builtins::BUILTIN_PARAMETER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == name)
+            .map_or(0.0, |descriptor| descriptor.default)
+    };
+    let (hpf, lpf) = (default_of("hpf_hz"), default_of("lpf_hz"));
+    // [left hpf, left lpf, right hpf, right lpf]
+    let mut cutoffs = [hpf, lpf, hpf, lpf];
+    for (index, row) in overrides.iter().enumerate() {
+        let descriptor = builtins::BUILTIN_PARAMETER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == row.parameter_id)
+            .ok_or(ResponsePreviewError::InvalidParameter)?;
+        let offset = match descriptor.name {
+            "hpf_hz" => 0,
+            "lpf_hz" => 1,
+            _ => return Err(ResponsePreviewError::InvalidParameter),
+        };
+        if overrides[..index].iter().any(|previous| {
+            previous.parameter_id == row.parameter_id
+                && lanes_overlap(previous.channel, row.channel)
+        }) {
+            return Err(ResponsePreviewError::DuplicateParameter);
+        }
+        if matches!(row.channel, ParameterChannel::Left | ParameterChannel::Both) {
+            cutoffs[offset] = row.value;
+        }
+        if matches!(
+            row.channel,
+            ParameterChannel::Right | ParameterChannel::Both
+        ) {
+            cutoffs[2 + offset] = row.value;
+        }
+    }
+    Ok(ResponsePreviewTarget::InputFilters {
+        left_hpf_hz: cutoffs[0],
+        left_lpf_hz: cutoffs[1],
+        right_hpf_hz: cutoffs[2],
+        right_lpf_hz: cutoffs[3],
+    })
 }
 
 /// The most points one response query may ask for, on every host.
@@ -705,6 +757,70 @@ pub enum ResponseQueryError {
     Overrides,
     /// The sample rate is not a launch rate.
     SampleRate,
+}
+
+/// The class of a refused response query, which a host maps to its own status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseRefusal {
+    /// A field of the request is outside its domain.
+    InvalidField,
+    /// A count, size or resource bound is exceeded.
+    LimitExceeded,
+    /// The named effect does not exist.
+    NotFound,
+    /// The request is well formed and this build cannot serve it.
+    Unavailable,
+    /// The owner refused the configuration; the code is the owner's own.
+    ValidationFailed,
+    /// The query failed after it was admitted; no request change cures it.
+    Internal,
+}
+
+impl ResponseQueryError {
+    /// The one refusal table of the response query (decision 17, C13, D6): the class and the
+    /// dotted code that every host reports for this error.
+    #[must_use]
+    pub fn refusal(&self) -> (ResponseRefusal, &'static str) {
+        use ResponseRefusal::{
+            Internal, InvalidField, LimitExceeded, NotFound, Unavailable, ValidationFailed,
+        };
+        match *self {
+            Self::Points => (InvalidField, "response.points"),
+            Self::Overrides => (LimitExceeded, "response.override.count"),
+            Self::SampleRate => (InvalidField, "response.rate"),
+            Self::Preview(error) => match error {
+                ResponsePreviewError::InvalidShape => (InvalidField, "response.rate"),
+                ResponsePreviewError::InvalidGrid => (InvalidField, "response.grid"),
+                ResponsePreviewError::UnknownEffect => (NotFound, "response.effect.unknown"),
+                ResponsePreviewError::UnsupportedEffect => {
+                    (Unavailable, "response.effect.unsupported")
+                }
+                ResponsePreviewError::InvalidParameter => {
+                    (InvalidField, "response.override.control")
+                }
+                ResponsePreviewError::ConflictingChannel => {
+                    (InvalidField, "response.override.lane")
+                }
+                ResponsePreviewError::DuplicateParameter => {
+                    (InvalidField, "response.override.duplicate")
+                }
+                ResponsePreviewError::OutputShape => (Internal, "response.internal"),
+                ResponsePreviewError::Owner(error) => match error {
+                    ResponseAnalysisError::InvalidFrequencyGrid => (InvalidField, "response.grid"),
+                    ResponseAnalysisError::UnsupportedMode
+                    | ResponseAnalysisError::UnsupportedCapability => {
+                        (Unavailable, "response.effect.unsupported")
+                    }
+                    ResponseAnalysisError::Configuration(error) => (ValidationFailed, error.code),
+                    ResponseAnalysisError::Capacity | ResponseAnalysisError::ResourceLimit => {
+                        (LimitExceeded, "response.limit")
+                    }
+                    ResponseAnalysisError::Numerical => (Internal, "response.numerical"),
+                    ResponseAnalysisError::OutputShape => (Internal, "response.internal"),
+                },
+            },
+        }
+    }
 }
 
 /// A response query whose owner is prepared; `curves` evaluates it.
@@ -1207,14 +1323,31 @@ mod tests {
             prepare_response_preview(request(&duplicate)).err(),
             Some(ResponsePreviewError::DuplicateParameter)
         ));
-        assert!(matches!(
+        // `both` on a per-lane parameter sets both lanes, and a `both` beside a `left` of the same
+        // parameter is a duplicate.
+        assert!(
             prepare_response_preview(request(&[ResponseParameterOverride {
                 parameter_id: id,
                 channel: ParameterChannel::Both,
                 value: 1.0,
             }]))
-            .err(),
-            Some(ResponsePreviewError::ConflictingChannel)
+            .is_ok()
+        );
+        let both_and_left = [
+            ResponseParameterOverride {
+                parameter_id: id,
+                channel: ParameterChannel::Both,
+                value: 1.0,
+            },
+            ResponseParameterOverride {
+                parameter_id: id,
+                channel: ParameterChannel::Left,
+                value: 0.0,
+            },
+        ];
+        assert!(matches!(
+            prepare_response_preview(request(&both_and_left)).err(),
+            Some(ResponsePreviewError::DuplicateParameter)
         ));
     }
 
