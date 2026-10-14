@@ -3,7 +3,7 @@
 Successor of #1609 (found by the batch 8 review), decision 17
 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on the batch 8
 integration branch `codex/controls-batch-8`. Issue number: assigned at filing (written here as
-TBD14). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+#1618). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 The defect predates batch 8.
 
 ## Product outcome
