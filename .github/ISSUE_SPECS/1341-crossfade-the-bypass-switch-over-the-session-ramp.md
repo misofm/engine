@@ -364,3 +364,88 @@ one core:
 Some(stamp)` publication block: kept main's shape, both write sites call `write_effect_record`) and
 `crates/host-core/src/control_provider.rs` (`control_row` became `Shape::of`: the bypass arm of the
 `Motion::Fixed` match moved there).
+
+## Decision record: #1341a2 (written in batch 8, lands in batch 9)
+
+### What shipped
+
+D4's banked kernel, and with it the deletion of the a1 interim. A bank now renders each lane's
+bypass crossfade exactly as the per-node path renders it, so a placement change (a console slot, a
+cohort of 4-7 inserts on a 4-lane target, a remainder insert) moves no rendered bit.
+
+- `BypassShunt::crossfade_bank::<L>` (`crates/effect-contract/src/live.rs`, a realtime-policy
+  region): the interleaved block holds `L::WIDTH` words per frame, one per bank lane. Per frame and
+  channel one vector op computes each lane's `m = fma(k, step, start)` from a vector of per-lane ramp
+  indices `k = position + f + 1` (one `add` per frame advances all of them; exact below `2^24`) and
+  the mix `dry + (wet - dry) * m` as a separate subtract, multiply and add, the per-node order.
+  `select(k < length, mix, select(settled_dry, dry, wet))` then keeps the wet words of a settled-wet
+  lane and the dry words of a settled-dry lane (bit selects: `-0.0`, NaN payloads and subnormals pass
+  untouched, and a settled lane never goes through the formula). A bank with no ramping lane skips
+  the mix and only selects, which replaces the old scalar strided restore loop with a vector select
+  over the same words.
+- State: `BankCrossfade` (five `[f32; 8]` arrays and a flag, inline in `LiveControlEffectBankStage`,
+  no allocation, nothing new in the heap resource report) is rewritten every block from
+  `EffectControlLane::bypass_crossfade_lane()`; a lane with no control lane is `BankCrossfadeLane::WET`.
+- The stage (`crates/rack/src/lib.rs`): the dry block is captured when any lane `needs_dry()` (D5,
+  was `bypassed()`), the kernel runs after the bank and the taps, and the lanes then advance by the
+  block (`advance_bypass_mix`, kept: it is the lane's state step and restores the witness term). The
+  interim, "restore dry words by the target and only advance", is gone. The collapsed (mono) body
+  shares the code: a ramping lane counts as bypassed for the witness, so a collapsed block has no
+  ramping lane.
+
+### Gates and tests
+
+- Gate 2 (bank equals node) and gate 3 banked:
+  `graph-compiler` `bypass_shunt_identity` `a_bank_crossfades_every_lane_exactly_as_the_node_does`.
+  The real `LiveControlEffectBankStage` through `BankChain` at the build's bank width, with eight
+  lanes' schedules (four on a 4-lane build): a bypass over 480 frames that ends inside a block (the
+  per-node kernel's scalar tail), a reversal at `k = 256`, a lift over 300, a step, a lane bypassed
+  without a channel, a lane without a control lane, a never-switched lane, and a lane whose ramp is
+  exactly one block followed by a bypass. Every lane equals its own per-node render (`needs_dry`,
+  capture, effect, `apply_bypass`) bit for bit in every block, for the compressor (no latency) and the
+  true-peak limiter (latency). Red when the bank steps: first diff is lane 1, block 3, a `-0.0` where
+  the node has `+0.0`.
+- Widths. An effect binds only the build's own bank width (no runtime dispatch, D4), so the stage
+  test runs at the host width (8 lanes on this AVX2 host). The 4-lane and 8-lane kernels are both
+  pinned lane by lane without a processor in `effect-contract`
+  `live_control::a_bank_kernel_crossfades_every_lane_exactly_as_the_node_kernel_does`: eight lane
+  schedules (ramp, reversal, lift, step, never, session-bypassed, short ramps, a ramp ending
+  mid-block), wet words with `-0.0`, infinities and NaNs, at `Simd4` and `Simd8` against the per-node
+  `apply_bypass` at the host width. The scalar tail is the per-node kernel's (the bank has none: its
+  frame is exactly one vector). The 4-lane build itself runs the stage test under
+  `scripts/run-aarch64-tests.sh` and, as simd128, the SDK headless evals below.
+- M1 (lift through the real runtime): `capi`
+  `a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control` now runs,
+  per effect (compressor with no latency, soft clip with 31), per `mute_ms` (10, and 0), a bypass and
+  a lift, and the effect as an insert (a remainder, rendered per node) and as a console slot (always
+  banked). The lift boots the document with the effect bypassed, commits the lift, and asserts
+  `D + (W - D) * m(k)` with `m` running 0 to 1 frame by frame, then W exactly, with no allocation in
+  a ramp block. Mutation: a lift ramping the wrong way, and a bank that steps, each turn it red.
+- `render_per_node` in `bypass_shunt_identity.rs` is **kept**: the C ABI test holds the law to a few
+  ulps of the block peak (the strip's gain stages round after the effect), and it is the only test
+  that pins the law exactly at the effect's output and at scalar kernel width.
+- SDK: `sdk/test/live-controls-evals.mjs` "the SDK bypass builder crossfades ..." now has an insert
+  case and a console-slot case (headless and browser transport, bit for bit per block, the ramp's
+  block count, settles on the booted bypassed document). The console-slot row of
+  `liveEqualsBooted` keeps its settle check, its comment now says the bank crossfades.
+- `hosts/host-web/tests/control_parity.rs`: the scripted console-slot bypass rows already compare the
+  two hosts bit for bit; the module doc no longer says the bank steps. A console-slot variant of
+  `a_live_bypass_crossfades_alike_on_both_hosts` was tried and dropped: this session's strips hold
+  effects after the console slot, whose history outlasts the ramp, so the render is not equal to the
+  booted bypassed one for 55 blocks (a property of the fixture, not of the crossfade).
+
+### Hazard 1 adaptation
+
+`capi` `a_live_eq_bypass_beside_a_gain_change_renders_like_the_browsers_lane`: the console EQ banks
+and stepped before a2; it compares with a reference lane pushed a bare `Bypass` record (a step), so
+its session authors the hard switch, as the insert test beside it already does.
+
+### Docs
+
+`docs/C_ABI_V1_QUALIFICATION.md` (the bank crossfades, no per-node-only sentence),
+`docs/EFFECT_CONTRACT_V1.md` (the bank kernel paragraph), the rack stage's docs.
+
+### Evidence
+
+No checked-in digest moved: `check-effect-runtime-fixtures.sh` and `check-console-fixtures.sh` pass
+unchanged (none of them toggles a live bypass).

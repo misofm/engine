@@ -972,6 +972,22 @@ impl EffectControlLane {
         self.mix.coefficients_at(self.mix_position)[0]
     }
 
+    /// This lane's crossfade for the next rendered block, as one lane of a bank's
+    /// [`BankCrossfade`] (#1341 D4).
+    #[must_use]
+    pub fn bypass_crossfade_lane(&self) -> BankCrossfadeLane {
+        let ramping = self.bypass_ramping();
+        BankCrossfadeLane {
+            step: self.mix.step[0],
+            start: self.mix.start[0],
+            // Exact: a position is at most the ramp's length, at most `2^22`.
+            position: self.mix_position as f32,
+            // A settled lane has length `0`, so no frame index (all at least `1`) is below it.
+            length: if ramping { self.mix.length as f32 } else { 0.0 },
+            settled_dry: self.bypass,
+        }
+    }
+
     /// Mix this block: replace the wet block in `left`/`right` with its bypass crossfade against
     /// `shunt`'s dry block, then advance the crossfade by the block (#1341 D3).
     ///
@@ -1001,8 +1017,8 @@ impl EffectControlLane {
     /// Advance the crossfade by `frames` rendered frames, and, when that settles it at wet, restore
     /// the witness' `UNBYPASSED` term: a ramping lane counts as bypassed until then (#1341 D6).
     ///
-    /// [`Self::apply_bypass`] calls it; a bank, which does not mix yet, calls it once per block so
-    /// the lane's state stays in step with the timeline.
+    /// [`Self::apply_bypass`] calls it; a bank mixes through [`BypassShunt::crossfade_bank`] and
+    /// then calls it once per block, so each lane's state stays in step with the timeline.
     pub fn advance_bypass_mix(&mut self, frames: u32) {
         if self.mix_position >= self.mix.length {
             return;
@@ -1835,7 +1851,149 @@ impl BypassShunt {
             right_settled.copy_from_slice(dry_right_settled);
         }
     }
+
+    /// Crossfade a bank's interleaved wet block against the captured dry block, in place, one
+    /// vector per frame and channel, each lane along its own ramp (#1341 D4).
+    ///
+    /// The block holds `L::WIDTH` contiguous words per frame (one per bank lane), so `L` is the
+    /// bank's lane type. For frame `f` the lane vector of ramp indices is
+    /// `position + f + 1`, exactly [`Self::crossfade`]'s `k`, and per lane:
+    ///
+    /// * `k < length`: the lane ramps, `m = fma(k, step, start)` and
+    ///   `out = dry + (wet - dry) * m`, the same separate subtract, multiply and add;
+    /// * otherwise the lane is settled: `settled_dry` takes the dry word and a settled-wet lane
+    ///   keeps the wet word. Both are a bit select, so `-0.0`, NaN payloads and subnormals pass
+    ///   unchanged, and a lane's wet word never reaches the arithmetic of a settled neighbour.
+    ///
+    /// Every lane's bits equal the per-node [`Self::crossfade`] of the same lane at any width:
+    /// `m(k)` is a pure function of the lane's own `k`, and the mix is the same operation order.
+    /// A bank with no ramping lane skips the mix and only selects.
+    ///
+    /// `frames` is cut to what the four planes hold. `L::WIDTH` must not exceed
+    /// [`BANK_CROSSFADE_LANES`].
+    #[inline(never)]
+    pub fn crossfade_bank<L: Lane>(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        lanes: &BankCrossfade,
+    ) {
+        debug_assert!(L::WIDTH <= BANK_CROSSFADE_LANES);
+        let words = core::cmp::min(
+            core::cmp::min(left.len(), right.len()),
+            core::cmp::min(self.dry_left.len(), self.dry_right.len()),
+        );
+        let words = core::cmp::min(words, frames.saturating_mul(L::WIDTH));
+        let words = words - words % L::WIDTH;
+        let (left, right) = (&mut left[..words], &mut right[..words]);
+        let (dry_left, dry_right) = (&self.dry_left[..words], &self.dry_right[..words]);
+        let zero = L::zero();
+        let settled_dry = L::load(&lanes.settled_dry[..L::WIDTH]).gt(zero);
+        let planes = left
+            .chunks_exact_mut(L::WIDTH)
+            .zip(right.chunks_exact_mut(L::WIDTH))
+            .zip(dry_left.chunks_exact(L::WIDTH))
+            .zip(dry_right.chunks_exact(L::WIDTH));
+        if !lanes.ramping {
+            for (((left, right), dry_left), dry_right) in planes {
+                L::select(settled_dry, L::load(dry_left), L::load(left)).store(left);
+                L::select(settled_dry, L::load(dry_right), L::load(right)).store(right);
+            }
+            return;
+        }
+        let step = L::load(&lanes.step[..L::WIDTH]);
+        let start = L::load(&lanes.start[..L::WIDTH]);
+        let length = L::load(&lanes.length[..L::WIDTH]);
+        let one = L::splat(1.0);
+        // Exact: each index is an integer below `position + frames`, far below `2^24`; and an
+        // index past a lane's length only has to compare at or above it.
+        let mut index = L::load(&lanes.position[..L::WIDTH]).add(one);
+        for (((left, right), dry_left), dry_right) in planes {
+            let ramping = index.lt(length);
+            let mix = index.fma(step, start);
+            let (dry, wet) = (L::load(dry_left), L::load(left));
+            let ramped = dry.add(wet.sub(dry).mul(mix));
+            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(left);
+            let (dry, wet) = (L::load(dry_right), L::load(right));
+            let ramped = dry.add(wet.sub(dry).mul(mix));
+            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(right);
+            index = index.add(one);
+        }
+    }
     // REALTIME_POLICY_END
+}
+
+/// The most lanes a bank's [`BankCrossfade`] holds: the widest bank, eight lanes on AVX2.
+pub const BANK_CROSSFADE_LANES: usize = 8;
+
+/// One bank lane's bypass crossfade for a block: what [`EffectControlLane::bypass_crossfade_lane`]
+/// reads and [`BankCrossfade::set`] stores.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BankCrossfadeLane {
+    step: f32,
+    start: f32,
+    position: f32,
+    length: f32,
+    settled_dry: bool,
+}
+
+impl BankCrossfadeLane {
+    /// A lane that only passes the wet block: no ramp, not bypassed. What a bank lane without a
+    /// control lane is. Its `step` and `start` are never read (its length is zero), and all-zero
+    /// words keep [`BankCrossfade::new`] a plain zero fill.
+    pub const WET: Self = Self {
+        step: 0.0,
+        start: 0.0,
+        position: 0.0,
+        length: 0.0,
+        settled_dry: false,
+    };
+}
+
+/// The per-lane crossfade state of one bank for one block, in the vectors
+/// [`BypassShunt::crossfade_bank`] loads. A plain inline value: the stage that owns it allocates
+/// nothing to fill it, block after block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BankCrossfade {
+    step: [f32; BANK_CROSSFADE_LANES],
+    start: [f32; BANK_CROSSFADE_LANES],
+    position: [f32; BANK_CROSSFADE_LANES],
+    length: [f32; BANK_CROSSFADE_LANES],
+    /// `1.0` for a lane settled dry (bypassed), else `0.0`: loaded and compared once per block.
+    settled_dry: [f32; BANK_CROSSFADE_LANES],
+    ramping: bool,
+}
+
+impl BankCrossfade {
+    /// Every lane passes the wet block.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            step: [0.0; BANK_CROSSFADE_LANES],
+            start: [0.0; BANK_CROSSFADE_LANES],
+            position: [0.0; BANK_CROSSFADE_LANES],
+            length: [0.0; BANK_CROSSFADE_LANES],
+            settled_dry: [0.0; BANK_CROSSFADE_LANES],
+            ramping: false,
+        }
+    }
+
+    /// Store `lane`'s crossfade for this block. `lane` must be below [`BANK_CROSSFADE_LANES`].
+    pub fn set(&mut self, lane: usize, state: BankCrossfadeLane) {
+        self.step[lane] = state.step;
+        self.start[lane] = state.start;
+        self.position[lane] = state.position;
+        self.length[lane] = state.length;
+        self.settled_dry[lane] = if state.settled_dry { 1.0 } else { 0.0 };
+        self.ramping = self.length.iter().any(|length| *length > 0.0);
+    }
+}
+
+impl Default for BankCrossfade {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// `1, 2, ..., 16`: the frame-index offsets of one vector's frames, `L::WIDTH` of them (sixteen

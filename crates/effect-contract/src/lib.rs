@@ -11,9 +11,10 @@ mod response;
 mod step;
 mod symmetry;
 pub use live::{
-    BypassShunt, BypassSwitch, EffectCellWriter, EffectControlLane, EffectControlRecord,
-    EffectLaneResources, EffectLaneShape, EffectLaneSpec, EffectWriteRefusal, ObservationLane,
-    ObservePushError, Staged, apply_observe, effect_control_lane,
+    BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
+    EffectLaneSpec, EffectWriteRefusal, ObservationLane, ObservePushError, Staged, apply_observe,
+    effect_control_lane,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,

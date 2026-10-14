@@ -461,3 +461,137 @@ fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
     rig.stage();
     assert!(!rig.lane.bypassed());
 }
+
+/// #1341a2 gate 2 at the kernel: `BypassShunt::crossfade_bank::<L>` over an interleaved block of
+/// `L::WIDTH` lanes equals, lane by lane and bit for bit, the per-node `apply_bypass` (the host
+/// width kernel and its scalar tail) of the same lane. Every lane has its own schedule: a ramp, a
+/// reversal mid-ramp, a lift, a step, a lane that never switches and one bypassed from the start.
+/// The wet words carry `-0.0`, infinities and NaNs, which a settled lane must pass or replace
+/// untouched. Run at every lane width the build has: four lanes, and eight on AVX2.
+///
+/// Test value: red if a lane reads a neighbour's `m` or position (lane-to-lane crosstalk), a
+/// settled lane goes through the formula (a `NaN` wet word would leak into the dry copy, and `-0.0`
+/// would turn `+0.0`), a reversal restarts from the endpoint, or the bank's `m(k)` differs from the
+/// node's by a frame (the index convention) or by a rounding (the operation order).
+fn bank_kernel_equals_node<L: lane::Lane>() {
+    use effect_contract::{BankCrossfade, BypassSwitch};
+    const FRAMES: usize = 30;
+    const BLOCKS: usize = 14;
+    let width = L::WIDTH;
+    // Per lane: starts bypassed; records as (block, bypassed, ramp).
+    let schedule = |lane: usize| -> (bool, Vec<(usize, bool, u32)>) {
+        match lane % 8 {
+            0 => (false, vec![]),
+            1 => (false, vec![(2, true, 100)]),
+            2 => (false, vec![(2, true, 100), (4, false, 100)]),
+            3 => (true, vec![(5, false, 61)]),
+            4 => (false, vec![(3, true, 0)]),
+            5 => (true, vec![]),
+            6 => (false, vec![(1, true, 30), (2, false, 30), (3, true, 7)]),
+            _ => (true, vec![(2, false, 30), (3, true, 45)]),
+        }
+    };
+    let new_rig = |lane: usize| {
+        let mut rig = Rig::new(shape(&[], &[], 0), 0);
+        // A lane that starts bypassed is built bypassed: a step record before the first block.
+        if schedule(lane).0 {
+            rig.commit_bypass(BypassSwitch::step(true)).expect("a cell");
+            rig.stage();
+        }
+        rig
+    };
+    let mut bank_rigs: Vec<Rig> = (0..width).map(new_rig).collect();
+    let mut node_rigs: Vec<Rig> = (0..width).map(new_rig).collect();
+    let mut bank_shunt = BypassShunt::new(FRAMES * width, 0);
+    let mut node_shunts: Vec<BypassShunt> =
+        (0..width).map(|_| BypassShunt::new(FRAMES, 0)).collect();
+    let mut seed = 0x0013_41a2_u64;
+    let mut random = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let word = |random: &mut dyn FnMut() -> u64| -> f32 {
+        match random() % 40 {
+            0 => -0.0,
+            1 => f32::INFINITY,
+            2 => f32::NAN,
+            3 => 0.0,
+            r => (r as f32 - 20.0) * 0.173 + (random() % 1000) as f32 * 1e-4,
+        }
+    };
+    let mut ramped = 0_usize;
+    for block in 0..BLOCKS {
+        for lane in 0..width {
+            for &(at, bypassed, ramp_samples) in &schedule(lane).1 {
+                if at == block {
+                    let switch = BypassSwitch {
+                        bypassed,
+                        ramp_samples,
+                    };
+                    bank_rigs[lane].commit_bypass(switch).expect("a cell");
+                    node_rigs[lane].commit_bypass(switch).expect("a cell");
+                }
+            }
+            bank_rigs[lane].stage();
+            node_rigs[lane].stage();
+        }
+        // Planar per-lane dry and wet, and the same words interleaved for the bank.
+        let mut dry = vec![vec![[0.0_f32; FRAMES]; width]; 2];
+        let mut wet = dry.clone();
+        for channel in 0..2 {
+            for lane in 0..width {
+                for frame in 0..FRAMES {
+                    dry[channel][lane][frame] = word(&mut random);
+                    wet[channel][lane][frame] = word(&mut random);
+                }
+            }
+        }
+        let interleave = |planes: &[[f32; FRAMES]]| -> Vec<f32> {
+            (0..FRAMES)
+                .flat_map(|frame| (0..width).map(move |lane| (lane, frame)))
+                .map(|(lane, frame)| planes[lane][frame])
+                .collect()
+        };
+        let (mut bank_left, mut bank_right) = (interleave(&wet[0]), interleave(&wet[1]));
+        bank_shunt.capture(&interleave(&dry[0]), &interleave(&dry[1]));
+        let mut crossfade = BankCrossfade::new();
+        for (lane, rig) in bank_rigs.iter().enumerate() {
+            crossfade.set(lane, rig.lane.bypass_crossfade_lane());
+            ramped += usize::from(rig.lane.bypass_ramping());
+        }
+        bank_shunt.crossfade_bank::<L>(&mut bank_left, &mut bank_right, FRAMES, &crossfade);
+        for rig in &mut bank_rigs {
+            rig.lane.advance_bypass_mix(FRAMES as u32);
+        }
+        for lane in 0..width {
+            let (mut left, mut right) = (wet[0][lane], wet[1][lane]);
+            node_shunts[lane].capture(&dry[0][lane], &dry[1][lane]);
+            if node_rigs[lane].lane.needs_dry() {
+                node_rigs[lane].lane.apply_bypass::<lane::Native>(
+                    &node_shunts[lane],
+                    &mut left,
+                    &mut right,
+                );
+            }
+            for frame in 0..FRAMES {
+                for (plane, node) in [(&bank_left, &left), (&bank_right, &right)] {
+                    assert_eq!(
+                        plane[frame * width + lane].to_bits(),
+                        node[frame].to_bits(),
+                        "width {width}, block {block}, lane {lane}, frame {frame}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(ramped > 0, "the schedule ramps");
+}
+
+#[test]
+fn a_bank_kernel_crossfades_every_lane_exactly_as_the_node_kernel_does() {
+    bank_kernel_equals_node::<lane::Simd4>();
+    #[cfg(target_feature = "avx2")]
+    bank_kernel_equals_node::<lane::Simd8>();
+}

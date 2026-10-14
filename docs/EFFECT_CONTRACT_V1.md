@@ -73,7 +73,11 @@ latency-matched signal. A settled lane is selected, not computed: settled dry co
 and settled wet keeps the wet words, so the output after the ramp is the whole-block select of an
 un-ramped bypass, and a ramp of 0 samples renders exactly that. The dry block is captured when the
 lane is bypassed or ramping, or the shunt feeds a latency line. A ramping lane counts as bypassed
-for the channel-symmetry witness until it settles at wet.
+for the channel-symmetry witness until it settles at wet. A bank mixes the same law lane-wide
+(`BypassShunt::crossfade_bank`): per frame one vector of each lane's ramp index `k`, the mix of
+that vector, and a bit select that keeps the wet words of a settled-wet lane, the dry words of a
+settled-dry lane and the mix of a ramping one. Each lane's bits equal the per-node render of the
+same lane at any lane width, as banking requires.
 
 Class-A identity, the same bits on every lane width and target, treats every NaN as one value
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`

@@ -10,11 +10,11 @@
 #![allow(missing_docs)]
 
 use effect_contract::{
-    BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
-    EffectControlRecord, EffectId, EffectProgramKey, LatencySamples, ObservationLane,
-    ObservationSample, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank,
-    PreparedSidechainPort, SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    apply_observe, transpose_tile_4,
+    BankCrossfade, BankCrossfadeLane, BankWidth, BypassShunt, ChannelSymmetryWitness,
+    EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectId, EffectProgramKey,
+    LatencySamples, ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedEffectBank,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, apply_observe, transpose_tile_4,
 };
 use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
@@ -1126,9 +1126,10 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 /// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
 /// ([`EffectControlLane::without_channel`] when no live controls are attached) whose bypass is set,
 /// so a bypassed track keeps its bank. Its lane runs the wet path with the others and step 4
-/// restores its latency-matched dry signal: the same words the effect's own prepared bypass emits,
-/// by copies, so `-0.0` survives, and the select is per lane, so banking couples the lanes' cost
-/// and never their bits.
+/// mixes in its latency-matched dry signal: once settled, the same words the effect's own
+/// prepared bypass emits, by a bit select, so `-0.0` survives; while a live switch ramps, the
+/// per-node crossfade `dry + (wet - dry) * m(k)` along the lane's own ramp (#1341). The mix and the
+/// select are per lane, so banking couples the lanes' cost and never their bits.
 ///
 /// # What one block does, in order
 ///
@@ -1140,7 +1141,8 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 /// 2. Capture the dry AoSoA block into the latency shunt, if any lane can be bypassed.
 /// 3. Run the bank once with the packed spans and the per-lane offsets the effect contract
 ///    already defines (`EffectBankProcessBlock::automation_offsets`).
-/// 4. Restore the latency-matched dry signal into exactly the bypassed lanes.
+/// 4. Mix the latency-matched dry signal into exactly the bypassed or ramping lanes, each along its
+///    own crossfade (`BypassShunt::crossfade_bank`).
 ///
 /// # Partition invariance and `to_bits` identity extend to command timelines
 ///
@@ -1173,6 +1175,9 @@ pub struct LiveControlEffectBankStage {
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
     /// slot can be bypassed: no live channel and no lane bypassed at preparation.
     shunt: Option<BypassShunt>,
+    /// This block's per-lane bypass crossfade, rewritten by the process body before the shunt
+    /// mixes (#1341 D4). Inline: a bank of at most eight lanes holds no allocation for it.
+    crossfade: BankCrossfade,
     /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
     /// plan named no observation capacity. `None` is the byte-identical unobserved path.
     observations: Option<Box<[Option<ObservationLane>]>>,
@@ -1311,6 +1316,7 @@ impl LiveControlEffectBankStage {
             staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
+            crossfade: BankCrossfade::new(),
             observations: observed.then(|| observations.into_boxed_slice()),
             samples,
             staged_spans: 0,
@@ -1464,14 +1470,14 @@ impl BankStage for LiveControlEffectBankStage {
     /// [`LiveControlEffectBankStage::process`] with the bank call collapsed onto the left plane.
     ///
     /// Every other step is the dual one, in the same order and on the same words: the drain runs
-    /// before a sample is touched, the shunt captures and restores both planes, and the taps
+    /// before a sample is touched, the shunt captures and mixes both planes, and the taps
     /// publish after the bank ran. The shunt's right plane is the ungathered scratch, which is
     /// sound for exactly one reason and it is worth stating: the seam overwrites the right plane
     /// after this slot, so nothing downstream ever reads what the shunt put there. The *left*
     /// restore is the one that matters and it is the dual one.
     ///
     /// A live bypass on any lane clears the witness' `UNBYPASSED` term, so a collapsed cohort has
-    /// no bypassed lane and the restore loop is a no-op whenever this body runs at all. It is kept
+    /// no bypassed or ramping lane and the mix is a no-op whenever this body runs at all. It is kept
     /// rather than asserted away because the two facts are maintained in different places and the
     /// cheap one is the one that should not be load-bearing.
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -1587,7 +1593,7 @@ impl LiveControlEffectBankStage {
         // reader could observe.
         let any_bypassed = self.lanes[..lane_count]
             .iter()
-            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::bypassed));
+            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::needs_dry));
         // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
         //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
         //    block boundary, so the skip moves no rendered bit.
@@ -1705,33 +1711,29 @@ impl LiveControlEffectBankStage {
                 }
             }
         }
-        // The lanes' bypass crossfades advance by the block (#1341 D6). The bank does not mix a
-        // crossfade yet, so a lane steps to its target at its record exactly as it always did;
-        // the advance keeps each lane's state, and the witness term it restores, in step.
-        for channel in self.lanes[..lane_count].iter_mut().flatten() {
-            channel.advance_bypass_mix(frames);
-        }
-        // 3. Latency-matched dry restore for exactly the bypassed lanes. `any_bypassed` is the
-        //    disjunction of the per-lane test below, decided before the capture; when it is false
-        //    this whole loop was already a no-op, and skipping it also proves the capture above
-        //    had no reader.
-        if let Some(shunt) = self.shunt.as_ref().filter(|_| any_bypassed) {
-            let (dry_left, dry_right) = shunt.dry();
-            for lane in 0..lane_count {
-                if !self.lanes[lane]
-                    .as_ref()
-                    .is_some_and(EffectControlLane::bypassed)
-                {
-                    continue;
-                }
-                let mut index = lane;
-                let words = frames as usize * lane_count;
-                while index < words {
-                    block.left[index] = dry_left[index];
-                    block.right[index] = dry_right[index];
-                    index += lane_count;
-                }
+        // 3. Latency-matched dry mix: each lane crossfades along its own bypass ramp, a settled
+        //    bypassed lane takes the dry words and every other lane keeps the wet ones, in one
+        //    lane-wide pass over the interleaved block (#1341 D4). `any_bypassed` is the
+        //    disjunction of `needs_dry` over the lanes, decided before the capture; when it is
+        //    false this whole step was already a no-op, and skipping it also proves the capture
+        //    above had no reader. The lanes advance by the block afterwards (#1341 D6).
+        if any_bypassed && let Some(shunt) = self.shunt.as_ref() {
+            for (lane, channel) in self.lanes[..lane_count].iter().enumerate() {
+                self.crossfade.set(
+                    lane,
+                    channel.as_ref().map_or(
+                        BankCrossfadeLane::WET,
+                        EffectControlLane::bypass_crossfade_lane,
+                    ),
+                );
             }
+            let frames = frames as usize;
+            effect_contract::match_bank_width!(self.width, |L| {
+                shunt.crossfade_bank::<L>(block.left, block.right, frames, &self.crossfade);
+            });
+        }
+        for channel in self.lanes[..lane_count].iter_mut().flatten() {
+            channel.advance_bypass_mix(block.frames);
         }
         Ok(())
     }

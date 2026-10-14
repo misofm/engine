@@ -1179,3 +1179,251 @@ fn a_reversal_continues_from_the_current_mix_and_a_repeat_changes_nothing() {
         );
     }
 }
+
+// ---- #1341a2: the bank crossfades exactly as the node does -----------------------------------------
+
+/// How a bank lane starts.
+#[derive(Clone, Copy, Debug)]
+enum Start {
+    /// A live channel, not bypassed.
+    Wet,
+    /// A live channel, session-bypassed.
+    Bypassed,
+    /// No channel, session-bypassed (it can never be lifted).
+    FixedBypass,
+    /// No control lane at all.
+    Plain,
+}
+
+/// `(lane, block, bypassed, ramp_samples)`: the bypass records of the bank test, one revision each.
+type Schedule = &'static [(usize, u64, bool, u32)];
+
+/// The bank test's lanes (the first four on a four-lane bank), and their records:
+///
+/// * 0 is never switched (W);
+/// * 1 bypasses at block 3 over 480 frames, which end inside block 6 (95 ramp frames there, so the
+///   per-node kernel runs its scalar tail on them);
+/// * 2 bypasses at block 3 and lifts at block 5, at `k = 256`: a reversal mid-ramp;
+/// * 3 starts bypassed and lifts at block 6 over 300 frames;
+/// * 4 bypasses at block 4 with a ramp of 0 (a step);
+/// * 5 is bypassed for good without a channel, 6 has no control lane;
+/// * 7 starts bypassed, lifts at block 3 over exactly one block and bypasses again at block 4 over
+///   100 frames, which end inside block 4.
+const BANK_LANES: [Start; 8] = [
+    Start::Wet,
+    Start::Wet,
+    Start::Wet,
+    Start::Bypassed,
+    Start::Wet,
+    Start::FixedBypass,
+    Start::Plain,
+    Start::Bypassed,
+];
+const BANK_SCHEDULE: Schedule = &[
+    (1, 3, true, 480),
+    (2, 3, true, 480),
+    (2, 5, false, 480),
+    (3, 6, false, 300),
+    (4, 4, true, 0),
+    (7, 3, false, 128),
+    (7, 4, true, 100),
+];
+
+/// A per-node reference lane: the instance, its shunt and its control lane, driven in the order
+/// `runtime::LiveControlEffect` runs them.
+struct NodeLane {
+    effect: Box<dyn PreparedNativeEffect>,
+    shunt: effect_contract::BypassShunt,
+    control: EffectControlLane,
+    writer: Option<effect_contract::EffectCellWriter>,
+}
+
+fn live_lane(
+    bypass: bool,
+    superseded: &LiveValuesSuperseded,
+) -> (effect_contract::EffectCellWriter, EffectControlLane) {
+    effect_control_lane(
+        EffectLaneSpec {
+            shape: EffectLaneShape::from_live_parameters([], 0),
+            bypass,
+            observation_depth: 0,
+        },
+        superseded,
+    )
+    .expect("the live lane")
+}
+
+/// Gate 2 of #1341 (bank equals node) and gate 3 banked. One bank of `backend`'s width runs
+/// `effect_id` on every lane of [`BANK_LANES`] through the rack's real live stage, with
+/// [`BANK_SCHEDULE`]'s bypass records, and each lane's output equals the per-node render of the
+/// same lane, bit for bit, in every block: a lane that bypasses over a ramp, one that reverses
+/// mid-ramp, one that lifts, a step, a lane bypassed without a channel, a lane without a control
+/// lane, and a lane that is never switched, next to one another in one bank.
+fn bank_equals_node(effect_id: &str, backend: Backend) {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let factory = registry.get_shared_ascii(effect_id).expect("launch effect");
+    let descriptor = factory.descriptor();
+    let case = cases(descriptor)[0];
+    let values = default_values(descriptor);
+    let width = BankWidth::for_backend(backend).expect("a vector backend");
+    let lanes = width.lanes() as usize;
+    let starts = &BANK_LANES[..lanes];
+    let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
+        .map(|_| request(descriptor, case, false, &values))
+        .collect();
+    let bank = factory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+            active_mask: width.full_mask(),
+        })
+        .expect("a well-formed bank request")
+        .expect("a bankable effect binds at this width");
+    let latency = usize::try_from(bank.metadata.program_key.latency.0).expect("latency fits");
+    let superseded = LiveValuesSuperseded::new();
+    let mut bank_writers: Vec<Option<effect_contract::EffectCellWriter>> = Vec::new();
+    let mut controls: Vec<Option<EffectControlLane>> = Vec::new();
+    let mut nodes: Vec<NodeLane> = Vec::new();
+    for start in starts {
+        let (writer, control) = match start {
+            Start::Wet | Start::Bypassed => {
+                let (writer, control) = live_lane(matches!(start, Start::Bypassed), &superseded);
+                (Some(writer), Some(control))
+            }
+            Start::FixedBypass => (None, Some(EffectControlLane::without_channel(true))),
+            Start::Plain => (None, None),
+        };
+        bank_writers.push(writer);
+        controls.push(control);
+        let (writer, control) = match start {
+            Start::Wet | Start::Bypassed => {
+                let (writer, control) = live_lane(matches!(start, Start::Bypassed), &superseded);
+                (Some(writer), control)
+            }
+            Start::FixedBypass => (None, EffectControlLane::without_channel(true)),
+            Start::Plain => (None, EffectControlLane::without_channel(false)),
+        };
+        nodes.push(NodeLane {
+            effect: factory
+                .prepare(request(descriptor, case, false, &values))
+                .expect("per-node instance")
+                .processor,
+            shunt: effect_contract::BypassShunt::new(QUANTUM as usize, latency),
+            control,
+            writer,
+        });
+    }
+    let stage = LiveControlEffectBankStage::new(
+        bank,
+        width,
+        QUANTUM,
+        controls,
+        (0..lanes).map(|_| None).collect(),
+        latency,
+    )
+    .expect("stage");
+    let mut chain = BankChain::new(
+        AoSoaScratch::new(width, QUANTUM).expect("scratch"),
+        vec![true; lanes].into_boxed_slice(),
+        vec![BankSlot {
+            stage: Box::new(stage) as Box<dyn BankStage>,
+            active_lanes: vec![true; lanes].into_boxed_slice(),
+        }],
+    )
+    .expect("chain");
+    // Lane 1 never bypassed: the evidence that its crossfade is not the wet or the dry output.
+    let mut wet_only = factory
+        .prepare(request(descriptor, case, false, &values))
+        .expect("wet twin")
+        .processor;
+    let (gate, mut pin) = RevisionGate::pair(0);
+    let mut signal = Rng::new(0x0013_41a2);
+    let (mut between_lane_one, mut compared) = (0_usize, 0_usize);
+    for block in 0..14_u64 {
+        for &(lane, at, bypassed, ramp_samples) in BANK_SCHEDULE {
+            if at != block || lane >= lanes {
+                continue;
+            }
+            let revision = pin.last_published() + 1;
+            let stamp = pin.stamp(revision).expect("a legal revision");
+            let switch = effect_contract::BypassSwitch {
+                bypassed,
+                ramp_samples,
+            };
+            for writer in [bank_writers[lane].as_mut(), nodes[lane].writer.as_mut()] {
+                writer
+                    .expect("a lane with records has a channel")
+                    .write_bypass(stamp, switch)
+                    .expect("a bypass cell");
+            }
+            pin.publish(&gate, revision);
+        }
+        let mut members = Planes {
+            left: Vec::new(),
+            right: Vec::new(),
+        };
+        for lane in 0..lanes {
+            members
+                .left
+                .push(input_block(lane, 0, block, Level::Loud, &mut signal));
+            members
+                .right
+                .push(input_block(lane, 1, block, Level::Loud, &mut signal));
+        }
+        let mut expected_left = members.left.clone();
+        let mut expected_right = members.right.clone();
+        let mut wet_left = members.left[1].clone();
+        let mut wet_right = members.right[1].clone();
+        let first_sample = block * u64::from(QUANTUM);
+        chain
+            .run(&mut members, QUANTUM, first_sample, gate.snapshot())
+            .expect("bank render");
+        process_scalar(wet_only.as_mut(), &mut wet_left, &mut wet_right, block);
+        for (lane, node) in nodes.iter_mut().enumerate() {
+            let (left, right) = (&mut expected_left[lane], &mut expected_right[lane]);
+            node.control.stage(&mut [], first_sample, gate.snapshot());
+            let needs_dry = node.control.needs_dry();
+            if needs_dry || node.shunt.feeds_line() {
+                node.shunt.capture(left, right);
+            }
+            process_scalar(node.effect.as_mut(), left, right, block);
+            if needs_dry {
+                node.control
+                    .apply_bypass::<lane::Native>(&node.shunt, left, right);
+            }
+            let what = format!("{effect_id} at {backend:?}: lane {lane} block {block}");
+            assert_bits(&format!("{what} left"), &members.left[lane], left);
+            assert_bits(&format!("{what} right"), &members.right[lane], right);
+        }
+        if (3..7).contains(&block) {
+            compared += QUANTUM as usize;
+            between_lane_one += members.left[1]
+                .iter()
+                .zip(&wet_left)
+                .filter(|(a, w)| folded(**a) != folded(**w))
+                .count();
+        }
+    }
+    assert!(
+        between_lane_one * 2 > compared,
+        "{effect_id}: lane 1's ramp never leaves the wet output, so the comparison proves nothing"
+    );
+}
+
+/// Gate 2 and gate 3 (banked) of #1341: a bank renders every lane's bypass crossfade exactly as the
+/// per-node path renders it, at the build's bank width (eight lanes on AVX2, four on NEON and
+/// simd128: an effect binds only the build's width, so the other width cannot be bound here; the
+/// kernel at each width is pinned lane by lane in `effect-contract`'s `live_control` tests), for a
+/// zero-latency effect and one with latency. The per-node leg runs at the host's lane width and its
+/// scalar tail (the ramp's last 95 frames in block 6 are not a whole vector).
+///
+/// Test value: red if a banked lane steps at its record instead of ramping (the interim this test
+/// replaces), reads a neighbour's `m` or position, keeps a settled lane on the formula path, or if
+/// a reversal restarts from the settled endpoint.
+#[test]
+fn a_bank_crossfades_every_lane_exactly_as_the_node_does() {
+    for effect_id in ZERO_AND_LATENT {
+        bank_equals_node(effect_id, Backend::current());
+    }
+}

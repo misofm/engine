@@ -564,9 +564,8 @@ describe("#1563B gate 3 -- every builder renders as the document that holds its 
     settle: 40,
   }));
 
-  // A console slot always banks, and the bank still steps its bypass until #1341a2; either way the
-  // output settles to the render of the document that holds the bypass. The crossfade itself is
-  // gated on an insert below.
+  // A console slot always banks: the output settles to the render of the document that holds the
+  // bypass. The crossfade itself (the bank renders what the node renders, #1341a2) is gated below.
   test("effect bypass on a console slot", () => liveEqualsBooted({
     base: compressor(),
     booted: variant(compressor(), (d) => { d.tracks[0].console[0].bypass = true; }),
@@ -629,9 +628,12 @@ describe("#1563B gate 3 -- every builder renders as the document that holds its 
 });
 
 /**
- * #1341a1, the amendment gate taken from #1563B gate 3: the SDK's `bypass` builder (a `SET_CONTROL`
- * on control `0` of an effect section) crossfades an insert over the session's `mute_ms` ramp, on
- * the headless engine and through the browser's core path, with the same bits in every block.
+ * #1341a1 and #1341a2, the amendment gate taken from #1563B gate 3: the SDK's `bypass` builder (a
+ * `SET_CONTROL` on control `0` of an effect section) crossfades an insert and a console slot over
+ * the session's `mute_ms` ramp, on the headless engine and through the browser's core path, with
+ * the same bits in every block. A console slot always banks and a lone insert renders per node, so
+ * the two cases are the banked kernel and the per-node one (a bank renders exactly what the node
+ * renders, #1341a2).
  *
  * Four engines render one input: W never bypassed, D booted bypassed, H bypassed live through the
  * headless controls, B bypassed live through the browser transport (`SET_CONTROL` frames into the
@@ -639,35 +641,30 @@ describe("#1563B gate 3 -- every builder renders as the document that holds its 
  * (`a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control`), and
  * the C ABI against the browser host is `hosts/host-web/tests/control_parity.rs`.
  */
-describe("#1341a1 -- the SDK bypass builder crossfades an insert over the session ramp", () => {
+describe("#1341a1, #1341a2 -- the SDK bypass builder crossfades an insert and a console slot over the session ramp", () => {
   const frames = 128 * 64;
   const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
   const threshold = compressor.parameters.find((row) => row.name === "threshold");
-  const insertDocument = () => sessionDocument({
-    frames,
-    effects: {
-      inserts: [effectEntry(
-        "ins",
-        compressor.id,
-        compressor.parameters.map((row) => ({
-          id: row.id,
-          unit: row.unitName,
-          value: row.id === threshold.id ? -30 : row.default,
-          channel: "both",
-        })),
-      )],
-    },
-  });
+  const entry = (id) => effectEntry(
+    id,
+    compressor.id,
+    compressor.parameters.map((row) => ({
+      id: row.id,
+      unit: row.unitName,
+      value: row.id === threshold.id ? -30 : row.default,
+      channel: "both",
+    })),
+  );
   /** The default session `mute_ms` is 10 ms. */
   const rampSamples = 480;
   const quantum = 128;
 
-  test("headless and browser paths render the same crossfade, and it settles on the bypassed document", async () => {
+  const crossfadeCase = async ({ document, bypassed, edit }) => {
     const [wet, dry, headless, browser] = await Promise.all([
-      boot(insertDocument()),
-      boot(variant(insertDocument(), (d) => { d.tracks[0].inserts.effects[0].bypass = true; })),
-      boot(insertDocument()),
-      boot(insertDocument()),
+      boot(document()),
+      boot(variant(document(), bypassed)),
+      boot(document()),
+      boot(document()),
     ]);
     try {
       const before = 4;
@@ -676,8 +673,8 @@ describe("#1341a1 -- the SDK bypass builder crossfades an insert over the sessio
         const headlessControls = headless.liveControls();
         const browserControls = await createBrowserLiveControls(engineHost(browser));
         const reports = [
-          await headlessControls.submit(headlessControls.edit.track("t").insert("ins", "miso.compressor").bypass(true)),
-          await browserControls.submit(browserControls.edit.track("t").insert("ins", "miso.compressor").bypass(true)),
+          await headlessControls.submit(edit(headlessControls.edit)),
+          await browserControls.submit(edit(browserControls.edit)),
         ];
         for (const report of reports) {
           assert.equal(report.ok, true);
@@ -720,7 +717,19 @@ describe("#1341a1 -- the SDK bypass builder crossfades an insert over the sessio
     } finally {
       for (const engine of [wet, dry, headless, browser]) engine.dispose();
     }
-  });
+  };
+
+  test("an insert: headless and browser paths render the same crossfade, and it settles on the bypassed document", () => crossfadeCase({
+    document: () => sessionDocument({ frames, effects: { inserts: [entry("ins")] } }),
+    bypassed: (d) => { d.tracks[0].inserts.effects[0].bypass = true; },
+    edit: (e) => e.track("t").insert("ins", "miso.compressor").bypass(true),
+  }));
+
+  test("a console slot, which always banks: the same crossfade, and it settles on the bypassed document", () => crossfadeCase({
+    document: () => sessionDocument({ frames, effects: { preInsert: [entry("compressor")] } }),
+    bypassed: (d) => { d.tracks[0].console[0].bypass = true; },
+    edit: (e) => e.track("t").console("compressor", "miso.compressor").bypass(true),
+  }));
 });
 
 describe("#1563B -- the browser transport posts the same frames and decodes the core's replies", () => {

@@ -771,9 +771,10 @@ the rack's latency-preserving bypass shunt (decision 14).
   the settled select, bit for bit; a session whose `mute_ms` is 0 steps at the record's block. A
   record for the target the lane is already heading for changes nothing, and a reversal continues
   from the current mix. It may ride with every other live edit.
-  In this slice the crossfade runs in the per-node render path (an insert that its cohort does not
-  bank, such as a lone track's); a lane inside an effect bank still steps until the banked
-  kernel lands (#1341a2). The browser edits through the same core, so it crossfades alike
+  The crossfade runs in the per-node render path and in an effect bank (a console slot, or a
+  cohort of inserts) alike: a bank mixes each lane along its own ramp and renders exactly the bits
+  the per-node path renders for that lane (#1341a2), so where the session places the effect never
+  moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
 - **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
   compressor: their session bypass is prepared into the effect, not lowered to the lane
