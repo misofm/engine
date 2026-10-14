@@ -404,11 +404,12 @@
     {
       "id": "vocal-presence",
       "target": {
-        "entity_id": "vocal",
-        "rack": "console",
-        "effect_id": "eq",
-        "parameter_id": 4,
-        "channel": "both"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "console",
+        "slot_id": "eq",
+        "control": 4,
+        "lane": "both"
       },
       "segments": [
         {

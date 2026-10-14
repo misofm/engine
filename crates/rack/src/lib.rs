@@ -10,11 +10,11 @@
 #![allow(missing_docs)]
 
 use effect_contract::{
-    BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
-    EffectControlRecord, EffectId, EffectProgramKey, LatencySamples, ObservationLane,
-    ObservationSample, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank,
-    PreparedSidechainPort, SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    apply_observe, transpose_tile_4,
+    BankCrossfade, BankCrossfadeLane, BankWidth, BypassShunt, ChannelSymmetryWitness,
+    EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectId, EffectProgramKey,
+    LatencySamples, ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedEffectBank,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, apply_observe, transpose_tile_4,
 };
 use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
@@ -192,8 +192,9 @@ pub enum RackError {
     Overflow,
     Shape,
     WidthMismatch,
-    /// A live-control slot's staging window is not exactly the bank's
-    /// `automation_capacity` spans (`EffectBankProcessBlock::check_automation_window`, issue #1012).
+    /// A live-control slot has a lane with more live parameter cells than the bank's
+    /// `automation_capacity` spans: the window that holds them would exceed the capacity the
+    /// effect cuts spans off at (issue #1012).
     AutomationWindow,
 }
 
@@ -1126,9 +1127,10 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 /// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
 /// ([`EffectControlLane::without_channel`] when no live controls are attached) whose bypass is set,
 /// so a bypassed track keeps its bank. Its lane runs the wet path with the others and step 4
-/// restores its latency-matched dry signal: the same words the effect's own prepared bypass emits,
-/// by copies, so `-0.0` survives, and the select is per lane, so banking couples the lanes' cost
-/// and never their bits.
+/// mixes in its latency-matched dry signal: once settled, the same words the effect's own
+/// prepared bypass emits, by a bit select, so `-0.0` survives; while a live switch ramps, the
+/// per-node crossfade `dry + (wet - dry) * m(k)` along the lane's own ramp (#1341). The mix and the
+/// select are per lane, so banking couples the lanes' cost and never their bits.
 ///
 /// # What one block does, in order
 ///
@@ -1140,7 +1142,8 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 /// 2. Capture the dry AoSoA block into the latency shunt, if any lane can be bypassed.
 /// 3. Run the bank once with the packed spans and the per-lane offsets the effect contract
 ///    already defines (`EffectBankProcessBlock::automation_offsets`).
-/// 4. Restore the latency-matched dry signal into exactly the bypassed lanes.
+/// 4. Mix the latency-matched dry signal into exactly the bypassed or ramping lanes, each along its
+///    own crossfade (`BypassShunt::crossfade_bank`).
 ///
 /// # Partition invariance and `to_bits` identity extend to command timelines
 ///
@@ -1160,8 +1163,8 @@ pub struct LiveControlEffectBankStage {
     /// The observation queue of each lane that has one, with the lane's index, taken out of the
     /// lane at bind so that the drain loop holds each pop in its own body (decision 15, #1345 D8).
     observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]>,
-    /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
-    /// lane has a live channel (issue #1087).
+    /// One lane's staging window: the widest lane's live parameter cell count (at most the bank's
+    /// `automation_capacity`), or none when no lane has a parameter cell (issue #1087; #1611 D3).
     ///
     /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
     /// the moment it is drained, before the next lane touches the window. The bank never sees this
@@ -1173,6 +1176,9 @@ pub struct LiveControlEffectBankStage {
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
     /// slot can be bypassed: no live channel and no lane bypassed at preparation.
     shunt: Option<BypassShunt>,
+    /// This block's per-lane bypass crossfade, rewritten by the process body before the shunt
+    /// mixes (#1341 D4). Inline: a bank of at most eight lanes holds no allocation for it.
+    crossfade: BankCrossfade,
     /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
     /// plan named no observation capacity. `None` is the byte-identical unobserved path.
     observations: Option<Box<[Option<ObservationLane>]>>,
@@ -1205,11 +1211,10 @@ impl LiveControlEffectBankStage {
     /// # Errors
     ///
     /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
-    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if the
-    /// staging window is not exactly the bank's automation capacity -- the precondition of the
-    /// live drain's pairing rule -- or holds fewer spans than a lane has live parameter cells
-    /// (#1345 D4: a block stages every cell it reads, with no deferral), refused here, at bind,
-    /// rather than discovered on the render thread.
+    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if a
+    /// lane has more live parameter cells than the bank's automation capacity -- the window that
+    /// holds them would pass the cut-off the live drain's pairing rule depends on (issue #1012) --
+    /// refused here, at bind, rather than discovered on the render thread.
     pub fn new(
         bank: PreparedEffectBank,
         width: BankWidth,
@@ -1238,18 +1243,30 @@ impl LiveControlEffectBankStage {
         // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
         // channel-less -- session bypasses with no live controls attached -- holds no window at
         // all: its drain stages nothing into an empty one, and there is no twin pair for the
-        // pairing rule to protect. The window is the automation capacity per lane of the bank,
-        // which a caller may set as high as `u32::MAX`, so this is what keeps a live-control-free
-        // bypass from costing live-control staging.
-        let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
-        let capacity = if live {
-            metadata.program_key.automation_capacity as usize
-        } else {
-            0
-        };
+        // pairing rule to protect.
+        //
+        // #1611 D3: the window is what the lanes can stage, not the bank's `automation_capacity`.
+        // A lane stages at most one span per live parameter cell
+        // ([`EffectControlLane::parameter_cells`]), so the window is the widest lane's cell count,
+        // and the packed array holds one such window per lane. A prepared-target owner (the
+        // parametric EQ) has no parameter cell -- its parameters ride its targets -- so its slot
+        // holds no span storage at all, however many parameters its descriptor declares. The window
+        // never exceeds the capacity (checked here), so a staged twin pair is never cut off by the
+        // effect's `span_index < automation_capacity` limit (issue #1012), and a window that holds
+        // every cell drops none (#1345 D4).
+        let capacity = lanes
+            .iter()
+            .flatten()
+            .map(EffectControlLane::parameter_cells)
+            .max()
+            .unwrap_or(0);
+        if capacity > metadata.program_key.automation_capacity as usize {
+            return Err(RackError::AutomationWindow);
+        }
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
+        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
 
         let words = (quantum as usize)
             .checked_mul(lane_count)
@@ -1274,23 +1291,11 @@ impl LiveControlEffectBankStage {
         let designed = (0..lane_count)
             .map(|lane| processor.lane_channel_symmetry(lane))
             .collect();
-        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
-        // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
-        // `span_index < automation_capacity` cut-off; a window of any other size would let a
-        // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
-        if live {
-            EffectBankProcessBlock::check_automation_window(&staging, &metadata)
-                .map_err(|_| RackError::AutomationWindow)?;
-        }
-        // The window holds a span for every live parameter cell of every lane: a block stages
-        // each cell it reads, so none is deferred or dropped (#1345 D4).
-        if lanes
-            .iter()
-            .flatten()
-            .any(|lane| lane.check_window(staging.len()).is_err())
-        {
-            return Err(RackError::AutomationWindow);
-        }
+        // One window serves every lane: a lane's staged prefix is copied into `packed` the moment
+        // it is drained. It holds a span for every live parameter cell of every lane (it is the
+        // widest lane's cell count), so a block stages each cell it reads and none is deferred or
+        // dropped (#1345 D4); it is never above the capacity (checked above), so the effect's
+        // `span_index < automation_capacity` cut-off refuses none of them (issue #1012).
         let observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]> = lanes
             .iter_mut()
             .enumerate()
@@ -1311,6 +1316,7 @@ impl LiveControlEffectBankStage {
             staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
+            crossfade: BankCrossfade::new(),
             observations: observed.then(|| observations.into_boxed_slice()),
             samples,
             staged_spans: 0,
@@ -1344,6 +1350,13 @@ impl LiveControlEffectBankStage {
             }
         }
         (declared, armed)
+    }
+
+    /// The spans of storage this slot holds for live-control staging: one window plus the packed
+    /// array of one window per lane (#1611 D3). Zero when no lane stages a span.
+    #[must_use]
+    pub fn span_storage_len(&self) -> usize {
+        self.staging.len() + self.packed.len()
     }
 
     /// Exact engine-owned bytes this slot's observation lanes retain. Zero when unobserved.
@@ -1464,14 +1477,14 @@ impl BankStage for LiveControlEffectBankStage {
     /// [`LiveControlEffectBankStage::process`] with the bank call collapsed onto the left plane.
     ///
     /// Every other step is the dual one, in the same order and on the same words: the drain runs
-    /// before a sample is touched, the shunt captures and restores both planes, and the taps
+    /// before a sample is touched, the shunt captures and mixes both planes, and the taps
     /// publish after the bank ran. The shunt's right plane is the ungathered scratch, which is
     /// sound for exactly one reason and it is worth stating: the seam overwrites the right plane
     /// after this slot, so nothing downstream ever reads what the shunt put there. The *left*
     /// restore is the one that matters and it is the dual one.
     ///
     /// A live bypass on any lane clears the witness' `UNBYPASSED` term, so a collapsed cohort has
-    /// no bypassed lane and the restore loop is a no-op whenever this body runs at all. It is kept
+    /// no bypassed or ramping lane and the mix is a no-op whenever this body runs at all. It is kept
     /// rather than asserted away because the two facts are maintained in different places and the
     /// cheap one is the one that should not be load-bearing.
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -1587,7 +1600,7 @@ impl LiveControlEffectBankStage {
         // reader could observe.
         let any_bypassed = self.lanes[..lane_count]
             .iter()
-            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::bypassed));
+            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::needs_dry));
         // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
         //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
         //    block boundary, so the skip moves no rendered bit.
@@ -1705,27 +1718,29 @@ impl LiveControlEffectBankStage {
                 }
             }
         }
-        // 3. Latency-matched dry restore for exactly the bypassed lanes. `any_bypassed` is the
-        //    disjunction of the per-lane test below, decided before the capture; when it is false
-        //    this whole loop was already a no-op, and skipping it also proves the capture above
-        //    had no reader.
-        if let Some(shunt) = self.shunt.as_ref().filter(|_| any_bypassed) {
-            let (dry_left, dry_right) = shunt.dry();
-            for lane in 0..lane_count {
-                if !self.lanes[lane]
-                    .as_ref()
-                    .is_some_and(EffectControlLane::bypassed)
-                {
-                    continue;
-                }
-                let mut index = lane;
-                let words = frames as usize * lane_count;
-                while index < words {
-                    block.left[index] = dry_left[index];
-                    block.right[index] = dry_right[index];
-                    index += lane_count;
-                }
+        // 3. Latency-matched dry mix: each lane crossfades along its own bypass ramp, a settled
+        //    bypassed lane takes the dry words and every other lane keeps the wet ones, in one
+        //    lane-wide pass over the interleaved block (#1341 D4). `any_bypassed` is the
+        //    disjunction of `needs_dry` over the lanes, decided before the capture; when it is
+        //    false this whole step was already a no-op, and skipping it also proves the capture
+        //    above had no reader. The lanes advance by the block afterwards (#1341 D6).
+        if any_bypassed && let Some(shunt) = self.shunt.as_ref() {
+            for (lane, channel) in self.lanes[..lane_count].iter().enumerate() {
+                self.crossfade.set(
+                    lane,
+                    channel.as_ref().map_or(
+                        BankCrossfadeLane::WET,
+                        EffectControlLane::bypass_crossfade_lane,
+                    ),
+                );
             }
+            let frames = frames as usize;
+            effect_contract::match_bank_width!(self.width, |L| {
+                shunt.crossfade_bank::<L>(block.left, block.right, frames, &self.crossfade);
+            });
+        }
+        for channel in self.lanes[..lane_count].iter_mut().flatten() {
+            channel.advance_bypass_mix(block.frames);
         }
         Ok(())
     }

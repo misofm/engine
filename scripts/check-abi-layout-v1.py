@@ -85,10 +85,8 @@ COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
 ]
-RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
 RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
-RESPONSE_FIELDS = [(1, "total"), (2, "sections")]
 # Decision 12 (#1096): the track targets follow the tap rename; their codes are unchanged.
 SPECTRUM_TARGETS = [(1, "trackPostInput"), (2, "trackPostPan"), (3, "output")]
 # Decision 12 (#1096): the effect racks of the command, observation, companion and configuration
@@ -157,17 +155,11 @@ EXPORTS = [
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
-    "miso_engine_web_v1_response_close",
-    "miso_engine_web_v1_response_effect_id_capacity",
-    "miso_engine_web_v1_response_effect_id_ptr",
-    "miso_engine_web_v1_response_parameter_bytes",
-    "miso_engine_web_v1_response_parameter_capacity",
-    "miso_engine_web_v1_response_parameter_ptr",
-    "miso_engine_web_v1_response_query",
-    "miso_engine_web_v1_response_request_bytes",
-    "miso_engine_web_v1_response_request_ptr",
-    "miso_engine_web_v1_response_result_bytes",
-    "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_response_frame_close",
+    "miso_engine_web_v1_response_frame_ptr",
+    "miso_engine_web_v1_response_frame_reply_bytes",
+    "miso_engine_web_v1_response_frame_reply_ptr",
+    "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
@@ -239,9 +231,6 @@ STRUCTURES = {
     "planWatermark": 96,
     "observationSelection": 32,
     "observationResult": 96,
-    "responseRequest": 128,
-    "responseParameter": 16,
-    "responseResult": 112,
     "spectrumRequest": 40,
     "spectrumCollectionRequest": 32,
     "spectrumCollectionEntry": 24,
@@ -290,20 +279,6 @@ STATUS_WATERMARK_OFFSETS = {
     "watermarkFirstSample": 64,
     "watermarkOutcomeFlags": 72,
 }
-RESPONSE_REQUEST_FIELDS = [
-    "structSize", "abiVersion", "target", "grid", "channels", "fields", "quality", "linkMode",
-    "bypass", "effectIdBytes", "parameterCount", "points", "sampleRateHz", "quantumFrames",
-    "minimumHz", "maximumHz", "leftHpfHz", "leftLpfHz", "rightHpfHz", "rightLpfHz",
-    "configurationId", "maximumPreparedBytes", "maximumTotalStateBytes", "maximumScratchBytes",
-    "maximumAutomationSpansPerBlock", "maximumResultBytes", "reserved",
-]
-RESPONSE_PARAMETER_FIELDS = ["parameterId", "channel", "value", "reserved"]
-RESPONSE_RESULT_FIELDS = [
-    "structSize", "abiVersion", "result", "target", "channels", "fields", "points", "sectionCount",
-    "sampleRateHz", "reserved0", "configurationId", "floorDb", "bypass", "enabledLeft",
-    "enabledRight", "retainedBytes", "resultBytes", "frequenciesOffset", "totalLeftOffset",
-    "totalRightOffset", "sectionsLeftOffset", "sectionsRightOffset", "reserved",
-]
 LIVE_RESPONSE_REQUEST_FIELDS = [
     "structSize", "abiVersion", "trackIdBytes", "grid", "channels", "points", "minimumHz",
     "maximumHz", "maximumResultBytes", "reserved",
@@ -471,9 +446,6 @@ def validate(document: object) -> None:
             f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
 
     for name, expected_fields in (
-        ("responseRequest", RESPONSE_REQUEST_FIELDS),
-        ("responseParameter", RESPONSE_PARAMETER_FIELDS),
-        ("responseResult", RESPONSE_RESULT_FIELDS),
         ("spectrumRequest", SPECTRUM_REQUEST_FIELDS),
         ("spectrumCollectionRequest", SPECTRUM_COLLECTION_REQUEST_FIELDS),
         ("spectrumCollectionEntry", SPECTRUM_COLLECTION_ENTRY_FIELDS),
@@ -508,9 +480,8 @@ def validate(document: object) -> None:
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes",
         "diagnosticBytes", "defaultMeterBlocks",
-        "maximumObservationTaps", "maximumResponseEffectIdBytes", "maximumResponseParameterOverrides",
-        "maximumResponseResultBytes", "defaultMaximumMemoryBytes", "sourceRing", "responseTargets",
-        "responseGrids", "responseChannels", "responseFields", "observationChannels",
+        "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
+        "responseGrids", "responseChannels", "observationChannels",
         "observationStatuses", "liveResponseModes", "liveResponseMeanings",
         "maximumLiveResponseOwners", "maximumLiveResponseSections", "maximumLiveResponseIdBytes", "maximumLiveResponsePoints",
         "liveResponseCaptureBytes", "spectrumTargets", "spectrumChannels", "spectrumCaptureBytes",
@@ -530,10 +501,8 @@ def validate(document: object) -> None:
     require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
             "constants.wireCommandKinds reallocates a retired value-command number")
     check_positional(document, "commandReasons", COMMAND_REASONS)
-    check_named(document, "responseTargets", RESPONSE_TARGETS)
     check_named(document, "responseGrids", RESPONSE_GRIDS)
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
-    check_named(document, "responseFields", RESPONSE_FIELDS)
     check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
     check_named(document, "racks", RACKS)
     check_named(document, "liveResponseRacks", LIVE_RESPONSE_RACKS)
@@ -569,9 +538,7 @@ def validate(document: object) -> None:
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
         ("maximumObservationTaps", 16),
-        ("maximumResponseEffectIdBytes", 127),
-        ("maximumResponseParameterOverrides", 256),
-        ("maximumResponseResultBytes", 16 << 20),
+        ("maximumResponsePoints", 4096),
         ("maximumLiveResponseOwners", 256),
         ("maximumLiveResponseSections", 6),
         ("maximumLiveResponseIdBytes", 127),

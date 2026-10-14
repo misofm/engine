@@ -377,7 +377,12 @@ impl Reference {
     /// One block fed from `feed`.
     fn step_feed(&mut self, feed: &Feed) -> Vec<f32> {
         let start = self.block * self.quantum as u64;
-        let [left, right] = feed.chunk(start, self.quantum);
+        self.step_planes(feed.chunk(start, self.quantum))
+    }
+
+    /// One block fed from the given planes, which start at this block's first frame.
+    fn step_planes(&mut self, [left, right]: [Vec<f32>; 2]) -> Vec<f32> {
+        let start = self.block * self.quantum as u64;
         self.sources
             .submit(
                 SOURCE,
@@ -844,6 +849,25 @@ impl Rig {
     /// call.
     fn step_feed(&mut self, feed: &Feed) -> (Vec<f32>, bench_support::alloc::Counters) {
         let [left, right] = feed.chunk(self.fed, self.quantum);
+        submit_c(
+            self.session,
+            self.generation,
+            self.fed,
+            self.rate,
+            &left,
+            &right,
+            false,
+        );
+        self.fed += self.quantum as u64;
+        self.render_counted()
+    }
+
+    /// One block fed the two planes `[left, right]`, with the calling thread's allocator events
+    /// inside the `render` call.
+    fn step_planes_counted(
+        &mut self,
+        [left, right]: [Vec<f32>; 2],
+    ) -> (Vec<f32>, bench_support::alloc::Counters) {
         submit_c(
             self.session,
             self.generation,
@@ -2178,7 +2202,7 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_n
 /// so cannot see it.
 #[test]
 fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() {
-    let mut children = compile_children(SESSION, limits(), None).expect("children");
+    let mut children = compile_children(SESSION, limits()).expect("children");
     let mut pcm = [0.0_f32; 256];
     children
         .plan
@@ -2361,12 +2385,11 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
             SessionEdit::UpsertAutomation {
                 automation: session::Automation {
                     id: id("fader-ride"),
-                    target: session::AutomationTarget {
-                        entity_id: model.tracks[0].id.clone(),
-                        rack: session::RackName::Builtins,
-                        effect_id: id(session::BUILTIN_AUTOMATION_EFFECT_ID),
-                        parameter_id: 5,
-                        channel: session::ParameterChannel::Both,
+                    target: session::ControlAddress {
+                        owner: session::Owner::Strip(model.tracks[0].id.clone()),
+                        section: session::Section::Builtins,
+                        control: 5,
+                        lane: session::ParameterChannel::Both,
                     },
                     segments: vec![session::AutomationSegment {
                         shape: session::AutomationShape::Linear,
@@ -2766,7 +2789,6 @@ impl LaneReference {
             &caps,
             &HostLiveControlRequest::default(),
             HostLiveLanes::ALL,
-            None,
             &host_core::LiveValuesSuperseded::default(),
         )
         .expect("lane prepare");
@@ -3098,7 +3120,7 @@ fn eq_session(sample_rate_hz: u32) -> String {
 #[test]
 fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_and_input_lanes() {
     let document = eq_session(48_000);
-    let children = compile_children(&document, limits(), None).expect("EQ session");
+    let children = compile_children(&document, limits()).expect("EQ session");
     let providers = children.session.test_providers();
     let model = parse_session_json(&document).expect("EQ session parses");
     let strips = model.tracks.len() + model.submixes.len();
@@ -3529,6 +3551,7 @@ fn live_bypass_pcm_shape(track_count: usize, sample_rate_hz: u32) {
     let model = parse_session_json(&document).expect("model");
     let first = model.tracks[0].id.as_str();
     let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let ramp = model.control_smoothing_samples().mute;
     let mut rig = Rig::new(&document);
     let latency = rig.latency();
     let quantum = rig.quantum;
@@ -3555,7 +3578,9 @@ fn live_bypass_pcm_shape(track_count: usize, sample_rate_hz: u32) {
             "{label}: bypass {bypass} commits one revision and prepares no plan"
         );
         let committed = rig.snapshot();
-        let settled = settle(&mut rig, window(latency, 0, quantum), 3);
+        // The switch crossfades over the session's mute ramp (#1341): the live plan equals the
+        // rebuild from the first block the ramp and the latency leave behind.
+        let settled = settle(&mut rig, window(latency, ramp, quantum), 3);
         let rebuilt = Reference::run(&committed, rig.block);
         let unedited = Reference::run(&document, rig.block);
         for (block, live) in settled {
@@ -3587,6 +3612,231 @@ fn live_effect_bypass_edits_render_like_a_rebuild() {
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
         for track_count in [1, 10] {
             live_bypass_pcm_shape(track_count, sample_rate_hz);
+        }
+    }
+}
+
+/// A loud noise source, different on the two lanes, that the strip's input high-pass leaves alone
+/// (`source_sample` is nearly DC, which it removes): a hash of the frame, so every target and every
+/// call gives the same words.
+fn noise_chunk(start: u64, frames: usize) -> [Vec<f32>; 2] {
+    [(0_u64, 0.9_f32), (1, -0.8)].map(|(lane, gain)| {
+        (0..frames as u64)
+            .map(|offset| {
+                let mut x = (start + offset).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (lane << 59);
+                x ^= x >> 29;
+                x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                x ^= x >> 32;
+                gain * ((x >> 40) as f32 / (1_u64 << 23) as f32 - 1.0)
+            })
+            .collect()
+    })
+}
+
+/// The one-track session with one native effect insert and nothing after it that is not unity, so
+/// the effect's output reaches the master untouched (a lone insert is a remainder, which renders
+/// per node), and the same session with the insert baked bypassed: the control a live bypass must
+/// land on (#1341 gate 5).
+fn bypass_crossfade_documents(
+    effect_id: &str,
+    control_smoothing: Option<ControlSmoothing>,
+    console: bool,
+) -> (String, String) {
+    let donor = parse_session_json(&long_session(1, 48_000)).expect("session");
+    let mut effect = donor.lower_track(&donor.tracks[0]).pre_insert[0].clone();
+    effect.id = StableId::parse("fx").expect("effect ID");
+    effect.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse(effect_id).expect("effect"),
+    };
+    effect.params.clear();
+    effect.bypass = false;
+    let mut model = super::tests::stateless_session(48_000);
+    model.sources[0].frames = SOURCE_FRAMES;
+    model.control_smoothing = control_smoothing;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let builtins = &mut model.tracks[0].builtins;
+    builtins.left.lpf_hz = 20_000.0;
+    builtins.right.lpf_hz = 20_000.0;
+    if console {
+        // A console slot always banks (a lone lane in a padded bank), where the insert is a
+        // remainder that renders per node: the same crossfade must come out of both (#1341a2).
+        model.tracks[0].console.push(session::ConsoleEntry {
+            slot: effect.id.clone(),
+            bypass: false,
+            params: Vec::new(),
+        });
+        model.console.post_insert.push(session::ConsoleSlot {
+            slot: effect.id.clone(),
+            identity: effect.identity.clone(),
+            quality: effect.quality,
+            link_mode: effect.link_mode,
+        });
+    } else {
+        model.tracks[0].inserts.effects.push(effect);
+    }
+    let live = session::canonical_session_json(&model).expect("canonical");
+    if console {
+        model.tracks[0].console[0].bypass = true;
+    } else {
+        model.tracks[0].inserts.effects[0].bypass = true;
+    }
+    let bypassed = session::canonical_session_json(&model).expect("canonical bypassed");
+    (live, bypassed)
+}
+
+/// Gate 5 of #1341. A bypass transaction on a playing session crossfades the per-node effect over
+/// the session's `mute_ms` ramp (480 frames at 48 kHz, so the ramp ends inside a block) and lands
+/// on a control booted bypassed, and a lift crossfades back and lands on the wet control. The
+/// effect sits once as an insert (a lone track's remainder, rendered per node) and once as a console
+/// slot (always banked): both render the one law. Frame `k`
+/// of the ramp (counted from the first frame of the block that drains the commit, from 1) is
+/// `D + (W - D) * m(k)` with `m` the indexed ramp law from `1` to `0` (the bypass) or `0` to `1`
+/// (the lift), `W` the output of a control that is never bypassed and `D` that of a control booted
+/// bypassed; frames before the commit equal the booted state (W, or D for a lift) and frames from
+/// the ramp's end equal the target (D, or W for a lift), bit for bit.
+/// The ramp blocks render without one allocation (statics warmed). A zero-latency effect (the
+/// compressor) and one with latency (the soft clip, 31 samples) run; a session whose `mute_ms` is 0
+/// steps at the commit's first block.
+///
+/// Test value: red if the C ABI producer forgets the session ramp (the toggle steps, so the first
+/// block is already D), if the record's ramp is another row's (the fader's or pan's length), if a
+/// ramp block allocates, or if a lift ramps from the wrong end or lands off W (the zero-latency lift
+/// is the one the review of #1341a1 found uncovered through the real runtime).
+#[test]
+fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control() {
+    bench_support::alloc::assert_installed();
+    for effect_id in ["miso.compressor", "miso.soft-clip"] {
+        for hard in [false, true] {
+            for lift in [false, true] {
+                for console in [false, true] {
+                    let (document, bypassed_document) = bypass_crossfade_documents(
+                        effect_id,
+                        hard.then_some(HARD_SWITCH).flatten(),
+                        console,
+                    );
+                    let model = parse_session_json(&document).expect("model");
+                    let ramp = model.control_smoothing_samples().mute;
+                    assert_eq!(
+                        ramp,
+                        if hard { 0 } else { 480 },
+                        "10 ms at 48 kHz, or the hard switch"
+                    );
+                    let first = model.tracks[0].id.as_str();
+                    let rack = if console {
+                        session::RackName::Console
+                    } else {
+                        session::RackName::Inserts
+                    };
+                    let mut rig = Rig::new(if lift { &bypassed_document } else { &document });
+                    let quantum = rig.quantum;
+                    let record_block = 6_u64;
+                    let blocks = record_block + 14;
+                    let run = |document: &str| {
+                        let mut reference = Reference::new(document);
+                        (0..blocks)
+                            .map(|block| {
+                                reference.step_planes(noise_chunk(block * quantum as u64, quantum))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let wet = run(&document);
+                    let dry = run(&bypassed_document);
+                    // What the session renders before the commit, and after the ramp.
+                    let (booted, landed) = if lift { (&dry, &wet) } else { (&wet, &dry) };
+                    let (from, to) = if lift { (0.0, 1.0) } else { (1.0, 0.0) };
+                    assert!(
+                        wet.iter()
+                            .zip(&dry)
+                            .skip(record_block as usize)
+                            .any(|(w, d)| bits(w) != bits(d)),
+                        "{effect_id}: the bypassed control differs from the wet one"
+                    );
+                    for block in 0..record_block {
+                        let planes = noise_chunk(rig.fed, quantum);
+                        assert_eq!(
+                            bits(&rig.step_planes_counted(planes).0),
+                            bits(&booted[block as usize]),
+                            "warm-up {block}"
+                        );
+                    }
+                    let (revision, _, epoch, _) = rig.summary();
+                    assert_eq!(
+                        rig.apply(&[bypass_edit(first, rack, "fx", !lift)]),
+                        crate::RESULT_OK
+                    );
+                    assert_eq!(
+                        (rig.summary().0, rig.summary().2, rig.summary().3),
+                        (revision + 1, epoch, 0),
+                        "one live revision and no plan prepared"
+                    );
+                    let mut ramping = 0_usize;
+                    let mut between = 0_usize;
+                    for block in record_block..blocks {
+                        let planes = noise_chunk(rig.fed, quantum);
+                        let (live, used) = rig.step_planes_counted(planes);
+                        assert_eq!(
+                            (used.allocations, used.deallocations),
+                            (0, 0),
+                            "{effect_id}: block {block} allocated or freed"
+                        );
+                        let peak = [&wet, &dry]
+                            .iter()
+                            .flat_map(|control| control[block as usize][quantum..].iter())
+                            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+                        for (index, sample) in live.iter().enumerate().skip(quantum) {
+                            // The fixture's pan sends both lanes to the right output plane; the left plane
+                            // holds only the pan's leakage, so the law is read on the right one.
+                            let frame = index % quantum;
+                            let (w, d) = (wet[block as usize][index], dry[block as usize][index]);
+                            let k = (block - record_block) * quantum as u64 + frame as u64 + 1;
+                            let what = format!(
+                                "{effect_id}, mute_ms {}, {}, {}: block {block} sample {index}",
+                                if hard { 0 } else { 10 },
+                                if console { "console slot" } else { "insert" },
+                                if lift { "lift" } else { "bypass" }
+                            );
+                            if k >= u64::from(ramp) {
+                                assert_eq!(
+                                    sample.to_bits(),
+                                    landed[block as usize][index].to_bits(),
+                                    "{what}: settled on the control"
+                                );
+                                continue;
+                            }
+                            ramping += 1;
+                            let m = lane::kernels::IndexedRamp::new(
+                                [from, 0.0, 0.0, 0.0],
+                                [to, 0.0, 0.0, 0.0],
+                                ramp,
+                            )
+                            .coefficients_at(k as u32)[0];
+                            // The strip's own gain stages follow the effect and round (the pan sums the
+                            // two lanes), so the law holds to a few ulps of the block's peak here
+                            // (`bypass_shunt_identity` pins it exactly at the effect's output). An
+                            // off-by-one frame moves a sample by `(W - D) / 480`, over twenty times this
+                            // bound wherever the two controls differ audibly.
+                            let tolerance = 64.0 * f32::EPSILON * peak;
+                            assert!(
+                                (sample - (d + (w - d) * m)).abs() <= tolerance,
+                                "{what}: {sample:e} is not D + (W - D) * m with D {d:e}, W {w:e}, m {m}"
+                            );
+                            between += usize::from(
+                                (sample - w).abs() > tolerance && (sample - d).abs() > tolerance,
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        ramping,
+                        (ramp as usize).saturating_sub(1),
+                        "{effect_id}: ramp frames"
+                    );
+                    assert!(
+                        between >= ramping / 2,
+                        "{effect_id}: the ramp is audibly between the wet and the dry control"
+                    );
+                }
+            }
         }
     }
 }
@@ -3782,7 +4032,7 @@ fn one_transaction_with_more_cells_than_the_old_queue_held_stays_live() {
         multiband.bypass = false;
         model.tracks[0].inserts.effects.push(multiband);
     });
-    let descriptor = compile_children(&document, limits(), None)
+    let descriptor = compile_children(&document, limits())
         .expect("multiband session")
         .session
         .test_providers()
@@ -3882,7 +4132,10 @@ fn a_bypass_lifted_beside_a_parameter_renders_like_the_browsers_lane() {
     use session::{ParameterChannel, ParameterUnit, RackName};
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
         let label = format!("{sample_rate_hz} Hz");
+        // The claim is the lane's drain order, and the reference lane is pushed bare `Bypass`
+        // records, which step, so the session authors the hard switch (#1341 hazards).
         let document = with_model(&effect_session(10, sample_rate_hz), |model| {
+            model.control_smoothing = HARD_SWITCH;
             let compressor = model.tracks[0]
                 .inserts
                 .effects
@@ -3968,7 +4221,12 @@ fn live_eq_bypass_pcm_shape(sample_rate_hz: u32) {
     use effect_contract::ParameterChannel::Left;
     use session::{ParameterChannel, ParameterUnit, RackName};
     let label = format!("nine tracks at {sample_rate_hz} Hz");
-    let document = eq_session(sample_rate_hz);
+    // The claim is the drain order beside the owner's transaction, and the reference lane is
+    // pushed a bare `Bypass` record, which steps, so the session authors the hard switch (#1341
+    // hazards). The console EQ banks, and a bank crossfades as a node does (#1341a2).
+    let document = with_model(&eq_session(sample_rate_hz), |model| {
+        model.control_smoothing = HARD_SWITCH;
+    });
     let mut rig = Rig::new(&document);
     let mut lanes = LaneReference::new(&document);
     for block in 0..window(rig.latency(), 0, rig.quantum) {
@@ -4105,8 +4363,8 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
 
 // Issue #1335: stored automation on an effect parameter the plan keeps prepared.
 
-/// An `UpsertAutomation` of one step on `eq_session`'s `eq0` console EQ, on a `(parameter_id,
-/// channel)` that `eq0` declares.
+/// An `UpsertAutomation` of one step on `eq_session`'s `eq0` console EQ, on the row `parameter_id`
+/// at `channel`.
 fn eq_automation_edit(
     parameter_id: u32,
     channel: session::ParameterChannel,
@@ -4116,12 +4374,11 @@ fn eq_automation_edit(
     SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("eq-ride"),
-            target: session::AutomationTarget {
-                entity_id: id("eq0"),
-                rack: session::RackName::Console,
-                effect_id: id("eq"),
-                parameter_id,
-                channel,
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(id("eq0")),
+                section: session::Section::Console(id("eq")),
+                control: parameter_id,
+                lane: channel,
             },
             segments: vec![session::AutomationSegment {
                 shape: session::AutomationShape::Step,
@@ -4137,7 +4394,7 @@ fn eq_automation_edit(
 
 /// #1335 gate 3. On a playing engine, a transaction that only adds an automation on the console
 /// EQ's `band-1-enabled` (`automation_rate` `None`) is refused with the compile rejection a
-/// rebuild's preparation gives (`effect.automation.rate`): the revision, the committed model and
+/// rebuild's preparation gives (`control.automation.target`): the revision, the committed model and
 /// the reliable lane do not move, no candidate is prepared, and the following blocks are
 /// bit-identical to an engine that never received it. The same transaction on the block-rate
 /// `band-1-gain` commits live, as #1260 D2 made it.
@@ -4163,7 +4420,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     let mut rejected = parse_session_json(&document).expect("model");
     protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
     let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
-    let Err(failure) = compile_children(&rejected, limits(), None) else {
+    let Err(failure) = compile_children(&rejected, limits()) else {
         panic!("an automation on band-1-enabled does not prepare")
     };
     assert_eq!(
@@ -4172,7 +4429,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
         "the refusal is preparation's diagnostic"
     );
     assert!(
-        String::from_utf8_lossy(&failure.diagnostics).contains("effect.automation.rate"),
+        String::from_utf8_lossy(&failure.diagnostics).contains("control.automation.target"),
         "{}",
         String::from_utf8_lossy(&failure.diagnostics)
     );
@@ -4389,6 +4646,18 @@ fn the_c_abi_lists_every_control_of_the_session_in_pages() {
             "{kind:?}"
         );
     }
+
+    // A bypass crossfades over the session's `mute_ms` and takes no length of its own (#1341): the
+    // row lists that ramp as its default and names no ramp row.
+    let bypass = whole
+        .iter()
+        .filter(|entry| entry.address.section == protocol::ControlSection::Inserts)
+        .find_map(|entry| control_of(entry).filter(|row| row.name == "bypass"))
+        .expect("an insert's bypass row");
+    assert_eq!(
+        (bypass.ramp_row, bypass.default_ramp_samples),
+        (None, model.control_smoothing_samples().mute)
+    );
 
     // The state poll reports the same values for the same handles.
     let state = control_state_all_c(rig.session, &mut rig.request, 256);
@@ -6084,6 +6353,9 @@ mod set_control {
     fn submix_effects_take_live_edits() {
         use effect_contract::ParameterChannel::{Left, Right};
         let document = with_bus_strip(&effect_session(10, 48_000), |model, submix| {
+            // The reference lane is pushed bare `Bypass` records, which step, so the session
+            // authors the hard switch (#1341 hazards).
+            model.control_smoothing = HARD_SWITCH;
             let template = model.tracks[0].inserts.effects[0].clone();
             let mut compressor = template;
             compressor.id = id("bcomp");
@@ -6555,7 +6827,7 @@ mod set_control {
         let over = with_model(&document, |model| {
             model.vcas.push(vca_of("third", &["eq1"]))
         });
-        let Err(failure) = compile_children(&over, capped, None) else {
+        let Err(failure) = compile_children(&over, capped) else {
             panic!("a third VCA does not prepare under a cap of two")
         };
         assert_eq!(rig.last_error(), failure.diagnostics);
@@ -6829,7 +7101,7 @@ mod set_control {
         assert_eq!(rig.apply(&adds), crate::RESULT_OK);
         assert_eq!(rig.summary().3, 0, "the adds are live");
         assert_eq!(retained(&rig), before + growth);
-        let rebuilt = compile_children(&grown, tight, None)
+        let rebuilt = compile_children(&grown, tight)
             .unwrap_or_else(|_| panic!("the grown session compiles"))
             .plan
             .resources()

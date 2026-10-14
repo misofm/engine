@@ -26,6 +26,7 @@ Evidence:
   `sdk-spectrum-continuous` gate, which is *Name the failed predicate and bound the waits of the
   browser continuous-spectrum gate by a deadline* (#1248).
 - It passed when the failed job was re-run, and in every local three-browser run.
+- It failed again in Chromium on PR #1625 (controls batch 9, head `097b9151e`) after passing on that PR's first run and in two local three-browser runs on the same code; batch 9 changed nothing the probe reaches (the qualification page's spectrum code and the spectrum service are unchanged by it).
 - The probe's code has been unchanged since `756ed813`.
 
 ## Smallest closable slice

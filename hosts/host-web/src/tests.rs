@@ -117,7 +117,7 @@ struct DenseInvalidAutomationDocument {
 fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDocument {
     const BASE: &str = include_str!("../tests/browser-v1/session.json");
     const EMPTY_AUTOMATION: &str = "\"automation\": []";
-    const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"entity_id":"track","rack":"builtins","effect_id":"strip","parameter_id":5,"channel":"both"},"segments":["#;
+    const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"owner":"strip","owner_id":"track","section":"builtins","control":5,"lane":"both"},"segments":["#;
     const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
     const FOOTER: &str = "]}]";
 
@@ -192,7 +192,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
-    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 25);
+    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 20);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
     assert_eq!(
@@ -5755,9 +5755,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                 );
             };
 
-        let mut boot_cache = control_plane::InputBoundCache::new();
         let (mut boot, boot_handles) = preparer
-            .prepare(&compiled, &caps, lanes, None, &mut boot_cache, &superseded)
+            .prepare(&compiled, &caps, lanes, None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
         check(&mut boot, &boot_handles, "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
@@ -5813,16 +5812,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             edit_ramps: &edit_ramps,
             monitor: host_core::MonitorBase::NONE,
         };
-        let mut successor_cache = control_plane::InputBoundCache::new();
         let (mut successor, successor_handles) = preparer
-            .prepare(
-                &compiled,
-                &caps,
-                lanes,
-                Some(base),
-                &mut successor_cache,
-                &superseded,
-            )
+            .prepare(&compiled, &caps, lanes, Some(base), &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
         assert!(

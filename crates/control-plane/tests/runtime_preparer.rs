@@ -10,8 +10,8 @@
 use std::sync::{Arc, Mutex};
 
 use control_plane::{
-    CompiledChildren, ControlAdapter, ControlLimits, InputBoundCache, PlanResources,
-    RuntimePreparer, compile_children,
+    CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
+    compile_children,
 };
 use host_core::{
     CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
@@ -52,29 +52,15 @@ impl RuntimePreparer for CountingPreparer {
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
         successor: Option<SuccessorBase<'_>>,
-        bound_cache: &mut InputBoundCache<'_>,
         superseded: &LiveValuesSuperseded,
     ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
         let live = HostLiveControlRequest::default();
         let base_inventory = successor.as_ref().map(|base| base.inventory.clone());
         let prepared = match successor {
             Some(base) => prepare_host_runtime_with_live_lanes_successor(
-                compiled,
-                caps,
-                &live,
-                lanes,
-                base,
-                Some(bound_cache),
-                superseded,
+                compiled, caps, &live, lanes, base, superseded,
             ),
-            None => prepare_host_runtime_with_live_lanes(
-                compiled,
-                caps,
-                &live,
-                lanes,
-                Some(bound_cache),
-                superseded,
-            ),
+            None => prepare_host_runtime_with_live_lanes(compiled, caps, &live, lanes, superseded),
         }?;
         let mut calls = self.0.lock().expect("calls");
         calls.seen.push(base_inventory);
@@ -161,7 +147,6 @@ fn the_session_prepares_through_its_preparer_at_boot_and_for_a_structural_edit()
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     )
     .expect("boot compile");
     {
@@ -202,7 +187,6 @@ fn a_refused_shape_never_reaches_the_preparer() {
         SESSION,
         limits(1_000),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     );
     assert!(
         refused.is_err(),

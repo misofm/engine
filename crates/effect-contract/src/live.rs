@@ -24,7 +24,7 @@
 //! replaced before any snapshot covered them are added to the session's `live_values_superseded`
 //! (`CellReader::read_counted`). One lane holds
 //!
-//! - one **bypass** cell (one word);
+//! - one **bypass** cell (two words: the bypass and the crossfade ramp that carries it, #1341);
 //! - one **parameter** cell per `(parameter_index, channel)` of every `Block`-rate parameter: a
 //!   `Shared` parameter has one `Both` cell, a `PerLane` one a `Left` and a `Right` cell (one
 //!   word, the value's bits). A lane whose effect owns prepared targets (the parametric EQ) has
@@ -79,7 +79,10 @@ use engine::realtime::{
     QueueGeneration, SharedAllocation, bounded_spsc, bounded_spsc_retained_payload,
     observation_slot_retained_bytes,
 };
-use lane::kernels::pdc_delay_block;
+use lane::Lane;
+use lane::kernels::{
+    FRAME_INDEX_OFFSETS, INDEXED_RAMP_LENGTH_MAXIMUM, IndexedRamp, pdc_delay_block,
+};
 use std::sync::Arc;
 
 use crate::{
@@ -128,29 +131,67 @@ pub enum EffectControlRecord {
         /// Render blocks per published window, or `0` for the plan's default.
         window_blocks: u32,
     },
-    /// Set this instance's live bypass.
+    /// Set this instance's live bypass as a **step**: the crossfade ramp is zero samples.
     ///
     /// Bypass is not a parameter and has no span: it is applied by the rack's latency-preserving
     /// shunt (see [`BypassShunt`]), never by the effect, because
     /// [`PreparedEffectMetadata::bypass`](crate::PreparedEffectMetadata) is baked into the
     /// program key and a bank's lanes must be able to disagree about it.
+    ///
+    /// A host that crossfades the switch over the session's ramp writes a [`BypassSwitch`] with
+    /// [`EffectCellWriter::write_bypass`] instead; this record is the same write with
+    /// `ramp_samples == 0`. The control plane writes the pair, so a host that edits through the core
+    /// (the C ABI and the browser alike) always crossfades; a bare record is for a host that drives
+    /// the lane directly.
     Bypass(bool),
 }
 
-/// Marks a parameter that has no live cell in [`EffectLaneShape::first`].
-const NOT_LIVE: u32 = u32::MAX;
-
-/// One live parameter cell: the `(parameter_index, channel)` it holds.
+/// A live bypass and the crossfade ramp that carries it: the two words of the bypass cell, written
+/// and drained as one unit (decision 15, D15-2; #1341 D1).
+///
+/// The render lane crossfades linearly between the effect's wet output and its latency-matched dry
+/// signal over `ramp_samples` frames, on the [`IndexedRamp`] law; `0` is a step, which renders the
+/// whole-block select of an un-ramped bypass. A host fills it from the session's mute ramp
+/// (`LiveRamps::mute_samples`); the bypass is the one live row with no per-edit length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParameterCell {
-    parameter_index: u32,
-    channel: ParameterChannel,
+pub struct BypassSwitch {
+    /// The bypass the lane reaches when the ramp ends.
+    pub bypassed: bool,
+    /// The ramp's length in frames, at most [`INDEXED_RAMP_LENGTH_MAXIMUM`]; `0` is a step.
+    pub ramp_samples: u32,
+}
+
+impl BypassSwitch {
+    /// A bypass change that takes effect in one step.
+    #[must_use]
+    pub const fn step(bypassed: bool) -> Self {
+        Self {
+            bypassed,
+            ramp_samples: 0,
+        }
+    }
+
+    /// Whether a cell may hold this switch: its ramp fits the indexed ramp law.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal::Ramp`] when `ramp_samples` exceeds [`INDEXED_RAMP_LENGTH_MAXIMUM`].
+    pub const fn check(&self) -> Result<(), EffectWriteRefusal> {
+        if self.ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+            Err(EffectWriteRefusal::Ramp)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// One drain unit of the parameter cells: a `Shared` parameter's one `Both` cell, or a `PerLane`
 /// parameter's `Left` cell with its `Right` twin at `first + 1`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ParameterGroup {
+    /// The descriptor's parameter index, strictly increasing along the shape's groups.
+    parameter_index: u32,
+    /// The group's first parameter cell.
     first: u32,
     pair: bool,
 }
@@ -160,13 +201,15 @@ struct ParameterGroup {
 ///
 /// Cell indices run bypass (`0`), the parameter cells (`1..=P`), then the target cells (`1 + P ..`,
 /// slot-major, `Left` before `Right`).
+///
+/// The shape is sized by the effect's live parameters alone (#1611 D2): one 12-byte group per live
+/// parameter, found by binary search on the parameter index, with no table as long as the last live
+/// index and no record per cell. The lookup runs on the control thread; render walks the groups.
 #[derive(Debug, Eq, PartialEq)]
 pub struct EffectLaneShape {
-    cells: Box<[ParameterCell]>,
     groups: Box<[ParameterGroup]>,
-    /// The first parameter cell of each descriptor parameter up to the last live one, or
-    /// [`NOT_LIVE`].
-    first: Box<[u32]>,
+    /// The parameter cells of all groups: one per `Shared` group, two per `PerLane` one.
+    parameter_cells: u32,
     target_slots: usize,
 }
 
@@ -184,48 +227,28 @@ impl EffectLaneShape {
         live: impl IntoIterator<Item = (u32, ParameterChannelPolicy)>,
         target_slots: usize,
     ) -> Self {
-        let mut cells = Vec::new();
         let mut groups = Vec::new();
-        let mut firsts: Vec<(u32, u32)> = Vec::new();
         let mut previous: Option<u32> = None;
+        let mut parameter_cells = 0_u32;
         for (parameter_index, policy) in live {
             assert!(
                 previous.is_none_or(|previous| parameter_index > previous),
                 "live parameters are strictly increasing in the parameter index"
             );
             previous = Some(parameter_index);
-            let first = u32::try_from(cells.len()).expect("a lane's parameter cells fit u32");
-            firsts.push((parameter_index, first));
-            match policy {
-                ParameterChannelPolicy::Shared => {
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Both,
-                    });
-                    groups.push(ParameterGroup { first, pair: false });
-                }
-                ParameterChannelPolicy::PerLane => {
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Left,
-                    });
-                    cells.push(ParameterCell {
-                        parameter_index,
-                        channel: ParameterChannel::Right,
-                    });
-                    groups.push(ParameterGroup { first, pair: true });
-                }
-            }
-        }
-        let table = firsts.last().map_or(0, |(index, _)| *index as usize + 1);
-        let mut first = vec![NOT_LIVE; table];
-        for (parameter_index, cell) in firsts {
-            first[parameter_index as usize] = cell;
+            let pair = policy == ParameterChannelPolicy::PerLane;
+            groups.push(ParameterGroup {
+                parameter_index,
+                first: parameter_cells,
+                pair,
+            });
+            parameter_cells = parameter_cells
+                .checked_add(if pair { 2 } else { 1 })
+                .expect("a lane's parameter cells fit u32");
         }
         Self {
-            cells: cells.into_boxed_slice(),
             groups: groups.into_boxed_slice(),
-            first: first.into_boxed_slice(),
+            parameter_cells,
             target_slots,
         }
     }
@@ -259,7 +282,7 @@ impl EffectLaneShape {
     /// The parameter cells this lane holds: the most spans a block stages.
     #[must_use]
     pub fn parameter_cells(&self) -> usize {
-        self.cells.len()
+        self.parameter_cells as usize
     }
 
     /// The target slots this lane holds cells for (`0` for an effect without prepared targets).
@@ -270,12 +293,12 @@ impl EffectLaneShape {
 
     /// Every cell of the lane: bypass, parameters and targets. Also the dirty bit count.
     fn cell_count(&self) -> usize {
-        1 + self.cells.len() + 2 * self.target_slots
+        1 + self.parameter_cells() + 2 * self.target_slots
     }
 
     /// The dirty bit (and cell index) of target cell `index`.
     fn target_bit(&self, index: usize) -> usize {
-        1 + self.cells.len() + index
+        1 + self.parameter_cells() + index
     }
 
     /// The parameter cell of `(parameter_index, channel)`, or why there is none.
@@ -284,13 +307,13 @@ impl EffectLaneShape {
         parameter_index: u32,
         channel: ParameterChannel,
     ) -> Result<usize, EffectWriteRefusal> {
-        let first = *self
-            .first
-            .get(parameter_index as usize)
-            .filter(|first| **first != NOT_LIVE)
-            .ok_or(EffectWriteRefusal::NotLive)? as usize;
-        let paired = self.cells[first].channel == ParameterChannel::Left;
-        match (paired, channel) {
+        let group = self
+            .groups
+            .binary_search_by_key(&parameter_index, |group| group.parameter_index)
+            .map(|position| self.groups[position])
+            .map_err(|_| EffectWriteRefusal::NotLive)?;
+        let first = group.first as usize;
+        match (group.pair, channel) {
             (false, ParameterChannel::Both) | (true, ParameterChannel::Left) => Ok(first),
             (true, ParameterChannel::Right) => Ok(first + 1),
             _ => Err(EffectWriteRefusal::Channel),
@@ -332,6 +355,8 @@ pub enum EffectWriteRefusal {
     /// The record is an observation subscription, which the queue takes
     /// ([`EffectCellWriter::try_push_observe`]).
     Observe,
+    /// A bypass switch's ramp is longer than [`INDEXED_RAMP_LENGTH_MAXIMUM`].
+    Ramp,
 }
 
 /// Why an observation subscription was not queued. Nothing was queued.
@@ -348,7 +373,7 @@ pub enum ObservePushError {
 /// dirty words.
 struct EffectCells {
     shape: EffectLaneShape,
-    bypass: LatestCell<1>,
+    bypass: LatestCell<2>,
     parameters: Box<[LatestCell<1>]>,
     targets: Box<[LatestCell<PREPARED_EFFECT_TARGET_WORDS>]>,
     /// One word per 64 cells.
@@ -398,7 +423,8 @@ impl EffectLaneResources {
 
 /// Where a record lands on a lane, with the words it writes there.
 enum Address {
-    Bypass(bool),
+    /// The bypass cell and its two words: the bypass and the ramp.
+    Bypass(BypassSwitch),
     /// A parameter cell and the value's bits.
     Parameter(usize, u32),
     /// The first and last target cell of a target (a `Both` target addresses two) and its words.
@@ -412,7 +438,7 @@ enum Address {
 /// that.
 pub struct EffectCellWriter {
     cells: Arc<EffectCells>,
-    bypass: CellWriter<1>,
+    bypass: CellWriter<2>,
     parameters: Box<[CellWriter<1>]>,
     targets: Box<[CellWriter<PREPARED_EFFECT_TARGET_WORDS>]>,
     observe: Option<Producer<EffectControlRecord>>,
@@ -442,7 +468,7 @@ impl EffectCellWriter {
                 };
                 Ok(Address::Targets(first, last, target.words))
             }
-            EffectControlRecord::Bypass(bypass) => Ok(Address::Bypass(bypass)),
+            EffectControlRecord::Bypass(bypass) => Ok(Address::Bypass(BypassSwitch::step(bypass))),
             EffectControlRecord::Observe { .. } => Err(EffectWriteRefusal::Observe),
         }
     }
@@ -472,13 +498,13 @@ impl EffectCellWriter {
     ) -> Result<(), EffectWriteRefusal> {
         let cells = &*self.cells;
         match self.address(&record)? {
-            Address::Bypass(bypass) => {
+            Address::Bypass(switch) => {
                 self.bypass.write(
                     &cells.bypass,
                     &cells.dirty[0],
                     0,
                     stamp,
-                    [u32::from(bypass)],
+                    [u32::from(switch.bypassed), switch.ramp_samples],
                 );
             }
             Address::Parameter(index, bits) => {
@@ -504,6 +530,31 @@ impl EffectCellWriter {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Write `switch` as the newest value of the bypass cell, stamped with the revision of the
+    /// transaction that commits it: the bypass and the ramp that carries it, as one unit.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal::Ramp`], with nothing written, when the ramp is longer than
+    /// [`INDEXED_RAMP_LENGTH_MAXIMUM`]. The caller has checked the switch ([`BypassSwitch::check`])
+    /// before the first write of its transaction.
+    pub fn write_bypass(
+        &mut self,
+        stamp: LiveStamp<'_>,
+        switch: BypassSwitch,
+    ) -> Result<(), EffectWriteRefusal> {
+        switch.check()?;
+        let cells = &*self.cells;
+        self.bypass.write(
+            &cells.bypass,
+            &cells.dirty[0],
+            0,
+            stamp,
+            [u32::from(switch.bypassed), switch.ramp_samples],
+        );
         Ok(())
     }
 
@@ -670,6 +721,8 @@ pub fn effect_control_lane(
         staged_targets: 0,
         observe: consumer,
         bypass,
+        mix: settled_mix(bypass),
+        mix_position: 0,
         symmetry,
     };
     Some((writer, lane))
@@ -712,8 +765,15 @@ pub struct EffectControlLane {
     /// The observation queue, if the lane has one and a rack has not taken it
     /// ([`Self::take_observe_queue`]).
     observe: Option<Consumer<EffectControlRecord>>,
-    /// Live bypass state, retained across blocks so a rendered block always knows it.
+    /// Live bypass target, retained across blocks so a rendered block always knows it. While a
+    /// crossfade runs, the lane is moving toward this state.
     bypass: bool,
+    /// The wet mix `m` (`1` wet, `0` dry) as an indexed ramp that uses word 0: settled at the
+    /// bypass target, or running from the mix the last record found toward it (#1341 D2).
+    mix: IndexedRamp,
+    /// Ramp frames rendered since the ramp started, saturated at the ramp's length. The ramp is
+    /// settled exactly when it has reached the length.
+    mix_position: u32,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
     /// is, and for the same reason: the terms describe what the *drained* values did, so
     /// they have to survive the block that drained them.
@@ -730,6 +790,11 @@ pub struct EffectControlLane {
     /// Only the two live terms move here. `SOURCE`, `DESIGNED` and `RESTORED` are decided off
     /// render, at preparation and at restore, and are conjoined by the stage that owns this lane.
     symmetry: ChannelSymmetryWitness,
+}
+
+/// The mix of a lane settled at bypass state `bypass`: `0` (dry) when bypassed, else `1` (wet).
+const fn settled_mix(bypass: bool) -> IndexedRamp {
+    IndexedRamp::settled([if bypass { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0])
 }
 
 impl EffectControlLane {
@@ -758,6 +823,8 @@ impl EffectControlLane {
             staged_targets: 0,
             observe: None,
             bypass,
+            mix: settled_mix(bypass),
+            mix_position: 0,
             symmetry,
         }
     }
@@ -819,9 +886,7 @@ impl EffectControlLane {
         let mut resources = EffectLaneResources::default();
         if let Some(cells) = self.cells.as_deref() {
             resources.add(Layout::new::<SharedAllocation<EffectCells>>().size());
-            resources.add_array::<ParameterCell>(cells.shape.cells.len());
             resources.add_array::<ParameterGroup>(cells.shape.groups.len());
-            resources.add_array::<u32>(cells.shape.first.len());
             resources.add_array::<LatestCell<1>>(cells.parameters.len());
             resources.add_array::<LatestCell<PREPARED_EFFECT_TARGET_WORDS>>(cells.targets.len());
             resources.add_array::<DirtyWord>(cells.dirty.len());
@@ -853,10 +918,93 @@ impl EffectControlLane {
         self.symmetry
     }
 
-    /// Whether this instance is bypassed as of the last [`stage`](Self::stage).
+    /// Whether this instance's bypass **target** is set as of the last [`stage`](Self::stage): the
+    /// state its crossfade is heading for or has reached. Use [`Self::needs_dry`] to ask whether a
+    /// block must capture the dry signal.
     #[must_use]
     pub const fn bypassed(&self) -> bool {
         self.bypass
+    }
+
+    /// Whether a bypass crossfade is running: the mix has not reached its target.
+    #[must_use]
+    pub const fn bypass_ramping(&self) -> bool {
+        self.mix_position < self.mix.length
+    }
+
+    /// Whether this block reads the dry signal: the instance is bypassed, or its crossfade is
+    /// running (#1341 D5). The caller captures the dry block before the effect runs exactly when
+    /// this is true or the shunt feeds a latency line.
+    #[must_use]
+    pub const fn needs_dry(&self) -> bool {
+        self.bypass || self.bypass_ramping()
+    }
+
+    /// The wet mix `m` the next rendered frame continues from: `1` for a lane settled wet, `0`
+    /// settled dry, and the last rendered frame's `m(k)` while a ramp runs.
+    #[must_use]
+    pub fn bypass_mix(&self) -> f32 {
+        self.mix.coefficients_at(self.mix_position)[0]
+    }
+
+    /// This lane's crossfade for the next rendered block, as one lane of a bank's
+    /// [`BankCrossfade`] (#1341 D4).
+    #[must_use]
+    pub fn bypass_crossfade_lane(&self) -> BankCrossfadeLane {
+        let ramping = self.bypass_ramping();
+        BankCrossfadeLane {
+            step: self.mix.step[0],
+            start: self.mix.start[0],
+            // Exact: a position is at most the ramp's length, at most `2^22`.
+            position: self.mix_position as f32,
+            // A settled lane has length `0`, so no frame index (all at least `1`) is below it.
+            length: if ramping { self.mix.length as f32 } else { 0.0 },
+            settled_dry: self.bypass,
+        }
+    }
+
+    /// Mix this block: replace the wet block in `left`/`right` with its bypass crossfade against
+    /// `shunt`'s dry block, then advance the crossfade by the block (#1341 D3).
+    ///
+    /// * Settled wet: nothing, the wet words stay untouched.
+    /// * Settled dry: the dry words are copied, as an un-ramped bypass always did.
+    /// * Ramping: `out = dry + (wet - dry) * m(k)`, `m(k)` the [`IndexedRamp`] law at ramp frame
+    ///   `k = position + f + 1`, a separate subtract, multiply and add (no fused multiply-add),
+    ///   vectorised over frames at the caller's width. One `m` serves both channels. The frames of
+    ///   the block past the ramp's end are settled and take the settled rule.
+    ///
+    /// `shunt` must have captured this block's dry signal ([`Self::needs_dry`]).
+    pub fn apply_bypass<L: Lane>(
+        &mut self,
+        shunt: &BypassShunt,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) {
+        if self.bypass_ramping() {
+            shunt.crossfade::<L>(left, right, &self.mix, self.mix_position, self.bypass);
+            let frames = left.len().min(right.len());
+            self.advance_bypass_mix(u32::try_from(frames).unwrap_or(u32::MAX));
+        } else if self.bypass {
+            shunt.apply(left, right);
+        }
+    }
+
+    /// Advance the crossfade by `frames` rendered frames, and, when that settles it at wet, restore
+    /// the witness' `UNBYPASSED` term: a ramping lane counts as bypassed until then (#1341 D6).
+    ///
+    /// [`Self::apply_bypass`] calls it; a bank mixes through [`BypassShunt::crossfade_bank`] and
+    /// then calls it once per block, so each lane's state stays in step with the timeline.
+    pub fn advance_bypass_mix(&mut self, frames: u32) {
+        if self.mix_position >= self.mix.length {
+            return;
+        }
+        self.mix_position = self
+            .mix_position
+            .saturating_add(frames)
+            .min(self.mix.length);
+        if self.mix_position >= self.mix.length && !self.bypass {
+            self.symmetry.admit(&EffectControlRecord::Bypass(false));
+        }
     }
 
     /// The targets applied by the most recent [`stage`](Self::stage), in `(slot, channel)` order.
@@ -901,6 +1049,8 @@ impl EffectControlLane {
             targets,
             staged_targets,
             bypass,
+            mix,
+            mix_position,
             symmetry,
             ..
         } = self;
@@ -926,15 +1076,30 @@ impl EffectControlLane {
             snapshot,
             superseded,
         };
-        if let Some([word]) = reads.read(0, &cells.bypass, bypass_reader) {
+        if let Some([word, ramp_samples]) = reads.read(0, &cells.bypass, bypass_reader) {
             let value = word != 0;
-            *bypass = value;
-            symmetry.admit(&EffectControlRecord::Bypass(value));
+            // A record whose target is the lane's current target changes nothing, whether the
+            // lane is settled there or still on its way (#1341 D2). Otherwise the crossfade starts
+            // from the mix the lane is at now, so a reversal mid-ramp continues without a jump.
+            if value != *bypass {
+                let now = mix.coefficients_at(*mix_position)[0];
+                let target = if value { 0.0 } else { 1.0 };
+                // The writer refuses a longer ramp, so the cell holds only checked words.
+                *mix = IndexedRamp::new(
+                    [now, 0.0, 0.0, 0.0],
+                    [target, 0.0, 0.0, 0.0],
+                    ramp_samples.min(INDEXED_RAMP_LENGTH_MAXIMUM),
+                );
+                *mix_position = 0;
+                *bypass = value;
+                // A ramping lane counts as bypassed until it settles at wet (#1341 D6).
+                symmetry.admit(&EffectControlRecord::Bypass(value || mix.length != 0));
+            }
         }
         let mut staged = 0_usize;
         for group in cells.shape.groups.iter() {
             let first = group.first as usize;
-            let parameter_index = cells.shape.cells[first].parameter_index;
+            let parameter_index = group.parameter_index;
             let mut applied = [None; 2];
             for (offset, slot) in applied
                 .iter_mut()
@@ -1413,9 +1578,22 @@ impl ObservationLane {
 ///   `PreparedEffectMetadata::latency` -- the same integer the enabled path reports and the same
 ///   integer `graph-compiler` derived every route timing from -- so a bypassed instance's impulse
 ///   lands on the sample an enabled instance's would. PDC is unchanged by construction.
-/// * **Selection is whole-block, never per sample.** #140's application rule is the block
-///   boundary, so a rendered block is entirely dry or entirely wet and the select is a
-///   `copy_from_slice`, not an arithmetic blend. `-0.0` survives it.
+/// * **A settled lane is selected, never computed.** A lane settled dry copies the dry block
+///   (`copy_from_slice`) and a lane settled wet keeps the wet words untouched, so after a ramp the
+///   output is bit-identical to a whole-block select, and `-0.0` survives it. A session whose
+///   `control_smoothing.mute_ms` is 0 gives every bypass record a ramp of zero samples, which
+///   renders exactly that select.
+/// * **A switch is a linear crossfade over the session ramp (#1341).** A bypass record applies at
+///   its block boundary (#140's rule) and starts a crossfade over `ramp_samples` frames:
+///   `out = dry + (wet - dry) * m(k)`, where `m` runs from the mix the lane is at (`1` wet, `0`
+///   dry) to the target on the [`IndexedRamp`] law, a pure function of the frame index `k`. It is a
+///   separate subtract, multiply and add -- no fused multiply-add, which base Wasm SIMD does not
+///   guarantee -- and the same `m` serves both channels, so the switch never makes them differ.
+///   The law is linear in amplitude, the engine's one ramp family: dry and wet are the same
+///   signal, latency-matched, and are highly correlated, so an equal-gain crossfade keeps the
+///   level where an equal-power one would bulge by up to 3 dB at the midpoint (#1055,
+///   `FINDINGS.md` section 3). The effect's latency does not change: the dry side stays delayed by
+///   exactly the declared latency throughout.
 ///
 /// # When a shunt exists (issue #1087)
 ///
@@ -1562,4 +1740,266 @@ impl BypassShunt {
     pub fn dry(&self) -> (&[f32], &[f32]) {
         (&self.dry_left, &self.dry_right)
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Crossfade the wet block in `left`/`right` against the captured dry block, in place, along
+    /// `ramp`'s word 0 (#1341 D3, D4).
+    ///
+    /// Frame `f` of the block takes ramp index `k = position + f + 1`, the convention of
+    /// [`route_mix_ramp_block`](lane::kernels::route_mix_ramp_block): a ramp's first frame is
+    /// already one step along it. The block splits by frame count, decided from `position` and
+    /// `ramp.length` before any loop:
+    ///
+    /// 1. the frames with `k < length` run the ramp body, vectorised over frames: a frame-index
+    ///    vector `k0 + [1, ..., L::WIDTH]` (exact: every value is an integer below `2^24`) yields
+    ///    `m = fma(k, step, start)` (two roundings), and the frame is
+    ///    `dry + (wet - dry) * m` as a separate subtract, multiply and add;
+    /// 2. the ramp frames that do not fill a vector run the same arithmetic in a non-generic,
+    ///    outlined `f32` function (the browser's kernel-shape rule);
+    /// 3. the frames with `k >= length` are settled and never computed: `settled_dry` copies the
+    ///    dry words, and a settled-wet lane leaves the wet words as they are.
+    ///
+    /// `m(k)` is a pure function of `k`, so the result does not depend on the width.
+    #[inline(never)]
+    pub fn crossfade<L: Lane>(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        ramp: &IndexedRamp,
+        position: u32,
+        settled_dry: bool,
+    ) {
+        // All four planes are cut to the shortest, so no index below can fail: the kernel is never
+        // inlined into the render loop, and a bounds check here would be its own trap owner.
+        let count = core::cmp::min(
+            core::cmp::min(left.len(), right.len()),
+            core::cmp::min(self.dry_left.len(), self.dry_right.len()),
+        );
+        let (left, right) = (&mut left[..count], &mut right[..count]);
+        let (dry_left, dry_right) = (&self.dry_left[..count], &self.dry_right[..count]);
+        // `k = position + f + 1 < length` holds for the first `length - position - 1` frames.
+        let ramping = ramp.length.saturating_sub(position).saturating_sub(1);
+        let ramping = core::cmp::min(count, ramping as usize);
+        let vectored = ramping - ramping % L::WIDTH;
+        let (left_ramp, left_settled) = left.split_at_mut(ramping);
+        let (right_ramp, right_settled) = right.split_at_mut(ramping);
+        let (dry_left_ramp, dry_left_settled) = dry_left.split_at(ramping);
+        let (dry_right_ramp, dry_right_settled) = dry_right.split_at(ramping);
+        let (left_vectors, left_tail) = left_ramp.split_at_mut(vectored);
+        let (right_vectors, right_tail) = right_ramp.split_at_mut(vectored);
+        let (dry_left_vectors, dry_left_tail) = dry_left_ramp.split_at(vectored);
+        let (dry_right_vectors, dry_right_tail) = dry_right_ramp.split_at(vectored);
+        let step = L::splat(ramp.step[0]);
+        let start = L::splat(ramp.start[0]);
+        let advance = L::splat(L::WIDTH as f32);
+        // One vector add per chunk advances every frame's index. Exact: each index is an integer
+        // below `position + vectored < length <= 2^22` whenever a frame ramps.
+        let mut index = L::splat(position as f32).add(L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]));
+        for (((left, right), dry_left), dry_right) in left_vectors
+            .chunks_exact_mut(L::WIDTH)
+            .zip(right_vectors.chunks_exact_mut(L::WIDTH))
+            .zip(dry_left_vectors.chunks_exact(L::WIDTH))
+            .zip(dry_right_vectors.chunks_exact(L::WIDTH))
+        {
+            let mix = index.fma(step, start);
+            let dry = L::load(dry_left);
+            let wet = L::load(left);
+            dry.add(wet.sub(dry).mul(mix)).store(left);
+            let dry = L::load(dry_right);
+            let wet = L::load(right);
+            dry.add(wet.sub(dry).mul(mix)).store(right);
+            index = index.add(advance);
+        }
+        if !left_tail.is_empty() {
+            // `vectored < ramping < length`, so the sum stays below `2^22`.
+            crossfade_tail(
+                left_tail,
+                right_tail,
+                dry_left_tail,
+                dry_right_tail,
+                ramp,
+                position + vectored as u32 + 1,
+            );
+        }
+        if settled_dry {
+            left_settled.copy_from_slice(dry_left_settled);
+            right_settled.copy_from_slice(dry_right_settled);
+        }
+    }
+
+    /// Crossfade a bank's interleaved wet block against the captured dry block, in place, one
+    /// vector per frame and channel, each lane along its own ramp (#1341 D4).
+    ///
+    /// The block holds `L::WIDTH` contiguous words per frame (one per bank lane), so `L` is the
+    /// bank's lane type. For frame `f` the lane vector of ramp indices is
+    /// `position + f + 1`, exactly [`Self::crossfade`]'s `k`, and per lane:
+    ///
+    /// * `k < length`: the lane ramps, `m = fma(k, step, start)` and
+    ///   `out = dry + (wet - dry) * m`, the same separate subtract, multiply and add;
+    /// * otherwise the lane is settled: `settled_dry` takes the dry word and a settled-wet lane
+    ///   keeps the wet word. Both are a bit select, so `-0.0`, NaN payloads and subnormals pass
+    ///   unchanged, and a lane's wet word never reaches the arithmetic of a settled neighbour.
+    ///
+    /// Every lane's bits equal the per-node [`Self::crossfade`] of the same lane at any width:
+    /// `m(k)` is a pure function of the lane's own `k`, and the mix is the same operation order.
+    /// A bank with no ramping lane skips the mix and only selects.
+    ///
+    /// `frames` is cut to what the four planes hold. `L::WIDTH` must not exceed
+    /// [`BANK_CROSSFADE_LANES`].
+    #[inline(never)]
+    pub fn crossfade_bank<L: Lane>(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        lanes: &BankCrossfade,
+    ) {
+        debug_assert!(L::WIDTH <= BANK_CROSSFADE_LANES);
+        let words = core::cmp::min(
+            core::cmp::min(left.len(), right.len()),
+            core::cmp::min(self.dry_left.len(), self.dry_right.len()),
+        );
+        let words = core::cmp::min(words, frames.saturating_mul(L::WIDTH));
+        let words = words - words % L::WIDTH;
+        let (left, right) = (&mut left[..words], &mut right[..words]);
+        let (dry_left, dry_right) = (&self.dry_left[..words], &self.dry_right[..words]);
+        let zero = L::zero();
+        let settled_dry = L::load(&lanes.settled_dry[..L::WIDTH]).gt(zero);
+        let planes = left
+            .chunks_exact_mut(L::WIDTH)
+            .zip(right.chunks_exact_mut(L::WIDTH))
+            .zip(dry_left.chunks_exact(L::WIDTH))
+            .zip(dry_right.chunks_exact(L::WIDTH));
+        if !lanes.ramping {
+            for (((left, right), dry_left), dry_right) in planes {
+                L::select(settled_dry, L::load(dry_left), L::load(left)).store(left);
+                L::select(settled_dry, L::load(dry_right), L::load(right)).store(right);
+            }
+            return;
+        }
+        let step = L::load(&lanes.step[..L::WIDTH]);
+        let start = L::load(&lanes.start[..L::WIDTH]);
+        let length = L::load(&lanes.length[..L::WIDTH]);
+        let one = L::splat(1.0);
+        // Exact: each index is an integer below `position + frames`, far below `2^24`; and an
+        // index past a lane's length only has to compare at or above it.
+        let mut index = L::load(&lanes.position[..L::WIDTH]).add(one);
+        for (((left, right), dry_left), dry_right) in planes {
+            let ramping = index.lt(length);
+            let mix = index.fma(step, start);
+            let (dry, wet) = (L::load(dry_left), L::load(left));
+            let ramped = dry.add(wet.sub(dry).mul(mix));
+            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(left);
+            let (dry, wet) = (L::load(dry_right), L::load(right));
+            let ramped = dry.add(wet.sub(dry).mul(mix));
+            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(right);
+            index = index.add(one);
+        }
+    }
+    // REALTIME_POLICY_END
 }
+
+/// The most lanes a bank's [`BankCrossfade`] holds: the widest bank, eight lanes on AVX2.
+pub const BANK_CROSSFADE_LANES: usize = 8;
+
+/// One bank lane's bypass crossfade for a block: what [`EffectControlLane::bypass_crossfade_lane`]
+/// reads and [`BankCrossfade::set`] stores.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BankCrossfadeLane {
+    step: f32,
+    start: f32,
+    position: f32,
+    length: f32,
+    settled_dry: bool,
+}
+
+impl BankCrossfadeLane {
+    /// A lane that only passes the wet block: no ramp, not bypassed. What a bank lane without a
+    /// control lane is. Its `step` and `start` are never read (its length is zero), and all-zero
+    /// words keep [`BankCrossfade::new`] a plain zero fill.
+    pub const WET: Self = Self {
+        step: 0.0,
+        start: 0.0,
+        position: 0.0,
+        length: 0.0,
+        settled_dry: false,
+    };
+}
+
+/// The per-lane crossfade state of one bank for one block, in the vectors
+/// [`BypassShunt::crossfade_bank`] loads. A plain inline value: the stage that owns it allocates
+/// nothing to fill it, block after block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BankCrossfade {
+    step: [f32; BANK_CROSSFADE_LANES],
+    start: [f32; BANK_CROSSFADE_LANES],
+    position: [f32; BANK_CROSSFADE_LANES],
+    length: [f32; BANK_CROSSFADE_LANES],
+    /// `1.0` for a lane settled dry (bypassed), else `0.0`: loaded and compared once per block.
+    settled_dry: [f32; BANK_CROSSFADE_LANES],
+    ramping: bool,
+}
+
+impl BankCrossfade {
+    /// Every lane passes the wet block.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            step: [0.0; BANK_CROSSFADE_LANES],
+            start: [0.0; BANK_CROSSFADE_LANES],
+            position: [0.0; BANK_CROSSFADE_LANES],
+            length: [0.0; BANK_CROSSFADE_LANES],
+            settled_dry: [0.0; BANK_CROSSFADE_LANES],
+            ramping: false,
+        }
+    }
+
+    /// Store `lane`'s crossfade for this block. `lane` must be below [`BANK_CROSSFADE_LANES`].
+    pub fn set(&mut self, lane: usize, state: BankCrossfadeLane) {
+        self.step[lane] = state.step;
+        self.start[lane] = state.start;
+        self.position[lane] = state.position;
+        self.length[lane] = state.length;
+        self.settled_dry[lane] = if state.settled_dry { 1.0 } else { 0.0 };
+        self.ramping = self.length.iter().any(|length| *length > 0.0);
+    }
+}
+
+impl Default for BankCrossfade {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The ramp frames of [`BypassShunt::crossfade`] that do not fill a vector: the same arithmetic at
+/// `f32`, frame `f` at ramp index `first + f`.
+///
+/// Non-generic and never inlined, so the browser's four-lane kernel instantiation carries no
+/// scalar ramp body.
+// REALTIME_POLICY_BEGIN
+#[inline(never)]
+fn crossfade_tail(
+    left: &mut [f32],
+    right: &mut [f32],
+    dry_left: &[f32],
+    dry_right: &[f32],
+    ramp: &IndexedRamp,
+    first: u32,
+) {
+    let (step, start) = (ramp.step[0], ramp.start[0]);
+    for ((((left, right), dry_left), dry_right), k) in left
+        .iter_mut()
+        .zip(right.iter_mut())
+        .zip(dry_left)
+        .zip(dry_right)
+        .zip(first..)
+    {
+        // Exact: `k < length <= 2^22`.
+        let mix = <f32 as Lane>::fma(k as f32, step, start);
+        let (dry, wet) = (*dry_left, *left);
+        *left = <f32 as Lane>::add(dry, <f32 as Lane>::mul(<f32 as Lane>::sub(wet, dry), mix));
+        let (dry, wet) = (*dry_right, *right);
+        *right = <f32 as Lane>::add(dry, <f32 as Lane>::mul(<f32 as Lane>::sub(wet, dry), mix));
+    }
+}
+// REALTIME_POLICY_END

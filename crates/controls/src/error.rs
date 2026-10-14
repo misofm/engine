@@ -20,6 +20,10 @@ pub enum ControlError {
     /// enumeration choice, not a whole number where the unit is samples, or a rate-keyed frequency
     /// above its rate bound.
     Domain,
+    /// `control.automation.target`: a stored automation names a row that is not automatable (a
+    /// rebuild-only, derived or monitor row, or a setting). Raised by
+    /// [`automation_diagnostics`](crate::automation_diagnostics) only; a write never meets it.
+    AutomationTarget,
     /// `control.ramp.fixed`: an explicit ramp length on a row whose ramp is fixed (an
     /// acknowledgement must not hide an ignored field).
     RampFixed,
@@ -43,6 +47,7 @@ impl ControlError {
             Self::Inactive => "control.inactive",
             Self::Lane => "control.lane",
             Self::Domain => "control.domain",
+            Self::AutomationTarget => "control.automation.target",
             Self::RampFixed => "control.ramp.fixed",
             Self::Monitor => "control.monitor",
             Self::RampConflict => "control.ramp.conflict",

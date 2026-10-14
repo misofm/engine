@@ -309,8 +309,9 @@ pub struct RetiredCodeRow {
 
 /// Every retired or refused code decision 12 leaves on the session-edit wire, one row each:
 ///
-/// - the retired rack codes `1` (`simd1`) and `3` (`simd2`) in every rack-addressed edit and in an
-///   automation target, refused at decode (`MALFORMED_FRAME`), never read as another rack;
+/// - the retired rack codes `1` (`simd1`) and `3` (`simd2`) in every rack-addressed edit
+///   (`MALFORMED_FRAME`) and in an automation target's address `section` (`INVALID_FIELD`, #1566),
+///   refused at decode, never read as another rack;
 /// - the retired track fields 6 (`simd1`) and 8 (`simd2`), mandatory (`UNKNOWN_REQUIRED_FIELD`)
 ///   and optional (`MALFORMED_FRAME`, never skipped as an unknown optional field);
 /// - each structural or declaration edit addressed at `console` (`VALIDATION_FAILED`,
@@ -333,6 +334,7 @@ pub struct RetiredCodeRow {
 #[must_use]
 pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
     const MALFORMED_FRAME: u16 = StatusCode::MalformedFrame as u16;
+    const INVALID_FIELD: u16 = StatusCode::InvalidField as u16;
     const UNKNOWN_REQUIRED_FIELD: u16 = StatusCode::UnknownRequiredField as u16;
     const UNSUPPORTED_MESSAGE: u16 = StatusCode::UnsupportedMessage as u16;
     const VALIDATION_FAILED: u16 = StatusCode::ValidationFailed as u16;
@@ -363,11 +365,13 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             automation_id: automation.id.clone(),
             target: automation.target.clone(),
         });
-        patch_rack_code(&mut bytes, &[1, 2, 2, 2], code);
+        patch_rack_code(&mut bytes, &[1, 2, 2, 3], code);
         rows.push(RetiredCodeRow {
             name: format!("retired.rack_code_{code}.set_automation_target"),
             bytes,
-            status: MALFORMED_FRAME,
+            // The target is the `SET_CONTROL` address now (#1566 D4): its `section` field, whose
+            // unallocated codes (the retired racks among them) are `INVALID_FIELD` there too.
+            status: INVALID_FIELD,
             diagnostic: DECODE_REFUSAL,
         });
     }
@@ -746,7 +750,11 @@ pub enum ConformanceDecoder {
 /// appends one command frame (every optional field of an effect configuration, three overrides)
 /// and two response frames (a curve reply with sections on both sides, and a lone tag), the
 /// capability registry lists `0x000e` and sets bit 14. The frame count is 50.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xcdfd_b054_0f09_3424;
+/// Issue #1566 (decision 17, C2 and C10) repinned it from `cdfdb0540f093424`: an automation target
+/// is the `SET_CONTROL` address message (`owner_kind`, `owner_id`, `section`, `slot_id`,
+/// `control`, `lane`) and no longer the five-field strip target, so the `UpsertAutomation` and
+/// `SetAutomationTarget` edits of the transaction carry it. The frame count stays 50.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x4f6a_80fb_52c1_2aed;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

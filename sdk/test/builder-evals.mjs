@@ -753,71 +753,94 @@ describe("validation refusals name the offending path", () => {
     assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").fader.left_db = 24.5; }), "numeric.out_of_schema_range");
   });
 
-  test("live input filters are accepted while delay remains prepared-only", () => {
-    const base = session({ id: "auto", sampleRateHz: 48_000 })
-      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
-      .track("t", { source: "stem" });
-    for (const [parameter, startValue, endValue] of [["hpf_hz", 80, 120], ["lpf_hz", 8_000, 12_000]]) {
-      assert.doesNotThrow(() =>
-        base.automation({
-          id: parameter,
-          target: { trackId: "t", rack: "builtins", parameter, channel: "left" },
-          segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue, endValue }],
-        }),
-      );
-    }
-    assert.throws(
-      () =>
-        base.automation({
-          id: "delay_samples",
-          target: { trackId: "t", rack: "builtins", parameter: "delay_samples", channel: "left" },
-          segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: 0, endValue: 1 }],
-        }),
-      (error) => {
-        assert.ok(error instanceof MisoUsageError);
-        assert.match(error.message, /automation\("delay_samples"\)\.target\.parameter/);
-        assert.match(error.message, /prepared-only/);
-        return true;
-      },
-    );
-    // A shared matrix coefficient is addressed as `both` and nothing else.
-    assert.throws(
-      () =>
-        base.automation({
-          id: "a",
-          target: { trackId: "t", rack: "builtins", parameter: "matrix_ll", channel: "left" },
-          segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: 0, endValue: 1 }],
-        }),
-      /automation\("a"\)\.target\.channel/,
-    );
-  });
-
-  test("an effect automation on a prepared-only parameter is refused by name", () => {
-    // Issue #1335 D5: the engine refuses an effect target that is not automatable at the block
-    // rate (`effect.automation.rate`), so the builder refuses it first. Red mutation: check only
-    // the declared `(parameter, channel)` for an effect row, as before, and `band-1-enabled`
-    // builds a session the engine refuses.
+  test("the builder resolves a target's row and leaves the row rule to the engine", async () => {
+    // #1566 D8: a target is a control address. The builder checks what the session document
+    // checks (the owner, the section and the slot exist) and finds the row for its unit; whether
+    // the row is automatable, takes the lane and accepts the values is the engine's rule, so a
+    // rebuild-only row builds here and is refused by the engine with the row's own code.
+    // Red mutation: refuse in the builder a row the engine would not -> the engine's code is
+    // never observed.
     const base = session({ id: "auto", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
       .track("t", {
         source: "stem",
         inserts: [effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" })],
+      })
+      .output("out")
+      .route({
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
       });
-    const ride = (parameter, startValue, endValue) => ({
-      id: parameter,
-      target: { trackId: "t", rack: "inserts", slotId: "eq", parameter, channel: "both" },
-      segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue, endValue }],
+    const ride = (id, target, startValue, endValue) => ({
+      id,
+      target,
+      segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue, endValue }],
     });
-    assert.throws(
-      () => base.automation(ride("band-1-enabled", 1, 1)),
-      (error) => {
-        assert.ok(error instanceof MisoUsageError);
-        assert.match(error.message, /automation\("band-1-enabled"\)\.target\.parameter/);
-        assert.match(error.message, /band-1-enabled is prepared-only/);
-        return true;
-      },
-    );
-    assert.doesNotThrow(() => base.automation(ride("band-1-gain", -2, 0)));
+    const code = (build) => {
+      try {
+        build();
+      } catch (error) {
+        assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+        return { code: error.diagnosticCode, message: error.message };
+      }
+      return assert.fail("the builder accepted the defect");
+    };
+    const builtinRow = (control, lane) => ({
+      owner: { kind: "strip", id: "t" },
+      section: { kind: "builtins" },
+      control,
+      lane,
+    });
+    const insertRow = (control, lane) => ({
+      owner: { kind: "strip", id: "t" },
+      section: { kind: "inserts", effect: "eq" },
+      control,
+      lane,
+    });
+    // A named row and a numeric row are one target.
+    const named = base.automation(ride("a", builtinRow("hpf_hz", "left"), 80, 120)).toJSON();
+    const numeric = base.automation(ride("a", builtinRow(3, "left"), 80, 120)).toJSON();
+    assert.deepEqual(named.automation, numeric.automation);
+    assert.deepEqual(named.automation[0].target, {
+      owner: "strip",
+      owner_id: "t",
+      section: "builtins",
+      control: 3,
+      lane: "left",
+    });
+    assert.equal(named.automation[0].segments[0].unit, "hz");
+
+    // The builder builds what only the engine refuses.
+    const engineCode = async (builder) => {
+      const outcome = await validate(builder, { asset });
+      assert.equal(outcome.ok, false);
+      return [outcome.diagnostics[0]?.code, outcome.diagnostics[0]?.path];
+    };
+    const refusedByTheEngine = [
+      ["delay", builtinRow("delay_samples", "left"), 0, 1, "control.automation.target"],
+      ["enabled", insertRow("band_1_enabled", "both"), 1, 1, "control.automation.target"],
+      ["matrix-lane", builtinRow("matrix_ll", "left"), 0, 1, "control.inactive"],
+    ];
+    for (const [id, target, startValue, endValue, expected] of refusedByTheEngine) {
+      const built = base.automation(ride(id, target, startValue, endValue));
+      assert.deepEqual(await engineCode(built), [expected, `$.automation[id=${id}].target`], id);
+    }
+    // ...and the engine accepts the live rows.
+    assert.equal((await validate(base.automation(ride("gain", insertRow("band_1_gain_db", "both"), -2, 0)), { asset })).ok, true);
+    assert.equal((await validate(base.automation(ride("fader", builtinRow("fader_db", "both"), -2, 0)), { asset })).ok, true);
+
+    // What the session document checks, the builder checks at the verb, by path.
+    const refused = (target) => code(() => base.automation(ride("x", target, 0, 1)));
+    assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "strip", id: "ghost" } }).code, "reference.missing_entity");
+    assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "route", id: "ghost" } }).code, "reference.missing_entity");
+    assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "vca", id: "ghost" } }).code, "reference.missing_entity");
+    assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "session" } }).code, "schema.invalid_enum");
+    assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "route", id: "main" } }).code, "schema.invalid_enum");
+    assert.equal(refused({ ...insertRow("band_1_gain_db", "both"), section: { kind: "inserts", effect: "ghost" } }).code, "reference.missing_entity");
+    assert.equal(refused({ ...insertRow("band_1_gain_db", "both"), section: { kind: "console", slot: "ghost" } }).code, "reference.missing_entity");
+    assert.equal(refused({ ...builtinRow("no_such_row", "both") }).code, "control.address.unknown");
+    assert.equal(refused({ ...builtinRow("fader_db", "middle") }).code, "schema.invalid_enum");
   });
 
   test("an effect parameter outside its catalog domain is refused by name", () => {
@@ -1080,7 +1103,12 @@ describe("canonical float spellings", () => {
       })
       .automation({
         id: "ride",
-        target: { trackId: "t", rack: "builtins", parameter: "fader_db", channel: "both" },
+        target: {
+          owner: { kind: "strip", id: "t" },
+          section: { kind: "builtins" },
+          control: "fader_db",
+          lane: "both",
+        },
         segments: [{ shape: "step", startSample: 0, endSample: maximum, startValue: 0, endValue: 0 }],
       });
     const model = built.toJSON();
@@ -1220,10 +1248,19 @@ describe("canonical float spellings", () => {
   });
 });
 
-/** The checked-in `builtins-automation.json` fixture, rebuilt through the SDK. */
+/**
+ * The checked-in `builtins-automation.json` fixture, rebuilt through the SDK: the strip's builtin
+ * rows, a send's gain on a route into a submix and a VCA's offset (#1566), each a control address.
+ */
 function builtinsAutomationFixture() {
   const span = (shape, startSample, endSample, startValue, endValue) =>
     [{ shape, startSample, endSample, startValue, endValue }];
+  const vocal = (control, lane) => ({
+    owner: { kind: "strip", id: "vocal" },
+    section: { kind: "builtins" },
+    control,
+    lane,
+  });
   return session({ id: "builtins-automation.session", sampleRateHz: 48_000, revision: 1 })
     .source("voice", { channels: 2, bitDepth: "32f", frames: 48_000, content: CONTENT_B })
     .track("vocal", {
@@ -1231,31 +1268,48 @@ function builtinsAutomationFixture() {
       builtins: { polarityInvert: false, trimDb: 0, hpfHz: 20, lpfHz: 20_000, delaySamples: 0 },
       pan: { left: 1, right: 1, smoothingSamples: 16 },
     })
+    .submix("bus")
+    .vca("riders", { members: ["vocal"] })
     .output("main-out")
     .route({
       id: "to-main",
       source: { kind: "track", trackId: "vocal", tap: "post_pan" },
       destination: { kind: "output_input", outputId: "main-out" },
     })
+    .route({
+      id: "send",
+      source: { kind: "track", trackId: "vocal", tap: "post_fader" },
+      destination: { kind: "submix_input", submixId: "bus" },
+    })
     .automation({
       id: "fader-ride",
-      target: { trackId: "vocal", rack: "builtins", parameter: "fader_db", channel: "both" },
+      target: vocal("fader_db", "both"),
       segments: span("linear", 0n, 960n, 0, -3),
     })
     .automation({
-      id: "matrix-ll",
-      target: { trackId: "vocal", rack: "builtins", parameter: "matrix_ll", channel: "both" },
+      id: "pan-ride",
+      target: vocal("pan", "left"),
       segments: span("linear", 0n, 960n, 1, 0.5),
     })
     .automation({
       id: "polarity-flip",
-      target: { trackId: "vocal", rack: "builtins", parameter: "polarity_invert", channel: "right" },
+      target: vocal("polarity_invert", "right"),
       segments: span("step", 480n, 960n, 0, 1),
     })
     .automation({
       id: "trim-ride-left",
-      target: { trackId: "vocal", rack: "builtins", parameter: "trim_db", channel: "left" },
+      target: vocal("trim_db", "left"),
       segments: span("linear", 0n, 480n, 0, -6),
+    })
+    .automation({
+      id: "route-ride",
+      target: { owner: { kind: "route", id: "send" }, section: { kind: "own" }, control: "gain_db", lane: "both" },
+      segments: span("linear", 0n, 960n, 0, -6),
+    })
+    .automation({
+      id: "vca-ride",
+      target: { owner: { kind: "vca", id: "riders" }, section: { kind: "own" }, control: "offset_db", lane: "left" },
+      segments: span("linear", 0n, 960n, 0, -3),
     });
 }
 
@@ -1339,11 +1393,10 @@ function richSession() {
     .automation({
       id: "eq-sweep",
       target: {
-        trackId: "vocal",
-        rack: "console",
-        slotId: "eq",
-        parameter: "band-1-gain",
-        channel: "both",
+        owner: { kind: "strip", id: "vocal" },
+        section: { kind: "console", slot: "eq" },
+        control: "band_1_gain_db",
+        lane: "both",
       },
       segments: [
         { shape: "linear", startSample: 0n, endSample: 480n, startValue: -2.5, endValue: 0 },
@@ -1352,7 +1405,12 @@ function richSession() {
     })
     .automation({
       id: "vocal-ride",
-      target: { trackId: "vocal", rack: "builtins", parameter: "fader_db", channel: "both" },
+      target: {
+        owner: { kind: "strip", id: "vocal" },
+        section: { kind: "builtins" },
+        control: "fader_db",
+        lane: "both",
+      },
       segments: [{ shape: "linear", startSample: 0n, endSample: 4_800n, startValue: -3, endValue: 0 }],
     });
 }

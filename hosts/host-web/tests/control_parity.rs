@@ -21,9 +21,16 @@
 //! a pan and an EQ parameter drain alike, with equal superseded counts), whose two narrow tests it
 //! replaces.
 //!
-//! Bypass: both hosts step a bypass today. When the bypass crossfade (#1341) reaches one host
-//! before the other this test turns red at the bypass row, which is a real parity defect; the row
-//! is never weakened for it.
+//! Bypass: both hosts crossfade a live bypass of an insert and of a console slot over the session's
+//! `mute_ms` ramp (#1341a1, #1341a2), because the browser is a thin client of the core's
+//! `SessionState`. The scripted bypass edits of the main test, the insert's and both console
+//! slots' (a console slot always banks), are compared bit for bit like every other row, and
+//! `a_live_bypass_crossfades_alike_on_both_hosts` proves the insert row is a crossfade (neither a
+//! step nor a no-op) at every launch rate. This session's strips hold effects after the console
+//! slot, whose own history outlasts the ramp, so the console slot's shape (its ramp, its settle on
+//! the booted document, and that a bank renders what a node renders) is gated where nothing
+//! follows it: `sdk/test/live-controls-evals.mjs` and `graph-compiler`'s `bypass_shunt_identity`.
+//! A parity defect at the bypass row is never weakened away.
 
 #![allow(unsafe_code)]
 
@@ -1587,6 +1594,83 @@ fn the_status_words_carry_the_applied_revision_the_c_abi_reports() {
         assert_eq!(status_watermark(&browser), applied, "{rate} Hz: block 4");
         assert_eq!(c_abi.watermark(), applied);
     }
+}
+
+/// Block the bypass of `a_live_bypass_crossfades_alike_on_both_hosts` is submitted before.
+const BYPASS_BLOCK: u64 = 6;
+
+/// A live bypass (`edit`) through the C ABI and the browser host, at each launch rate: the blocks
+/// are equal bit for bit (`run` compares them), and against two controls rendered by the browser
+/// leg (never bypassed; authored bypassed by `author`) the render equals the first control until
+/// the ramp reaches the output, differs from both for as many blocks as the session's `mute_ms`
+/// ramp spans, and equals the second from then on.
+fn a_live_bypass_crossfades_alike(edit: Edit, author: fn(&mut SessionModel)) {
+    let step = [live(BYPASS_BLOCK, edit)];
+    for rate in RATES {
+        let (edited, _) = run(rate, &step);
+        let model = model_at(rate);
+        let mut plain = Rig::new(&model);
+        let wet: Vec<Vec<u32>> = (0..BLOCKS).map(|block| plain.step(block)).collect();
+        let mut dry_model = model.clone();
+        author(&mut dry_model);
+        let mut booted = Rig::new(&dry_model);
+        let dry: Vec<Vec<u32>> = (0..BLOCKS).map(|block| booted.step(block)).collect();
+        assert_ne!(wet[10], dry[10], "{rate} Hz: the bypass is audible");
+        // The session's PDC delays the strip's output by the chain's latency, so the render of
+        // the edit begins some blocks after the submit: it is found, not assumed.
+        let start = (0..BLOCKS as usize)
+            .find(|&block| edited[block] != wet[block])
+            .expect("the bypass is heard");
+        assert!(
+            start >= BYPASS_BLOCK as usize,
+            "{rate} Hz: the render changes at block {start}, before the submit at {BYPASS_BLOCK}"
+        );
+        // The default session `mute_ms` is 10 ms.
+        let ramp_blocks = (u64::from(rate) / 100).div_ceil(u64::from(QUANTUM)) as usize;
+        let between = (start..BLOCKS as usize)
+            .take_while(|&block| edited[block] != dry[block])
+            .count();
+        assert!(
+            (ramp_blocks..=ramp_blocks + 1).contains(&between),
+            "{rate} Hz: {between} blocks sit between the controls, the 10 ms ramp spans {ramp_blocks} \
+             or {}; a step spans at most one",
+            ramp_blocks + 1
+        );
+        for block in start + between..BLOCKS as usize {
+            assert_eq!(
+                edited[block], dry[block],
+                "{rate} Hz: block {block} follows the ramp"
+            );
+        }
+    }
+}
+
+/// A live bypass of the compressor insert of `t1`.
+///
+/// Red if either host steps the bypass (a step spans at most one block), drops its ramp (the
+/// same), runs it over a length other than the session's (the settle block moves), or leaves the
+/// insert un-bypassed after the ramp.
+#[test]
+fn a_live_bypass_crossfades_alike_on_both_hosts() {
+    a_live_bypass_crossfades_alike(
+        Edit::Bypass {
+            insert: COMPRESSOR,
+            bypassed: true,
+        },
+        |model| {
+            model
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == COMPRESSOR.track.id)
+                .expect("the compressor's track")
+                .inserts
+                .effects
+                .iter_mut()
+                .find(|effect| effect.id.as_str() == COMPRESSOR.id)
+                .expect("the compressor")
+                .bypass = true;
+        },
+    );
 }
 
 /// The browser leg alone over `steps`: its blocks. The audibility check below compares scripts

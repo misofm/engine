@@ -1394,7 +1394,6 @@ fn live_control_cells_are_charged_exactly_as_allocated_with_and_without_the_inpu
                 &requests,
                 controls,
                 caps(),
-                None,
             )
         })
         .expect("prepare")

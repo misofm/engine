@@ -7,7 +7,6 @@ use session::{
     FADER_MINIMUM_DB, MatrixOrPan, SessionModel, StableId, StripKind, StripRef,
 };
 
-use crate::address::{Owner, Section};
 use crate::builtin_rows;
 use crate::descriptor::{BASE, Choice, ControlDescriptor, Lanes, Motion};
 use crate::effect_rows::{self, Instance};
@@ -17,6 +16,7 @@ use crate::lane::Side;
 use crate::lane::{is_on, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control};
 use crate::{ControlClass, ControlKind, ControlScope, Family, LiveRampRow, Taper};
+use session::{Owner, Section};
 
 /// The own-row ID of `matrix_mode`.
 pub(crate) const MATRIX_MODE: u32 = 1;

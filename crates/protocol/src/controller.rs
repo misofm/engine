@@ -487,27 +487,6 @@ impl ReplayCache {
         Ok(())
     }
 
-    /// Replace the response bytes of the entry `request_id` completed, with bytes of the same
-    /// length (#1313 D3). The request bytes, the entry order and the arena offsets do not move.
-    /// The prepared structural commit uses it to write the edit path into the replay entry that
-    /// preparation completed before the host classified the edit.
-    fn overwrite_completed_response(
-        &mut self,
-        request_id: RequestId,
-        response: &[u8],
-    ) -> Result<(), ReplayCacheError> {
-        let index = self
-            .entry_index(request_id)
-            .map_err(|_| ReplayCacheError::ReservationMissing)?;
-        let entry = self.entries[index];
-        if entry.response_bytes != response.len() {
-            return Err(ReplayCacheError::ResponseTooLarge);
-        }
-        self.storage[entry.response_offset..entry.response_offset + entry.response_bytes]
-            .copy_from_slice(response);
-        Ok(())
-    }
-
     /// Borrow the exact cached response bytes represented by a hit from [`Self::preflight`].
     ///
     /// Returns an empty slice for a stale or foreign hit. Use [`Self::try_cached`] when an empty
@@ -1268,17 +1247,17 @@ pub struct PreparedStructuralCommand {
     request_id: RequestId,
     previous_revision: SessionRevision,
     prospective_session: Option<PreparedSessionTransaction>,
-    prospective_replay: Option<ReplayCache>,
+    // The replay entry this transaction will take, planned against the committed cache (#1615): the
+    // eviction the commit applies, and the request bytes it stores. The committed cache is not
+    // cloned; nothing is written to it before the commit, so a dropped token has nothing to undo.
+    replay_plan: ReplayPreflightPlan,
+    request: Box<[u8]>,
     response: Option<ControllerResponse>,
     event_reservations: Option<crate::ReliableEventReservations>,
     event_sequence: u64,
     cancellation_batches: usize,
     applied_operations: u32,
     armed: bool,
-    // The CAPI resource contract counts this public opaque token's established retained layout.
-    // ReplayCache itself is compact in the live controller; keep the prepared-token authority
-    // stable until that external resource contract can be revised in its own issue.
-    _resource_layout_reservation: [u8; 24],
 }
 
 impl PreparedStructuralCommand {
@@ -1851,11 +1830,27 @@ impl<P: ControlProvider> ProtocolController<P> {
                 edit_path: EditPath::ModelOnly,
             }),
         };
+        // The frame staging holds exactly the measured response: the final frame (the same fields
+        // with the edit path the host reports) has the same length, so nothing larger is staged.
+        let frame_len = crate::OUTER_HEADER_BYTES
+            .checked_add(plan.response_measure.length)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        if frame_len > self.replay.config.max_response_bytes {
+            return Err(CommandFrameProcessError::Encode(
+                EncodeError::OutputTooSmall {
+                    required: frame_len,
+                },
+            ));
+        }
         #[cfg(test)]
         RESPONSE_STAGING_VECS.with(|allocations| {
             allocations.set(allocations.get().saturating_add(1));
         });
-        let mut frame = vec![0_u8; self.replay.config.max_response_bytes];
+        let mut frame = Vec::new();
+        frame
+            .try_reserve_exact(frame_len)
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        frame.resize(frame_len, 0);
         let written = self
             .codec
             .encode_success_response_frame_measured_into(
@@ -1864,23 +1859,24 @@ impl<P: ControlProvider> ProtocolController<P> {
                 &mut frame,
             )
             .map_err(CommandFrameProcessError::Encode)?;
-        frame.truncate(written);
+        if written != frame_len {
+            return Err(CommandFrameProcessError::Internal);
+        }
         let response = ControllerResponse::from_complete_frame(
             header.request_id,
             StatusCode::Ok,
             revision,
             frame,
         );
-        let mut prospective_replay = self
-            .replay
-            .try_clone_eager()
+        // What the commit will write into the committed cache: the request bytes, kept off the
+        // cache until then. The plan came from the committed cache in `plan_structural_command`,
+        // and nothing writes the cache while this token is outstanding (every entry point refuses
+        // on the odd generation set below), so the commit's eviction and completion cannot fail.
+        let mut request = Vec::new();
+        request
+            .try_reserve_exact(input.len())
             .map_err(|_| CommandFrameProcessError::Internal)?;
-        if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
-            return Err(CommandFrameProcessError::Internal);
-        }
-        prospective_replay
-            .complete(header.request_id, input, response.complete_frame())
-            .map_err(|_| CommandFrameProcessError::Internal)?;
+        request.extend_from_slice(input);
         let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
             Ok(reservations) => reservations,
             Err(_) => return Err(CommandFrameProcessError::Internal),
@@ -1900,14 +1896,14 @@ impl<P: ControlProvider> ProtocolController<P> {
             request_id: plan.request_id,
             previous_revision: plan.previous_revision,
             prospective_session: Some(plan.prospective_session),
-            prospective_replay: Some(prospective_replay),
+            replay_plan: plan.replay_plan,
+            request: request.into_boxed_slice(),
             response: Some(response),
             event_reservations: Some(event_reservations),
             event_sequence: plan.event_sequence,
             cancellation_batches: plan.cancellation_batches,
             applied_operations: plan.applied_operations,
             armed: true,
-            _resource_layout_reservation: [0; 24],
         })
     }
 
@@ -2249,9 +2245,12 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// `path` is how the host applied the transaction (#1313 D3). Preparation encodes the response
     /// with [`EditPath::ModelOnly`] because the host classifies after preparing; the frame never
     /// leaves the token before this commit. The commit re-encodes the same frame with `path` into
-    /// the token's own buffer and into the prospective replay entry. The field is fixed width, so
-    /// the length is unchanged and neither write can fail. A caller whose token is refused returns
-    /// before either write. A token of monitor writes only commits no model and no revision
+    /// the token's own buffer, then applies the token's replay plan to the committed cache and
+    /// completes the entry with that frame (#1615). The field is fixed width, so the length is
+    /// unchanged; the plan was made against the committed cache, which no entry point writes while
+    /// the token is outstanding, so neither write can fail. A caller whose token is refused returns
+    /// before either write, and a token dropped instead of committed leaves the cache as it was.
+    /// The reply exists only after the replay entry is written, in this one call. A token of monitor writes only commits no model and no revision
     /// (#1559 D4): its response takes [`EditPath::Monitor`] whatever `path` says.
     pub fn commit_prepared_structural(
         &mut self,
@@ -2306,10 +2305,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Some(effective_sample),
             );
         }
-        let mut replay = prepared
-            .prospective_replay
-            .take()
-            .expect("affine token owns prospective replay");
         let response = prepared
             .response
             .take()
@@ -2334,10 +2329,19 @@ impl<P: ControlProvider> ProtocolController<P> {
             bytes.len(),
             "the final frame has the prepared frame's length"
         );
-        replay
-            .overwrite_completed_response(prepared.request_id, &bytes)
-            .expect("this token completed the entry with a response of the same length");
-        self.replay = replay;
+        // The replay entry is written here, in the same call that returns the reply: the reply
+        // exists only after the entry does (the acked-batch rule). The cache is the one the plan was
+        // made against: no entry point wrote it while the token was outstanding.
+        self.replay.apply_preflight_plan(
+            prepared.request_id,
+            &prepared.request,
+            prepared.replay_plan,
+        );
+        self.replay
+            .complete(prepared.request_id, &prepared.request, &bytes)
+            .expect(
+                "the plan reserved room for the response, whose length the prepared frame fixed",
+            );
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;

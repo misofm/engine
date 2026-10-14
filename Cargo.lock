@@ -1540,7 +1540,9 @@ dependencies = [
  "effect-contract",
  "host-core",
  "host-web",
+ "protocol",
  "serde_json",
+ "session",
  "sha2 0.11.0",
 ]
 
@@ -1928,6 +1930,7 @@ name = "session-validator"
 version = "0.1.0"
 dependencies = [
  "builtins-compiler",
+ "controls",
  "effect-compiler",
  "host-web",
  "serde_json",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BrowserResponsePreview } from "../src/browser/response.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError, resultName } from "../src/core/errors.ts";
 import { RESPONSE_CAPABILITIES, ResponsePreviewModule } from "../src/core/response.ts";
 import { createResponsePreview as createHeadlessResponsePreview } from "../src/headless/response.ts";
 import { effect } from "../src/core/session.ts";
@@ -199,7 +199,8 @@ test("candidate Wasm answers EQ and input-filter previews headlessly", {
         ...query,
         grid: { ...query.grid, points: 2 },
       }),
-      (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+      (error) => error instanceof MisoEngineError && error.code === "response.reply_too_large"
+        && resultName(error.result, "call") === "refusedBudget",
     );
     const memoryAfterTiny = boundedInstance.exports.memory.buffer.byteLength;
     assert.throws(
@@ -207,11 +208,59 @@ test("candidate Wasm answers EQ and input-filter previews headlessly", {
         ...query,
         grid: { ...query.grid, points: 250_000 },
       }),
-      (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+      (error) => error instanceof MisoEngineError && error.code === "response.points"
+        && resultName(error.result, "call") === "invalidArgument",
     );
     assert.ok(memoryAfterTiny >= memoryBefore);
     assert.equal(boundedInstance.exports.memory.buffer.byteLength, memoryAfterTiny);
     bounded.close();
+  } finally {
+    await preview.close();
+  }
+});
+
+test("candidate Wasm: a per-lane value given as both equals the same value on each lane", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const preview = await createHeadlessResponsePreview({ asset });
+  try {
+    const curves = (gain) => preview.query({
+      ...query,
+      configuration: effect("miso.parametric-eq", {
+        "band-1-enabled": true,
+        "band-1-kind": "bell",
+        "band-1-frequency": 1_000,
+        "band-1-gain": gain,
+        "band-1-q": 1,
+      }),
+      grid: { kind: "logarithmic", points: 32, minimumHz: 20, maximumHz: 20_000 },
+      fields: "totalAndSections",
+    });
+    const both = curves(4);
+    const lanes = curves([4, 4]);
+    assert.ok(both.totalLeftDb.some((value) => value > 0), "the gain shows in the curve");
+    assert.deepEqual(both.totalLeftDb, lanes.totalLeftDb);
+    assert.deepEqual(both.totalRightDb, lanes.totalRightDb);
+    assert.deepEqual(both.totalLeftDb, both.totalRightDb);
+  } finally {
+    await preview.close();
+  }
+});
+
+test("candidate Wasm: the engine refuses 4097 points with its own code", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const preview = await createHeadlessResponsePreview({ asset });
+  try {
+    assert.throws(
+      () => preview.query({ ...query, grid: { ...query.grid, points: 4097 } }),
+      (error) => error instanceof MisoEngineError && error.code === "response.points"
+        && resultName(error.result, "call") === "invalidArgument",
+    );
+    const accepted = preview.query({ ...query, grid: { ...query.grid, points: 4096 } });
+    assert.equal(accepted.frequenciesHz.length, 4096);
   } finally {
     await preview.close();
   }

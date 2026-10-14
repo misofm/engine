@@ -193,3 +193,97 @@ Commands: `cargo test --locked -p builtins --features test-support`,
 ## Size
 
 Half a day to one day. Most of the work is deletion and dropping one argument at each caller.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Dependencies are met.** #1556 and #1565 are closed. The browser's preparer
+  (`WebRuntimePreparer`, `hosts/host-web/src/lib.rs:4900-4960`) attaches the lanes that the control
+  plane chose (#1381a, #1400), so no host designs an input bound in production. The browser
+  preparation calls of Context (`lib.rs:7193`, `:7210`, `:7226`, `live_lanes` `:7850`) are gone. D7's
+  closure of #1470 (still open) needs only this slice upstream.
+- **#1400 added a trait parameter.** Every preparation now goes through
+  `control_plane::RuntimePreparer::prepare(..., bound_cache: &mut InputBoundCache<'_>, ...)`
+  (`crates/control-plane/src/compile.rs:659-672`). Its three implementations: capi
+  (`crates/capi/src/runtime/mod.rs:92-114`), host-web (`WebRuntimePreparer::prepare`, `lib.rs:4951`,
+  which ignores `_bound_cache`) and the test preparer in
+  `crates/control-plane/tests/runtime_preparer.rs:13-75`. D3 also removes this parameter. The
+  non-goal "Any change to host-web" is replaced: host-web drops the parameter from its preparer, the
+  doc lines at `lib.rs:4906-4907` and the two test caches in `src/tests.rs:5758`, `:5816`, and changes
+  nothing else.
+- **The cache type now has a lifetime** (`InputBoundCache<'seed>`, `with_seed`). D2 deletes it whole.
+- **Anchors moved.** `host-core`: re-export `lib.rs:258`; `prepare_host_runtime_with_live_lanes`
+  `prepare.rs:1067-1100` and `_successor` `:1103-1130`; the policy function is now
+  `prepare_host_runtime_with_live_controls_policy_and_spectrum` (`:1667-1677`), its pass `:2159`; the
+  test `a_design_bound_cache_changes_no_prepared_value` `:4005`. `builtins-compiler`: `:4437-4443`,
+  `:4540-4548`, test `:13719`. `control-plane`: re-export `lib.rs:69`; `compile.rs` `bound_seed` is a
+  field of `CompiledChildren` (`:29`), `capi_resources` `:213-294`, `prepared_capi_resources`
+  `:375-421`, `prepare_runtime` `:698-832`, `compile_children` `:843-923` and `:1008`; `control.rs`
+  `:54`, `:96`, `:106-116`, `:130-140`, rebuild `:1330-1353`. `capi`: `abi.rs:426-436`, `ffi.rs:385`,
+  `runtime/mod.rs:92-149`; `tests/design_bound_cache.rs:301`; `tests/resource_lifecycle.rs`
+  `three_cutoff_session` `:527`, `bound_seed_bytes` `:692`, `capi_epoch_terms` `:722-751`, "three input
+  cutoffs" `:1031-1033`, the seed assertion `:1848`. Header `miso_engine_v1.h:167-179`.
+  `docs/C_ABI_V1_QUALIFICATION.md:783-829`; `docs/REALTIME_DEPENDENCY_POLICY.md:211`, `:377`;
+  `tools/realtime-policy/src/policy.rs:197`. The `builtins` anchors held.
+- **Added authorized paths:** `crates/control-plane/tests/runtime_preparer.rs`,
+  `hosts/host-web/src/{lib.rs,tests.rs}` (the parameter and its doc lines only).
+- **Edit order.** After #1341a1/a2 (`control-plane/src/control.rs`). Before #1566 in
+  `host-core/src/prepare.rs` and before #1574 and #1611 in `hosts/host-web/src/lib.rs`. The open
+  #1593 also changes `RuntimePreparer` and `host-core/src/prepare.rs`: this slice lands first (it
+  only deletes), and #1593 rebases.
+
+## Decision record: #1602 (batch 9)
+
+**Shipped.** The input-design bound cache is gone, whole. `builtins`: `InputBoundCache`,
+`InputBoundRecord`, `CachedDesign`, `INPUT_BOUND_CACHE_ENTRIES`, the journal and the seed are
+deleted; `input_section_bounds(rate, strips)` and
+`test_support::input_section_bounds_within(rate, strips, budget)` lose the `cache` argument. The
+per-preparation dedupe by `InputBoundKey`, the budget, the stopped walk and the live-bound fallback
+are unchanged (a spent budget reports the live bound without a call, as the `ChargeAbove(0)` leg did).
+`builtins-compiler`, `host-core` (the two live-lanes entries and the policy function), the
+`RuntimePreparer::prepare` trait method and `compile_children` in `control-plane`, and
+`Engine::bound_cache` in `capi` lose the parameter. `PreparedRuntime`/`CompiledChildren`'s
+`bound_seed`, the epoch's `bound_seed` and `test_bound_seed`, and the `bound_seed_bytes` epoch row and
+largest-allocation term of `capi_resources` are deleted; the rebuild prepares with no seed. The header's
+"Engine memory" paragraph now says the engine owns no control-thread memory outside the compile limits
+beyond its own handle; ABI, layout, symbols and `ABI_VERSION` are unchanged.
+
+**Departures.**
+- `hosts/host-web/src/lib.rs` also drops the trailing `None` of its `compile_children` call (one
+  argument of the same removal); `tests.rs` drops the two test caches. Nothing else in host-web moved.
+- Mechanical callers outside the listed paths: `crates/builtins-compiler/tests/allocation_tracker.rs`,
+  `crates/graph-compiler/src/lib.rs` (a test call), `crates/host-core/tests/monitor_tick.rs`,
+  `crates/capi/src/runtime/live_peak_tests.rs`.
+- `examples/input_bound_budget.rs` measured "design work" as the no-cache preparation less the warm
+  rebuild. With no cache there is no warm rebuild, so the subtracted leg is now a keying-only
+  preparation under a budget of 0 (it prepares and keys every strip and walks nothing), which is the
+  same non-design work. The example builds; it was not run (benchmark campaigns are out of scope), so
+  `FRAME_EQUIVALENT_NS` and the charge constants are untouched.
+- `a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing` became
+  `a_preparation_walks_at_most_the_budget` (budget leg unchanged, every expected value unchanged).
+
+**Deleted tests (they defended only the cache).** `tail_contract`: `a_full_bound_cache_is_cleared_and_reports_the_same_values`,
+`a_journal_holds_every_design_a_preparation_used_through_a_clear`,
+`a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used`,
+`a_cache_over_a_record_finds_every_design_and_journals_only_what_it_used`; host-core
+`a_design_bound_cache_changes_no_prepared_value`; `resource_lifecycle` "three input cutoffs" case,
+`three_cutoff_session`, `HostHalf::bound_seed_bytes` and its zero-seed assertion. `design_bound_cache.rs`
+became `input_design_bounds.rs` (git rename), keeping `a_c_abi_plan_bounds_no_input_design`.
+`tail_contract`'s `the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` keeps its budget
+legs (the cold/warm/other-budget cache legs are removed).
+
+**Ceilings.** No test pins a ceiling this slice moves: `resource_lifecycle`'s complete-charge checks
+compare the engine's rows with the allocator and with `capi_epoch_terms`, and the seed row left both
+sides (it was 0 bytes on every fixture since #1556, so no measured row changed). The figures that left
+the header and `docs/C_ABI_V1_QUALIFICATION.md` were derived worst cases, not measurements, and
+nothing reached them: the engine's memory outside the compile limits drops from "at most 4,300,720
+bytes of cache plus 947,248 bytes of open journal" to the engine handle alone. No re-pin.
+
+**Gates.** (1) the review grep over `crates/ hosts/ tools/ docs/*.md` returns nothing (only closed
+`docs/handoffs/` records match). (2) `input_design_bounds::a_c_abi_plan_bounds_no_input_design`. (3)
+`tail_contract::the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` and
+`::a_design_walks_at_most_the_budget_it_is_given`, `builtins-compiler`
+`a_preparation_walks_at_most_the_budget`. (4) `resource_lifecycle` complete-charge tests
+(`capi_retained_bytes_charge_every_byte_the_compile_retains` and the replacement oracle). (5)
+`audit capi`. Results are in the implementer's report.

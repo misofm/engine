@@ -37,14 +37,12 @@ use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
     Owner, RebuildReason, Section,
 };
-use effect_compiler::{
-    LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
-    resolve_initial_values,
-};
+use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
+use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
     EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks,
     Route, RouteDestination, SessionModel, StableId, StripRef, canonical_session_json,
@@ -128,6 +126,12 @@ pub struct LiveEffectRecords<'a> {
     /// Its `Bypass` record, like every other instance's, is written as it is, ahead of the
     /// targets.
     pub records: Vec<EffectControlRecord>,
+    /// The crossfade ramp, in samples, that the [`EffectControlRecord::Bypass`] in `records`
+    /// carries: the session's `mute_ms` through [`LiveRampRow::BypassCrossfade`] (#1341 D1), the one
+    /// live row with no per-edit length, so `0` (a step) only when the session's `mute_ms` is 0.
+    /// `0` when `records` holds no bypass. A host writes the bypass with this ramp
+    /// (`EffectControlProducer::write_bypass`), never as a bare record.
+    pub bypass_ramp_samples: u32,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
     /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
@@ -223,10 +227,10 @@ pub enum LiveRebuild {
     /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
     /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
     RebuildOnly(RebuildReason),
-    /// The stored automation changes and `next` automates an effect parameter that the plan keeps
-    /// prepared ([`effect_automation_diagnostics`] is not empty, decision 15 E1, #1335 D4). The
-    /// rebuild's preparation refuses it with `effect.automation.rate`; the classifier only
-    /// routes, so the refusal has one author and no live commit can ack it first.
+    /// The stored automation changes and one of `next`'s automations names a row that its rule
+    /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
+    /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
+    /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
 }
 
@@ -244,8 +248,8 @@ pub enum LiveRebuild {
 ///    `current`'s. Bytes, never `PartialEq`: the canonical `f32` spelling keeps a zero's sign. A
 ///    canonical JSON error is structural too.
 /// 2. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
-///    [`effect_automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
-///    #1335 D4). An unchanged automation table is never re-checked: it was prepared. An accepted
+///    [`controls::automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
+///    #1335 D4, #1566 D6). An unchanged automation table is never re-checked: it was prepared. An accepted
 ///    change stays live with no records, as #1260 D2 made it.
 /// 3. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
@@ -365,11 +369,10 @@ pub fn classify_live_delta_with_monitor<'a>(
     drop(masked);
 
     // Step 2.
-    if current.automation != next.automation {
-        let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
-        if !effect_automation_diagnostics(next, registry).is_empty() {
-            return Err(LiveRebuild::AutomationTarget);
-        }
+    if current.automation != next.automation
+        && !controls::automation_diagnostics(next, next.sample_rate_hz).is_empty()
+    {
+        return Err(LiveRebuild::AutomationTarget);
     }
 
     // Step 3. A VCA added or removed has no row in the diff, so the lists decide whether the
@@ -1714,13 +1717,20 @@ fn effect_records<'a>(
             ctx.next.structure().sample_rate_hz,
         )?
     };
+    let mut bypass_ramp_samples = 0;
     if let Some(bypass) = bypass {
+        // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
+        bypass_ramp_samples = ctx.ramps.for_row(LiveRampRow::BypassCrossfade);
+        if bypass_ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+            return Err(LiveRebuild::Domain);
+        }
         records.insert(0, EffectControlRecord::Bypass(bypass));
     }
     Ok((!records.is_empty()).then(|| LiveEffectRecords {
         strip_id: target.after.id.as_str(),
         address,
         records,
+        bypass_ramp_samples,
         targets,
     }))
 }
@@ -1754,8 +1764,10 @@ fn parameter_records(
             continue;
         }
         let parameter = &descriptor.parameters[value_after.parameter_index as usize];
-        // A row is live only when the plan keeps a block-rate cell for it; the control rows say
-        // so, and this refuses a descriptor whose row would claim more.
+        // A row is live only when the plan keeps a block-rate cell for it, and the control rows
+        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `Sample`-rate
+        // one is rebuild-only for correctness. This guard keeps the classifier from trusting a row
+        // that ever claimed more than the plan holds.
         if parameter.automation_rate != AutomationRate::Block {
             return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
         }

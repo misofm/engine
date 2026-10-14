@@ -149,7 +149,6 @@ fn with_lanes(
         &caps(),
         &request(),
         lanes,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())))
@@ -333,7 +332,6 @@ fn observation_without_effect_lanes_is_refused() {
         &caps(),
         &request,
         lanes,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .err()
@@ -349,7 +347,6 @@ fn observation_without_effect_lanes_is_refused() {
         &caps(),
         &request,
         HostLiveLanes::ALL,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));

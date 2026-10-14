@@ -1209,7 +1209,8 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         PreparedCommandFrame::Structural(prepared) => *prepared,
         PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
     };
-    PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 1));
+    // The token holds a plan against the committed cache, not a clone of it (#1615).
+    PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
     RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 1));
     assert_eq!(endpoint.session().revision(), SessionRevision(7));
     assert_eq!(endpoint.session().canonical_snapshot(), before_snapshot);
@@ -1318,6 +1319,119 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
         assert_eq!(transaction_edit_path(&replay[..replay_len]), path);
         assert_eq!(endpoint.session().revision(), SessionRevision(8));
     }
+}
+
+/// #1615: the replay entry of a structural commit is written to the committed cache by the commit,
+/// with the oldest entry evicted there, and by nothing before. The cache of one entry makes every
+/// commit an eviction, and a token dropped before its commit leaves the cache as it was: an
+/// exact replay of the entry it held returns the bytes it acknowledged, and the evicted request
+/// is expired once, at the commit that evicted it.
+#[test]
+fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
+    fn transaction(request: u64, revision: u64, name: &str) -> Vec<u8> {
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse(name).expect("ID"),
+        }];
+        full_command(
+            request,
+            ExpectedRevision::Exact(SessionRevision(revision)),
+            crate::CommandPayload::SessionTransactionApply(&edits),
+        )
+    }
+    fn structural(
+        endpoint: &mut ProtocolController<MockProvider>,
+        input: &[u8],
+    ) -> PreparedStructuralCommand {
+        match endpoint
+            .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .expect("prepare")
+        {
+            PreparedCommandFrame::Structural(prepared) => *prepared,
+            PreparedCommandFrame::Immediate(_) => panic!("expected structural token"),
+        }
+    }
+    fn replay(endpoint: &mut ProtocolController<MockProvider>, input: &[u8]) -> Vec<u8> {
+        let mut output = [0_u8; 2048];
+        match endpoint.process_command_frame_into(
+            input,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut output,
+        ) {
+            Ok(length) => output[..length].to_vec(),
+            Err(error) => panic!("replay refused: {error:?}"),
+        }
+    }
+    fn status(frame: &[u8]) -> StatusCode {
+        match ProtocolCodec::default()
+            .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("typed response")
+        {
+            crate::DecodedTypedResponseFrame::Success { header, .. }
+            | crate::DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+        }
+    }
+
+    let first = transaction(1, 7, "replay-first");
+    let second = transaction(2, 8, "replay-second");
+    let mut endpoint = controller(1, 2);
+
+    let token = structural(&mut endpoint, &first);
+    assert!(
+        endpoint.replay().is_empty(),
+        "nothing is written before the commit"
+    );
+    let committed = endpoint
+        .commit_prepared_structural(token, EditPath::Live)
+        .expect("first commit");
+    let mut first_reply = [0_u8; 2048];
+    let first_length = committed.write_into(&mut first_reply).expect("reply");
+    let first_reply = &first_reply[..first_length];
+    assert_eq!(
+        endpoint.replay().len(),
+        1,
+        "the reply exists with its entry"
+    );
+    assert_eq!(replay(&mut endpoint, &first), first_reply);
+    let _ = endpoint.queues_mut().try_dequeue_event();
+
+    // A token dropped before its commit changes nothing: entry 1 is still there and exact.
+    let token = structural(&mut endpoint, &second);
+    assert_eq!(endpoint.replay().len(), 1);
+    drop(token);
+    assert_eq!(endpoint.replay().len(), 1);
+    assert_eq!(replay(&mut endpoint, &first), first_reply);
+    assert_eq!(endpoint.session().revision(), SessionRevision(8));
+
+    // The commit of the second evicts the first, once.
+    let token = structural(&mut endpoint, &second);
+    assert_eq!(
+        endpoint.replay().len(),
+        1,
+        "the eviction waits for the commit"
+    );
+    // While the token is outstanding every entry point refuses, a replay of a cached entry too:
+    // typed, with nothing queued and nothing acknowledged.
+    assert!(matches!(
+        endpoint.process_command_frame_into(
+            &first,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut [0_u8; 2048],
+        ),
+        Err(CommandFrameProcessError::PreparedCommandOutstanding)
+    ));
+    let committed = endpoint
+        .commit_prepared_structural(token, EditPath::ModelOnly)
+        .expect("second commit");
+    let mut second_reply = [0_u8; 2048];
+    let second_length = committed.write_into(&mut second_reply).expect("reply");
+    let second_reply = &second_reply[..second_length];
+    assert_eq!(endpoint.replay().len(), 1);
+    assert_eq!(replay(&mut endpoint, &second), second_reply);
+    assert_eq!(
+        status(&replay(&mut endpoint, &first)),
+        StatusCode::ReplayExpired
+    );
+    assert_eq!(endpoint.session().revision(), SessionRevision(9));
 }
 
 fn response_revision(frame: &[u8]) -> SessionRevision {

@@ -1,10 +1,11 @@
 //! Canonical JSON writer over the shared emit-side model walk.
 
-use core::{convert::Infallible, fmt::Write as _};
+use core::convert::Infallible;
 
 use crate::{
-    FieldKey, ModelVisitor, SessionModel, Token, VisitModel, WalkOrder, validate::validate_session,
-    value::write_f32,
+    FieldKey, ModelVisitor, SessionModel, Token, VisitModel, WalkOrder,
+    validate::validate_session,
+    value::{Spelling, spell_f32},
 };
 
 /// Produce canonical Session V1 JSON as UTF-8 text with one final newline.
@@ -44,14 +45,59 @@ struct Container {
     first: bool,
     empty: bool,
 }
-struct JsonWriter {
-    output: String,
+/// Where the canonical writer puts its text: a `String` (the document) or a [`ByteCount`] (the
+/// length of a part of it, with no buffer).
+trait Sink: core::fmt::Write {
+    fn push_str(&mut self, text: &str) {
+        let _ = self.write_str(text);
+    }
+    fn push(&mut self, character: char) {
+        let _ = self.write_char(character);
+    }
+    /// One canonical `f32` spelling.
+    fn f32(&mut self, value: f32);
+}
+
+impl Sink for String {
+    fn f32(&mut self, value: f32) {
+        spell_f32(self, value);
+    }
+}
+
+/// A sink that keeps the number of bytes written and nothing else.
+#[derive(Default)]
+struct ByteCount(usize);
+
+impl core::fmt::Write for ByteCount {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        self.0 += text.len();
+        Ok(())
+    }
+    fn write_char(&mut self, character: char) -> core::fmt::Result {
+        self.0 += character.len_utf8();
+        Ok(())
+    }
+}
+
+impl Sink for ByteCount {
+    fn f32(&mut self, value: f32) {
+        // A number is spelled in a fixed buffer on the stack, then counted.
+        let mut spelling = Spelling::new();
+        spell_f32(&mut spelling, value);
+        self.0 += spelling.len();
+    }
+}
+
+struct JsonWriter<S: Sink> {
+    output: S,
     containers: Vec<Container>,
 }
 
-impl JsonWriter {
+impl<S: Sink> JsonWriter<S> {
     fn indent(&mut self, depth: usize) {
-        self.output.extend(core::iter::repeat_n(' ', depth * 2));
+        for _ in 0..depth * 2 {
+            self.output.push(' ');
+        }
     }
     fn entry_prefix(&mut self) {
         let depth = self.containers.len();
@@ -84,7 +130,7 @@ impl JsonWriter {
     }
 }
 
-impl ModelVisitor for JsonWriter {
+impl<S: Sink> ModelVisitor for JsonWriter<S> {
     type Error = Infallible;
     fn record_begin(&mut self, key: Option<FieldKey>, _fields: u32) -> Result<(), Self::Error> {
         match key {
@@ -156,7 +202,7 @@ impl ModelVisitor for JsonWriter {
     }
     fn f32(&mut self, key: FieldKey, value: f32) -> Result<(), Self::Error> {
         self.field(key);
-        let _ = write_f32(&mut self.output, value);
+        self.output.f32(value);
         Ok(())
     }
     fn id(&mut self, key: FieldKey, value: &crate::StableId) -> Result<(), Self::Error> {
@@ -177,7 +223,7 @@ impl ModelVisitor for JsonWriter {
     }
 }
 
-fn write_quoted(output: &mut String, value: &str) {
+fn write_quoted<S: Sink>(output: &mut S, value: &str) {
     output.push('"');
     for character in value.chars() {
         match character {
@@ -204,7 +250,7 @@ fn write_quoted(output: &mut String, value: &str) {
 /// owner's (#1613).
 pub(crate) fn owner_bytes<T: VisitModel>(owner: &T) -> usize {
     let mut writer = JsonWriter {
-        output: String::new(),
+        output: ByteCount::default(),
         containers: vec![
             Container {
                 kind: Kind::Object,
@@ -219,7 +265,7 @@ pub(crate) fn owner_bytes<T: VisitModel>(owner: &T) -> usize {
         ],
     };
     match owner.visit(WalkOrder::Canonical, &mut writer) {
-        Ok(()) => writer.output.len(),
+        Ok(()) => writer.output.0,
         Err(error) => match error {},
     }
 }
@@ -230,12 +276,14 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{write_f32, write_quoted};
+    use super::{ByteCount, Sink, write_quoted};
+    use crate::value::write_f32;
     use crate::{
-        ChannelBuiltins, ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins,
-        DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
-        ParameterChannel, ParameterUnit, Rack, Route, RouteDestination, RouteSource, SendTap,
-        Sidechain, SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
+        Automation, AutomationSegment, AutomationShape, ChannelBuiltins, ChannelMatrix, Console,
+        ConsoleEntry, ConsoleSlot, ControlAddress, DualMonoBuiltins, DualMonoFader, Effect,
+        EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan, Owner, ParameterChannel,
+        ParameterUnit, Rack, Route, RouteDestination, RouteSource, Section, SendTap, Sidechain,
+        SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
     };
     #[test]
     fn canonical_string_escaping_is_frozen() {
@@ -248,6 +296,37 @@ mod tests {
             output,
             "\"\\\"\\\\\\b\\t\\n\\f\\r\\u0000\\u007F\\u0080/\u{2028}\u{2029}\u{1f642}\""
         );
+    }
+
+    /// The counting writer's `f32` length is the `String` writer's length, for the extremes (the
+    /// smallest and largest of each sign, which spell longest) and a sweep of every exponent.
+    #[test]
+    fn the_counting_sink_counts_the_bytes_of_the_string_sink() {
+        let mut bits = vec![
+            0,
+            0x8000_0000,
+            1,
+            0x8000_0001,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0xff7f_ffff,
+            0x3f80_0000,
+        ];
+        for exponent in 0..255_u32 {
+            for mantissa in [0, 1, 0x2a_aaaa, 0x7f_ffff] {
+                bits.push(exponent << 23 | mantissa);
+                bits.push(0x8000_0000 | exponent << 23 | mantissa);
+            }
+        }
+        for pattern in bits {
+            let value = f32::from_bits(pattern);
+            let mut text = String::new();
+            Sink::f32(&mut text, value);
+            let mut counted = ByteCount::default();
+            counted.f32(value);
+            assert_eq!(counted.0, text.len(), "{pattern:#010x}: {text}");
+        }
     }
 
     fn corpus_path(relative: &str) -> PathBuf {
@@ -274,7 +353,7 @@ mod tests {
         StableId::parse(value).expect("valid corpus ID")
     }
 
-    fn full_surface_document() -> String {
+    fn full_surface_model() -> crate::SessionModel {
         let source = fs::read_to_string(corpus_path("fixtures/session/v1/canonical.json"))
             .expect("read representative session");
         let mut model = parse_session_json(&source).expect("parse representative session");
@@ -473,7 +552,81 @@ mod tests {
             fader_ms: 12.5,
             pan_ms: 1000.0,
         });
-        canonical_session_json(&model).expect("full tagged surface canonicalizes")
+        // One stored automation per address section (#1566): `canonical.json` already automates an
+        // insert; these add the builtins, console and own (route and VCA) targets, so the corpus
+        // walks every arm of the target record. Declared out of ID order.
+        let ride = |name: &str, target: ControlAddress| Automation {
+            id: id(name),
+            target,
+            segments: vec![AutomationSegment {
+                shape: AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 480,
+                start_value: 0.0,
+                end_value: -3.0,
+                unit: ParameterUnit::Db,
+            }],
+        };
+        model.automation.insert(
+            0,
+            ride(
+                "vca-offset",
+                ControlAddress {
+                    owner: Owner::Vca(id("group")),
+                    section: Section::Own,
+                    control: 1,
+                    lane: ParameterChannel::Both,
+                },
+            ),
+        );
+        model.automation.push(ride(
+            "route-gain",
+            ControlAddress {
+                owner: Owner::Route(id("to-main")),
+                section: Section::Own,
+                control: 1,
+                lane: ParameterChannel::Both,
+            },
+        ));
+        model.automation.push(ride(
+            "fader-ride",
+            ControlAddress {
+                owner: Owner::Strip(id("vocal")),
+                section: Section::Builtins,
+                control: 5,
+                lane: ParameterChannel::Left,
+            },
+        ));
+        model.automation.push(ride(
+            "desk-gain",
+            ControlAddress {
+                owner: Owner::Strip(id("mix")),
+                section: Section::Console(id("desk-eq")),
+                control: 4,
+                lane: ParameterChannel::Right,
+            },
+        ));
+        model
+    }
+
+    fn full_surface_document() -> String {
+        canonical_session_json(&full_surface_model()).expect("full tagged surface canonicalizes")
+    }
+
+    /// The full surface with the track's matrix and the submix's pan exchanged, so the corpus
+    /// walks both arms of `matrix_or_pan` under both strip records (#1569).
+    fn exchanged_strips_document() -> String {
+        let mut model = full_surface_model();
+        let matrix = std::mem::replace(
+            &mut model.tracks[0].matrix_or_pan,
+            MatrixOrPan::Pan {
+                left: 0.75,
+                right: -0.75,
+                smoothing_samples: 8,
+            },
+        );
+        model.submixes[0].matrix_or_pan = matrix;
+        canonical_session_json(&model).expect("exchanged strips canonicalize")
     }
 
     #[test]
@@ -497,6 +650,10 @@ mod tests {
             json!({
                 "id": "canonical-full-surface",
                 "canonical": full_surface_document(),
+            }),
+            json!({
+                "id": "canonical-exchanged-strips",
+                "canonical": exchanged_strips_document(),
             }),
         ];
 

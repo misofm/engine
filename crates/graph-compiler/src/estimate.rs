@@ -179,7 +179,8 @@ pub(crate) fn resource_estimate(
 ///   live-control-free `NodeKind::Effect` does not allocate at all; the staging window of
 ///   `automation_capacity` spans, for a live channel only; and the shunt, always.
 /// * **Banked**, `rack::LiveControlEffectBankStage`: its growth over the `rack::EffectBankStage` it
-///   replaces; the one-lane staging window and the packed window of `automation_capacity` spans
+///   replaces; the one-lane staging window and the packed window of the widest lane's live
+///   parameter cells (#1611 D3; at most `automation_capacity`) spans
 ///   per lane, when any lane has a live channel; and the shunt over the whole AoSoA block, when
 ///   any lane has a live channel or is bypassed.
 ///
@@ -278,6 +279,9 @@ pub(crate) fn effect_control_resource(
         let mut live = false;
         let mut shunted = false;
         let mut queued_lanes = 0_u64;
+        // The widest lane's live parameter cells: `rack::LiveControlEffectBankStage::new` sizes its
+        // staging window by them, not by the bank's `automation_capacity` (#1611 D3).
+        let mut window_spans = 0_u64;
         for member in &bank.members {
             let rack = match member.rack {
                 RackId::Simd1 => EffectRack::Simd1,
@@ -289,6 +293,7 @@ pub(crate) fn effect_control_resource(
             {
                 has_control = true;
                 live |= control.has_channel();
+                window_spans = window_spans.max(u64::try_from(control.parameter_cells()).ok()?);
                 shunted |= control.has_channel() || control.bypassed();
                 queued_lanes += u64::from(control.has_observe_queue());
             }
@@ -317,11 +322,10 @@ pub(crate) fn effect_control_resource(
             // `graph`'s `stage_for` builds in place of a plain `EffectBankStage` for any slot with
             // a lane.
             let metadata = &bank.metadata;
-            let capacity = u64::from(metadata.program_key.automation_capacity);
             let (staging, packed) = if live {
                 (
-                    capacity.checked_mul(span_bytes)?,
-                    capacity.checked_mul(lanes)?.checked_mul(span_bytes)?,
+                    window_spans.checked_mul(span_bytes)?,
+                    window_spans.checked_mul(lanes)?.checked_mul(span_bytes)?,
                 )
             } else {
                 (0, 0)

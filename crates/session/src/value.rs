@@ -1,7 +1,5 @@
 //! Small checked numeric helpers shared by parsing and compilation.
 
-use core::fmt::Write as _;
-
 pub(crate) enum F32Token {
     Value(f32),
     NonFinite,
@@ -19,19 +17,99 @@ pub(crate) fn parse_f32_token(text: &str) -> F32Token {
 }
 
 /// Append one canonical finite `f32` spelling and report whether exact-`f64` fallback was needed.
+#[cfg(test)]
 pub(crate) fn write_f32(output: &mut String, value: f32) -> bool {
-    let start = output.len();
+    spell_f32(output, value)
+}
+
+/// A text a spelling is written into and can take back: a `String`, or the fixed [`Spelling`]
+/// buffer of a counting writer.
+pub(crate) trait SpellingSink: core::fmt::Write {
+    fn mark(&self) -> usize;
+    fn since(&self, start: usize) -> &str;
+    fn cut(&mut self, start: usize);
+}
+
+impl SpellingSink for String {
+    fn mark(&self) -> usize {
+        self.len()
+    }
+    fn since(&self, start: usize) -> &str {
+        &self[start..]
+    }
+    fn cut(&mut self, start: usize) {
+        self.truncate(start);
+    }
+}
+
+/// The longest spelling of a finite `f32`: the shortest round-trip digits of the value as an `f32`
+/// or, past that, as an `f64`, in positional notation (about 70 bytes for the smallest subnormal),
+/// so 128 bytes hold every one. A test walks the extremes.
+const SPELLING_BYTES: usize = 128;
+
+/// A fixed buffer for one `f32` spelling: the length of a number can be counted with no heap.
+pub(crate) struct Spelling {
+    bytes: [u8; SPELLING_BYTES],
+    length: usize,
+}
+
+impl Spelling {
+    pub(crate) const fn new() -> Self {
+        Self {
+            bytes: [0; SPELLING_BYTES],
+            length: 0,
+        }
+    }
+
+    /// The bytes written so far.
+    pub(crate) fn len(&self) -> usize {
+        self.length
+    }
+}
+
+impl core::fmt::Write for Spelling {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self
+            .length
+            .checked_add(text.len())
+            .filter(|&end| end <= SPELLING_BYTES)
+            .ok_or(core::fmt::Error)?;
+        self.bytes[self.length..end].copy_from_slice(text.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
+
+impl SpellingSink for Spelling {
+    fn mark(&self) -> usize {
+        self.length
+    }
+    fn since(&self, start: usize) -> &str {
+        // Only `write_str` fills the buffer, with whole `str`s.
+        core::str::from_utf8(&self.bytes[start..self.length]).expect("a spelling is UTF-8")
+    }
+    fn cut(&mut self, start: usize) {
+        self.length = start;
+    }
+}
+
+/// The one spelling algorithm, over any [`SpellingSink`]. The direct `f32` digits when they parse
+/// back to the same `f32` through `f64` (the session parser's path), the exact `f64` digits when
+/// not, and a `.0` when the digits hold no point or exponent.
+pub(crate) fn spell_f32<S: SpellingSink>(output: &mut S, value: f32) -> bool {
+    let start = output.mark();
     let _ = write!(output, "{value}");
-    let survives_session_parse = output[start..]
+    let survives_session_parse = output
+        .since(start)
         .parse::<f64>()
         .is_ok_and(|parsed| (parsed as f32).to_bits() == value.to_bits());
     let used_f64_fallback = !survives_session_parse;
     if used_f64_fallback {
-        output.truncate(start);
+        output.cut(start);
         let _ = write!(output, "{}", f64::from(value));
     }
-    if !output[start..].contains(['.', 'e', 'E']) {
-        output.push_str(".0");
+    if !output.since(start).contains(['.', 'e', 'E']) {
+        let _ = output.write_str(".0");
     }
     used_f64_fallback
 }

@@ -1,6 +1,9 @@
 //! The control address (decision 17, C2): stable IDs, never indices.
+//!
+//! It lives in `session` because a stored automation target is a [`ControlAddress`] (slice
+//! S12a, #1566); `controls` re-exports every name.
 
-use session::{RackName, StableId};
+use crate::{ParameterChannel, RackName, StableId};
 
 /// Which side of a dual-mono strip a control value lives on: `left`, `right`, or `both` (the
 /// existing `ParameterChannel` codes).
@@ -8,7 +11,7 @@ use session::{RackName, StableId};
 /// A per-lane row is listed as a `left` row and a `right` row and never as `both`; a shared row is
 /// listed once, as `both`. On a write, `both` on a per-lane row is an alias that sets both lanes
 /// in one edit; `left` or `right` on a shared row is refused as `control.lane`.
-pub type Lane = session::ParameterChannel;
+pub type Lane = ParameterChannel;
 
 /// The entity that owns a control.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -66,6 +69,15 @@ impl OwnerKind {
 }
 
 impl Owner {
+    /// The owner's stable ID: absent for the session, which has none.
+    #[must_use]
+    pub const fn id(&self) -> Option<&StableId> {
+        match self {
+            Self::Session => None,
+            Self::Strip(id) | Self::Route(id) | Self::Vca(id) => Some(id),
+        }
+    }
+
     /// The field-free kind of this owner.
     #[must_use]
     pub const fn kind(&self) -> OwnerKind {

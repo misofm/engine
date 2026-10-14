@@ -249,17 +249,17 @@ fn retired_tap_tokens_refuse() {
     }
 }
 
-/// The retired rack spellings are unknown automation-target tokens, never aliases: a table that
-/// kept `dynamic` as a synonym for `inserts` would silently accept a pre-decision-12 target.
+/// The retired rack spellings are unknown automation-target section tokens, never aliases: a table
+/// that kept `dynamic` as a synonym for `inserts` would silently accept a pre-decision-12 target.
 #[test]
 fn retired_rack_tokens_refuse() {
     for rack in ["simd1", "dynamic", "simd2"] {
         let mut document = console_document();
-        document["automation"][0]["target"]["rack"] = json!(rack);
+        document["automation"][0]["target"]["section"] = json!(rack);
         refused(
             &document,
             DiagnosticCode::InvalidEnum,
-            "$.automation[0].target.rack",
+            "$.automation[0].target.section",
         );
         assert_eq!(RackName::from_token(rack), None, "{rack}");
     }

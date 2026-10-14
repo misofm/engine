@@ -158,7 +158,6 @@ fn prepare_live(model: &SessionModel) -> (PreparedHost, HostLiveControlHandles) 
         &caps(),
         &HostLiveControlRequest::default(),
         HostLiveLanes::FADER_AND_MATRIX,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())))

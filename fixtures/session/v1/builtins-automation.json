@@ -65,8 +65,58 @@
       }
     }
   ],
-  "submixes": [],
-  "vcas": [],
+  "submixes": [
+    {
+      "id": "bus",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "vcas": [
+    {
+      "id": "riders",
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "members": [
+        "vocal"
+      ]
+    }
+  ],
   "control_smoothing": {
     "kind": "default"
   },
@@ -76,6 +126,27 @@
     }
   ],
   "routes": [
+    {
+      "id": "send",
+      "source": {
+        "kind": "track",
+        "track_id": "vocal",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "bus"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
     {
       "id": "to-main",
       "source": {
@@ -102,11 +173,11 @@
     {
       "id": "fader-ride",
       "target": {
-        "entity_id": "vocal",
-        "rack": "builtins",
-        "effect_id": "strip",
-        "parameter_id": 5,
-        "channel": "both"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "builtins",
+        "control": 5,
+        "lane": "both"
       },
       "segments": [
         {
@@ -120,13 +191,13 @@
       ]
     },
     {
-      "id": "matrix-ll",
+      "id": "pan-ride",
       "target": {
-        "entity_id": "vocal",
-        "rack": "builtins",
-        "effect_id": "strip",
-        "parameter_id": 7,
-        "channel": "both"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "builtins",
+        "control": 12,
+        "lane": "left"
       },
       "segments": [
         {
@@ -142,11 +213,11 @@
     {
       "id": "polarity-flip",
       "target": {
-        "entity_id": "vocal",
-        "rack": "builtins",
-        "effect_id": "strip",
-        "parameter_id": 1,
-        "channel": "right"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "builtins",
+        "control": 1,
+        "lane": "right"
       },
       "segments": [
         {
@@ -160,13 +231,33 @@
       ]
     },
     {
+      "id": "route-ride",
+      "target": {
+        "owner": "route",
+        "owner_id": "send",
+        "section": "own",
+        "control": 1,
+        "lane": "both"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "0",
+          "end_sample": "960",
+          "start_value": 0.0,
+          "end_value": -6.0,
+          "unit": "db"
+        }
+      ]
+    },
+    {
       "id": "trim-ride-left",
       "target": {
-        "entity_id": "vocal",
-        "rack": "builtins",
-        "effect_id": "strip",
-        "parameter_id": 2,
-        "channel": "left"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "builtins",
+        "control": 2,
+        "lane": "left"
       },
       "segments": [
         {
@@ -175,6 +266,26 @@
           "end_sample": "480",
           "start_value": 0.0,
           "end_value": -6.0,
+          "unit": "db"
+        }
+      ]
+    },
+    {
+      "id": "vca-ride",
+      "target": {
+        "owner": "vca",
+        "owner_id": "riders",
+        "section": "own",
+        "control": 1,
+        "lane": "left"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "0",
+          "end_sample": "960",
+          "start_value": 0.0,
+          "end_value": -3.0,
           "unit": "db"
         }
       ]

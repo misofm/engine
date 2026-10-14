@@ -4,11 +4,11 @@
 //! the same field specifications used by validation and decoding.
 
 use session::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
-    ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect,
-    EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName,
-    RenderProfile, Route, RouteDestination, RouteSource, SidechainDeclaration, Source,
-    SourceBitDepth, StableId, Submix, Vca,
+    Automation, AutomationSegment, AutomationShape, ChannelBuiltins, ChannelMatrix, Console,
+    ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity,
+    EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile,
+    Route, RouteDestination, RouteSource, SidechainDeclaration, Source, SourceBitDepth, StableId,
+    Submix, Vca,
 };
 
 use crate::{
@@ -1008,36 +1008,16 @@ fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
         value.follows_mute,
     )
 }
-fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result<(), EncodeError> {
-    tx_start_message(
-        sink,
-        schema::session::automation_target::SPEC.field_count(&[])?,
-    )?;
-    tx_id(
-        sink,
-        schema::session::automation_target::ENTITY_ID,
-        &value.entity_id,
-    )?;
-    tx_u8(
-        sink,
-        schema::session::automation_target::RACK,
-        schema::session_parameter_rack_wire(value.rack),
-    )?;
-    tx_id(
-        sink,
-        schema::session::automation_target::EFFECT_ID,
-        &value.effect_id,
-    )?;
-    tx_u32(
-        sink,
-        schema::session::automation_target::PARAMETER_ID,
-        value.parameter_id,
-    )?;
-    tx_u8(
-        sink,
-        schema::session::automation_target::CHANNEL,
-        schema::session_parameter_channel_wire(value.channel),
-    )
+/// A stored automation target is the control address `SET_CONTROL` carries (#1566 D4), written by
+/// the same encoder; no session row is automatable, so a session owner has no spelling here.
+fn tx_automation_target(
+    sink: &mut dyn Sink,
+    value: &controls::ControlAddress,
+) -> Result<(), EncodeError> {
+    if value.owner == controls::Owner::Session {
+        return Err(EncodeError::InvalidField);
+    }
+    tx_control_address(sink, value)
 }
 fn tx_automation_segment(
     sink: &mut dyn Sink,
@@ -1686,30 +1666,12 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
         follows_mute: parse_bool(one_spec!(message, schema::session::route::FOLLOWS_MUTE)?)?,
     })
 }
-fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, DecodeError> {
-    let message = message.schema_spec(&schema::session::automation_target::SPEC)?;
-    Ok(AutomationTarget {
-        entity_id: stable_id(one_spec!(
-            message,
-            schema::session::automation_target::ENTITY_ID
-        )?)?,
-        rack: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
-            message,
-            schema::session::automation_target::RACK
-        )?)?)?,
-        effect_id: stable_id(one_spec!(
-            message,
-            schema::session::automation_target::EFFECT_ID
-        )?)?,
-        parameter_id: read_u32_exact(one_spec!(
-            message,
-            schema::session::automation_target::PARAMETER_ID
-        )?)?,
-        channel: schema::session_parameter_channel_from_wire(read_u8_exact(one_spec!(
-            message,
-            schema::session::automation_target::CHANNEL
-        )?)?)?,
-    })
+fn parse_automation_target(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
+    let address = parse_control_address(message)?;
+    if address.owner == controls::Owner::Session {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(address)
 }
 fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, DecodeError> {
     let message = message.schema_spec(&schema::session::automation_segment::SPEC)?;

@@ -31,15 +31,24 @@ builtins.workspace = true
 controls.workspace = true
 effect-compiler.workspace = true
 effect-contract.workspace = true
+host-core.workspace = true
 host-web.workspace = true
+session.workspace = true
+# The canonical writer corpus manifest is read as data.
+serde_json = "=1.0.151"
 
 [dependencies.sha2]
 workspace = true
 
 [dev-dependencies]
-host-core.workspace = true
-# Gate 1 reads the emitted document back as data.
-serde_json = "=1.0.151"
+# Test-only (#1615): `tests/control_command_heap.rs` drives host-web's control command with
+# `protocol` frames and measures its peak heap with `bench_support::alloc`. It lives here because
+# `scripts/check-bench-policy.sh` keeps `bench-support` out of every `hosts/` package, dev
+# dependencies included, and this tool already links both host-web and bench-support.
+protocol.workspace = true
+# Test-only: `host_core::verify_stages(false)` turns off the debug stage oracle, so the heap numbers
+# are the release path's.
+host-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

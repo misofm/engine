@@ -1,6 +1,6 @@
 //! Typed declarative V1 session model.
 
-use crate::StableId;
+use crate::{ControlAddress, StableId};
 
 pub(crate) trait ClosedToken: Copy + 'static {
     const ALL: &'static [(Self, &'static str)];
@@ -969,25 +969,11 @@ closed_tokens! {
 pub struct Automation {
     /// Stable automation identity.
     pub id: StableId,
-    /// Typed target reference.
-    pub target: AutomationTarget,
+    /// The control this automation drives: the address `SET_CONTROL` and the control list use
+    /// (decision 17, C2; #1566). Its owner is never the session.
+    pub target: ControlAddress,
     /// Ordered segments, preserved canonically.
     pub segments: Vec<AutomationSegment>,
-}
-
-/// An effect parameter automation target.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AutomationTarget {
-    /// Owning track identity (only tracks carry racks).
-    pub entity_id: StableId,
-    /// Rack containing the named local effect.
-    pub rack: RackName,
-    /// Local effect slot identity.
-    pub effect_id: StableId,
-    /// Effect parameter identity.
-    pub parameter_id: u32,
-    /// Explicit target channel.
-    pub channel: ParameterChannel,
 }
 
 closed_tokens! {
@@ -1003,16 +989,13 @@ closed_tokens! {
         /// matrix/pan pair (issue #178, ruled by #210's D2).
         ///
         /// Not a rack of swappable modules -- it is the chassis. The token joins `RackName`
-        /// anyway, and does not get a vocabulary of its own, because an automation target's
-        /// shape is `{ entity_id, rack, effect_id, parameter_id, channel }` and the strip is
-        /// addressed through exactly that shape: `effect_id` carries the fixed validated literal
-        /// `"strip"` (the schema has no optional keys, so the field must carry a value rather
-        /// than be omitted) and `parameter_id` carries a builtin descriptor id.
+        /// anyway, and does not get a vocabulary of its own: it is the code a control address's
+        /// `builtins` section keeps (`SectionKind::Builtins`, decision 17).
         ///
         /// **Appended, never inserted.** Its code is `4`, spelled explicitly so that retiring
         /// `simd1` and `simd2` renumbered nothing.
         Builtins = 4 => "builtins",
-        /// A session console slot: `effect_id` names the slot, in either section (decision 12).
+        /// A session console slot, in either section (decision 12).
         Console = 5 => "console",
     }
 }

@@ -266,42 +266,38 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "automation.invalid_range",
     ),
-    // Issue #178, ruled by #210's D2: the `rack = "builtins"` automation-target arm. All four are
-    // stage-2 refusals, and each names one clause of the arm.
-    //
-    // `effect_id` carries a fixed validated literal because Session V1 has no optional keys, so
-    // the wrong literal has to be a typed diagnostic rather than an ignored field.
+    // An automation target is a control address (#1566). The structure of an address is stage 2's:
+    // an owner that is not declared, and a route that has no builtins section.
     (
         "builtins-automation.json",
-        "\"effect_id\": \"strip\",\n        \"parameter_id\": 5",
-        "\"effect_id\": \"channel-strip\",\n        \"parameter_id\": 5",
+        "\"owner_id\": \"vocal\",\n        \"section\": \"builtins\",\n        \"control\": 5",
+        "\"owner_id\": \"nobody\",\n        \"section\": \"builtins\",\n        \"control\": 5",
         1,
         "reference.missing_entity",
     ),
-    // A `MatrixShared` parameter is one 2x2 for the track; addressing one of its lanes is a
-    // category error, not a narrower request.
     (
         "builtins-automation.json",
-        "\"parameter_id\": 7,\n        \"channel\": \"both\"",
-        "\"parameter_id\": 7,\n        \"channel\": \"left\"",
+        "\"owner\": \"strip\",\n        \"owner_id\": \"vocal\",\n        \"section\": \"builtins\",\n        \"control\": 5",
+        "\"owner\": \"route\",\n        \"owner_id\": \"to-main\",\n        \"section\": \"builtins\",\n        \"control\": 5",
         1,
         "schema.invalid_enum",
     ),
-    // #808 makes HPF/LPF live. An unknown builtin ID still receives a typed refusal.
+    // Whether the row at an address exists and is automatable is the control core's rule, run at
+    // stage 5 with the effect diagnostics: an unknown builtin ID has no row, and `delay_samples`
+    // (id 11) is rebuild-only: a delay change re-times the ring.
     (
         "builtins-automation.json",
-        "\"parameter_id\": 2,\n        \"channel\": \"left\"",
-        "\"parameter_id\": 4294967295,\n        \"channel\": \"left\"",
-        1,
-        "reference.missing_entity",
+        "\"control\": 2,\n        \"lane\": \"left\"",
+        "\"control\": 4294967295,\n        \"lane\": \"left\"",
+        4,
+        "control.address.unknown",
     ),
-    // `delay_samples` (id 11) remains prepared-only: a delay change re-times the ring.
     (
         "builtins-automation.json",
-        "\"parameter_id\": 1,\n        \"channel\": \"right\"",
-        "\"parameter_id\": 11,\n        \"channel\": \"right\"",
-        1,
-        "reference.missing_entity",
+        "\"control\": 1,\n        \"lane\": \"right\"",
+        "\"control\": 11,\n        \"lane\": \"right\"",
+        4,
+        "control.automation.target",
     ),
     // The removed document limits are strict unknowns rather than silently ignored host policy.
     (
@@ -547,7 +543,7 @@ fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() 
 
 /// Decision 14's probe (F1), closed by decision 15 E1 (#1335 gate 2): an automation on the
 /// observation fixture's EQ `band-1-enabled` passes stages 1-4 and fails `prepare-effects` with
-/// `effect.automation.rate` at the automation; the same automation on the block-rate
+/// `control.automation.target` at the automation; the same automation on the block-rate
 /// `band-1-gain` passes every stage.
 ///
 /// Red mutation: refuse the target anywhere `session-validator` does not run (a host-only check)
@@ -561,11 +557,12 @@ fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
         value["automation"] = serde_json::json!([{
             "id": "probe",
             "target": {
-                "entity_id": "t1",
-                "rack": "inserts",
-                "effect_id": "eq",
-                "parameter_id": parameter_id,
-                "channel": "both"
+                "owner": "strip",
+                "owner_id": "t1",
+                "section": "inserts",
+                "slot_id": "eq",
+                "control": parameter_id,
+                "lane": "both"
             },
             "segments": [{
                 "shape": "step",
@@ -589,11 +586,8 @@ fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
         );
         let diagnostics = &report.stages()[4].diagnostics;
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert_eq!(diagnostics[0].code, "effect.automation.rate");
-        assert_eq!(
-            diagnostics[0].path,
-            "$.automation[id=probe].target.parameter_id"
-        );
+        assert_eq!(diagnostics[0].code, "control.automation.target");
+        assert_eq!(diagnostics[0].path, "$.automation[id=probe].target");
         assert!(report.canonical().is_none());
     }
 }

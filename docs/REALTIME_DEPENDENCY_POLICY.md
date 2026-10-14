@@ -208,8 +208,8 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged
   to `System` and adds thread-local counters that are enabled only around its isolated test
   thread.
-- `crates/capi/tests/design_bound_cache.rs` (#1471): the exported-C design-bound cache evidence.
-  It compiles, submits structural transactions, renders (so a pending plan swaps in) and drains the
+- `crates/capi/tests/input_design_bounds.rs` (#1556, #1602): the exported-C evidence that a plan
+  bounds no input design. It compiles, submits structural transactions, renders (so a pending plan swaps in) and drains the
   event lanes through the C entries. Its unsafe is the C calls themselves, render included, each
   with the handle and storage contract stated beside it; it installs no allocator.
 - `hosts/host-web/tests/control_parity.rs` (#1560, which absorbed #1364's
@@ -355,10 +355,13 @@ Approved unsafe code that runs on a render thread, per entry:
   reads `spectrum_read`, `spectrum_stream_read` and `track_response_capture` reach only
   `copy_live_record`, through `write_spectrum_window` and `spectrum_failure` (the two spectrum
   reads) and through `run_live_response_capture`, `live_response_failure` and
-  `LiveResponseCaptureSink` (the capture). `read_live_record` and `response_header_bytes` are
-  reached only from the worker-side analysis and query exports (`spectrum_analysis`,
-  `spectrum_stream_analysis`, `spectrum_stream_analysis_configure`, `track_response_analysis` and
-  `response_query`), none of which is render-locked or called by either worklet. Its
+  `LiveResponseCaptureSink` (the capture). `read_live_record` is reached only from the
+  worker-side analysis exports (`spectrum_analysis`, `spectrum_stream_analysis`,
+  `spectrum_stream_analysis_configure` and `track_response_analysis`), none of which is
+  render-locked or called by either worklet. The five session-less `response_frame_*` exports
+  (#1574) are control work of the response-preview instance of the same kind: they stage one
+  `RESPONSE_GET` frame and answer one frame through `host_core::serve_response_frame`, and no
+  worklet calls them. Its
   `CountingAllocator` is test-only.
 - `render_lock.rs`: its allocator methods run on every allocator call the browser module makes. They
   count a call exactly when it is made inside a render-locked window, at boot or after it; the count
@@ -374,7 +377,7 @@ Approved unsafe code that runs on a render thread, per entry:
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
-  `design_bound_cache.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
+  `input_design_bounds.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
   render entry from threads of their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
   which runs on the same test thread as its render calls.

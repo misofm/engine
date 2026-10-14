@@ -1,11 +1,12 @@
 //! Explicit typed walk over a strict, spanned JSON value tree.
 use crate::{
-    Automation, AutomationSegment, AutomationTarget, CONTROL_SMOOTHING_MS_MAXIMUM, ChannelBuiltins,
-    ChannelMatrix, ControlSmoothing, Diagnostic, DiagnosticCode,
+    Automation, AutomationSegment, CONTROL_SMOOTHING_MS_MAXIMUM, ChannelBuiltins, ChannelMatrix,
+    ControlAddress, ControlSmoothing, Diagnostic, DiagnosticCode,
     DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect,
-    EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack, RenderProfile, Route,
-    RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Sidechain,
-    SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track, Vca,
+    EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Owner, Rack, RenderProfile,
+    Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section, SessionModel,
+    Sidechain, SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track,
+    Vca,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     json_preflight,
     model::ClosedToken,
@@ -1585,24 +1586,81 @@ fn parse_target(
     parser: &mut Parser,
     table: TableRef<'_>,
     path: DiagnosticPath,
-) -> Option<AutomationTarget> {
+) -> Option<ControlAddress> {
     parser.keys(
         table,
-        &["entity_id", "rack", "effect_id", "parameter_id", "channel"],
+        &["owner", "owner_id", "section", "slot_id", "control", "lane"],
         &path,
     );
-    let entity_id = parser.id(table, "entity_id", &path);
-    let rack = parser.closed_token(table, "rack", &path, DiagnosticCode::InvalidEnum);
-    let effect_id = parser.id(table, "effect_id", &path);
-    let parameter_id = parser.u32(table, "parameter_id", &path);
-    let channel = parser.closed_token(table, "channel", &path, DiagnosticCode::InvalidEnum);
-    Some(AutomationTarget {
-        entity_id: entity_id?,
-        rack: rack?,
-        effect_id: effect_id?,
-        parameter_id: parameter_id?,
-        channel: channel?,
+    let owner_kind = parse_target_token(
+        parser,
+        table,
+        "owner",
+        &path,
+        &["strip", "route", "vca"],
+        "expected strip, route or vca",
+    );
+    let owner_id = parser.id(table, "owner_id", &path);
+    let section_kind = parse_target_token(
+        parser,
+        table,
+        "section",
+        &path,
+        &["own", "builtins", "console", "inserts"],
+        "expected own, builtins, console or inserts",
+    );
+    // `slot_id` names the console slot or the insert, so it exists exactly for those two sections
+    // (the way `sidechain` refuses the keys its `none` arm does not carry).
+    let slot_id = match section_kind {
+        Some("console" | "inserts") => parser.id(table, "slot_id", &path),
+        Some(_) => {
+            parser.reject_key(
+                table,
+                "slot_id",
+                path.key("slot_id"),
+                "slot_id is legal only in a console or inserts section",
+            );
+            None
+        }
+        None => None,
+    };
+    let control = parser.u32(table, "control", &path);
+    let lane = parser.closed_token(table, "lane", &path, DiagnosticCode::InvalidEnum);
+    let owner_id = owner_id?;
+    let owner = match owner_kind? {
+        "strip" => Owner::Strip(owner_id),
+        "route" => Owner::Route(owner_id),
+        _ => Owner::Vca(owner_id),
+    };
+    let section = match section_kind? {
+        "own" => Section::Own,
+        "builtins" => Section::Builtins,
+        "console" => Section::Console(slot_id?),
+        _ => Section::Inserts(slot_id?),
+    };
+    Some(ControlAddress {
+        owner,
+        section,
+        control: control?,
+        lane: lane?,
     })
+}
+
+/// Read one address token that only some of its spellings are legal for the target.
+fn parse_target_token<'a>(
+    parser: &mut Parser,
+    table: TableRef<'a>,
+    key: &'static str,
+    path: &DiagnosticPath,
+    allowed: &[&'static str],
+    expected: &'static str,
+) -> Option<&'static str> {
+    let token = parser.token(table, key, path)?;
+    if let Some(allowed) = allowed.iter().find(|candidate| **candidate == token) {
+        return Some(*allowed);
+    }
+    parser.error_field(table, key, path, DiagnosticCode::InvalidEnum, expected);
+    None
 }
 
 fn parse_segment(

@@ -22,8 +22,9 @@ use host_core::{
     prepare_response_preview,
 };
 use session::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, EditRamps, ParameterChannel,
-    ParameterUnit, RackName, SessionModel, StableId, canonical_session_json, parse_session_json,
+    Automation, AutomationSegment, AutomationShape, ControlAddress, EditRamps, Owner,
+    ParameterChannel, ParameterUnit, Section, SessionModel, StableId, canonical_session_json,
+    parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -94,17 +95,16 @@ fn classify_parameter_change(current: &SessionModel) {
 }
 
 /// A stored automation added on the first track's console EQ: reaches
-/// `effect_automation_diagnostics`.
+/// `controls::automation_diagnostics`.
 fn classify_automation_change(current: &SessionModel) {
     let mut next = current.clone();
     next.automation.push(Automation {
         id: StableId::parse("eq-ride").expect("stable id"),
-        target: AutomationTarget {
-            entity_id: next.tracks[0].id.clone(),
-            rack: RackName::Console,
-            effect_id: StableId::parse("eq").expect("stable id"),
-            parameter_id: 4,
-            channel: ParameterChannel::Left,
+        target: ControlAddress {
+            owner: Owner::Strip(next.tracks[0].id.clone()),
+            section: Section::Console(StableId::parse("eq").expect("stable id")),
+            control: 4,
+            lane: ParameterChannel::Left,
         },
         segments: vec![AutomationSegment {
             shape: AutomationShape::Step,

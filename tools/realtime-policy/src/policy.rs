@@ -194,7 +194,7 @@ impl Policy {
             "crates/session/tests/allocation_budget.rs",
             "crates/capi/src/ffi.rs",
             "crates/capi/tests/resource_lifecycle.rs",
-            "crates/capi/tests/design_bound_cache.rs",
+            "crates/capi/tests/input_design_bounds.rs",
             "crates/capi/tests/plan_swap_race.rs",
             "crates/capi/tests/response_get.rs",
             "hosts/host-web/src/ffi.rs",

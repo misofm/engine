@@ -11,7 +11,12 @@ export type { ErrorPhase, ResultCodeName, BootResultAliasName };
  * rejected the options block -- so the vocabulary a caller sees is the union of both spellings and
  * the SDK chooses by context. Adopted ruling 5462139867 finding 2.
  */
-export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCode | SdkControlCode;
+export type MisoErrorCode =
+  | ResultCodeName
+  | BootResultAliasName
+  | SdkTimeoutCode
+  | SdkControlCode
+  | SdkResponseCode;
 
 /**
  * A code the SDK itself raises when a bounded wait does not settle. It comes from the SDK, not
@@ -31,6 +36,14 @@ export type SdkTimeoutCode = "spectrumCloseTimeout" | "hostDisposeTimeout" | "co
  * when a state read names a stale list. The caller lists again.
  */
 export type SdkControlCode = "control.list.stale";
+
+/**
+ * The core's own diagnostic code for a refused response preview, such as `response.points` or
+ * `response.reply_too_large`. The core sent it as the diagnostic of a refusal and the error's
+ * `result` names the engine result class the refusal's status maps to. A frame the core could not
+ * decode answers `protocol.failure`.
+ */
+export type SdkResponseCode = `response.${string}` | "protocol.failure";
 
 const RESULT_NAMES: ReadonlyMap<number, ResultCodeName> = new Map(
   ABI_LAYOUT.constants.resultCodes.map((row) => [row.value, row.name] as const),

@@ -1038,3 +1038,60 @@ fn a_bank_window_below_a_lanes_live_cells_is_refused_at_bind() {
     )
     .expect("a lane whose cells fit the window");
 }
+
+/// Issue #1611 D3: a live slot's span storage is sized by what its lanes can stage, not by the
+/// bank effect's `automation_capacity`.
+///
+/// The bank below declares a capacity of 4,096 spans, as the prepared-target owner of a descriptor
+/// with many parameters does while its lanes hold no parameter cell. A lane with two cells and a
+/// lane with none (a target owner's) both bind and the slot holds one two-span window plus one
+/// window per lane (eight spans on a four-lane bank); a slot whose lanes hold no cell holds none.
+///
+/// Red mutation: size `staging` and `packed` by `automation_capacity` again -> the first
+/// assertion reads 4,096 + 4 x 4,096 spans.
+#[test]
+fn a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity() {
+    const CAPACITY: u32 = 4_096;
+    let superseded = LiveValuesSuperseded::new();
+    let cellless = || {
+        effect_control_lane(
+            EffectLaneSpec {
+                shape: EffectLaneShape::from_live_parameters([], 0),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &superseded,
+        )
+        .expect("lane")
+        .1
+    };
+    let mut bank = MockGainBank::new(0).bound();
+    bank.metadata.program_key.automation_capacity = CAPACITY;
+    let stage = LiveControlEffectBankStage::new(
+        bank,
+        BankWidth::Four,
+        8,
+        vec![
+            Some(lane_pair(false, &superseded).1),
+            Some(cellless()),
+            None,
+            None,
+        ],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("a window of the widest lane's two cells");
+    assert_eq!(stage.span_storage_len(), 2 + 2 * 4);
+    let mut bank = MockGainBank::new(0).bound();
+    bank.metadata.program_key.automation_capacity = CAPACITY;
+    let stage = LiveControlEffectBankStage::new(
+        bank,
+        BankWidth::Four,
+        8,
+        vec![Some(cellless()), None, None, None],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("a slot whose lanes hold no parameter cell holds no span storage");
+    assert_eq!(stage.span_storage_len(), 0);
+}

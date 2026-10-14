@@ -123,3 +123,39 @@ advertised. This slice's address table and domain check are therefore reachable 
 protocol crate's controller with the feature enabled (as `controller::tests` does), not through
 either host, until the render-side automation drain (#1058) sets the feature. Gates that drive a
 host test the refusal; the address and domain gates run on the protocol controller.
+
+## Amendment (controls coordinator, batch 9, 2026-10-14)
+
+Checked against `main` at `7feb27800`.
+
+- **Anchors moved.** `AutomationEnqueue` is `message_wire.rs:856`; `RevisionChanged` and
+  `AutomationCanceled` are `:969-982`. `validate_automation_domains` is `controller.rs:3861`. #1552
+  D5's `automation.target.unsupported` is `controller.rs:3634-3638`, with the provider's note at
+  `control_provider.rs:907`. The feature refusal is `execute`, `controller.rs:3156`; the capability
+  bit is `:3758`. `queue.rs:58`, `:85` and `:199-207` held.
+- **D1's codec exists.** Decode and encode each table entry with
+  `message_wire::decode_set_control_address` and `write_set_control_address` (`SET_CONTROL`'s,
+  `control` and `lane` required).
+- **D3 follows #1566 on `control.inactive`.** `controls::check` returns `control.inactive` for an
+  automatable row that the owner's shape does not use. #1566's batch 9 amendment proposes it as a
+  fifth code (recommended); this slice uses the same ruling.
+- **D4 in fact.** Today every committed session transaction that is not monitor-only cancels the
+  queued batches with `RevisionChanged` (`controller.rs:2303` and `:3260`), live ones included. So a
+  stored handle never outlives a revision. D4's epoch stamp stays as written; gate 3 is unchanged.
+- **#1315, more precisely than the batch 8 amendment.** The frame decodes before `execute`'s feature
+  check. Through a host, a batch that fails D1 or D2 decoding is `INVALID_FIELD`, and a well-formed
+  batch is `UNAVAILABLE`. Gate 4 sends a well-formed batch in the new shape. Gate 1 stays a codec
+  test in `protocol`.
+- **No drain is filed.** #1058 (research) is closed and no open issue renders stored or enqueued
+  automation. The refusal holds until such a slice is filed and sets the feature.
+- **More files that build an `AUTOMATION_ENQUEUE` frame** (authorized):
+  `crates/protocol/src/message_wire/tests.rs`, `crates/capi/src/runtime/tests.rs` (`:284-305`,
+  `:2251`, `:2710`) and `hosts/host-web/tests/protocol_cross_host.rs` (`:704-730`).
+- **Edit order.** After #1566. Before #1615 in `protocol/src/controller.rs` (#1615's S2 edits the
+  structural prepare and commit; this slice edits admission). With #1574 and #1615 in
+  `host-core/src/control_provider.rs`: this slice first.
+
+
+## Parked (root, 2026-10-14)
+
+Parked 2026-10-14: #1058 A9 retires AUTOMATION_ENQUEUE; close as superseded when #1058 slice 21a is filed and lands.

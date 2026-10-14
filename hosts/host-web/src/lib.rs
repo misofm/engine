@@ -83,15 +83,17 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// 4-effect document on the shipped module (`scripts/check-web-boot-budget.mjs`): the boot now
 /// builds the control plane's session, whose catalog, producers and protocol state the browser did
 /// not hold, and the wasm high-water growth rose from under 20 MiB to 25,427,968 bytes (24.25
-/// bytes per input byte). Root ruled 25 (2026-10-14): 25 MiB = 26,214,400 bytes is the tightest
-/// whole multiplier above the measurement (3.1% headroom); the growth is decision 17 C6's
-/// always-attached live lanes (per-effect lanes 4.0 MB, bank lanes 2.4 MB, control-plane rows
-/// ~0.4 MB, input lanes 0.17 MB), and its successor ("Shrink the always-attached per-effect live
-/// lanes") aims to bring the pin back to 20. Boot checks
+/// bytes per input byte). Root ruled 25 for the interval (2026-10-14). Issue #1611 found the cause
+/// of that growth in the control plane's live-lane choice (`controls::live_lanes`), which collected
+/// every control row of the session (53,763 rows of 232 bytes for this document) into one vector
+/// grown by doubling to 15.2 MB, only to read three booleans, and on wasm the freed large blocks of
+/// that doubling are not reused; it now walks the rows one owner at a time. The same document grows
+/// the wasm high-water by 20,447,232 bytes (19.5 bytes per input byte, 312 pages), under the 20 MiB
+/// pin of 20,971,520 bytes plus one page, so the multiplier is 20 again. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 25;
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
@@ -173,11 +175,6 @@ pub const BUFFER_COMMAND: u32 = 6;
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
 
-/// Explicit stopped-response target kinds.
-#[allow(missing_docs)]
-pub const RESPONSE_TARGET_EFFECT: u32 = 1;
-#[allow(missing_docs)]
-pub const RESPONSE_TARGET_INPUT_FILTERS: u32 = 2;
 /// Explicit frequency-axis kinds.
 #[allow(missing_docs)]
 pub const RESPONSE_GRID_LINEAR: u32 = 1;
@@ -190,18 +187,6 @@ pub const RESPONSE_CHANNEL_LEFT: u32 = 1;
 pub const RESPONSE_CHANNEL_RIGHT: u32 = 2;
 #[allow(missing_docs)]
 pub const RESPONSE_CHANNEL_BOTH: u32 = RESPONSE_CHANNEL_LEFT | RESPONSE_CHANNEL_RIGHT;
-/// Response field-selection bits.
-#[allow(missing_docs)]
-pub const RESPONSE_FIELD_TOTAL: u32 = 1;
-#[allow(missing_docs)]
-pub const RESPONSE_FIELD_SECTIONS: u32 = 2;
-/// Maximum request-side variable payload retained by the analysis-only adapter.
-#[allow(missing_docs)]
-pub const RESPONSE_MAXIMUM_EFFECT_ID_BYTES: u32 = 127;
-#[allow(missing_docs)]
-pub const RESPONSE_MAXIMUM_PARAMETER_OVERRIDES: u32 = 256;
-#[allow(missing_docs)]
-pub const RESPONSE_MAXIMUM_RESULT_BYTES: u64 = 16 << 20;
 
 /// Maximum number of owners a bounded live response query may return.
 pub const LIVE_RESPONSE_MAXIMUM_OWNERS: usize = 256;
@@ -527,88 +512,6 @@ pub const LIVE_RESPONSE_OWNER_BYTES: u32 = size_of::<WebLiveResponseOwner>() as 
 pub const LIVE_RESPONSE_SECTION_BYTES: u32 = size_of::<WebLiveResponseSection>() as u32;
 #[allow(missing_docs)]
 pub const LIVE_RESPONSE_RESULT_BYTES: u32 = size_of::<WebLiveResponseResult>() as u32;
-
-/// Fixed request header for the analysis-only response adapter.
-#[allow(missing_docs)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct WebResponseRequest {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub target: u32,
-    pub grid: u32,
-    pub channels: u32,
-    pub fields: u32,
-    pub quality: u32,
-    pub link_mode: u32,
-    pub bypass: u32,
-    pub effect_id_bytes: u32,
-    pub parameter_count: u32,
-    pub points: u32,
-    pub sample_rate_hz: u32,
-    pub quantum_frames: u32,
-    pub minimum_hz: f32,
-    pub maximum_hz: f32,
-    pub left_hpf_hz: f32,
-    pub left_lpf_hz: f32,
-    pub right_hpf_hz: f32,
-    pub right_lpf_hz: f32,
-    pub configuration_id: u64,
-    pub maximum_prepared_bytes: u64,
-    pub maximum_total_state_bytes: u64,
-    pub maximum_scratch_bytes: u64,
-    pub maximum_automation_spans_per_block: u32,
-    pub maximum_result_bytes: u32,
-    pub reserved: [u32; 2],
-}
-
-/// One fixed-width numeric parameter override following the request header.
-#[allow(missing_docs)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct WebResponseParameter {
-    pub parameter_id: u32,
-    pub channel: u32,
-    pub value: f32,
-    pub reserved: u32,
-}
-
-/// Fixed result header followed by contiguous little-endian `f32` vectors.
-#[allow(missing_docs)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct WebResponseResult {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub result: u32,
-    pub target: u32,
-    pub channels: u32,
-    pub fields: u32,
-    pub points: u32,
-    pub section_count: u32,
-    pub sample_rate_hz: u32,
-    pub reserved0: u32,
-    pub configuration_id: u64,
-    pub floor_db: f32,
-    pub bypass: u32,
-    pub enabled_left: u32,
-    pub enabled_right: u32,
-    pub retained_bytes: u64,
-    pub result_bytes: u64,
-    pub frequencies_offset: u32,
-    pub total_left_offset: u32,
-    pub total_right_offset: u32,
-    pub sections_left_offset: u32,
-    pub sections_right_offset: u32,
-    pub reserved: [u32; 3],
-}
-
-#[allow(missing_docs)]
-pub const RESPONSE_REQUEST_BYTES: u32 = size_of::<WebResponseRequest>() as u32;
-#[allow(missing_docs)]
-pub const RESPONSE_PARAMETER_BYTES: u32 = size_of::<WebResponseParameter>() as u32;
-#[allow(missing_docs)]
-pub const RESPONSE_RESULT_BYTES: u32 = size_of::<WebResponseResult>() as u32;
 
 /// Exact byte size of one staged `miso.command.v1` record.
 pub const COMMAND_RECORD_BYTES: u32 = 48;
@@ -4903,8 +4806,7 @@ pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
 /// plan.
 ///
 /// It attaches the live lanes the control plane chose ([`controls::live_lanes`], passed in as the
-/// `lanes` argument), so the boot word chooses no lane here. It ignores `bound_cache`: no browser
-/// entry reads the input-design bound cache (#1602).
+/// `lanes` argument), so the boot word chooses no lane here.
 pub struct WebRuntimePreparer {
     options: WebBootOptions,
     spectrum: Option<SpectrumPreparationRequest>,
@@ -4948,7 +4850,6 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
         successor: Option<SuccessorBase<'_>>,
-        _bound_cache: &mut control_plane::InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
         let boot = successor.is_none();
@@ -5102,7 +5003,7 @@ fn compile_ready(
     let control_plane::CompiledChildren {
         session: control,
         mut plan,
-    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
+    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
         .map_err(|failure| boot_refusal(&failure, &record))?;
     let (engine, master_track, live_values_superseded) = {
         let mut record = record

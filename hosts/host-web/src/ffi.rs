@@ -62,9 +62,7 @@ use crate::{
     OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
     OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
     OBSERVATION_STATUS_UNARMED, ObservationAddress, ObservationReadChannels, ObservationReadError,
-    ObservationReadValues, RESPONSE_MAXIMUM_EFFECT_ID_BYTES, RESPONSE_MAXIMUM_PARAMETER_OVERRIDES,
-    RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES, RESPONSE_REQUEST_BYTES,
-    RESPONSE_RESULT_BYTES, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
+    ObservationReadValues, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
     RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SPECTRUM_CAPTURE_BYTES,
     SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
@@ -73,27 +71,23 @@ use crate::{
     SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES,
     STATE_READY, WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest,
     WebLiveResponseResult, WebLiveResponseSection, WebObservationResult, WebObservationSelection,
-    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow, spectrum_result,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, spectrum_result,
 };
 use core::{
     cell::{Cell, RefCell},
     mem::{ManuallyDrop, MaybeUninit, needs_drop, size_of},
     ptr, slice,
 };
-use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
 use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    ResponseChannels, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
-    ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
-    ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
-    ResponseSnapshotQueryError, SpectrumAnalysis, SpectrumAnalysisHistory, SpectrumAnalysisResult,
-    SpectrumChannels, SpectrumContinuousWindow, SpectrumHop, SpectrumPreparation,
-    SpectrumRequestError, SpectrumSmoothingConfig, SpectrumSnapshot, SpectrumStreamMetadata,
-    SpectrumStreamStatus, SpectrumTargetRef, SpectrumWindow, prepare_response_query,
+    ResponsePreviewGrid, ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput,
+    ResponseSnapshotOwner, ResponseSnapshotQueryError, SpectrumAnalysis, SpectrumAnalysisHistory,
+    SpectrumAnalysisResult, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
+    SpectrumPreparation, SpectrumRequestError, SpectrumSmoothingConfig, SpectrumSnapshot,
+    SpectrumStreamMetadata, SpectrumStreamStatus, SpectrumTargetRef, SpectrumWindow,
     query_response_snapshot_into, spectrum_channels_from_raw, spectrum_smoothing,
 };
 
@@ -121,17 +115,20 @@ struct BootStaging {
 }
 
 struct ResponseStaging {
-    request: Box<WebResponseRequest>,
-    effect_id: Box<[u8]>,
-    parameters: Box<[WebResponseParameter]>,
-    result: Vec<u8>,
-    result_header: WebResponseResult,
     live_request: Box<WebLiveResponseRequest>,
     live_track_id: Box<[u8]>,
     live_result: Vec<u8>,
     live_result_len: usize,
     live_result_header: WebLiveResponseResult,
     live_token: u64,
+}
+
+/// The session-less response preview's request and reply frames (#1574). It is allocated on first
+/// touch and never reserved by a boot: the preview instance never boots, and no worklet calls it.
+#[derive(Default)]
+struct ResponseFrameStaging {
+    request: Vec<u8>,
+    reply: Vec<u8>,
 }
 
 struct SpectrumStaging {
@@ -295,6 +292,9 @@ fn validate_spectrum_capture_capacity(capacity: usize) -> Result<(), u32> {
     }
 }
 
+/// The longest stable observation ID the observation staging holds.
+const OBSERVATION_MAXIMUM_ID_BYTES: u32 = 127;
+
 struct ObservationStaging {
     selections: Box<[WebObservationSelection]>,
     addresses: Vec<ObservationAddress>,
@@ -312,7 +312,7 @@ impl ObservationStaging {
             rows: vec![ObservationReadValues::default(); MAXIMUM_OBSERVATION_READS]
                 .into_boxed_slice(),
             results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
-            id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
+            id: vec![0; OBSERVATION_MAXIMUM_ID_BYTES as usize].into_boxed_slice(),
         }
     }
 
@@ -362,7 +362,7 @@ pub(crate) const fn observation_staging_retained_bytes() -> u64 {
         Some(bytes) => bytes,
         None => 0,
     };
-    match bytes.checked_add(RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64) {
+    match bytes.checked_add(OBSERVATION_MAXIMUM_ID_BYTES as u64) {
         Some(bytes) => bytes,
         None => 0,
     }
@@ -376,7 +376,7 @@ pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
     let addresses = checked_mul_or_zero(count, size_of::<ObservationAddress>() as u64);
     let rows = checked_mul_or_zero(count, size_of::<ObservationReadValues>() as u64);
     let results = checked_mul_or_zero(count, size_of::<WebObservationResult>() as u64);
-    let ids = RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+    let ids = OBSERVATION_MAXIMUM_ID_BYTES as u64;
     let mut largest = containing;
     if selections > largest {
         largest = selections;
@@ -398,11 +398,7 @@ pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
 
 /// Heap payload retained by the prewarmed live-response capture staging area.
 pub(crate) const fn live_response_staging_retained_bytes() -> u64 {
-    // Prewarming this shared workspace also initializes its existing preview request buffers.
-    size_of::<WebResponseRequest>() as u64
-        + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64
-        + RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as u64 * size_of::<WebResponseParameter>() as u64
-        + size_of::<WebLiveResponseRequest>() as u64
+    size_of::<WebLiveResponseRequest>() as u64
         + LIVE_RESPONSE_MAXIMUM_ID_BYTES as u64
         + LIVE_RESPONSE_CAPTURE_BYTES as u64
 }
@@ -486,24 +482,6 @@ pub(crate) const fn spectrum_staging_largest_allocation_bytes(
 impl ResponseStaging {
     fn new() -> Self {
         Self {
-            request: Box::new(WebResponseRequest {
-                struct_size: RESPONSE_REQUEST_BYTES,
-                abi_version: ABI_VERSION,
-                ..WebResponseRequest::default()
-            }),
-            effect_id: vec![0; RESPONSE_MAXIMUM_EFFECT_ID_BYTES as usize].into_boxed_slice(),
-            parameters: vec![
-                WebResponseParameter::default();
-                RESPONSE_MAXIMUM_PARAMETER_OVERRIDES as usize
-            ]
-            .into_boxed_slice(),
-            result: Vec::new(),
-            result_header: WebResponseResult {
-                struct_size: RESPONSE_RESULT_BYTES,
-                abi_version: ABI_VERSION,
-                result: RESULT_OK,
-                ..WebResponseResult::default()
-            },
             live_request: Box::new(WebLiveResponseRequest {
                 struct_size: LIVE_RESPONSE_REQUEST_BYTES,
                 abi_version: ABI_VERSION,
@@ -522,10 +500,6 @@ impl ResponseStaging {
             },
             live_token: 0,
         }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
     }
 }
 
@@ -593,6 +567,7 @@ thread_local! {
     static RESPONSE_STAGING: StagingSlot<ResponseStaging> = const { Cell::new(None) };
     static SPECTRUM_STAGING: StagingSlot<SpectrumStaging> = const { Cell::new(None) };
     static OBSERVATION_STAGING: StagingSlot<ObservationStaging> = const { Cell::new(None) };
+    static RESPONSE_FRAME_STAGING: StagingSlot<ResponseFrameStaging> = const { Cell::new(None) };
 }
 
 const _: () = assert!(!needs_drop::<LiveHostSlot>());
@@ -600,6 +575,7 @@ const _: () = assert!(!needs_drop::<RefCell<BootStaging>>());
 const _: () = assert!(!needs_drop::<StagingSlot<ResponseStaging>>());
 const _: () = assert!(!needs_drop::<StagingSlot<SpectrumStaging>>());
 const _: () = assert!(!needs_drop::<StagingSlot<ObservationStaging>>());
+const _: () = assert!(!needs_drop::<StagingSlot<ResponseFrameStaging>>());
 
 /// The staging in `slot`, allocated once on first touch and never freed.
 fn leaked_staging<T: 'static>(
@@ -626,6 +602,15 @@ fn spectrum_staging() -> &'static RefCell<SpectrumStaging> {
 
 fn observation_staging() -> &'static RefCell<ObservationStaging> {
     leaked_staging(&OBSERVATION_STAGING, ObservationStaging::new)
+}
+
+fn with_response_frame_staging<R>(
+    operation: impl FnOnce(&RefCell<ResponseFrameStaging>) -> R,
+) -> R {
+    operation(leaked_staging(
+        &RESPONSE_FRAME_STAGING,
+        ResponseFrameStaging::default,
+    ))
 }
 
 fn with_response_staging<R>(operation: impl FnOnce(&RefCell<ResponseStaging>) -> R) -> R {
@@ -833,84 +818,6 @@ fn observation_error_code(error: ObservationReadError) -> u32 {
         ObservationReadError::Unsupported => RESULT_UNSUPPORTED,
         ObservationReadError::BufferTooSmall => RESULT_BUFFER_TOO_SMALL,
     }
-}
-
-fn response_error_code(error: ResponsePreviewError) -> u32 {
-    match error {
-        ResponsePreviewError::UnsupportedEffect => RESULT_UNSUPPORTED,
-        ResponsePreviewError::UnknownEffect
-        | ResponsePreviewError::InvalidShape
-        | ResponsePreviewError::InvalidParameter
-        | ResponsePreviewError::DuplicateParameter
-        | ResponsePreviewError::ConflictingChannel
-        | ResponsePreviewError::InvalidGrid
-        | ResponsePreviewError::OutputShape
-        | ResponsePreviewError::Owner(_) => RESULT_INVALID_ARGUMENT,
-    }
-}
-
-fn response_query_error_code(error: ResponseQueryError) -> u32 {
-    match error {
-        ResponseQueryError::Preview(error) => response_error_code(error),
-        ResponseQueryError::Points
-        | ResponseQueryError::Overrides
-        | ResponseQueryError::SampleRate => RESULT_INVALID_ARGUMENT,
-    }
-}
-
-fn response_grid(request: WebResponseRequest) -> Result<ResponsePreviewGrid, u32> {
-    let points = usize::try_from(request.points).map_err(|_| RESULT_INVALID_ARGUMENT)?;
-    match request.grid {
-        crate::RESPONSE_GRID_LINEAR => Ok(ResponsePreviewGrid::Linear {
-            points,
-            minimum_hz: request.minimum_hz,
-            maximum_hz: request.maximum_hz,
-        }),
-        crate::RESPONSE_GRID_LOGARITHMIC => Ok(ResponsePreviewGrid::Logarithmic {
-            points,
-            minimum_hz: request.minimum_hz,
-            maximum_hz: request.maximum_hz,
-        }),
-        _ => Err(RESULT_INVALID_ARGUMENT),
-    }
-}
-
-fn response_quality(raw: u32) -> Result<EffectQuality, u32> {
-    EffectQuality::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
-}
-
-fn response_link_mode(raw: u32) -> Result<LinkMode, u32> {
-    LinkMode::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
-}
-
-fn response_channel(raw: u32) -> Result<ParameterChannel, u32> {
-    ParameterChannel::from_raw(raw).ok_or(RESULT_INVALID_ARGUMENT)
-}
-
-fn append_f32_values(result: &mut Vec<u8>, values: &[f32], maximum: usize) -> Result<u32, u32> {
-    let offset = u32::try_from(result.len()).map_err(|_| RESULT_REFUSED_BUDGET)?;
-    let bytes = values
-        .len()
-        .checked_mul(size_of::<f32>())
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    let end = result
-        .len()
-        .checked_add(bytes)
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    if end > maximum {
-        return Err(RESULT_REFUSED_BUDGET);
-    }
-    result.reserve(bytes);
-    for value in values {
-        result.extend_from_slice(&value.to_le_bytes());
-    }
-    Ok(offset)
-}
-
-fn response_header_bytes(header: WebResponseResult) -> Vec<u8> {
-    let pointer = ptr::from_ref(&header).cast::<u8>();
-    // SAFETY: `WebResponseResult` is repr(C), and the exact object is alive for this copy.
-    unsafe { slice::from_raw_parts(pointer, size_of::<WebResponseResult>()) }.to_vec()
 }
 
 /// Copy one fully initialized ABI record without allocating a temporary byte vector.
@@ -2075,366 +1982,86 @@ fn run_live_response_analysis(staging: &mut ResponseStaging) -> u32 {
     RESULT_OK
 }
 
-fn response_buffer_budget(
-    points: usize,
-    section_count: usize,
-    channels: u32,
-    fields: u32,
-    maximum: usize,
-) -> Result<(), u32> {
-    let frequency_bytes = points
-        .checked_mul(size_of::<f32>())
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    let section_points = section_count
-        .checked_mul(points)
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    let section_bytes = section_points
-        .checked_mul(size_of::<f32>())
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    let working_bytes = frequency_bytes
-        .checked_add(
-            frequency_bytes
-                .checked_mul(2)
-                .ok_or(RESULT_REFUSED_BUDGET)?,
-        )
-        .and_then(|bytes| {
-            if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
-                bytes.checked_add(section_bytes.checked_mul(2)?)
-            } else {
-                Some(bytes)
-            }
-        })
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    let mut result_bytes = size_of::<WebResponseResult>()
-        .checked_add(frequency_bytes)
-        .ok_or(RESULT_REFUSED_BUDGET)?;
-    if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
-        result_bytes = result_bytes
-            .checked_add(frequency_bytes)
-            .ok_or(RESULT_REFUSED_BUDGET)?;
-    }
-    if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
-        result_bytes = result_bytes
-            .checked_add(frequency_bytes)
-            .ok_or(RESULT_REFUSED_BUDGET)?;
-    }
-    if fields & crate::RESPONSE_FIELD_SECTIONS != 0 {
-        if channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
-            result_bytes = result_bytes
-                .checked_add(section_bytes)
-                .ok_or(RESULT_REFUSED_BUDGET)?;
-        }
-        if channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
-            result_bytes = result_bytes
-                .checked_add(section_bytes)
-                .ok_or(RESULT_REFUSED_BUDGET)?;
-        }
-    }
-    if result_bytes > maximum || working_bytes > maximum {
-        return Err(RESULT_REFUSED_BUDGET);
-    }
-    Ok(())
-}
+/// The most request frame bytes the session-less response entry accepts.
+const RESPONSE_FRAME_MAXIMUM_REQUEST_BYTES: u32 = 1 << 20;
 
-fn response_failure(staging: &mut ResponseStaging, result: u32) -> u32 {
-    staging.result_header = WebResponseResult {
-        struct_size: RESPONSE_RESULT_BYTES,
-        abi_version: ABI_VERSION,
-        result,
-        ..WebResponseResult::default()
-    };
-    staging.result = response_header_bytes(staging.result_header);
-    result
-}
-
-fn run_response_query(staging: &mut ResponseStaging) -> u32 {
-    let request = *staging.request;
-    if request.struct_size != RESPONSE_REQUEST_BYTES
-        || request.abi_version != ABI_VERSION
-        || request.reserved != [0; 2]
-        || request.channels == 0
-        || request.channels & !crate::RESPONSE_CHANNEL_BOTH != 0
-        || request.fields == 0
-        || request.fields & !(crate::RESPONSE_FIELD_TOTAL | crate::RESPONSE_FIELD_SECTIONS) != 0
-        || request.parameter_count > RESPONSE_MAXIMUM_PARAMETER_OVERRIDES
-        || request.effect_id_bytes > RESPONSE_MAXIMUM_EFFECT_ID_BYTES
-        || request.maximum_result_bytes == 0
-        || u64::from(request.maximum_result_bytes) > RESPONSE_MAXIMUM_RESULT_BYTES
-    {
-        return response_failure(staging, RESULT_INVALID_ARGUMENT);
-    }
-    let grid = match response_grid(request) {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let parameter_count = request.parameter_count as usize;
-    let mut overrides = Vec::with_capacity(parameter_count);
-    for row in &staging.parameters[..parameter_count] {
-        let channel = match response_channel(row.channel) {
-            Ok(value) => value,
-            Err(result) => return response_failure(staging, result),
-        };
-        overrides.push(ResponseParameterOverride {
-            parameter_id: row.parameter_id,
-            channel,
-            value: row.value,
-        });
-    }
-    let target = match request.target {
-        crate::RESPONSE_TARGET_EFFECT => {
-            let id_bytes = &staging.effect_id[..request.effect_id_bytes as usize];
-            let Ok(effect_id) = core::str::from_utf8(id_bytes) else {
-                return response_failure(staging, RESULT_INVALID_ARGUMENT);
-            };
-            let quality = match response_quality(request.quality) {
-                Ok(value) => value,
-                Err(result) => return response_failure(staging, result),
-            };
-            let link_mode = match response_link_mode(request.link_mode) {
-                Ok(value) => value,
-                Err(result) => return response_failure(staging, result),
-            };
-            ResponsePreviewTarget::Effect {
-                effect_id,
-                overrides: &overrides,
-                quality,
-                bypass: request.bypass != 0,
-                link_mode,
-            }
-        }
-        crate::RESPONSE_TARGET_INPUT_FILTERS => {
-            if request.parameter_count != 0 || request.effect_id_bytes != 0 {
-                return response_failure(staging, RESULT_INVALID_ARGUMENT);
-            }
-            ResponsePreviewTarget::InputFilters {
-                left_hpf_hz: request.left_hpf_hz,
-                left_lpf_hz: request.left_lpf_hz,
-                right_hpf_hz: request.right_hpf_hz,
-                right_lpf_hz: request.right_lpf_hz,
-            }
-        }
-        _ => return response_failure(staging, RESULT_INVALID_ARGUMENT),
-    };
-    let limits = ResponsePreviewLimits {
-        maximum_prepared_bytes: match usize::try_from(request.maximum_prepared_bytes) {
-            Ok(value) if value != 0 => value,
-            _ => return response_failure(staging, RESULT_REFUSED_BUDGET),
-        },
-        maximum_total_state_bytes: request.maximum_total_state_bytes,
-        maximum_scratch_bytes: request.maximum_scratch_bytes,
-        maximum_automation_spans_per_block: request.maximum_automation_spans_per_block,
-    };
-    let Some(channels) = ResponseChannels::from_raw(request.channels) else {
-        return response_failure(staging, RESULT_INVALID_ARGUMENT);
-    };
-    let want_sections = request.fields & crate::RESPONSE_FIELD_SECTIONS != 0;
-    let prepared = match prepare_response_query(&ResponseQuery {
-        configuration_id: request.configuration_id,
-        sample_rate_hz: request.sample_rate_hz,
-        quantum_frames: request.quantum_frames,
-        target,
-        grid,
-        channels,
-        sections: want_sections,
-        limits,
-    }) {
-        Ok(value) => value,
-        Err(ResponseQueryError::Points) => {
-            // A point count past the core cap is refused on every host. The browser keeps its
-            // earlier answer for a result that cannot fit the caller's byte budget, which needs
-            // no sections to be certain: the totals alone already exceed it.
-            let result = response_buffer_budget(
-                grid.points(),
-                0,
-                request.channels,
-                request.fields,
-                request.maximum_result_bytes as usize,
-            )
-            .err()
-            .unwrap_or(RESULT_INVALID_ARGUMENT);
-            return response_failure(staging, result);
-        }
-        Err(error) => return response_failure(staging, response_query_error_code(error)),
-    };
-    let points = prepared.points();
-    let maximum = request.maximum_result_bytes as usize;
-    if let Err(result) = response_buffer_budget(
-        points,
-        prepared.section_count(),
-        request.channels,
-        request.fields,
-        maximum,
-    ) {
-        return response_failure(staging, result);
-    }
-    let curves = match prepared.curves() {
-        Ok(value) => value,
-        Err(error) => return response_failure(staging, response_query_error_code(error)),
-    };
-    let mut payload = Vec::new();
-    let header_size = size_of::<WebResponseResult>();
-    if header_size > maximum {
-        return response_failure(staging, RESULT_REFUSED_BUDGET);
-    }
-    payload.resize(header_size, 0);
-    let frequencies_offset = match append_f32_values(&mut payload, &curves.frequencies_hz, maximum)
-    {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let mut append_optional = |values: &Option<Vec<f32>>| match values {
-        Some(values) => append_f32_values(&mut payload, values, maximum),
-        None => Ok(0),
-    };
-    let total_left_offset = match append_optional(&curves.left_db) {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let total_right_offset = match append_optional(&curves.right_db) {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let sections_left_offset = match append_optional(&curves.sections_left_db) {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let sections_right_offset = match append_optional(&curves.sections_right_db) {
-        Ok(value) => value,
-        Err(result) => return response_failure(staging, result),
-    };
-    let header = WebResponseResult {
-        struct_size: RESPONSE_RESULT_BYTES,
-        abi_version: ABI_VERSION,
-        result: RESULT_OK,
-        target: request.target,
-        channels: request.channels,
-        fields: request.fields,
-        points: request.points,
-        section_count: curves.section_count,
-        sample_rate_hz: curves.sample_rate_hz,
-        reserved0: 0,
-        configuration_id: curves.configuration_id,
-        floor_db: curves.floor_db,
-        bypass: u32::from(curves.bypass),
-        enabled_left: curves.enabled_left,
-        enabled_right: curves.enabled_right,
-        retained_bytes: curves.retained_bytes,
-        result_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
-        frequencies_offset,
-        total_left_offset,
-        total_right_offset,
-        sections_left_offset,
-        sections_right_offset,
-        reserved: [0; 3],
-    };
-    let header_bytes = response_header_bytes(header);
-    payload[..header_size].copy_from_slice(&header_bytes);
-    staging.result_header = header;
-    staging.result = payload;
-    RESULT_OK
-}
-
-/// Return a writable request header for one analysis-only response query.
+/// Stage a request frame of `bytes` bytes for the session-less response entry and return its
+/// writable address, or `0` when `bytes` is outside `1..=1 << 20` or the allocation is refused.
+/// Control work of a preview instance: no render path calls it, and no worklet.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_request_ptr() -> u32 {
-    with_response_staging(|slot| {
+pub extern "C" fn miso_engine_web_v1_response_frame_ptr(bytes: u32) -> u32 {
+    if bytes == 0 || bytes > RESPONSE_FRAME_MAXIMUM_REQUEST_BYTES {
+        return 0;
+    }
+    with_response_frame_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
-        staging.result.clear();
-        staging.request.struct_size = RESPONSE_REQUEST_BYTES;
-        staging.request.abi_version = ABI_VERSION;
-        pointer_u32(ptr::from_mut(&mut *staging.request))
-    })
-}
-
-/// Return the fixed request-header byte size.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_request_bytes() -> u32 {
-    RESPONSE_REQUEST_BYTES
-}
-
-/// Return a writable effect-ID staging address.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_effect_id_ptr() -> u32 {
-    with_response_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
+        staging.reply.clear();
+        staging.request.clear();
+        if staging.request.try_reserve_exact(bytes as usize).is_err() {
             return 0;
-        };
-        pointer_u32(staging.effect_id.as_mut_ptr())
+        }
+        staging.request.resize(bytes as usize, 0);
+        pointer_u32(staging.request.as_ptr())
     })
 }
 
-/// Return the maximum effect-ID staging length.
+/// Serve the staged request frame of `bytes` bytes through the core's session-less response entry.
+/// `RESULT_OK` when a reply frame exists (OK or non-OK), `RESULT_INVALID_ARGUMENT` when the frame
+/// has no decodable command header, which leaves no reply, and `RESULT_INTERNAL` when not even a
+/// non-OK reply frame could be encoded, which leaves no reply either.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_effect_id_capacity() -> u32 {
-    RESPONSE_MAXIMUM_EFFECT_ID_BYTES
-}
-
-/// Return a writable numeric-override staging address.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_parameter_ptr() -> u32 {
-    with_response_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        pointer_u32(staging.parameters.as_mut_ptr())
-    })
-}
-
-/// Return the numeric-override record size.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_parameter_bytes() -> u32 {
-    RESPONSE_PARAMETER_BYTES
-}
-
-/// Return the maximum number of numeric-override records.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_parameter_capacity() -> u32 {
-    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES
-}
-
-/// Prepare and query one explicit response without booting the audio host.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_query() -> u32 {
-    with_response_staging(|slot| {
+pub extern "C" fn miso_engine_web_v1_response_frame_submit(bytes: u32) -> u32 {
+    with_response_frame_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        run_response_query(&mut staging)
+        let staging = &mut *staging;
+        let Some(request) = staging.request.get(..bytes as usize) else {
+            return RESULT_INVALID_ARGUMENT;
+        };
+        match host_core::serve_response_frame(request, &mut staging.reply) {
+            Ok(()) => RESULT_OK,
+            Err(host_core::ResponseFrameError::Malformed) => RESULT_INVALID_ARGUMENT,
+            Err(host_core::ResponseFrameError::Internal) => RESULT_INTERNAL,
+        }
     })
 }
 
-/// Return the result-header-plus-vectors address.
+/// Return the address of the reply frame, or `0` when there is none.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_result_ptr() -> u32 {
-    with_response_staging(|slot| {
+pub extern "C" fn miso_engine_web_v1_response_frame_reply_ptr() -> u32 {
+    with_response_frame_staging(|slot| {
         let Ok(staging) = slot.try_borrow() else {
             return 0;
         };
-        pointer_u32(staging.result.as_ptr())
+        if staging.reply.is_empty() {
+            return 0;
+        }
+        pointer_u32(staging.reply.as_ptr())
     })
 }
 
-/// Return the current result-header-plus-vectors byte length.
+/// Return the reply frame's byte length.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_result_bytes() -> u32 {
-    with_response_staging(|slot| {
+pub extern "C" fn miso_engine_web_v1_response_frame_reply_bytes() -> u32 {
+    with_response_frame_staging(|slot| {
         slot.try_borrow()
             .ok()
-            .and_then(|staging| u32::try_from(staging.result.len()).ok())
+            .and_then(|staging| u32::try_from(staging.reply.len()).ok())
             .unwrap_or(0)
     })
 }
 
-/// Close and release the one analysis-only response workspace.
+/// Free the request and reply buffers.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_response_close() -> u32 {
-    with_response_staging(|slot| {
+pub extern "C" fn miso_engine_web_v1_response_frame_close() -> u32 {
+    with_response_frame_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        staging.reset();
+        *staging = ResponseFrameStaging::default();
         RESULT_OK
     })
 }
@@ -3877,7 +3504,7 @@ pub extern "C" fn miso_engine_web_v1_observation_id_ptr() -> u32 {
 /// Return the maximum stable observation-ID staging length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_id_capacity() -> u32 {
-    render_locked(|| RESPONSE_MAXIMUM_EFFECT_ID_BYTES)
+    render_locked(|| OBSERVATION_MAXIMUM_ID_BYTES)
 }
 
 fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
@@ -4528,128 +4155,73 @@ pub(crate) fn test_resource_address(handle: u32) -> usize {
 }
 
 #[cfg(test)]
-mod response_budget_tests {
+mod response_frame_tests {
     use super::*;
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
+        RequestId, StatusCode, TypedCommandFrame,
+    };
 
+    /// #1574: the session-less response entry stages one frame, answers one frame, and frees
+    /// both. A frame with no command header is a typed refusal with no reply, and a size outside
+    /// the staging bound is refused before any allocation.
     #[test]
-    fn response_budget_rejects_point_storage_before_allocation() {
-        assert_eq!(
-            response_buffer_budget(
-                250_000,
-                2,
-                crate::RESPONSE_CHANNEL_BOTH,
-                crate::RESPONSE_FIELD_TOTAL,
-                16,
-            ),
-            Err(RESULT_REFUSED_BUDGET),
-        );
-        let result_bytes = size_of::<WebResponseResult>() + 8 + 16 + 32;
-        assert_eq!(
-            response_buffer_budget(
-                2,
-                2,
-                crate::RESPONSE_CHANNEL_BOTH,
-                crate::RESPONSE_FIELD_SECTIONS,
-                result_bytes,
-            ),
-            Ok(()),
-        );
-    }
+    fn the_response_frame_exports_stage_answer_and_close() {
+        assert_eq!(miso_engine_web_v1_response_frame_ptr(0), 0);
+        assert_eq!(miso_engine_web_v1_response_frame_ptr((1 << 20) + 1), 0);
 
-    fn input_filter_request(points: u32) -> WebResponseRequest {
-        WebResponseRequest {
-            struct_size: RESPONSE_REQUEST_BYTES,
-            abi_version: ABI_VERSION,
-            target: crate::RESPONSE_TARGET_INPUT_FILTERS,
-            grid: crate::RESPONSE_GRID_LOGARITHMIC,
-            channels: crate::RESPONSE_CHANNEL_BOTH,
-            fields: crate::RESPONSE_FIELD_TOTAL,
-            points,
-            sample_rate_hz: 48_000,
-            quantum_frames: 128,
-            minimum_hz: 20.0,
-            maximum_hz: 20_000.0,
-            left_hpf_hz: 80.0,
-            left_lpf_hz: 12_000.0,
-            right_hpf_hz: 160.0,
-            right_lpf_hz: 6_000.0,
-            maximum_prepared_bytes: 1 << 20,
-            maximum_total_state_bytes: 1 << 30,
-            maximum_scratch_bytes: 1 << 30,
-            maximum_automation_spans_per_block: 4096,
-            maximum_result_bytes: 16 << 20,
-            ..WebResponseRequest::default()
-        }
-    }
+        // A staged request that is not a frame leaves no reply. (A native address does not fit
+        // the `u32` the export returns, so the staging is read directly.)
+        let _ = miso_engine_web_v1_response_frame_ptr(10);
+        assert_eq!(
+            with_response_frame_staging(|slot| slot.borrow().request.len()),
+            10
+        );
+        assert_eq!(
+            miso_engine_web_v1_response_frame_submit(10),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(miso_engine_web_v1_response_frame_reply_bytes(), 0);
 
-    /// Test value: the browser refuses a bad frequency axis through the core's one axis check, as
-    /// `RESPONSE_GET` does, with the same status and a header-only result: a NaN or infinite
-    /// endpoint, a negative or non-increasing axis, a maximum past the rate's own Nyquist (44.1 and
-    /// 96 kHz as well as 48), and a logarithmic axis from zero. A browser that kept the check
-    /// after preparation, or only for finite values, answers one of them with a prepared owner.
-    #[test]
-    fn a_bad_frequency_axis_is_refused_with_a_header_only_result() {
-        let mut staging = ResponseStaging::new();
-        let with = |rate: u32, grid: u32, minimum_hz: f32, maximum_hz: f32| {
-            let mut request = input_filter_request(64);
-            request.sample_rate_hz = rate;
-            request.grid = grid;
-            request.minimum_hz = minimum_hz;
-            request.maximum_hz = maximum_hz;
-            request
+        // A `CAPABILITIES_GET` frame is a command this entry does not serve: a non-OK reply.
+        let mut request = vec![0_u8; 256];
+        let length = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(7).expect("request ID"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CapabilitiesGet,
+                },
+                &mut request,
+            )
+            .expect("command frame");
+        let _ = miso_engine_web_v1_response_frame_ptr(u32::try_from(length).expect("length"));
+        with_response_frame_staging(|slot| {
+            slot.borrow_mut()
+                .request
+                .copy_from_slice(&request[..length]);
+        });
+        assert_eq!(
+            miso_engine_web_v1_response_frame_submit(u32::try_from(length).expect("length")),
+            RESULT_OK
+        );
+        let reply = with_response_frame_staging(|slot| slot.borrow().reply.clone());
+        assert_eq!(
+            miso_engine_web_v1_response_frame_reply_bytes() as usize,
+            reply.len()
+        );
+        let mut fields = [0_u16; 64];
+        let DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+            .expect("a typed response")
+        else {
+            panic!("a refusal");
         };
-        let linear = crate::RESPONSE_GRID_LINEAR;
-        let logarithmic = crate::RESPONSE_GRID_LOGARITHMIC;
-        let bad = [
-            with(48_000, linear, f32::NAN, 1_000.0),
-            with(48_000, linear, 20.0, f32::NAN),
-            with(48_000, linear, 20.0, f32::INFINITY),
-            with(48_000, linear, -1.0, 1_000.0),
-            with(48_000, linear, 1_000.0, 1_000.0),
-            with(48_000, linear, 2_000.0, 20.0),
-            with(48_000, linear, 20.0, 24_001.0),
-            with(44_100, linear, 20.0, 22_051.0),
-            with(96_000, logarithmic, 20.0, 48_001.0),
-            with(48_000, logarithmic, 0.0, 1_000.0),
-        ];
-        for request in bad {
-            *staging.request = request;
-            assert_eq!(
-                run_response_query(&mut staging),
-                RESULT_INVALID_ARGUMENT,
-                "{request:?}"
-            );
-            assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
-        }
-        for request in [
-            with(44_100, linear, 0.0, 22_050.0),
-            with(96_000, logarithmic, 20.0, 48_000.0),
-        ] {
-            *staging.request = request;
-            assert_eq!(run_response_query(&mut staging), RESULT_OK, "{request:?}");
-        }
-    }
+        assert_eq!(header.status, StatusCode::UnsupportedMessage);
+        assert_eq!(header.request_id.get(), 7);
 
-    /// Test value: the core's 4096-point cap is not reached from the browser (a request past it
-    /// would allocate a megabyte-scale result), or the refusal returns more than the header.
-    #[test]
-    fn a_request_past_the_core_point_cap_is_refused_with_a_header_only_result() {
-        let mut staging = ResponseStaging::new();
-        *staging.request = input_filter_request(4096);
-        assert_eq!(run_response_query(&mut staging), RESULT_OK);
-        assert_eq!(staging.result_header.points, 4096);
-        assert!(staging.result.len() > size_of::<WebResponseResult>());
-
-        *staging.request = input_filter_request(4097);
-        assert_eq!(run_response_query(&mut staging), RESULT_INVALID_ARGUMENT);
-        assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
-        assert_eq!(staging.result_header.result, RESULT_INVALID_ARGUMENT);
-
-        let mut request = input_filter_request(250_000);
-        request.maximum_result_bytes = 16;
-        *staging.request = request;
-        assert_eq!(run_response_query(&mut staging), RESULT_REFUSED_BUDGET);
-        assert_eq!(staging.result.len(), size_of::<WebResponseResult>());
+        assert_eq!(miso_engine_web_v1_response_frame_close(), RESULT_OK);
+        assert_eq!(miso_engine_web_v1_response_frame_reply_bytes(), 0);
     }
 }
 
@@ -6938,7 +6510,7 @@ mod observation_alias_tests {
                 + size_of::<ObservationAddress>() as u64
                 + size_of::<ObservationReadValues>() as u64)
             + count * size_of::<WebObservationResult>() as u64
-            + RESPONSE_MAXIMUM_EFFECT_ID_BYTES as u64;
+            + OBSERVATION_MAXIMUM_ID_BYTES as u64;
         let containing = size_of::<RefCell<ObservationStaging>>() as u64;
         assert_eq!(
             observation_staging_retained_bytes(),

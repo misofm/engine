@@ -763,7 +763,19 @@ the rack's latency-preserving bypass shunt (decision 14).
   applies the transaction; the block applies the bypass first.
   The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
   so the effect's state continues either way and prepared latency does not change. The switch is a
-  step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.
+  linear crossfade over the session's `mute_ms` (#1341): the record carries `mute_ms` in samples
+  (the one live row with no per-edit length, so an edit's own `ramp_samples` does not apply) and
+  the lane mixes `dry + (wet - dry) * m(k)` on the indexed ramp law, `m` from the mix the lane is at
+  (`1` wet, `0` dry) to its target, over the frames from the block that applies the record. The
+  dry side stays latency-matched throughout. From the first frame after the ramp the output is
+  the settled select, bit for bit; a session whose `mute_ms` is 0 steps at the record's block. A
+  record for the target the lane is already heading for changes nothing, and a reversal continues
+  from the current mix. It may ride with every other live edit.
+  The crossfade runs in the per-node render path and in an effect bank (a console slot, or a
+  cohort of inserts) alike: a bank mixes each lane along its own ramp and renders exactly the bits
+  the per-node path renders for that lane (#1341a2), so where the session places the effect never
+  moves a rendered bit. The browser edits through the same core, so it crossfades alike
+  (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
 - **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
   compressor: their session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
@@ -774,58 +786,21 @@ the rack's latency-preserving bypass shunt (decision 14).
   instance's own state is the same either way. An effect downstream of it keeps the live history,
   as after any live edit, so the from-sample-0 oracle holds only while that downstream memory fits
   the window. On the gate fixture (a compressor insert, then a soft-clip console slot), from
-  E + ceil(latency / quantum) + 1 on, a live bypass or lift renders bit-identically to a plan
+  E + ceil((latency + `mute_ms` in samples) / quantum) + 1 on, a live bypass or lift renders
+  bit-identically to a plan
   compiled from the committed snapshot and fed the same source from sample 0, on one and ten
   tracks at the four launch rates. A second stateful effect after the switched one (a compressor
   after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.
 
-## Design-bound caches (#1471)
+## Input design bounds (#1602)
 
-**Since #1556 no C ABI compile or rebuild fills these caches.** Every strip carries the live input
+The engine keeps no cache of input-section design bounds. Every C ABI strip carries the live input
 lane, which reports the rate's live bound and designs none, so a compile and a rebuild bound no
-input design and walk no frame (`design_bound_cache`'s `a_c_abi_plan_bounds_no_input_design`), and
-the engine's cache and every epoch's seed stay empty. The rest of this section describes the
-machinery as it stands; it is dead on the C ABI until a successor removes it or a lane-free plan
-returns.
-
-The engine owns one control-thread cache of input-section design bounds (`builtins::
-InputBoundCache`, #1457), read and filled by every `miso_engine_v1_compile_session` on it. A
-session keeps none of it: each provider epoch owns the designs the preparation that made its plan
-used (`bound_seed`), journaled at the time of use with each stored charge or stopped-walk horizon,
-and a structural rebuild reads the newest epoch's seed read-only and journals its own. The seed is
-one exact-size boxed slice, a row of the epoch's `epoch_retained` charge and a candidate for the
-largest named allocation, so a compile or a rebuild whose seed would pass `maximum_capi_retained_bytes`
-is refused before any commit with the existing limit refusal.
-
-**The engine cache's ceiling.** The cache is outside every compile limit, lives as long as the
-engine, and `miso_engine_v1_engine_destroy` frees it. Its ceiling on a 64-bit target is derived
-here from the cap, the entry layout and the ordered map's worst-case node occupancy, not measured:
-
-- The cap is `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries; an insertion past it clears the map first.
-- An entry is a 124-byte key (the rate and per channel two sections' seven words and a trim
-  magnitude, 4-byte aligned) and a 112-byte value (8-byte aligned), 236 bytes without padding and
-  240 in a pair.
-- The standard `BTreeMap` (B = 6) stores entries in its internal nodes as well as its leaves. Every
-  node but the root holds 5 to 11 entries (a full node splits into two of at least 5), and the
-  cache never removes one entry (it only clears), so occupancy stays at that bound whatever the
-  insertion order. 8,192 entries need at most 1 + (8,192 - 1) / 5 = 1,639 nodes.
-- A leaf is `repr(C)` {parent 8, parent index 2, length 2, 11 keys x 124, 11 values x 112} = 2,608
-  bytes. An internal node adds 12 child pointers of 8 bytes = 2,704 bytes. Each internal node
-  but the root has at least 6 children and the root at least 2, so a tree of 1,639 nodes has at
-  most 273 internal nodes.
-- So, between calls, the map holds at most 1,639 x 2,608 + 273 x 96 = **4,300,720 bytes of
-  requested heap**, plus the map's own header inside the engine. The figure counts requested
-  bytes. The platform allocator rounds each block up to its own size class and keeps its own
-  bookkeeping (glibc, libmalloc and scudo differ), so the extra is platform-specific and no figure
-  is stated for it.
-- During `miso_engine_v1_compile_session` the cache also holds the open journal: at most one
-  preparation's designs, at most 1,805 (`INPUT_BOUND_BUDGET_FRAMES / 837` + 1), in the same
-  map shape. By the same arithmetic that is at most 1 + 1,804 / 5 = 361 nodes, at most 60
-  internal, so 361 x 2,608 + 60 x 96 = **947,248 bytes of requested heap**. The call takes the
-  journal on every path and frees it before it returns; the record it becomes is the plan
-  epoch's seed, charged to `maximum_capi_retained_bytes`, not the engine's cache.
-
-The two tests that measured the ceiling against a filled cache were removed with #1556: no C ABI
-compile reaches the cache any more. The C header states the
-ceiling in its "Engine memory" paragraph.
+input design and walk no frame (`input_design_bounds`'s `a_c_abi_plan_bounds_no_input_design`).
+Before #1602 the engine also owned a control-thread cache of designs (#1457, #1471) and each
+provider epoch a seed of the designs its plan used; both were always empty on the C ABI after #1556,
+and #1602 removed them with their ceilings (4,300,720 bytes of cache and 947,248 bytes of open
+journal outside every compile limit) and their epoch row. The engine's memory outside the compile
+limits is its handle alone; the C header states it in its "Engine memory" paragraph. A host that
+needs fast bounded designs again re-earns a cache in a new issue.

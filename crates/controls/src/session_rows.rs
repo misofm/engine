@@ -10,10 +10,10 @@ use session::{
 };
 
 use crate::Family;
-use crate::address::{Owner, Section};
 use crate::descriptor::{BASE, ControlDescriptor};
 use crate::error::ControlError;
 use crate::registry::{ControlRow, Resolved, push_control};
+use session::{Owner, Section};
 
 const FADER_MS: u32 = 1;
 const MUTE_MS: u32 = 2;

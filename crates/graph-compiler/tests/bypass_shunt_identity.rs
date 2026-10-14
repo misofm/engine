@@ -888,3 +888,542 @@ fn the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit() {
         "the delay's prepared bypass and a shunt now agree; it may leave NEVER_BANKED_EFFECTS"
     );
 }
+
+// ---- #1341: the bypass crossfade over the session ramp, per node ----------------------------------
+
+/// What a per-node live instance does with its bypass: nothing (W, never bypassed), a session
+/// bypass from preparation (D), or a live bypass by records.
+enum Bypassing {
+    Never,
+    FromPreparation,
+    /// `(block, bypassed, ramp_samples)`, in block order.
+    Records(Vec<(u64, bool, u32)>),
+}
+
+/// One per-node live instance rendered in the order `runtime::LiveControlEffect` runs it: stage
+/// the lane, capture the dry block when the lane needs it or the shunt feeds a line, run the
+/// effect, then mix the dry block back in. Returns every block's output.
+///
+/// `L` is the width of the mix kernel, so the same run at two widths pins that the crossfade is a
+/// function of the frame index and not of the vector width.
+fn render_per_node<L: lane::Lane>(
+    effect_id: &str,
+    bypassing: &Bypassing,
+    blocks: u64,
+) -> (usize, Vec<[Vec<f32>; 2]>) {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let factory = registry.get_shared_ascii(effect_id).expect("launch effect");
+    let descriptor = factory.descriptor();
+    let case = cases(descriptor)[0];
+    let values = default_values(descriptor);
+    let effect_contract::PreparedEffect {
+        processor: mut effect,
+        metadata,
+    } = factory
+        .prepare(request(descriptor, case, false, &values))
+        .expect("instance");
+    let latency = usize::try_from(metadata.latency.0).expect("latency fits");
+    let mut shunt = effect_contract::BypassShunt::new(QUANTUM as usize, latency);
+    let superseded = LiveValuesSuperseded::new();
+    let (gate, mut pin) = RevisionGate::pair(0);
+    let (mut writer, mut lane) = match bypassing {
+        Bypassing::Records(_) => {
+            let (writer, lane) = effect_control_lane(
+                EffectLaneSpec {
+                    shape: EffectLaneShape::from_live_parameters([], 0),
+                    bypass: false,
+                    observation_depth: 0,
+                },
+                &superseded,
+            )
+            .expect("the live lane");
+            (Some(writer), lane)
+        }
+        Bypassing::FromPreparation => (None, EffectControlLane::without_channel(true)),
+        Bypassing::Never => (None, EffectControlLane::without_channel(false)),
+    };
+    let mut signal = Rng::new(0x1341);
+    let mut output = Vec::new();
+    for block in 0..blocks {
+        if let (Bypassing::Records(records), Some(writer)) = (bypassing, writer.as_mut()) {
+            for &(at, bypassed, ramp_samples) in records {
+                if at == block {
+                    let revision = pin.last_published() + 1;
+                    let stamp = pin.stamp(revision).expect("a legal revision");
+                    writer
+                        .write_bypass(
+                            stamp,
+                            effect_contract::BypassSwitch {
+                                bypassed,
+                                ramp_samples,
+                            },
+                        )
+                        .expect("a bypass cell");
+                    pin.publish(&gate, revision);
+                }
+            }
+        }
+        let first_sample = block * u64::from(QUANTUM);
+        lane.stage(&mut [], first_sample, gate.snapshot());
+        let mut left = input_block(0, 0, block, Level::Loud, &mut signal);
+        let mut right = input_block(0, 1, block, Level::Loud, &mut signal);
+        let needs_dry = lane.needs_dry();
+        if needs_dry || shunt.feeds_line() {
+            shunt.capture(&left, &right);
+        }
+        process_scalar(effect.as_mut(), &mut left, &mut right, block);
+        if needs_dry {
+            lane.apply_bypass::<L>(&shunt, &mut left, &mut right);
+        }
+        output.push([left, right]);
+    }
+    (latency, output)
+}
+
+/// The wet mix of a crossfade of `length` frames from `start` to `target`, at ramp index `k`, from
+/// the indexed ramp law alone.
+fn mix_at(start: f32, target: f32, length: u32, k: u32) -> f32 {
+    lane::kernels::IndexedRamp::new([start, 0.0, 0.0, 0.0], [target, 0.0, 0.0, 0.0], length)
+        .coefficients_at(k)[0]
+}
+
+/// `dry + (wet - dry) * m`, as a separate subtract, multiply and add.
+fn mixed(dry: f32, wet: f32, m: f32) -> f32 {
+    dry + (wet - dry) * m
+}
+
+/// A zero-latency effect that changes the loud test signal, and one with latency.
+const ZERO_AND_LATENT: [&str; 2] = ["miso.compressor", "miso.true-peak-limiter"];
+
+/// How many of `a`'s samples differ from `b`'s, in the blocks `from..`: the evidence that a
+/// comparison of the two is not vacuous.
+fn differing(a: &[[Vec<f32>; 2]], b: &[[Vec<f32>; 2]], from: usize) -> usize {
+    a[from..]
+        .iter()
+        .zip(&b[from..])
+        .flat_map(|(a, b)| a.iter().flatten().zip(b.iter().flatten()))
+        .filter(|(a, b)| folded(**a) != folded(**b))
+        .count()
+}
+
+const RAMP: u32 = 480;
+const RECORD_BLOCK: u64 = 3;
+
+/// Gate 1 of #1341: a live bypass crossfades over the session ramp, per node, and settles on
+/// today's whole-block select. X is bypassed by a record at block 3 with a 480-sample ramp at
+/// quantum 128, so the ramp ends inside block 6. Before the record X is W; inside the ramp it is
+/// `D + (W - D) * m(k)` with `m` from the indexed ramp law alone and `k` counted from the record's
+/// first frame; from the ramp's end it is D bit for bit. A zero-latency effect and one with
+/// latency (the true-peak limiter), at the host's width and at scalar width.
+///
+/// Test value: red if `m` comes from an accumulated sum or a fused multiply-add, if the ramp is
+/// off by a frame at the block boundary, if the settled frames compute the formula instead of
+/// copying the dry words, or if the mix reads another width's `m`.
+#[test]
+fn a_live_bypass_crossfades_per_node_over_the_ramp_and_settles_on_the_select() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 12;
+        let (latency, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![(RECORD_BLOCK, true, RAMP)]);
+        let (_, crossfaded) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        let (_, scalar) = render_per_node::<f32>(effect_id, &records, blocks);
+        assert_eq!(
+            latency == 0,
+            effect_id == ZERO_AND_LATENT[0],
+            "{effect_id}: the pair covers one zero-latency effect and one with latency"
+        );
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the crossfade proves nothing"
+        );
+        assert!(
+            differing(&crossfaded, &wet, RECORD_BLOCK as usize) > 0
+                && differing(&crossfaded, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the crossfade is neither the wet nor the dry output"
+        );
+        let mut inside = 0_usize;
+        for block in 0..blocks {
+            for channel in 0..2 {
+                let what = format!("{effect_id} block {block} channel {channel}");
+                assert_bits(
+                    &format!("{what}: the host width equals scalar width"),
+                    &crossfaded[block as usize][channel],
+                    &scalar[block as usize][channel],
+                );
+                let expected: Vec<f32> = (0..QUANTUM)
+                    .map(|frame| {
+                        let (w, d) = (
+                            wet[block as usize][channel][frame as usize],
+                            dry[block as usize][channel][frame as usize],
+                        );
+                        if block < RECORD_BLOCK {
+                            return w;
+                        }
+                        let k = (block - RECORD_BLOCK) * u64::from(QUANTUM) + u64::from(frame) + 1;
+                        if k < u64::from(RAMP) {
+                            inside += 1;
+                            mixed(d, w, mix_at(1.0, 0.0, RAMP, k as u32))
+                        } else {
+                            d
+                        }
+                    })
+                    .collect();
+                assert_bits(&what, &crossfaded[block as usize][channel], &expected);
+            }
+        }
+        assert_eq!(
+            inside,
+            2 * (RAMP as usize - 1),
+            "{effect_id}: the ramp frames"
+        );
+    }
+}
+
+/// Gate 4 of #1341: a record with a zero-sample ramp is a step. X equals D from the first sample of
+/// the record's block, which is what an un-ramped bypass always rendered.
+///
+/// Test value: red if a zero length is not a step, which would move today's bits for an explicit
+/// `mute_ms = 0`.
+#[test]
+fn a_bypass_record_with_a_zero_ramp_steps_at_the_first_sample_of_its_block() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 8;
+        let (_, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![(RECORD_BLOCK, true, 0)]);
+        let (_, stepped) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the step proves nothing"
+        );
+        for block in 0..blocks as usize {
+            let expected = if block < RECORD_BLOCK as usize {
+                &wet
+            } else {
+                &dry
+            };
+            for channel in 0..2 {
+                assert_bits(
+                    &format!("{effect_id} block {block} channel {channel}"),
+                    &stepped[block][channel],
+                    &expected[block][channel],
+                );
+            }
+        }
+    }
+}
+
+/// Gate 3 of #1341, per node: the un-bypass record lands at block 5, at `k = 256` of the 480-frame
+/// ramp. From block 5 the output follows `IndexedRamp::new([m(256), 0, 0, 0], [1, 0, 0, 0], 480)`
+/// with no jump, and equals W exactly from 480 frames later. A second bypass record for the
+/// target the lane is already heading for, in block 7, changes nothing.
+///
+/// Test value: red if a reversal restarts from the settled endpoint (a jump) instead of from the
+/// current mix, or if a repeated target restarts the ramp.
+#[test]
+fn a_reversal_continues_from_the_current_mix_and_a_repeat_changes_nothing() {
+    for effect_id in ZERO_AND_LATENT {
+        let blocks = 14;
+        let (_, wet) = render_per_node::<lane::Native>(effect_id, &Bypassing::Never, blocks);
+        let (_, dry) =
+            render_per_node::<lane::Native>(effect_id, &Bypassing::FromPreparation, blocks);
+        let records = Bypassing::Records(vec![
+            (RECORD_BLOCK, true, RAMP),
+            (5, false, RAMP),
+            (7, false, RAMP),
+        ]);
+        let (_, reversed) = render_per_node::<lane::Native>(effect_id, &records, blocks);
+        assert!(
+            differing(&wet, &dry, RECORD_BLOCK as usize) > 0,
+            "{effect_id}: the wet and dry outputs never differ, so the reversal proves nothing"
+        );
+        // Blocks 3 and 4 rendered 256 ramp frames; the last of them used m(256).
+        let resume = mix_at(1.0, 0.0, RAMP, 256);
+        let mut continuing = 0_usize;
+        for block in 0..blocks as usize {
+            for channel in 0..2 {
+                let expected: Vec<f32> = (0..QUANTUM as usize)
+                    .map(|frame| {
+                        let (w, d) = (wet[block][channel][frame], dry[block][channel][frame]);
+                        let block = block as u64;
+                        if block < RECORD_BLOCK {
+                            w
+                        } else if block < 5 {
+                            let k = (block - RECORD_BLOCK) * u64::from(QUANTUM) + frame as u64 + 1;
+                            mixed(d, w, mix_at(1.0, 0.0, RAMP, k as u32))
+                        } else {
+                            let k = (block - 5) * u64::from(QUANTUM) + frame as u64 + 1;
+                            if k < u64::from(RAMP) {
+                                continuing += 1;
+                                mixed(d, w, mix_at(resume, 1.0, RAMP, k as u32))
+                            } else {
+                                w
+                            }
+                        }
+                    })
+                    .collect();
+                assert_bits(
+                    &format!("{effect_id} block {block} channel {channel}"),
+                    &reversed[block][channel],
+                    &expected,
+                );
+            }
+        }
+        assert_eq!(
+            continuing,
+            2 * (RAMP as usize - 1),
+            "{effect_id}: the second ramp"
+        );
+    }
+}
+
+// ---- #1341a2: the bank crossfades exactly as the node does -----------------------------------------
+
+/// How a bank lane starts.
+#[derive(Clone, Copy, Debug)]
+enum Start {
+    /// A live channel, not bypassed.
+    Wet,
+    /// A live channel, session-bypassed.
+    Bypassed,
+    /// No channel, session-bypassed (it can never be lifted).
+    FixedBypass,
+    /// No control lane at all.
+    Plain,
+}
+
+/// `(lane, block, bypassed, ramp_samples)`: the bypass records of the bank test, one revision each.
+type Schedule = &'static [(usize, u64, bool, u32)];
+
+/// The bank test's lanes (the first four on a four-lane bank), and their records:
+///
+/// * 0 is never switched (W);
+/// * 1 bypasses at block 3 over 480 frames, which end inside block 6 (95 ramp frames there, so the
+///   per-node kernel runs its scalar tail on them);
+/// * 2 bypasses at block 3 and lifts at block 5, at `k = 256`: a reversal mid-ramp;
+/// * 3 starts bypassed and lifts at block 6 over 300 frames;
+/// * 4 bypasses at block 4 with a ramp of 0 (a step);
+/// * 5 is bypassed for good without a channel, 6 has no control lane;
+/// * 7 starts bypassed, lifts at block 3 over exactly one block and bypasses again at block 4 over
+///   100 frames, which end inside block 4.
+const BANK_LANES: [Start; 8] = [
+    Start::Wet,
+    Start::Wet,
+    Start::Wet,
+    Start::Bypassed,
+    Start::Wet,
+    Start::FixedBypass,
+    Start::Plain,
+    Start::Bypassed,
+];
+const BANK_SCHEDULE: Schedule = &[
+    (1, 3, true, 480),
+    (2, 3, true, 480),
+    (2, 5, false, 480),
+    (3, 6, false, 300),
+    (4, 4, true, 0),
+    (7, 3, false, 128),
+    (7, 4, true, 100),
+];
+
+/// A per-node reference lane: the instance, its shunt and its control lane, driven in the order
+/// `runtime::LiveControlEffect` runs them.
+struct NodeLane {
+    effect: Box<dyn PreparedNativeEffect>,
+    shunt: effect_contract::BypassShunt,
+    control: EffectControlLane,
+    writer: Option<effect_contract::EffectCellWriter>,
+}
+
+fn live_lane(
+    bypass: bool,
+    superseded: &LiveValuesSuperseded,
+) -> (effect_contract::EffectCellWriter, EffectControlLane) {
+    effect_control_lane(
+        EffectLaneSpec {
+            shape: EffectLaneShape::from_live_parameters([], 0),
+            bypass,
+            observation_depth: 0,
+        },
+        superseded,
+    )
+    .expect("the live lane")
+}
+
+/// Gate 2 of #1341 (bank equals node) and gate 3 banked. One bank of `backend`'s width runs
+/// `effect_id` on every lane of [`BANK_LANES`] through the rack's real live stage, with
+/// [`BANK_SCHEDULE`]'s bypass records, and each lane's output equals the per-node render of the
+/// same lane, bit for bit, in every block: a lane that bypasses over a ramp, one that reverses
+/// mid-ramp, one that lifts, a step, a lane bypassed without a channel, a lane without a control
+/// lane, and a lane that is never switched, next to one another in one bank.
+fn bank_equals_node(effect_id: &str, backend: Backend) {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let factory = registry.get_shared_ascii(effect_id).expect("launch effect");
+    let descriptor = factory.descriptor();
+    let case = cases(descriptor)[0];
+    let values = default_values(descriptor);
+    let width = BankWidth::for_backend(backend).expect("a vector backend");
+    let lanes = width.lanes() as usize;
+    let starts = &BANK_LANES[..lanes];
+    let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
+        .map(|_| request(descriptor, case, false, &values))
+        .collect();
+    let bank = factory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+            active_mask: width.full_mask(),
+        })
+        .expect("a well-formed bank request")
+        .expect("a bankable effect binds at this width");
+    let latency = usize::try_from(bank.metadata.program_key.latency.0).expect("latency fits");
+    let superseded = LiveValuesSuperseded::new();
+    let mut bank_writers: Vec<Option<effect_contract::EffectCellWriter>> = Vec::new();
+    let mut controls: Vec<Option<EffectControlLane>> = Vec::new();
+    let mut nodes: Vec<NodeLane> = Vec::new();
+    for start in starts {
+        let (writer, control) = match start {
+            Start::Wet | Start::Bypassed => {
+                let (writer, control) = live_lane(matches!(start, Start::Bypassed), &superseded);
+                (Some(writer), Some(control))
+            }
+            Start::FixedBypass => (None, Some(EffectControlLane::without_channel(true))),
+            Start::Plain => (None, None),
+        };
+        bank_writers.push(writer);
+        controls.push(control);
+        let (writer, control) = match start {
+            Start::Wet | Start::Bypassed => {
+                let (writer, control) = live_lane(matches!(start, Start::Bypassed), &superseded);
+                (Some(writer), control)
+            }
+            Start::FixedBypass => (None, EffectControlLane::without_channel(true)),
+            Start::Plain => (None, EffectControlLane::without_channel(false)),
+        };
+        nodes.push(NodeLane {
+            effect: factory
+                .prepare(request(descriptor, case, false, &values))
+                .expect("per-node instance")
+                .processor,
+            shunt: effect_contract::BypassShunt::new(QUANTUM as usize, latency),
+            control,
+            writer,
+        });
+    }
+    let stage = LiveControlEffectBankStage::new(
+        bank,
+        width,
+        QUANTUM,
+        controls,
+        (0..lanes).map(|_| None).collect(),
+        latency,
+    )
+    .expect("stage");
+    let mut chain = BankChain::new(
+        AoSoaScratch::new(width, QUANTUM).expect("scratch"),
+        vec![true; lanes].into_boxed_slice(),
+        vec![BankSlot {
+            stage: Box::new(stage) as Box<dyn BankStage>,
+            active_lanes: vec![true; lanes].into_boxed_slice(),
+        }],
+    )
+    .expect("chain");
+    // Lane 1 never bypassed: the evidence that its crossfade is not the wet or the dry output.
+    let mut wet_only = factory
+        .prepare(request(descriptor, case, false, &values))
+        .expect("wet twin")
+        .processor;
+    let (gate, mut pin) = RevisionGate::pair(0);
+    let mut signal = Rng::new(0x0013_41a2);
+    let (mut between_lane_one, mut compared) = (0_usize, 0_usize);
+    for block in 0..14_u64 {
+        for &(lane, at, bypassed, ramp_samples) in BANK_SCHEDULE {
+            if at != block || lane >= lanes {
+                continue;
+            }
+            let revision = pin.last_published() + 1;
+            let stamp = pin.stamp(revision).expect("a legal revision");
+            let switch = effect_contract::BypassSwitch {
+                bypassed,
+                ramp_samples,
+            };
+            for writer in [bank_writers[lane].as_mut(), nodes[lane].writer.as_mut()] {
+                writer
+                    .expect("a lane with records has a channel")
+                    .write_bypass(stamp, switch)
+                    .expect("a bypass cell");
+            }
+            pin.publish(&gate, revision);
+        }
+        let mut members = Planes {
+            left: Vec::new(),
+            right: Vec::new(),
+        };
+        for lane in 0..lanes {
+            members
+                .left
+                .push(input_block(lane, 0, block, Level::Loud, &mut signal));
+            members
+                .right
+                .push(input_block(lane, 1, block, Level::Loud, &mut signal));
+        }
+        let mut expected_left = members.left.clone();
+        let mut expected_right = members.right.clone();
+        let mut wet_left = members.left[1].clone();
+        let mut wet_right = members.right[1].clone();
+        let first_sample = block * u64::from(QUANTUM);
+        chain
+            .run(&mut members, QUANTUM, first_sample, gate.snapshot())
+            .expect("bank render");
+        process_scalar(wet_only.as_mut(), &mut wet_left, &mut wet_right, block);
+        for (lane, node) in nodes.iter_mut().enumerate() {
+            let (left, right) = (&mut expected_left[lane], &mut expected_right[lane]);
+            node.control.stage(&mut [], first_sample, gate.snapshot());
+            let needs_dry = node.control.needs_dry();
+            if needs_dry || node.shunt.feeds_line() {
+                node.shunt.capture(left, right);
+            }
+            process_scalar(node.effect.as_mut(), left, right, block);
+            if needs_dry {
+                node.control
+                    .apply_bypass::<lane::Native>(&node.shunt, left, right);
+            }
+            let what = format!("{effect_id} at {backend:?}: lane {lane} block {block}");
+            assert_bits(&format!("{what} left"), &members.left[lane], left);
+            assert_bits(&format!("{what} right"), &members.right[lane], right);
+        }
+        if (3..7).contains(&block) {
+            compared += QUANTUM as usize;
+            between_lane_one += members.left[1]
+                .iter()
+                .zip(&wet_left)
+                .filter(|(a, w)| folded(**a) != folded(**w))
+                .count();
+        }
+    }
+    assert!(
+        between_lane_one * 2 > compared,
+        "{effect_id}: lane 1's ramp never leaves the wet output, so the comparison proves nothing"
+    );
+}
+
+/// Gate 2 and gate 3 (banked) of #1341: a bank renders every lane's bypass crossfade exactly as the
+/// per-node path renders it, at the build's bank width (eight lanes on AVX2, four on NEON and
+/// simd128: an effect binds only the build's width, so the other width cannot be bound here; the
+/// kernel at each width is pinned lane by lane in `effect-contract`'s `live_control` tests), for a
+/// zero-latency effect and one with latency. The per-node leg runs at the host's lane width and its
+/// scalar tail (the ramp's last 95 frames in block 6 are not a whole vector).
+///
+/// Test value: red if a banked lane steps at its record instead of ramping (the interim this test
+/// replaces), reads a neighbour's `m` or position, keeps a settled lane on the formula path, or if
+/// a reversal restarts from the settled endpoint.
+#[test]
+fn a_bank_crossfades_every_lane_exactly_as_the_node_does() {
+    for effect_id in ZERO_AND_LATENT {
+        bank_equals_node(effect_id, Backend::current());
+    }
+}

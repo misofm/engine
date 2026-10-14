@@ -11,9 +11,10 @@ mod response;
 mod step;
 mod symmetry;
 pub use live::{
-    BypassShunt, EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources,
-    EffectLaneShape, EffectLaneSpec, EffectWriteRefusal, ObservationLane, ObservePushError, Staged,
-    apply_observe, effect_control_lane,
+    BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
+    EffectLaneSpec, EffectWriteRefusal, ObservationLane, ObservePushError, Staged, apply_observe,
+    effect_control_lane,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
@@ -1657,8 +1658,8 @@ pub enum ProcessBlockError {
     Automation,
     /// A live-control staging window whose span count is not the effect's
     /// `automation_capacity`; refused at preparation by
-    /// [`EffectProcessBlock::check_automation_window`] and
-    /// [`EffectBankProcessBlock::check_automation_window`].
+    /// [`EffectProcessBlock::check_automation_window`] (the per-node window). A banked live slot
+    /// sizes its window by its lanes' parameter cells instead and reports its own rack error.
     AutomationWindow,
 }
 
@@ -1789,27 +1790,6 @@ impl<'a> EffectBankProcessBlock<'a> {
             automation,
             automation_offsets: offsets,
         })
-    }
-
-    /// Refuse, at preparation, a live-control staging window that is not exactly this bank's
-    /// `automation_capacity` spans (issue #1012).
-    ///
-    /// The bank sibling of [`EffectProcessBlock::check_automation_window`], with the same reason:
-    /// `rack`'s live-control bank stage drains every lane through one window before packing the
-    /// lane's partition, and each lane's partition meets the effect's per-lane `span_index <
-    /// automation_capacity` cut-off, so the window must be exactly that capacity for a staged twin
-    /// pair never to straddle it. Called once, off the render thread, where the window is
-    /// allocated.
-    ///
-    /// # Errors
-    ///
-    /// [`ProcessBlockError::AutomationWindow`] when `window.len()` differs from the bank's
-    /// `program_key.automation_capacity`.
-    pub const fn check_automation_window(
-        window: &[PreparedAutomationSpan],
-        metadata: &PreparedBankMetadata,
-    ) -> Result<(), ProcessBlockError> {
-        check_window(window.len(), metadata.program_key.automation_capacity)
     }
 }
 /// Whether one span is valid on its own for a block of `frames` samples from `first`, against the

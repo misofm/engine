@@ -25,9 +25,9 @@ use std::any::Any;
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
     BuiltinParameterError, BuiltinParameters, ChannelParameters, FaderMuteBuiltins,
-    FaderMuteRampBuiltins, InputBoundCache, InputBuiltins, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
-    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator, MeterConfig,
+    MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap,
+    PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveControlRecord, NodeTailBound, ResponseAnalysisError,
@@ -4409,7 +4409,7 @@ pub fn prepare_session_builtins(
         session.normalized_model(),
         &controls::MonitorOverlay::default(),
     );
-    prepare_session_builtins_with_live_controls(session, &effective, requests, &[], caps, None)
+    prepare_session_builtins_with_live_controls(session, &effective, requests, &[], caps)
 }
 
 /// Prepare builtins with live-control channels attached (issue #137 D1).
@@ -4428,19 +4428,12 @@ pub fn prepare_session_builtins(
 /// [`prepare_session_builtins`] is exactly this call with no control channels, so a host that does
 /// not want live controls pays nothing: no queue is allocated and the matrix processors carry
 /// `None`.
-///
-/// `bound_cache` (#1457 D2) is a design-bound cache the host keeps across preparations (one per
-/// engine, or one per session for its rebuilds): each distinct input design's bound is read from
-/// it when it holds the design and stored there when it is computed. The prepared session is the
-/// same, bit for bit, with `None`, an empty cache or a warm one; only the control-thread cost
-/// changes.
 pub fn prepare_session_builtins_with_live_controls(
     session: &CompiledSession,
     effective: &controls::Effective,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
-    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     prepare_session_builtins_with_live_controls_and_policy(
         session,
@@ -4450,7 +4443,6 @@ pub fn prepare_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
-        bound_cache,
     )
 }
 
@@ -4474,7 +4466,6 @@ pub fn prepare_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
-        None,
     )
 }
 
@@ -4496,7 +4487,6 @@ pub fn prepare_selected_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
-        None,
     )
 }
 
@@ -4520,7 +4510,6 @@ pub fn prepare_selected_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
-        None,
     )
 }
 
@@ -4545,7 +4534,6 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
-    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
@@ -4680,8 +4668,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
     // design (#1329 follow-up C). #1457: within the preparation budget
     // `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged in strip order; a design past it reports the
-    // live bound (D3). `bound_cache`, when the host keeps one, serves designs it already holds with
-    // the same charge, so the prepared values are the same with or without it (D2).
+    // live bound (D3).
     let input_lane_live = |track_id: &str| {
         control_lanes
             .get(track_id)
@@ -4702,7 +4689,6 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                 )
                 .expect("preflighted parameters")
             }),
-        bound_cache,
     )
     .expect("preflighted coefficients");
     let mut design_bounds = design_bounds.into_iter();
@@ -8092,7 +8078,6 @@ mod tests {
                 meter.as_slice(),
                 &controls,
                 caps(),
-                None,
             )
         }
         .expect("prepared builtins");
@@ -8533,7 +8518,6 @@ mod tests {
             &[],
             &controls,
             caps(),
-            None,
         )
         .expect("prepared builtins");
         assert!(builtins.validate_for_session(&compiled).0.is_empty());
@@ -12787,7 +12771,6 @@ mod tests {
                 &[],
                 &controls,
                 caps(),
-                None,
             )
             .expect("raw"),
         );
@@ -12967,7 +12950,6 @@ mod tests {
             &[],
             &controls,
             caps(),
-            None,
         )
         .expect("concurrent owners")
         .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
@@ -13502,7 +13484,6 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
-            None,
         )
         .expect("live");
         // A live input lane can enable either filter anywhere in the domain, so the strip reports
@@ -13608,7 +13589,6 @@ mod tests {
                 &[],
                 &controls(live),
                 caps(),
-                None,
             )
             .expect("prepare");
             let after = builtins::test_support::fixed_input_bounds_computed();
@@ -13683,7 +13663,6 @@ mod tests {
                     &[],
                     &[],
                     caps(),
-                    None,
                 )
                 .expect("prepare");
                 let walked = builtins::test_support::fixed_input_frames_walked() - frames;
@@ -13708,15 +13687,13 @@ mod tests {
         }
     }
 
-    /// #1457 D1, D2: a preparation walks at most the budget, and a warm cache walks nothing. The
-    /// first three strips carry distinct near-top designs, more than the budget covers: a cold
-    /// preparation walks exactly the budget less the three designs' section charges (the design that
-    /// crosses it is stopped there, and every later one walks nothing), and a second preparation
-    /// with the same cache computes no bound and walks no frame, the stopped design included, with
-    /// the same prepared bounds.
+    /// #1457 D1: a preparation walks at most the budget. The first three strips carry distinct
+    /// near-top designs, more than the budget covers: a preparation walks exactly the budget less
+    /// the three designs' section charges (the design that crosses it is stopped there, and every
+    /// later one walks nothing) and reports the live bound for the stopped design.
     #[cfg(feature = "test-support")]
     #[test]
-    fn a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing() {
+    fn a_preparation_walks_at_most_the_budget() {
         let mut model = parse_session_json(include_str!(
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
@@ -13748,7 +13725,7 @@ mod tests {
             },
         )
         .expect("compile");
-        let prepare = |cache: Option<&mut InputBoundCache>| {
+        let prepare = || {
             let bounds = builtins::test_support::fixed_input_bounds_computed();
             let frames = builtins::test_support::fixed_input_frames_walked();
             let prepared = prepare_session_builtins_with_live_controls(
@@ -13757,7 +13734,6 @@ mod tests {
                 &[],
                 &[],
                 caps(),
-                cache,
             )
             .expect("prepare");
             assert!(prepared.validate_for_session(&compiled).0.is_empty());
@@ -13774,15 +13750,10 @@ mod tests {
         // Each design reserves its sections' charge before it walks: two sections on one cascade.
         let fixed = 3 * 2 * builtins::INPUT_BOUND_SECTION_CHARGE;
         let spent = builtins::INPUT_BOUND_BUDGET_FRAMES - fixed;
-        let (none, _, walked) = prepare(None);
-        assert_eq!(walked, spent, "no cache");
+        let (none, _, walked) = prepare();
+        assert_eq!(walked, spent, "walked");
         let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
         assert!(none.iter().any(|(_, bound)| *bound == live), "{none:?}");
-        let mut cache = InputBoundCache::new();
-        let (cold, _, walked) = prepare(Some(&mut cache));
-        assert_eq!((&cold, walked), (&none, spent));
-        let (warm, computed, walked) = prepare(Some(&mut cache));
-        assert_eq!((&warm, computed, walked), (&none, 0, 0), "warm cache");
     }
 
     #[test]
@@ -15194,7 +15165,6 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
-            None,
         )
         .expect("attached live controls");
         assert_eq!(baseline.track_control_count(), 0);
@@ -15235,7 +15205,6 @@ mod tests {
                 },
             ],
             caps(),
-            None,
         )
         .map(|_| ())
         .expect_err("a track may hold one control channel");
@@ -15257,7 +15226,6 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
-            None,
         )
         .map(|_| ())
         .expect_err("an undeclared track has no channel");
@@ -15290,15 +15258,9 @@ mod tests {
         effective.strips[0].fader_db = [-12.5, -3.0];
         assert!(!effective.routes.is_empty(), "the fixture declares a route");
         effective.routes[0].follow = [true, false];
-        let prepared = prepare_session_builtins_with_live_controls(
-            &compiled,
-            &effective,
-            &[],
-            &[],
-            caps(),
-            None,
-        )
-        .expect("prepare");
+        let prepared =
+            prepare_session_builtins_with_live_controls(&compiled, &effective, &[], &[], caps())
+                .expect("prepare");
         assert_eq!(
             prepared.effective_route_follow(),
             effective
@@ -15319,16 +15281,10 @@ mod tests {
             controls::Effective::with_shape(strips + 1, routes),
             controls::Effective::with_shape(strips, routes + 1),
         ] {
-            let refused = prepare_session_builtins_with_live_controls(
-                &compiled,
-                &wrong,
-                &[],
-                &[],
-                caps(),
-                None,
-            )
-            .err()
-            .expect("refused");
+            let refused =
+                prepare_session_builtins_with_live_controls(&compiled, &wrong, &[], &[], caps())
+                    .err()
+                    .expect("refused");
             assert!(refused.0.iter().any(
                 |value| value.code == "builtin.effective.shape" && value.path == "$.effective"
             ));

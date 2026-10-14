@@ -2,12 +2,12 @@
 
 use session::SessionModel;
 
-use crate::address::{ControlAddress, Owner, Section};
 use crate::descriptor::{ControlDescriptor, ControlScope};
 use crate::effective::MonitorOverlay;
 use crate::lane::Side;
 use crate::registry::{ControlRow, Source, list, resolve};
 use crate::{ControlClass, strip};
+use session::{ControlAddress, Owner, Section};
 
 /// One control whose committed value differs between two models.
 #[derive(Clone, Debug, PartialEq)]

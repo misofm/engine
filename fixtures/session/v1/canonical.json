@@ -124,11 +124,12 @@
     {
       "id": "eq-gain",
       "target": {
-        "entity_id": "vocal",
-        "rack": "inserts",
-        "effect_id": "eq",
-        "parameter_id": 1,
-        "channel": "both"
+        "owner": "strip",
+        "owner_id": "vocal",
+        "section": "inserts",
+        "slot_id": "eq",
+        "control": 1,
+        "lane": "both"
       },
       "segments": [
         {

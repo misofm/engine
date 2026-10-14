@@ -13,7 +13,7 @@ use effect_contract::{
     BypassShunt, EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
     ParameterChannelPolicy,
 };
-use lane_rig::{Rig, both, left, right, target};
+use lane_rig::{Rig, UNBYPASSED, both, left, right, target};
 
 /// A shape with `Left`/`Right` cells for each `PerLane` index and one `Both` cell for each
 /// `Shared` one.
@@ -367,4 +367,241 @@ fn a_value_above_the_snapshot_waits_and_is_applied_once() {
         0,
         "nothing was replaced before a snapshot covered it"
     );
+}
+
+/// #1341 D2, D5, D6: a bypass switch with a ramp starts a crossfade the lane steps through by the
+/// block. A ramping lane counts as bypassed for the witness from the record until the ramp settles
+/// at wet, and needs the dry block until then; a record whose target is the one the lane is
+/// already heading for changes nothing; a switch with no ramp steps at the record.
+///
+/// Test value: a lane that restores `UNBYPASSED` at the un-bypass record (collapse engaging
+/// while the dry mix is still in the output), or that restarts its ramp on a repeated target, or
+/// that stops needing the dry block one block early.
+#[test]
+fn a_bypass_crossfade_is_bypassed_to_the_witness_and_needs_dry_until_it_settles_at_wet() {
+    use effect_contract::BypassSwitch;
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    assert!(!rig.lane.needs_dry() && !rig.lane.bypass_ramping());
+    assert_eq!(rig.lane.bypass_mix(), 1.0);
+
+    rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert!(rig.lane.bypassed() && rig.lane.bypass_ramping() && rig.lane.needs_dry());
+    assert!(
+        !rig.lane.symmetry().holds(UNBYPASSED),
+        "bypassed from the record"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 1.0, "no frame has rendered yet");
+    rig.lane.advance_bypass_mix(128);
+    let after_one_block = rig.lane.bypass_mix();
+    assert!(after_one_block < 1.0 && after_one_block > 0.0);
+
+    // The same target again, mid-ramp: nothing restarts.
+    rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert_eq!(rig.lane.bypass_mix(), after_one_block);
+    rig.lane.advance_bypass_mix(128);
+    rig.lane.advance_bypass_mix(128);
+    assert!(
+        !rig.lane.bypass_ramping() && rig.lane.needs_dry(),
+        "settled dry still needs dry"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 0.0);
+
+    // The way back is a crossfade too: bypassed for the witness until it settles at wet.
+    rig.commit_bypass(BypassSwitch {
+        bypassed: false,
+        ramp_samples: 300,
+    })
+    .expect("a cell");
+    rig.stage();
+    assert!(!rig.lane.bypassed() && rig.lane.bypass_ramping() && rig.lane.needs_dry());
+    assert!(!rig.lane.symmetry().holds(UNBYPASSED));
+    rig.lane.advance_bypass_mix(128);
+    rig.lane.advance_bypass_mix(128);
+    assert!(rig.lane.bypass_ramping() && !rig.lane.symmetry().holds(UNBYPASSED));
+    rig.lane.advance_bypass_mix(128);
+    assert!(!rig.lane.bypass_ramping() && !rig.lane.needs_dry());
+    assert!(
+        rig.lane.symmetry().holds(UNBYPASSED),
+        "restored when the ramp settles at wet"
+    );
+    assert_eq!(rig.lane.bypass_mix(), 1.0);
+
+    // A zero ramp is a step, in both directions.
+    rig.commit_bypass(BypassSwitch::step(true)).expect("a cell");
+    rig.stage();
+    assert!(rig.lane.needs_dry() && !rig.lane.bypass_ramping());
+    assert!(!rig.lane.symmetry().holds(UNBYPASSED));
+    assert_eq!(rig.lane.bypass_mix(), 0.0);
+    rig.commit_bypass(BypassSwitch::step(false))
+        .expect("a cell");
+    rig.stage();
+    assert!(!rig.lane.needs_dry() && rig.lane.symmetry().holds(UNBYPASSED));
+}
+
+/// A ramp the indexed ramp law cannot spell is refused before the first write.
+#[test]
+fn a_bypass_ramp_longer_than_the_law_is_refused_and_writes_nothing() {
+    use effect_contract::BypassSwitch;
+    let mut rig = Rig::new(shape(&[], &[], 0), 0);
+    let refused = rig.commit_bypass(BypassSwitch {
+        bypassed: true,
+        ramp_samples: lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM + 1,
+    });
+    assert_eq!(refused, Err(EffectWriteRefusal::Ramp));
+    rig.stage();
+    assert!(!rig.lane.bypassed());
+}
+
+/// #1341a2 gate 2 at the kernel: `BypassShunt::crossfade_bank::<L>` over an interleaved block of
+/// `L::WIDTH` lanes equals, lane by lane and bit for bit, the per-node `apply_bypass` (the host
+/// width kernel and its scalar tail) of the same lane. Every lane has its own schedule: a ramp, a
+/// reversal mid-ramp, a lift, a step, a lane that never switches and one bypassed from the start.
+/// The wet words carry `-0.0`, infinities and NaNs, which a settled lane must pass or replace
+/// untouched. Run at every lane width the build has: one lane (scalar), four lanes, and eight on AVX2.
+///
+/// Test value: red if a lane reads a neighbour's `m` or position (lane-to-lane crosstalk), a
+/// settled lane goes through the formula (a `NaN` wet word would leak into the dry copy, and `-0.0`
+/// would turn `+0.0`), a reversal restarts from the endpoint, or the bank's `m(k)` differs from the
+/// node's by a frame (the index convention) or by a rounding (the operation order).
+fn bank_kernel_equals_node<L: lane::Lane>(first_lane: usize) -> usize {
+    use effect_contract::{BankCrossfade, BypassSwitch};
+    const FRAMES: usize = 30;
+    const BLOCKS: usize = 14;
+    let width = L::WIDTH;
+    // Per lane: starts bypassed; records as (block, bypassed, ramp).
+    let schedule = |lane: usize| -> (bool, Vec<(usize, bool, u32)>) {
+        match (first_lane + lane) % 8 {
+            0 => (false, vec![]),
+            1 => (false, vec![(2, true, 100)]),
+            2 => (false, vec![(2, true, 100), (4, false, 100)]),
+            3 => (true, vec![(5, false, 61)]),
+            4 => (false, vec![(3, true, 0)]),
+            5 => (true, vec![]),
+            6 => (false, vec![(1, true, 30), (2, false, 30), (3, true, 7)]),
+            _ => (true, vec![(2, false, 30), (3, true, 45)]),
+        }
+    };
+    let new_rig = |lane: usize| {
+        let mut rig = Rig::new(shape(&[], &[], 0), 0);
+        // A lane that starts bypassed is built bypassed: a step record before the first block.
+        if schedule(lane).0 {
+            rig.commit_bypass(BypassSwitch::step(true)).expect("a cell");
+            rig.stage();
+        }
+        rig
+    };
+    let mut bank_rigs: Vec<Rig> = (0..width).map(new_rig).collect();
+    let mut node_rigs: Vec<Rig> = (0..width).map(new_rig).collect();
+    let mut bank_shunt = BypassShunt::new(FRAMES * width, 0);
+    let mut node_shunts: Vec<BypassShunt> =
+        (0..width).map(|_| BypassShunt::new(FRAMES, 0)).collect();
+    let mut seed = 0x0013_41a2_u64;
+    let mut random = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let word = |random: &mut dyn FnMut() -> u64| -> f32 {
+        match random() % 40 {
+            0 => -0.0,
+            1 => f32::INFINITY,
+            2 => f32::NAN,
+            3 => 0.0,
+            r => (r as f32 - 20.0) * 0.173 + (random() % 1000) as f32 * 1e-4,
+        }
+    };
+    let mut ramped = 0_usize;
+    for block in 0..BLOCKS {
+        for lane in 0..width {
+            for &(at, bypassed, ramp_samples) in &schedule(lane).1 {
+                if at == block {
+                    let switch = BypassSwitch {
+                        bypassed,
+                        ramp_samples,
+                    };
+                    bank_rigs[lane].commit_bypass(switch).expect("a cell");
+                    node_rigs[lane].commit_bypass(switch).expect("a cell");
+                }
+            }
+            bank_rigs[lane].stage();
+            node_rigs[lane].stage();
+        }
+        // Planar per-lane dry and wet, and the same words interleaved for the bank.
+        let mut dry = vec![vec![[0.0_f32; FRAMES]; width]; 2];
+        let mut wet = dry.clone();
+        for channel in 0..2 {
+            for lane in 0..width {
+                for frame in 0..FRAMES {
+                    dry[channel][lane][frame] = word(&mut random);
+                    wet[channel][lane][frame] = word(&mut random);
+                }
+            }
+        }
+        let interleave = |planes: &[[f32; FRAMES]]| -> Vec<f32> {
+            (0..FRAMES)
+                .flat_map(|frame| (0..width).map(move |lane| (lane, frame)))
+                .map(|(lane, frame)| planes[lane][frame])
+                .collect()
+        };
+        let (mut bank_left, mut bank_right) = (interleave(&wet[0]), interleave(&wet[1]));
+        bank_shunt.capture(&interleave(&dry[0]), &interleave(&dry[1]));
+        let mut crossfade = BankCrossfade::new();
+        for (lane, rig) in bank_rigs.iter().enumerate() {
+            crossfade.set(lane, rig.lane.bypass_crossfade_lane());
+            ramped += usize::from(rig.lane.bypass_ramping());
+        }
+        bank_shunt.crossfade_bank::<L>(&mut bank_left, &mut bank_right, FRAMES, &crossfade);
+        for rig in &mut bank_rigs {
+            rig.lane.advance_bypass_mix(FRAMES as u32);
+        }
+        for lane in 0..width {
+            let (mut left, mut right) = (wet[0][lane], wet[1][lane]);
+            node_shunts[lane].capture(&dry[0][lane], &dry[1][lane]);
+            if node_rigs[lane].lane.needs_dry() {
+                node_rigs[lane].lane.apply_bypass::<lane::Native>(
+                    &node_shunts[lane],
+                    &mut left,
+                    &mut right,
+                );
+            }
+            for frame in 0..FRAMES {
+                for (plane, node) in [(&bank_left, &left), (&bank_right, &right)] {
+                    assert_eq!(
+                        plane[frame * width + lane].to_bits(),
+                        node[frame].to_bits(),
+                        "width {width}, block {block}, lane {lane}, frame {frame}"
+                    );
+                }
+            }
+        }
+    }
+    ramped
+}
+
+/// Four and eight lanes (the vector widths), and the scalar width: a one-lane bank (`f32`, the
+/// oracle backend) is run once per schedule row, so every row meets the scalar kernel as well.
+#[test]
+fn a_bank_kernel_crossfades_every_lane_exactly_as_the_node_kernel_does() {
+    assert!(
+        bank_kernel_equals_node::<lane::Simd4>(0) > 0,
+        "four lanes ramp"
+    );
+    #[cfg(target_feature = "avx2")]
+    assert!(
+        bank_kernel_equals_node::<lane::Simd8>(0) > 0,
+        "eight lanes ramp"
+    );
+    let scalar: usize = (0..8).map(bank_kernel_equals_node::<f32>).sum();
+    assert!(scalar > 0, "the scalar rows ramp");
 }
