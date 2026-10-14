@@ -95,11 +95,15 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// 4-effect document on the shipped module (`scripts/check-web-boot-budget.mjs`): the boot now
 /// builds the control plane's session, whose catalog, producers and protocol state the browser did
 /// not hold, and the wasm high-water growth rose from under 20 MiB to 25,427,968 bytes (24.25
-/// bytes per input byte). 26 leaves 7.2% headroom over that. Boot checks
+/// bytes per input byte). Root ruled 25 (2026-10-14): 25 MiB = 26,214,400 bytes is the tightest
+/// whole multiplier above the measurement (3.1% headroom); the growth is decision 17 C6's
+/// always-attached live lanes (per-effect lanes 4.0 MB, bank lanes 2.4 MB, control-plane rows
+/// ~0.4 MB, input lanes 0.17 MB), and its successor ("Shrink the always-attached per-effect live
+/// lanes") aims to bring the pin back to 20. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 26;
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 25;
 
 /// The most VCAs a browser session may declare (issue #1245 amendment A1).
 ///

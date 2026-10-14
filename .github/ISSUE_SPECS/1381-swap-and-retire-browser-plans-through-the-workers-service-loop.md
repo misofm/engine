@@ -458,3 +458,16 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
   and the resource rows are checked first and hold); `check-sdk-headless.sh` fails 25 subtests, all
   of them command-driven; 113 host-web unit tests and the two `control_parity.rs` tests are
   `#[ignore]`d with one reason string, for #1565A to delete.
+
+### Decision record: boot budget (root, 2026-10-14)
+
+- The 1 MiB worst document's wasm high-water growth rose from 16,121,856 bytes (batch 6 head) to
+  25,427,968 bytes (24.25 MiB) when the single instance began to own `SessionState` with decision
+  17 C6's always-attached live lanes. Nothing is held twice (catalog 887,888 bytes and model 527,071
+  bytes held once each). Native retained after boot: 6,450,366 -> 13,449,640 bytes. Breakdown:
+  per-effect live lanes 4.0 MB (768 effects x about 5.2 KB), render-side bank live lanes 2.4 MB,
+  control-plane fixed rows about 0.4 MB, per-strip input lanes 0.17 MB. This is the browser half of
+  the C6 evidence (#1555 recorded the C ABI half).
+- Root ruled the multiplier 20 -> 25 (25 MiB = 26,214,400 bytes, the tightest whole multiplier
+  above the measurement). A CI measurement above 25 MiB stops the batch and goes to root. The
+  successor "Shrink the always-attached per-effect live lanes" (TBD8) aims to return the pin to 20.

@@ -25,7 +25,7 @@ stays allocation-free with no higher per-block cost.
   - the control plane's fixed rows, about 0.4 MB; per-strip input lanes, about 0.17 MB.
 - **The pin.** `scripts/check-web-boot-budget.mjs` pins growth to the document length times
   `PARSE_TRANSIENT_MULTIPLIER` plus one page (`:9`, `:53-58`). Root ruled the multiplier from 20
-  to 25 for now (the file reads `26n` at `846b7d240`).
+  to 25 for now.
 - **The per-effect lane.** `attach_effect_live_controls`
   (`crates/effect-compiler/src/prepare.rs:1727-1800`) builds one lane per prepared effect with
   `effect_control_lane` (`crates/effect-contract/src/live.rs:623-692`). The lane's shape is
