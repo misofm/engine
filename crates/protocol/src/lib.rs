@@ -32,7 +32,9 @@ pub use message_wire::{
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {
-    pub use controls::{ControlAddress, ControlError, Lane, Owner, Section};
+    pub use controls::{
+        ControlAddress, ControlError, Lane, MonitorOverlay, MonitorWrite, Owner, Section,
+    };
 }
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,

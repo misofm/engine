@@ -1180,6 +1180,20 @@ impl PreparedStructuralCommand {
             .expect("live affine token owns prospective session")
     }
 
+    /// The writes to monitor rows (solo) the transaction holds, in transaction order (#1559 D3).
+    /// The host applies them to its monitor overlay when it commits the token.
+    #[must_use]
+    pub fn monitor_edits(&self) -> &[controls::MonitorWrite] {
+        self.prospective_session().monitor_edits()
+    }
+
+    /// Whether every edit of the transaction writes a monitor row: the commit then changes no
+    /// model and no revision, and its response has [`EditPath::Monitor`].
+    #[must_use]
+    pub fn is_monitor_only(&self) -> bool {
+        self.prospective_session().is_monitor_only()
+    }
+
     /// Exact canonical response byte count retained for post-publication caller output.
     #[must_use]
     pub fn response_len(&self) -> usize {
@@ -1585,7 +1599,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        match self.plan_structural_command(input, scratch, output.len(), header)? {
+        // The one-call path has no host to apply a monitor write to: it refuses solo, as it always
+        // did, rather than acknowledge a write nobody applies.
+        match self.plan_structural_command(input, scratch, output.len(), header, false)? {
             StructuralCommandDisposition::Legacy => {
                 self.process_command_frame_into_legacy(input, scratch, output)
             }
@@ -1614,7 +1630,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        match self.plan_structural_command(input, scratch, output_capacity, header)? {
+        // The prepared path hands the token to a host that owns a monitor overlay (#1559).
+        match self.plan_structural_command(input, scratch, output_capacity, header, true)? {
             StructuralCommandDisposition::Legacy => {
                 self.process_immediate_command(input, scratch, output_capacity)
             }
@@ -1711,6 +1728,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
+        monitor: bool,
     ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
         if header.message_id != MessageId::SessionTransactionApply {
             return Ok(StructuralCommandDisposition::Legacy);
@@ -1768,10 +1786,20 @@ impl<P: ControlProvider> ProtocolController<P> {
                 outcome: self.non_ok(StatusCode::LimitExceeded, None),
             });
         }
-        let cancellation_batches =
+        // A transaction of monitor writes changes no revision: it cancels no automation and
+        // emits no event, so it needs no event room (#1559 D4).
+        let monitor_only = monitor && crate::model::is_monitor_transaction(&edits);
+        let cancellation_batches = if monitor_only {
+            0
+        } else {
             usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                .unwrap_or(usize::MAX);
-        let required_events = cancellation_batches.saturating_add(1);
+                .unwrap_or(usize::MAX)
+        };
+        let required_events = if monitor_only {
+            0
+        } else {
+            cancellation_batches.saturating_add(1)
+        };
         let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
         if required_events
             > event_report
@@ -1802,10 +1830,14 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
-        let prospective_session = match self
-            .session
-            .prepare_transaction(header.expected_revision, &edits)
-        {
+        let prepared_transaction = if monitor {
+            self.session
+                .prepare_transaction_with_monitor(header.expected_revision, &edits)
+        } else {
+            self.session
+                .prepare_transaction(header.expected_revision, &edits)
+        };
+        let prospective_session = match prepared_transaction {
             Ok(value) => value,
             Err(error) => {
                 return Ok(StructuralCommandDisposition::Immediate {
@@ -1999,11 +2031,18 @@ impl<P: ControlProvider> ProtocolController<P> {
         if !Arc::ptr_eq(&self.structural_generation, &prepared.owner) {
             return Err(PreparedCommandCommitError::WrongController);
         }
+        // A monitor-only token cancels no automation, so the automation queue may hold what it
+        // likes.
+        let monitor_only = prepared
+            .prospective_session
+            .as_ref()
+            .is_some_and(PreparedSessionTransaction::is_monitor_only);
         if self.structural_generation.load(Ordering::Acquire) != prepared.generation
             || self.session.revision() != prepared.previous_revision
-            || usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
-                .unwrap_or(usize::MAX)
-                != prepared.cancellation_batches
+            || (!monitor_only
+                && usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
+                    .unwrap_or(usize::MAX)
+                    != prepared.cancellation_batches)
         {
             return Err(PreparedCommandCommitError::StaleGeneration);
         }
@@ -2018,7 +2057,8 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// leaves the token before this commit. The commit re-encodes the same frame with `path` into
     /// the token's own buffer and into the prospective replay entry. The field is fixed width, so
     /// the length is unchanged and neither write can fail. A caller whose token is refused returns
-    /// before either write.
+    /// before either write. A token of monitor writes only commits no model and no revision
+    /// (#1559 D4): its response takes [`EditPath::Monitor`] whatever `path` says.
     pub fn commit_prepared_structural(
         &mut self,
         mut prepared: PreparedStructuralCommand,
@@ -2035,27 +2075,43 @@ impl<P: ControlProvider> ProtocolController<P> {
             .take()
             .expect("affine token owns prospective session");
         let response_revision = session.revision();
-        let commit = self.session.commit_prepared(session);
-        debug_assert_eq!(
-            commit.applied_operations,
-            prepared.applied_operations as usize
+        // A monitor-only transaction is not a session mutation (#1559 D4): the model and the
+        // revision stay, no `SESSION_COMMITTED` follows and no queued automation is canceled.
+        // Its token reserved no event. The response and the replay entry are recorded as for any
+        // other transaction, so an exact replay returns these bytes and applies nothing.
+        let monitor_only = session.is_monitor_only();
+        let path = if monitor_only {
+            EditPath::Monitor
+        } else {
+            path
+        };
+        debug_assert!(
+            monitor_only || path != EditPath::Monitor,
+            "only a transaction of monitor writes has the monitor path"
         );
-        self.queues.commit_reserved_reliable_event(
-            &mut event_reservations,
-            ReliableSlot::session_committed(
-                commit.revision,
-                prepared.event_sequence,
-                prepared.request_id,
-                prepared.previous_revision,
-                prepared.applied_operations,
-            ),
-        );
-        self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
-        let _ = self.cancel_queued_automation_reserved(
-            &mut event_reservations,
-            AutomationCancellationReason::RevisionChanged,
-            Some(effective_sample),
-        );
+        if !monitor_only {
+            let commit = self.session.commit_prepared(session);
+            debug_assert_eq!(
+                commit.applied_operations,
+                prepared.applied_operations as usize
+            );
+            self.queues.commit_reserved_reliable_event(
+                &mut event_reservations,
+                ReliableSlot::session_committed(
+                    commit.revision,
+                    prepared.event_sequence,
+                    prepared.request_id,
+                    prepared.previous_revision,
+                    prepared.applied_operations,
+                ),
+            );
+            self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
+            let _ = self.cancel_queued_automation_reserved(
+                &mut event_reservations,
+                AutomationCancellationReason::RevisionChanged,
+                Some(effective_sample),
+            );
+        }
         let mut replay = prepared
             .prospective_replay
             .take()

@@ -100,6 +100,7 @@ impl Session {
                 committed,
                 revision: SUCCESSOR_REVISION,
                 edit_ramps: &session::EditRamps::new(),
+                monitor: host_core::MonitorBase::NONE,
             },
             backend,
         )

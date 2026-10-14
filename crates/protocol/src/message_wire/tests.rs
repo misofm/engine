@@ -2830,6 +2830,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         (EditPath::Live, 1_u8),
         (EditPath::ModelOnly, 2),
         (EditPath::Rebuild, 3),
+        (EditPath::Monitor, 4),
     ] {
         let value = TransactionApplied {
             applied_operations: 5,
@@ -2849,7 +2850,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
             Ok(value)
         );
         // Zero and every value above the last allocated code are refused.
-        for bad in [0_u8, 4, 5, 255] {
+        for bad in [0_u8, 5, 6, 255] {
             let mut corrupt = bytes;
             corrupt[written - 8] = bad;
             assert!(

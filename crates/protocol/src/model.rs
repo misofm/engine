@@ -1230,6 +1230,8 @@ pub struct PreparedSessionTransaction {
     compiled: CompiledSession,
     applied_operations: usize,
     edit_ramps: EditRamps,
+    monitor_edits: Vec<controls::MonitorWrite>,
+    monitor_only: bool,
 }
 
 impl PreparedSessionTransaction {
@@ -1250,6 +1252,22 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub fn revision(&self) -> SessionRevision {
         SessionRevision(self.compiled.normalized_model().revision)
+    }
+
+    /// The writes to monitor rows (solo) that the transaction holds, in transaction order, with
+    /// a later write of one strip replacing the earlier (decision 17, C8, #1559 D3). They are not
+    /// part of the compiled model: the host applies them to its monitor overlay when it commits.
+    #[must_use]
+    pub fn monitor_edits(&self) -> &[controls::MonitorWrite] {
+        &self.monitor_edits
+    }
+
+    /// Whether every edit of the transaction is a write to a monitor row. Such a transaction
+    /// leaves the model and the revision as they are: [`Self::compiled`] is the committed
+    /// compilation and [`Self::revision`] the committed revision (#1559 D4).
+    #[must_use]
+    pub const fn is_monitor_only(&self) -> bool {
+        self.monitor_only
     }
 }
 
@@ -1343,6 +1361,31 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(expected_revision, edits, false)
+    }
+
+    /// [`Self::prepare_transaction`] for a host that owns a monitor overlay (decision 17, C8,
+    /// #1559 D3): a `SetControl` whose row is a monitor row (solo) is validated against the
+    /// candidate at its place in the transaction, written nowhere, and recorded as one of the
+    /// preparation's [`PreparedSessionTransaction::monitor_edits`]. Without the overlay
+    /// ([`Self::prepare_transaction`]) the same edit is refused with `control.monitor`.
+    ///
+    /// A transaction of monitor writes only prepares the committed compilation at the committed
+    /// revision: it is not a session mutation, so it needs no new revision.
+    pub fn prepare_transaction_with_monitor(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(expected_revision, edits, true)
+    }
+
+    fn prepare_transaction_with(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+        monitor: bool,
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
         };
@@ -1353,36 +1396,63 @@ impl SessionStore {
         if edits.is_empty() {
             return Err(SessionStoreError::EmptyTransaction);
         }
+        // A transaction of monitor writes commits no revision (#1559 D4, #1603): it advances
+        // nothing, so the revision ceiling does not refuse it. The host publishes its records, if
+        // any, under the committed revision with a monitor publication.
+        let monitor_only = monitor && is_monitor_transaction(edits);
         // The plan revision gate cannot hold a revision above its ceiling (#1432, #1503): the
         // store's own typed refusal comes after the cheap argument checks and before the candidate
         // clone, any edit and the compile, so it wins over the schema's `$.revision` refusal and
         // nothing is written.
-        if current.0 >= engine::realtime::GATE_REVISION_MAX {
+        if !monitor_only && current.0 >= engine::realtime::GATE_REVISION_MAX {
             return Err(SessionStoreError::RevisionExhausted);
         }
         let next_revision = current.0 + 1;
         let mut candidate = self.compiled.normalized_model().clone();
         let mut edit_ramps = EditRamps::new();
         let mut control_writes = ControlRampWrites::new();
+        let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
         for (operation_index, edit) in edits.iter().enumerate() {
-            apply_session_edit(&mut candidate, edit).map_err(|error| SessionStoreError::Edit {
+            let refused = |error| SessionStoreError::Edit {
                 operation_index,
                 error,
-            })?;
-            record_edit_ramps(&mut edit_ramps, &mut control_writes, edit).map_err(|error| {
-                SessionStoreError::Edit {
-                    operation_index,
-                    error: SessionEditError::Control(error),
+            };
+            if monitor
+                && let SessionEdit::SetControl {
+                    address,
+                    value,
+                    ramp_samples,
+                } = edit
+            {
+                let rate = candidate.sample_rate_hz;
+                // The monitor sort of #1559 D3: a monitor row is checked here and written to
+                // the overlay by the host; a model row goes through `set`.
+                let write =
+                    controls::check_monitor(&candidate, address, *value, *ramp_samples, rate)
+                        .map_err(|error| refused(SessionEditError::Control(error)))?;
+                if let Some(write) = write {
+                    // A later write of one strip replaces the earlier one.
+                    monitor_edits.retain(|earlier| earlier.strip != write.strip);
+                    monitor_edits.push(write);
+                    continue;
                 }
-            })?;
-        }
-        candidate.revision = next_revision;
-        let compiled = compile_session(&candidate, self.caps).map_err(|diagnostics| {
-            SessionStoreError::Validation {
-                operation_index: edits.len(),
-                diagnostics,
             }
-        })?;
+            apply_session_edit(&mut candidate, edit).map_err(refused)?;
+            record_edit_ramps(&mut edit_ramps, &mut control_writes, edit)
+                .map_err(|error| refused(SessionEditError::Control(error)))?;
+        }
+        let compiled = if monitor_only {
+            // Not a mutation: the committed compilation, at the committed revision.
+            self.compiled.clone()
+        } else {
+            candidate.revision = next_revision;
+            compile_session(&candidate, self.caps).map_err(|diagnostics| {
+                SessionStoreError::Validation {
+                    operation_index: edits.len(),
+                    diagnostics,
+                }
+            })?
+        };
         // #1394 D4: every length is bounded by one second at the rate the transaction commits,
         // so the check follows the compile that validated that rate and precedes any commit.
         let maximum_ramp = compiled.normalized_model().sample_rate_hz;
@@ -1400,6 +1470,8 @@ impl SessionStore {
             compiled,
             applied_operations: edits.len(),
             edit_ramps,
+            monitor_edits,
+            monitor_only,
         })
     }
 
@@ -1410,6 +1482,10 @@ impl SessionStore {
         prepared: PreparedSessionTransaction,
     ) -> SessionCommit {
         debug_assert_eq!(self.revision(), prepared.base_revision);
+        debug_assert!(
+            !prepared.monitor_only,
+            "a monitor-only transaction commits no model"
+        );
         let revision = prepared.revision();
         let applied_operations = prepared.applied_operations;
         self.compiled = prepared.compiled;
@@ -1418,6 +1494,24 @@ impl SessionStore {
             applied_operations,
         }
     }
+}
+
+/// Whether every edit of a non-empty transaction is a `SetControl` on a monitor row (solo).
+pub(crate) fn is_monitor_transaction(edits: &[SessionEdit]) -> bool {
+    !edits.is_empty() && edits.iter().all(is_monitor_row_edit)
+}
+
+/// Whether `edit` is a `SetControl` on a monitor row (solo). Decided by the address alone: the
+/// row's table says its scope, and the strip is looked up when the edit is checked.
+fn is_monitor_row_edit(edit: &SessionEdit) -> bool {
+    let SessionEdit::SetControl { address, .. } = edit else {
+        return false;
+    };
+    controls::row_scope(
+        address.owner.kind(),
+        address.section.kind(),
+        address.control,
+    ) == Some(controls::ControlScope::Monitor)
 }
 
 fn upsert<T: Clone>(items: &mut Vec<T>, item: &T, id: impl Fn(&T) -> &StableId) {

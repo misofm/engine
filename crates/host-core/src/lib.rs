@@ -136,11 +136,12 @@ pub use live_delta::take_lowered_owner_count;
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
+    classify_live_delta_with_monitor,
 };
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps, MonitorBase,
     PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase,
     check_counts, compile_host_model, compile_host_session, count_effects,
     default_source_ring_frames, effect_producer_position, parse_host_session, prepare_host_runtime,

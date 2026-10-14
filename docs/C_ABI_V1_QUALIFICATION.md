@@ -565,7 +565,7 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   field `2:edit-path U8`: `live` 1 (records on the running plan's live lanes, no plan prepared),
   `model_only` 2 (committed; the classifier's delta holds no record of any kind) and `rebuild` 3
   (a successor plan was prepared and published, whatever live records the transaction also
-  held). The path is known at submit and written by the commit into the response frame and its
+  held) and `monitor` 4 (a transaction of solo writes only, #1559, below). The path is known at submit and written by the commit into the response frame and its
   replay entry, so an exact replay of the request returns the same bytes. Zero and every other
   value are refused on decode. This reverses #1053 Q3 ("not now"). A fallback after submit and a
   supersession are reported by the watermark's outcome flags (#1314). After a live edit or a
@@ -576,6 +576,24 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   `miso_engine_v1_plan_resources` describes whichever plan is active, which a replacement may
   leave unchanged. No new symbol, opcode, result code or event is added; the field travels inside
   the response bytes.
+- **Solo (#1559, decision 17 C8).** Solo is a `SET_CONTROL` on a track's own row 2 (`solo`, a
+  toggle, `both`); a submix has no solo row (`control.address.unknown`, a submix is solo-safe). It
+  is host-local: it lives in the session state's monitor overlay (empty at boot), is never saved,
+  is never in a `SESSION_SNAPSHOT_GET` document and changes no structure epoch; the list's and the
+  state's `solo` value is the overlay's. A transaction of solo writes only keeps the revision and
+  the model, replies `monitor` (4) at the committed revision, emits no `SESSION_COMMITTED`, and
+  is recorded in the replay table like any response. The overlay composes through
+  `controls::effective` for the live path and for preparation alike: the other tracks' mutes and
+  the sends that follow them are records of the running plan (or, while a replacement is pending,
+  of the newest plan's cells), and a rebuild prepares its successor under the overlay and carries
+  the difference as retargets. A solo's records ramp over `LiveRampRow::Solo` (`mute_ms`), the
+  write's `ramp_samples` when it gives one; a record that a model edit of the same transaction
+  also produced takes the model edit's length. The overlay is written only after every fallible
+  step of the transaction passed. The records ride the plan's revision gate as a monitor publication under the committed
+  revision (#1603): the gate orders every publication, and the applied watermark reports the
+  revision a publication carries, so a solo spends no revision number, committed revisions stay
+  dense (the next model commit after any number of solos is the committed revision plus one), and
+  the watermark never reads a number above the committed revision, and never an early one. No symbol, opcode, result code or event is added.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the

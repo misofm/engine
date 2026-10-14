@@ -26,6 +26,12 @@ pub struct MonitorOverlay {
 }
 
 impl MonitorOverlay {
+    /// An overlay that solos nothing. `const`, so a host may keep one in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { soloed: Vec::new() }
+    }
+
     /// An overlay that solos exactly the named strips.
     #[must_use]
     pub fn with_soloed(ids: impl IntoIterator<Item = StableId>) -> Self {
@@ -46,6 +52,66 @@ impl MonitorOverlay {
     pub fn is_soloed(&self, id: &StableId) -> bool {
         self.soloed.binary_search(id).is_ok()
     }
+
+    /// Solo or unsolo `id`. Keeps the set sorted and free of duplicates.
+    pub fn set_soloed(&mut self, id: &StableId, soloed: bool) {
+        match (self.soloed.binary_search(id), soloed) {
+            (Err(index), true) => self.soloed.insert(index, id.clone()),
+            (Ok(index), false) => {
+                self.soloed.remove(index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    /// Drop every soloed ID that names no strip of `model`: a removed strip keeps no solo.
+    pub fn retain_strips_of(&mut self, model: &SessionModel) {
+        self.soloed
+            .retain(|id| model.strips().any(|strip| strip.id == id));
+    }
+
+    /// The overlay after `writes`, applied in order, on a session whose strips are `next`'s, and
+    /// the ramp the change carries (decision 17, C6 step 4, #1559 D7).
+    ///
+    /// The ramp is that of the last write whose strip's solo differs between `self` and the
+    /// result, and `None` (the session's `mute_ms`) when no write changed anything or the last
+    /// such write gave no ramp. A strip `next` no longer has is dropped from the result.
+    #[must_use]
+    pub fn after(&self, writes: &[MonitorWrite], next: &SessionModel) -> MonitorChange {
+        let mut overlay = self.clone();
+        for write in writes {
+            overlay.set_soloed(&write.strip, write.soloed);
+        }
+        overlay.retain_strips_of(next);
+        let ramp = writes
+            .iter()
+            .rev()
+            .find(|write| overlay.is_soloed(&write.strip) != self.is_soloed(&write.strip))
+            .and_then(|write| write.ramp);
+        MonitorChange { overlay, ramp }
+    }
+}
+
+/// One validated write to a monitor row (solo): the strip, the new state and the explicit ramp
+/// length of the write, in samples. See [`check_monitor`](crate::check_monitor).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorWrite {
+    /// The strip whose solo the write sets.
+    pub strip: StableId,
+    /// Whether the strip is soloed after the write.
+    pub soloed: bool,
+    /// The write's own ramp length in samples; `None` is the session's `mute_ms`.
+    pub ramp: Option<u32>,
+}
+
+/// What [`MonitorOverlay::after`] returns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorChange {
+    /// The overlay after the writes.
+    pub overlay: MonitorOverlay,
+    /// The ramp length that the records the change produces take, in samples; `None` is the
+    /// session's `mute_ms`.
+    pub ramp: Option<u32>,
 }
 
 /// One strip's effective values, per lane (`[left, right]`).
@@ -153,6 +219,14 @@ pub fn any_solo(inputs: &impl EffectiveInputs) -> bool {
     (0..inputs.strip_count()).any(|strip| inputs.soloed(strip) && !inputs.solo_safe(strip))
 }
 
+/// The solo term of one strip's mute: some soloable strip is soloed (`any_solo`, from
+/// [`any_solo`]) and this strip is neither soloed nor solo-safe. The only spelling of the rule;
+/// [`effective_strip`] and a host that must tell a solo's mute from another cause call it.
+#[must_use]
+pub fn solo_term(inputs: &impl EffectiveInputs, strip: usize, any_solo: bool) -> bool {
+    any_solo && !inputs.solo_safe(strip) && !inputs.soloed(strip)
+}
+
 /// One strip's effective values. `any_solo` is [`any_solo`]'s result for the same inputs.
 ///
 /// Per lane: `fader_db = vca_effective_db(own, the reaching VCAs' offsets in ascending VCA-ID
@@ -166,7 +240,7 @@ pub fn effective_strip(
 ) -> EffectiveStrip {
     let (own_db, own_mute) = inputs.own_fader(strip);
     let reach = inputs.reach(strip);
-    let solo_term = any_solo && !inputs.solo_safe(strip) && !inputs.soloed(strip);
+    let solo_term = solo_term(inputs, strip, any_solo);
     let mut out = EffectiveStrip::default();
     for lane in 0..2 {
         out.fader_db[lane] = vca_effective_db(

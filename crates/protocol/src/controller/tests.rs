@@ -1319,6 +1319,196 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
     }
 }
 
+fn response_revision(frame: &[u8]) -> SessionRevision {
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut fields))
+        .expect("decodable response")
+    {
+        crate::DecodedTypedResponseFrame::Success { header, .. } => header.revision,
+        crate::DecodedTypedResponseFrame::NonOk { .. } => panic!("expected a success"),
+    }
+}
+
+fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionEdit {
+    SessionEdit::SetControl {
+        address: crate::control_core::ControlAddress {
+            owner: crate::control_core::Owner::Strip(track.clone()),
+            section: crate::control_core::Section::Own,
+            control: 2,
+            lane: crate::control_core::Lane::Both,
+        },
+        value: f32::from(u8::from(on)),
+        ramp_samples: ramp,
+    }
+}
+
+/// A transaction of monitor writes (#1559 D3, D4): its token exposes the writes, commits no model
+/// and no revision, emits no `SESSION_COMMITTED` and cancels no automation, answers `monitor` at
+/// the committed revision, and an exact replay returns the same bytes. A solo spends no revision
+/// number: the next model commit is the committed revision plus one (#1603). The one-call path has
+/// no overlay and refuses the write.
+///
+/// Red if a monitor write advances or spends a revision or emits an event (a listener would reload
+/// a session that did not change), if a replay is not byte-identical, or if the one-call path
+/// acknowledges a write that nobody applies.
+#[test]
+fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
+    let track = parse_session_json(EXAMPLE).expect("fixture").tracks[0]
+        .id
+        .clone();
+    let solo = [solo_edit(&track, true, Some(96))];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&solo),
+    );
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| match endpoint
+        .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .expect("prepare")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_) => panic!("expected a token"),
+    };
+
+    {
+        let mut endpoint = controller(8, 2);
+        let snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let events = endpoint
+            .queues_mut()
+            .report(crate::QueueKind::ReliableEvent);
+        let prepared = prepare(&mut endpoint, &input);
+        assert!(prepared.is_monitor_only());
+        assert_eq!(
+            prepared.monitor_edits(),
+            [crate::control_core::MonitorWrite {
+                strip: track.clone(),
+                soloed: true,
+                ramp: Some(96),
+            }]
+        );
+        assert_eq!(
+            prepared.prospective_session().revision(),
+            SessionRevision(7)
+        );
+        assert_eq!(
+            prepared.prospective_session().compiled().canonical_json(),
+            snapshot,
+            "the model is the committed one"
+        );
+        let committed = endpoint
+            .commit_prepared_structural(prepared, EditPath::ModelOnly)
+            .expect("a monitor token takes the monitor path whatever path the host names");
+        let mut first = [0_u8; 2048];
+        let len = committed.write_into(&mut first).expect("bytes");
+        assert_eq!(transaction_edit_path(&first[..len]), EditPath::Monitor);
+        assert_eq!(response_revision(&first[..len]), SessionRevision(7));
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+        assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+        assert_eq!(
+            endpoint.queues().report(crate::QueueKind::ReliableEvent),
+            events,
+            "no SESSION_COMMITTED"
+        );
+
+        // The replay returns the committed bytes and spends nothing.
+        let mut replay = [0_u8; 2048];
+        let replay_len = endpoint
+            .process_command_frame_into(
+                &input,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                &mut replay,
+            )
+            .expect("replay");
+        assert_eq!(&replay[..replay_len], &first[..len]);
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+
+        // The next model commit is the committed revision plus one: a solo spends no number
+        // (#1603).
+        let model_edit = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("after-solo").expect("ID"),
+        }];
+        let next = full_command(
+            2,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&model_edit),
+        );
+        let prepared = prepare(&mut endpoint, &next);
+        assert!(!prepared.is_monitor_only());
+        assert!(prepared.monitor_edits().is_empty());
+        assert_eq!(
+            prepared.prospective_session().revision(),
+            SessionRevision(8)
+        );
+        endpoint
+            .commit_prepared_structural(prepared, EditPath::ModelOnly)
+            .expect("commit");
+        assert_eq!(endpoint.session().revision(), SessionRevision(8));
+    }
+
+    // A solo beside a model edit is a model transaction with a monitor write, in order, the later
+    // write of a strip replacing the earlier.
+    let mut endpoint = controller(8, 2);
+    let mixed = [
+        solo_edit(&track, true, Some(10)),
+        SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("mixed").expect("ID"),
+        },
+        solo_edit(&track, false, Some(20)),
+    ];
+    let input = full_command(
+        3,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&mixed),
+    );
+    let prepared = prepare(&mut endpoint, &input);
+    assert!(!prepared.is_monitor_only());
+    assert_eq!(
+        prepared.monitor_edits(),
+        [crate::control_core::MonitorWrite {
+            strip: track.clone(),
+            soloed: false,
+            ramp: Some(20),
+        }]
+    );
+    assert_eq!(
+        prepared.prospective_session().revision(),
+        SessionRevision(8)
+    );
+    endpoint
+        .commit_prepared_structural(prepared, EditPath::Live)
+        .expect("commit");
+    assert_eq!(endpoint.session().revision(), SessionRevision(8));
+
+    // The one-call path has no overlay: it refuses the write, as it always did.
+    let mut endpoint = controller(8, 2);
+    let input = full_command(
+        4,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&solo),
+    );
+    let mut output = [0_u8; 2048];
+    let len = endpoint
+        .process_command_frame_into(
+            &input,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut output,
+        )
+        .expect("a typed refusal");
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&output[..len], &mut DecodeScratch::new(&mut fields))
+        .expect("decodable")
+    {
+        crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            assert_eq!(header.status, StatusCode::ValidationFailed);
+            assert_eq!(payload.diagnostics[0].code, "control.monitor");
+        }
+        crate::DecodedTypedResponseFrame::Success { .. } => panic!("acknowledged a lost write"),
+    }
+    assert_eq!(endpoint.session().revision(), SessionRevision(7));
+}
+
 #[test]
 fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
     fn structural(

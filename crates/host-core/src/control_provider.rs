@@ -583,13 +583,14 @@ impl ControlCatalog {
     /// Build the catalog of `model` at `sample_rate`: one `controls::list` pass with the owner and
     /// section headers inserted, every allocation reserved up front.
     ///
-    /// The derived rows show the default monitor overlay (no solo), as the committed model does.
+    /// The derived rows show the effective values under `overlay`, and a strip's `solo` row shows
+    /// whether the overlay solos it (decision 17, C4 and C8, #1559 D11).
     pub fn build(
         model: &SessionModel,
+        overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
-        let rows =
-            controls::list(model, &MonitorOverlay::default(), sample_rate).collect::<Vec<_>>();
+        let rows = controls::list(model, overlay, sample_rate).collect::<Vec<_>>();
         // Every owner opens with a header and every section of it with another.
         let mut headers = 0_usize;
         let mut previous: Option<&controls::ControlAddress> = None;
@@ -1121,7 +1122,8 @@ mod tests {
     }
 
     fn provider_of(model: &session::SessionModel) -> (SessionControlProvider, Arc<Clock>) {
-        let catalog = ControlCatalog::build(model, RATE).expect("catalog");
+        let catalog =
+            ControlCatalog::build(model, &MonitorOverlay::default(), RATE).expect("catalog");
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let sample_source: Arc<dyn PlanSampleSource> = Arc::clone(&clock) as Arc<_>;
         let provider = SessionControlProvider::try_new(
@@ -1217,7 +1219,8 @@ mod tests {
             fader: model.tracks[0].fader.clone(),
             members: vec![model.tracks[0].id.clone()],
         });
-        let catalog = ControlCatalog::build(&model, RATE).expect("catalog");
+        let catalog =
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         let expected = controls::list(&model, &MonitorOverlay::default(), RATE).collect::<Vec<_>>();
         let controls_listed = catalog
             .entries
@@ -1356,7 +1359,8 @@ mod tests {
 
         let effects = prepare_effects(&model);
         assert_eq!(effects.entries.len(), descriptor_ids.len() + 2 * eligible);
-        let catalog = ControlCatalog::build(&model, RATE).expect("catalog");
+        let catalog =
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         let mut saw_both = false;
         let mut saw_left = false;
         let mut saw_right = false;
@@ -1548,7 +1552,10 @@ mod tests {
 
         // A live-style commit: the values move, the handles and the epoch do not.
         controls::set(&mut model, &address, -6.0, None, RATE).expect("set the fader");
-        provider.replace_session_catalog(ControlCatalog::build(&model, RATE).expect("catalog"), 2);
+        provider.replace_session_catalog(
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog"),
+            2,
+        );
         let after = whole_list(&mut provider, 256);
         assert_eq!(provider.structure_epoch(), 1);
         assert_eq!(
@@ -1572,7 +1579,8 @@ mod tests {
             .expect("a rebuild-only value")
             .address;
         controls::set(&mut model, &delay, 48.0, None, RATE).expect("set the delay");
-        let same = ControlCatalog::build(&model, RATE).expect("catalog");
+        let same =
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         provider.replace_session_catalog(same, 3);
         assert_eq!(provider.structure_epoch(), 1);
         // A switch to matrix mode flips `active` on the pan and matrix rows and no address: the
@@ -1587,7 +1595,10 @@ mod tests {
             .address;
         controls::set(&mut model, &mode, 1.0, None, RATE).expect("switch to matrix");
         let before_switch = whole_list(&mut provider, 256);
-        provider.replace_session_catalog(ControlCatalog::build(&model, RATE).expect("catalog"), 4);
+        provider.replace_session_catalog(
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog"),
+            4,
+        );
         assert_eq!(provider.structure_epoch(), 2, "a descriptor changed");
         let after_switch = whole_list(&mut provider, 256);
         let active = |list: &[ControlEntry]| {
@@ -1611,7 +1622,8 @@ mod tests {
             "only descriptors moved"
         );
         model.tracks.pop();
-        let changed = ControlCatalog::build(&model, RATE).expect("catalog");
+        let changed =
+            ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         provider.replace_session_catalog(changed, 5);
         assert_eq!(provider.structure_epoch(), 3);
         assert_eq!(

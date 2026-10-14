@@ -965,6 +965,7 @@ where
             render_diagnostic_head: 0,
             render_diagnostic_len: 0,
             protocol_reliable_pending: false,
+            monitor: controls::MonitorOverlay::new(),
         },
         plan: PlanState::new(owner, shared),
     })

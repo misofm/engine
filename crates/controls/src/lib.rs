@@ -50,12 +50,14 @@ pub use effect_contract::control::{
 pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
-    EffectiveStrip, ModelInputs, MonitorOverlay, any_solo, effective, effective_follow,
-    effective_gate, effective_into, effective_strip,
+    EffectiveStrip, ModelInputs, MonitorChange, MonitorOverlay, MonitorWrite, any_solo, effective,
+    effective_follow, effective_gate, effective_into, effective_strip, solo_term,
 };
 pub use error::ControlError;
 pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
-pub use registry::{ControlRow, get, list, row_descriptor, row_motion, set};
+pub use registry::{
+    ControlRow, check_monitor, get, list, row_descriptor, row_motion, row_scope, set,
+};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};

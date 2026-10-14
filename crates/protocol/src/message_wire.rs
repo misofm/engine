@@ -176,6 +176,11 @@ pub enum EditPath {
     ModelOnly = 2,
     /// A successor plan was prepared and published.
     Rebuild = 3,
+    /// The transaction held only writes to monitor rows (solo): they went to the host's
+    /// monitor overlay, which is not a session mutation, so the revision did not advance and no
+    /// `SESSION_COMMITTED` event followed (decision 17, C8, #1559). A transaction that holds a
+    /// model edit never has this path.
+    Monitor = 4,
 }
 
 impl EditPath {
@@ -192,6 +197,7 @@ impl EditPath {
             1 => Some(Self::Live),
             2 => Some(Self::ModelOnly),
             3 => Some(Self::Rebuild),
+            4 => Some(Self::Monitor),
             _ => None,
         }
     }

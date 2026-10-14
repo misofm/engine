@@ -71,7 +71,8 @@ extern "C" {
  * command returns and in the same frame as the new revision: 1 = live (records went to the
  * running plan's live lanes, no plan was prepared), 2 = model_only (committed, and the delta
  * holds no record for render: any transaction whose effective values do not change), 3 = rebuild
- * (a successor plan was prepared and published, whatever else the transaction held). Zero and every other value are refused by the decoder. An exact replay of
+ * (a successor plan was prepared and published, whatever else the transaction held), 4 = monitor
+ * (see "Solo" below). Zero and every other value are refused by the decoder. An exact replay of
  * the request returns the same bytes, the path included. A fallback to a rebuild after submit
  * and a supersession are not in the response; the watermark's outcome flags report them. After
  * a live edit or a replacement the host goes on submitting every source the transaction left
@@ -80,6 +81,26 @@ extern "C" {
  * in time" below). (miso_engine_v1_plan_resources describes whichever plan is active, so a
  * replacement may change it, but an unchanged report does not mean that no replacement
  * happened; the edit path is the signal.)
+ *
+ * Solo (issue 1559). Solo is a SET_CONTROL like every other value: the address is the strip's
+ * own section, control 2 (named "solo", a toggle, value exactly 0 or 1, lane both), on a track.
+ * A submix has no solo row (a submix is solo-safe), so a solo on a submix is the typed refusal
+ * control.address.unknown. A solo is host-local: it lives in the engine's monitor overlay, it is
+ * never saved, it is never in a SESSION_SNAPSHOT_GET document and it does not change the control
+ * list's structure epoch; CONTROL_LIST_GET and CONTROL_STATE_GET report the overlay's value on
+ * the solo row. A transaction of solo writes only commits no model: its response has edit-path
+ * 4 (monitor) at the committed revision, no SESSION_COMMITTED event follows, and an exact replay
+ * returns the same bytes and applies nothing again. The other tracks mute and the sends that
+ * follow them close through the same effective values that a plan's preparation reads, ramped
+ * over the write's ramp_samples (absent: the session's mute_ms; 0: a step); a structural
+ * transaction keeps the solo (a strip it removes loses its entry, a strip it adds while another
+ * is soloed is muted), and a transaction that mixes solo writes with model edits is all or
+ * nothing and advances the revision once. The records of a solo are published on the running
+ * plan's revision gate under the committed revision with a monitor publication number (issue
+ * 1603): such a solo spends no revision number, so committed revisions stay dense and the next
+ * commit after any number of solos is the committed revision plus one. The applied watermark
+ * reports revisions only, so it never reads a number above the committed revision, and it is
+ * never early.
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its

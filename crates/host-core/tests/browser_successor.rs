@@ -283,6 +283,7 @@ fn base<'a>(
         committed,
         revision: SUCCESSOR_REVISION,
         edit_ramps,
+        monitor: host_core::MonitorBase::NONE,
     }
 }
 

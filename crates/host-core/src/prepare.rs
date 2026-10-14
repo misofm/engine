@@ -868,6 +868,39 @@ pub struct SuccessorBase<'a> {
     /// takes its length from here as the classifier's record of the same edit would, else from
     /// the session's `control_smoothing`. Transaction metadata; [`EditRamps::new`] is "none".
     pub edit_ramps: &'a EditRamps,
+    /// The monitor overlay of the predecessor's base and of this successor (decision 17, C8,
+    /// #1559 D9). [`MonitorBase::NONE`] for a host without a solo.
+    pub monitor: MonitorBase<'a>,
+}
+
+/// The host-local monitor values (solo) a successor is prepared under (decision 17, C8, #1559).
+///
+/// The successor bakes `controls::effective(model, next)`, so it renders the solo from its first
+/// block and a strip added while another is soloed is solo-muted; the carry joins the effective
+/// values of `(committed model, committed)` and `(model, next)`, so a carried strip's solo change
+/// is a retarget with the length `ramp` gives. The overlay is not part of the session: a snapshot
+/// never holds it.
+#[derive(Clone, Copy, Debug)]
+pub struct MonitorBase<'a> {
+    /// The overlay the predecessor's cells hold.
+    pub committed: &'a controls::MonitorOverlay,
+    /// The overlay the successor renders under: `committed` plus the transaction's writes.
+    pub next: &'a controls::MonitorOverlay,
+    /// The ramp length, in samples, of a record that only the overlay change produced; `None` is
+    /// the session's `mute_ms` ([`LiveRampRow::Solo`]).
+    pub ramp: Option<u32>,
+}
+
+/// The overlay that solos nothing, for [`MonitorBase::NONE`].
+static NO_OVERLAY: controls::MonitorOverlay = controls::MonitorOverlay::new();
+
+impl MonitorBase<'static> {
+    /// No solo before and none after: the base of a host without a monitor overlay.
+    pub const NONE: Self = Self {
+        committed: &NO_OVERLAY,
+        next: &NO_OVERLAY,
+        ramp: None,
+    };
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -1787,7 +1820,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_strips = attach_live;
     let strip_joins: Vec<StripJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_strips(base.committed, model, live_strips, base.edit_ramps),
+        Some(base) => join_strips(
+            base.committed,
+            model,
+            live_strips,
+            base.edit_ramps,
+            base.monitor,
+        ),
     };
     // Issue #1279 D1: how each strip's console slots and effect chain differ between the
     // predecessor's base and this model, resolved against the plans' lanes once this plan is
@@ -1891,9 +1930,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         return Err(resource("host.effect.resource.limit"));
     }
     #[cfg(feature = "control-provider")]
-    let control_catalog =
-        crate::ControlCatalog::build(compiled.normalized_model(), compiled.sample_rate().0)
-            .map_err(|_| resource("host.control_provider.allocation"))?;
+    let control_catalog = crate::ControlCatalog::build(
+        compiled.normalized_model(),
+        successor.map_or(&NO_OVERLAY, |base| base.monitor.next),
+        compiled.sample_rate().0,
+    )
+    .map_err(|_| resource("host.control_provider.allocation"))?;
 
     // Issue #140 A: one live-control lane per prepared strip effect instance (a submix strip's
     // included, #1207 D5): its latest-target cells and, for an effect that declares taps when the
@@ -2056,12 +2098,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
-    // Decision 17, C7: every effective value is computed once per preparation, here. No monitor
-    // overlay exists on this path yet, so nothing is soloed.
-    let effective = controls::effective(
-        compiled.normalized_model(),
-        &controls::MonitorOverlay::default(),
-    );
+    // Decision 17, C7: every effective value is computed once per preparation, here, under the
+    // overlay the successor renders with (#1559 D9); a first plan has no solo.
+    let overlay = successor.map_or(&NO_OVERLAY, |base| base.monitor.next);
+    let effective = controls::effective(compiled.normalized_model(), overlay);
     let builtins = if selected_meters.is_some() {
         // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
         // other request. The serialized form keeps its fused fader and matrix banks.
@@ -2829,28 +2869,46 @@ pub(crate) struct EffectiveDiff<'a> {
     reach: Vec<Vec<usize>>,
     ramps: LiveRamps,
     edit_ramps: &'a EditRamps,
+    /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
+    solo_before: Vec<bool>,
+    solo_after: Vec<bool>,
+    /// The ramp length of a mute record that only the overlay change produced (#1559 D7).
+    solo_ramp: Option<u32>,
+}
+
+/// The solo term of every strip of `model` under `overlay`, in [`SessionModel::strips`] order.
+fn solo_terms(model: &SessionModel, overlay: &controls::MonitorOverlay) -> Vec<bool> {
+    use controls::EffectiveInputs as _;
+    let inputs = controls::ModelInputs::new(model, overlay);
+    let any_solo = controls::any_solo(&inputs);
+    (0..inputs.strip_count())
+        .map(|strip| controls::solo_term(&inputs, strip, any_solo))
+        .collect()
 }
 
 impl<'a> EffectiveDiff<'a> {
-    /// The effective values of `current` and `next`. No monitor overlay exists on this path yet
-    /// (solo on the C ABI is #1559): nothing is soloed.
+    /// The effective values of `current` under `monitor.committed` and of `next` under
+    /// `monitor.next` (decision 17, C7; #1559 D6).
     pub(crate) fn new(
         current: &'a SessionModel,
         next: &'a SessionModel,
         ramps: LiveRamps,
         edit_ramps: &'a EditRamps,
+        monitor: MonitorBase<'_>,
     ) -> Self {
-        let overlay = controls::MonitorOverlay::default();
         Self {
             current,
             next,
-            before: controls::effective(current, &overlay),
-            after: controls::effective(next, &overlay),
+            before: controls::effective(current, monitor.committed),
+            after: controls::effective(next, monitor.next),
             before_strips: current.strips().collect(),
             after_strips: next.strips().collect(),
             reach: next.vca_reach(),
             ramps,
             edit_ramps,
+            solo_before: solo_terms(current, monitor.committed),
+            solo_after: solo_terms(next, monitor.next),
+            solo_ramp: monitor.ramp,
         }
     }
 
@@ -2921,10 +2979,19 @@ impl<'a> EffectiveDiff<'a> {
                     .resolve(LiveRampRow::VcaOffset, reaching(lane, false))
             }
         });
+        // A model edit's length wins: the strip's own mute, then a reaching VCA's. A mute that
+        // only the overlay moved takes the solo's (#1559 D7).
+        let solo_moved = self.solo_before[before] != self.solo_after[after];
         let mute = [0, 1].map(|lane| {
             let muted = |fader: &session::DualMonoFader| [fader.left_mute, fader.right_mute][lane];
             if muted(own_before) != muted(own_after) {
                 self.ramps.resolve(LiveRampRow::Mute, edit.mute)
+            } else if solo_moved
+                && !self.reach[after]
+                    .iter()
+                    .any(|&vca| self.vca_changed(&self.next.vcas[vca], lane, true))
+            {
+                self.ramps.resolve(LiveRampRow::Solo, self.solo_ramp)
             } else {
                 self.ramps
                     .resolve(LiveRampRow::VcaMute, reaching(lane, true))
@@ -3165,9 +3232,10 @@ fn join_strips<'a>(
     model: &'a SessionModel,
     live: bool,
     edit_ramps: &'a EditRamps,
+    monitor: MonitorBase<'a>,
 ) -> Vec<StripJoin<'a>> {
     let ramps = LiveRamps::for_session(model);
-    let diff = EffectiveDiff::new(committed, model, ramps, edit_ramps);
+    let diff = EffectiveDiff::new(committed, model, ramps, edit_ramps, monitor);
     let mut joins = Vec::new();
     for (index, strip) in model.strips().enumerate() {
         let id = strip.id.as_str();

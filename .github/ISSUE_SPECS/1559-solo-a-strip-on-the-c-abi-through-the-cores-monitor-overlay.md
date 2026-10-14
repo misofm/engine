@@ -208,3 +208,30 @@ Commands: `cargo test --locked -p protocol -p controls`,
   is its shared-path half; the browser half ends with the browser admission in #1565.
 - Shrinks *Admit browser live edits in the Worker through the committed model* (#1562, formerly #1382): its D3 as filed
   (the overlay composed in the shared commit) is this slice; see #1562's amendment record.
+
+## Implementation record (attempt 1, 2026-10-13)
+
+Built as specified, with these facts the spec did not have, each decided here:
+
+- **A solo's records ride a monitor publication** (#1603, root ruling of 2026-10-13, option B as
+  implemented by option C). A monitor-only transaction that produces records stamps
+  `stamp_monitor(committed revision)` on the newest plan's gate and publishes that key with
+  `publish_key`: a new publication that carries the committed revision `r`. No revision number is
+  spent: the store has no `next_gate_revision`, and the next model commit is `r + 1`. The applied
+  watermark reports `r` and never a higher number. A monitor-only transaction never rebuilds (a
+  rebuild verdict for one is `INTERNAL`, a defect, with nothing written), and an exhausted
+  publication number (`PublicationsExhausted`, 2^63 - 1 on one plan's gate) is `INTERNAL` too.
+- **Where the writes sort.** `controls::check_monitor` (new) checks a monitor row exactly as `set`
+  would and returns `controls::MonitorWrite`; `SessionStore::prepare_transaction_with_monitor`
+  records them on the token in order (a later write of one strip replaces the earlier). The
+  one-call path (`process_command_frame_into`) has no overlay and keeps refusing with
+  `control.monitor`.
+- **Overlay in preparation.** `host_core::SuccessorBase` gains `monitor: MonitorBase`
+  (`MonitorBase::NONE` for a host without a solo); `classify_live_delta_with_monitor` is the
+  classifier with the overlays; `classify_live_delta` is it with `NONE`. `ControlCatalog::build`
+  takes the overlay.
+- **Ramp (D7).** `EffectiveDiff::lengths`: the strip's own mute edit's length, then a reaching VCA's,
+  then `Solo` for a mute that only the solo term moved. The solo term has one spelling,
+  `controls::solo_term`.
+- **Corpus.** The conformance corpus's response frame is unchanged (it carries `rebuild`), so
+  `COMPLETE_SCHEMA_HASH` does not move; the codec test covers 4 and refuses 0 and 5.
