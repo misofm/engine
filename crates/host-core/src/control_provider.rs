@@ -690,6 +690,179 @@ pub(crate) fn serve_response_at(
     )
 }
 
+/// The most payload bytes a session-less reply may carry: the bound the browser preview has
+/// always had, lowered by the request's own `maximum_reply_bytes`.
+const SESSIONLESS_REPLY_BYTES: usize = 16 << 20;
+
+/// The most request frame bytes a session-less endpoint decodes.
+const SESSIONLESS_REQUEST_FRAME_BYTES: usize = 1 << 20;
+
+/// Why [`serve_response_frame`] wrote no reply: the input has no command header that names a
+/// request, so a reply could not be correlated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseFrameError {
+    /// The command header did not decode.
+    Malformed,
+}
+
+/// Serve one command frame without a session (#1574): the browser's response preview, which has no
+/// session, sends the frame a C ABI host sends and reads the reply it reads.
+///
+/// The frame is decoded with a limit of 1 MiB. A frame whose header does not decode is
+/// [`ResponseFrameError::Malformed`] and writes nothing. Any message but `RESPONSE_GET` is
+/// answered with a non-OK `UNSUPPORTED_MESSAGE` frame, and a payload that does not decode with
+/// the status of its decode error. A `RESPONSE_GET` needs a configuration target
+/// (`response.target.unavailable` otherwise) and both `sample_rate_hz` and `quantum_frames`
+/// (`response.rate` otherwise); it then runs [`serve_response_at`], the function a session
+/// endpoint runs, so the reply payload equals a session endpoint's for the same request. The
+/// reply echoes the request ID with revision 0. `reply` is cleared, then holds one complete
+/// frame, OK or non-OK.
+///
+/// # Errors
+///
+/// [`ResponseFrameError::Malformed`] when the command header does not decode.
+pub fn serve_response_frame(request: &[u8], reply: &mut Vec<u8>) -> Result<(), ResponseFrameError> {
+    let decode_codec = protocol::ProtocolCodec::new(protocol::ProtocolLimits {
+        max_frame_bytes: SESSIONLESS_REQUEST_FRAME_BYTES,
+        ..protocol::ProtocolLimits::default()
+    });
+    reply.clear();
+    let header = decode_codec
+        .decode_command_header(request)
+        .map_err(|_| ResponseFrameError::Malformed)?;
+    // The reply may exceed the request's frame limit, so it has its own codec.
+    let encode_codec = protocol::ProtocolCodec::new(protocol::ProtocolLimits {
+        max_frame_bytes: protocol::OUTER_HEADER_BYTES + SESSIONLESS_REPLY_BYTES,
+        ..protocol::ProtocolLimits::default()
+    });
+    let refused = |status: StatusCode, code: &str, reply: &mut Vec<u8>| {
+        write_non_ok(&encode_codec, header, status, code, reply);
+    };
+    if header.message_id != protocol::MessageId::ResponseGet {
+        refused(StatusCode::UnsupportedMessage, "protocol.failure", reply);
+        return Ok(());
+    }
+    let mut fields = [0_u16; 1024];
+    let decoded = match decode_codec
+        .decode_typed_command(request, &mut protocol::DecodeScratch::new(&mut fields))
+    {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            refused(error.status(), "protocol.failure", reply);
+            return Ok(());
+        }
+    };
+    let protocol::DecodedCommandPayload::ResponseGet(query) = decoded.payload else {
+        refused(StatusCode::Internal, "protocol.failure", reply);
+        return Ok(());
+    };
+    let outcome = match (&query.target, query.sample_rate_hz, query.quantum_frames) {
+        (ResponseTarget::Configuration(_), Some(rate), Some(quantum)) => {
+            serve_response_at(rate, quantum, SESSIONLESS_REPLY_BYTES, &query, false)
+        }
+        (ResponseTarget::Configuration(_), _, _) => {
+            Err(refuse(StatusCode::InvalidField, "response.rate"))
+        }
+        _ => Err(refuse(
+            StatusCode::Unavailable,
+            "response.target.unavailable",
+        )),
+    };
+    match outcome {
+        Ok(result) => write_response_frame(&encode_codec, header, &result, reply),
+        Err(error) => refused(error.status, error.code, reply),
+    }
+    Ok(())
+}
+
+/// Encode a `RESPONSE_GET` success frame; a result the codec cannot encode is `INTERNAL`.
+fn write_response_frame(
+    codec: &protocol::ProtocolCodec,
+    header: protocol::CommandHeader,
+    result: &ResponseResult,
+    reply: &mut Vec<u8>,
+) {
+    let frame = protocol::TypedSuccessResponseFrame {
+        request_id: header.request_id,
+        revision: protocol::SessionRevision(0),
+        payload: protocol::SuccessResponsePayload::ResponseResult(result.clone()),
+    };
+    let Ok(payload) = codec.encoded_response_result_len(result) else {
+        return write_non_ok(
+            codec,
+            header,
+            StatusCode::Internal,
+            "response.internal",
+            reply,
+        );
+    };
+    let mut capacity = protocol::OUTER_HEADER_BYTES.saturating_add(payload);
+    for _ in 0..2 {
+        if reply.try_reserve_exact(capacity).is_err() {
+            return write_non_ok(
+                codec,
+                header,
+                StatusCode::Internal,
+                "response.internal",
+                reply,
+            );
+        }
+        reply.resize(capacity, 0);
+        match codec.encode_success_response_frame_into(&frame, reply) {
+            Ok(written) => {
+                reply.truncate(written);
+                return;
+            }
+            Err(protocol::EncodeError::OutputTooSmall { required }) => capacity = required,
+            Err(_) => break,
+        }
+    }
+    reply.clear();
+    write_non_ok(
+        codec,
+        header,
+        StatusCode::Internal,
+        "response.internal",
+        reply,
+    );
+}
+
+/// Encode a non-OK reply that carries one error diagnostic, echoing the request's ID and message.
+fn write_non_ok(
+    codec: &protocol::ProtocolCodec,
+    header: protocol::CommandHeader,
+    status: StatusCode,
+    code: &str,
+    reply: &mut Vec<u8>,
+) {
+    let payload = protocol::NonOkResponse {
+        diagnostics: vec![Diagnostic {
+            code: code.to_owned(),
+            severity: DiagnosticSeverity::Error,
+            path: Vec::new(),
+            detail: None,
+            operation_index: None,
+            sample_time: None,
+            provider_sequence: None,
+        }],
+        omitted_diagnostics: 0,
+        backpressure: None,
+    };
+    let frame = protocol::TypedNonOkResponseFrame {
+        request_id: header.request_id,
+        revision: protocol::SessionRevision(0),
+        message_id: header.message_id,
+        status,
+        payload: &payload,
+    };
+    reply.clear();
+    reply.resize(protocol::OUTER_HEADER_BYTES + 512, 0);
+    let written = codec
+        .encode_non_ok_response_frame_into(&frame, reply)
+        .unwrap_or(0);
+    reply.truncate(written);
+}
+
 /// Everything after the rate rules: the limits, the bypass rows, the preparation, the reply bound
 /// and the curves. The request has passed [`response_preflight`], which returned its
 /// configuration and grid.

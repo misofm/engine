@@ -49,6 +49,7 @@
 
 use core::mem::offset_of;
 
+use host_core::RESPONSE_MAXIMUM_POINTS;
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
     BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
@@ -68,17 +69,13 @@ use host_web::{
     OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING,
     OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, RACK_CONSOLE, RACK_INSERTS,
     RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT,
-    RESPONSE_CHANNEL_RIGHT, RESPONSE_FIELD_SECTIONS, RESPONSE_FIELD_TOTAL, RESPONSE_GRID_LINEAR,
-    RESPONSE_GRID_LOGARITHMIC, RESPONSE_MAXIMUM_EFFECT_ID_BYTES,
-    RESPONSE_MAXIMUM_PARAMETER_OVERRIDES, RESPONSE_MAXIMUM_RESULT_BYTES, RESPONSE_PARAMETER_BYTES,
-    RESPONSE_REQUEST_BYTES, RESPONSE_RESULT_BYTES, RESPONSE_TARGET_EFFECT,
-    RESPONSE_TARGET_INPUT_FILTERS, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
-    RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES,
-    SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
-    SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
+    RESPONSE_CHANNEL_RIGHT, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC, RESULT_ABI_MISMATCH,
+    RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
+    RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
+    RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
+    SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
+    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
     SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
     SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES,
     SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED,
@@ -89,9 +86,8 @@ use host_web::{
     STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport,
     WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
     WebMeterHeader, WebObservationResult, WebObservationSelection, WebPlanWatermark,
-    WebResourceReport, WebResponseParameter, WebResponseRequest, WebResponseResult,
-    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
-    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    WebResourceReport, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
+    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -125,7 +121,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 108] = [
+pub const EXPORTS: [&str; 102] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -167,17 +163,11 @@ pub const EXPORTS: [&str; 108] = [
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
-    "miso_engine_web_v1_response_close",
-    "miso_engine_web_v1_response_effect_id_capacity",
-    "miso_engine_web_v1_response_effect_id_ptr",
-    "miso_engine_web_v1_response_parameter_bytes",
-    "miso_engine_web_v1_response_parameter_capacity",
-    "miso_engine_web_v1_response_parameter_ptr",
-    "miso_engine_web_v1_response_query",
-    "miso_engine_web_v1_response_request_bytes",
-    "miso_engine_web_v1_response_request_ptr",
-    "miso_engine_web_v1_response_result_bytes",
-    "miso_engine_web_v1_response_result_ptr",
+    "miso_engine_web_v1_response_frame_close",
+    "miso_engine_web_v1_response_frame_ptr",
+    "miso_engine_web_v1_response_frame_reply_bytes",
+    "miso_engine_web_v1_response_frame_reply_ptr",
+    "miso_engine_web_v1_response_frame_submit",
     "miso_engine_web_v1_service",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
@@ -716,219 +706,6 @@ fn command_record_fields() -> [Field; 11] {
         ("reserved1", 20, "u32"),
         ("values", 24, "f32[4]"),
         ("reserved2", 40, "u8[8]"),
-    ]
-}
-
-fn response_request_fields() -> [Field; 27] {
-    [
-        (
-            "structSize",
-            offset_of!(WebResponseRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebResponseRequest, abi_version),
-            "u32",
-        ),
-        ("target", offset_of!(WebResponseRequest, target), "u32"),
-        ("grid", offset_of!(WebResponseRequest, grid), "u32"),
-        ("channels", offset_of!(WebResponseRequest, channels), "u32"),
-        ("fields", offset_of!(WebResponseRequest, fields), "u32"),
-        ("quality", offset_of!(WebResponseRequest, quality), "u32"),
-        ("linkMode", offset_of!(WebResponseRequest, link_mode), "u32"),
-        ("bypass", offset_of!(WebResponseRequest, bypass), "u32"),
-        (
-            "effectIdBytes",
-            offset_of!(WebResponseRequest, effect_id_bytes),
-            "u32",
-        ),
-        (
-            "parameterCount",
-            offset_of!(WebResponseRequest, parameter_count),
-            "u32",
-        ),
-        ("points", offset_of!(WebResponseRequest, points), "u32"),
-        (
-            "sampleRateHz",
-            offset_of!(WebResponseRequest, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "quantumFrames",
-            offset_of!(WebResponseRequest, quantum_frames),
-            "u32",
-        ),
-        (
-            "minimumHz",
-            offset_of!(WebResponseRequest, minimum_hz),
-            "f32",
-        ),
-        (
-            "maximumHz",
-            offset_of!(WebResponseRequest, maximum_hz),
-            "f32",
-        ),
-        (
-            "leftHpfHz",
-            offset_of!(WebResponseRequest, left_hpf_hz),
-            "f32",
-        ),
-        (
-            "leftLpfHz",
-            offset_of!(WebResponseRequest, left_lpf_hz),
-            "f32",
-        ),
-        (
-            "rightHpfHz",
-            offset_of!(WebResponseRequest, right_hpf_hz),
-            "f32",
-        ),
-        (
-            "rightLpfHz",
-            offset_of!(WebResponseRequest, right_lpf_hz),
-            "f32",
-        ),
-        (
-            "configurationId",
-            offset_of!(WebResponseRequest, configuration_id),
-            "u64",
-        ),
-        (
-            "maximumPreparedBytes",
-            offset_of!(WebResponseRequest, maximum_prepared_bytes),
-            "u64",
-        ),
-        (
-            "maximumTotalStateBytes",
-            offset_of!(WebResponseRequest, maximum_total_state_bytes),
-            "u64",
-        ),
-        (
-            "maximumScratchBytes",
-            offset_of!(WebResponseRequest, maximum_scratch_bytes),
-            "u64",
-        ),
-        (
-            "maximumAutomationSpansPerBlock",
-            offset_of!(WebResponseRequest, maximum_automation_spans_per_block),
-            "u32",
-        ),
-        (
-            "maximumResultBytes",
-            offset_of!(WebResponseRequest, maximum_result_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebResponseRequest, reserved),
-            "u32[2]",
-        ),
-    ]
-}
-
-fn response_parameter_fields() -> [Field; 4] {
-    [
-        (
-            "parameterId",
-            offset_of!(WebResponseParameter, parameter_id),
-            "u32",
-        ),
-        ("channel", offset_of!(WebResponseParameter, channel), "u32"),
-        ("value", offset_of!(WebResponseParameter, value), "f32"),
-        (
-            "reserved",
-            offset_of!(WebResponseParameter, reserved),
-            "u32",
-        ),
-    ]
-}
-
-fn response_result_fields() -> [Field; 23] {
-    [
-        (
-            "structSize",
-            offset_of!(WebResponseResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebResponseResult, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebResponseResult, result), "u32"),
-        ("target", offset_of!(WebResponseResult, target), "u32"),
-        ("channels", offset_of!(WebResponseResult, channels), "u32"),
-        ("fields", offset_of!(WebResponseResult, fields), "u32"),
-        ("points", offset_of!(WebResponseResult, points), "u32"),
-        (
-            "sectionCount",
-            offset_of!(WebResponseResult, section_count),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebResponseResult, sample_rate_hz),
-            "u32",
-        ),
-        ("reserved0", offset_of!(WebResponseResult, reserved0), "u32"),
-        (
-            "configurationId",
-            offset_of!(WebResponseResult, configuration_id),
-            "u64",
-        ),
-        ("floorDb", offset_of!(WebResponseResult, floor_db), "f32"),
-        ("bypass", offset_of!(WebResponseResult, bypass), "u32"),
-        (
-            "enabledLeft",
-            offset_of!(WebResponseResult, enabled_left),
-            "u32",
-        ),
-        (
-            "enabledRight",
-            offset_of!(WebResponseResult, enabled_right),
-            "u32",
-        ),
-        (
-            "retainedBytes",
-            offset_of!(WebResponseResult, retained_bytes),
-            "u64",
-        ),
-        (
-            "resultBytes",
-            offset_of!(WebResponseResult, result_bytes),
-            "u64",
-        ),
-        (
-            "frequenciesOffset",
-            offset_of!(WebResponseResult, frequencies_offset),
-            "u32",
-        ),
-        (
-            "totalLeftOffset",
-            offset_of!(WebResponseResult, total_left_offset),
-            "u32",
-        ),
-        (
-            "totalRightOffset",
-            offset_of!(WebResponseResult, total_right_offset),
-            "u32",
-        ),
-        (
-            "sectionsLeftOffset",
-            offset_of!(WebResponseResult, sections_left_offset),
-            "u32",
-        ),
-        (
-            "sectionsRightOffset",
-            offset_of!(WebResponseResult, sections_right_offset),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebResponseResult, reserved),
-            "u32[3]",
-        ),
     ]
 }
 
@@ -1650,27 +1427,6 @@ pub fn render() -> String {
     );
     render_structure(
         &mut out,
-        "responseRequest",
-        RESPONSE_REQUEST_BYTES,
-        &response_request_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "responseParameter",
-        RESPONSE_PARAMETER_BYTES,
-        &response_parameter_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "responseResult",
-        RESPONSE_RESULT_BYTES,
-        &response_result_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
         "liveResponseRequest",
         LIVE_RESPONSE_REQUEST_BYTES,
         &live_response_request_fields(),
@@ -1794,14 +1550,6 @@ pub fn render() -> String {
     );
     render_named_constants(
         &mut out,
-        "responseTargets",
-        &[
-            (RESPONSE_TARGET_EFFECT, "effect"),
-            (RESPONSE_TARGET_INPUT_FILTERS, "inputFilters"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
         "responseGrids",
         &[
             (RESPONSE_GRID_LINEAR, "linear"),
@@ -1815,14 +1563,6 @@ pub fn render() -> String {
             (RESPONSE_CHANNEL_LEFT, "left"),
             (RESPONSE_CHANNEL_RIGHT, "right"),
             (RESPONSE_CHANNEL_BOTH, "both"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "responseFields",
-        &[
-            (RESPONSE_FIELD_TOTAL, "total"),
-            (RESPONSE_FIELD_SECTIONS, "sections"),
         ],
     );
     render_named_constants(
@@ -1885,15 +1625,7 @@ pub fn render() -> String {
     );
     append!(
         &mut out,
-        "    \"maximumResponseEffectIdBytes\": {RESPONSE_MAXIMUM_EFFECT_ID_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumResponseParameterOverrides\": {RESPONSE_MAXIMUM_PARAMETER_OVERRIDES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumResponseResultBytes\": {RESPONSE_MAXIMUM_RESULT_BYTES},\n"
+        "    \"maximumResponsePoints\": {RESPONSE_MAXIMUM_POINTS},\n"
     );
     append!(
         &mut out,

@@ -118,8 +118,9 @@ mod limiter_linked_session;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
-    CatalogResources, ControlCatalog, PlanSampleSource, SessionControlProvider,
+    CatalogResources, ControlCatalog, PlanSampleSource, ResponseFrameError, SessionControlProvider,
     SessionControlProviderError, SessionControlProviderResources, StagedCatalog, StagedValues,
+    serve_response_frame,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use control_provider::{

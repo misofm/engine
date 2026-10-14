@@ -195,3 +195,58 @@ Checked against `main` at `7feb27800`.
   transaction.
 - **Edit order.** In `host-core/src/control_provider.rs`: after #1341a1 (batch 9) and #1567; before
   #1615. In `hosts/host-web/src/lib.rs`: after #1602 and #1611 (each changes one line there).
+
+## Decision record: preview over the C ABI's frame (batch 9)
+
+**Shipped.**
+
+- `host_core::serve_response_frame(request, reply)` and `ResponseFrameError::Malformed` in
+  `control_provider.rs` (feature `control-provider`), calling `serve_response_at(.., false)`. It
+  decodes with a 1 MiB frame limit, writes no reply when the command header does not decode, answers
+  any other message with a non-OK `UNSUPPORTED_MESSAGE`, a payload that does not decode with its
+  decode error's status (`protocol.failure`, as the session endpoint does), then checks the target
+  (`response.target.unavailable`) and the rate and quantum (`response.rate`). The reply echoes the
+  request ID with revision 0. The reply payload bound is the 16 MiB constant
+  `SESSIONLESS_REPLY_BYTES` (today's browser bound), lowered by the request's field 18. The reply
+  frame is encoded with its own codec, whose frame limit is 16 MiB plus the header.
+- Five exports in `hosts/host-web/src/ffi.rs`: `response_frame_ptr`, `_submit`, `_reply_ptr`,
+  `_reply_bytes`, `_close`, over a leaked, destructor-free `ResponseFrameStaging` (request and reply
+  `Vec`s) that no boot reserves. The eleven old exports, `WebResponse*`, the old constants, the
+  preview fields of `ResponseStaging`, the helpers and `mod response_budget_tests` are deleted.
+- SDK: `sdk/src/core/response-frame.ts` (request encoder, reply decoder, status mapping) and
+  `ResponsePreviewModule` over it. `both` is sent as `both`. A refusal is a `MisoEngineError` whose
+  `code` is the first diagnostic's code, whose `diagnostics` hold the codes and whose `result` is the
+  ABI code of `invalidArgument`, `unsupported`, `refusedBudget` or `internal` (D4).
+- Layout generator, `check-abi-layout-v1.py`, its fixture, `check-web-audioworklet.sh` and the SDK
+  mirrors list the five exports; `maximumResponsePoints` (4096) is a new constant (D6); the three
+  old `maximumResponse*` constants and the `responseTargets` and `responseFields` tables are gone.
+
+**Departures.**
+
+- `RESPONSE_MAXIMUM_EFFECT_ID_BYTES` also sized the observation ID staging. It is now a private
+  `OBSERVATION_MAXIMUM_ID_BYTES` (127) in `ffi.rs`; the observation export is unchanged.
+- Gate 1 lives in `crates/capi/tests/response_get.rs`, not in `host-core/tests/`: it needs the C ABI,
+  which `host-core` cannot depend on. Gate 2 is `crates/host-core/tests/response_frame.rs`.
+- `tools/parameter-metadata` takes `host-core` as a normal dependency (for `RESPONSE_MAXIMUM_POINTS`).
+  `SdkResponseCode` is added to `MisoErrorCode` in `sdk/src/core/errors.ts`.
+- The old eval assertions on `code === "refusedBudget"` follow the engine's own codes now
+  (`response.reply_too_large`, `response.points`); the eval inputs are unchanged.
+- An input-filter request sends all four cutoffs (controls 3 and 4, both lanes), `0` for an absent
+  one, as the old request did. A bypass row (control 0, lane `both`, value 1) is sent only when set.
+
+**Gates.**
+
+- Gate 1: `the_sessionless_frame_entry_answers_the_payload_of_a_session` (capi).
+- Gate 2: `a_request_with_a_rate_and_a_quantum_is_answered`,
+  `a_request_the_entry_cannot_resolve_is_refused_with_its_code`,
+  `another_message_is_unsupported_and_a_broken_header_has_no_reply` (host-core).
+- Export lifecycle: `ffi::response_frame_tests::the_response_frame_exports_stage_answer_and_close`.
+- Gate 3: `sdk/test/response-evals.mjs` (the existing evals, plus "a per-lane value given as both
+  equals the same value on each lane" and "the engine refuses 4097 points with its own code").
+- Gate 4: `check-abi-layout-v1.py` (and `--self-test`), `check-web-audioworklet.sh`,
+  `check-sdk-deletions.py`.
+- Ran green: `cargo test -p host-core --all-features`, `cargo test -p host-web`,
+  `cargo test -p capi --test response_get`, `cargo clippy -D warnings` on the touched crates,
+  `check-web-audioworklet.sh`, `test-web-audioworklet.sh`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh` (526 pass), `check-sdk-generated.sh`, the browser qualification with
+  `--check-matrix --self-test-mutations` on chromium. Firefox and webkit were not run here.
