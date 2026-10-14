@@ -8081,7 +8081,7 @@ fn compile_ready(
         .largest_bridge_allocation_bytes
         .max(control_table)
         .max(id_arena)
-        .max(catalog.largest_allocation_bytes)
+        .max(control.catalog_resources().largest_allocation_bytes)
         .max(engine.session_largest_allocation_bytes);
     // One input-filter shadow per strip, the tracks then the submixes (issue #1213 D1): the order
     // of `handles.strips`, so a bus's prepared input-filter owner is its strip index.

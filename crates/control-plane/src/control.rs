@@ -2041,6 +2041,14 @@ where
         self.controller.session().compiled()
     }
 
+    /// What the session's one control catalog holds (#1381a): the control plane's provider owns it,
+    /// and an adapter that charges its own report reads the figures here, not from a catalog of its
+    /// own.
+    #[must_use]
+    pub fn catalog_resources(&self) -> host_core::CatalogResources {
+        self.controller.provider().catalog_resources()
+    }
+
     /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
     /// (#1381a): the adapter reaches an effect's observation queue through them, for the
     /// browser's observe kinds 7 and 8 (ruling C9).
