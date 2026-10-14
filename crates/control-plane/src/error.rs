@@ -29,6 +29,29 @@ pub enum CompileFailure {
     Diagnostics(Vec<u8>),
 }
 
+impl CompileFailure {
+    /// The diagnostic bytes of this failure, the same on every host (decision 17 C1): a resource
+    /// failure is one whole-session `code\t$\n` line, and diagnostics are the session,
+    /// preparation and admission lines as the control plane built them.
+    #[must_use]
+    pub fn diagnostic(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Resource(fault) => {
+                let code = match fault {
+                    ResourceFault::Arithmetic => "capi.resource.arithmetic",
+                    ResourceFault::Platform => "capi.resource.platform",
+                    ResourceFault::Limit => "capi.resource.limit",
+                    ResourceFault::Allocation => "capi.resource.allocation",
+                    ResourceFault::ProtocolQueue => "capi.protocol.queue",
+                    ResourceFault::PlanExchange => "capi.plan.exchange",
+                };
+                std::borrow::Cow::Owned(format!("{code}\t$\n").into_bytes())
+            }
+            Self::Diagnostics(bytes) => std::borrow::Cow::Borrowed(bytes),
+        }
+    }
+}
+
 pub(crate) fn failure(fault: ResourceFault) -> CompileFailure {
     CompileFailure::Resource(fault)
 }

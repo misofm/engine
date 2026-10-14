@@ -18,8 +18,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
     CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailure,
-    SourceFailureReport, compile_children, failure_bytes, limits_are_valid, plan_error,
-    render_error_code,
+    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -721,37 +720,20 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                 }
                 code
             }
-            Err(CommandError::BufferTooSmall { required }) => {
-                // SAFETY: The response descriptor was validated above; only required length is
-                // updated and no caller payload byte is written.
-                unsafe { (*response).required_bytes = required };
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.output.too_small");
-                RESULT_BUFFER_TOO_SMALL
-            }
-            Err(CommandError::Invalid) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.frame.invalid");
-                RESULT_INVALID_ARGUMENT
-            }
-            Err(CommandError::Backpressure) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(b"control.plan.backpressure");
-                RESULT_BACKPRESSURE
-            }
-            Err(CommandError::CompileRejected(failure)) => {
-                session.last_error.borrow_mut().set(&failure_bytes(failure));
-                RESULT_COMPILE_REJECTED
-            }
-            Err(CommandError::Internal) => {
-                session.last_error.borrow_mut().set(b"control.internal");
-                RESULT_INTERNAL
+            Err(refused) => {
+                if let CommandError::BufferTooSmall { required } = refused {
+                    // SAFETY: The response descriptor was validated above; only required length
+                    // is updated and no caller payload byte is written.
+                    unsafe { (*response).required_bytes = required };
+                }
+                session.last_error.borrow_mut().set(&refused.diagnostic());
+                match refused {
+                    CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                    CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+                    CommandError::Backpressure => RESULT_BACKPRESSURE,
+                    CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+                    CommandError::Internal => RESULT_INTERNAL,
+                }
             }
         }
     })

@@ -554,6 +554,21 @@ pub enum CommandError {
     Internal,
 }
 
+impl CommandError {
+    /// The diagnostic text of this refusal, the same on every host (decision 17 C1). An adapter
+    /// owns only its result-code numbering.
+    #[must_use]
+    pub fn diagnostic(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Invalid => std::borrow::Cow::Borrowed(b"control.frame.invalid"),
+            Self::BufferTooSmall { .. } => std::borrow::Cow::Borrowed(b"control.output.too_small"),
+            Self::Backpressure => std::borrow::Cow::Borrowed(b"control.plan.backpressure"),
+            Self::CompileRejected(failure) => failure.diagnostic(),
+            Self::Internal => std::borrow::Cow::Borrowed(b"control.internal"),
+        }
+    }
+}
+
 impl EventError {
     /// The diagnostic text of this refusal, the same on every host (decision 17 C1). An adapter
     /// owns only its result-code numbering.
