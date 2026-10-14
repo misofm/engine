@@ -240,3 +240,7 @@ every PCM digest, status
 snapshot and result transcript is unchanged, and only the `resourceCeilings`-budgeted rows move (all
 down). This is the live-transaction peak of the SET_CONTROL timeline's nine-edit commits falling by
 about 97 kB, as this record measures natively.
+
+## Ruling (root, 2026-10-14): the token size
+
+Root reversed "the token keeps its size" (batch 9 review): the token's layout reservation and the exact `size_of == 960` test are deleted. The C ABI prepared-protocol resource row computes `size_of::<PreparedStructuralCommand>()` itself, so it follows the smaller token with no re-pin; an exact byte count is kept only for wire, ABI or on-disk formats (AGENTS.md).

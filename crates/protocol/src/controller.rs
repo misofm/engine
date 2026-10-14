@@ -1258,12 +1258,6 @@ pub struct PreparedStructuralCommand {
     cancellation_batches: usize,
     applied_operations: u32,
     armed: bool,
-    // The CAPI resource contract counts this public opaque token's established retained layout.
-    // ReplayCache itself is compact in the live controller; keep the prepared-token authority
-    // stable until that external resource contract can be revised in its own issue. The plan and
-    // the request copy replaced the 88-byte cache handle (#1615), so the reservation grew by the
-    // difference and `size_of::<PreparedStructuralCommand>()` is unchanged.
-    _resource_layout_reservation: [u8; 80],
 }
 
 impl PreparedStructuralCommand {
@@ -1910,7 +1904,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             cancellation_batches: plan.cancellation_batches,
             applied_operations: plan.applied_operations,
             armed: true,
-            _resource_layout_reservation: [0; 80],
         })
     }
 

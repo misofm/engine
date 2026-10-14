@@ -4764,11 +4764,3 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
     assert!(rebuilt(&commands, flags & !(1 << 14)).is_err());
     assert!(rebuilt(&without_message, flags & !(1 << 14)).is_ok());
 }
-
-/// #1615: the token's replay plan and request copy replaced the cache handle it held, and the
-/// reservation took up the difference: the opaque token's size is the number the C ABI's
-/// prepared-protocol resource row already counts (`size_of::<PreparedStructuralCommand>()`).
-#[test]
-fn the_prepared_token_keeps_the_size_the_resource_row_counts() {
-    assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 960);
-}
