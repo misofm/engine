@@ -179,3 +179,14 @@ F19), clippy `-D warnings`, `cargo fmt --all -- --check`.
   (`automation_row_renders`), draft 12 (jump rows), amended draft 02 (the shape rule), draft 09b
   (member node time).
 - Batch R2, after 13c. A complete outcome alone; not in a must-land group.
+
+## Ruling (root, 2026-10-14)
+
+- **Hand move.** A hand move of an automated VCA `offset_db` writes an offset, the same rule as
+  fader, trim and send gain (a level control).
+- **Summation order.** Static terms are summed first, then the automated VCA curves: a class B
+  change under the standing summation-order ruling, recorded with F16.
+- **Membership of an automated VCA.** A change to which members an automated VCA reaches is a
+  carried rebuild. Decision 14, rule 3 entry, for automated VCAs only: the reach change needs new
+  memory (an `own_db` cell word per newly reached lane and the member's curve tables), so it cannot
+  be a live update. Non-automated VCAs keep D15-6's live set.
