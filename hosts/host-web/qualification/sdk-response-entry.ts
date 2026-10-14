@@ -107,14 +107,54 @@ function sdkFailureObject(error: unknown): object {
     : new Error(`non-object error: ${String(error)}`, { cause: error });
 }
 
-function attachSdkFailure(failure: object, key: "renderAllocationReadFailures" | "sdkCleanupFailures", message: string) {
-  const record = failure as Record<string, unknown>;
-  const list = Array.isArray(record[key]) ? record[key] as string[] : (record[key] = []) as string[];
-  list.push(message);
+type SdkFailureKey = "renderAllocationReadFailures" | "sdkCleanupFailures";
+
+/**
+ * The read and cleanup failures that followed a thrown value. A thrown value is never written to:
+ * the SDK's own errors are frozen, and a write to one throws and hides the failure being reported.
+ */
+const sdkFailureAttachments = new WeakMap<object, Record<SdkFailureKey, string[]>>();
+
+function attachSdkFailure(failure: object, key: SdkFailureKey, message: string) {
+  let attached = sdkFailureAttachments.get(failure);
+  if (attached === undefined) {
+    attached = { renderAllocationReadFailures: [], sdkCleanupFailures: [] };
+    sdkFailureAttachments.set(failure, attached);
+  }
+  attached[key].push(message);
+}
+
+/**
+ * The value to throw for `failure`: itself when nothing followed it, else a new `Error` that keeps
+ * its message and name, carries it as `cause` (and its stack as `causeStack`, since the report
+ * spreads own properties) and lists what followed. Call it once, after every instance has closed.
+ */
+function reportSdkFailure(failure: object): object {
+  const attached = sdkFailureAttachments.get(failure);
+  if (attached === undefined) return failure;
+  const wrapper = new Error(sdkErrorMessage(failure), { cause: failure });
+  const name = (failure as { name?: unknown }).name;
+  wrapper.name = name === undefined ? "Error" : String(name);
+  const stack = (failure as { stack?: unknown }).stack;
+  return Object.assign(wrapper, {
+    causeStack: typeof stack === "string" ? stack : undefined,
+    renderAllocationReadFailures: attached.renderAllocationReadFailures,
+    sdkCleanupFailures: attached.sdkCleanupFailures,
+  });
 }
 
 function sdkErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (typeof message === "string") return message;
+  if (error !== null && typeof error === "object") {
+    try {
+      return JSON.stringify(error, (_key, value) => typeof value === "bigint" ? `${value}n` : value) ?? String(error);
+    } catch {
+      return Object.prototype.toString.call(error);
+    }
+  }
+  return String(error);
 }
 
 /**
@@ -2382,12 +2422,22 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
     };
   } catch (error) {
     runFailure = sdkFailureObject(error);
-    throw runFailure;
-  } finally {
     try {
       await closeOpenSdkEngines(runFailure);
     } finally {
       await preview.close();
+    }
+    throw reportSdkFailure(runFailure);
+  } finally {
+    // The success path; a failed run closed its instances above, once its error was recorded.
+    if (runFailure === undefined) {
+      try {
+        await closeOpenSdkEngines(undefined);
+      } catch (error) {
+        throw reportSdkFailure(sdkFailureObject(error));
+      } finally {
+        await preview.close();
+      }
     }
   }
 }
