@@ -395,3 +395,24 @@ rows to the parity script, each compared per step by reply bytes and per block b
 into the output (gain and mute), the delay and multiband prepared bypass, `delay_samples`, and an
 audio-rate effect parameter if a launch effect declares one. Until #1562b lands this is the one
 known host difference, and it is a sequenced refusal, not a divergent result.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14): for #1562b
+
+- **Meter strip order after a structural edit.** Since #1564C the SDK takes strip order from the
+  core's control list and re-reads it when the structure epoch moves, but the browser meter feed
+  keeps the strip IDs of the boot-time shape and `meterProjection` refuses a frame of another
+  shape. Nothing can move strips before #1562b, because the browser refuses rebuild-path frames.
+  #1562b's gates include a rebuild that adds or removes a strip, after which meters and observation
+  follow the new list order.
+- **Watermark rebuild leg.** #1349's gate 1 ran with a live edit (rebuild refused). #1562b adds the
+  rebuild leg: a rebuild, then a live edit before the swap; the browser status words stay at the
+  initial revision until the swap block and then equal the C ABI's `miso_engine_v1_plan_watermark`.
+- **Named effect rows (batch 8 review).** `sdk/src/core/live-controls.ts` (`#effectRowId`) resolves
+  an effect row's name through the session the SDK built, checked against the booted bytes. After
+  #1562b a rebuild can change an insert's effect, and a named edit could land on another effect's
+  row with the same number. #1562b resolves named effect rows from the control list's section
+  headers (the effect ID) and re-reads them when the structure epoch moves.
+- **Meter frames and the structure epoch (batch 8 review).** `pollMeters` (`sdk/src/core/boundary.ts`)
+  re-reads the strip order only when a frame's `trackCount` differs, so after #1562b a structural
+  edit that keeps the count would name the wrong strips. #1562b carries the structure epoch in the
+  meter header (or an equal signal) and re-reads the strip order when it differs.

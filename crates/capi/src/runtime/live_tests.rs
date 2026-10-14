@@ -2288,11 +2288,14 @@ fn reliable_event_kinds(rig: &Rig) -> Vec<&'static str> {
 }
 
 /// #1053 D10: a live edit emits exactly the events a rebuild's commit does -- one
-/// `SESSION_COMMITTED`, and an `AUTOMATION_CANCELED` when an automation batch is queued.
+/// `SESSION_COMMITTED`. The C ABI serves no automation (#1315), so a refused `AUTOMATION_ENQUEUE`
+/// leaves no batch for the next commit to cancel and the next live edit raises no
+/// `AUTOMATION_CANCELED` either; the cancel event itself is the protocol crate's, tested there
+/// with the command enabled.
 ///
 /// Test value: red if a live edit commits through a path that skips the protocol commit's events,
-/// for example a live-only commit that emits no `SESSION_COMMITTED` or leaves the queued
-/// automation of the superseded revision uncanceled.
+/// for example a live-only commit that emits no `SESSION_COMMITTED`, or if a refused automation
+/// batch is queued anyway and the next commit cancels it.
 #[test]
 fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
     let mut rig = Rig::new(&long_session(10, 48_000));
@@ -2302,44 +2305,26 @@ fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
     assert_eq!(rig.summary().3, 0, "the edit is live");
     assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
 
-    // Queue one automation batch at the committed revision, then edit live again.
+    // Offer one automation batch at the committed revision: it is refused, so the next live edit
+    // has nothing to cancel.
     let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 64);
-    let record = protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(automation_target(&entries, 100.0)),
-        start: protocol::SampleTime(1 << 20),
-        end: protocol::SampleTime(1 << 20),
-        start_value: 100.0,
-        end_value: 100.0,
-    };
     let request = rig.next_request();
-    let automation = command_bytes_at_revision(
-        request,
-        ExpectedRevision::Exact(SessionRevision(rig.summary().0)),
-        protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
-            records: core::slice::from_ref(&record),
-        }),
-    );
-    let (result, response) = command_c(rig.session, &automation);
-    assert_eq!(result, crate::RESULT_OK);
-    let mut fields = [0_u16; 64];
-    assert!(
-        matches!(
-            ProtocolCodec::default()
-                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-                .expect("automation response"),
-            protocol::DecodedTypedResponseFrame::Success { .. }
-        ),
-        "the automation batch is queued"
+    assert_eq!(
+        automation_status(
+            rig.session,
+            request,
+            rig.summary().0,
+            automation_target(&entries, 100.0),
+            100.0
+        )
+        .0,
+        protocol::StatusCode::Unavailable
     );
     assert_eq!(reliable_event_kinds(&rig), Vec::<&str>::new());
     let bytes = rig.transaction(&[left_db_edit("eq0", -2.0)]);
     assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the edit is live");
-    assert_eq!(
-        reliable_event_kinds(&rig),
-        ["SESSION_COMMITTED", "AUTOMATION_CANCELED"]
-    );
+    assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
 }
 
 /// The model-only edits: #1260 D1's four and #1365's `control_smoothing`, each a change no
@@ -4526,41 +4511,6 @@ fn a_structural_commit_advances_the_epoch_and_a_value_only_rebuild_keeps_it() {
     };
     let request = rig.next_request();
     assert!(control_list_c(rig.session, request, &current).is_ok());
-}
-
-/// #1552 gate 4. Red if automation is acked for a row nothing renders.
-#[test]
-fn automation_is_admitted_for_an_effect_parameter_and_refused_for_any_other_row() {
-    let mut rig = Rig::new(&effect_session(10, 48_000));
-    rig.step();
-    let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
-    let revision = rig.summary().0;
-    let parameter = automation_target(&entries, 0.0);
-    let request = rig.next_request();
-    assert_eq!(
-        automation_status(rig.session, request, revision, parameter, 0.0),
-        (protocol::StatusCode::Ok, Vec::new()),
-        "an effect parameter is admitted as before"
-    );
-    let fader = builtin_handle(&entries, "eq0", "fader_db");
-    let bypass = entries
-        .iter()
-        .find(|entry| {
-            entry.address.control == Some(0) && entry.address.owner_id.as_deref() == Some("eq0")
-        })
-        .expect("a bypass row")
-        .handle;
-    for handle in [fader, bypass] {
-        let request = rig.next_request();
-        assert_eq!(
-            automation_status(rig.session, request, revision, handle, 0.0),
-            (
-                protocol::StatusCode::InvalidField,
-                vec!["automation.target.unsupported".to_owned()]
-            ),
-            "handle {handle}"
-        );
-    }
 }
 
 /// #1552: a live commit that changes a descriptor advances the structure epoch, and one that changes

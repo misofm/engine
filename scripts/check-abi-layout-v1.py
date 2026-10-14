@@ -135,10 +135,6 @@ EXPORTS = [
     "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_live_control_submix_count",
-    "miso_engine_web_v1_live_control_submix_id",
-    "miso_engine_web_v1_live_control_track_count",
-    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -281,6 +277,19 @@ PLAN_WATERMARK_FIELDS = [
     "structSize", "reserved0", "revision", "firstSample", "outcomeFlags", "exactCount",
     "transitionFallbackCount", "supersededCount", "reserved",
 ]
+# The status block (#1349 D2): offset 48 `liveValuesSuperseded` (#1399), then the applied-revision
+# watermark words at 56, 64 and 72, and no reserved word.
+STATUS_FIELDS = [
+    "structSize", "abiVersion", "state", "lastResult", "backend", "sampleRateHz",
+    "quantumFrames", "reserved0", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
+    "watermarkRevision", "watermarkFirstSample", "watermarkOutcomeFlags",
+]
+STATUS_WATERMARK_OFFSETS = {
+    "liveValuesSuperseded": 48,
+    "watermarkRevision": 56,
+    "watermarkFirstSample": 64,
+    "watermarkOutcomeFlags": 72,
+}
 RESPONSE_REQUEST_FIELDS = [
     "structSize", "abiVersion", "target", "grid", "channels", "fields", "quality", "linkMode",
     "bypass", "effectIdBytes", "parameterCount", "points", "sampleRateHz", "quantumFrames",
@@ -478,6 +487,14 @@ def validate(document: object) -> None:
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
+    status_rows = structures["status"]["fields"]
+    require([row["name"] for row in status_rows] == STATUS_FIELDS,
+            f"status names exactly {STATUS_FIELDS}")
+    for row in status_rows:
+        if row["name"] in STATUS_WATERMARK_OFFSETS:
+            require(row["offset"] == STATUS_WATERMARK_OFFSETS[row["name"]]
+                    and row["type"] == "u64",
+                    f"status.{row['name']} is a u64 at {STATUS_WATERMARK_OFFSETS[row['name']]}")
     for name, expected_fields in (
         ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("observationSelection", OBSERVATION_SELECTION_FIELDS),
@@ -628,6 +645,9 @@ def self_test() -> int:
     def drop_watermark_field(document: dict) -> None:
         document["structures"]["planWatermark"]["fields"].pop(2)
 
+    def drop_status_watermark_word(document: dict) -> None:
+        document["structures"]["status"]["fields"].pop()
+
     def drop_spectrum_hop_capability_export(document: dict) -> None:
         export = "miso_engine_web_v1_spectrum_hop_capability"
         try:
@@ -707,6 +727,7 @@ def self_test() -> int:
         ("an export is dropped", drop_export),
         ("the service export is dropped", drop_service_export),
         ("the watermark record omits a field", drop_watermark_field),
+        ("the status omits a watermark word", drop_status_watermark_word),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),

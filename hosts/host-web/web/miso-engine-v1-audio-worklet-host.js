@@ -984,7 +984,7 @@ class MisoAudioWorkletHost {
         : pending.response === "control"
           ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
+          ? ["tag", "requestId", "result", "sources", "metersAttached"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1007,7 +1007,7 @@ class MisoAudioWorkletHost {
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
-          "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
+          "appliedRevision", "appliedSample", "appliedOutcome", "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
@@ -1047,8 +1047,7 @@ class MisoAudioWorkletHost {
       && validU64(message.revision)
     );
     const validSessionMap = pending.response !== "sessionMap" || (
-      message.result === RESULT_OK && Array.isArray(message.tracks)
-      && message.tracks.every((value) => typeof value === "string" && value.length > 0)
+      message.result === RESULT_OK
       // Issue #207: the source list is held to what a *compiled* session can produce -- a nonzero
       // channel count and a nonzero full-source frame count -- so a malformed list fails the host
       // loudly instead of reaching a consumer as plausible numbers.
@@ -1058,10 +1057,6 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
-      // Issue #1210 D3: the submix IDs in canonical order, the order of the meter frame's submix
-      // sections.
-      && Array.isArray(message.submixes)
-      && message.submixes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
@@ -1115,6 +1110,8 @@ class MisoAudioWorkletHost {
       && message.quantumFrames === this.#quantumFrames
       && validU64(message.nextAbsoluteSample) && validU64(message.renderedQuanta)
       && validU64(message.liveValuesSuperseded)
+      && validU64(message.appliedRevision) && validU64(message.appliedSample)
+      && validU64(message.appliedOutcome)
       // The module's memory only grows, and a control call may grow it (counted on the control
       // side, no fault; the worklet re-binds its views), so the live size is the boot size or more,
       // in whole 64 KiB Wasm pages.

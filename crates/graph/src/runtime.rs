@@ -2634,6 +2634,9 @@ pub(crate) struct Runtime {
     /// plan with a silencing route gate or (issue #1220) a live route. `None` otherwise, and every
     /// op then runs as it did before.
     route_activity: Option<Box<RouteActivity>>,
+    /// Issue #1609: the units that hold an observer which accepts `block_end`, in unit order.
+    /// Built at bind by [`block_end_units`]; empty (no allocation) when no observer accepts it.
+    block_end_units: Box<[u32]>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2685,6 +2688,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     output_unit: Option<usize>,
     source_plane_of_buffer: Box<[u32]>,
     route_activity: Option<Box<RouteActivity>>,
+    block_end_units: Box<[u32]>,
 }
 
 pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
@@ -2861,6 +2865,7 @@ impl Runtime {
             })
             .max()
             .unwrap_or(0);
+        let block_end_units = block_end_units(&units);
         Self {
             arena,
             delays: delays.into_boxed_slice(),
@@ -2876,6 +2881,7 @@ impl Runtime {
             output_unit,
             source_plane_of_buffer: Box::default(),
             route_activity: None,
+            block_end_units,
         }
     }
 
@@ -3370,7 +3376,53 @@ impl Runtime {
             }
         }
     }
+
+    /// Tell every observer that accepted it that the block rendered without failure (issue
+    /// #1609), in binding order. Visits only the units bind found to hold such an observer, and
+    /// calls only those observers: an observer that declined pays nothing, and a plan with none
+    /// walks an empty table.
+    pub(crate) fn block_end_observers(&mut self) {
+        for &index in &self.block_end_units {
+            let Some(unit) = self.units.get_mut(index as usize) else {
+                continue;
+            };
+            match unit {
+                RuntimeUnit::Op(op) => {
+                    for observer in &mut op.observers {
+                        if observer.block_end {
+                            observer.observer.block_end();
+                        }
+                    }
+                }
+                RuntimeUnit::Bank { members, .. } => {
+                    for member in members {
+                        for observer in &mut member.observers {
+                            if observer.block_end {
+                                observer.observer.block_end();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // REALTIME_POLICY_END
+}
+
+/// The units that hold an observer whose binding recorded `accepts_block_end` (issue #1609), in
+/// unit order. Bind-time only.
+fn block_end_units(units: &[RuntimeUnit]) -> Box<[u32]> {
+    units
+        .iter()
+        .enumerate()
+        .filter(|(_, unit)| match unit {
+            RuntimeUnit::Op(op) => op.observers.iter().any(|observer| observer.block_end),
+            RuntimeUnit::Bank { members, .. } => members
+                .iter()
+                .any(|member| member.observers.iter().any(|observer| observer.block_end)),
+        })
+        .filter_map(|(index, _)| u32::try_from(index).ok())
+        .collect()
 }
 
 // REALTIME_POLICY_BEGIN
@@ -13521,6 +13573,110 @@ mod tests {
             bits(&storage),
             rendered,
             "the plan's rejection leaves the planes alone"
+        );
+    }
+
+    /// Issue #1609 D4: `block_end` runs once per block that rendered without failure, on the
+    /// observers that accepted it and only those, in binding order; a failed block never runs it.
+    ///
+    /// Red if the call moves before the failure check (the failed block's observer is told), if
+    /// an observer that declined is called, or if the order is not the binding order.
+    #[test]
+    fn block_end_runs_on_accepting_observers_in_binding_order_after_a_good_block_only() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// Counts its `block_end` calls and stamps each with a shared sequence number.
+        struct BlockEnd {
+            accepts: bool,
+            fail_from: u64,
+            sequence: Arc<AtomicU64>,
+            calls: Arc<AtomicU64>,
+            last_stamp: Arc<AtomicU64>,
+        }
+
+        impl crate::GraphRuntimeObserver for BlockEnd {
+            fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                if block.first_sample >= self.fail_from {
+                    return Err(RenderError::InvalidEnvelope);
+                }
+                Ok(())
+            }
+            fn accepts_block_end(&self) -> bool {
+                self.accepts
+            }
+            fn block_end(&mut self) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.last_stamp.store(
+                    self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+                    Ordering::Relaxed,
+                );
+            }
+        }
+
+        const FRAMES: u32 = 13;
+        let frames = FRAMES as usize;
+        let output = GraphNodeId::Output {
+            output_id: crate::StableGraphId::parse("main").expect("output id"),
+        };
+        let published = Published::default();
+        let (plan, mut bindings, _) = fold_fixture_parts(
+            FoldFixture {
+                metered: false,
+                ..FoldFixture::metered(CONSOLE_WIDTH, 64, FRAMES)
+            },
+            &published,
+        );
+        let sequence = Arc::new(AtomicU64::new(0));
+        // Handle order is binding order: first, then the decliner, then second. The second fails
+        // from the second block.
+        let mut probes = Vec::new();
+        for (handle, accepts, fail_from) in
+            [(7, true, u64::MAX), (8, false, u64::MAX), (9, true, 13)]
+        {
+            let calls = Arc::new(AtomicU64::new(0));
+            let last_stamp = Arc::new(AtomicU64::new(0));
+            probes.push((Arc::clone(&calls), Arc::clone(&last_stamp)));
+            bindings.observers.push(GraphNodeObserverBinding::new(
+                output.clone(),
+                handle,
+                Box::new(BlockEnd {
+                    accepts,
+                    fail_from,
+                    sequence: Arc::clone(&sequence),
+                    calls,
+                    last_stamp,
+                }),
+            ));
+        }
+        let (mut executor, _) = bind_executor(plan, bindings, None);
+        let mut storage = vec![0.0_f32; 2 * frames];
+        let mut render = |executor: &mut crate::GraphExecutor, first_sample: u64| {
+            render_host(
+                executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, frames, frames)
+                    .expect("host output"),
+                first_sample,
+            )
+        };
+        render(&mut executor, 0).expect("the first block renders");
+        let calls = |index: usize| probes[index].0.load(Ordering::Relaxed);
+        let stamp = |index: usize| probes[index].1.load(Ordering::Relaxed);
+        assert_eq!(
+            (calls(0), calls(1), calls(2)),
+            (1, 0, 1),
+            "one call each, none to the decliner"
+        );
+        assert!(stamp(0) < stamp(2), "binding order: the lower handle first");
+        assert_eq!(
+            render(&mut executor, u64::from(FRAMES)),
+            Err(RenderError::InvalidEnvelope),
+            "the second block fails in the third observer"
+        );
+        assert_eq!(
+            (calls(0), calls(1), calls(2)),
+            (1, 0, 1),
+            "a failed block runs no block end, on any observer"
         );
     }
 

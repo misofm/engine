@@ -115,3 +115,77 @@ response_get`, `cargo test --locked -p protocol`.
 ## Size
 
 Half a day, one sonnet-high implementer.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Anchors.** Batch 7 changed `control_provider.rs` only in its catalog-staging code
+  (`ModelView`, `verify_stages`). `serve_response` did not change, but its lines moved:
+  `serve_response` is `crates/host-core/src/control_provider.rs:619-784`; the target refusal
+  `:624-629`; `check_response_request` `:646-647`; the session rule `:649-651`; the query's rate
+  and quantum `:738-739`; the reply bound `:748-765`; `SessionControlProvider::response_get`
+  `:838-844`; `response_get_asks_the_core_first_and_names_a_bad_bypass` `:2207`. The controller
+  calls it at `crates/protocol/src/controller.rs:3291-3300`. The `crates/capi/tests/response_get.rs`
+  anchors did not move.
+- **Decisions.** D1-D5 hold. The model still gives only `sample_rate_hz` and `quantum_frames`.
+- **Scope note.** Since the flip, the browser's session runs the same control plane and provider
+  (`control_plane::compile_children`, `ProviderFeatures::ALL` at
+  `crates/control-plane/src/compile.rs:974`). The split therefore also serves the browser's session
+  `RESPONSE_GET`. D4's "same bytes" holds there too; gate 1's harness stays on the C ABI.
+- **Gate 1 base.** "The branch's parent" is now `32cee58d0` or later.
+
+## Decision record: serve a response without a session (batch 8)
+
+Shipped D1-D5 in `crates/host-core/src/control_provider.rs`: `response_preflight` (private; the
+target refusal and `check_response_request`, returns the grid), `serve_checked` (private; the
+limits, bypass rows, preparation, reply bound and curves, unchanged in order and code),
+`serve_response_at` (`pub(crate)`) and `serve_response` as the session wrapper (preflight, then
+`response.rate.session`, then `serve_checked` with the model's rate and quantum). The core reads
+neither `request.sample_rate_hz` nor `request.quantum_frames`.
+
+- **Departure.** Until #1574 calls it, `serve_response_at` has no non-test caller. It carries
+  `#[cfg_attr(not(test), expect(dead_code, ...))]`, so #1574's first use makes the build fail until
+  the attribute is removed. `serve_checked` re-extracts the configuration with a `let ... else`
+  that cannot be reached after the preflight (the target refusal is repeated there only to avoid a
+  panic path); it runs no check the preflight ran.
+- **Gate 1 (C ABI bytes).** A scratch copy of `crates/capi/tests/response_get.rs` (not committed,
+  deleted) wrote every response frame of its five tests (length-prefixed, one file per test,
+  concatenated in file-name order) and hashed them with SHA-256. Base `d402a00d3` (code identical to
+  `32cee58d0`): `3d4d51229c10c806fccbbd61b2c246231f18a2d81a545ff1f65b0e6771eac4f4`, twice (the
+  harness is deterministic). After the change:
+  `3d4d51229c10c806fccbbd61b2c246231f18a2d81a545ff1f65b0e6771eac4f4`. Equal.
+- **Gate 2.** `response_get_asks_the_core_first_and_names_a_bad_bypass` and all five tests of
+  `crates/capi/tests/response_get.rs` pass unchanged.
+- **Gates 3 and 4.** `control_provider::tests::the_core_serves_without_a_session_and_refuses_as_the_session_does`:
+  curves at 44,100 Hz and 128 frames bit-equal to `prepare_response_query`, with a request naming
+  48,000 Hz and 64 frames; `serve_response` on a 44,100 Hz session gives the same curves; the
+  target, point-count and NaN-axis refusals are `response.target.unavailable`, `response.points`
+  and `response.grid` from both functions.
+- Commands: `cargo test --locked -p host-core --all-features`, `cargo test --locked -p capi --test
+  response_get`, `cargo test --locked -p protocol` pass; clippy `-D warnings` on host-core and capi
+  (all targets, all features) is clean.
+
+## Fold (batch 8 review)
+
+- **The dead-code attribute is gone.** `serve_response` now calls `serve_response_at`, so the
+  function is live: `serve_response_at(rate, quantum, max_reply_bytes, request, session)` runs the
+  preflight, then (with `session` true) the rule that a session endpoint refuses a request that
+  names its own rate or quantum (`response.rate.session`), then `serve_checked`. The session path
+  passes the model's rate and quantum and `true`; #1574 passes its resolved rate and quantum and
+  `false`. Departure from D1's signature: one `bool` parameter (an enum would leave one variant
+  unconstructed outside tests, which is the same dead-code warning). Refusal order is unchanged
+  (target, rate, points, override count, axis; then the session rule; then the rest), and no check
+  runs twice.
+- `response_preflight` returns the configuration and the grid, so `serve_checked` takes the
+  configuration and no longer repeats the unreachable target `let ... else`.
+- **Gate 1 again.** Scratch harness (not committed, restored): every response frame the five
+  tests of `crates/capi/tests/response_get.rs` receive from `miso_engine_v1_submit_command`, each
+  written as an 8-byte little-endian length and the frame, one file per test, concatenated in file
+  name order, SHA-256. With `control_provider.rs` of the base `d82de9a9d`:
+  `0b913e21e5d73f5231838ba6f92a8923b331189c6297e7ae34ccb2e207f73f1e`. After the fold:
+  `0b913e21e5d73f5231838ba6f92a8923b331189c6297e7ae34ccb2e207f73f1e`. Equal (byte-compared as
+  well). The earlier digest `3d4d5122...` came from a different framing and is not comparable.
+- **Test.** The existing `the_core_serves_without_a_session_and_refuses_as_the_session_does`
+  gains the session cases: a named rate is `response.rate.session`, and a request that is both
+  named-rate and one-point is `response.points` (the core's checks come first).

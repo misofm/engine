@@ -349,7 +349,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   const host = hostWithCapture({
     control: scriptedControl(),
     async sessionMap() {
-      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] };
+      return { sources: [], metersAttached: false };
     },
     async observationMap() {
       return {

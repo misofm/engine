@@ -3,6 +3,8 @@ import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
+import { readControlStripOrder } from "../core/control-list.ts";
+import type { ControlListTransport, ControlStripOrder } from "../core/control-list.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
@@ -31,6 +33,39 @@ function browserCommand(edit: LaneEdit): MisoCommand {
     parameterId: edit.parameterId ?? 0,
     smoothingSamples: laneEditWord(edit),
     values: [...edit.values],
+  };
+}
+
+/** Post one command frame to the host's `control` message; a call that failed throws. */
+function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
+  return async (frame) => {
+    const reply = await host.control(frame);
+    if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+    return reply.response;
+  };
+}
+
+/**
+ * How the browser engine reads the control list (#1564 D1): the host's `control` message, with the
+ * request IDs of the host's one allocator (the transaction queue's), so no two frames share an ID.
+ */
+export async function createBrowserControlListTransport(
+  host: MisoAudioWorkletHost,
+): Promise<ControlListTransport> {
+  const queue = await createBrowserControlQueue(host);
+  return { send: hostControlSend(host), requestIds: queue.requestIds };
+}
+
+/**
+ * The strip order of the host's running session, read from the core's control list (#1564 D5).
+ * Each call probes the structure epoch and reads the list again only when it differs from the
+ * epoch of the order returned last, so a structure change is followed and nothing is read twice.
+ */
+export function createBrowserStripOrder(host: MisoAudioWorkletHost): () => Promise<ControlStripOrder> {
+  let known: ControlStripOrder | undefined;
+  return async () => {
+    known = await readControlStripOrder(await createBrowserControlListTransport(host), known);
+    return known;
   };
 }
 
@@ -70,11 +105,7 @@ async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<Cont
     return reply;
   };
   const first = await probe();
-  return new ControlTransactionQueue(async (frame) => {
-    const reply = await host.control(frame);
-    if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
-    return reply.response;
-  }, {
+  return new ControlTransactionQueue(hostControlSend(host), {
     initialRevision: first.revision,
     requestIds,
     limits: decodeControlLimits(first.response),
@@ -96,13 +127,17 @@ export async function createBrowserLiveControls(
   booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
   const remoteMap = await host.sessionMap();
+  const queue = await createBrowserControlQueue(host);
+  // The strip order is the core's control list (#1564 D5), not the worklet's index exports: the
+  // map keeps the worklet's sources and meter lease, and takes the tracks and submixes from the
+  // owner headers.
+  const order = await readControlStripOrder({ send: hostControlSend(host), requestIds: queue.requestIds });
   const map: SessionMap = Object.freeze({
-    tracks: Object.freeze([...remoteMap.tracks]),
+    tracks: order.tracks,
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
-    submixes: Object.freeze([...remoteMap.submixes]),
+    submixes: order.submixes,
   });
-  const queue = await createBrowserControlQueue(host);
   return new EngineLiveControls(map, {
     queue,
     observe: async (edits): Promise<CommandReport> => {

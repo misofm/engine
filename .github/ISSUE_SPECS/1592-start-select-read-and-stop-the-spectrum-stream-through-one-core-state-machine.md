@@ -187,3 +187,150 @@ Commands: as #1591's gate list.
 ## Supersedes and shrinks
 
 - None.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Dependencies met.** #1591 merged in batch 6 (`44ff8004c`, review fold `9625fe263`). #1165
+  merged in batch 4 (`e2371f932`): `SpectrumCaptureCollection::select` now moves the old entry's
+  checked cadence to the new entry (`crates/host-core/src/spectrum.rs:997-1012`). The Context
+  bullet on #1165 is history. Gate 2's "holds only with #1165 on `main`" is now unconditional.
+- **`spectrum.rs` anchors** (the file has not changed since batch 6). The single forms keep their
+  lines (`:601`, `:618`, `:665`, `:717`, `:742`, `:757`, `:765`). The rest moved by two lines: the
+  collection forms `:1043`, `:1061`, `:1080`, `:1087`, `:1096`, `:1103`, `:1119`;
+  `begin_continuous(cadence, true)` `:1056`, `:1075`; `SpectrumHop` `:1153`, `SpectrumCadence`
+  `:1176`, `SpectrumContinuousWindow` `:1267`, `SpectrumContinuousReadError` `:1309`,
+  `SpectrumContinuousCaptureError` `:1332`, `SpectrumSmoothingConfig` `:2355`,
+  `SpectrumAnalysisHistory` `:2395` (`reset` `:2423`, `analysis_epoch` `:2435`),
+  `SpectrumAnalysisMetadata` `:2472`, `analyze_continuous` `:2547`.
+- **`hosts/host-web/src/ffi.rs` anchors** (lines moved because the flip deleted code above them):
+  `SpectrumStaging` `:136-165`, which already holds #1591's `analysis: Option<SpectrumAnalysis>`
+  (`:150`); its stream fields `:157-163`; `SpectrumStreamWindowFacts` `:167`;
+  `stream_metadata_profile` `:1105`, `stream_metadata_error` `:1128`,
+  `imported_stream_configuration` `:1153`; `select_spectrum_with_smoothing` `:2826`; the exports
+  `spectrum_stream_select` `:2967`, `_start` `:3026`, `_read` `:3107`, `_analysis` `:3262`,
+  `_analysis_configure` `:3280`, `_reset` `:3306`, `_stop` `:3322`; the stream refusal of
+  `spectrum_cancel` `:3385`; `boot_staged_with_spectrum_hop` `:3753` and
+  `miso_engine_web_v1_boot_with_spectrum_hop` `:3774`.
+- **`hosts/host-web/src/lib.rs` anchors.** The status codes `:251-263`; `WebSpectrumStreamMetadata`
+  `:358`; #1591's result mapping `spectrum_result` `:409`; the host's `spectrum_hop` `:1692`;
+  `start_spectrum_stream` `:2381` (its cadence mapping `:2405-2414`), `restart_spectrum_stream`
+  `:2419`, `read_spectrum_stream` `:2438`, `stop_spectrum_stream` `:2454`,
+  `spectrum_stream_cadence` `:2470`, `spectrum_stream_epoch` `:2480`. The worklet's stream
+  operations are `miso-engine-v1-audio-worklet.js:1345-1411` (select `:1270-1330`); the SDK's
+  analysis instance is `sdk/src/core/spectrum.ts:699-754`, called from
+  `sdk/src/browser/response-worker.ts:109`.
+- **#1591's hand-off ends here.** `SpectrumService::captures_mut` and `end_caller_arm`
+  (`crates/host-core/src/spectrum_service.rs:502-509`) exist for this slice. Today host-web calls
+  `end_caller_arm` after a successful start (`lib.rs:2402-2404`): that is the "the arm was
+  discarded" behaviour that D4 changes. When `start_stream` owns the start, delete
+  `end_caller_arm` and the stream use of `captures_mut`.
+- **Decisions and gates hold.** The slice touches no browser rebuild path, deleted command kind,
+  host mirror or carry-chain code. The flip did not change spectrum behaviour.
+- **Lane.** D7 is host-web code, which only lane W edits (STREAMS.md, controls program, "Lanes").
+  #1565B also edits `lib.rs` and `ffi.rs` in batch 8; the later of the two rebases. The old note
+  "rebase after stream H" reads: stream H's open host-web work is the Worker deployment (batch
+  table, row "later"); whichever of it and this slice lands second rebases.
+
+## Decision record: S29 (batch 8)
+
+**Shipped.** D1-D7 as one state machine in `crates/host-core/src/spectrum_service.rs`.
+`SpectrumService` (now `new(captures, rate, quantum, hop)`, one boxed `SpectrumContinuousWindow`)
+owns `start_stream`, `select_stream`, `read_stream`, `stop_stream`, the metadata, the cadence, the
+last window and the `StreamActive` refusal of `cancel`. `SpectrumAnalysis` owns the history (boxed on
+the first analysis or import), the stream cadence and smoothing, `reset_stream`, `configure_imported`
+and `analyze_stream_into`. host-web keeps its byte buffers, the metadata record, one
+`SpectrumAnalysis` and thin exports (`ffi.rs`: `stream_metadata_of`, `write_stream_metadata`,
+`imported_stream_metadata`, `adopt_imported_stream`). #1591's `captures()`, `captures_mut()` and
+`end_caller_arm` are deleted, as are the host's `spectrum_hop` field, `restart_spectrum_stream` and
+`spectrum_selection_would_change`. D4 holds: a stream start refuses `Busy`
+while the caller's arm stands (`RESULT_BACKPRESSURE` in the browser).
+
+**Departures from the text, and why.**
+- `select_stream`'s `smoothing` is `Option<SpectrumSmoothingConfig>`. The plain `spectrum_select`
+  export, while a stream runs, restarts the stream exactly as the stream select does (the browser's
+  bytes), so it calls `select_stream(.., None, ..)` (`None` keeps the smoothing). To make that the
+  only road, the plain `SpectrumService::select` now refuses `StreamActive` while a stream runs.
+- `stop_stream(&mut self)` has no analysis argument (as the text); the analysis side has
+  `SpectrumAnalysis::end_stream`, which the host-web stop export calls.
+- `analyze_stream_into` takes the window with its own capture facts. The analysis keeps only whether
+  a window is at hand (`has_stream_window`): a reset or an unavailable read clears it, as the old
+  `stream_window = None`.
+- The history is boxed lazily (first `analyze_stream_into` or `configure_imported`), not at
+  `SpectrumAnalysis::new`. With an eager history a stream started after a one-shot analysis would
+  report `analysis_epoch` 1 where the browser reports 0.
+- The audio thread keeps no `SpectrumAnalysis`, so the headless instance, which starts a stream
+  before its analysis exists, is served by `miso_engine_web_v1_spectrum_stream_analysis`: when the
+  analysis does not run the stream and the metadata record is a ready window, it adopts the stream
+  from the record with the import's checks (`adopt_imported_stream`). Without a ready record the
+  answer is `RESULT_WRONG_STATE`. One edge differs from the old code: an analysis export after a
+  `pending` read answered `RESULT_INVALID_ARGUMENT`, and now answers `RESULT_WRONG_STATE`.
+- The metadata record's analysis fields (`analysis_epoch`, `history_start_sample`) are refreshed
+  from the analysis on every service call that takes one, and are 0 without one.
+- The host-side stream window (about 16 KiB) is charged in `spectrum_staging_retained_bytes` and
+  `spectrum_staging_largest_allocation_bytes` for a configured spectrum.
+- Gate 1 uses the fixture's two entries (`eq0` post-input Left, `main-out` Stereo), not the text's
+  post-pan and post-input pair.
+
+**Gates and tests.**
+1. `stream_sequence_one_owner` (crates/host-core/tests/spectrum_service.rs): select, start,
+   warming, pending, ready 0/1/2 at 2,048 spacing, restart on a changed entry and on changed
+   smoothing (history reset, fresh capture epoch), gap with two drops, `StreamActive`, stop, inactive.
+2. `an_explicit_hop_survives_start_and_select`: hop 1,024 spacing before and after `select_stream`.
+3. `a_stream_start_never_discards_a_callers_arm` (core) and
+   `stream_start_refuses_a_callers_arm_on_a_collection` (host-web, the one new browser-parity test).
+4. `imported_metadata_is_checked_and_analyzes_like_the_owner`: 14 malformed fields, each
+   `MetadataInvalid` with no adopted state; an import analyzes bit-equal to the owner.
+5. `stream_calls_allocate_and_free_nothing`: 0 allocations, reallocations and frees for start,
+   select, read, stop and cancel on `bench_support::alloc`'s thread-scoped counters.
+6. Browser parity: host-web `--lib` and integration tests pass; `check-sdk-headless.sh` (463 SDK
+   tests, including the spectrum evals) passes against a rebuilt artifact;
+   `check-web-audioworklet.sh` (callgraph, boot budget, ABI layout) passes. The in-browser
+   qualification rows were not run here.
+- One host-web test is deleted: `failed_stream_metadata_starts_new_epoch_drop_count_at_zero`
+  tested a moved helper; the rule is `SpectrumStreamMetadata::record_outcome`, tested in
+  `spectrum_service::tests::a_failed_window_starts_a_fresh_epoch_with_no_drops`. Host-web tests that
+  read the removed staging stream fields now read the analysis through test helpers.
+- `realtime-policy`: ok, 130 marked regions in 28 files; the two spectrum-service regions now also
+  hold the stream calls.
+
+## Fold (batch 8 review)
+
+Findings m3 and m4, folded in `crates/host-core/src/spectrum_service.rs` and
+`hosts/host-web/src/{ffi,lib}.rs`. The rule: logic the C ABI (#1593/#1595) would repeat lives in
+host-core.
+
+- **m3, moved into the core.**
+  - `SpectrumService::select_target(target, channels, smoothing, analysis) -> Result<bool, _>`
+    chooses between the entry selection and the stream's restarting selection by the stream's
+    state, refuses a smoothing without a running stream (`StreamInactive`) and maps a cadence
+    refusal at a restart to `StreamInactive` (the browser's `RESULT_WRONG_STATE`). It returns
+    whether a running stream restarted. The host's `select_spectrum` and `select_spectrum_stream`
+    become one `select_spectrum_target`; the export holds only the byte parsing and the staging
+    resets. `spectrum_stream_active` (no caller left) is removed.
+  - `SpectrumService::stop_stream(analysis)` ends the analysis of the stream in the same call and
+    refreshes the metadata's analysis facts from it. The stop export no longer calls
+    `end_stream` or writes `STOPPED`: it writes the record from `stream_metadata()` like every other
+    export.
+  - `SpectrumAnalysis::adoption_needed(analysis, metadata)` is the adopt-from-a-ready-record
+    rule: `Ok(false)` when the analysis runs the stream, `StreamInactive` for an inactive or
+    stopped record, `WindowInvalid` for a running stream without a ready window, `Ok(true)` for a
+    ready one. The analysis export keeps only the record-word checks and the byte copy.
+  - The reset export maps its error with `spectrum_result` (the old arm that sent every other
+    error to `RESULT_REFUSED_BUDGET` was the same mapping for the only other error, `Exhausted`)
+    and reads `history_start_sample` from the analysis instead of writing 0.
+- **m4, restored.** The analysis export after a read that left the stream `Pending` (or `Warming`,
+  `Gap`, `Failed`) answers `RESULT_INVALID_ARGUMENT` again, as before #1592; a stopped or
+  never-started stream answers `RESULT_WRONG_STATE`. The departure noted in the decision record
+  above ("now answers `RESULT_WRONG_STATE`") no longer holds.
+- **One departure.** Two refusals that were already wrong together now answer in a different
+  order: a smoothing without a running stream used to be checked before the target ID, kind and
+  channel bytes (`RESULT_WRONG_STATE` before `RESULT_INVALID_ARGUMENT`), and the core cannot see
+  the bytes. A call with both faults answers `RESULT_INVALID_ARGUMENT` first. No state changes in
+  either order.
+- **Tests.** `one_select_and_one_stop_serve_the_entry_and_the_stream` and
+  `adoption_follows_the_metadata_status` (crates/host-core/tests/spectrum_service.rs; red if a
+  host adapter must choose the road, or if the stop leaves the analysis running or the metadata
+  without its facts); `stream_analysis_answers_by_the_stream_state` (host-web `ffi.rs`; red on the
+  m4 answer). The tests that called `stop_stream()` now pass `None`.

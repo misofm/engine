@@ -37,7 +37,7 @@ use super::spsc::{
     plan_mailbox_retained_bytes,
 };
 use super::watermark::{
-    CandidateOutcome, PlanWatermarkReader, WatermarkWriter, plan_watermark,
+    CandidateOutcome, PlanWatermark, PlanWatermarkReader, WatermarkWriter, plan_watermark,
     watermark_retained_bytes,
 };
 use super::{Consumer, GATE_REVISION_MAX, Producer, QueueEmpty, QueueGeneration, SpscError};
@@ -178,6 +178,10 @@ pub struct RealtimeRenderReport {
     pub active_epoch: PlanEpoch,
     /// Inner prepared-plan render report.
     pub render: RenderReport,
+    /// The watermark this block published: `Some` exactly on a block that advanced it (#1314 D3),
+    /// with the values render just wrote; `None` on every other block (#1349 D1). A host copies
+    /// from it and never reads back the record render writes.
+    pub watermark: Option<PlanWatermark>,
 }
 
 /// Boundary metadata for a response capture made from the active realtime plan.
@@ -798,12 +802,13 @@ impl RealtimePlanOwner {
         &mut self,
         io: RenderIo<'_>,
         time: RenderTime,
-    ) -> Result<RenderReport, RenderError> {
+    ) -> Result<(RenderReport, Option<PlanWatermark>), RenderError> {
         match self.active.1.render_inner(io, time) {
             Ok(render) => {
-                self.watermark
+                let watermark = self
+                    .watermark
                     .advance(render.live_snapshot.revision(), time.absolute_sample);
-                Ok(render)
+                Ok((render, watermark))
             }
             Err(failure) => {
                 if failure.after_snapshot {
@@ -840,12 +845,13 @@ impl RealtimePlanOwner {
             if absolute_sample != expected {
                 return Err(RenderError::TimeDiscontinuity { expected });
             }
-            let render = self.render_active(io, RenderTime { absolute_sample })?;
+            let (render, watermark) = self.render_active(io, RenderTime { absolute_sample })?;
             Ok(RealtimeRenderReport {
                 swap,
                 carry,
                 active_epoch,
                 render,
+                watermark,
             })
         })
     }
@@ -859,12 +865,13 @@ impl RealtimePlanOwner {
             // The host's explicit time, not the plan's own clock, is the block's start.
             let (swap, carry) = self.enter_block(time.absolute_sample);
             let active_epoch = self.active.0;
-            let render = self.render_active(io, time)?;
+            let (render, watermark) = self.render_active(io, time)?;
             Ok(RealtimeRenderReport {
                 swap,
                 carry,
                 active_epoch,
                 render,
+                watermark,
             })
         })
     }

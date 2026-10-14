@@ -215,10 +215,11 @@ impl Policy {
             // #1345 D9: the awk gate's 118 regions in 27 files), #1448's `poll_meters` region and
             // #1443's seven (three in `crates/source`, four in `spectrum.rs`) and the spectrum
             // service's two (`spectrum_service.rs`: the prepared captures' one-shot methods and the
-            // service's arm, read, cancel and select; #1591 fold). A change that adds a marker
-            // raises them in the same change.
+            // service's arm, read, cancel and select; #1591 fold) and #1609's one (`spectrum.rs`:
+            // the one-shot render functions and the held-window publication). A change that adds
+            // a marker raises them in the same change.
             marked_files_floor: 28,
-            marked_regions_floor: 128,
+            marked_regions_floor: 129,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

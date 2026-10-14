@@ -203,7 +203,7 @@ that no launch effect declares `AutomationRate::None`; they are stale, since fou
   - **`AUTOMATION_ENQUEUE`** is admitted and acked for `Block`-rate parameters but reaches no PCM on
     any host (`docs/CONTROL_PROTOCOL_SEMANTICS.md:15`; decision 13's DESIGN R8). It refuses
     `AutomationRate::None` (`crates/protocol/src/controller.rs:3347-3351`), which agrees with
-    rule 4. Refusing it as unavailable is audit row IO-5 of the open #349 tracker.
+    rule 4. Refusing it as unavailable is audit row IO-5 of the open #349 tracker. Met by #1315: both hosts refuse it `UNAVAILABLE` and no longer advertise it.
 - **Known gap: plan swaps are not seamless on either host.** Under C2, value changes stay live
   even after swaps become seamless, so the gap matters only for structural edits.
 

@@ -114,3 +114,12 @@ Commands: `cargo test --locked -p protocol -p host-core -p control-plane --featu
 ## Supersedes and shrinks
 
 - None beyond #1566's line on #1315.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Since #1315 (batch 8), both hosts build their controller without the `automation` provider
+feature and refuse `AUTOMATION_ENQUEUE` `UNAVAILABLE` before any check; command `0x0006` is not
+advertised. This slice's address table and domain check are therefore reachable only through the
+protocol crate's controller with the feature enabled (as `controller::tests` does), not through
+either host, until the render-side automation drain (#1058) sets the feature. Gates that drive a
+host test the refusal; the address and domain gates run on the protocol controller.

@@ -703,6 +703,37 @@ mod tests {
             assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
         }
 
+        /// #1349 gate 2: a block's report carries the watermark exactly when the block advanced
+        /// it, with the values render just published, and carries nothing on any other block.
+        #[test]
+        fn the_render_report_carries_the_watermark_only_on_the_advancing_block() {
+            let (_gate, mut publisher, mut realtime, _retirer) = exchange_at(1);
+            assert_eq!(block(&mut realtime, 0).watermark, None);
+            assert_eq!(block(&mut realtime, 1).watermark, None);
+
+            let mut live = publish_at(&mut publisher, 2, 5);
+            let adopted = block(&mut realtime, 2);
+            assert_eq!(adopted.swap, SwapOutcome::Applied);
+            assert_eq!(adopted.watermark, Some(read(&publisher)));
+            assert_eq!(
+                adopted
+                    .watermark
+                    .map(|w| (w.revision, w.first_sample, w.outcome_flags)),
+                Some((5, 2 * QUANTUM, OUTCOME_EXACT))
+            );
+            assert_eq!(block(&mut realtime, 3).watermark, None);
+
+            live.publish(6);
+            let edited = block(&mut realtime, 4);
+            assert_eq!(edited.swap, SwapOutcome::None);
+            assert_eq!(edited.watermark, Some(read(&publisher)));
+            assert_eq!(
+                edited.watermark.map(|w| (w.revision, w.first_sample)),
+                Some((6, 4 * QUANTUM))
+            );
+            assert_eq!(block(&mut realtime, 5).watermark, None);
+        }
+
         /// #1314 gate 4 on plan gates: a candidate's `superseded` count and its outcome complete
         /// once, at the first advance after its claim, and a withdrawn candidate takes its outcome
         /// with it.

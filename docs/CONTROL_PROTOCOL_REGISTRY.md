@@ -8,6 +8,8 @@ This freezes the semantic registry referenced by [the wire specification](CONTRO
 | --- | --- |
 | `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
 
+Command `0006` and capability flag bit 5 are advertised together and only by an endpoint that serves automation. The control plane both hosts build serves none (#1315): `AUTOMATION_ENQUEUE` is refused `UNAVAILABLE`, `CAPABILITIES_GET` lists no `0006` and clears bit 5, and event `8002` stays listed with the session family (the wire rule ties it to `8001`).
+
 Message IDs `0004` (parameter metadata get) and `0005` (parameter state get) are **retired** by decision 17 (C4, #1551): the decoder refuses them as `UNSUPPORTED_MESSAGE`, no capability registry lists them, and they are never reallocated (`RETIRED_MESSAGE_IDS`; a conformance row pins each). `CONTROL_LIST_GET` and `CONTROL_STATE_GET` replace them.
 
 Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupported message, `4` unknown required field, `5` invalid field, `6` limit exceeded, `7` revision conflict, `8` revision exhausted, `9` request ID reuse, `10` replay expired, `11` backpressure, `12` validation failed, `13` not found, `14` unavailable, `15` time in past, `16` automation order, `17` PCM forbidden, `18` internal.

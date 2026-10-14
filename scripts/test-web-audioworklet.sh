@@ -323,7 +323,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
   "$map_dir/hosts/host-web/web/"
 session_map_mutations=(
-  'miso-engine-v1-audio-worklet-host.js|s/"result", "tracks", "sources", "metersAttached"/"result", "tracks", "metersAttached"/'
+  'miso-engine-v1-audio-worklet-host.js|s/"result", "sources", "metersAttached"/"result", "metersAttached"/'
   'miso-engine-v1-audio-worklet-host.d.ts|s/  readonly frames: bigint;/  readonly frames: number;/'
 )
 for entry in "${session_map_mutations[@]}"; do

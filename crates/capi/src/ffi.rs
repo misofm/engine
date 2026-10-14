@@ -897,7 +897,7 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
                 }
             };
         match state.render(absolute_sample, render_output) {
-            Ok(()) => {
+            Ok(_) => {
                 // The control plane scans the two planes for an armed observer (#163 phase 4
                 // item 2) and publishes the block's activity.
                 //

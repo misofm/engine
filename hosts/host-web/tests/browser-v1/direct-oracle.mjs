@@ -47,8 +47,10 @@ function status(exports, handle) {
   assert.equal(view.getUint32(4, true), ABI_VERSION);
   assert.equal(view.getUint32(28, true), 0);
   // Word 48 is `live_values_superseded` (#1399): a script that replaces a live value render has
-  // not read counts it, so it is not required zero. Words 56, 64 and 72 are still reserved.
-  for (const offset of [56, 64, 72]) assert.equal(view.getBigUint64(offset, true), 0n);
+  // not read counts it, so it is not required zero. Words 56, 64 and 72 are the applied-revision
+  // watermark (#1349 D2): its revision, first sample and outcome flags. They move with every
+  // committed edit, so no zero is required of them either; the timeline reads them where it
+  // needs them.
   return {
     state: view.getUint32(8, true),
     lastResult: view.getUint32(12, true),
@@ -313,7 +315,6 @@ async function runSetControlTimeline(modulePath, sessionDocument, sourceId, fram
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
   const handle = boot(exports, sessionDocument);
-  assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
   assert.equal(exports.miso_engine_web_v1_control_revision(handle), 1n);
 
   // `control_command` is control work: its allocations are the instance's counted control
@@ -380,7 +381,6 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   const handle = boot(exports, sessionDocument, [
     0n, BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
-  assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
   const resourceReport = resources(exports, handle);
   assert.equal(
     resourceReport.observationRetainedBytes === "0",

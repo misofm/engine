@@ -7,13 +7,13 @@ use host_core::{
     SPECTRUM_FLOOR_DB, SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES,
     SPECTRUM_TARGET_OUTPUT, SPECTRUM_WINDOW_FRAMES, SourceControlSet, SourceSubmission,
     SpectrumAnalysis, SpectrumAnalysisResult, SpectrumAnalyzer, SpectrumCaptureCollectionEntry,
-    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels, SpectrumOutput,
-    SpectrumPreparation, SpectrumRequestError, SpectrumService, SpectrumServiceError,
-    SpectrumSnapshot, SpectrumTarget, SpectrumTargetRef, StartedRenderSession,
-    compile_host_session, prepare_host_runtime_with_spectrum,
-    prepare_host_runtime_with_spectrum_collection, spectrum_capture_collection_resources,
-    spectrum_capture_resources_for, spectrum_channels_from_raw, spectrum_target_kind,
-    spectrum_target_ref,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels, SpectrumHop,
+    SpectrumOutput, SpectrumPreparation, SpectrumRequestError, SpectrumService,
+    SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata, SpectrumStreamStatus,
+    SpectrumTarget, SpectrumTargetRef, StartedRenderSession, compile_host_session,
+    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
+    spectrum_capture_collection_resources, spectrum_capture_resources_for,
+    spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind, spectrum_target_ref,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -120,6 +120,7 @@ fn single_service(channels: SpectrumChannels) -> (Rig, SpectrumService) {
             PreparedSpectrumCaptures::from(capture),
             SAMPLE_RATE_HZ,
             QUANTUM as u32,
+            None,
         ),
     )
 }
@@ -128,6 +129,10 @@ const TRACK: SpectrumTargetRef<'static> = SpectrumTargetRef::TrackPostInputBuilt
 const OUTPUT: SpectrumTargetRef<'static> = SpectrumTargetRef::Output("main-out");
 
 fn collection_service() -> (Rig, SpectrumService) {
+    collection_service_with_hop(None)
+}
+
+fn collection_service_with_hop(hop: Option<SpectrumHop>) -> (Rig, SpectrumService) {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let entries = vec![
         SpectrumCaptureCollectionEntry {
@@ -155,6 +160,7 @@ fn collection_service() -> (Rig, SpectrumService) {
             PreparedSpectrumCaptures::from(capture),
             SAMPLE_RATE_HZ,
             QUANTUM as u32,
+            hop,
         ),
     )
 }
@@ -332,7 +338,7 @@ fn single_one_shot_sequence() {
     }
 
     service.arm().expect("arm");
-    service.cancel();
+    service.cancel().unwrap();
     assert_eq!(
         service.read(SpectrumChannels::Right).unwrap_err(),
         SpectrumServiceError::NotArmed
@@ -441,9 +447,9 @@ fn a_callers_arm_is_never_discarded_by_select() {
 
     // A cancel ends the caller's claim.
     service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
-    service.cancel();
+    service.cancel().unwrap();
     service.arm().unwrap();
-    service.cancel();
+    service.cancel().unwrap();
     assert_eq!(service.select(TRACK, SpectrumChannels::Left), Ok(true));
 }
 
@@ -590,7 +596,7 @@ fn control_calls_allocate_and_free_nothing() {
     rig.window();
     let _ = read(&mut service, SpectrumChannels::Left);
     service.arm().unwrap();
-    service.cancel();
+    service.cancel().unwrap();
     rig.window();
 
     service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
@@ -614,7 +620,7 @@ fn control_calls_allocate_and_free_nothing() {
         service.read(SpectrumChannels::Left).map(|s| s.is_some()),
         Ok(false)
     );
-    service.cancel();
+    service.cancel().unwrap();
     assert_eq!(service.select(TRACK, SpectrumChannels::Left), Ok(true));
     let delta = bench_alloc::current_thread_delta_since(mark);
     assert!(seen > 1);
@@ -622,5 +628,591 @@ fn control_calls_allocate_and_free_nothing() {
         (delta.allocations, delta.reallocations, delta.deallocations),
         (0, 0, 0),
         "arm, read, cancel and select allocated or freed"
+    );
+}
+
+// ---- The continuous stream (issue #1592) ----
+
+const OUTPUT_KIND: u32 = SPECTRUM_TARGET_OUTPUT;
+const INPUT_KIND: u32 = 1;
+const HOP: u64 = SPECTRUM_WINDOW_FRAMES as u64;
+
+fn smoothing(ms: f64) -> host_core::SpectrumSmoothingConfig {
+    spectrum_smoothing(ms).expect("smoothing in range")
+}
+
+fn metadata(service: &SpectrumService) -> SpectrumStreamMetadata {
+    *service.stream_metadata()
+}
+
+/// Read the stream once and return its metadata.
+fn read_stream(
+    service: &mut SpectrumService,
+    analysis: &mut Option<SpectrumAnalysis>,
+) -> SpectrumStreamMetadata {
+    service.read_stream(analysis.as_mut()).expect("read");
+    metadata(service)
+}
+
+/// Gate 1. Turns red if a status, an epoch or a history reset moves to a different call than the
+/// browser's: warming, pending, ready with its sequence and hop spacing, a restart on a changed
+/// entry or smoothing, a gap with its drops, the cancel refusal and the stop.
+#[test]
+fn stream_sequence_one_owner() {
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = Some(SpectrumAnalysis::new());
+    assert_eq!(
+        service
+            .select_stream(OUTPUT, SpectrumChannels::Stereo, None, analysis.as_mut())
+            .unwrap_err(),
+        SpectrumServiceError::StreamInactive
+    );
+    assert_eq!(service.select(OUTPUT, SpectrumChannels::Stereo), Ok(true));
+    service
+        .start_stream(smoothing(100.0), analysis.as_mut())
+        .expect("start");
+    assert!(service.stream_active());
+    assert_eq!(
+        service
+            .start_stream(smoothing(100.0), analysis.as_mut())
+            .unwrap_err(),
+        SpectrumServiceError::Busy,
+        "a stream already runs"
+    );
+    assert_eq!(
+        service.select(TRACK, SpectrumChannels::Left),
+        Err(SpectrumServiceError::StreamActive),
+        "a running stream selects through select_stream"
+    );
+    assert_eq!(service.selection_epoch(), 1);
+    let started = metadata(&service);
+    assert_eq!(started.status, SpectrumStreamStatus::Warming);
+    assert_eq!(started.target_kind, OUTPUT_KIND);
+    assert_eq!(started.channels, 3);
+    assert_eq!(
+        (started.sample_rate_hz, started.quantum_frames),
+        (48_000, 128)
+    );
+    assert_eq!(started.hop_frames, 2_048);
+    assert_eq!(started.capture_epoch, 1);
+    assert_eq!(started.smoothing_ms, 100.0);
+    assert_eq!(started.analysis_epoch, 0);
+
+    assert_eq!(
+        read_stream(&mut service, &mut analysis).status,
+        SpectrumStreamStatus::Warming
+    );
+    rig.block();
+    assert_eq!(
+        read_stream(&mut service, &mut analysis).status,
+        SpectrumStreamStatus::Pending
+    );
+    for _ in 1..BLOCKS_PER_WINDOW {
+        rig.block();
+    }
+    let mut out = SpectrumAnalysisResult::new();
+    for sequence in 0..3_u64 {
+        let ready = read_stream(&mut service, &mut analysis);
+        assert_eq!(ready.status, SpectrumStreamStatus::Ready);
+        assert_eq!(ready.sequence, sequence);
+        assert_eq!(ready.windows, sequence + 1);
+        assert_eq!(ready.captured_sample, sequence * HOP, "default hop spacing");
+        assert_eq!(
+            ready.end_sample,
+            sequence * HOP + SPECTRUM_WINDOW_FRAMES as u64
+        );
+        assert_eq!(ready.capture_epoch, 1);
+        let window = *service.stream_window().expect("a ready window");
+        assert_eq!(window.first_sample, ready.captured_sample);
+        let mut analyzed = ready;
+        analysis
+            .as_mut()
+            .unwrap()
+            .analyze_stream_into(&window, &mut out, &mut analyzed)
+            .expect("analyzes");
+        assert_eq!(analyzed.analysis_epoch, 0, "one history across the epoch");
+        assert_eq!(analyzed.history_start_sample, 0);
+        assert_eq!(out.token, sequence + 1);
+        rig.window();
+    }
+    assert!(analysis.as_ref().unwrap().has_stream_history());
+
+    // A new entry restarts the capture and resets the history at one commit.
+    assert_eq!(service.selection_epoch(), 1);
+    let _ = read_stream(&mut service, &mut analysis);
+    assert_eq!(
+        service.select_stream(TRACK, SpectrumChannels::Right, None, analysis.as_mut()),
+        Err(SpectrumServiceError::UnknownEntry)
+    );
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Ready);
+    assert_eq!(
+        service.select_stream(
+            OUTPUT,
+            SpectrumChannels::Stereo,
+            Some(smoothing(100.0)),
+            analysis.as_mut()
+        ),
+        Ok(false),
+        "the same entry and smoothing change nothing"
+    );
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Ready);
+    let before = metadata(&service);
+    assert_eq!(
+        service.select_stream(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(100.0)),
+            analysis.as_mut()
+        ),
+        Ok(true)
+    );
+    assert_eq!(service.selection_epoch(), 2);
+    let switched = metadata(&service);
+    assert_eq!(switched.status, SpectrumStreamStatus::Warming);
+    assert_eq!(switched.target_kind, INPUT_KIND);
+    assert_eq!(switched.channels, 1);
+    assert_eq!(
+        switched.capture_epoch, 1,
+        "each entry counts its own epochs"
+    );
+    assert_ne!(switched.capture_epoch, 0);
+    let _ = before;
+    assert_eq!(switched.analysis_epoch, 1, "the history reset");
+    assert_eq!(switched.history_start_sample, 0);
+    assert_eq!((switched.sequence, switched.windows), (0, 0));
+    assert!(service.stream_window().is_none());
+    rig.window();
+    let after_switch = read_stream(&mut service, &mut analysis);
+    assert_eq!(after_switch.status, SpectrumStreamStatus::Ready);
+    assert_eq!(
+        after_switch.target_kind, INPUT_KIND,
+        "the next window is the new entry's"
+    );
+    assert_eq!(after_switch.sequence, 0);
+    assert_eq!(
+        service.stream_window().unwrap().channels,
+        SpectrumChannels::Left
+    );
+
+    // The same entry with other smoothing restarts the capture epoch.
+    assert_eq!(
+        service.select_stream(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(50.0)),
+            analysis.as_mut()
+        ),
+        Ok(true)
+    );
+    let restarted = metadata(&service);
+    assert_eq!(restarted.capture_epoch, after_switch.capture_epoch + 1);
+    assert_eq!(restarted.analysis_epoch, 2);
+    assert_eq!(restarted.smoothing_ms, 50.0);
+    assert_eq!(service.selection_epoch(), 2, "the entry did not change");
+    assert_eq!(
+        analysis.as_ref().unwrap().stream_smoothing(),
+        Some(smoothing(50.0))
+    );
+
+    // Three hops that nobody reads: the queue drops two and the read reports a gap.
+    for _ in 0..3 {
+        rig.window();
+    }
+    let gap = read_stream(&mut service, &mut analysis);
+    assert_eq!(gap.status, SpectrumStreamStatus::Gap);
+    assert_eq!(gap.dropped_captures, 2);
+    assert_eq!(gap.analysis_epoch, 3, "a gap resets the history");
+    assert!(service.stream_window().is_none());
+    let recovered = read_stream(&mut service, &mut analysis);
+    assert_eq!(
+        recovered.status,
+        SpectrumStreamStatus::Ready,
+        "one window recovers the stream"
+    );
+
+    assert_eq!(service.cancel(), Err(SpectrumServiceError::StreamActive));
+    service.stop_stream(None);
+    assert!(!service.stream_active());
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Stopped);
+    assert!(service.stream_window().is_none());
+    assert_eq!(
+        read_stream(&mut service, &mut analysis).status,
+        SpectrumStreamStatus::Inactive
+    );
+    service.cancel().expect("a stopped stream may cancel");
+}
+
+/// Gate 2. Turns red if the service starts or switches a stream with the default cadence when the
+/// preparation named a hop.
+#[test]
+fn an_explicit_hop_survives_start_and_select() {
+    let hop = SpectrumHop::new(1_024).unwrap();
+    let (mut rig, mut service) = collection_service_with_hop(Some(hop));
+    let mut analysis = None;
+    assert_eq!(service.hop(), Some(hop));
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service.start_stream(smoothing(0.0), None).unwrap();
+    assert_eq!(metadata(&service).hop_frames, 1_024);
+    for _ in 0..BLOCKS_PER_WINDOW {
+        rig.block();
+    }
+    let first = read_stream(&mut service, &mut analysis);
+    assert_eq!(first.status, SpectrumStreamStatus::Ready);
+    for _ in 0..BLOCKS_PER_WINDOW / 2 {
+        rig.block();
+    }
+    let second = read_stream(&mut service, &mut analysis);
+    assert_eq!(second.captured_sample - first.captured_sample, 1_024);
+
+    assert_eq!(
+        service.select_stream(TRACK, SpectrumChannels::Left, None, None),
+        Ok(true)
+    );
+    assert_eq!(service.stream_cadence().unwrap().hop_frames(), 1_024);
+    assert_eq!(metadata(&service).hop_frames, 1_024);
+    for _ in 0..BLOCKS_PER_WINDOW {
+        rig.block();
+    }
+    let third = read_stream(&mut service, &mut analysis);
+    assert_eq!(third.status, SpectrumStreamStatus::Ready, "{third:?}");
+    for _ in 0..BLOCKS_PER_WINDOW / 2 {
+        rig.block();
+    }
+    let fourth = read_stream(&mut service, &mut analysis);
+    assert_eq!(fourth.status, SpectrumStreamStatus::Ready, "{fourth:?}");
+    assert_eq!(
+        fourth.captured_sample - third.captured_sample,
+        1_024,
+        "the switched entry keeps the hop"
+    );
+}
+
+/// Gate 3. Turns red if a stream start discards a caller's arm, or no longer replaces a
+/// select-made arm.
+#[test]
+fn a_stream_start_never_discards_a_callers_arm() {
+    let (mut rig, mut service) = collection_service();
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service
+        .start_stream(smoothing(0.0), None)
+        .expect("a select-made arm is replaced");
+    service.stop_stream(None);
+    service.cancel().unwrap();
+    service.arm().unwrap();
+    assert_eq!(
+        service.start_stream(smoothing(0.0), None).unwrap_err(),
+        SpectrumServiceError::Busy
+    );
+    assert!(!service.stream_active());
+    rig.window();
+    let snapshot = read(&mut service, SpectrumChannels::Stereo);
+    assert_eq!(snapshot.token, 1, "the armed window still reads");
+    service
+        .start_stream(smoothing(0.0), None)
+        .expect("the read ended the caller's claim");
+    service.stop_stream(None);
+
+    let (_rig, mut single) = single_service(SpectrumChannels::Left);
+    single.arm().unwrap();
+    assert_eq!(
+        single.start_stream(smoothing(0.0), None).unwrap_err(),
+        SpectrumServiceError::Busy
+    );
+    single.cancel().unwrap();
+    single
+        .start_stream(smoothing(0.0), None)
+        .expect("an idle single starts");
+    assert_eq!(single.cancel(), Err(SpectrumServiceError::StreamActive));
+}
+
+fn ready_stream() -> (Rig, SpectrumService, SpectrumAnalysis) {
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = SpectrumAnalysis::new();
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service
+        .start_stream(smoothing(100.0), Some(&mut analysis))
+        .unwrap();
+    rig.window();
+    service.read_stream(Some(&mut analysis)).unwrap();
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Ready);
+    (rig, service, analysis)
+}
+
+/// Gate 4. Turns red if the analysis instance accepts metadata that the one-owner path would never
+/// write, leaves a partly adopted configuration behind a refusal, or analyzes an imported window
+/// differently from the one-owner result.
+#[test]
+fn imported_metadata_is_checked_and_analyzes_like_the_owner() {
+    let (mut rig, service, mut owner) = ready_stream();
+    let valid = metadata(&service);
+    let window = *service.stream_window().unwrap();
+    let mut owner_out = SpectrumAnalysisResult::new();
+    let mut owner_metadata = valid;
+    owner
+        .analyze_stream_into(&window, &mut owner_out, &mut owner_metadata)
+        .unwrap();
+
+    let mut worker = SpectrumAnalysis::new();
+    assert!(!worker.stream_active());
+    worker.configure_imported(&valid).expect("a valid import");
+    assert!(worker.stream_active() && worker.has_stream_history());
+    let mut worker_out = SpectrumAnalysisResult::new();
+    let mut worker_metadata = valid;
+    worker
+        .analyze_stream_into(&window, &mut worker_out, &mut worker_metadata)
+        .unwrap();
+    assert_eq!(worker_out, owner_out);
+    assert_eq!(worker_metadata, owner_metadata);
+
+    // Each malformed field is refused and leaves the adopted state alone.
+    type Mutation = fn(&mut SpectrumStreamMetadata);
+    let cases: [(&str, Mutation); 14] = [
+        ("status", |m| m.status = SpectrumStreamStatus::Pending),
+        ("kind 0", |m| m.target_kind = 0),
+        ("kind 4", |m| m.target_kind = 4),
+        ("channels 0", |m| m.channels = 0),
+        ("channels 4", |m| m.channels = 4),
+        ("epoch 0", |m| m.capture_epoch = 0),
+        ("windows", |m| m.windows += 1),
+        ("sequence overflow", |m| m.sequence = u64::MAX),
+        ("end sample", |m| m.end_sample += 1),
+        ("rate", |m| m.sample_rate_hz = 32_000),
+        ("quantum", |m| m.quantum_frames = 0),
+        ("hop", |m| m.hop_frames = 300),
+        ("smoothing nan", |m| m.smoothing_ms = f64::NAN),
+        ("smoothing high", |m| m.smoothing_ms = 10_001.0),
+    ];
+    let state = |a: &SpectrumAnalysis| {
+        (
+            a.stream_active(),
+            a.stream_cadence(),
+            a.stream_smoothing(),
+            a.analysis_epoch(),
+            a.history_start_sample(),
+            a.has_stream_history(),
+        )
+    };
+    let before = state(&worker);
+    let mut fresh = SpectrumAnalysis::new();
+    for (name, mutate) in cases {
+        let mut bad = valid;
+        mutate(&mut bad);
+        assert_eq!(
+            worker.configure_imported(&bad),
+            Err(SpectrumServiceError::MetadataInvalid),
+            "{name}"
+        );
+        assert_eq!(state(&worker), before, "{name}: an adopted state changed");
+        assert_eq!(
+            fresh.configure_imported(&bad),
+            Err(SpectrumServiceError::MetadataInvalid),
+            "{name}"
+        );
+        assert!(
+            !fresh.stream_active() && !fresh.has_stream_history(),
+            "{name}: a refused import adopted state"
+        );
+    }
+
+    // An analysis that was reset, or never fed a window, refuses.
+    worker.reset_stream().unwrap();
+    assert_eq!(worker.analysis_epoch(), 1);
+    let mut kept = SpectrumAnalysisResult::new();
+    assert_eq!(
+        worker.analyze_stream_into(&window, &mut kept, &mut worker_metadata),
+        Err(SpectrumServiceError::WindowInvalid)
+    );
+    assert_eq!(kept, SpectrumAnalysisResult::new());
+    worker.end_stream();
+    assert_eq!(
+        worker.reset_stream(),
+        Err(SpectrumServiceError::StreamInactive)
+    );
+    assert_eq!(
+        worker.analyze_stream_into(&window, &mut kept, &mut worker_metadata),
+        Err(SpectrumServiceError::StreamInactive)
+    );
+    rig.window();
+}
+
+/// Gate 5. Turns red if the moved stream code allocates or frees on the browser's audio thread:
+/// the capture-side calls run in render-locked exports with no analysis.
+#[test]
+fn stream_calls_allocate_and_free_nothing() {
+    let (mut rig, mut service) = collection_service();
+    bench_alloc::assert_installed();
+    let cycle = |rig: &mut Rig, service: &mut SpectrumService| -> u64 {
+        let mut seen = 0_u64;
+        service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+        service.start_stream(smoothing(100.0), None).unwrap();
+        seen += u64::from(service.stream_window().is_none());
+        service.read_stream(None).unwrap();
+        for _ in 0..2 {
+            rig.window();
+        }
+        service.read_stream(None).unwrap();
+        seen += service
+            .stream_window()
+            .map_or(0, |window| window.sequence + 1);
+        assert_eq!(
+            service.select_stream(TRACK, SpectrumChannels::Left, Some(smoothing(50.0)), None),
+            Ok(true)
+        );
+        assert_eq!(
+            service.select_stream(TRACK, SpectrumChannels::Left, Some(smoothing(10.0)), None),
+            Ok(true)
+        );
+        assert_eq!(service.cancel(), Err(SpectrumServiceError::StreamActive));
+        assert_eq!(
+            service.start_stream(smoothing(0.0), None),
+            Err(SpectrumServiceError::Busy)
+        );
+        for _ in 0..3 {
+            rig.window();
+        }
+        service.read_stream(None).unwrap();
+        service.read_stream(None).unwrap();
+        service.stop_stream(None);
+        service.cancel().unwrap();
+        seen + u64::from(service.stream_cadence().is_none())
+    };
+    // Warm up one full cycle so every process static is initialized.
+    let _ = cycle(&mut rig, &mut service);
+    let mark = bench_alloc::current_thread_counters();
+    let seen = cycle(&mut rig, &mut service);
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert!(seen > 1);
+    assert_eq!(
+        (delta.allocations, delta.reallocations, delta.deallocations),
+        (0, 0, 0),
+        "start, select, read, stop or cancel allocated or freed"
+    );
+}
+
+/// Fold (batch 8 review). Turns red if the one target select stops choosing the road by the
+/// stream's state (a host adapter would have to repeat that choice), if a smoothing without a
+/// running stream changes the selection, or if the stop leaves the analysis running or the
+/// metadata without the analysis facts.
+#[test]
+fn one_select_and_one_stop_serve_the_entry_and_the_stream() {
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = Some(SpectrumAnalysis::new());
+    // No stream: the plain entry selection; a smoothing has no stream to change.
+    assert_eq!(
+        service.select_target(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(50.0)),
+            analysis.as_mut()
+        ),
+        Err(SpectrumServiceError::StreamInactive)
+    );
+    assert_eq!(service.selection_epoch(), 0, "a refusal changed the entry");
+    assert_eq!(
+        service.select_target(OUTPUT, SpectrumChannels::Stereo, None, analysis.as_mut()),
+        Ok(false)
+    );
+    assert_eq!(service.selection_epoch(), 1);
+    // A stream: the restarting selection; the same entry is no restart.
+    service
+        .start_stream(smoothing(100.0), analysis.as_mut())
+        .expect("start");
+    assert_eq!(
+        service.select_target(OUTPUT, SpectrumChannels::Stereo, None, analysis.as_mut()),
+        Ok(false)
+    );
+    assert_eq!(
+        service.select_target(TRACK, SpectrumChannels::Left, None, analysis.as_mut()),
+        Ok(true)
+    );
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Warming);
+    assert_eq!(metadata(&service).target_kind, INPUT_KIND);
+    assert_eq!(
+        service.select_target(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(10.0)),
+            analysis.as_mut()
+        ),
+        Ok(true),
+        "a changed smoothing restarts the stream"
+    );
+    assert_eq!(metadata(&service).smoothing_ms, 10.0);
+    // The stop ends the analysis with the service, and the metadata carries its facts.
+    let mut ready = metadata(&service);
+    for _ in 0..4 {
+        rig.window();
+        ready = read_stream(&mut service, &mut analysis);
+        if ready.status == SpectrumStreamStatus::Ready {
+            break;
+        }
+    }
+    assert_eq!(ready.status, SpectrumStreamStatus::Ready);
+    let window = *service.stream_window().expect("ready window");
+    let (mut out, mut facts) = (SpectrumAnalysisResult::new(), ready);
+    analysis
+        .as_mut()
+        .unwrap()
+        .analyze_stream_into(&window, &mut out, &mut facts)
+        .expect("analysis");
+    assert!(analysis.as_ref().unwrap().has_stream_history());
+    service.stop_stream(analysis.as_mut());
+    let stopped = metadata(&service);
+    assert_eq!(stopped.status, SpectrumStreamStatus::Stopped);
+    let owned = analysis.as_ref().unwrap();
+    assert!(!owned.stream_active());
+    assert_eq!(stopped.analysis_epoch, owned.analysis_epoch());
+    assert_eq!(stopped.history_start_sample, owned.history_start_sample());
+    assert_eq!(stopped.history_start_sample, facts.history_start_sample);
+    assert_eq!(stopped.analysis_epoch, facts.analysis_epoch);
+}
+
+/// Fold (batch 8 review). Turns red if an instance that owns both halves of a stream adopts a
+/// window the metadata does not describe as ready, or reports a stopped or never-started stream
+/// as a missing window (the browser answers the first as invalid input, the second as a wrong
+/// state).
+#[test]
+fn adoption_follows_the_metadata_status() {
+    let with = |status| SpectrumStreamMetadata {
+        status,
+        ..SpectrumStreamMetadata::default()
+    };
+    for status in [
+        SpectrumStreamStatus::Inactive,
+        SpectrumStreamStatus::Stopped,
+    ] {
+        assert_eq!(
+            SpectrumAnalysis::adoption_needed(None, &with(status)),
+            Err(SpectrumServiceError::StreamInactive),
+            "{status:?}"
+        );
+    }
+    for status in [
+        SpectrumStreamStatus::Warming,
+        SpectrumStreamStatus::Pending,
+        SpectrumStreamStatus::Gap,
+        SpectrumStreamStatus::Failed,
+    ] {
+        assert_eq!(
+            SpectrumAnalysis::adoption_needed(Some(&SpectrumAnalysis::new()), &with(status)),
+            Err(SpectrumServiceError::WindowInvalid),
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        SpectrumAnalysis::adoption_needed(None, &with(SpectrumStreamStatus::Ready)),
+        Ok(true)
+    );
+    // An analysis that runs the stream never adopts, whatever the record says.
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = Some(SpectrumAnalysis::new());
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service
+        .start_stream(smoothing(100.0), analysis.as_mut())
+        .unwrap();
+    rig.window();
+    assert_eq!(
+        SpectrumAnalysis::adoption_needed(analysis.as_ref(), &with(SpectrumStreamStatus::Pending)),
+        Ok(false)
     );
 }

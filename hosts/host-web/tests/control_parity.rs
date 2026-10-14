@@ -1218,6 +1218,26 @@ impl CAbi {
         }
     }
 
+    /// The plan's applied-revision watermark through `miso_engine_v1_plan_watermark`: `(revision,
+    /// first sample, outcome flags)`.
+    fn watermark(&self) -> (u64, u64, u64) {
+        let mut out = capi::Watermark {
+            struct_size: capi::WATERMARK_SIZE,
+            reserved0: 0,
+            revision: 0,
+            first_sample: 0,
+            outcome_flags: 0,
+            exact_count: 0,
+            transition_fallback_count: 0,
+            superseded_count: 0,
+            reserved: [0; 5],
+        };
+        // SAFETY: The plan is live; the query is pure and `out` is owned storage of the exact size.
+        let code = unsafe { capi::miso_engine_v1_plan_watermark(self.plan, &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI watermark");
+        (out.revision, out.first_sample, out.outcome_flags)
+    }
+
     fn superseded(&mut self) -> u64 {
         let response = self.send(
             CommandPayload::CountersGet(&CountersRequest {
@@ -1428,6 +1448,12 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
             }
         }
         let (b, c) = (browser.step(block), c_abi.step(block));
+        // #1349 gate 1: the status words are the C ABI's watermark after every block.
+        assert_eq!(
+            status_watermark(&browser),
+            c_abi.watermark(),
+            "{rate} Hz: block {block}: the browser status carries the C ABI's watermark"
+        );
         let differing = b.iter().zip(&c).filter(|(x, y)| x != y).count();
         assert_eq!(
             differing, 0,
@@ -1486,6 +1512,80 @@ fn both_hosts_give_the_same_result_for_the_same_control_edits() {
             moved >= 40,
             "{rate} Hz: only {moved} blocks differ from the unedited run"
         );
+    }
+}
+
+/// The three watermark words of the browser's status: `(revision, first sample, outcome flags)`.
+fn status_watermark(browser: &Rig) -> (u64, u64, u64) {
+    let status = browser.host.status();
+    (
+        status.watermark_revision,
+        status.watermark_first_sample,
+        status.watermark_outcome_flags,
+    )
+}
+
+/// #1349 gates 1 and 3: the status words stay at the initial revision until the block that applies
+/// a live edit, then read `(r2, that block's first sample, EXACT)`. That is the C ABI's watermark
+/// for the same script and the record `read_watermark` copies from the plan's query.
+///
+/// Test value: red if the browser computes its own application sample (it would report the new
+/// revision before block 3, or block 2's sample), if the status copies from a different advance
+/// than the record published (a block late), or if a block that advanced nothing rewrites the words.
+#[test]
+fn the_status_words_carry_the_applied_revision_the_c_abi_reports() {
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let initial = (model.revision, 0, 1);
+        assert_eq!(status_watermark(&browser), initial, "{rate} Hz: boot");
+        assert_eq!(c_abi.watermark(), initial, "{rate} Hz: C ABI boot");
+
+        let edit = Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        };
+        for block in 0..3 {
+            let _ = (browser.step(block), c_abi.step(block));
+            assert_eq!(
+                status_watermark(&browser),
+                initial,
+                "{rate} Hz: block {block}"
+            );
+            assert_eq!(c_abi.watermark(), initial);
+        }
+        // Committed before block 3: pending until the block that applies it renders.
+        let (verdict, _) = browser.transaction_reply(&CAbi::edits(edit, None));
+        let (c_verdict, _) = c_abi.edit(edit, None);
+        assert_eq!(verdict, c_verdict);
+        let Verdict::Applied { revision, .. } = verdict else {
+            panic!("the live edit commits")
+        };
+        assert_eq!(revision, model.revision + 1);
+        assert_eq!(
+            status_watermark(&browser),
+            initial,
+            "{rate} Hz: never early"
+        );
+
+        let _ = (browser.step(3), c_abi.step(3));
+        let applied = (revision, 3 * u64::from(QUANTUM), 1);
+        assert_eq!(status_watermark(&browser), applied, "{rate} Hz: block 3");
+        assert_eq!(c_abi.watermark(), applied, "{rate} Hz: C ABI block 3");
+        // Gate 3: the control-side record is the same level.
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        let record = browser.host.watermark();
+        assert_eq!(
+            (record.revision, record.first_sample, record.outcome_flags),
+            applied
+        );
+
+        // A block that advances nothing leaves the words as they were.
+        let _ = (browser.step(4), c_abi.step(4));
+        assert_eq!(status_watermark(&browser), applied, "{rate} Hz: block 4");
+        assert_eq!(c_abi.watermark(), applied);
     }
 }
 

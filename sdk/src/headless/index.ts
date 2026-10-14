@@ -54,7 +54,7 @@ export type {
   SpectrumStreamStatus,
 } from "../core/spectrum.ts";
 export { EngineLiveControls } from "../core/live-controls.ts";
-export type { ControlEditSet, LiveControlTransport } from "../core/live-controls.ts";
+export type { ControlEditSet, LiveControlTransport, SetControlOptions } from "../core/live-controls.ts";
 export { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 export type {
   ControlAppliedReport,
@@ -79,6 +79,44 @@ export type {
   ControlTransactionRequest,
   ControlWireAddress,
 } from "../core/control-frame.ts";
+export {
+  CONTROL_LIST_PAGE_ROWS,
+  CONTROL_LIST_RESTARTS,
+  CONTROL_LIST_STALE,
+  decodeControlListPage,
+  decodeControlStatePage,
+  encodeControlListRequest,
+  readControlList,
+  readControlState,
+} from "../core/control-list.ts";
+export type {
+  ControlChoice,
+  ControlClassName,
+  ControlFamilyName,
+  ControlHeader,
+  ControlHeaderAddress,
+  ControlList,
+  ControlListEntry,
+  ControlListFilter,
+  ControlListPage,
+  ControlListRequest,
+  ControlListTransport,
+  ControlOwnerHeader,
+  ControlOwnerHeaderKind,
+  ControlPageRefusal,
+  ControlPageResult,
+  ControlRampRowName,
+  ControlReasonName,
+  ControlRouteEnds,
+  ControlScopeName,
+  ControlSectionHeader,
+  ControlState,
+  ControlStatePage,
+  ControlTaperName,
+  ControlTapName,
+  ControlUnitName,
+  ControlValueKind,
+} from "../core/control-list.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
   CommandReport,

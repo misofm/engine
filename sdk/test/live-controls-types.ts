@@ -223,3 +223,21 @@ void [applied, observed, wrongValueReport, wrongObservationReport];
 const faderEdits: ControlEditSet = track.faderDb(-6, { smoothingSamples: 32 });
 const firstEdit: ControlFrameEdit | undefined = faderEdits.edits[0];
 void firstEdit;
+
+// #1564B: the builders are generated from the core's control tables, with value types from its rows.
+track.matrixMode("matrix");
+// @ts-expect-error a matrix mode is one of the row's labels
+track.matrixMode("diagonal");
+// @ts-expect-error a shared row with a fixed ramp takes no options
+track.panWindowSamples(64, { smoothingSamples: 1 });
+// @ts-expect-error a fixed-ramp per-lane row takes a channel and no ramp
+track.hpfHz(80, { smoothingSamples: 1 });
+const sessionEdits = busEdits.session();
+sessionEdits.faderMs(50);
+// @ts-expect-error a session ramp length is a number
+sessionEdits.faderMs(true);
+compressor.linkMode("maximum");
+// @ts-expect-error a link mode is one of the effect's labels
+compressor.linkMode("sideways");
+// @ts-expect-error the delay has no choice of link mode
+delay.linkMode("maximum");

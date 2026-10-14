@@ -29,7 +29,9 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserLiveControls } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "./live-controls.ts";
+import { readControlList, readControlState } from "../core/control-list.ts";
+import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { createTrackResponse } from "./response.ts";
 import type { BrowserTrackResponse } from "./response.ts";
 import { createSpectrum } from "./response.ts";
@@ -222,6 +224,21 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
   /** Bind the semantic live controls once (every value edit is a `SET_CONTROL` transaction). */
   liveControls(): Promise<EngineLiveControls>;
+  /**
+   * Every control of the running session, with its descriptor and committed value (decision 17, C4;
+   * #1564 D1): `CONTROL_LIST_GET` pages posted to the host until `eof`. The core decides the rows,
+   * their order and their values; this call only pages.
+   *
+   * A page refused `control.list.stale` (the structure changed between two pages) restarts the read
+   * from the first page, and after three restarts rejects with `MisoEngineError` `control.list.stale`.
+   * `filter.owner` restricts the list to one owner, `filter.pageLimit` sets the rows per request.
+   */
+  controls(filter?: ControlListFilter): Promise<ControlList>;
+  /**
+   * The committed values of `list`'s control rows (`CONTROL_STATE_GET`), by handle. A structure that
+   * changed since `list` was read rejects with `MisoEngineError` `control.list.stale`: list again.
+   */
+  controlState(list: ControlList, options?: Pick<ControlListFilter, "pageLimit">): Promise<ControlState>;
   /**
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
@@ -646,8 +663,13 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       shape.submixes,
       policy.liveControls !== undefined,
     );
-    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes.
-    const strips = (): readonly string[] => [...shape.tracks, ...shape.submixes];
+    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes. The
+    // order is the core's control list (#1564 D5), read again whenever its structure epoch moves.
+    const stripOrder = createBrowserStripOrder(host);
+    const strips = async (): Promise<readonly string[]> => {
+      const order = await stripOrder();
+      return [...order.tracks, ...order.submixes];
+    };
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -658,14 +680,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           result: reply.result,
         });
       }
-      return enrichObservationMap(strips(), reply.bindings as readonly RawObservationBinding[]);
+      return enrichObservationMap(await strips(), reply.bindings as readonly RawObservationBinding[]);
     };
     const readObservations = async (
       selections: readonly ObservationSelection[],
     ): Promise<readonly ObservationReadResult[]> => {
       validateObservationSelections(selections);
       const map = await observationMap();
-      const addresses = resolveObservationAddressesWithTracks(map, strips(), selections);
+      const stripIds = await strips();
+      const addresses = resolveObservationAddressesWithTracks(map, stripIds, selections);
       const reply = await host.readObservations({ selections: [...addresses] });
       if (reply.result !== constantValue("resultCodes", "ok")) {
         throw new MisoEngineError("the browser host refused the selected observation read", {
@@ -676,7 +699,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return decodeObservationRows(
         map,
-        strips(),
+        stripIds,
         selections,
         addresses,
         reply.rows as readonly RawObservationRow[],
@@ -1360,6 +1383,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       queryTrackResponse,
       querySpectrum,
       liveControls: getLiveControls,
+      controls: async (filter?: ControlListFilter) =>
+        readControlList(await createBrowserControlListTransport(host), filter),
+      controlState: async (list: ControlList, options?: Pick<ControlListFilter, "pageLimit">) =>
+        readControlState(await createBrowserControlListTransport(host), list, options),
       close: () => {
         closed = true;
         measurementFeeds.close();

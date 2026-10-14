@@ -49,10 +49,10 @@ use host_core::{
     source_id_arena_bytes,
 };
 use host_core::{
-    PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
-    SpectrumChannels, SpectrumContinuousCaptureError, SpectrumContinuousReadError,
-    SpectrumContinuousWindow, SpectrumHop, SpectrumService, SpectrumServiceError, SpectrumSnapshot,
-    SpectrumTarget, SpectrumTargetRef,
+    PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumAnalysis,
+    SpectrumCadence, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop, SpectrumService,
+    SpectrumServiceError, SpectrumSmoothingConfig, SpectrumSnapshot, SpectrumStreamMetadata,
+    SpectrumStreamStatus, SpectrumTarget, SpectrumTargetRef,
 };
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
@@ -410,12 +410,28 @@ pub(crate) const fn spectrum_result(error: SpectrumServiceError) -> u32 {
     match error {
         SpectrumServiceError::Unprepared | SpectrumServiceError::SelectSingle => RESULT_UNSUPPORTED,
         SpectrumServiceError::Busy => RESULT_BACKPRESSURE,
-        SpectrumServiceError::NotArmed => RESULT_WRONG_STATE,
+        SpectrumServiceError::NotArmed
+        | SpectrumServiceError::StreamActive
+        | SpectrumServiceError::StreamInactive => RESULT_WRONG_STATE,
         SpectrumServiceError::CaptureInvalid => RESULT_RENDER_REJECTED,
         SpectrumServiceError::Exhausted => RESULT_REFUSED_BUDGET,
+        SpectrumServiceError::CadenceRate => RESULT_UNSUPPORTED,
         SpectrumServiceError::UnknownEntry
         | SpectrumServiceError::Channels
-        | SpectrumServiceError::WindowInvalid => RESULT_INVALID_ARGUMENT,
+        | SpectrumServiceError::WindowInvalid
+        | SpectrumServiceError::CadenceShape
+        | SpectrumServiceError::Smoothing
+        | SpectrumServiceError::MetadataInvalid => RESULT_INVALID_ARGUMENT,
+    }
+}
+
+/// The result word of a stream read that returned its status.
+const fn spectrum_stream_result(status: SpectrumStreamStatus) -> u32 {
+    match status {
+        SpectrumStreamStatus::Inactive | SpectrumStreamStatus::Stopped => RESULT_WRONG_STATE,
+        SpectrumStreamStatus::Warming | SpectrumStreamStatus::Pending => RESULT_BACKPRESSURE,
+        SpectrumStreamStatus::Gap | SpectrumStreamStatus::Ready => RESULT_OK,
+        SpectrumStreamStatus::Failed => RESULT_RENDER_REJECTED,
     }
 }
 
@@ -1201,8 +1217,16 @@ pub struct WebStatus {
     /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
     /// writing no cell, for input, route, VCA and submix edits.
     pub live_values_superseded: u64,
-    /// Required-zero expansion words.
-    pub reserved: [u64; 3],
+    /// The applied-revision watermark's revision (#1349 D2): the highest committed revision in
+    /// effect together with every revision before it. Copied from the render report of the block
+    /// that advanced it; the initial revision from boot until then.
+    pub watermark_revision: u64,
+    /// The absolute render sample of the first block in which `watermark_revision` was in effect;
+    /// `0` for the initial revision.
+    pub watermark_first_sample: u64,
+    /// The watermark's outcome flags, in the bits of the C ABI's `miso_engine_v1_watermark`:
+    /// `EXACT = 1`, `TRANSITION_FALLBACK = 2`, `SUPERSEDED = 4`. The browser assigns no bit.
+    pub watermark_outcome_flags: u64,
 }
 
 /// The applied-revision watermark of the plan (#1381a D5), in the order and sizes of the C ABI's
@@ -1688,8 +1712,6 @@ pub struct AudioWorkletEngineHost {
     /// readers. It is the render side of the single instance, beside the control half in `ready`,
     /// so the two borrow apart. Dropped, with `ready`, only by [`Self::dispose`].
     plan: Option<WebPlan>,
-    /// Optional prepared cadence for the ordinary spectrum capture.
-    spectrum_hop: Option<SpectrumHop>,
     diagnostic_len: usize,
     /// What the last control command left to read (issue #1562a D1).
     control_response: ControlResponse,
@@ -1842,6 +1864,7 @@ impl AudioWorkletEngineHost {
             memory_budget,
             projection.report,
             spectrum_request.as_ref(),
+            spectrum_hop,
         )?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
@@ -1851,6 +1874,12 @@ impl AudioWorkletEngineHost {
                 memory_budget,
             ));
         }
+        // #1349 D2: the status opens with the plan's initial watermark, `(initial revision, 0,
+        // EXACT)`. No render is in flight at boot, so the read cannot be busy.
+        let initial_watermark = ready
+            .queries
+            .watermark()
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.internal.watermark"))?;
         let buffers = allocate_buffers(projection)?;
         let backend = selected_backend();
         Ok(Self {
@@ -1867,7 +1896,9 @@ impl AudioWorkletEngineHost {
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
                 live_values_superseded: 0,
-                reserved: [0; 3],
+                watermark_revision: initial_watermark.revision,
+                watermark_first_sample: initial_watermark.first_sample,
+                watermark_outcome_flags: initial_watermark.outcome_flags,
             },
             resources,
             command_report: empty_command_report(),
@@ -1880,7 +1911,6 @@ impl AudioWorkletEngineHost {
             buffers: Some(buffers),
             ready: Some(ready),
             plan: Some(plan),
-            spectrum_hop: spectrum_request.as_ref().and(spectrum_hop),
             diagnostic_len: 0,
             control_response: ControlResponse::None,
         })
@@ -2377,121 +2407,115 @@ impl AudioWorkletEngineHost {
     /// Start the managed spectrum stream for this prepared target.
     ///
     /// The sample rate and render quantum come from the prepared host, so callers cannot create
-    /// a stream whose cadence differs from the graph that will produce its samples.
-    pub fn start_spectrum_stream(&mut self) -> Result<SpectrumCadence, u32> {
-        if self.status.state != STATE_READY {
-            return Err(RESULT_WRONG_STATE);
-        }
-        let Some(ready) = self.ready.as_mut() else {
-            return Err(RESULT_WRONG_STATE);
-        };
-        let Some(service) = ready.spectrum.as_mut() else {
-            return Err(RESULT_UNSUPPORTED);
-        };
-        let capture = service.captures_mut();
-        let started = match self.spectrum_hop {
-            Some(hop) => capture.start_continuous_with_hop(
-                self.status.sample_rate_hz,
-                self.status.quantum_frames,
-                hop,
-            ),
-            None => {
-                capture.start_continuous(self.status.sample_rate_hz, self.status.quantum_frames)
-            }
-        };
-        if started.is_ok() {
-            service.end_caller_arm();
-        }
-        started.map_err(|error| match error {
-            SpectrumContinuousCaptureError::Busy => RESULT_BACKPRESSURE,
-            SpectrumContinuousCaptureError::Cadence(error) => match error {
-                host_core::SpectrumCadenceError::UnsupportedRate => RESULT_UNSUPPORTED,
-                host_core::SpectrumCadenceError::ZeroQuantum => RESULT_INVALID_ARGUMENT,
-                host_core::SpectrumCadenceError::UnsupportedHop => RESULT_INVALID_ARGUMENT,
-                host_core::SpectrumCadenceError::HopOverflow => RESULT_REFUSED_BUDGET,
-            },
-            SpectrumContinuousCaptureError::EpochOverflow => RESULT_REFUSED_BUDGET,
-        })
-    }
-
-    /// Restart the active managed stream at a fresh capture epoch without a fallible stop/start
-    /// pair. The caller has already prevalidated the replacement analysis configuration.
-    pub fn restart_spectrum_stream(&mut self) -> u32 {
-        if self.status.state != STATE_READY {
-            return RESULT_WRONG_STATE;
-        }
-        let Some(ready) = self.ready.as_mut() else {
-            return RESULT_WRONG_STATE;
-        };
-        let Some(service) = ready.spectrum.as_mut() else {
-            return RESULT_UNSUPPORTED;
-        };
-        match service.captures_mut().restart_continuous() {
-            Ok(()) => RESULT_OK,
-            Err(SpectrumContinuousCaptureError::Busy) => RESULT_BACKPRESSURE,
-            Err(SpectrumContinuousCaptureError::Cadence(_)) => RESULT_WRONG_STATE,
-            Err(SpectrumContinuousCaptureError::EpochOverflow) => RESULT_REFUSED_BUDGET,
-        }
-    }
-
-    /// Read one independently scheduled managed stream window or its explicit availability state.
-    pub fn read_spectrum_stream(
+    /// a stream whose cadence differs from the graph that will produce its samples. `analysis` is
+    /// the smoothing history of a caller that owns both halves; the browser's audio thread passes
+    /// `None`.
+    ///
+    /// # Errors
+    ///
+    /// The result word of the service's refusal.
+    pub fn start_spectrum_stream(
         &mut self,
-    ) -> Result<SpectrumContinuousWindow, SpectrumContinuousReadError> {
-        if self.status.state != STATE_READY {
-            return Err(SpectrumContinuousReadError::NotActive);
-        }
-        let Some(ready) = self.ready.as_mut() else {
-            return Err(SpectrumContinuousReadError::NotActive);
-        };
-        let Some(service) = ready.spectrum.as_mut() else {
-            return Err(SpectrumContinuousReadError::NotActive);
-        };
-        service.captures_mut().try_read_continuous()
+        smoothing: SpectrumSmoothingConfig,
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) -> Result<(), u32> {
+        self.spectrum_service_mut()?
+            .start_stream(smoothing, analysis)
+            .map_err(spectrum_result)
     }
 
-    /// Stop the managed stream and discard its queued native window.
-    pub fn stop_spectrum_stream(&mut self) -> u32 {
-        if self.status.state != STATE_READY {
-            return RESULT_WRONG_STATE;
+    /// Select one exact prepared entry, with the stream's restarting selection while a stream
+    /// runs. Returns whether a running stream restarted (its metadata is then `Warming`).
+    /// `smoothing` changes a running stream's smoothing; without a running stream it is a
+    /// wrong state. `analysis` is the smoothing history of a caller that owns both halves.
+    ///
+    /// The collection performs all fallible admission before retiring its current capture, so a
+    /// refusal leaves the old stream, queued window and effective configuration intact. A select
+    /// that would replace the entry while the caller holds an armed window is refused as
+    /// backpressure (decision 17 D7).
+    ///
+    /// The worklet calls this on the browser's audio thread, so the target is borrowed and the
+    /// selection allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// The result word of the service's refusal.
+    pub fn select_spectrum_target(
+        &mut self,
+        target: SpectrumTargetRef<'_>,
+        channels: SpectrumChannels,
+        smoothing: Option<SpectrumSmoothingConfig>,
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) -> Result<bool, u32> {
+        self.spectrum_service_mut()?
+            .select_target(target, channels, smoothing, analysis)
+            .map_err(spectrum_result)
+    }
+
+    /// Read the managed stream once and return the result word of its status. The stream metadata
+    /// and the ready window are read with [`Self::spectrum_stream_metadata`] and
+    /// [`Self::spectrum_stream_window`].
+    pub fn read_spectrum_stream(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+        match self.spectrum_service_mut() {
+            Ok(service) => match service.read_stream(analysis) {
+                Ok(()) => spectrum_stream_result(service.stream_metadata().status),
+                Err(error) => spectrum_result(error),
+            },
+            // A host without a stream reads as an inactive one.
+            Err(_) => RESULT_WRONG_STATE,
         }
-        let Some(ready) = self.ready.as_mut() else {
-            return RESULT_WRONG_STATE;
-        };
-        let Some(service) = ready.spectrum.as_mut() else {
-            return RESULT_UNSUPPORTED;
-        };
-        service.captures_mut().stop_continuous();
-        RESULT_OK
+    }
+
+    /// Stop the managed stream and discard its queued native window. With `analysis`, the
+    /// analysis of the stream ends at the same call.
+    pub fn stop_spectrum_stream(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+        match self.spectrum_service_mut() {
+            Ok(service) => {
+                service.stop_stream(analysis);
+                RESULT_OK
+            }
+            Err(result) => result,
+        }
+    }
+
+    /// The stream metadata, or `None` without a spectrum observer.
+    #[must_use]
+    pub fn spectrum_stream_metadata(&self) -> Option<&SpectrumStreamMetadata> {
+        self.spectrum_service()
+            .ok()
+            .map(SpectrumService::stream_metadata)
+    }
+
+    /// The window of the last stream read that was ready.
+    #[must_use]
+    pub fn spectrum_stream_window(&self) -> Option<&SpectrumContinuousWindow> {
+        self.spectrum_service()
+            .ok()
+            .and_then(SpectrumService::stream_window)
     }
 
     /// Return the active managed stream cadence, if it is running.
     #[must_use]
     pub fn spectrum_stream_cadence(&self) -> Option<SpectrumCadence> {
-        self.ready
-            .as_ref()
-            .and_then(|ready| ready.spectrum.as_ref())
-            .map(SpectrumService::captures)
-            .and_then(PreparedSpectrumCaptures::cadence)
+        self.spectrum_service()
+            .ok()
+            .and_then(SpectrumService::stream_cadence)
     }
 
     /// Return the native capture epoch for the active managed stream.
     #[must_use]
     pub fn spectrum_stream_epoch(&self) -> Option<u64> {
-        self.ready
-            .as_ref()
-            .and_then(|ready| ready.spectrum.as_ref())
-            .map(SpectrumService::captures)
-            .and_then(PreparedSpectrumCaptures::stream_epoch)
+        self.spectrum_service()
+            .ok()
+            .and_then(SpectrumService::stream_epoch)
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
     pub fn cancel_spectrum(&mut self) -> u32 {
         match self.spectrum_service_mut() {
-            Ok(service) => {
-                service.cancel();
-                RESULT_OK
-            }
+            Ok(service) => service
+                .cancel()
+                .map_or_else(spectrum_result, |()| RESULT_OK),
             Err(result) => result,
         }
     }
@@ -2513,41 +2537,6 @@ impl AudioWorkletEngineHost {
             .and_then(|ready| ready.spectrum.as_ref())
             .and_then(SpectrumService::channels)
             .map_or(0, spectrum_channels_raw)
-    }
-
-    /// Atomically select one exact prepared spectrum target and channel mask.
-    ///
-    /// The collection performs all fallible admission before retiring its current capture. A
-    /// refusal therefore leaves the old stream, queued window and effective configuration intact.
-    /// A select that would replace the entry while the caller holds an armed window is refused as
-    /// backpressure (decision 17 D7).
-    ///
-    /// The worklet calls this on the browser's audio thread, so the target is borrowed and the
-    /// selection allocates nothing.
-    pub fn select_spectrum(
-        &mut self,
-        target: SpectrumTargetRef<'_>,
-        channels: SpectrumChannels,
-    ) -> u32 {
-        match self
-            .spectrum_service_mut()
-            .map(|service| service.select(target, channels))
-        {
-            Ok(Ok(_)) => RESULT_OK,
-            Ok(Err(error)) => spectrum_result(error),
-            Err(result) => result,
-        }
-    }
-
-    /// Validate a collection selection and report whether it would replace the current entry.
-    pub fn spectrum_selection_would_change(
-        &self,
-        target: SpectrumTargetRef<'_>,
-        channels: SpectrumChannels,
-    ) -> Result<bool, u32> {
-        self.spectrum_service()?
-            .selection_would_change(target, channels)
-            .map_err(spectrum_result)
     }
 
     /// Return the collection selection identity, or zero for the singular compatibility path.
@@ -2875,28 +2864,6 @@ impl AudioWorkletEngineHost {
             .is_some_and(|ready| ready.commands_enabled)
     }
 
-    /// Copy one canonical live-control track ID into ID staging; returns its byte length.
-    pub(crate) fn copy_live_control_track_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let Some(id) = ready.tracks.get(index as usize) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
-    }
-
-    /// Copy one canonical submix ID into ID staging; returns its byte length (issue #1210 D1).
-    pub(crate) fn copy_live_control_submix_id(&mut self, index: u32) -> u32 {
-        let Some(ready) = self.ready.as_ref() else {
-            return 0;
-        };
-        let Some(id) = ready.submixes.get(index as usize) else {
-            return 0;
-        };
-        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
-    }
-
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
@@ -3057,7 +3024,14 @@ impl AudioWorkletEngineHost {
         // boundary and continues the clock.
         let result = plan.render(self.status.next_absolute_sample, output);
         match result {
-            Ok(()) => {
+            Ok(watermark) => {
+                // #1349 D1/D2: copied from the report of the block that advanced the watermark;
+                // a block that did not advance it leaves the three words as they were.
+                if let Some(watermark) = watermark {
+                    self.status.watermark_revision = watermark.revision;
+                    self.status.watermark_first_sample = watermark.first_sample;
+                    self.status.watermark_outcome_flags = watermark.outcome_flags;
+                }
                 let next_absolute_sample = plan.owner().next_absolute_sample();
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -5111,6 +5085,7 @@ fn compile_ready(
     memory_budget: u64,
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
+    spectrum_hop: Option<SpectrumHop>,
 ) -> Result<(ReadyOwnership, WebPlan, WebResourceReport), BootFailure> {
     // The command staging, and with it the observation records, exist exactly when the boot asked
     // for observation taps (#1565).
@@ -5499,7 +5474,12 @@ fn compile_ready(
         submixes,
         rack_effects: rack_effects.into_boxed_slice(),
         spectrum: spectrum_capture.map(|captures| {
-            SpectrumService::new(captures, session_sample_rate_hz, session_quantum_frames)
+            SpectrumService::new(
+                captures,
+                session_sample_rate_hz,
+                session_quantum_frames,
+                spectrum_hop,
+            )
         }),
         meter_frame: boxed_zero_meter_frame(strip_count)?,
         master_peak: [0.0, 0.0],

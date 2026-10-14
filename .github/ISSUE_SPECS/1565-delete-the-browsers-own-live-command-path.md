@@ -301,3 +301,123 @@ Re-pins and their history lines are recorded with the batch's gate run below.
 - `RUSTDOCFLAGS='-D warnings' cargo doc` fails on `crates/control-plane/src/control.rs:236`
   (`SessionControlSnapshot::effect_cells` unresolved link) on the batch head, also without this
   slice's changes; that crate belongs to #1613's lane.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Status.** #1565A landed in the flip (batch 7, PR #1614) as `5576cdc56`. It took all of #1565C
+  and most of #1565B, as its decision record says. The lists below are what is on `main` and what
+  remains.
+- **#1565C (D4, gate 2) is done. Nothing remains.** All from `5576cdc56`:
+  - Offset 32 is `reserved1` (`hosts/host-web/src/tests.rs:269`). A nonzero word is refused
+    `web.options.reserved1`.
+  - The command staging exists only when `live_control_observation_taps != 0`. Without taps every
+    submission is `RESULT_UNSUPPORTED` with `COMMAND_REASON_UNSUPPORTED_KIND`.
+  - The SDK option `policy.liveControls.commandQueueRecords` is gone, and
+    `sdk/src/browser/host-mirror.ts:78` writes `reserved1: 0n`.
+  - Tests: `the_boot_word_is_reserved_and_observation_staging_follows_the_taps` (gate 2,
+    `tests.rs:2474`), `a_subscription_without_capacity_is_unsupported` (`:4303`) and
+    `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes`.
+- **#1565B: done on `main`** (`5576cdc56`):
+  - D3: `prepared_command_submit`, every `eq_target_*`, `input_filters_prepare`,
+    `input_filters_config_copy`, `prepared_companion_ptr` and `_capacity`, and
+    `live_control_{route,vca}_{count,id}`; `control_targets.rs` and `web/prepared-control.js`; the
+    worklet's `preparedCommand` message and the session map's route and VCA fields.
+  - D5: every listed host-core type, its four modules and `tests/vca_live.rs`, and their
+    `MUTATIONS.md` rows. Only history notes in `docs/BUILTINS_AND_METERING_V1.md` name them now.
+  - D7 for those names: `check-web-audioworklet.sh`, the ABI layout generator and its two
+    regenerated mirrors, `check-abi-layout-v1.py` (its `retired_export_returns` self-test keeps
+    `prepared_command_submit` on purpose, as a negative case), `render-thread-exports.json` and
+    `test-web-audioworklet.mjs`.
+  - Gate 4: the required `qualification` check of PR #1614 ran the browser qualification on
+    chromium, firefox and webkit (the non-isolated leg) after these deletions, and passed.
+- **#1565B: what remains** (needs #1564C, which moves the SDK's strip order to the control list):
+  1. Delete `miso_engine_web_v1_live_control_{track,submix}_{count,id}`
+     (`hosts/host-web/src/ffi.rs:4112-4150`) and the host methods `copy_live_control_track_id` and
+     `copy_live_control_submix_id` (`hosts/host-web/src/lib.rs:2879`, `:2890`).
+  2. The worklet: the strip-order reads (`miso-engine-v1-audio-worklet.js:611-645`), the meter
+     header check against `submixIds` (`:764`) and the `tracks` and `submixes` of the
+     `miso.sessionmap.v1` reply (`:1030`, `:1037`). As D3 says, the order comes from the core's list
+     (the worklet's own `CONTROL_LIST_GET` at construction: owner header rows, kind track then kind
+     submix), or the map drops the two fields and the meter check uses the meter header's counts.
+     The host typing (`miso-engine-v1-audio-worklet-host.d.ts:36-38`, `:211`, `:262-263`, `:895`)
+     follows.
+  3. The other readers: `hosts/host-web/tests/browser-v1/direct-oracle.mjs:316` and `:383` (track
+     count asserts); `scripts/test-web-audioworklet.mjs:2720-2728` and `:4271-4273` (mock exports);
+     `scripts/check-web-audioworklet.sh:290-293`; the doc list in `hosts/host-web/src/render_lock.rs:26-27`;
+     `tools/parameter-metadata/src/abi_layout.rs:148-151` with the regenerated
+     `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`;
+     `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`.
+  4. Gate 4 runs again after these deletions (the observation and meter rows).
+- **Not in #1565B.** `live_control_tracks` in `crates/host-core/src/prepare.rs:1993-2043` is the
+  preparation's track prefix, not an export. It stays. The Rust accessors `live_control_tracks()`
+  and `live_control_submixes()` (`hosts/host-web/src/lib.rs:2200`, `:2208`) stay while tests or the
+  meters use them.
+
+## Decision record: #1565B (batch 8)
+
+What shipped: the last of #1565B. Nothing of the browser's own strip enumeration is left.
+
+- **Rust (`hosts/host-web`).** Deleted `miso_engine_web_v1_live_control_{track,submix}_{count,id}`
+  (`ffi.rs`), `copy_live_control_track_id` and `copy_live_control_submix_id` (`lib.rs`), and fixed
+  the unwrapped-export list in the `render_lock.rs` header (22 to 18 names). The Rust accessors
+  `live_control_tracks()` and `live_control_submixes()` stay (tests and the meters use them).
+- **Tests deleted, with the reason.**
+  `submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them` (and its helper
+  `submix_name_document`): the claim "strips list in canonical order" belongs to the core's control
+  list now, and `sdk/test/strip-order-evals.mjs` plus `control_list_fixture.rs` hold it.
+  `live_control_track_id_longer_than_every_source_id_boots_and_round_trips`: it defended the export's
+  staging against a long track ID; no export reads a track ID through staging any more. One
+  `live_control_track_count` assertion in the sticky-failure source-query test went; the source
+  queries it defends stay.
+- **Worklet.** It no longer reads or posts strip IDs. `miso.sessionmap.v1` is now
+  `{ tag, requestId, result, sources, metersAttached }`. The meter views take their track and
+  submix counts from the meter header (words at offsets 8 and 64), and the existing frame-capacity
+  check `(strips * 3 + 3) * 4` rejects a header that disagrees with the frame the engine sized.
+  `process()` is untouched.
+- **Host and typing.** The host's `sessionMap` validator drops `tracks` and `submixes`;
+  `MisoSessionMap` drops both fields in `miso-engine-v1-audio-worklet-host.d.ts` and the
+  byte-equal `sdk/src/browser/shipped-host.d.ts`, and the comments that named
+  `sessionMap().tracks` now name the control list's owner rows.
+  `scripts/check-session-map-shape.py` follows (its three field-set mutations are re-pointed; 16
+  mutations are caught), as does the `sed` mutation in `scripts/test-web-audioworklet.sh`.
+- **SDK.** `UNUSED_EXPORTS` in `sdk/src/core/boundary.ts` is deleted. `sdk/test/strip-order-evals.mjs`
+  lost its export-removal and call-counting twins (the exports do not exist, so neither can be
+  built); its one remaining gate 5 test boots the shipped module and checks shape, meters and
+  observation in list order, twice (boot and `loadSession`). The five SDK host mocks stop returning
+  `tracks` and `submixes`.
+- **Mirrors.** `abi_layout.rs` (`EXPORTS` 112 to 108), `check-abi-layout-v1.py`, its self-test
+  fixture, `check-web-audioworklet.sh`; the SDK's `miso-engine-v1-abi-layout.json` and
+  `src/generated/abi.ts` came out of the generators (`node codegen/assets.mjs` and
+  `generate.mjs`). `render-thread-exports.json` never listed them.
+- **JS tests.** `direct-oracle.mjs` lost its two track-count asserts. `test-web-audioworklet.mjs`
+  lost the four mock exports and the track/submix ID checks; the session-map field-set gate now
+  holds "no source list", "a retired track list" and "a retired submix list" red; two meter-header
+  mutations (submix and track count disagree with the sized frame) replace the old submix-count
+  mutation.
+
+Repairs on the batch head found on the way (mechanical, outside the listed files):
+
+- `test-web-audioworklet.mjs` did not run on the head: since #1564C
+  `createBrowserLiveControls` reads the strip list through `host.control`, which the fake worklet
+  answers with the reversed request frame. The test scripts the list with `scriptedControl`
+  (everything else still goes through the real host).
+- `direct-oracle.mjs::status` required status words 56, 64 and 72 to be zero. They have been the
+  watermark revision, first sample and flags since #1381a (the initial revision is 1), so the oracle
+  threw on the head and `check-browser-expected-resources.py` could not run. The assertion is
+  dropped with a comment; the expected digests did not move.
+
+Gates (all on this tree, rebuilt wasm in `target/ci/b8w-artifacts`):
+`cargo test --locked -p host-web --features host-web/test-support` (all binaries ok; unit 102
+passed), `cargo test -p parameter-metadata`, `cargo clippy --locked -p host-web -p
+parameter-metadata --all-targets --all-features -- -D warnings`, `check-abi-layout-v1.py` (document
+and `--self-test`, 28 mutations), `check-web-audioworklet.sh` (with the named twin),
+`test-web-audioworklet.sh`, `check-session-map-shape.py` (+ self-test), `check-sdk-generated.sh`,
+`check-sdk-types.sh`, `check-sdk-headless.sh` (524 tests, 0 fail), `check-browser-expected-resources.py
+--artifacts`, `check-sdk-deletions.py`. Gate 4 (browser qualification) is the coordinator's.
+
+Successor: the ID staging buffer is still sized for the longest source, track, submix, route and VCA
+ID (`hosts/host-web/src/lib.rs` ~1816, and the test mirrors at `tests.rs` 85 and 827). Only source IDs
+cross it now. Shrinking it moves `id_staging_bytes` and the `memoryBytes` rows in `expected.json`,
+so it needs a browser re-pin; left for its own slice.

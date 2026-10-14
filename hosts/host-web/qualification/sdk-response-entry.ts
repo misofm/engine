@@ -1,7 +1,7 @@
 import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
 import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
-import { createBrowserLiveControls } from "../../../sdk/src/browser/live-controls.ts";
+import { createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
 import type { MisoAudioWorkletHost } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
@@ -1387,6 +1387,9 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
     queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
       initialRevision: headless.controlRevision(),
+      // The boundary's one allocator: its own strip-order reads at boot drew IDs from the same
+      // endpoint, and the core refuses an ID at or below the highest it has seen.
+      requestIds: headless.controlRequestIds,
     }),
     observe: (edits) => headless.submitCommands(encodeLaneEdits(edits), edits.length),
   });
@@ -2350,6 +2353,15 @@ export async function applyMatrixThroughSdk(
   const controls = await createBrowserLiveControls(host);
   const report = await controls.submit(controls.edit.track(trackId).matrix(matrix, { smoothingSamples: 0 }));
   return { ok: report.ok, path: report.path, appliedOperations: report.appliedOperations };
+}
+
+/**
+ * The track IDs of the host's running session, in the core's own order (the owner headers of its
+ * control list, #1564 D5). The worklet's session map no longer carries them (#1565B), and the
+ * raw qualification rows read them here, through the SDK, so that they hold no reader of their own.
+ */
+export async function readTracksThroughSdk(host: MisoAudioWorkletHost): Promise<readonly string[]> {
+  return (await createBrowserStripOrder(host)()).tracks;
 }
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {

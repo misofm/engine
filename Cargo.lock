@@ -956,6 +956,7 @@ dependencies = [
  "graph",
  "graph-compiler",
  "lane",
+ "loom",
  "math",
  "microfft",
  "parametric-eq",

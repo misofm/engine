@@ -33,10 +33,10 @@
 // ## Addressing is session-stable and string-free
 //
 // A command names a strip by its strip index -- the compiled session's canonical normalized tracks
-// first, then its submixes in canonical order (issue 1213), both of which `sessionMap()` returns --
-// plus a rack, an effect index and a numeric tap ID. No string crosses the command path. The
-// identity mapping is `sessionMap()` for the session and the build-time metadata JSON for the
-// effect vocabulary.
+// first, then its submixes in canonical order (issue 1213), as the core's control list names them
+// (the owner header rows, track rows first) -- plus a rack, an effect index and a numeric tap ID.
+// No string crosses the command path. The identity mapping is the control list for the session
+// and the build-time metadata JSON for the effect vocabulary.
 //
 // ## One batch is one transaction
 //
@@ -207,8 +207,8 @@ export const enum MisoCommandReason {
   /// Unknown kind, nonzero reserved word, non-finite value, a field set for the wrong kind, or a
   /// submission that names one observation tap more than once.
   Malformed = 1,
-  /// `trackIndex` is not a strip of the compiled session: it is at or past `tracks.length +
-  /// submixes.length` of `sessionMap()`. The spelling is kept (issue 1213, DESIGN P17).
+  /// `trackIndex` is not a strip of the compiled session: it is at or past the control list's
+  /// track and submix owner rows together. The spelling is kept (issue 1213, DESIGN P17).
   UnknownTrack = 2,
   /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
   /// retired `simd1` (`0`) and `simd2` (`2`) codes are refused with it only on the raw export
@@ -259,8 +259,8 @@ export interface MisoCommand {
   rack: number;
   /// `0` left, `1` right, `2` both, `255` for a kind with no lane (both observation kinds).
   channel: number;
-  /// Strip index: `i < tracks.length` is `sessionMap().tracks[i]`, and from there submix
-  /// `sessionMap().submixes[i - tracks.length]` (issue 1213).
+  /// Strip index: the control list's track owner rows first, then its submix owner rows, each in
+  /// list order (issue 1213).
   trackIndex: number;
   /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
@@ -314,9 +314,6 @@ export interface MisoSessionMap {
   readonly tag: "miso.sessionmap.v1";
   readonly requestId: number;
   readonly result: number;
-  /// Canonical normalized track order. A `trackIndex` below `tracks.length` indexes this; from
-  /// `tracks.length` on it names a submix (see `submixes`).
-  readonly tracks: string[];
   /// Canonical normalized source order (issue 207).
   ///
   /// The engine's own order: session compilation sorts `sources` by stable ID, and the queries
@@ -326,9 +323,6 @@ export interface MisoSessionMap {
   readonly sources: MisoSessionSource[];
   /// Whether preparation bound meter observers at all.
   readonly metersAttached: boolean;
-  /// Canonical normalized submix order (issue 1210): submix `j` is strip `tracks.length + j`, and
-  /// the meter frame's submix sections (`submixPeaks`, `submixGrDb`) follow this order.
-  readonly submixes: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
@@ -742,6 +736,17 @@ export interface MisoStatus {
   /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). Every value reaches
   /// the engine through `control()` (issue #1565), the one path the C ABI takes.
   readonly liveValuesSuperseded: bigint;
+  /// The applied-revision watermark's revision (issue 1349): the highest committed revision in
+  /// effect together with every revision before it, copied from the engine's render report.
+  /// @internal The SDK's `engine.apply` is the public surface.
+  readonly appliedRevision: bigint;
+  /// The absolute render sample of the first block in which `appliedRevision` was in effect.
+  /// @internal
+  readonly appliedSample: bigint;
+  /// The watermark's outcome flags, the C ABI's bits: `EXACT` 1, `TRANSITION_FALLBACK` 2,
+  /// `SUPERSEDED` 4.
+  /// @internal
+  readonly appliedOutcome: bigint;
   /// The module's memory size now: at least the boot size (`MisoAudioWorkletHost.memoryBytes`),
   /// larger after a control call grew it.
   readonly memoryBytes: number;
@@ -887,11 +892,10 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track, submix and source order (issues 137 D1, 207,
-  /// 1210).
+  /// Read the compiled session's canonical source order (issues 137 D1, 207).
   ///
-  /// `tracks` then `submixes` is the strip order `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
-  /// submission has to agree with.
+  /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
+  /// submission has to agree with. The strip order is the control list's, not this map's (#1565).
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(

@@ -109,6 +109,11 @@ fn retained_telemetry_configuration(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(missing_docs)] // Frozen one-to-one capability feature switches.
 pub struct ProviderFeatures {
+    /// `AUTOMATION_ENQUEUE` (capability flag bit 5). A host sets it only when render drains the
+    /// automation queue; with it clear the command is refused `UNAVAILABLE` before any check and
+    /// the capabilities record omits command `0x0006` and flag bit 5 (#1315). Event `0x8002`
+    /// stays tied to the session family.
+    pub automation: bool,
     /// `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (capability flag bit 7).
     pub controls: bool,
     /// `RESPONSE_GET` (capability flag bit 14).
@@ -124,6 +129,7 @@ pub struct ProviderFeatures {
 impl ProviderFeatures {
     /// Enable every typed provider and event family.
     pub const ALL: Self = Self {
+        automation: true,
         controls: true,
         response: true,
         transport: true,
@@ -135,6 +141,7 @@ impl ProviderFeatures {
     };
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
+        automation: false,
         controls: false,
         response: false,
         transport: false,
@@ -3146,6 +3153,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 features.controls
             }
             ControlCommand::ResponseGet { .. } => features.response,
+            ControlCommand::AutomationEnqueue { .. } => features.automation,
             ControlCommand::TransportGet => features.transport,
             ControlCommand::TransportSet { .. } => features.transport && features.transport_events,
             ControlCommand::CountersGet { .. } => features.counters,
@@ -3712,6 +3720,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
                 3 => session_transactions,
+                6 => features.automation,
                 7 => features.transport,
                 8 => features.transport && features.transport_events,
                 10 => features.counters,
@@ -3745,6 +3754,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         let mut flags = (1 << 7) - 1;
         if !session_transactions {
             flags &= !(1 << 3);
+        }
+        if !features.automation {
+            flags &= !(1 << 5);
         }
         if features.controls {
             flags |= 1 << 7;

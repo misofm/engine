@@ -206,6 +206,8 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
   const host = fakeHost();
   const reads = [];
   Object.assign(host, {
+    // The strip order the SDK reads from the core's list: the track, then the bus.
+    control: scriptedControl({ strips: { tracks: ["t"], submixes: ["bus"] } }),
     async observationMap() {
       return {
         tag: "miso.observationmap.v1", result: 0,
@@ -391,8 +393,7 @@ test("browser live controls retain the managed observation conflict hook", async
     control: scriptedControl(),
     async sessionMap() {
       return {
-        tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,
-        submixes: [],
+        tag: "miso.sessionmap.v1", result: 0, sources: [], metersAttached: true,
       };
     },
     async command(request) {

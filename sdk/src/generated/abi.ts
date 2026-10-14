@@ -50,10 +50,6 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_control_revision",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
-    "miso_engine_web_v1_live_control_submix_count",
-    "miso_engine_web_v1_live_control_submix_id",
-    "miso_engine_web_v1_live_control_track_count",
-    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -264,9 +260,19 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved",
+          "name": "watermarkRevision",
           "offset": 56,
-          "type": "u64[3]"
+          "type": "u64"
+        },
+        {
+          "name": "watermarkFirstSample",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "watermarkOutcomeFlags",
+          "offset": 72,
+          "type": "u64"
         }
       ]
     },

@@ -608,43 +608,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return false;
     }
 
-    this.trackCount = this.exports.miso_engine_web_v1_live_control_track_count(this.handle);
-    if (!u32(this.trackCount)) return false;
-    // `TextDecoder` is no more guaranteed in a `WorkletGlobalScope` than `TextEncoder` is, and
-    // a session track ID is `[a-z][a-z0-9._-]{0,126}` by the session schema, so every byte is
-    // ASCII by construction. A byte that is not is a corrupt artifact, not a decoding problem.
-    this.trackIds = [];
-    for (let index = 0; index < this.trackCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_live_control_track_id(this.handle, index);
-      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
-      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return false;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      this.trackIds.push(id);
-    }
-    // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
-    // sections), read through the same staging exactly as the track IDs are. Preparation sizes
-    // that staging for the longest source, track or submix ID, so the capacity check
-    // below is a corrupt-artifact check, not a limit a valid session can reach.
-    const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
-    if (!u32(submixCount)) return false;
-    this.submixIds = [];
-    for (let index = 0; index < submixCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_live_control_submix_id(this.handle, index);
-      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
-      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return false;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      this.submixIds.push(id);
-    }
-
-    // Issue #207: source introspection, read once here for the same reason the track identities
+    // Issue #207: source introspection, read once here for the same reason the other
     // are -- the construction path is the one that may allocate, and `process()` never touches
     // this. A headless consumer of the session map cannot otherwise learn which sources a compiled
     // session declares, how many channels each carries, or which frames it is waiting for; the
@@ -755,13 +719,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (!u32(headerPointer) || headerPointer === 0) return false;
       this.bindView("meterHeaderView", DataView, headerPointer, METER_HEADER_BYTES);
       if (this.meterHeaderView.getUint32(0, true) !== METER_HEADER_BYTES
-          || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION
-          || this.meterHeaderView.getUint32(8, true) !== this.trackCount) {
+          || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION) {
         return false;
       }
+      // The header owns the strip counts; the strip order is the core's control list (the
+      // owner header rows), which the frame's sections follow. The capacity check below rejects
+      // a header whose counts do not match the frame the engine sized.
+      this.trackCount = this.meterHeaderView.getUint32(8, true);
       this.submixCount = this.meterHeaderView.getUint32(64, true);
-      // Issue #1210 D3: the frame's submix sections are the enumerated submixes, in their order.
-      if (this.submixCount !== this.submixIds.length) return false;
       const strips = this.trackCount + this.submixCount;
       if (!u32(framePointer) || framePointer === 0
           || frameCapacity !== (strips * 3 + 3) * 4) return false;
@@ -904,8 +869,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   readStatus() {
     const view = this.statusView;
     if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
-        || view.getUint32(28, true) !== 0
-        || [56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
+        || view.getUint32(28, true) !== 0) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -917,6 +881,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
       liveValuesSuperseded: view.getBigUint64(48, true),
+      // Issue #1349 D2: the applied-revision watermark's three words, copied by the engine from
+      // the report of the block that advanced it. The worklet assigns no flag bit of its own.
+      appliedRevision: view.getBigUint64(56, true),
+      appliedSample: view.getBigUint64(64, true),
+      appliedOutcome: view.getBigUint64(72, true),
     });
   }
 
@@ -1027,14 +996,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         tag: "miso.sessionmap.v1",
         requestId: message.requestId,
         result: RESULT_OK,
-        tracks: [...this.trackIds],
         sources: this.sources.map((source) => ({
           id: source.id,
           channels: source.channels,
           frames: source.frames,
         })),
         metersAttached: this.metersAttached === true,
-        submixes: [...this.submixIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {

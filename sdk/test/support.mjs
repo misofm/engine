@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 import process from "node:process";
 
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
+import { onEndpointIds } from "./control-support.mjs";
 
 const ARTIFACT_DIRECTORY_ENV = "MISO_ENGINE_SDK_ARTIFACTS_HEX";
 const WASM_BASENAME = Buffer.from("/miso-engine-v1-audio-worklet.simd128.wasm", "ascii");
@@ -152,9 +153,12 @@ export function digestPlanes(blocks) {
  */
 export function engineHost(engine, { frames = [] } = {}) {
   let next = 0;
+  // The engine reads its own strip order from the core's list, so the host's frames share its
+  // endpoint's one request-ID allocator.
+  const forward = onEndpointIds(engine.controlTransactions().requestIds, (frame) => engine.controlFrame(frame));
   return {
     async sessionMap() {
-      return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, ...engine.sessionMap() };
+      return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: engine.sessionMap().sources, metersAttached: engine.sessionMap().metersAttached };
     },
     async control(frame) {
       frames.push(frame.slice());
@@ -162,7 +166,7 @@ export function engineHost(engine, { frames = [] } = {}) {
       let result = 0;
       let response;
       try {
-        response = engine.controlFrame(frame);
+        response = forward(frame);
       } catch (error) {
         if (typeof error?.result !== "number") throw error;
         result = error.result;

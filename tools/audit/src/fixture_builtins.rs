@@ -375,8 +375,9 @@ const INPUT_PROCESSOR_BYTES: u64 = 696;
 const STRIP_PREPARATION_BYTES: u64 = 1136;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
-// #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
-const GRAPH_OBSERVER_BINDING_BYTES: u64 = 80;
+// #1080 removed the controlled-activation flag #816 added, so the binding was 80 bytes again;
+// #1609 adds the bind-time `block_end` acceptance flag, so it is 88 bytes.
+const GRAPH_OBSERVER_BINDING_BYTES: u64 = 88;
 const METER_CONSUMER_BYTES: u64 = 72;
 // A2's private `MeterRequestSeal` binding policy fits the existing alignment padding, so its
 // native size remains 56 bytes after controlled-meter provenance was added.
@@ -5368,7 +5369,11 @@ mod tests {
             // follow gates, `Box<[[bool; 2]]>`, one `[bool; 2]` per route, kept for graph
             // lowering; the fixture session declares one route at every track count). The largest
             // allocation does not move. No PCM, meter, response or benchmark fixture moved.
-            "4432d2bfe744d480def089049d8e26e31d0db726093f545086e400a9321a581c",
+            //
+            // Re-pinned by issue #1609: `GraphNodeObserverBinding` grows from 80 to 88 bytes after
+            // the bind-time `block_end` acceptance flag is added; only the meter-bearing resource
+            // rows (eight bytes per meter) and this joined manifest identity move.
+            "f99fdbf2e91782a98f044b35ec71d044303b8a11bc53a232707db3e17b4c795a",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
