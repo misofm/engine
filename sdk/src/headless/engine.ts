@@ -33,7 +33,8 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import { ControlTransactionQueue } from "../core/control-queue.ts";
+import { decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
+import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -293,10 +294,23 @@ export class OfflineEngine {
    * `loadSession()`, and closes on `dispose()`.
    */
   controlTransactions(): ControlTransactionQueue {
-    return this.#controlQueue ??= new ControlTransactionQueue(
-      (frame) => this.#boundary.controlFrame(frame),
-      { initialRevision: this.#boundary.controlRevision() },
-    );
+    if (this.#controlQueue === undefined) {
+      const requestIds = new ControlRequestIds();
+      // The core reports its own frame ceiling, which the queue holds every transaction under.
+      const limits = decodeControlLimits(
+        this.#boundary.controlFrame(encodeRevisionProbe(requestIds.next())),
+      );
+      this.#controlQueue = new ControlTransactionQueue(
+        (frame) => this.#boundary.controlFrame(frame),
+        {
+          initialRevision: this.#boundary.controlRevision(),
+          requestIds,
+          limits,
+          readRevision: () => this.#boundary.controlRevision(),
+        },
+      );
+    }
+    return this.#controlQueue;
   }
 
   /**

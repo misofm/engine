@@ -13,7 +13,12 @@ import { readFile } from "node:fs/promises";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { encodeControlTransaction, encodeRevisionProbe } from "../src/core/control-frame.ts";
+import {
+  CONTROL_TRANSACTION_HEADER_BYTES,
+  controlEditBytes,
+  encodeControlTransaction,
+  encodeRevisionProbe,
+} from "../src/core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../src/core/control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
@@ -90,7 +95,7 @@ const settled = () => new Promise((resolve) => setImmediate(resolve));
 describe("one transaction in flight, the committed revision in every frame", () => {
   test("an idle submit sends at once, with revision 0 and request ID 1, and reports the reply", async () => {
     const core = fakeCore();
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const e = edit(vocal, 3, -6);
     const report = await queue.submit([e]);
     assert.equal(core.frames.length, 1);
@@ -117,7 +122,7 @@ describe("one transaction in flight, the committed revision in every frame", () 
 
   test("edits staged while one is in flight coalesce by address into one next transaction", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const order = [];
     const track = (label, promise) => promise.then((report) => { order.push([label, report.revision]); });
 
@@ -157,7 +162,7 @@ describe("one transaction in flight, the committed revision in every frame", () 
 
   test("edits of one submit go in one transaction, and an address staged again moves last", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const first = queue.submit([edit(vocal, 1, 0)]);
     const pair = [edit(vocal, 5, 0.25, "left"), edit(vocal, 5, 0.75, "right")];
     const second = queue.submit(pair);
@@ -182,7 +187,7 @@ describe("one transaction in flight, the committed revision in every frame", () 
 
   test("a stale value is never sent: a later value staged during flight goes in the next transaction", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const first = queue.submit([edit(vocal, 3, -1)]);
     const second = queue.submit([edit(vocal, 3, -2)]);
     core.release();
@@ -208,7 +213,7 @@ describe("one transaction in flight, the committed revision in every frame", () 
 
   test("flush with nothing staged waits for the transaction in flight, or resolves empty", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     assert.deepEqual({ ...(await queue.flush()) }, {
       ok: true, revision: 0n, path: "model_only", appliedOperations: 0,
     });
@@ -230,7 +235,7 @@ describe("a refusal is the core's, once", () => {
       frames.push(frame);
       const requestId = new DataView(frame.buffer).getBigUint64(24, true);
       return reply("control_domain", requestId, 5n);
-    });
+    }, { initialRevision: 0n });
     const refusal = await queue.submit([edit(vocal, 3, 30)]).then(
       () => assert.fail("a refused transaction resolved"),
       (error) => error,
@@ -239,10 +244,10 @@ describe("a refusal is the core's, once", () => {
     assert.equal(refusal.code, "control.domain");
     assert.equal(refusal.diagnosticCode, "control.domain");
     assert.equal(refusal.status, "validation_failed");
-    assert.equal(refusal.editIndex, 2);
-    assert.deepEqual({ ...refusal.report }, {
-      ok: false, revision: 5n, code: "control.domain", editIndex: 2,
-    });
+    // The fixture's diagnostic names edit 2 of the transaction; the submit holds one edit, so it
+    // names none of the submit's own and the refusal is the whole transaction's, without an index.
+    assert.equal(refusal.editIndex, undefined);
+    assert.deepEqual({ ...refusal.report }, { ok: false, revision: 5n, code: "control.domain" });
     await settledAll();
     assert.equal(frames.length, 1, "not retried");
     // The reply's revision is the core's current one: the next transaction expects it.
@@ -254,7 +259,7 @@ describe("a refusal is the core's, once", () => {
     const queue = new ControlTransactionQueue((frame) => {
       const requestId = new DataView(frame.buffer).getBigUint64(24, true);
       return reply("revision_conflict", requestId, 9n);
-    });
+    }, { initialRevision: 0n });
     const refusal = await queue.submit([edit(vocal, 3, 0)]).catch((error) => error);
     assert.ok(refusal instanceof MisoControlRefusal);
     assert.equal(refusal.code, "revision_conflict");
@@ -270,7 +275,7 @@ describe("a refusal is the core's, once", () => {
       refuse = false;
       const requestId = new DataView(frame.buffer).getBigUint64(24, true);
       return reply("control_domain", requestId, 3n);
-    });
+    }, { initialRevision: 0n });
     const refused = queue.submit([edit(vocal, 3, 30)]).catch((error) => error);
     const next = queue.submit([edit(vocal, 3, -3)]);
     assert.ok((await refused) instanceof MisoControlRefusal);
@@ -294,7 +299,7 @@ describe("transport and reply faults reject the submit and leave the queue usabl
       if (calls === 1) throw new Error("no port");
       if (calls === 2) return Promise.reject(new Error("port closed"));
       return reply("applied_live", new DataView(frame.buffer).getBigUint64(24, true), 1n);
-    });
+    }, { initialRevision: 0n });
     await assert.rejects(queue.submit([edit(vocal, 3, 0)]), /no port/);
     await assert.rejects(queue.submit([edit(vocal, 3, 0)]), /port closed/);
     assert.equal(queue.inFlight, false);
@@ -302,16 +307,16 @@ describe("transport and reply faults reject the submit and leave the queue usabl
   });
 
   test("a reply for another request, or bytes that are not a reply", async () => {
-    const wrong = new ControlTransactionQueue(() => reply("applied_live", 99n, 1n));
+    const wrong = new ControlTransactionQueue(() => reply("applied_live", 99n, 1n), { initialRevision: 0n });
     await assert.rejects(wrong.submit([edit(vocal, 3, 0)]), MisoEngineError);
-    const garbage = new ControlTransactionQueue(() => new Uint8Array(10));
+    const garbage = new ControlTransactionQueue(() => new Uint8Array(10), { initialRevision: 0n });
     await assert.rejects(garbage.submit([edit(vocal, 3, 0)]), MisoEngineError);
     assert.equal(wrong.revision, 0n);
   });
 
   test("an edit the frame cannot hold is refused at stage and never sits staged", async () => {
     const core = fakeCore();
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     assert.throws(() => queue.stage({ ...edit(vocal, 3, 0), rampSamples: 1.5 }), MisoUsageError);
     assert.throws(() => queue.submit([edit(vocal, 3, 0), { ...edit(vocal, 4, 0), value: "x" }]), MisoUsageError);
     assert.equal(queue.pending, 0);
@@ -323,11 +328,11 @@ describe("transport and reply faults reject the submit and leave the queue usabl
 describe("a replaced session starts the queue over", () => {
   test("reset rejects staged edits, sets the revision, and ignores a late reply's revision", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const flying = queue.submit([edit(vocal, 3, -1)]);
     const staged = queue.submit([edit(vocal, 3, -2)]);
     const stagedOutcome = staged.then(() => "resolved", (error) => error);
-    queue.reset();
+    queue.reset(0n);
     assert.ok((await stagedOutcome) instanceof MisoUsageError);
     core.release();
     await flying;
@@ -340,15 +345,15 @@ describe("a replaced session starts the queue over", () => {
   });
 
   test("reset keeps a closed queue closed", () => {
-    const queue = new ControlTransactionQueue(fakeCore().send);
+    const queue = new ControlTransactionQueue(fakeCore().send, { initialRevision: 0n });
     queue.close();
-    queue.reset();
+    queue.reset(0n);
     assert.throws(() => queue.stage(edit(vocal, 3, 0)), MisoUsageError);
   });
 
   test("close rejects staged edits and refuses new ones; the transaction in flight settles", async () => {
     const core = fakeCore({ hold: true });
-    const queue = new ControlTransactionQueue(core.send);
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
     const flying = queue.submit([edit(vocal, 3, -1)]);
     const staged = queue.submit([edit(vocal, 3, -2)]).catch((error) => error);
     queue.close();
@@ -415,8 +420,9 @@ describe("the headless engine owns one queue", () => {
         value: -3,
       };
       await queue.submit([edit]);
-      // The probe drew ID 1 and the transaction ID 2: the core's replay cache saw no reuse.
-      assert.equal(queue.requestIds.next(), 3n);
+      // The queue's own capabilities read drew ID 1, the probe 2 and the transaction 3: the core's
+      // replay cache saw no reuse.
+      assert.equal(queue.requestIds.next(), 4n);
     } finally {
       engine.dispose();
     }
@@ -467,7 +473,7 @@ describe("callers are isolated in one queue (#1563B)", () => {
         : reply("applied_live", requestId, BigInt(frames.length));
       answers.push(answer);
       return frames.length === 1 ? new Promise((resolve) => { release = () => resolve(answer); }) : answer;
-    });
+    }, { initialRevision: 0n });
     let release;
     const first = queue.submit([edit(vocal, 1, 0)]);
     const [e0, e1, e2, e3] = [edit(vocal, 2, 0), edit(vocal, 3, 0), edit(vocal, 4, 99), edit(vocal, 5, 0)];
@@ -510,7 +516,7 @@ describe("callers are isolated in one queue (#1563B)", () => {
       return calls === 2
         ? reply("control_domain", requestId, 2n) // names edit 2 of the transaction it answers
         : reply("applied_live", requestId, 3n);
-    });
+    }, { initialRevision: 0n });
     const first = queue.submit([edit(vocal, 1, 0)]);
     // Three edits so that the fixture's edit index 2 is the later submit's.
     const early = queue.submit([edit(vocal, 2, -5), edit(vocal, 3, -5)]);
@@ -547,7 +553,7 @@ describe("callers are isolated in one queue (#1563B)", () => {
       return calls === 1
         ? new Promise((resolve) => { release = () => resolve(reply("applied_live", requestId, 1n)); })
         : reply("revision_conflict", requestId, 9n);
-    });
+    }, { initialRevision: 0n });
     let release;
     const first = queue.submit([edit(vocal, 1, 0)]);
     const a = queue.submit([edit(vocal, 2, 0)]);
@@ -568,7 +574,7 @@ describe("callers are isolated in one queue (#1563B)", () => {
       const requestId = new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
       // Edit 2 of the first (three-edit) transaction is refused, then everything applies.
       return calls === 1 ? reply("control_domain", requestId, 1n) : reply("applied_live", requestId, 2n);
-    });
+    }, { initialRevision: 0n });
     queue.stage(edit(vocal, 1, 0));
     queue.stage(edit(vocal, 2, 0));
     queue.stage(edit(vocal, 3, 99));
@@ -589,11 +595,262 @@ describe("request IDs come from one allocator", () => {
     const taken = [ids.next(), ids.next()];
     assert.deepEqual(taken, [1n, 2n]);
     const core = fakeCore();
-    const queue = new ControlTransactionQueue(core.send, { requestIds: ids });
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n, requestIds: ids });
     assert.equal(queue.requestIds, ids);
     await queue.submit([edit(vocal, 3, 0)]);
     assert.equal(ids.next(), 4n, "the transaction took 3");
     const frame = core.frames[0];
     assert.equal(new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true), 3n);
+  });
+});
+
+const frameBytes = (frame) => frame.byteLength;
+const frameEdits = (frame) => new DataView(frame.buffer, frame.byteOffset).getUint32(40, true);
+const requestIdOf = (frame) => new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
+
+describe("a transaction stays under the host's frame ceiling (batch 7 M4)", () => {
+  const oneEdit = controlEditBytes(edit(vocal, 3, 0));
+  const ceilingFor = (edits) => CONTROL_TRANSACTION_HEADER_BYTES + edits * oneEdit;
+
+  test("staged submits are cut into transactions that each fit, whole and in the order staged", async () => {
+    // Plausible defect: coalescing merges every staged submit into one frame, which the transport
+    // then refuses (browser 16 KiB, C ABI 4 KiB), and a caller resends the same frame forever.
+    const core = fakeCore({ hold: true });
+    const queue = new ControlTransactionQueue(core.send, {
+      initialRevision: 0n,
+      limits: { maximumFrameBytes: ceilingFor(3), maximumTransactionEdits: 1000 },
+    });
+    const first = queue.submit([edit(vocal, 100, 0)]);
+    // While it is in flight: a two-edit submit, then eight single edits, on distinct addresses.
+    const pair = queue.submit([edit(vocal, 1, 0), edit(vocal, 2, 0)]);
+    const singles = Array.from({ length: 8 }, (_unused, at) => queue.submit([edit(vocal, 10 + at, 0)]));
+    core.release();
+    for (;;) {
+      await settled();
+      if (core.waiting === 0) break;
+      core.release();
+    }
+    const reports = await Promise.all([first, pair, ...singles]);
+    assert.ok(reports.every((report) => report.ok));
+    for (const frame of core.frames) {
+      assert.ok(frameBytes(frame) <= ceilingFor(3), `a ${frameBytes(frame)} byte frame is over the ceiling`);
+    }
+    // 1 + 10 edits: the pair is never split, so it shares a frame with one single (3), and the
+    // other seven go three, three and one.
+    assert.deepEqual(core.frames.map(frameEdits), [1, 3, 3, 3, 1]);
+    assert.deepEqual(
+      core.frames.map(requestIdOf),
+      [1n, 2n, 3n, 4n, 5n],
+      "each transaction drew its own request ID",
+    );
+  });
+
+  test("a submit that no transaction can carry is refused up front, naming the limit, and stages nothing", async () => {
+    // Plausible defect: an oversized submit is staged, fails the transport on every send, and
+    // blocks the writer that owns it for good.
+    const core = fakeCore();
+    const queue = new ControlTransactionQueue(core.send, {
+      initialRevision: 0n,
+      limits: { maximumFrameBytes: ceilingFor(2), maximumTransactionEdits: 1000 },
+    });
+    const big = [edit(vocal, 1, 0), edit(vocal, 2, 0), edit(vocal, 3, 0)];
+    const thrown = (() => {
+      try {
+        queue.submit(big);
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    assert.ok(thrown instanceof MisoUsageError);
+    assert.match(thrown.message, new RegExp(`limit of ${ceilingFor(2)} bytes`));
+    assert.throws(() => queue.stage(edit({ kind: "strip", id: "x".repeat(ceilingFor(2)) }, 1, 0)), MisoUsageError);
+    assert.equal(queue.pending, 0);
+    assert.equal(core.frames.length, 0);
+    // The same address three times is one edit once coalesced, and fits.
+    await queue.submit([edit(vocal, 1, 0), edit(vocal, 1, 1), edit(vocal, 1, 2)]);
+    assert.equal(frameEdits(core.frames[0]), 1);
+    // An edit-count ceiling is held the same way.
+    const counted = new ControlTransactionQueue(core.send, {
+      initialRevision: 0n,
+      limits: { maximumFrameBytes: 1 << 20, maximumTransactionEdits: 2 },
+    });
+    assert.throws(() => counted.submit(big), /2 edits/);
+  });
+
+  test("the real core's limits bound the headless queue", async () => {
+    const asset = await MisoEngineAsset.load(await moduleBytes());
+    const engine = await createOfflineEngine(sessionDocument(), { asset });
+    try {
+      const queue = engine.controlTransactions();
+      assert.equal(queue.maximumFrameBytes, 16384, "the web host's control frame");
+      assert.ok(queue.maximumTransactionEdits > 0);
+      // A submit past the frame is refused here, before the core's staging buffer could be.
+      const wide = Array.from({ length: 200 }, (_unused, at) => edit(vocal, at + 1, 0));
+      assert.throws(() => queue.submit(wide), MisoUsageError);
+    } finally {
+      engine.dispose();
+    }
+  });
+});
+
+describe("a call that failed without a reply (batch 7 minors)", () => {
+  test("it resends each submit alone, rejects only the one at fault, and reads the revision again", async () => {
+    // Plausible defect: a call-level failure (rebuild pending, plan backpressure) rejects every
+    // caller that was coalesced with the one at fault, or leaves the queue on a revision a lost
+    // reply made stale.
+    const frames = [];
+    const reads = [];
+    let calls = 0;
+    let release;
+    const queue = new ControlTransactionQueue((frame) => {
+      frames.push(frame);
+      calls += 1;
+      if (calls === 1) return new Promise((resolve) => { release = () => resolve(reply("applied_live", requestIdOf(frame), 1n)); });
+      // The transaction holding all three is refused as a call, then each goes alone: the middle one fails.
+      if (calls === 2) throw new MisoEngineError("rebuild", { phase: "lifecycle", code: "compileRejected" });
+      if (frameEdits(frame) === 1 && calls === 4) {
+        throw new MisoEngineError("rebuild", { phase: "lifecycle", code: "compileRejected" });
+      }
+      return reply("applied_live", requestIdOf(frame), BigInt(calls));
+    }, {
+      initialRevision: 0n,
+      readRevision: () => {
+        reads.push(calls);
+        return 40n;
+      },
+    });
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const a = queue.submit([edit(vocal, 2, 0)]);
+    const b = queue.submit([edit(vocal, 3, 0)]);
+    const c = queue.submit([edit(vocal, 4, 0)]);
+    release();
+    await first;
+    const outcomes = await Promise.allSettled([a, b, c]);
+    assert.deepEqual(outcomes.map((row) => row.status), ["fulfilled", "rejected", "fulfilled"]);
+    assert.equal(outcomes[1].reason.code, "compileRejected");
+    // One frame of three, then three alone: bounded, not retried again.
+    assert.equal(calls, 5);
+    assert.deepEqual(frames.slice(1).map(frameEdits), [3, 1, 1, 1]);
+    // The revision was read after each failure and the next frame carried it.
+    assert.deepEqual(reads, [2, 4]);
+    assert.equal(new DataView(frames[2].buffer, frames[2].byteOffset).getBigUint64(32, true), 40n);
+    assert.equal(queue.inFlight, false);
+  });
+
+  test("a lost reply leaves no stale revision: the core is read again", async () => {
+    // Plausible defect: the transport threw after the core committed, the queue kept the old
+    // revision, and every later transaction was refused as a revision conflict.
+    let calls = 0;
+    const frames = [];
+    const queue = new ControlTransactionQueue((frame) => {
+      frames.push(frame);
+      calls += 1;
+      if (calls === 1) throw new Error("port closed");
+      return reply("applied_live", requestIdOf(frame), 9n);
+    }, { initialRevision: 3n, readRevision: async () => 8n });
+    await assert.rejects(queue.submit([edit(vocal, 1, 0)]), /port closed/);
+    assert.equal(queue.revision, 8n);
+    await queue.submit([edit(vocal, 1, 0)]);
+    assert.equal(new DataView(frames[1].buffer, frames[1].byteOffset).getBigUint64(32, true), 8n);
+  });
+
+  test("a request-ID allocator that throws settles the batch and frees the queue", async () => {
+    // Plausible defect: a fault inside the send loop leaves the queue "in flight" for good, and
+    // every caller waits on a transaction that never settles.
+    class Broken extends ControlRequestIds {
+      next() {
+        throw new Error("ids exhausted");
+      }
+    }
+    const queue = new ControlTransactionQueue(fakeCore().send, { initialRevision: 0n, requestIds: new Broken() });
+    await assert.rejects(queue.submit([edit(vocal, 1, 0)]), /ids exhausted/);
+    assert.equal(queue.inFlight, false);
+  });
+});
+
+describe("what a refusal names, and what a replaced submit costs (batch 7 minors)", () => {
+  test("a whole-transaction refusal names an edit only when it is in that submit's own edits", async () => {
+    // Plausible defect: the transaction-level index of the fixture's diagnostic (edit 2) is
+    // reported on a refusal of a submit that holds one edit.
+    let calls = 0;
+    let release;
+    const queue = new ControlTransactionQueue((frame) => {
+      calls += 1;
+      if (calls === 1) return new Promise((resolve) => { release = () => resolve(reply("applied_live", requestIdOf(frame), 1n)); });
+      return reply("control_domain", requestIdOf(frame), 5n);
+    }, { initialRevision: 0n });
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const a = queue.submit([edit(vocal, 2, 0)]);
+    const b = queue.submit([edit(vocal, 3, 0)]);
+    release();
+    await first;
+    const [ra, rb] = await Promise.all([a, b].map((promise) => promise.catch((error) => error)));
+    // The diagnostic names edit 2, and the transaction holds two: no submit owns it.
+    assert.equal(ra.editIndex, undefined);
+    assert.equal(rb.editIndex, undefined);
+    assert.equal(ra.report.editIndex, undefined);
+  });
+
+  test("a submit whose addresses were all staged again resolves ok, and the queue counts it", async () => {
+    // Plausible defect: the replacement is silent, so a caller that reads `ok` believes the core
+    // saw its value.
+    const core = fakeCore({ hold: true });
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const early = queue.submit([edit(vocal, 2, -1)]);
+    const late = queue.submit([edit(vocal, 2, -9)]);
+    core.release();
+    await first;
+    core.release();
+    const [earlyReport, lateReport] = await Promise.all([early, late]);
+    assert.equal(earlyReport.ok, true);
+    assert.equal(earlyReport, lateReport, "the replaced submit gets the later values' report");
+    assert.equal(core.frames.length, 2, "its value never reached the core");
+    assert.deepEqual({ ...queue.stats }, { transactions: 2, coalescedEdits: 1, replacedSubmits: 1 });
+  });
+
+  test("the queue has no assumed revision", () => {
+    // Plausible defect: a queue made without the core's revision starts at 0 and meets a revision
+    // conflict on its first transaction.
+    const send = fakeCore().send;
+    assert.throws(() => new ControlTransactionQueue(send), MisoUsageError);
+    assert.throws(() => new ControlTransactionQueue(send, {}), MisoUsageError);
+    assert.throws(() => new ControlTransactionQueue(send, { initialRevision: 0n }).reset(), MisoUsageError);
+  });
+});
+
+describe("a control event listener that throws loses nothing (batch 7 M5)", () => {
+  test("the committed reply still returns, the failure is counted and reported outside the call", async () => {
+    // Plausible defect: the listener runs inside the control call with no guard, so its throw
+    // replaces the reply of a transaction the core already committed, and the caller resends it.
+    const asset = await MisoEngineAsset.load(await moduleBytes());
+    const engine = await createOfflineEngine(sessionDocument(), { asset });
+    const reported = [];
+    const original = globalThis.reportError;
+    globalThis.reportError = (error) => { reported.push(error); };
+    try {
+      const seen = [];
+      engine.onControlEvent(() => { throw new Error("listener fault"); });
+      engine.onControlEvent((event) => seen.push(event));
+      const queue = engine.controlTransactions();
+      const revision = queue.revision;
+      const report = await queue.submit([{
+        address: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: 5, lane: "both" },
+        value: -3,
+      }]);
+      assert.equal(report.ok, true);
+      assert.equal(report.revision, revision + 1n, "the reply of the committed transaction");
+      assert.ok(engine.controlListenerFailures >= 1);
+      assert.ok(seen.length >= 1, "a later listener still hears the event");
+      await settled();
+      assert.ok(reported.length >= 1);
+      assert.match(String(reported[0].message), /listener fault/);
+      assert.equal(engine.discardedControlEvents, 0);
+    } finally {
+      if (original === undefined) delete globalThis.reportError;
+      else globalThis.reportError = original;
+      engine.dispose();
+    }
   });
 });

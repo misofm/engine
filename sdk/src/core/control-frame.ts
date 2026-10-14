@@ -237,6 +237,17 @@ export function controlCallFailure(result: number, response: Uint8Array): MisoEn
   });
 }
 
+/** The bytes of a `SESSION_TRANSACTION_APPLY` frame before its first edit. */
+export const CONTROL_TRANSACTION_HEADER_BYTES = HEADER_BYTES;
+
+/**
+ * The bytes one edit adds to a transaction frame. It throws `MisoUsageError` for an edit that cannot
+ * be encoded, as `validateControlEdit` does.
+ */
+export function controlEditBytes(edit: ControlFrameEdit): number {
+  return editField(edit).length;
+}
+
 /** The address an edit writes: two edits with one key write the same lane of the same control. */
 export function controlEditKey(edit: ControlFrameEdit): string {
   const { owner, section, control, lane } = edit.address;
@@ -312,6 +323,44 @@ export function encodeRevisionProbe(requestId: bigint): Uint8Array {
   view.setUint16(16, MESSAGE_CAPABILITIES_GET, true);
   view.setBigUint64(24, id, true);
   return out;
+}
+
+/** The limits a `CAPABILITIES_GET` reply reports that bound what one transaction may hold. */
+export interface ControlLimits {
+  /** The most bytes one command frame may hold, header included. */
+  readonly maximumFrameBytes: number;
+  /** The most edits one transaction may hold. */
+  readonly maximumTransactionEdits: number;
+}
+
+/**
+ * Read the frame limits out of the reply to `encodeRevisionProbe`. A reply that is not a
+ * `CAPABILITIES_GET` response at all (a scripted host that answers a probe with a blank frame)
+ * reports `undefined`, which leaves a queue unbounded by bytes. A response that is one but does not
+ * hold the limits raises `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
+ */
+export function decodeControlLimits(bytes: Uint8Array): ControlLimits | undefined {
+  if (bytes.length < HEADER_BYTES) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let index = 0; index < MAGIC.length; index += 1) {
+    if (bytes[index] !== MAGIC[index]) return undefined;
+  }
+  if (bytes[14] !== KIND_RESPONSE || view.getUint16(16, true) !== MESSAGE_CAPABILITIES_GET) {
+    return undefined;
+  }
+  if (view.getUint16(18, true) !== 0) throw malformed("the capabilities reply is not ok");
+  if (HEADER_BYTES + view.getUint32(20, true) !== bytes.length) throw malformed("the payload length is wrong");
+  const fields = readFields(bytes.subarray(HEADER_BYTES), view.getUint32(40, true));
+  const frame = scalar(fields, 5, WIRE_U64, 8)?.getBigUint64(0, true);
+  const edits = scalar(fields, 24, WIRE_U32, 4)?.getUint32(0, true);
+  if (frame === undefined || edits === undefined || frame === 0n || edits === 0) {
+    throw malformed("the capabilities reply holds no frame or transaction limit");
+  }
+  const cap = BigInt(Number.MAX_SAFE_INTEGER);
+  return Object.freeze({
+    maximumFrameBytes: Number(frame > cap ? cap : frame),
+    maximumTransactionEdits: edits,
+  });
 }
 
 /** How the core applied a committed transaction (`TransactionApplied.edit_path`). */

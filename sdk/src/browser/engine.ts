@@ -685,10 +685,17 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     };
     const getLiveControls = (): Promise<EngineLiveControls> => {
       // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
-      semanticLiveControls ??= createBrowserLiveControls(host, (edits, managed) =>
-        observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-      options.document instanceof SessionBuilder ? options.document : undefined,
-      bootedDocument);
+      if (semanticLiveControls === undefined) {
+        const pending: Promise<EngineLiveControls> = createBrowserLiveControls(host, (edits, managed) =>
+          observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+        options.document instanceof SessionBuilder ? options.document : undefined,
+        bootedDocument);
+        semanticLiveControls = pending;
+        // A probe that failed is not the answer for good: the next call asks the host again.
+        pending.catch(() => {
+          if (semanticLiveControls === pending) semanticLiveControls = undefined;
+        });
+      }
       return semanticLiveControls;
     };
     // An observation subscription is the one 48-byte command record left, and the host stages

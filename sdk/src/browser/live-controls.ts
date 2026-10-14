@@ -1,7 +1,7 @@
 import { commandReasonName } from "../core/boundary.ts";
 import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
-import { controlCallFailure, encodeRevisionProbe } from "../core/control-frame.ts";
+import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
@@ -34,26 +34,52 @@ function browserCommand(edit: LaneEdit): MisoCommand {
   };
 }
 
+const hostQueues = new WeakMap<object, Promise<ControlTransactionQueue>>();
+
 /**
  * The browser's transaction queue for one host (#1563 D7): it posts each `SET_CONTROL` transaction
  * as the worklet's `control` message and decodes the reply with the same code the headless engine
  * uses. It starts from the committed revision the core reports now, read with a revision probe
  * (a `CAPABILITIES_GET`, which takes any revision), because the host exposes the revision only in a
- * reply. The probe and the transactions draw their request IDs from the queue's one allocator
+ * reply; the probe's reply also holds the frame limits the queue keeps every transaction under. The
+ * probe and the transactions draw their request IDs from the queue's one allocator
  * (`queue.requestIds`), which must also serve every other frame sent through `host.control()`: the
  * engine's replay cache refuses a reused ID.
+ *
+ * One host has one allocator, so one queue: a second call for the same host returns the first
+ * call's queue. A call whose probe failed is not remembered, and the next call probes again.
  */
-export async function createBrowserControlQueue(
+export function createBrowserControlQueue(
   host: MisoAudioWorkletHost,
 ): Promise<ControlTransactionQueue> {
+  const known = hostQueues.get(host);
+  if (known !== undefined) return known;
+  const created = openBrowserControlQueue(host);
+  hostQueues.set(host, created);
+  created.catch(() => {
+    if (hostQueues.get(host) === created) hostQueues.delete(host);
+  });
+  return created;
+}
+
+async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<ControlTransactionQueue> {
   const requestIds = new ControlRequestIds();
-  const probe = await host.control(encodeRevisionProbe(requestIds.next()));
-  if (probe.result !== 0) throw controlCallFailure(probe.result, probe.response);
+  const probe = async () => {
+    const reply = await host.control(encodeRevisionProbe(requestIds.next()));
+    if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+    return reply;
+  };
+  const first = await probe();
   return new ControlTransactionQueue(async (frame) => {
     const reply = await host.control(frame);
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply.response;
-  }, { initialRevision: probe.revision, requestIds });
+  }, {
+    initialRevision: first.revision,
+    requestIds,
+    limits: decodeControlLimits(first.response),
+    readRevision: async () => (await probe()).revision,
+  });
 }
 
 /**

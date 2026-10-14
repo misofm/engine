@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
-import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
+import { createBrowserControlQueue, createBrowserLiveControls } from "../src/browser/live-controls.ts";
 import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
 import { EngineLiveControls, LiveControlEdits } from "../src/core/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
@@ -649,6 +649,35 @@ describe("#1563B -- the browser transport posts the same frames and decodes the 
       const ids = frames.map((frame) => new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true));
       assert.deepEqual(ids, [1n, 2n], "the probe and the transaction share one allocator");
       assert.equal(controls.queue.requestIds.next(), 3n, "a catalog read would draw the next ID");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("one host has one queue and one allocator, and a failed probe is not remembered", async () => {
+    // Plausible defect: two queues over one host draw request IDs from two allocators, and the
+    // engine's replay cache refuses the second queue's first ID; or a probe that failed once is
+    // the answer for good.
+    const engine = await boot(compressorDocument());
+    try {
+      const host = engineHost(engine);
+      const control = host.control.bind(host);
+      let failures = 1;
+      host.control = async (frame) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("worker gone");
+        }
+        return control(frame);
+      };
+      await assert.rejects(createBrowserControlQueue(host), /worker gone/);
+      const [queue, again] = await Promise.all([createBrowserControlQueue(host), createBrowserControlQueue(host)]);
+      assert.equal(queue, again);
+      const controls = await createBrowserLiveControls(host);
+      assert.equal(controls.queue, queue);
+      assert.equal(queue.maximumFrameBytes, 16384, "the limit the core reported to the probe");
+      assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
+      assert.equal((await createBrowserLiveControls(host)).queue.requestIds, queue.requestIds);
     } finally {
       engine.dispose();
     }
