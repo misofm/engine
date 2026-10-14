@@ -5,8 +5,9 @@
 //! sits behind `Box<dyn PreparedPlanExecutor>` and is reached by a `call_indirect`. This module is
 //! the runtime proof: every export the engine worklet or the SDK's PCM-feed worklet calls on its
 //! render thread after boot runs inside [`render_locked`] (the set is the table
-//! `tools/realtime-policy/render-thread-exports.json`; its two named exceptions are `dispose`
-//! and `render_allocation_count`), and the module's global allocator counts each allocator call
+//! `tools/realtime-policy/render-thread-exports.json`; its named exceptions are the entries with
+//! `wrapped: false` that the worklets call after boot: `dispose`, `render_allocation_count`,
+//! `service`, `control_allocation_count`, the control-frame exports and `control_event`), and the module's global allocator counts each allocator call
 //! made while the flag is set. Browser qualification reads the count through
 //! `miso_engine_web_v1_render_allocation_count` and asserts it is exactly zero.
 //!

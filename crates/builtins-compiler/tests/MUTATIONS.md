@@ -55,7 +55,7 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| 140-10 | `LiveControlFaderProcessor::process` drains its queue *after* `self.fader.process(block)`, so an admitted fader move lands one block late | `builtins-compiler/src/lib.rs` | `host-web` `tests::a_fader_command_names_the_exact_application_sample` | RED (`a zero-window move is settled for every sample of the block, both lanes`) |
+| 140-10 | `LiveControlFaderProcessor::process` drains its queue *after* `self.fader.process(block)`, so an admitted fader move lands one block late | `builtins-compiler/src/lib.rs` | `host-web` `tests::a_fader_command_names_the_exact_application_sample` (deleted with the browser's own command path, #1565A: no test holds this row now; re-pin it to a core test or retire it) | RED (`a zero-window move is settled for every sample of the block, both lanes`) |
 
 ## Issue #210 phase 3 — the third drain
 

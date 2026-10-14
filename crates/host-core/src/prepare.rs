@@ -2852,6 +2852,17 @@ pub(crate) fn fader_records(
 
 /// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
 /// records are derived from.
+/// Whether a strip's effective fader or mute differs, as bits: the one test of "this strip's level
+/// moved", for the dense diff and the local one.
+#[cfg(feature = "control-provider")]
+pub(crate) fn level_differs(
+    before: &controls::EffectiveStrip,
+    after: &controls::EffectiveStrip,
+) -> bool {
+    before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
+        || before.mute != after.mute
+}
+
 pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::DualMonoFader {
     session::DualMonoFader {
         left_db: effective.fader_db[0],
@@ -3109,9 +3120,7 @@ impl<'a> EffectiveDiff<'a> {
     #[cfg(feature = "control-provider")]
     /// Whether the strip's effective fader or mute differs, as bits, between the two models.
     pub(crate) fn level_changed(&self, before: usize, after: usize) -> bool {
-        let (before, after) = (&self.before.strips[before], &self.after.strips[after]);
-        before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
-            || before.mute != after.mute
+        level_differs(&self.before.strips[before], &self.after.strips[after])
     }
 
     /// The level records of one strip: its effective values in the two models, with the lengths

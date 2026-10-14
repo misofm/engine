@@ -2958,7 +2958,8 @@ fn live_effect_pcm_shape(track_count: usize, sample_rate_hz: u32) {
 }
 
 /// #1264 gate 2. Red if the C ABI path addresses a different instance, lane or parameter index
-/// than the browser's lane: hand-built records pushed into a host-core plan with every live lane
+/// than the direct host-core lane (the records the browser wrote before #1565A deleted its own
+/// command path; the test names keep the old word): hand-built records pushed into a host-core plan with every live lane
 /// must render the same bits as the C ABI edit.
 #[test]
 fn live_effect_parameter_edits_render_like_the_browsers_lane() {
@@ -3199,7 +3200,7 @@ impl LaneReference {
             .collect()
     }
 
-    /// Runs one EQ owner transaction as the browser's lane does: the edits, targets designed in
+    /// Runs one EQ owner transaction as the direct host-core lane does: the edits, targets designed in
     /// the test by `EqTargetPreparer` from the owner's committed rows, publication and commit.
     fn publish_eq(&mut self, track_id: &str, effect_id: &str, edits: &[EqEdit]) {
         let rate = self.reference.rate;
@@ -3332,7 +3333,7 @@ fn live_eq_pcm_shape(sample_rate_hz: u32) {
 }
 
 /// #1265 gate 2. Red if the C ABI designs, addresses or publishes an EQ target differently from
-/// the browser's lane: targets designed in the test by `EqTargetPreparer` from the owner's own
+/// the direct host-core lane: targets designed in the test by `EqTargetPreparer` from the owner's own
 /// rows, published through the owner of a host-core plan with every live lane at the same block,
 /// must render the same bits as the C ABI edit.
 #[test]
@@ -4999,7 +5000,7 @@ mod set_control {
 
     /// One rig of one document takes `edits`: one revision, the plan epoch unchanged, no candidate,
     /// and the next blocks are heard to differ from an untouched second rig. The effect rows'
-    /// render bits are pinned against the browser's lane by
+    /// render bits are pinned against the direct host-core lane by
     /// `live_effect_parameter_edits_render_like_the_browsers_lane` and
     /// `live_effect_bypass_edits_render_like_a_rebuild`.
     fn live_alone(document: &str, edits: &[SessionEdit], label: &str) {
@@ -6124,7 +6125,7 @@ mod set_control {
     }
 
     /// Gate 1, effect family on a submix strip: a console slot's parameter, an insert's
-    /// parameter and an insert's bypass commit live and render the bits of the browser's lane
+    /// parameter and an insert's bypass commit live and render the bits of the direct host-core lane
     /// (host-core records pushed to the bus's own producers at the same block).
     ///
     /// Red if a submix effect is left a rebuild, or its record reaches another strip's instance
@@ -6142,7 +6143,7 @@ mod set_control {
                 entry.bypass = false;
             }
         });
-        // A case: its label, its edits, the records the browser's lane gets for them, and whether it
+        // A case: its label, its edits, the records the direct host-core lane gets for them, and whether it
         // bypasses the bus's compressor.
         type Push = (&'static str, u32, effect_contract::ParameterChannel, f32);
         type Case = (&'static str, Vec<SessionEdit>, Vec<Push>, bool);

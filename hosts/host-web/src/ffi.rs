@@ -45,7 +45,7 @@
 //! control allocations. Since issue #1570b `control_event`, the event entry, is the same kind of
 //! control work, and the worklet's message handler drains both event lanes through it. The
 //! render-locked count stays zero. Boot is outside the rule. The `render_lock` module header names the exports it calls,
-//! wrapped or not, among them the 28 unwrapped ones it calls after the `boot` export returns a
+//! wrapped or not, among them the 22 unwrapped ones it calls after the `boot` export returns a
 //! handle.
 
 #![allow(unsafe_code)]

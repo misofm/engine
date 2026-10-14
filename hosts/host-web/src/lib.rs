@@ -79,7 +79,7 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// headroom. Issue #1093 re-measured it after decision 12's required root `console` grew the
 /// minimal document from 447 to 511 bytes and its parse, model and compile peak from 6,780 to
 /// 8,944 bytes: 17.503 bytes per input byte, now the largest ratio (the dense documents stay
-/// below 13.1). 20 left 14.3% headroom. Issue #1381a re-measured the exact 1 MiB, 512-track by
+/// below 13.1). 20 left 14.3% headroom. Issue #1381a re-measured the exact 1 MiB, 192-track by
 /// 4-effect document on the shipped module (`scripts/check-web-boot-budget.mjs`): the boot now
 /// builds the control plane's session, whose catalog, producers and protocol state the browser did
 /// not hold, and the wasm high-water growth rose from under 20 MiB to 25,427,968 bytes (24.25
@@ -2008,6 +2008,11 @@ impl AudioWorkletEngineHost {
     /// for a typed refusal before commit, `web.apply.rebuild_pending` for a transaction that needs
     /// a plan rebuild (D9); [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
     /// response is the refusal's diagnostic (`code\tpath\n` lines).
+    ///
+    /// A frame refused after the core has seen it, `web.apply.rebuild_pending` included, has
+    /// consumed its request ID: the same bytes sent again are answered [`RESULT_OK`] with a non-ok
+    /// response frame whose code is `protocol.failure` (the replay cache), and a retry must take a
+    /// new request ID to meet the refusal again.
     pub fn control_command(&mut self, len: u32) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {

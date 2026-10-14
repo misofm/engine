@@ -67,7 +67,7 @@ pub fn take_fast_classification_count() -> usize {
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
     EffectiveDiff, LevelRules, OutOfDomain, StripChange, StripEditRamps, effective_fader,
-    fader_records, lane_records, matrix_record, route_source_strip, strip_at,
+    fader_records, lane_records, level_differs, matrix_record, route_source_strip, strip_at,
 };
 use crate::prepare::{LiveRampRow, LiveRamps, MonitorBase};
 
@@ -1184,12 +1184,6 @@ impl<'a> LocalDiff<'a> {
             .chain(self.route_indices().map(|route| strip_count + route))
             .collect()
     }
-}
-
-/// Whether a strip's effective fader or mute differs, as bits.
-fn level_differs(before: &EffectiveStrip, after: &EffectiveStrip) -> bool {
-    before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
-        || before.mute != after.mute
 }
 
 impl LevelDiff for LocalDiff<'_> {
