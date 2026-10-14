@@ -1,4 +1,4 @@
-//! A transaction of `SetControl`s applied to clones of the owners it names (TBD10).
+//! A transaction of `SetControl`s applied to clones of the owners it names (#1613).
 //!
 //! [`OwnerEdits`] holds the committed model and a small model of the edited owners. Each
 //! [`OwnerEdits::set`] clones the owner it names the first time, then runs the very [`crate::set`]

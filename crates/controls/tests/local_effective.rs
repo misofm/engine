@@ -1,4 +1,4 @@
-//! TBD9 D7: the effective values of one strip and one route, read through `LocalInputs` and
+//! #1612 D7: the effective values of one strip and one route, read through `LocalInputs` and
 //! `any_solo_in`, are the dense `effective`'s, so a host that classifies one edit applies the very
 //! rules of the whole-model pass without building its tables.
 

@@ -1,7 +1,7 @@
 # Shrink the always-attached per-effect live lanes
 
 Successor of #1381a and #1555, decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`, design point C6: the core attaches live lanes on every plan). Code anchors verified on `846b7d240` (the flip branch, #1381a).
-Issue number: assigned at filing (written here as #TBD8). Feature sprint mode (owner,
+Issue number: assigned at filing (written here as #1611). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review. The realtime gates below are mandatory
 all the same.
 

@@ -356,7 +356,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
 }
 
-/// Makes this thread's control commands prepare their transactions by the full path (TBD10): a
+/// Makes this thread's control commands prepare their transactions by the full path (#1613): a
 /// clone of the model with the edits applied, compiled, as before the in-place preparation. A test
 /// runs one script both ways and compares the two sessions.
 #[cfg(feature = "test-support")]
@@ -373,7 +373,7 @@ pub fn test_verify_catalog_stages(on: bool) {
 }
 
 /// How many commits this thread made from a token prepared in place, and how many such tokens it
-/// had to materialize into the full preparation, since the last call (TBD10), and resets both.
+/// had to materialize into the full preparation, since the last call (#1613), and resets both.
 #[cfg(feature = "test-support")]
 pub fn test_take_in_place_counts() -> (usize, usize) {
     IN_PLACE_COUNTS.with(core::cell::Cell::take)
@@ -621,7 +621,7 @@ pub(crate) enum LiveCommit {
     Done(Result<usize, CommandError>),
     /// The delta needs a plan rebuild; the token comes back untouched.
     Rebuild(ObservedPreparedToken),
-    /// The token was prepared in place (TBD10) and the fast classification could not judge it:
+    /// The token was prepared in place (#1613) and the fast classification could not judge it:
     /// the token comes back untouched, and the arm goes on with its full preparation. Never
     /// returned for a token that holds a compilation, and never leaves `commit_live`.
     NeedsFull(ObservedPreparedToken),
@@ -1211,7 +1211,7 @@ where
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
-        // TBD10: a transaction of values is prepared in place (no clone, no compile); every other
+        // #1613: a transaction of values is prepared in place (no clone, no compile); every other
         // command is prepared as it always was. A test can force the full preparation.
         #[cfg(feature = "test-support")]
         let in_place = !FORCE_FULL_PREPARATION.with(core::cell::Cell::get);
@@ -1538,7 +1538,7 @@ where
     /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
     /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     ///
-    /// **A token prepared in place (TBD10).** A transaction of `SetControl`s on existing values holds
+    /// **A token prepared in place (#1613).** A transaction of `SetControl`s on existing values holds
     /// the owners it edited and no compilation (`PreparedSessionTransaction::is_in_place`). The
     /// classification, the admission, the catalog stage and the producers' preflight read the
     /// committed model and those owners as one view (`controls::ModelView`), and nothing writes the
@@ -1548,7 +1548,7 @@ where
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         match self.commit_live_once(prepared) {
             LiveCommit::NeedsFull(mut prepared) => {
-                // TBD10: the fast classification could not judge the in-place transaction. Its
+                // #1613: the fast classification could not judge the in-place transaction. Its
                 // edits are prepared by the full path now (nothing was written), and the arm goes
                 // on as it always did, a rebuild included.
                 #[cfg(feature = "test-support")]
@@ -1577,7 +1577,7 @@ where
         let in_place = transaction.is_in_place();
         let committed = self.controller.session().compiled().normalized_model();
         // The model after the transaction, read as the committed model and the owners the
-        // transaction edited (TBD10), or the prospective compilation's model, whole.
+        // transaction edited (#1613), or the prospective compilation's model, whole.
         let view = match (transaction.edited_owners(), in_place) {
             (Some(owners), _) => controls::ModelView::edited(committed, owners),
             (None, true) => controls::ModelView::whole(committed),
@@ -1599,7 +1599,7 @@ where
         };
         let ramps = host_core::LiveRamps::for_session(next);
         let delta = if in_place {
-            // TBD10: classified from the rows the edits name over the view, with no model built.
+            // #1613: classified from the rows the edits name over the view, with no model built.
             let rows = transaction.set_control_rows().unwrap_or_default();
             match host_core::classify_live_staged(
                 committed,
@@ -1613,7 +1613,7 @@ where
                 None => return LiveCommit::NeedsFull(prepared),
             }
         } else {
-            // TBD9: a transaction of `SetControl`s is classified from the rows it names, with no
+            // #1612: a transaction of `SetControl`s is classified from the rows it names, with no
             // model clone and no canonical JSON; any other, and any row the fast path cannot
             // judge, runs the full classifier inside this one call.
             match host_core::classify_live_edit(
@@ -2004,7 +2004,7 @@ where
         let transaction = prepared.get().prospective_session();
         let committed = self.controller.session().compiled();
         let models = if transaction.is_in_place() {
-            // TBD10: a transaction prepared in place changes values, never a count (the
+            // #1613: a transaction prepared in place changes values, never a count (the
             // preparation proved it), so the counts a rebuild would check are those of the
             // committed model, which passed them when it was admitted. The model charge is the one
             // the full path would make: the committed estimate and the next one.

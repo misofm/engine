@@ -1,4 +1,4 @@
-//! TBD9: the fast live-edit classifier.
+//! #1612: the fast live-edit classifier.
 //!
 //! `classify_live_edit` reads a transaction of `SetControl`s from the rows it names, with no model
 //! clone and no canonical JSON, and must give exactly what `classify_live_delta_with_monitor` gives

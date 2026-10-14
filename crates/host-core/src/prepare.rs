@@ -2905,7 +2905,7 @@ pub(crate) struct StripChange<'s> {
 pub(crate) struct LevelRules<'a> {
     pub(crate) current: &'a SessionModel,
     /// The model after the change, read through a view so that a transaction of values need not
-    /// build it (TBD10).
+    /// build it (#1613).
     pub(crate) next: controls::ModelView<'a>,
     pub(crate) ramps: LiveRamps,
     pub(crate) edit_ramps: &'a EditRamps,

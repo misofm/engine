@@ -1,5 +1,5 @@
 //! `vca_reach_of` and `strips_reached_by` are the one-strip and the inverse forms of `vca_reach`
-//! (TBD9 D7): a host that classifies one VCA edit asks for the strips that VCA reaches, and for the
+//! (#1612 D7): a host that classifies one VCA edit asks for the strips that VCA reaches, and for the
 //! reach of each of them, without building the table of every strip. Red if either drifts from
 //! `vca_reach` on a nested, shared or cyclic membership.
 

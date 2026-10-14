@@ -470,7 +470,7 @@ fn validate_strip<'a>(
 
 /// The numeric half of a strip's validation: the input section, the fader and the pan or matrix.
 /// It reads the strip alone, so a host that changes values can check the strip it changed without
-/// the session's cross-reference index (TBD10).
+/// the session's cross-reference index (#1613).
 fn validate_strip_values(
     diagnostics: &mut Vec<Diagnostic>,
     path: &PathRef<'_>,
@@ -1190,7 +1190,7 @@ fn error(
 }
 
 /// Whether the numeric values of one owner pass the checks `validate_session` makes of them
-/// (TBD10): a strip's input section, fader, pan or matrix and the parameters of its console entries
+/// (#1613): a strip's input section, fader, pan or matrix and the parameters of its console entries
 /// and inserts; a VCA's offsets; a route's gain, matrix and `follows_mute`. The owner's references
 /// to other entities are not read.
 pub(crate) fn owner_values_valid(owner: crate::OwnerRef<'_>) -> bool {

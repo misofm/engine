@@ -1,7 +1,7 @@
 # Serve a response without a session
 
 Successor of #1573, decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `5415352a9` (PR #1608).
-Issue number: assigned at filing (written here as #TBD7). Feature sprint mode (owner,
+Issue number: assigned at filing (written here as #1610). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome

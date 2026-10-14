@@ -474,4 +474,4 @@ Landed on `codex/controls-batch-7`, single mode only, on today's one-instance mo
   the C6 evidence (#1555 recorded the C ABI half).
 - Root ruled the multiplier 20 -> 25 (25 MiB = 26,214,400 bytes, the tightest whole multiplier
   above the measurement). A CI measurement above 25 MiB stops the batch and goes to root. The
-  successor "Shrink the always-attached per-effect live lanes" (TBD8) aims to return the pin to 20.
+  successor "Shrink the always-attached per-effect live lanes" (#1611) aims to return the pin to 20.

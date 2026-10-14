@@ -1,4 +1,4 @@
-//! TBD10: a transaction of `SetControl`s applied to clones of the owners it names, and the model
+//! #1613: a transaction of `SetControl`s applied to clones of the owners it names, and the model
 //! read as the committed model plus those owners.
 //!
 //! Red if `OwnerEdits` writes anything the whole-model `set` does not (or refuses where it does not),

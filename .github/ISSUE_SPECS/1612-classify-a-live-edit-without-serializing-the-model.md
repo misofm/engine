@@ -1,7 +1,7 @@
 # Classify a live edit without serializing the model
 
 Decision 17 flip batch, root ruling A of 2026-10-14. Code anchors verified on `22268aa14`.
-Issue number: assigned at filing (written here as #TBD9). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1612). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review. The allocation gate below is mandatory all the same.
 
 ## Product outcome

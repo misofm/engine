@@ -80,7 +80,7 @@ pub fn changed_controls(
 /// Whether a write to the row at `address` changes that row alone: the session's rows do not (a ramp
 /// length changes every owner's descriptors) and a strip's `matrix_mode` does not (the switch flips
 /// which rows are active and rewrites the pan or the matrix). A host that applies a transaction of
-/// single-row writes in place, and [`changed_rows`], need exactly this rule (TBD9, TBD10).
+/// single-row writes in place, and [`changed_rows`], need exactly this rule (#1612, #1613).
 #[must_use]
 pub fn writes_only_its_row(address: &ControlAddress) -> bool {
     !match (&address.owner, &address.section) {
@@ -91,7 +91,7 @@ pub fn writes_only_its_row(address: &ControlAddress) -> bool {
 }
 
 /// The controls of the one row `address` names whose value bits differ between `current` and `next`,
-/// one change per listed lane, exactly as [`changed_controls`] gives them for that row (TBD9 D4).
+/// one change per listed lane, exactly as [`changed_controls`] gives them for that row (#1612 D4).
 /// The lane of `address` does not matter: the row's lanes are all compared.
 ///
 /// It resolves the row in each model and reads its committed value, so its cost is the size of the

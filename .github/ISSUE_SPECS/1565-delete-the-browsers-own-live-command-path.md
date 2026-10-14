@@ -253,7 +253,7 @@ it departs from the filed text:
     word no longer chooses lanes since #1562a; host-core's lane-bit tests hold the claim).
 - New: gate 1 above; gate 2, `the_boot_word_is_reserved_and_observation_staging_follows_the_taps`;
   `a_subscription_without_capacity_is_unsupported`; and the D6 pair below.
-- `tests/control_command_timing.rs` (TBD9) did not compile on the batch head (it called the
+- `tests/control_command_timing.rs` (#1612) did not compile on the batch head (it called the
   `native_staging::drain_reliable_events` that #1570b deleted); it drains through `control_event`
   now. Every `tests/*.rs` boot dropped the queue word.
 - `tools/parameter-metadata/tests/round_trip.rs::every_metadata_id_resolves_through_a_command_acknowledgement`
@@ -300,4 +300,4 @@ Re-pins and their history lines are recorded with the batch's gate run below.
   browser qualification rows were not run here (no local browser runs).
 - `RUSTDOCFLAGS='-D warnings' cargo doc` fails on `crates/control-plane/src/control.rs:236`
   (`SessionControlSnapshot::effect_cells` unresolved link) on the batch head, also without this
-  slice's changes; that crate belongs to TBD10's lane.
+  slice's changes; that crate belongs to #1613's lane.

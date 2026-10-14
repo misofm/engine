@@ -1,4 +1,4 @@
-//! TBD10: a live-only transaction committed without cloning and compiling the model.
+//! #1613: a live-only transaction committed without cloning and compiling the model.
 //!
 //! The protocol prepares a transaction of `SetControl`s on existing values **in place**
 //! (`SessionStore::prepare_transaction_in_place`): the owners the edits name, edited, and nothing

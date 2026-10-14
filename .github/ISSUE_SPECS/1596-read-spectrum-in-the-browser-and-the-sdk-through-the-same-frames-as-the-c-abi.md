@@ -151,7 +151,7 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   through the core).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332), for
   the two modes.
-- #TBD6 (make the spectrum one-shot handoff safe across threads), root 2026-10-14.
+- #1609 (make the spectrum one-shot handoff safe across threads), root 2026-10-14.
 
 ## Supersedes and shrinks
 

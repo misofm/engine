@@ -1,4 +1,4 @@
-//! The pieces of a value-only commit that the session owns (TBD10): which owners an edit
+//! The pieces of a value-only commit that the session owns (#1613): which owners an edit
 //! touched, whether their values are valid, whether their counts are those of the owners they
 //! replace, and how many bytes they take in the canonical text.
 //!

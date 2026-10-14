@@ -1,7 +1,7 @@
 # Make the spectrum one-shot handoff safe across threads
 
 Successor of #1591, decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `5415352a9` (PR #1608).
-Issue number: assigned at filing (written here as #TBD6). Feature sprint mode (owner,
+Issue number: assigned at filing (written here as #1609). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review. The realtime gates below are mandatory
 all the same.
 

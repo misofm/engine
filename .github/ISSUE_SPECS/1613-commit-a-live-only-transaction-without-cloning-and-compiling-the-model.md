@@ -1,9 +1,9 @@
 # Commit a live-only transaction without cloning and compiling the model
 
 Decision 17 flip batch, root ruling A of 2026-10-14. Code anchors verified on `9666949b3`.
-Issue number: assigned at filing (written here as #TBD10). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1613). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review. The allocation gate below is mandatory all the same.
-Builds on #TBD9 (the fast classifier, `host_core::classify_live_edit`).
+Builds on #1612 (the fast classifier, `host_core::classify_live_edit`).
 
 ## Product outcome
 
@@ -18,7 +18,7 @@ events, watermark, control catalog. What the fast path does not cover goes throu
 
 ## Context
 
-- **The measured cost after #TBD9** (native release, x86-64, one fader edit, one source, route and
+- **The measured cost after #1612** (native release, x86-64, one fader edit, one source, route and
   no insert per track, 200 calls; `hosts/host-web/tests/control_command_timing.rs`): 267 us at 64
   tracks and 1.11 ms at 256 for the whole `control_command`. Of that, the protocol's
   `prepare_transaction` is 206 us and 804 us (the model clone at
@@ -42,7 +42,7 @@ events, watermark, control catalog. What the fast path does not cover goes throu
   values, the model's `revision`, the canonical text and the estimate's three canonical-length fields
   (`canonical_bytes`, `compiled_model_bytes`, `estimated_bytes`) is unchanged: the estimate counts
   entities, effects, parameters (a `params` entry added or removed changes it), and string bytes.
-- **What the classifier and the catalog read.** After #TBD9 the classifier reads the committed
+- **What the classifier and the catalog read.** After #1612 the classifier reads the committed
   model (`current`) for old values and the prospective model (`next`) for new ones, and only for the
   owners its rows name, through `strip_at`, `routes.get`, `vcas[..]`, `LocalInputs` and
   `controls::changed_rows`. The catalog stage reads `next` through `owner_rows_with`,
@@ -59,10 +59,10 @@ Binding, from root (2026-10-14):
   replay cache byte-identical.
 - **R2. The committed model stays snapshot-able.** After any sequence of fast commits the canonical
   JSON of the model equals what the full path produces for the same transactions. The differential
-  gate runs on the #1560 parity script and #TBD9's seeded generator; the full path stays as the
+  gate runs on the #1560 parity script and #1612's seeded generator; the full path stays as the
   oracle.
 - **R3. Cost does not depend on the track count.** The allocation count of a live-only commit is
-  equal at 64 and 256 tracks (thread-scoped counters, as #TBD9), plus one descriptive timing line of
+  equal at 64 and 256 tracks (thread-scoped counters, as #1612), plus one descriptive timing line of
   the whole `control_command` at 64 and 256 tracks.
 - **R4. Only the rows the edits reach.** The catalog stage reads the derived rows of the strips and
   sends the edited rows reach (VCA members, followed sends, solo); the catalog after a fast commit
@@ -127,8 +127,8 @@ Design (this slice):
   read `next` through the view; none reads it as a dense `SessionModel` any more, and the lowering
   bodies stay one body for both paths. `LiveDelta` borrows from both parts of the view.
 - **D6. The classifier on the view.** `host_core::classify_live_staged(current, view, ramps,
-  edit_ramps, monitor, rows) -> Option<LiveDelta<'_>>` is #TBD9's fast path over the view; `None`
-  when it cannot judge. #TBD9's `classify_live_edit(current, next, .., rows)` stays (it is the
+  edit_ramps, monitor, rows) -> Option<LiveDelta<'_>>` is #1612's fast path over the view; `None`
+  when it cannot judge. #1612's `classify_live_edit(current, next, .., rows)` stays (it is the
   differential's subject for two whole models) and calls the same body with the view of `next`.
   `LiveDelta` gains `derived_owners: Option<Vec<usize>>`: the owner indices (strips, then routes as
   strip count plus route index) whose derived rows the classification reached, set by the fast path
@@ -183,7 +183,7 @@ Design (this slice):
 - `crates/control-plane/src/{control.rs,compile.rs,lib.rs}`.
 - `crates/capi/src/runtime/live_tests.rs` (the new tests at its end; no production code of `capi`).
 - `crates/host-core/tests/support/edit_sessions.rs` (the sessions, the parity script and the
-  generator that #TBD9's test file held, moved so that both tests share them).
+  generator that #1612's test file held, moved so that both tests share them).
 - `hosts/host-web/tests/control_command_timing.rs` (no `hosts/host-web/src`, no `sdk/`).
 - This spec.
 
@@ -210,7 +210,7 @@ build (pcm `76525e7ef9e78cf4`).
 1. **Differential.** For every transaction of (a) the #1560 parity script
    (`hosts/host-web/tests/control_parity.rs`, as replayed in `live_edit_classifier.rs`) at 48 and
    96 kHz, with its solo steps, and (b) at least 2,000 seeded transactions of one to four edits drawn
-   from every row class (the #TBD9 generator), the in-place chain (`prepare_transaction_in_place`,
+   from every row class (the #1612 generator), the in-place chain (`prepare_transaction_in_place`,
    `classify_live_staged`, the view-based catalog stage, `commit_prepared`) equals the full chain
    (`prepare_transaction_with_monitor`, `classify_live_delta_with_monitor`, the dense stage,
    `commit_prepared`) on: the whole `LiveDelta`, the refusal, the staged and published catalog (every
@@ -248,7 +248,7 @@ build (pcm `76525e7ef9e78cf4`).
 
 ## Dependencies
 
-- #TBD9 (the fast classifier and `set_control_rows`), #1600 (`changed_owners`, `settings_changed`),
+- #1612 (the fast classifier and `set_control_rows`), #1600 (`changed_owners`, `settings_changed`),
   #1559 (the monitor overlay), #1562a (the control plane's one command entry), D15-17 (a submit is
   synchronous only for what can fail, the watermark, the replay cache).
 
@@ -284,7 +284,7 @@ clone and the compile), the second makes the stage local.
   `control_plane::test_verify_catalog_stages(false)`) turns it off for one thread; only the
   allocation gate does, and every other test keeps it on, so the stage of every in-place commit of
   the differentials is compared with a full restage (R4).
-- **`#TBD9`'s test file shares its builders.** The sessions, the parity script and the generator moved
+- **`#1612`'s test file shares its builders.** The sessions, the parity script and the generator moved
   to `crates/host-core/tests/support/edit_sessions.rs`; `live_edit_classifier.rs` imports them and
   now says, per case, that the fast path set `derived_owners` and the full path did not.
 - **The brief's `crates/capi/tests/in_place_commit.rs` is `live_tests.rs` of `capi`'s runtime
@@ -310,7 +310,7 @@ Native release, x86-64 (AVX2), a fader edit, 200 calls after one warm-up.
 Whole `control_command` of `hosts/host-web/tests/control_command_timing.rs` (one source, route and
 no insert per track; the browser host's entry, which is `SessionState::command` and so the C ABI's):
 
-| tracks | after #TBD9 (recorded there) | in place |
+| tracks | after #1612 (recorded there) | in place |
 | --- | --- | --- |
 | 64 | 267 us | 18.4 us |
 | 256 | 1.11 ms | 19.0 us |

@@ -201,7 +201,7 @@ fn write_quoted(output: &mut String, value: &str) {
 /// session, at the depth of an item of the root's arrays: the walk of [`write_canonical`] over that
 /// value alone, indented as in the document. The bytes of a document are the sum of its owners'
 /// bytes and of the rest, so a value change moves the document's length by the change of its
-/// owner's (TBD10).
+/// owner's (#1613).
 pub(crate) fn owner_bytes<T: VisitModel>(owner: &T) -> usize {
     let mut writer = JsonWriter {
         output: String::new(),

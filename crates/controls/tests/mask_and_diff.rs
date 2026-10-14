@@ -188,7 +188,7 @@ fn the_vca_set_and_its_members_are_values() {
     assert!(matches!(changes[0].address.owner, controls::Owner::Vca(_)));
 }
 
-/// TBD9 D4. Red if `changed_rows` differs from the row's share of `changed_controls` for any
+/// #1612 D4. Red if `changed_rows` differs from the row's share of `changed_controls` for any
 /// writable row of the model, or answers for a row whose write moves more than the row (the
 /// session's ramp lengths, a strip's `matrix_mode`), where the caller needs the full diff.
 #[test]

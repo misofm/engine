@@ -57,7 +57,7 @@ thread_local! {
 
 /// How many calls of [`classify_live_edit`] on this thread were answered by the fast path (from the
 /// rows the edits name, with no model clone and no canonical JSON) since the last call, and resets
-/// the count (TBD9). A test shows that a transaction took the path it was meant to.
+/// the count (#1612). A test shows that a transaction took the path it was meant to.
 #[cfg(feature = "test-support")]
 pub fn take_fast_classification_count() -> usize {
     FAST_CLASSIFICATIONS.with(|count| count.replace(0))
@@ -176,7 +176,7 @@ pub struct LiveDelta<'a> {
     /// strips whose effective fader or mute can differ (their own level, a VCA that reaches them,
     /// their solo), by strip index, and the sends whose gate can differ, as the strip count plus the
     /// route index. Ascending. `Some` only when the classification was made from the rows the edits
-    /// name (TBD9, TBD10), which also means the models list the same owners in the same order; a
+    /// name (#1612, #1613), which also means the models list the same owners in the same order; a
     /// control catalog then stages the derived rows of these owners and of `changed_owners` and no
     /// others. `None` when the classification compared the whole models: every derived row is read.
     pub derived_owners: Option<Vec<usize>>,
@@ -439,7 +439,7 @@ pub fn classify_live_delta_with_monitor<'a>(
     Ok(delta)
 }
 
-/// The classification of a transaction at a host that holds a running plan (TBD9): the live delta
+/// The classification of a transaction at a host that holds a running plan (#1612): the live delta
 /// of `current` to `next`, or the reason it needs a rebuild. The one entry both hosts' control
 /// plane calls.
 ///
@@ -496,7 +496,7 @@ pub fn classify_live_edit<'a>(
     classify_live_delta_with_monitor(current, next, ramps, edit_ramps, monitor)
 }
 
-/// The fast path of [`classify_live_edit`] over a [`ModelView`] (TBD10): the classification of a
+/// The fast path of [`classify_live_edit`] over a [`ModelView`] (#1613): the classification of a
 /// transaction of `SetControl`s whose model `next` is the committed model `current` with the owners
 /// the transaction edited, read as one model, so that no prospective model is built. `None` when it
 /// cannot answer, and the caller then has the full classifier decide on a whole model, which it
@@ -1028,7 +1028,7 @@ struct LocalStrip {
     solo_after: bool,
 }
 
-/// The effective values of **the strips and sends an edit reaches**, in both models (TBD9 D6): the
+/// The effective values of **the strips and sends an edit reaches**, in both models (#1612 D6): the
 /// rules of [`EffectiveDiff`], computed for the strips whose own level, VCA, solo or following send
 /// moved and for nothing else. A strip or send it does not hold has unchanged effective values.
 struct LocalDiff<'a> {

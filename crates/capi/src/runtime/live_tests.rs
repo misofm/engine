@@ -7589,7 +7589,7 @@ mod set_control {
 }
 
 // ---------------------------------------------------------------------------------------------
-// TBD10: a live-only transaction committed in place
+// #1613: a live-only transaction committed in place
 // ---------------------------------------------------------------------------------------------
 
 /// A small deterministic generator (xorshift64*).
@@ -7663,7 +7663,7 @@ fn observed(rig: &mut Rig) -> Observed {
     (snapshot, list, state)
 }
 
-/// TBD10 gate 1, through the C ABI. Two sessions of one document are given the same stream of
+/// #1613 gate 1, through the C ABI. Two sessions of one document are given the same stream of
 /// transactions of one to three edits drawn from the control list (every row of every class, the
 /// solo rows, with and without a ramp): the first prepares each by the full path (a clone of the
 /// model, compiled), the second in place. Every command gives the same result, the same response
@@ -7825,7 +7825,7 @@ fn strip_row(
     }
 }
 
-/// TBD10 gate 2. The allocations and frees of one whole `SESSION_TRANSACTION_APPLY` that edits live
+/// #1613 gate 2. The allocations and frees of one whole `SESSION_TRANSACTION_APPLY` that edits live
 /// values, through the C ABI's control entry, are the same at 64 and 256 tracks, for each kind of
 /// live row: and the commit was made in place. With the full preparation forced, the count at 256
 /// tracks is larger than at 64, so the gate sees what it guards.

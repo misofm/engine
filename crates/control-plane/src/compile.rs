@@ -96,7 +96,7 @@ pub(crate) fn compiled_model_admission(
 }
 
 /// [`compiled_model_admission`] from the two models' resource estimates, for a prospective model
-/// that is not held as a compilation (TBD10).
+/// that is not held as a compilation (#1613).
 pub(crate) fn compiled_model_admission_between(
     current: session::ResourceEstimate,
     prospective: session::ResourceEstimate,

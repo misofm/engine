@@ -1,5 +1,5 @@
 //! Sessions, the #1560 parity script and a seeded generator of transactions, shared by the tests
-//! of the live-edit classifier (TBD9) and of the in-place commit (TBD10).
+//! of the live-edit classifier (#1612) and of the in-place commit (#1613).
 #![allow(dead_code)]
 
 use controls::{

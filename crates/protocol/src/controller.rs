@@ -1218,7 +1218,7 @@ impl PreparedImmediateCommandFrame {
     }
 }
 
-/// How a command's transaction is prepared (TBD10).
+/// How a command's transaction is prepared (#1613).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Preparation {
     /// The one-call path: no host monitor overlay, a compilation always.
@@ -1751,7 +1751,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     }
 
     /// [`Self::prepare_command_frame`] for a host that commits a transaction of values without a
-    /// compilation (TBD10): a `SESSION_TRANSACTION_APPLY` whose edits are all `SetControl`s on
+    /// compilation (#1613): a `SESSION_TRANSACTION_APPLY` whose edits are all `SetControl`s on
     /// existing values is prepared with [`SessionStore::prepare_transaction_in_place`], so its token
     /// holds the edited owners and no compilation ([`PreparedSessionTransaction::is_in_place`]).
     /// Every other command, and every transaction the in-place preparation cannot prove equal to

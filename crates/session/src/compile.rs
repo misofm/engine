@@ -51,7 +51,7 @@ pub struct CompiledSession {
     pub(crate) normalized: NormalizedSession,
     /// The canonical text of the model. The compile writes it. A commit of values only
     /// ([`Self::finish_in_place`]) drops it, and the next read writes it again from the model, so a
-    /// commit that changes no structure costs no serialization of the session (TBD10).
+    /// commit that changes no structure costs no serialization of the session (#1613).
     pub(crate) canonical_json: std::sync::OnceLock<String>,
     sample_rate: SampleRateHz,
     quantum: QuantumFrames,

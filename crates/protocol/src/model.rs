@@ -914,7 +914,7 @@ enum TransactionForm {
     /// The complete prospective compilation: the clone of the model with the edits applied,
     /// validated, normalized and written as canonical text.
     Compiled(CompiledSession),
-    /// A transaction of `SetControl`s on existing values (TBD10): the owners the edits changed and
+    /// A transaction of `SetControl`s on existing values (#1613): the owners the edits changed and
     /// nothing else of the model. The committed compilation is not cloned, compiled or serialized;
     /// the commit installs the owners in it.
     InPlace(InPlaceEdit),
@@ -924,7 +924,7 @@ enum TransactionForm {
     Monitor(Vec<SessionEdit>),
 }
 
-/// The owners a transaction of values changed (TBD10).
+/// The owners a transaction of values changed (#1613).
 struct InPlaceEdit {
     /// The session header and the edited owners, in ID order (`controls::OwnerEdits`).
     owners: SessionModel,
@@ -953,7 +953,7 @@ impl PreparedSessionTransaction {
         }
     }
 
-    /// Whether the transaction was prepared in place (TBD10): it holds no compilation of its own,
+    /// Whether the transaction was prepared in place (#1613): it holds no compilation of its own,
     /// so [`Self::compiled`] is not available. Either it changes values (read
     /// [`Self::edited_owners`] for them) or it is a transaction of solo writes only.
     #[must_use]
@@ -1015,7 +1015,7 @@ impl PreparedSessionTransaction {
     /// **every** edit of the transaction is a `SetControl` (a write to a monitor row is in
     /// [`Self::monitor_edits`], not here); `None` as soon as one edit is another kind. A host that
     /// classifies the transaction reads the rows it names instead of comparing the two models
-    /// whole, because a `SetControl` writes its row and nothing else (TBD9 D2).
+    /// whole, because a `SetControl` writes its row and nothing else (#1612 D2).
     #[must_use]
     pub fn set_control_rows(&self) -> Option<&[controls::ControlAddress]> {
         self.set_control_rows.as_deref()
@@ -1174,7 +1174,7 @@ impl SessionStore {
     }
 
     /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
-    /// without a compilation (TBD10).
+    /// without a compilation (#1613).
     ///
     /// A transaction whose edits are all `SetControl`s on values that exist is prepared **in
     /// place**: the owners the edits name are cloned and edited with the very `controls::set` the
@@ -1349,7 +1349,7 @@ impl SessionStore {
     /// Install a preparation whose base revision was checked by the controller immediately
     /// before this call.  Moving the complete compilation is allocation-free and non-fallible; so
     /// is installing the owners of a transaction prepared in place, which is the first write of the
-    /// committed model (TBD10): a swap of each edited owner, then the revision and the estimate.
+    /// committed model (#1613): a swap of each edited owner, then the revision and the estimate.
     pub(crate) fn commit_prepared(
         &mut self,
         prepared: PreparedSessionTransaction,
@@ -1699,7 +1699,7 @@ mod tests {
         )
     }
 
-    /// TBD10. A transaction of values is prepared in place, holds the edited owners and no
+    /// #1613. A transaction of values is prepared in place, holds the edited owners and no
     /// compilation, commits to the session the full path commits to, and is materialized into the
     /// full preparation on demand; a transaction of solo writes only holds nothing; a structural edit
     /// and a refusal are the full path's.
@@ -1805,7 +1805,7 @@ mod tests {
         );
     }
 
-    /// TBD9 D2. `set_control_rows` names the rows a transaction of `SetControl`s wrote, in
+    /// #1612 D2. `set_control_rows` names the rows a transaction of `SetControl`s wrote, in
     /// transaction order, and is `None` as soon as one edit is another kind. A write to a monitor
     /// row is not a model write, so it is not in the list, and a transaction of such writes alone
     /// has an empty list.

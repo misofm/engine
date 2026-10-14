@@ -455,14 +455,14 @@ pub fn any_solo_in(model: &SessionModel, overlay: &MonitorOverlay) -> bool {
     })
 }
 
-/// [`EffectiveInputs`] for **one strip** of a model, and any of its routes (TBD9 D7): the inputs
+/// [`EffectiveInputs`] for **one strip** of a model, and any of its routes (#1612 D7): the inputs
 /// of [`effective_strip`] for that strip and of [`effective_follow`] and [`effective_gate`] for
 /// any route, with no table built for the other strips. The strip's VCA reach is
 /// [`SessionModel::vca_reach_of`]; a route's source strip is found by binary search over the
 /// sorted strip IDs (tracks, then submixes), so the model must be a compiled session's normalized
 /// model.
 ///
-/// The model is read through a [`ModelView`] (TBD10), so the strip, the VCAs and the routes are the
+/// The model is read through a [`ModelView`] (#1613), so the strip, the VCAs and the routes are the
 /// ones the view holds edited.
 ///
 /// [`EffectiveInputs::reach`] answers for the strip given to [`Self::new`] only; a call for another
@@ -595,7 +595,7 @@ impl EffectiveInputs for LocalInputs<'_> {
 
 /// A source of the effective values [`crate::owner_rows_in`] and [`crate::derived_rows_in`] read: the
 /// dense [`Effective`] of a whole model, or [`LocalEffective`], which computes one strip's or route's
-/// values when asked (TBD10). Both come from the one set of rules above.
+/// values when asked (#1613). Both come from the one set of rules above.
 pub trait EffectiveSource {
     /// Strip number `index`'s effective values.
     fn strip(&self, index: usize) -> EffectiveStrip;
@@ -613,7 +613,7 @@ impl EffectiveSource for Effective {
     }
 }
 
-/// The effective values of **the strips and routes asked for**, with no table of the others (TBD10):
+/// The effective values of **the strips and routes asked for**, with no table of the others (#1613):
 /// [`effective_strip`], [`effective_follow`] and [`effective_gate`] over [`LocalInputs`], with the
 /// solo term from [`any_solo_in`]. The values are those [`effective`] gives for the same model and
 /// overlay.

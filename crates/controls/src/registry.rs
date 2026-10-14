@@ -187,7 +187,7 @@ pub fn owner_rows_with(
 
 /// [`owner_rows_with`] over a [`ModelView`] and any source of effective values: the rows of owner
 /// number `owner` of the model the view stands for, read from the committed model and the owners the
-/// view holds edited, with the effective values of `effective` (TBD10). The one body of both.
+/// view holds edited, with the effective values of `effective` (#1613). The one body of both.
 pub fn owner_rows_in(
     view: ModelView<'_>,
     effective: &impl EffectiveSource,
@@ -233,7 +233,7 @@ pub fn derived_rows_with(
     derived_rows_in(ModelView::whole(model), effective, owner, out);
 }
 
-/// [`derived_rows_with`] over a [`ModelView`] and any source of effective values (TBD10).
+/// [`derived_rows_with`] over a [`ModelView`] and any source of effective values (#1613).
 pub fn derived_rows_in(
     view: ModelView<'_>,
     effective: &impl EffectiveSource,

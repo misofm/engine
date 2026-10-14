@@ -1,4 +1,4 @@
-//! The pieces of a value-only commit (TBD10): the canonical bytes of an owner, the owners' values
+//! The pieces of a value-only commit (#1613): the canonical bytes of an owner, the owners' values
 //! and counts, and installing edited owners in a compiled session.
 //!
 //! A host that changes values commits without compiling the session again, so every figure it keeps
