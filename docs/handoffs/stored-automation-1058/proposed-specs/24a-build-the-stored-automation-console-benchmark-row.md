@@ -210,3 +210,12 @@ batch Q. Drafts 01, 02 and 03a (the documents must validate) and *Session `contr
 configurable ramp lengths for live mute, fader and pan changes* (#1054), for the document's
 `control_smoothing` key, arrive through draft 20. Draft
 24b *Record the stored-automation console benchmark baseline* follows it.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Realtime policy.** `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` are
+  deleted; use `./target/release/realtime_policy` (draft 07's amendment).
+- The native console rows stay under owner ruling R9 (`tools/bench/src/console.rs` holds
+  `console_mixing_automation`, `:138`). No other change.

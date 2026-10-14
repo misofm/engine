@@ -138,3 +138,11 @@ Batch P1. Direct dependency:
 
 - Draft 21b *Retire the AUTOMATION_CANCELED event and the cancellation path*: it removes the locate
   cancellation, the last reader of a set position.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** The stored position is `transport_position` (`crates/host-core/src/control_provider.rs:339`,
+  seed `:405`, set `:1186-1187`, snapshot `:1179`). #1315 has landed and kept `TRANSPORT_SET`.
+  Decision 17 does not touch the transport. Batch P1, ready.

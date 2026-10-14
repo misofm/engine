@@ -256,7 +256,7 @@ fn a_live_bypass_reaches_the_addressed_lane() {
         support::write_effect(
             addressed(&mut handles, address, instance),
             &mut gate,
-            EffectControlRecord::Bypass(true),
+            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
         );
         let live = render(&mut prepared);
         let (mut oracle, _oracle_handles) = prepare(&document(Some((TRACK, instance))));

@@ -61,6 +61,10 @@ pub enum DiagnosticCode {
     AutomationSegmentOverlap,
     /// An automation segment has an invalid value/range relationship.
     AutomationInvalidRange,
+    /// Two automation entries drive one lane (#1626).
+    AutomationDuplicateLane,
+    /// Two discontinuities of one automation entry are closer than 64 samples (#1626).
+    AutomationDiscontinuitySpacing,
     /// A required bounded capacity was zero.
     CapacityZero,
     /// Checked capacity arithmetic or platform-size conversion failed.
@@ -104,6 +108,8 @@ impl DiagnosticCode {
             Self::AutomationOutOfOrder => "automation.out_of_order",
             Self::AutomationSegmentOverlap => "automation.segment_overlap",
             Self::AutomationInvalidRange => "automation.invalid_range",
+            Self::AutomationDuplicateLane => "automation.duplicate_lane",
+            Self::AutomationDiscontinuitySpacing => "automation.discontinuity_spacing",
             Self::CapacityZero => "capacity.zero",
             Self::CapacityArithmeticOverflow => "capacity.arithmetic_overflow",
             Self::ResourceLimitExceeded => "resource.limit_exceeded",

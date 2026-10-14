@@ -1,5 +1,7 @@
 # Mirror the stored automation rules in the SDK builder
 
+> **Obsolete (controls coordinator, 2026-10-14):** the SDK is a thin client (decision 17 C1, C13; #1566 D8). Kept as a record; do not file. See the amendment at the end.
+
 Proposed by *Research: render stored session automation in the engine, identically on every
 platform* (#1058), answer A3, under decision 15 D15-16
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`). A draft for root
@@ -118,3 +120,12 @@ accepts.
   *Validate effect automation units, domains and shapes at preparation*: D1 mirrors their rules,
   so each must be on `main` first.
 - Batch: R3.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Status: obsolete (decision 17 C1 and C13, #1566 D8).** The SDK is a thin client: "the row rule
+  is the engine's" and the builder checks only structure (#1566 D8); C13 lists "the SDK builder's
+  checks" among the one-host differences to remove, not to grow. The builder's `validate()` boots
+  the headless engine, so an author sees the engine's own codes there. Do not file this draft.

@@ -144,3 +144,15 @@ Batch R3. Direct dependencies:
 
 Draft 17b *Process an effect node in pieces at automation events* depends on this draft and lands
 in the same batch.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The bypass crossfade** (#1341a1, #1341a2) is a per-block step of every live effect stage. A
+  piece boundary inside a crossfade must not change its bits; the probe adds one schedule with a
+  bypass toggle at block start and `Point`s at mid-block offsets during the crossfade.
+- **Block rate only.** A live effect parameter is `Block` rate; `Sample`-rate rows are rebuild-only
+  (`crates/controls/src/effect_rows.rs:146-160`). The probe covers the descriptor's `Block` cells,
+  as written. Re-count them at filing (#1336 and #1337 are still open).
+- **Dependencies.** #1069 is still open.

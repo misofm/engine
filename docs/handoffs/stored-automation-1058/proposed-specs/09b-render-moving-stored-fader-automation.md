@@ -180,3 +180,14 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
   host).
 - Batch: R1, in one push with drafts 09a, 10 *Classify fader automation edits as carried
   rebuilds* and 11 *Compose VCA offsets with stored fader automation*.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Comment anchors gone.** The `crates/session/src/validate.rs` comments of D4 (`:812-822`,
+  `:842-853`) left with `BUILTIN_AUTOMATION_TARGETS` (#1566); the inert sentence is now in
+  `docs/SESSION_SCHEMA_V1.md` near `:278-279` and in `validate_automation_target`'s rustdoc
+  (`validate.rs:868-870`). D4 rewrites those.
+- **Composition.** Each event's gain is draft 09a D1's with `S` that includes the hand offset (11b).
+- **Must-land group** is 09a, 09b, 10, 11 and 11b.

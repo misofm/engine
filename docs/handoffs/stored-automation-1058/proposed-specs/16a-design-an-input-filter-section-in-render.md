@@ -126,3 +126,15 @@ Batch R2. Direct dependencies:
 - Root's confirmation of README finding F1.
 
 Draft 16b depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **F1.** The README's F1 proposal (2026-10-14) recommends option A (design in render at events)
+  with four conditions; this slice carries the contract amendments of condition 4, including a
+  one-line note against decision 17 C6 ("strip input ... through prepared filter targets designed
+  off render" stays true for live edits). It still waits for root's confirmation of F1.
+- **Anchors.** `SvfSection::design` is now `crates/builtins/src/lib.rs:837-875`; the test counter
+  is `FILTER_DESIGN_CALLS` (`:839`). #1407 has landed; #1602 retired the input-design bound cache.
+- Realtime policy as in draft 07's amendment.

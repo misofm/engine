@@ -198,3 +198,21 @@ Batch R2. Direct dependencies:
 
 Draft 07's events, draft 08's model (D1 follows it) and *Session `controlSmoothing`: configurable
 ramp lengths for live mute, fader and pan changes* (#1054) arrive through drafts 10 and 12.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **OQ1 = C: trim takes the hand offset.** When this slice adds rows 1 and 2 to
+  `automation_row_renders`, slice 11b's write rule applies to trim: `SET_CONTROL trim_db` on an
+  automated trim lane writes that lane's stored offset (live). This slice adds the trim offsets
+  cell (one `f64` and a ramp word, 36 bytes per automated trim lane, charged as draft 09a D4
+  charges the fader's) and composes each trim event as `checked_trim_gain(clamp(f64(curve) +
+  offset, -144, 24))` with the lane's current sign; a cell change jumps at the next block entry over
+  `LiveRamps::resolve(InputTrim, edit ramp)`. A flat trim at `v` with offset `o` renders the bits of
+  a static trim of `f32(clamp(f64(v) + f64(o)))`. D5's trim sentence is replaced by this rule.
+- **Polarity: automation wins** (D5's rule stands for row 1). Its jump length is
+  `LiveRamps::for_row(PolarityInvert)`, twice `mute_ms` (decision 17's ramp row), not the mute
+  length of D2.
+- **Browser commands** `COMMAND_TRIM_DB` and `COMMAND_POLARITY_INVERT` are deleted (#1565).
+  #1261 and #1346 have landed. Realtime policy as in draft 07's amendment.

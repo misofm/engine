@@ -115,3 +115,18 @@ Batch R2. Direct dependencies:
 - Draft 13b *Follow an automated mute on following sends in render* (same push).
 - *Make a send's follows_mute live in the browser* (#1342): the browser's `follows_mute` edit. It
   brings #1225, #1226 and #1382.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The mirror is gone.** `LiveRouteMuteFollow` and `crates/host-core/src/live_route_state.rs` are
+  deleted; the send gate is `controls::effective`'s (C7), and route records come from
+  `route_records` (`crates/host-core/src/live_delta.rs:1416`) and `RouteControlProducer`
+  (`crates/host-core/src/route_controls.rs:201`). D1-D3 apply to that code.
+- **`terms`** for an automated source lane is `static_mute || VCA mute || solo term` (OQ1 = C);
+  solo exists on both hosts (C8).
+- **#1342** is superseded by #1562 (its gate 1). #1225, #1226, #1347 have landed.
+- Authorized paths: `crates/host-core/src/{live_delta.rs,route_controls.rs}`,
+  `crates/host-core/tests/live_delta.rs`, `crates/control-plane/src/`,
+  `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`.

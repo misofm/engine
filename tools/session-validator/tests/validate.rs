@@ -299,6 +299,23 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         4,
         "control.automation.target",
     ),
+    // Stored automation gives each lane one curve (#1626), checked structurally at stage 1: a
+    // `left` trim ride added to the `both` fader's control, and a step then a segment that starts
+    // away from the held value 40 samples later.
+    (
+        "builtins-automation.json",
+        "\"control\": 2,\n        \"lane\": \"left\"",
+        "\"control\": 5,\n        \"lane\": \"left\"",
+        1,
+        "automation.duplicate_lane",
+    ),
+    (
+        "builtins-automation.json",
+        "\"start_sample\": \"480\",\n          \"end_sample\": \"960\",\n          \"start_value\": 0.0,\n          \"end_value\": 1.0,\n          \"unit\": \"linear\"\n        }",
+        "\"start_sample\": \"480\",\n          \"end_sample\": \"960\",\n          \"start_value\": 0.0,\n          \"end_value\": 1.0,\n          \"unit\": \"linear\"\n        },\n        {\n          \"shape\": \"linear\",\n          \"start_sample\": \"1000\",\n          \"end_sample\": \"1100\",\n          \"start_value\": 0.5,\n          \"end_value\": 0.5,\n          \"unit\": \"linear\"\n        }",
+        1,
+        "automation.discontinuity_spacing",
+    ),
     // The removed document limits are strict unknowns rather than silently ignored host policy.
     (
         "canonical.json",

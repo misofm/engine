@@ -147,3 +147,14 @@ Batch P2, after batch R3 (#1306). Direct dependencies:
 
 *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for
 `ControlLimits`, arrives through drafts 21a-21c.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Earlier.** With README F23, #1306 no longer waits for R3; it keeps only its D3 (S leaves the
+  preparation caps). This slice follows #1306 directly: batch P2 can follow P1.
+- **Moved files.** `all_limits_nonzero` and `limits_are_valid` are `crates/capi/src/runtime/mod.rs:144`,
+  `:172`; `prepare_caps` is `crates/control-plane/src/compile.rs:596` over `ControlLimits`
+  (`crates/control-plane/src/adapter.rs:33`). The browser's S derivation
+  (`hosts/host-web/src/lib.rs:4447-4455`) is #1306 D3's.

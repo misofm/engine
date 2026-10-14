@@ -168,3 +168,14 @@ in batch R1, so `main` never holds the types with no caller.
   consumer check and replay its next blocks for a prime* (#1320), merge first: D1 factors their
   seek code (Hazards).
 - Batch: R1. Draft 04b depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Realtime policy.** `scripts/check-realtime-policy.sh` is deleted; the check is
+  `cargo build --locked --release -p realtime-policy && ./target/release/realtime_policy`, and its
+  floors are `marked_files_floor` and `marked_regions_floor` in `tools/realtime-policy/src/policy.rs:161-222`.
+- **Dependencies.** #1316, #1318 and #1320 are still open; the ordering rule stands. The source
+  crate's seek anchors have moved; re-read them at filing.
+- No decision 17 change: the timeline is source transport, not a control.

@@ -1,5 +1,7 @@
 # Validate effect automation units, domains and shapes at preparation
 
+> **Obsolete (controls coordinator, 2026-10-14):** its unit and domain rules are #1566's row rule and its shape rule moves into draft 02. Kept as a record; do not file. See the amendment at the end.
+
 Proposed by *Research: render stored session automation in the engine, identically on every
 platform* (#1058), answer A3, under decision 15 D15-16
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`). A draft for root
@@ -143,3 +145,13 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 - *Refuse automation on effect parameters that are not block-rate* (#1335): D1 extends its
   function and relies on its classifier route.
 - Batch: R3. Draft 03b *Mirror the stored automation rules in the SDK builder* builds on it.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Status: obsolete (decision 17, #1566).** Its unit and domain rules are #1566's row rule
+  (`controls::automation_diagnostics`, `control.domain`), which covers effect rows through their
+  descriptors (`DomainRule::Contract`); `effect_automation_diagnostics`, the function it extends, is
+  deleted (#1566 D7). Its one remaining rule, the shape rule, moves into amended draft 02 as one
+  rule for every row. Do not file this draft.

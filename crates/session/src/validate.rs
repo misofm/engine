@@ -1,10 +1,10 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
-    AutomationShape, ConsoleEntry, ControlAddress, Diagnostic, DiagnosticCode, DiagnosticSet,
-    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, Owner, ParameterUnit,
-    ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Rack,
-    RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section, SessionModel, Source,
-    Submix, Track,
+    Automation, AutomationSegment, AutomationShape, ConsoleEntry, ControlAddress, Diagnostic,
+    DiagnosticCode, DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, Owner,
+    ParameterChannel, ParameterUnit, ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM,
+    ROUTE_GAIN_DB_MINIMUM, Rack, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section,
+    SessionModel, Source, StableId, Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -967,8 +967,12 @@ fn validate_automation(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let automations_path = root.key("automation");
+    let mut first_ids = HashSet::with_capacity(session.automation.len());
+    // The entries that reach the lane check: target accepted, `id` the first of its value.
+    let mut lane_entries = Vec::with_capacity(session.automation.len());
     for (position, automation) in session.automation.iter().enumerate() {
         let path = automations_path.index(position);
+        let first_of_id = first_ids.insert(automation.id.as_str());
         if automation.segments.is_empty() {
             error(
                 diagnostics,
@@ -978,14 +982,20 @@ fn validate_automation(
             );
         }
 
+        let before_target = diagnostics.len();
         validate_automation_target(&automation.target, index, &path.key("target"), diagnostics);
+        if first_of_id && diagnostics.len() == before_target {
+            lane_entries.push((position, automation));
+        }
 
         let segments_path = path.key("segments");
         let mut previous_start = None;
         let mut previous_end = None;
+        let mut ordered = true;
         for (segment_position, segment) in automation.segments.iter().enumerate() {
             let segment_path = segments_path.index(segment_position);
             if segment.start_sample >= segment.end_sample {
+                ordered = false;
                 error(
                     diagnostics,
                     DiagnosticCode::AutomationInvalidRange,
@@ -994,6 +1004,7 @@ fn validate_automation(
                 );
             }
             if previous_start.is_some_and(|start| segment.start_sample < start) {
+                ordered = false;
                 error(
                     diagnostics,
                     DiagnosticCode::AutomationOutOfOrder,
@@ -1001,6 +1012,7 @@ fn validate_automation(
                     "segment starts before its predecessor",
                 );
             } else if previous_end.is_some_and(|end| segment.start_sample < end) {
+                ordered = false;
                 error(
                     diagnostics,
                     DiagnosticCode::AutomationSegmentOverlap,
@@ -1038,6 +1050,125 @@ fn validate_automation(
                 }
             }
         }
+        if ordered {
+            validate_discontinuity_spacing(&automation.segments, &segments_path, diagnostics);
+        }
+    }
+    validate_lane_uniqueness(&lane_entries, &automations_path, diagnostics);
+}
+
+/// The least grid period of stored automation, in samples (#1626 D3, note A1.4 of #1058): render
+/// evaluates a moving curve on a fixed 64-sample grid, and a lane takes at most one jump in any
+/// window of this length. A fixed engine constant, not a session value.
+const DISCONTINUITY_SPACING_SAMPLES: u64 = 64;
+
+/// Refuse two discontinuities of one entry closer than [`DISCONTINUITY_SPACING_SAMPLES`] (#1626
+/// D3). The caller guarantees the segments are ordered and disjoint.
+///
+/// A discontinuity is a sample where the value, by `f32` bits, differs from the value just before
+/// it (the hold rule in `docs/SESSION_SCHEMA_V1.md`). Only segment boundaries can be one: a
+/// segment's start whose `start_value` differs from what the lane held before it (never the first
+/// segment's, which is held before it), and the end of a `step` segment whose two values differ
+/// and that no segment follows at once. Where a segment follows at once its start is the one
+/// boundary at that sample, so two boundaries at one sample are one discontinuity. Of a close pair
+/// the later one is named: `(sample, segment, field)`.
+fn validate_discontinuity_spacing(
+    segments: &[AutomationSegment],
+    segments_path: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // Boundaries are pushed in ascending sample order: a step's end comes before the start of
+    // any later segment.
+    let mut jumps: Vec<(u64, usize, &'static str)> = Vec::new();
+    for (position, segment) in segments.iter().enumerate() {
+        if let Some(previous) = position.checked_sub(1).map(|at| &segments[at]) {
+            // Just before this start a step still holds its `start_value` when it ends here;
+            // every other segment, and a step after its end, holds `end_value`.
+            let held = if previous.shape == AutomationShape::Step
+                && previous.end_sample == segment.start_sample
+            {
+                previous.start_value
+            } else {
+                previous.end_value
+            };
+            if held.to_bits() != segment.start_value.to_bits() {
+                jumps.push((segment.start_sample, position, "start_sample"));
+            }
+        }
+        let next_starts_here = segments
+            .get(position + 1)
+            .is_some_and(|next| next.start_sample == segment.end_sample);
+        if segment.shape == AutomationShape::Step
+            && !next_starts_here
+            && segment.end_value.to_bits() != segment.start_value.to_bits()
+        {
+            jumps.push((segment.end_sample, position, "end_sample"));
+        }
+    }
+    for pair in jumps.windows(2) {
+        if pair[1].0 - pair[0].0 < DISCONTINUITY_SPACING_SAMPLES {
+            error(
+                diagnostics,
+                DiagnosticCode::AutomationDiscontinuitySpacing,
+                &segments_path.index(pair[1].1).key(pair[1].2),
+                "discontinuities of one automation entry must be at least 64 samples apart",
+            );
+        }
+    }
+}
+
+/// Refuse an automation entry whose lane an earlier entry (by `id`) already drives (#1626 D1).
+///
+/// A lane is one control of one owner's section; `both` overlaps both channels, `left` and `right`
+/// only themselves. Of an overlapping pair the greater `id` is refused, once however many entries
+/// it overlaps, so the refused entry does not depend on declared order. One sort, then one pass.
+fn validate_lane_uniqueness(
+    entries: &[(usize, &Automation)],
+    automations_path: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    type LaneKey<'a> = (u8, Option<&'a str>, u8, Option<&'a str>, u32);
+    fn key(target: &ControlAddress) -> LaneKey<'_> {
+        let slot = match &target.section {
+            Section::Console(slot) | Section::Inserts(slot) => Some(slot.as_str()),
+            Section::Own | Section::Builtins => None,
+        };
+        (
+            target.owner.kind().code(),
+            target.owner.id().map(StableId::as_str),
+            target.section.code(),
+            slot,
+            target.control,
+        )
+    }
+    let mut sorted: Vec<&(usize, &Automation)> = entries.iter().collect();
+    sorted.sort_by(|left, right| {
+        key(&left.1.target)
+            .cmp(&key(&right.1.target))
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+    let mut group = None;
+    let (mut left_taken, mut right_taken) = (false, false);
+    for (position, automation) in sorted {
+        let this = key(&automation.target);
+        if group != Some(this) {
+            group = Some(this);
+            (left_taken, right_taken) = (false, false);
+        }
+        let (overlaps, now_taken) = match automation.target.lane {
+            ParameterChannel::Left => (left_taken, (true, right_taken)),
+            ParameterChannel::Right => (right_taken, (left_taken, true)),
+            ParameterChannel::Both => (left_taken || right_taken, (true, true)),
+        };
+        if overlaps {
+            error(
+                diagnostics,
+                DiagnosticCode::AutomationDuplicateLane,
+                &automations_path.index(*position).key("target").key("lane"),
+                "an earlier automation entry already drives this lane",
+            );
+        }
+        (left_taken, right_taken) = now_taken;
     }
 }
 

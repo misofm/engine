@@ -280,6 +280,39 @@ and renders nothing. Extending the vocabulary unblocks authoring and the SDK's b
 the stored automation table, builtin targets included, identically on every platform is owned by
 issue #1058 (research first); #140, which once gated it, was descoped
 (`rulings/engine-footprint-2026-09-28.md`).
+
+**What the table means: the hold rule (#1626, #1058 A3).** One entry is one curve of one lane over
+absolute sample time. Before its first segment the lane holds the first `start_value`. Inside a
+segment `[start_sample, end_sample)` it follows the segment: `linear` is `v0 + (v1 - v0)·x`,
+`exponential` is `v0·(v1/v0)^x`, with `x = (t - t0)/(t1 - t0)`, and a `step` segment holds
+`start_value` on the whole of `[start_sample, end_sample)`. After a segment, and in a gap between
+two, the lane holds that segment's `end_value`; a `step` takes its `end_value` at `end_sample`. The
+value after the last segment holds for ever.
+
+Session validation refuses what no rendering could honour, structurally and before any row is read:
+
+- **One entry per lane** (`automation.duplicate_lane`, at `$.automation[<i>].target.lane`). Two
+  entries share a lane when their `owner`, `owner_id`, `section`, `slot_id` and `control` are equal
+  and their lanes overlap: `both` overlaps `left` and `right`, `left` overlaps `left`, `right`
+  overlaps `right`. A `left` entry and a `right` entry on one control are two lanes. Of an
+  overlapping pair the entry with the greater `id` is refused, once however many entries it
+  overlaps, so the refused entry does not depend on declared order. An entry whose target is
+  already refused, and an entry whose `id` repeats an earlier one (`id.duplicate`), is not
+  reported again.
+- **Discontinuities at least 64 samples apart** (`automation.discontinuity_spacing`, at the later
+  one's `$.automation[<i>].segments[<k>].start_sample` or `.end_sample`, once per close pair). A
+  *discontinuity* is a sample where the lane's value differs, by `f32` bits (so `0.0` and `-0.0`
+  differ), from its value just before it. Only segment boundaries can be one: a segment's
+  `start_sample` whose `start_value` differs from the value held before it (never the first
+  segment's), and the `end_sample` of a `step` segment whose `end_value` differs from its
+  `start_value`. Two boundaries at one sample are one discontinuity. 64 is the engine's fixed grid
+  period for a moving curve, not a session value. The rule reads only an entry whose segments
+  passed the order and overlap checks.
+
+These rules read no row, so they say nothing of unit, domain, shape or filter order against the
+target's row: that is the preparation rules of the control core
+(`controls::automation_diagnostics`, above). A pan target on a matrix strip is that core's
+`control.inactive`.
 Builtin cutoffs are finite nonnegative hertz values, but their DSP/Nyquist relationships are not
 issue-004 validation.
 

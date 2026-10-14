@@ -212,3 +212,16 @@ ring stalls. No suspended-context requirement is added.
 - *Send a session transaction to the browser control plane* (#1294): its internal messages on the
   same routing and the `@internal` declaration convention (#1294 D6) that D1 follows.
 - Batch: R1.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Single mode first.** Under #1562's amendment the browser runs one instance and #1332 (open)
+  moves the control half to the Worker later. Scope this slice to `single` mode (the worklet's
+  control handler and the worklet-prelude drain); the `worker` routing and the Worker drain of D1
+  and D2 move to the slice that deploys the Worker (#1332, #1387), which then carries this
+  message with no other logic. Gates 1 and 2 keep their `single` legs.
+- **The browser's own command path is deleted** (#1565); the session seek message is one more
+  control message beside #1562a's.
+- **Dependencies.** 06a; #1294 and #1387 are open; #1332 only for the Worker half.

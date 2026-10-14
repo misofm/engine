@@ -254,3 +254,18 @@ Draft 17b (the pieces), draft 03a (the domain and shape rules that make a refuse
 unreachable), *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345, the cell D4
 lays out) and *Carry live-controlled effect lanes across a
 plan swap* (#1280) arrive through draft 19.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **F1** as in draft 16a's amendment and the README's F1 proposal (option A recommended).
+- **Automation wins on EQ values** (OQ1 = C): D5's static-edit rule stands.
+- **D7 is simpler:** every EQ has its live stage on every plan (C6); no channel-less lane. With
+  #1611 and #1621 an EQ lane has no parameter cells, so it holds no span window (`stored(i) = 0` is
+  already the window).
+- **D5's anchor:** the masked line is now `crates/host-core/src/live_delta.rs:359-361`, and the
+  routing variant is `LiveRebuild::AutomationTarget` over `controls::automation_diagnostics`
+  (#1566), not #1335's function. Draft 03a's gate 3 no longer exists (03a is obsolete); the
+  step-only rule for `enabled` and `kind` is amended draft 02's.
+- **Dependencies.** #1337 is open; #1345 has landed.

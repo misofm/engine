@@ -25,8 +25,8 @@ use effect_compiler::{
     prepare_native_session_effects, resolve_initial_values,
 };
 use effect_contract::{
-    AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
-    ParameterChannel, PreparedEffectTarget, TailSamples,
+    AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget, TailSamples,
 };
 // `LiveRampRow` and `LiveRamps` moved to `effect_contract::control` and `controls` (decision 17);
 // these re-exports keep the old paths, so no call site changes.
@@ -2682,9 +2682,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         for retarget in &effect_carry.retargets {
             let producer = &mut effect_controls[retarget.producer];
             let fault = || graph_failure("host.control.order");
-            if let Some(switch) = retarget.bypass {
-                producer.write_bypass(stamp, switch).map_err(|_| fault())?;
-            }
             for &record in &retarget.records {
                 producer.write(stamp, record).map_err(|_| fault())?;
             }
@@ -3311,14 +3308,12 @@ fn successor_revision_refusal() -> PrepareDiagnostics {
 /// instance that rides prepared targets (#1264 D2, #1265 D1, #1266 D1).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EffectInstanceRecords {
-    /// One [`EffectControlRecord::Bypass`] first when the bypass changes, then one `Parameter`
+    /// One [`EffectControlRecord::Bypass`] first when the bypass changes (it carries the session's
+    /// `mute_ms` crossfade, [`LiveRampRow::BypassCrossfade`], #1341 D1), then one `Parameter`
     /// record per `(parameter_index, channel)` whose resolved value changes, in descriptor order,
     /// `Left` before `Right`; never empty. For an instance with `targets` the `Parameter` records
     /// are its owner's edits, never written as they are.
     pub(crate) records: Vec<EffectControlRecord>,
-    /// The ramp, in samples, that the bypass record carries: the session's `mute_ms`
-    /// ([`LiveRampRow::BypassCrossfade`], #1341 D1). `0` when `records` holds no bypass.
-    pub(crate) bypass_ramp_samples: u32,
     /// The targets [`EqTargetPreparer`] designed from the pre-commit values and the records.
     pub(crate) targets: Option<Vec<PreparedEffectTarget>>,
 }
@@ -3368,20 +3363,21 @@ pub(crate) fn effect_instance_records(
     } else {
         parameter_records(before, after, sample_rate_hz)?
     };
-    let mut bypass_ramp_samples = 0;
-    if let Some(bypass) = bypass {
+    if let Some(bypassed) = bypass {
         // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
-        bypass_ramp_samples = ramps.for_row(LiveRampRow::BypassCrossfade);
-        if bypass_ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+        let ramp_samples = ramps.for_row(LiveRampRow::BypassCrossfade);
+        if ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
             return Err(LiveRebuild::Domain);
         }
-        records.insert(0, EffectControlRecord::Bypass(bypass));
+        records.insert(
+            0,
+            EffectControlRecord::Bypass(BypassSwitch {
+                bypassed,
+                ramp_samples,
+            }),
+        );
     }
-    Ok((!records.is_empty()).then_some(EffectInstanceRecords {
-        records,
-        bypass_ramp_samples,
-        targets,
-    }))
+    Ok((!records.is_empty()).then_some(EffectInstanceRecords { records, targets }))
 }
 
 /// The parameter records of one instance, and the targets of a target-capable one.
@@ -3963,9 +3959,9 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
 struct EffectRetarget {
     /// The instance's position in the successor's sorted effect producers.
     producer: usize,
-    /// The bypass and its crossfade ramp (#1341 D1).
-    bypass: Option<effect_contract::BypassSwitch>,
-    /// The parameter records written as they are; empty for an instance with `targets`.
+    /// The bypass record (it carries its crossfade ramp, #1341 D1, #1622) first, then the parameter
+    /// records, all written as they are; the parameter records are empty for an instance with
+    /// `targets`.
     records: Vec<EffectControlRecord>,
     /// For an instance that rides prepared targets: the owner's committed revision its open
     /// candidate began at, and the targets to publish.
@@ -3992,17 +3988,12 @@ fn prepare_effect_retarget(
     position: usize,
     instance: &EffectInstanceRecords,
 ) -> Option<EffectRetarget> {
-    let mut bypass = None;
     let mut records = Vec::new();
     for &record in &instance.records {
         match record {
-            EffectControlRecord::Bypass(bypassed) => {
-                let switch = effect_contract::BypassSwitch {
-                    bypassed,
-                    ramp_samples: instance.bypass_ramp_samples,
-                };
-                producer.preflight_bypass(switch).ok()?;
-                bypass = Some(switch);
+            EffectControlRecord::Bypass(_) => {
+                producer.preflight(record).ok()?;
+                records.push(record);
             }
             // An instance with targets takes its parameters as the owner's edits.
             EffectControlRecord::Parameter { .. } if instance.targets.is_some() => {}
@@ -4039,7 +4030,6 @@ fn prepare_effect_retarget(
     };
     Some(EffectRetarget {
         producer: position,
-        bypass,
         records,
         targets,
     })
@@ -4334,8 +4324,12 @@ mod tests {
                 slot: SLOT,
                 address: super::LiveEffectAddress::console(0),
                 state: super::FamilyJoin::Live(super::EffectInstanceRecords {
-                    records: vec![effect_contract::EffectControlRecord::Bypass(true)],
-                    bypass_ramp_samples: 64,
+                    records: vec![effect_contract::EffectControlRecord::Bypass(
+                        effect_contract::BypassSwitch {
+                            bypassed: true,
+                            ramp_samples: 64,
+                        },
+                    )],
                     targets: None,
                 }),
             }],
@@ -4351,10 +4345,9 @@ mod tests {
             &[live()],
             &own,
             &mut |strip, address, instance| {
-                asked.push((strip.to_owned(), address, instance.bypass_ramp_samples));
+                asked.push((strip.to_owned(), address, instance.records[0]));
                 Some(super::EffectRetarget {
                     producer: 7,
-                    bypass: None,
                     records: Vec::new(),
                     targets: None,
                 })
@@ -4366,7 +4359,14 @@ mod tests {
         assert!(accepted.restarted.is_empty());
         assert_eq!(
             asked,
-            vec![("eq0".to_owned(), super::LiveEffectAddress::console(0), 64)]
+            vec![(
+                "eq0".to_owned(),
+                super::LiveEffectAddress::console(0),
+                effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch {
+                    bypassed: true,
+                    ramp_samples: 64,
+                })
+            )]
         );
     }
 
@@ -4417,11 +4417,10 @@ mod tests {
         );
         assert_eq!(
             live.records[0],
-            effect_contract::EffectControlRecord::Bypass(true)
-        );
-        assert_eq!(
-            live.bypass_ramp_samples,
-            ramps.for_row(super::LiveRampRow::BypassCrossfade)
+            effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch {
+                bypassed: true,
+                ramp_samples: ramps.for_row(super::LiveRampRow::BypassCrossfade),
+            })
         );
         assert!(
             records(

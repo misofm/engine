@@ -163,3 +163,20 @@ already in flight keeps the length it started with.
   edit's `model_only` path from *Report each transaction's edit path in its response* (#1313).
 - *Admit browser live edits in the Worker through the committed model* (#1382), for D5.
 - Batch: R1. Draft 09a builds on it; no dependency on draft 10.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The keys are setting rows.** `control_smoothing`'s keys are the session rows `fader_ms`,
+  `mute_ms` and `pan_ms`, family `Setting` (`crates/controls/src/session_rows.rs:38-75`), set by
+  `SET_CONTROL`; `SetControlSmoothing` (`0x0008`) is retired (#1561;
+  `crates/protocol/src/model.rs:2281-2285`). A setting change gives no record and sets
+  `LiveDelta::settings_changed`. D3's "edit path" is that row change; the `live` classification
+  rule of D3 stands.
+- **The cell holds the three key lengths**, the values of `controls::LiveRamps`
+  (`crates/controls/src/live_ramps.rs:14-24`); a stage resolves a row's length with
+  `LiveRamps::for_row` (polarity is twice `mute_ms`; sends and VCAs have their own rows), as draft 07
+  (amended) says. D1's row-to-word list is replaced by that function.
+- **Context.** #1054 and #1365 have landed; `LiveRamps` moved from host-core to `controls`.
+- **The browser** is the same `SessionState` (#1562a); D5 holds by construction.

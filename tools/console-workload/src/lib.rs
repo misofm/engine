@@ -1583,7 +1583,7 @@ impl SessionRuntime {
     pub fn push_bypass(&mut self, channel: usize, bypassed: bool) -> bool {
         let Self { controls, gate, .. } = self;
         let producer = &mut controls[channel];
-        let record = EffectControlRecord::Bypass(bypassed);
+        let record = EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(bypassed));
         producer.preflight(record).is_ok()
             && write_published(gate, |stamp| producer.write(stamp, record).is_ok())
     }

@@ -41,3 +41,31 @@ side field travels beside it.
 ## Size
 
 Half a day.
+
+## Decision record: #1622 (batch 10)
+
+Shipped. `EffectControlRecord::Bypass` now carries `BypassSwitch { bypassed, ramp_samples }`.
+`LiveEffectRecords::bypass_ramp_samples` is deleted; the classifier builds the record with the
+session's `BypassCrossfade` ramp, and the control plane writes the record as it is.
+
+- **One write path.** `EffectCellWriter::write_bypass`, `EffectControlProducer::write_bypass` and
+  `EffectControlProducer::preflight_bypass` are deleted. `EffectCellWriter::address` runs
+  `BypassSwitch::check`, so `check`/`preflight`/`write` refuse a ramp over
+  `INDEXED_RAMP_LENGTH_MAXIMUM` as `EffectWriteRefusal::Ramp` with nothing written, as
+  `write_bypass` did. A step is `BypassSwitch::step(bool)`.
+- **Departure from the filed text.** Anchors had moved (#1280a added carry code): the carry code
+  reads the cell words, not the record, so it needed no change. The mirror in `symmetry.rs` is only
+  `SymmetryEvent::Bypass(bool)` (a separate type, kept); `EffectControlRecord::symmetry_event` now
+  reads `switch.bypassed`. Callers outside the authorized paths were updated mechanically (test
+  and workload call sites that spelled `Bypass(bool)` or `write_bypass`): `capi` live_tests,
+  `graph`, `graph-compiler`, `rack`, `host-core` tests, `effect-contract` tests/support,
+  `host-core/src/limiter_linked_session.rs`, `effect-compiler/src/prepare.rs` and
+  `tools/console-workload`. #1280c's `write_bypass` call in host-core `prepare.rs` becomes
+  `write(stamp, EffectControlRecord::Bypass(switch))` at merge.
+- **Gates.** `a_bypass_flip_carries_the_sessions_mute_ramp_and_nothing_else` now reads the ramp
+  from the record. effect-contract, rack, host-core (all features), control-plane (test-support),
+  capi, host-web (test-support), and graph-compiler `bypass_shunt_identity` + `bypass_cohorts`
+  pass; clippy `-D warnings` and fmt clean. `git grep bypass_ramp_samples` is empty in code.
+- **D2.** `audit capi` `pcm_digest` is `9bc5ec3d8a4c223c` both before (stash of this change, same
+  tree) and after; the digest `76525e7ef9e78cf4` named in the brief does not hold on this base.
+  No rendered bit moved by this change.

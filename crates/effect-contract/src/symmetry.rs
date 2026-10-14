@@ -365,7 +365,7 @@ impl LiveControlRecord for EffectControlRecord {
             // A subscription changes what is *read* after the block, never what the block
             // renders, so it cannot move a designed word.
             Self::Observe { .. } => SymmetryEvent::Preserve,
-            Self::Bypass(value) => SymmetryEvent::Bypass(value),
+            Self::Bypass(switch) => SymmetryEvent::Bypass(switch.bypassed),
         }
     }
 }
@@ -389,6 +389,7 @@ pub fn payload_sections_agree(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BypassSwitch;
 
     #[test]
     fn a_declined_witness_names_every_term_it_is_missing() {
@@ -469,13 +470,13 @@ mod tests {
     #[test]
     fn bypass_is_reversible_and_asymmetric_parameters_are_not() {
         let mut witness = ChannelSymmetryWitness::SYMMETRIC;
-        witness.admit(&EffectControlRecord::Bypass(true));
+        witness.admit(&EffectControlRecord::Bypass(BypassSwitch::step(true)));
         assert_eq!(
             witness.declined(),
             ChannelSymmetryWitness::UNBYPASSED,
             "a live bypass declines the cohort while it is on"
         );
-        witness.admit(&EffectControlRecord::Bypass(false));
+        witness.admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
         assert!(witness.eligible(), "lifting the bypass re-earns the term");
 
         witness.admit(&EffectControlRecord::Parameter {
@@ -483,8 +484,8 @@ mod tests {
             channel: ParameterChannel::Left,
             value: 1.0,
         });
-        witness.admit(&EffectControlRecord::Bypass(true));
-        witness.admit(&EffectControlRecord::Bypass(false));
+        witness.admit(&EffectControlRecord::Bypass(BypassSwitch::step(true)));
+        witness.admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
         assert!(
             !witness.eligible(),
             "an asymmetric parameter write is not undone by bypass traffic"
