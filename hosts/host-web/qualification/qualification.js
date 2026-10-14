@@ -291,6 +291,12 @@ async function applyMatrix(host, matrix) {
   return applyMatrixThroughSdk(host, "track", matrix);
 }
 
+/// The track IDs of the running session, in the core's order, read by the SDK from the control list.
+async function readTracks(host) {
+  const { readTracksThroughSdk } = await import("/sdk/sdk-response-client.js");
+  return readTracksThroughSdk(host);
+}
+
 /// #137 E8: a live-control row -- one parameter change applied and one meter frame received.
 ///
 /// The transaction is awaited before rendering starts, so the whole rendered block is
@@ -351,6 +357,7 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   // The retarget is a SET_CONTROL transaction, built and sent by the SDK (the served bundle), and
   // committed by the core before the first render: the whole rendered block is post-edit.
   const command = await applyMatrix(host, { ll: 0.5, lr: 0, rl: 0, rr: 1 });
+  const tracks = await readTracks(host);
 
   const rendered = await context.startRendering();
   // Frames posted from the render thread arrive as tasks; yield until the queue is drained.
@@ -373,7 +380,7 @@ async function runLiveControlQualification(createHost, sessionDocument) {
     0,
   );
   return {
-    tracks: map.tracks,
+    tracks,
     metersAttached: map.metersAttached,
     commandOk: command.ok,
     commandPath: command.path,

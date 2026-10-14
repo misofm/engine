@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { createEngine } from "../src/browser/index.ts";
-import { createBrowserControlListTransport, createBrowserLiveControls } from "../src/browser/live-controls.ts";
+import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "../src/browser/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply, encodeControlTransaction } from "../src/core/control-frame.ts";
 import {
@@ -733,6 +733,47 @@ describe("#1564A the request IDs of a list read come from the endpoint's one all
       assert.equal(transport.requestIds, controls.queue.requestIds);
     } finally {
       engine.dispose();
+    }
+  });
+
+  test("a BrowserEngine interleaves list reads, strip-order probes and transactions on one allocator", async () => {
+    // `engineHost` asserts that the IDs the browser path sends are strictly ascending, so a second
+    // allocator on the endpoint (it would restart from 1) turns this red even though the fixture
+    // maps the frames onto the served engine's own allocator.
+    const served = await boot();
+    const closed = [];
+    const browser = await createEngine({
+      document: new Uint8Array([1]),
+      scratchBoot: async () => served.shape(),
+      createContext: () => ({
+        sampleRate: 48000, renderQuantumSize: 128, state: "running",
+        audioWorklet: { async addModule() {} }, async close() { closed.push("context"); },
+      }),
+      createHost: async () => ({ ...engineHost(served), async dispose() { closed.push("host"); } }),
+    });
+    try {
+      const first = await browser.controls({ pageLimit: 5 });
+      const fader = find(first, (e) => owned(e, "strip", "t1") && e.name === "fader_db" && e.address.lane === "left",
+        "t1 left fader");
+      const controls = await browser.liveControls();
+      const strips = createBrowserStripOrder(browser.host);
+      await strips();
+      // A transaction between two reads, then a read racing a transaction and a probe.
+      const one = await controls.submit(controls.edit.set(fader.address, -4, { rampSamples: 0 }));
+      assert.equal(one.ok, true);
+      const raced = await Promise.all([
+        browser.controls({ pageLimit: 7 }),
+        controls.submit(controls.edit.set(fader.address, -5, { rampSamples: 0 })),
+        strips(),
+        browser.controlState(first, { pageLimit: 9 }),
+      ]);
+      assert.equal(raced[1].ok, true);
+      const state = await browser.controlState(await browser.controls());
+      assert.equal(state.values.get(fader.handle), -5);
+      await strips();
+    } finally {
+      await browser.close();
+      served.dispose();
     }
   });
 });

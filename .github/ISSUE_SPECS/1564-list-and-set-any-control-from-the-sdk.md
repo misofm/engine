@@ -411,3 +411,30 @@ the SDK now ignores.
 - **Nit (#1564C).** `readObservations` took the strip order twice (the map and the resolver), and each
   read probes the structure epoch. It now takes the order once and passes it to
   `observationMap(order)`, whose argument is optional.
+
+## Fold (batch 8 qualification)
+
+The browser qualification (all three browsers) failed `browser-execution` with `MisoControlRefusal`,
+`replay_expired`, revision 1. The cause was not a second allocator in the SDK's browser path: that
+path holds one allocator per host (`createBrowserControlQueue`'s per-host queue serves the
+revision probe, the list pages, the strip-order probe and every transaction, and its frames ascend
+without a gap in the page's log). The refused frame came from the qualification page's own headless
+reference in `runTrackResponseSubscriptionQualification` (`hosts/host-web/qualification/
+sdk-response-entry.ts`): it built a `ControlTransactionQueue` on its own allocator while the
+`WasmBoundary` it served had already drawn IDs for its boot-time strip-order reads. That queue now
+takes `headless.controlRequestIds`, the boundary's one allocator, as #1564C requires.
+
+- **Fixture.** `engineHost` still maps a browser host's frames onto the served engine's allocator
+  (the served headless engine is a second sender on that core, which the real worklet is not). The
+  map now asserts that the IDs the browser path itself draws are strictly ascending and never
+  reused (`onEndpointIds`, `sdk/test/control-support.mjs`), so a browser path with two allocators on
+  one host goes red in the evals. New eval: "a BrowserEngine interleaves list reads, strip-order
+  probes and transactions on one allocator" (`sdk/test/control-list-evals.mjs`). Red on the mutation
+  that gives `createBrowserControlListTransport` its own `ControlRequestIds`
+  ("the browser path sent request ID 1 after 1: two allocators share one endpoint"); green on the tree.
+- **Stale raw-row gate.** `qualification.js` read `map.tracks` from `host.sessionMap()`, which no
+  longer carries the strip order (#1565B). The live-control row now reads the track IDs through the
+  SDK (`readTracksThroughSdk`, the core's control list), and the `control-path` gate holds again.
+- **Harness.** `run.mjs` printed `JSON.stringify(result.qualificationError)`, which threw "Do not know
+  how to serialize a BigInt" on a `MisoControlRefusal` and hid the error. The replacer prints a
+  bigint as `<n>n`.

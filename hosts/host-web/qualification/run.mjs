@@ -1041,7 +1041,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       result.resumes.clicksPerformed = clicksPerformed;
     }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
-      `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
+      `${JSON.stringify(result.qualificationError, (_key, value) => (typeof value === "bigint" ? `${value}n` : value))}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {

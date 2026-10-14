@@ -115,15 +115,26 @@ export function stripListReply(requestId, revision, { tracks = ["t"], submixes =
 }
 
 /**
- * Put the frames of a second sender onto an endpoint's one request-ID allocator. A fixture that
- * serves a browser host from a headless engine has two senders on one core (the SDK's browser queue
- * and the engine's own strip-order reads); the core takes request IDs in ascending order and refuses
- * a reused one, so the fixture renumbers the browser's frames onto the engine's allocator and gives
- * each reply its caller's ID back.
+ * Put the frames of a browser host onto the served core's request-ID allocator, and hold the host to
+ * the rule that makes that safe. A fixture that serves a browser host from a headless engine has two
+ * senders on one core (the SDK's browser path and the engine's own strip-order reads at boot); the
+ * core takes request IDs in ascending order and refuses a reused one, so the fixture maps each
+ * frame onto the engine's allocator and gives each reply its caller's ID back.
+ *
+ * The map hides nothing: the IDs the browser path draws are asserted strictly ascending and never
+ * reused, which is what the real worklet core requires of its one sender. A browser path that holds
+ * two allocators on one host restarts from 1 and fails here, not only in a real browser.
  */
 export function onEndpointIds(allocator, send) {
+  let highest = 0n;
   return (frame) => {
     const own = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getBigUint64(24, true);
+    if (own <= highest) {
+      throw new Error(
+        `the browser path sent request ID ${own} after ${highest}: two allocators share one endpoint`,
+      );
+    }
+    highest = own;
     const renumbered = frame.slice();
     new DataView(renumbered.buffer).setBigUint64(24, allocator.next(), true);
     const reply = send(renumbered).slice();
