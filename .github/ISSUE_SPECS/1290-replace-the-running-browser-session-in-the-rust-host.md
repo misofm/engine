@@ -318,3 +318,61 @@ Checked against `12d4a4f9d`.
 Gate 6 is restated on what is still bound to boot-time indices: after adoption, the observation
 catalog exports (until #1590) and the source table describe the successor. D4 step 3's prepared
 commands no longer exist (#1565A) and leave the gate.
+
+## Decision record: (a) the rebuild apply (batch 10)
+
+**Shipped.** The browser host applies a structural transaction while it plays, through the existing
+`SessionState::command` rebuild arm and `WebRuntimePreparer`'s successor entries. It is reachable
+now only through the test-support switch `structural_command_for_test` (the refusal is #1562b's).
+
+- **Tables travel with the plan.** `PlanShape` (the strip order, the dense effect table, the
+  observation arm tables and the per-meter scratch) was ReadyOwnership's boot-time state. It is now
+  built by one function (`build_plan_shape`) in the preparer, for the boot plan and for every
+  successor. A command that publishes a rebuild keeps the successor's tables in a bounded
+  `pending_shapes` list (room checked before the command, so an ack never meets a full list). The
+  block that adopts the plan swaps them in place (`adopt_shape`, a pointer exchange, no indexing,
+  no allocation); the service step drops the retired tables. The tables live in the host, not in the
+  plan's attachment, because reaching an attachment is a `dyn Any` call and the render export pins
+  zero indirect sites in `render_next`.
+- **Gate 6 (restated).** After the adoption block the observation catalog and strip order describe
+  the successor; the source table is the committed model's from the commit. An observation record
+  (kinds 7 and 8) is `BACKPRESSURE` from the commit until the service step after the adoption block
+  (its tables and the control plane's producers are one plan's again then); nothing is queued.
+- **D3 (budget).** `ControlLimits.maximum_replacement_peak_bytes` (new; the C ABI sets `u64::MAX`)
+  bounds the sum of both plans' graph, both models and both plans' source bytes (a carried ring
+  once). The browser sets it after boot to its one budget less its exact bridge rows
+  (`SessionState::set_replacement_peak_limit`). A successor's tables are charged to its plan row.
+- **Rate or quantum change.** The plan exchange answered it as retryable `BACKPRESSURE`. The core
+  now refuses it before preparing (`control.apply.reprepare_required`, `REPREPARE_REQUIRED`); the
+  browser maps it to `RESULT_REPREPARE_REQUIRED`. This also fixes the C ABI's answer.
+- **D6.** `AudioWorkletEngineHost::blocking_rebuilds()` (saturating `u32`), counted when a command
+  publishes a replacement (`SessionState::newest_plan_epoch` advanced). No export and no status word
+  carry it yet: the worklet status field is #1293-#1297's, so no ABI mirror changed.
+- **Meters across a swap (until #1290d).** A swap restarts the meter delivery state (a new delivery
+  epoch, `meter_generation` + 1). The published frame keeps its boot size (the worklet binds fixed
+  views over it), so a swap that changes the strip count publishes nothing instead of a misshaped
+  frame. Observation arm bits are not carried (#1327).
+
+**Departures.**
+- Gates 1, 2, 3, 5, 6 and 8 run on one thread (apply between render calls). No test-support
+  control/render halves exist for two real threads; that form arrives with the Worker.
+- Gate 8 uses the module's own `RenderLockedAllocator` and the export counters, as the sibling
+  binaries do (the workspace has no `bench_support::alloc`; the spec's `assert_installed` form does
+  not apply).
+- D4 step 3 and the old gate 6 (prepared companions) are gone with #1565A.
+- Gate 7 (meters, spectrum), gate 9 (single-mode browser legs) and gate 4 (supersession) are not
+  in (a). Effects: the gate sessions have no console slot and no insert; an effect carries state
+  across a swap only with #1280a.
+
+**Gates -> tests** (`cargo test --locked -p host-web --features host-web/test-support`):
+- gate 1: `tests::structural_apply::a_rebuild_swaps_without_a_gap`
+- gate 2: `a_live_edit_is_part_of_the_base_the_successor_is_prepared_from` (the ramp is in flight
+  at the adoption block)
+- gate 3: `a_malformed_transaction_is_refused_and_changes_nothing`,
+  `a_rate_or_quantum_change_is_refused_as_a_required_reprepare`,
+  `a_transaction_over_the_memory_budget_is_refused_and_changes_nothing`
+- gate 5: `a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured`
+- gate 6: `the_catalogs_describe_the_successor_from_the_adoption_block_on`
+- meter interim: `meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
+- gate 8: `tests/structural_apply_realtime.rs` (two tests); render-locked allocations 0 across every
+  render call, the adoption block included; the retired plan and tables drop in the service step.

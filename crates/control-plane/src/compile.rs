@@ -440,14 +440,13 @@ pub(crate) fn validate_replacement_peak(
         left.checked_add(right)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))
     };
-    if combined(
+    let graph_peak = combined(
         current.graph_session_plus_plan_bytes,
         prospective.graph_session_plus_plan_bytes,
     )?
     .checked_add(compiled_models.retained_bytes)
-    .ok_or_else(|| failure(ResourceFault::Arithmetic))?
-        > limits.maximum_graph_session_plus_plan_bytes
-    {
+    .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    if graph_peak > limits.maximum_graph_session_plus_plan_bytes {
         return Err(diagnostic("graph.resource.limit"));
     }
     // Issue #1273 D5: a carried ring is the current plan's until the swap, so the double-live
@@ -469,6 +468,17 @@ pub(crate) fn validate_replacement_peak(
         )? > limits.maximum_source_overhead_bytes
     {
         return Err(diagnostic("source.resource.limit"));
+    }
+    // #1290a D3: the categories above each fit alone; their sum must fit an adapter's one budget.
+    if combined(
+        graph_peak,
+        combined(
+            current.source_total_bytes,
+            allocated(prospective.source_total_bytes, prospective_carried.total)?,
+        )?,
+    )? > limits.maximum_replacement_peak_bytes
+    {
+        return Err(diagnostic("control.resource.replacement_peak"));
     }
     if combined(
         current.effect_scalar_state_bytes,
