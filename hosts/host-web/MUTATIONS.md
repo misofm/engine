@@ -749,3 +749,39 @@ Chromium leg of `qualification/run.mjs`.
 | same | drop `validU32(message.count)` | the host accepts `count -1`, `4294967296`, `1.5`, `"0"` and `0n` |
 | same | add `"extra"` to the `renderAllocations` reply field list | the host accepts the extra-field reply |
 | same | change the `renderAllocations` expected tag to `miso.status.v1` | the host accepts the wrong-tag reply |
+
+## Issue #1530 — the browser observation wait against the real AudioWorklet
+
+Gate `sdk-observation-wait` in `qualification/run.mjs` (predicates 1-3) over two SDK instances,
+`observation-wait-deadline` and `observation-wait-render`, in the three `browser` legs.
+
+### Result mutations (`--self-test-mutations`)
+
+Each makes `validate` throw `<browser>: sdk-observation-wait:`; `mutationProofs` requires that prefix.
+All eight were checked against a green fixture of the result (node, no browser); the real three-browser
+runs are the `browser` legs of `qualification.yml`.
+
+| Where | Mutation | Observed red |
+|---|---|---|
+| `sdk-observation-wait-unbounded` | `wait.deadline.settled = false` | gate 1 (`settled`) |
+| `sdk-observation-wait-late` | `wait.deadline.elapsedMs = 5_000` | gate 1 (upper bound 4_000) |
+| `sdk-observation-wait-early` | `wait.deadline.elapsedMs = 0` | gate 1 (lower bound 225) |
+| `sdk-observation-wait-untyped` | `wait.deadline.errorCode = "invalidArgument"` | gate 1 (`errorCode`) |
+| `sdk-observation-wait-rendered` | `wait.deadline.renderedQuantaAfterRefusal = "1"` | gate 1 (the context did not render) |
+| `sdk-observation-wait-after-render` | `wait.deadline.closeAfterRender.resolved = false` | gate 2 |
+| `sdk-observation-wait-resend` | a second `bp` entry before the last `ok` of `wait.render`'s command log | gate 3 (log) |
+| `sdk-observation-wait-quanta` | `wait.render.renderedQuantaAtResolve = "0"` | gate 3 (the status moved) |
+
+### Source mutations (PR evidence; one at a time in `sdk/src`, then reverted)
+
+Not run in this slice (sprint mode, root 2026-10-13: no mutation runs locally). The expected red
+is the spec's (gate 5); the observed red and message belong to the successor "Post-sprint
+qualification of decision 15's heavy gates" (TBD5) or the first CI run that applies them.
+
+| Where | Mutation | Expected red |
+|---|---|---|
+| `qualification/run.mjs` `sdk-observation-wait` (S1) | delete the `limit` timer in `next` (`sdk/src/browser/engine.ts`, `setTimeout(() => finish(false), timeoutMs)`; keep `limit` defined) | gate 1: `settled: false` at the 10 s guard |
+| same (S2), Chromium, Firefox, WebKit | `boundMs: 5_000` regardless of `requestDeadlineMs` | gate 1: late (`elapsedMs` above 4_000) |
+| same (S3), Chromium, Firefox, WebKit | in `#submit` (`sdk/src/core/observation-subscriptions.ts`), drop `if (!rendered)` so the typed refusal is thrown whatever `next` returns | gate 3: the render instance's close ends in `backpressure` (`resolved: false`, log `[ok, bp]`) |
+| same (S4) | `current.renderedQuanta >= started` in `next` | gate 1: early, and more than one close send in the log |
+| same (S5) | the browser engine passes no `renderWait` | gates 1 and 3 |

@@ -42,6 +42,10 @@ const MUTATIONS = [
   // Batch-verdict 2, B2 (root 2026-10-12): a real AudioContext resumed outside a trusted click, and
   // a harness that clicked fewer or more controls than the page declared.
   "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra",
+  // Issue #1530 gate 4: the browser observation wait, one predicate each.
+  "sdk-observation-wait-unbounded", "sdk-observation-wait-late", "sdk-observation-wait-early",
+  "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
+  "sdk-observation-wait-after-render", "sdk-observation-wait-resend", "sdk-observation-wait-quanta",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -53,6 +57,8 @@ const PAGE_DEADLINE_MS = 300_000;
 // read (with repeats). A new SDK instance adds its label here.
 const SDK_RENDER_ALLOCATION_WORKLOADS = Object.freeze([
   "resident-observation",
+  "observation-wait-deadline",
+  "observation-wait-render",
   "track-response-subscription",
   "sdk-observation",
   "spectrum-query:trackPostInput:track",
@@ -321,6 +327,47 @@ function validateSdkLiveBypass(browserName, live) {
 }
 
 /**
+ * Issue #1530 gates 1-3: the browser SDK's wait on observation backpressure, against the shipped
+ * worklet. `ok` is command result 0; `bp` is result 6 with reason 8.
+ */
+function validateSdkObservationWait(browserName, wait) {
+  const deadline = wait?.deadline;
+  const render = wait?.render;
+  const log = (entries) => JSON.stringify(Array.isArray(entries)
+    ? entries.map((entry) => [entry?.result, entry?.reason]) : null);
+  const OK = [0, 0];
+  const BP = [6, 8];
+  const expected = (...entries) => JSON.stringify(entries);
+  gate(browserName, "sdk-observation-wait", deadline?.settled === true
+    && deadline.typed === true
+    && deadline.errorCode === "backpressure"
+    && Number.isFinite(deadline.elapsedMs) && deadline.elapsedMs >= 225 && deadline.elapsedMs < 4_000
+    && deadline.renderedQuantaBefore === "0"
+    && deadline.renderedQuantaAfterRefusal === "0"
+    && deadline.handleOpenAfterRefusal === true
+    && log(deadline.commandsBeforeRender) === expected(OK, BP),
+  `a close on a context that did not render did not end in the typed backpressure error at the 250 ms deadline: ${
+    JSON.stringify({ ...deadline, commands: undefined, commandsBeforeRender: log(deadline?.commandsBeforeRender) })}`);
+  gate(browserName, "sdk-observation-wait", deadline?.closeAfterRender?.resolved === true
+    && deadline.renderedQuantaAfterRender === "16"
+    && log(deadline.commands) === expected(OK, BP, OK),
+  `the close after the context rendered did not resolve with the rendered blocks reported: ${
+    JSON.stringify({ closeAfterRender: deadline?.closeAfterRender,
+      renderedQuantaAfterRender: deadline?.renderedQuantaAfterRender, commands: log(deadline?.commands) })}`);
+  gate(browserName, "sdk-observation-wait", render?.refusalSeenBeforeRender === true
+    && render.settled === true
+    && render.resolved === true
+    && Number.isFinite(render.elapsedMs) && render.elapsedMs < 10_000
+    && render.renderedQuantaBefore === "0"
+    && canonicalU64(render.renderedQuantaAtResolve) > 0n
+    && render.renderedQuantaAfterRender === "16"
+    && log(render.commands) === expected(OK, BP, OK)
+    && render.resendIdentical === true,
+  `a refused close did not resolve by itself with one identical resend when the context rendered: ${
+    JSON.stringify({ ...render, commands: log(render?.commands) })}`);
+}
+
+/**
  * Issue #1476 D4: every SDK engine, read before its close, made no allocator call in any export
  * its processor calls on the render thread -- including paths no raw workload reaches. Every
  * instance the entry created has exactly one row, under its frozen label.
@@ -541,6 +588,7 @@ function validateSdkResponse(browserName, response) {
     && resident.firstSnapshotRetained === true
     && resident.staleReadRefused === true,
   "resident observation subscription did not preserve shared, update, and close lifecycle semantics");
+  validateSdkObservationWait(browserName, observations?.wait);
   const spectrum = response?.spectrum;
   const spectrumRows = Array.isArray(spectrum?.targets) ? spectrum.targets : [];
   const expectedSpectrumTargets = [
@@ -781,6 +829,18 @@ function mutate(result, mutation) {
   if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
   if (mutation === "staging-reads") copy.stagingReads.oneShot.spectrumReadResult = 6;
+  const wait = copy.sdkResponse?.observations?.wait;
+  if (mutation === "sdk-observation-wait-unbounded") wait.deadline.settled = false;
+  if (mutation === "sdk-observation-wait-late") wait.deadline.elapsedMs = 5_000;
+  if (mutation === "sdk-observation-wait-early") wait.deadline.elapsedMs = 0;
+  if (mutation === "sdk-observation-wait-untyped") wait.deadline.errorCode = "invalidArgument";
+  if (mutation === "sdk-observation-wait-rendered") wait.deadline.renderedQuantaAfterRefusal = "1";
+  if (mutation === "sdk-observation-wait-after-render") wait.deadline.closeAfterRender.resolved = false;
+  if (mutation === "sdk-observation-wait-resend") {
+    wait.render.commands.splice(wait.render.commands.length - 1, 0,
+      { result: 6, reason: 8, records: wait.render.commands[1].records });
+  }
+  if (mutation === "sdk-observation-wait-quanta") wait.render.renderedQuantaAtResolve = "0";
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   return copy;
@@ -794,7 +854,9 @@ function mutationProofs(browserName, result) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation)),
       (error) => error instanceof Error && error.message.startsWith(
-        mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:` : `${browserName}:`,
+        mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:`
+          : mutation.startsWith("sdk-observation-wait-") ? `${browserName}: sdk-observation-wait:`
+            : `${browserName}:`,
       ),
       `${browserName}: ${mutation}: red mutation escaped its gate`,
     );
