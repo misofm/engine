@@ -14,8 +14,9 @@
 //! Nobody spells a rule again.
 
 use core::fmt;
+use std::cell::OnceCell;
 
-use session::{Route, RouteSource, SessionModel, StableId, vca_effective_db};
+use session::{Route, RouteSource, SessionModel, StableId, VcaSum};
 
 use crate::view::ModelView;
 
@@ -121,7 +122,7 @@ pub struct MonitorChange {
 /// One strip's effective values, per lane (`[left, right]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EffectiveStrip {
-    /// The fader in dB: [`vca_effective_db`] over the reaching VCAs' offsets.
+    /// The fader in dB: [`session::vca_effective_db`] over the reaching VCAs' offsets.
     pub fader_db: [f32; 2],
     /// The mute: the strip's own, any reaching VCA's, or the solo term.
     pub mute: [bool; 2],
@@ -246,12 +247,17 @@ pub fn effective_strip(
     let reach = inputs.reach(strip);
     let solo_term = solo_term(inputs, strip, any_solo);
     let mut out = EffectiveStrip::default();
+    // One read of each reaching VCA feeds both lanes; the sum is `vca_effective_db`'s.
+    let mut sums = [VcaSum::new(own_db[0]), VcaSum::new(own_db[1])];
+    for &vca in reach {
+        let (offset_db, muted) = inputs.vca(vca);
+        for lane in 0..2 {
+            sums[lane].add(offset_db[lane]);
+            out.vca_mute[lane] |= muted[lane];
+        }
+    }
     for lane in 0..2 {
-        out.fader_db[lane] = vca_effective_db(
-            own_db[lane],
-            reach.iter().map(|&vca| inputs.vca(vca).0[lane]),
-        );
-        out.vca_mute[lane] = reach.iter().any(|&vca| inputs.vca(vca).1[lane]);
+        out.fader_db[lane] = sums[lane].finish();
         out.mute[lane] = own_mute[lane] || out.vca_mute[lane] || solo_term;
     }
     out
@@ -480,12 +486,24 @@ impl<'a> LocalInputs<'a> {
     /// [`Self::new`] over a [`ModelView`].
     #[must_use]
     pub fn of(view: ModelView<'a>, overlay: &'a MonitorOverlay, strip: usize) -> Option<Self> {
+        Self::of_nested(view, overlay, strip, &OnceCell::new())
+    }
+
+    /// [`Self::of`] for a caller that builds the inputs of many strips of one model: `nesting`
+    /// carries the VCA tree between them ([`SessionModel::vca_reach_of_in`]).
+    #[must_use]
+    pub fn of_nested(
+        view: ModelView<'a>,
+        overlay: &'a MonitorOverlay,
+        strip: usize,
+        nesting: &OnceCell<session::VcaNesting>,
+    ) -> Option<Self> {
         let id = strip_id_at(view.structure(), strip)?;
         Some(Self {
             view,
             overlay,
             strip,
-            reach: view.structure().vca_reach_of(id),
+            reach: view.structure().vca_reach_of_in(nesting, id),
         })
     }
 
@@ -599,11 +617,15 @@ impl EffectiveSource for Effective {
 /// [`effective_strip`], [`effective_follow`] and [`effective_gate`] over [`LocalInputs`], with the
 /// solo term from [`any_solo_in`]. The values are those [`effective`] gives for the same model and
 /// overlay.
-#[derive(Clone, Copy, Debug)]
+///
+/// The VCA tree of the model is built once, the first time a strip is held by a VCA, and serves
+/// every strip asked for after it.
+#[derive(Clone, Debug)]
 pub struct LocalEffective<'a> {
     view: ModelView<'a>,
     overlay: &'a MonitorOverlay,
     any_solo: bool,
+    nesting: OnceCell<session::VcaNesting>,
 }
 
 impl<'a> LocalEffective<'a> {
@@ -614,6 +636,7 @@ impl<'a> LocalEffective<'a> {
             view,
             overlay,
             any_solo: any_solo_in(view.structure(), overlay),
+            nesting: OnceCell::new(),
         }
     }
 
@@ -624,8 +647,8 @@ impl<'a> LocalEffective<'a> {
     /// If the model has no such strip.
     #[must_use]
     pub fn strip(&self, index: usize) -> EffectiveStrip {
-        let inputs =
-            LocalInputs::of(self.view, self.overlay, index).expect("the model has the strip");
+        let inputs = LocalInputs::of_nested(self.view, self.overlay, index, &self.nesting)
+            .expect("the model has the strip");
         effective_strip(&inputs, index, self.any_solo)
     }
 
@@ -646,7 +669,8 @@ impl<'a> LocalEffective<'a> {
             return EffectiveRoute::default_gate(self.view.route(index));
         };
         let strip = self.strip(source);
-        let inputs = LocalInputs::of(self.view, self.overlay, source).expect("the source exists");
+        let inputs = LocalInputs::of_nested(self.view, self.overlay, source, &self.nesting)
+            .expect("the source exists");
         EffectiveRoute {
             gate: effective_gate(&inputs, index, &strip),
             follow: effective_follow(&inputs, index, &strip),

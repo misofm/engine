@@ -568,6 +568,7 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
         } else {
             limits.maximum_vcas
         },
+        maximum_vca_reach_pairs: host_core::MAXIMUM_VCA_REACH_PAIRS,
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
         maximum_effects: limits.maximum_effects,

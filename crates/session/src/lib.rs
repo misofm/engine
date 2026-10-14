@@ -34,7 +34,7 @@ pub use in_place::{
 pub use model::*;
 pub use parse::parse_session_json;
 pub use validate::{BUILTIN_AUTOMATION_EFFECT_ID, BUILTIN_AUTOMATION_TARGETS};
-pub use vca::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, vca_effective_db};
+pub use vca::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, VcaNesting, VcaSum, vca_effective_db};
 pub use visit::{FieldKey, ModelVisitor, Token, VisitModel, WalkOrder, keys};
 
 /// The only schema version accepted by [`parse_session_json`].

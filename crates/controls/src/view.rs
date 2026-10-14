@@ -153,6 +153,10 @@ pub(crate) fn position<T>(
     id: &StableId,
     id_of: impl Fn(&T) -> &StableId,
 ) -> Option<usize> {
+    // A short slice (an edited-owner list is usually one or two items) is scanned once.
+    if items.len() <= 8 {
+        return items.iter().position(|item| id_of(item) == id);
+    }
     items
         .binary_search_by(|item| id_of(item).cmp(id))
         .ok()

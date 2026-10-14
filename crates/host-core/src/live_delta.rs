@@ -20,6 +20,7 @@
 //! a followed mute and an own edit are one difference, and preparation and the live path cannot
 //! compose them two ways.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::control_preparation::{
@@ -1063,9 +1064,16 @@ impl<'a> LocalDiff<'a> {
         indices.dedup();
 
         let mut strips = Vec::with_capacity(indices.len());
+        // The VCA tree of each model, built once for all the strips the edit reaches.
+        let (nesting_before, nesting_after) = (OnceCell::new(), OnceCell::new());
         for index in indices {
-            let before = LocalInputs::new(current, monitor.committed, index)?;
-            let after = LocalInputs::of(view, monitor.next, index)?;
+            let before = LocalInputs::of_nested(
+                ModelView::whole(current),
+                monitor.committed,
+                index,
+                &nesting_before,
+            )?;
+            let after = LocalInputs::of_nested(view, monitor.next, index, &nesting_after)?;
             strips.push(LocalStrip {
                 index,
                 before: controls::effective_strip(&before, index, any_before),

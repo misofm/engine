@@ -43,10 +43,10 @@ use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut};
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError, SourceSubmission,
-    SuccessorBase, compile_host_model, compiled_session_shape, control_table_bytes,
-    parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
-    source_id_arena_bytes,
+    MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection,
+    PreparedHost, SourceControlError, SourceSubmission, SuccessorBase, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
+    prepare_host_runtime_with_live_controls_and_spectrum, source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
@@ -4573,7 +4573,8 @@ fn prepare_caps(
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,
-        maximum_vcas: u64::MAX,
+        maximum_vcas: MAXIMUM_VCAS_BOUNDED,
+        maximum_vca_reach_pairs: MAXIMUM_VCA_REACH_PAIRS,
         maximum_sources: u64::MAX,
         maximum_routes: u64::MAX,
         maximum_effects: u64::MAX,
@@ -4623,6 +4624,7 @@ fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
         maximum_replay_entries: CONTROL_REPLAY_ENTRIES,
         maximum_submixes: caps.maximum_submixes,
         maximum_vcas: caps.maximum_vcas,
+        maximum_vca_reach_pairs: caps.maximum_vca_reach_pairs,
     }
 }
 

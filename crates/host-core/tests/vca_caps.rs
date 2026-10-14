@@ -24,6 +24,7 @@ fn caps(maximum_vcas: u64) -> HostPrepareCaps {
         maximum_tracks: TRACKS,
         maximum_submixes: 0,
         maximum_vcas,
+        maximum_vca_reach_pairs: u64::MAX,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -143,4 +144,40 @@ fn the_session_shape_measures_the_longest_vca_id() {
             .longest_vca_id_bytes,
         0
     );
+}
+
+/// Batch 7 review M1 (ruling V-Q3): a VCA move's work grows with the (strip, VCA) reach pairs, not
+/// the VCA count, so preparation refuses a session over `maximum_vca_reach_pairs` with its own
+/// diagnostic. The chain puts every track under every VCA: `TRACKS * vcas` pairs.
+///
+/// Test value: red if the pairs go uncounted (a chain of 256 VCAs under 16,384 strips would pass
+/// the VCA count and still compose millions of pairs per move), if a nested VCA's reach stops at
+/// its direct parent (the count would be `TRACKS`, not `TRACKS * vcas`), or if the cap is off by
+/// one in either direction.
+#[test]
+fn reach_pairs_are_counted_through_nested_vcas_and_capped() {
+    let vcas = 4_u64;
+    let pairs = TRACKS * vcas;
+    let at_the_cap = HostPrepareCaps {
+        maximum_vca_reach_pairs: pairs,
+        ..caps(vcas)
+    };
+    prepare_host_session(&session(vcas as usize), &at_the_cap).expect("pairs at the cap");
+    let over = HostPrepareCaps {
+        maximum_vca_reach_pairs: pairs - 1,
+        ..caps(vcas)
+    };
+    let failure = prepare_host_session(&session(vcas as usize), &over)
+        .map(|_| ())
+        .expect_err("one pair over the cap");
+    assert_eq!(failure.kind(), PrepareRejection::Resource);
+    assert_eq!(failure.as_bytes(), b"host.resource.vca_reach_pairs\t$\n");
+
+    // The count is a bound on reach, not on VCAs: VCAs with no members reach no strip.
+    let ids: Vec<String> = (0..4).map(|index| format!("empty{index}")).collect();
+    let zero_pairs = HostPrepareCaps {
+        maximum_vca_reach_pairs: 0,
+        ..caps(4)
+    };
+    prepare_host_session(&session_with(&ids), &zero_pairs).expect("no member, no pair");
 }

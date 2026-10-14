@@ -106,6 +106,14 @@ pub enum HostShapePolicy {
     },
 }
 
+/// The VCA groups a session may declare when a host bounds them the way the browser does (ruling
+/// V-Q3): the browser's `maximum_vcas`.
+pub const MAXIMUM_VCAS_BOUNDED: u64 = 256;
+
+/// The (strip, VCA) reach pairs a session may declare (ruling V-Q3): the bound on one VCA move's
+/// work, the same on every host.
+pub const MAXIMUM_VCA_REACH_PAIRS: u64 = 16_384;
+
 /// Everything one host declares it can drive, as bounds checked during preparation.
 ///
 /// Every field is a hard cap: preparation fails rather than allocating past it. Hosts spell these
@@ -128,6 +136,11 @@ pub struct HostPrepareCaps {
     /// Maximum VCA groups in the session (#1243). A configured bound of its own, never folded into
     /// `maximum_tracks` or `maximum_submixes`: a VCA is a control group, not a strip.
     pub maximum_vcas: u64,
+    /// Maximum (strip, VCA) reach pairs in the session (ruling V-Q3, batch 7 review M1). A count
+    /// of VCAs does not bound a VCA move's work, which grows with the pairs; every host applies
+    /// the same bound, [`MAXIMUM_VCA_REACH_PAIRS`], because the move composes every reached
+    /// member wherever the control plane runs.
+    pub maximum_vca_reach_pairs: u64,
     /// Maximum sources in the session.
     pub maximum_sources: u64,
     /// Maximum routes in the session.
@@ -2904,8 +2917,9 @@ impl LevelRules<'_> {
             strip
                 .reach
                 .iter()
-                .map(|&vca| self.next.vca(vca))
-                .find(|vca| self.vca_changed(vca, lane, mute))
+                .map(|&index| (index, self.next.vca(index)))
+                .find(|&(index, vca)| self.vca_changed(index, vca, lane, mute))
+                .map(|(_, vca)| vca)
                 .and_then(|vca| {
                     let row = if mute {
                         EditRampRow::VcaMute
@@ -2956,7 +2970,7 @@ impl LevelRules<'_> {
         strip
             .reach
             .iter()
-            .any(|&vca| self.vca_changed(self.next.vca(vca), lane, true))
+            .any(|&vca| self.vca_changed(vca, self.next.vca(vca), lane, true))
             || strip
                 .reach_before
                 .iter()
@@ -2965,9 +2979,18 @@ impl LevelRules<'_> {
     }
 
     /// Whether `vca`'s offset (or its mute) on `lane` differs from the committed model's, or the
-    /// committed model has no such VCA.
-    fn vca_changed(&self, vca: &session::Vca, lane: usize, mute: bool) -> bool {
-        let Some(prior) = self.current.vcas.iter().find(|prior| prior.id == vca.id) else {
+    /// committed model has no such VCA. `index` is the VCA's position in the model after the
+    /// change; the committed model usually holds the same VCA at the same position, which is
+    /// tried first, because a search by ID per reaching VCA is quadratic in the VCA count for a
+    /// strip that every VCA reaches.
+    fn vca_changed(&self, index: usize, vca: &session::Vca, lane: usize, mute: bool) -> bool {
+        let Some(prior) = self
+            .current
+            .vcas
+            .get(index)
+            .filter(|prior| prior.id == vca.id)
+            .or_else(|| self.current.vcas.iter().find(|prior| prior.id == vca.id))
+        else {
             return true;
         };
         if mute {
@@ -3714,6 +3737,12 @@ pub fn check_counts(
     {
         return Err(resource("host.resource.count"));
     }
+    // The pairs are counted only for a session that declares VCAs, and the count stops at the cap.
+    if vca_count != 0
+        && model.vca_reach_pairs(caps.maximum_vca_reach_pairs) > caps.maximum_vca_reach_pairs
+    {
+        return Err(resource("host.resource.vca_reach_pairs"));
+    }
     Ok(())
 }
 
@@ -3980,6 +4009,7 @@ mod tests {
             maximum_tracks: u64::MAX,
             maximum_submixes: u64::MAX,
             maximum_vcas: u64::MAX,
+            maximum_vca_reach_pairs: u64::MAX,
             maximum_sources: u64::MAX,
             maximum_routes: u64::MAX,
             maximum_effects: u64::MAX,

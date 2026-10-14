@@ -81,6 +81,13 @@ fn the_one_strip_and_the_inverse_forms_equal_the_table() {
             assert_eq!(model.strips_reached_by(vca), inverse, "strips of VCA {vca}");
         }
         assert!(model.strips_reached_by(model.vcas.len()).is_empty());
+        // Batch 7 review M1: the pair count is the table's size, and stops past its limit.
+        let pairs: u64 = table.iter().map(|reach| reach.len() as u64).sum();
+        assert_eq!(model.vca_reach_pairs(u64::MAX), pairs);
+        assert_eq!(model.vca_reach_pairs(pairs), pairs);
+        if pairs > 0 {
+            assert!(model.vca_reach_pairs(pairs - 1) > pairs - 1);
+        }
     }
     assert!(nested_seen, "the generator reached a strip under two VCAs");
 }

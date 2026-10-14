@@ -110,6 +110,7 @@ fn limits(source_ring_frames: u32) -> ControlLimits {
         maximum_replay_entries: 16,
         maximum_submixes: 0,
         maximum_vcas: 0,
+        maximum_vca_reach_pairs: u64::MAX,
     }
 }
 

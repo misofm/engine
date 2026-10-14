@@ -618,6 +618,7 @@ pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
         } else {
             limits.maximum_vcas
         },
+        maximum_vca_reach_pairs: limits.maximum_vca_reach_pairs,
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
         maximum_effects: limits.maximum_effects,

@@ -75,6 +75,9 @@ pub struct ControlLimits {
     pub maximum_submixes: u64,
     /// VCA groups of one session; zero means `maximum_tracks` (#1243 D2).
     pub maximum_vcas: u64,
+    /// (Strip, VCA) reach pairs of one session (ruling V-Q3): the bound on one VCA move's work.
+    /// Every adapter sets [`host_core::MAXIMUM_VCA_REACH_PAIRS`].
+    pub maximum_vca_reach_pairs: u64,
 }
 
 /// One plan's frozen resource accounting (#1309 D4): every field of the C ABI's

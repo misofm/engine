@@ -1394,6 +1394,7 @@ mod tests {
             maximum_tracks: u64::MAX,
             maximum_submixes: u64::MAX,
             maximum_vcas: u64::MAX,
+            maximum_vca_reach_pairs: u64::MAX,
             maximum_sources: u64::MAX,
             maximum_routes: u64::MAX,
             maximum_effects: u64::MAX,

@@ -259,6 +259,7 @@ fn caps() -> HostPrepareCaps {
         maximum_tracks: 256,
         maximum_submixes: 256,
         maximum_vcas: 256,
+        maximum_vca_reach_pairs: u64::MAX,
         maximum_sources: 16,
         maximum_routes: 256,
         maximum_effects: 256,
