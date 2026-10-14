@@ -1,5 +1,7 @@
 import type { ModelRecord, ModelValue, SessionModel } from "../core/session.ts";
 import { MisoUsageError } from "../core/errors.ts";
+import { SESSION_KEYS } from "../generated/session-keys.ts";
+import type { SessionKeyKind } from "../generated/session-keys.ts";
 
 /**
  * Internal canonical Session V1 serializer shared by `SessionBuilder.toJson()` and its corpus
@@ -10,157 +12,77 @@ export function writeCanonicalSessionDocument(model: SessionModel): string {
   return `${jsonValue(model, "", 0)}\n`;
 }
 
-const ROOT_KEYS = [
-  "schema_version",
-  "session_id",
-  "revision",
-  "sample_rate_hz",
-  "quantum_frames",
-  "render_profile",
-  "output_profile",
-  "sources",
-  "console",
-  "tracks",
-  "submixes",
-  "vcas",
-  "control_smoothing",
-  "outputs",
-  "routes",
-  "automation",
-] as const;
+/**
+ * One record shape from the engine's key tables: its keys in emit order and what each key holds.
+ *
+ * `src/generated/session-keys.ts` is the Rust session field walk, recorded over the canonical
+ * writer corpus (`parameter-metadata --print-session-keys`). The writer holds no key list, order
+ * or number spelling of its own: a field added in Rust reaches this module by regeneration.
+ */
+interface RecordShape {
+  readonly name: string;
+  readonly order: readonly string[];
+  /** The sorted key names joined, to compare against a model record's own keys. */
+  readonly keySet: string;
+  readonly kinds: ReadonlyMap<string, SessionKeyKind>;
+}
+
+/** Every record shape that may sit under a parent JSON key (`""` for the root). */
+const SHAPES_BY_PARENT: ReadonlyMap<string, readonly RecordShape[]> = (() => {
+  const byName = new Map<string, RecordShape>();
+  for (const record of SESSION_KEYS.records) {
+    const name = record.arm === null ? record.module : `${record.module}/${record.arm}`;
+    const order = record.keys.map(([key]) => key as string);
+    byName.set(name, {
+      name,
+      order,
+      keySet: [...order].sort().join(","),
+      kinds: new Map(record.keys.map(([key, kind]) => [key as string, kind as SessionKeyKind])),
+    });
+  }
+  const byParent = new Map<string, RecordShape[]>();
+  for (const parent of SESSION_KEYS.parents) {
+    byParent.set(parent.key, parent.records.map((entry) => {
+      const name = entry.arm === null ? entry.module : `${entry.module}/${entry.arm}`;
+      const shape = byName.get(name);
+      if (shape === undefined) throw new Error(`session key tables name no record ${name}`);
+      return shape;
+    }));
+  }
+  return byParent;
+})();
 
 /**
- * Every numeric leaf key in the schema, by JSON schema type.
- *
- * A number in the model does not say whether the schema calls it a `u32` or an `f32`, and the two
- * spell differently: `0` versus `0.0`. Every leaf is therefore transcribed from the Rust field
- * walk, and an unlisted numeric leaf fails loudly.
+ * The shape of a record under the parent key: the one candidate whose key set equals the
+ * record's exactly. Several candidates may share a key set only when the generator proved they
+ * write the same order and kinds, so the first answers for all of them.
  */
-const INTEGER_KEYS: ReadonlySet<string> = new Set([
-  "schema_version",
-  "sample_rate_hz",
-  "quantum_frames",
-  "channels",
-  "bit_depth",
-  "left_source_channel",
-  "right_source_channel",
-  "delay_samples",
-  "smoothing_samples",
-  "parameter_id",
-]);
-const FLOAT_KEYS: ReadonlySet<string> = new Set([
-  "trim_db",
-  "hpf_hz",
-  "lpf_hz",
-  "left_db",
-  "right_db",
-  "left",
-  "right",
-  "ll",
-  "lr",
-  "rl",
-  "rr",
-  "gain_db",
-  "value",
-  "start_value",
-  "end_value",
-  "mute_ms",
-  "fader_ms",
-  "pan_ms",
-]);
-
-const OBJECT_KEY_ORDERS = {
-  render_profile: ["id", "mode"],
-  output_profile: ["id", "channels", "sample_format"],
-  sources: ["id", "content", "channels", "bit_depth", "frames"],
-  builtins: ["left", "right"],
-  channel_builtins: ["polarity_invert", "trim_db", "hpf_hz", "lpf_hz", "delay_samples"],
-  inserts: ["effects"],
-  effects: ["id", "identity", "quality", "bypass", "link_mode", "params", "sidechain"],
-  pre_insert: ["slot", "identity", "quality", "link_mode"],
-  post_insert: ["slot", "identity", "quality", "link_mode"],
-  params: ["parameter_id", "channel", "unit", "value"],
-  fader: ["left_db", "right_db", "left_mute", "right_mute"],
-  pan: ["left", "right", "smoothing_samples"],
-  matrix: ["ll", "lr", "rl", "rr", "smoothing_samples"],
-  vcas: ["id", "fader", "members"],
-  outputs: ["id"],
-  routes: ["id", "source", "destination", "channel_matrix", "gain_db", "mute", "follows_mute"],
-  channel_matrix: ["ll", "lr", "rl", "rr"],
-  automation: ["id", "target", "segments"],
-  target: ["entity_id", "rack", "effect_id", "parameter_id", "channel"],
-  segments: ["shape", "start_sample", "end_sample", "start_value", "end_value", "unit"],
-} as const;
-
-function taggedOrder(record: ModelRecord, key: string): readonly string[] {
-  const kind = record.kind;
-  if (key === "identity") {
-    if (kind === "native") return ["kind", "effect_id"];
-    if (kind === "cid") return ["kind", "cid"];
+function recordShape(record: ModelRecord, parentKey: string): RecordShape {
+  const candidates = SHAPES_BY_PARENT.get(parentKey);
+  if (candidates === undefined) {
+    throw new MisoUsageError(`the canonical writer has no declared object shape for '${parentKey}'`);
   }
-  if (key === "sidechain") {
-    if (kind === "none") return ["kind"];
-    if (kind === "routed") return ["kind", "source", "port_id"];
-  }
-  if (key === "control_smoothing") {
-    if (kind === "default") return ["kind"];
-    if (kind === "explicit") return ["kind", "mute_ms", "fader_ms", "pan_ms"];
-  }
-  if (key === "source") {
-    if (kind === "track") return ["kind", "track_id", "tap"];
-    if (kind === "submix") return ["kind", "submix_id", "tap"];
-  }
-  if (key === "destination") {
-    if (kind === "submix_input") return ["kind", "submix_id"];
-    if (kind === "output_input") return ["kind", "output_id"];
-  }
-  throw new MisoUsageError(`the canonical writer has no declared ${key} variant '${String(kind)}'`);
-}
-
-function objectOrder(record: ModelRecord, key: string): readonly string[] {
-  if (key === "") return ROOT_KEYS;
-  if (key === "tracks") {
-    return [
-      "id", "source_id", "left_source_channel", "right_source_channel", "builtins",
-      "console", "inserts", "fader", "pan" in record ? "pan" : "matrix",
-    ];
-  }
-  // A submix strip is a track's strip without the source fields.
-  if (key === "submixes") {
-    return ["id", "builtins", "console", "inserts", "fader", "pan" in record ? "pan" : "matrix"];
-  }
-  // `console` names two records: the session's root declaration and each entry of a track's
-  // console array. The root one is the only record with sections.
-  if (key === "console") {
-    return "pre_insert" in record ? ["pre_insert", "post_insert"] : ["slot", "bypass", "params"];
-  }
-  if (key === "left" || key === "right") return OBJECT_KEY_ORDERS.channel_builtins;
-  if (["identity", "sidechain", "source", "destination", "control_smoothing"].includes(key)) {
-    return taggedOrder(record, key);
-  }
-  const order = OBJECT_KEY_ORDERS[key as keyof typeof OBJECT_KEY_ORDERS];
-  if (order !== undefined) return order;
-  throw new MisoUsageError(`the canonical writer has no declared object shape for '${key}'`);
-}
-
-function checkedObjectOrder(record: ModelRecord, key: string): readonly string[] {
-  const order = objectOrder(record, key);
-  const actual = Object.keys(record).sort();
-  const expected = [...order].sort();
-  if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+  const keySet = Object.keys(record).sort().join(",");
+  const shape = candidates.find((candidate) => candidate.keySet === keySet);
+  if (shape === undefined) {
     throw new MisoUsageError(
-      `the canonical writer received the wrong keys for '${key || "session"}': ${actual.join(", ")}`,
+      `the canonical writer received the wrong keys for '${parentKey || "session"}': ${keySet.split(",").join(", ")}`,
     );
   }
-  return order;
+  return shape;
 }
 
-function jsonValue(value: ModelValue, key: string, depth: number): string {
+function jsonValue(
+  value: ModelValue,
+  key: string,
+  depth: number,
+  kind: SessionKeyKind | undefined = undefined,
+): string {
   if (typeof value === "string") return quote(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") {
-    if (INTEGER_KEYS.has(key)) return String(value);
-    if (FLOAT_KEYS.has(key)) return canonicalFloat(value);
+    if (kind === "integer") return String(value);
+    if (kind === "float") return canonicalFloat(value);
     throw new MisoUsageError(
       `the canonical writer has no declared JSON type for the numeric key '${key}'`,
     );
@@ -168,13 +90,13 @@ function jsonValue(value: ModelValue, key: string, depth: number): string {
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
     const indent = "  ".repeat(depth + 1);
-    return `[\n${value.map((item) => `${indent}${jsonValue(item, key, depth + 1)}`).join(",\n")}\n${"  ".repeat(depth)}]`;
+    return `[\n${value.map((item) => `${indent}${jsonValue(item, key, depth + 1, kind)}`).join(",\n")}\n${"  ".repeat(depth)}]`;
   }
   const record = value as ModelRecord;
-  const keys = checkedObjectOrder(record, key);
-  if (keys.length === 0) return "{}";
+  const shape = recordShape(record, key);
+  if (shape.order.length === 0) return "{}";
   const indent = "  ".repeat(depth + 1);
-  return `{\n${keys.map((name) => `${indent}${quote(name)}: ${jsonValue(record[name]!, name, depth + 1)}`).join(",\n")}\n${"  ".repeat(depth)}}`;
+  return `{\n${shape.order.map((name) => `${indent}${quote(name)}: ${jsonValue(record[name]!, name, depth + 1, shape.kinds.get(name))}`).join(",\n")}\n${"  ".repeat(depth)}}`;
 }
 
 /** The canonical writer's escape set, from the Rust authority's `write_quoted`. */

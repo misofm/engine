@@ -36,13 +36,26 @@ pub trait ModelVisitor {
     /// Begin a record. `key` is absent for the root and array elements; `wire_fields` is the
     /// emitted occurrence count, including repeated fields and any wire tag.
     fn record_begin(&mut self, key: Option<FieldKey>, wire_fields: u32) -> Result<(), Self::Error>;
+    /// Name the record just begun: the key module its keys belong to and, for a variant record,
+    /// the arm. The walk calls it right after [`record_begin`](Self::record_begin) and before any
+    /// field or [`wire_tag`](Self::wire_tag), exactly once per record. `module` is a name in
+    /// [`keys::MODULES`]; `arm` is the variant arm's token text (`"pan"`, `"routed"`), and `None`
+    /// for a record with one shape. A visitor that does not need the schema's names keeps this
+    /// default.
+    fn record_schema(
+        &mut self,
+        _module: &'static str,
+        _arm: Option<&'static str>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
     /// End the current record.
     fn record_end(&mut self) -> Result<(), Self::Error>;
     /// Begin an array with its exact item count.
     fn array_begin(&mut self, key: FieldKey, len: usize) -> Result<(), Self::Error>;
     /// End the current array.
     fn array_end(&mut self) -> Result<(), Self::Error>;
-    /// Emit a discriminator present only on the wire, immediately after `record_begin`.
+    /// Emit a discriminator present only on the wire, immediately after `record_schema`.
     fn wire_tag(&mut self, tag: Token) -> Result<(), Self::Error>;
     /// Emit a Boolean field.
     fn bool(&mut self, key: FieldKey, value: bool) -> Result<(), Self::Error>;
@@ -133,6 +146,8 @@ pub mod keys {
  }
 }
 
+pub use walk::VARIANT_ARMS;
+
 mod walk {
     use core::cmp::Ordering;
 
@@ -142,6 +157,13 @@ mod walk {
     fn token(text: &'static str, wire: u8) -> Token {
         Token { text, wire }
     }
+    /// A strip's record shape follows its pan-or-matrix field: the key list differs by arm.
+    fn strip_arm(matrix_or_pan: &MatrixOrPan) -> &'static str {
+        match matrix_or_pan {
+            MatrixOrPan::Pan { .. } => "pan",
+            MatrixOrPan::Matrix { .. } => "matrix",
+        }
+    }
     trait Record {
         fn record<V: ModelVisitor>(
             &self,
@@ -150,19 +172,22 @@ mod walk {
             v: &mut V,
         ) -> Result<(), V::Error>;
     }
-    macro_rules! records { ($($ty:ty=>$m:ident |$s:ident,$v:ident,$o:ident,$f:ident| [$count:expr] {$($event:expr),*})+) => {$(
+    macro_rules! records { ($($ty:ty=>$m:ident |$s:ident,$v:ident,$o:ident,$f:ident| [$count:expr $(; $arm:expr)?] {$($event:expr),*})+) => {$(
         impl Record for $ty { fn record<V: ModelVisitor>(&self, key: Option<FieldKey>, o: WalkOrder, v: &mut V) -> Result<(), V::Error> {
             use keys::$m as $f; let ($s,$v,$o)=(self,v,o);
-            $v.record_begin(key,$count)?; $($event?;)* $v.record_end()
+            $v.record_begin(key,$count)?; $v.record_schema(stringify!($m),None $(.or(Some($arm)))?)?; $($event?;)* $v.record_end()
         } }
         impl VisitModel for $ty { fn visit<V: ModelVisitor>(&self, o: WalkOrder, v: &mut V) -> Result<(), V::Error> { self.record(None,o,v) } }
     )+}; }
-    macro_rules! rec { ($v:ident,$key:expr,$n:expr;$($e:expr),*$(,)?) => {{ $v.record_begin($key,$n)?; $($e?;)* $v.record_end() }}; }
-    macro_rules! variants { ($($ty:ty=>$m:ident |$v:ident,$f:ident,$o:ident| {$([$pat:pat]=>$n:literal {$($e:expr),*})+})+) => {$(
+    macro_rules! rec { ($v:ident,$key:expr,$n:expr,$m:ident,$arm:literal;$($e:expr),*$(,)?) => {{ $v.record_begin($key,$n)?; $v.record_schema(stringify!($m),Some($arm))?; $($e?;)* $v.record_end() }}; }
+    macro_rules! variants { ($($ty:ty=>$m:ident |$v:ident,$f:ident,$o:ident| {$([$pat:pat]=>$n:literal $arm:literal {$($e:expr),*})+})+) => {
+        /// Every variant record's `(key module, arm)`, so a consumer of [`ModelVisitor::record_schema`] can tell an arm it never saw from one that does not exist.
+        pub const VARIANT_ARMS: &[(&str, &str)] = &[$($((stringify!($m), $arm)),+),+];
+        $(
         impl Record for $ty {
             fn record<V: ModelVisitor>(&self, key: Option<FieldKey>, order: WalkOrder, visitor: &mut V) -> Result<(), V::Error> {
                 use keys::$m as $f; let ($v,$o)=(visitor,order);
-                match self {$($pat=>rec!($v,key,$n;$($e),*),)+}
+                match self {$($pat=>rec!($v,key,$n,$m,$arm;$($e),*),)+}
             }
         }
         impl VisitModel for $ty { fn visit<V: ModelVisitor>(&self, o: WalkOrder, v: &mut V) -> Result<(), V::Error> { self.record(None,o,v) } }
@@ -244,7 +269,7 @@ mod walk {
           v.token(f::LINK_MODE,token(s.link_mode.token(),s.link_mode.wire()))
         }
         ConsoleEntry=>console_entry |s,v,o,f| [2+s.params.len() as u32] {v.id(f::SLOT,&s.slot),v.bool(f::BYPASS,s.bypass),sorted_array(f::PARAMS,&s.params,o,v)}
-        Track=>track |s,v,o,f| [8+s.console.len() as u32] {
+        Track=>track |s,v,o,f| [8+s.console.len() as u32; strip_arm(&s.matrix_or_pan)] {
           v.id(f::ID,&s.id),v.id(f::SOURCE_ID,&s.source_id),v.u8(f::LEFT_SOURCE_CHANNEL,s.left_source_channel),v.u8(f::RIGHT_SOURCE_CHANNEL,s.right_source_channel),
           s.builtins.record(Some(f::BUILTINS),o,v),array(f::CONSOLE,&s.console,o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),
           {let k=match s.matrix_or_pan {MatrixOrPan::Pan{..}=>f::PAN,MatrixOrPan::Matrix{..}=>f::MATRIX};s.matrix_or_pan.record(Some(k),o,v)}
@@ -260,7 +285,7 @@ mod walk {
           v.u32(f::PARAMETER_ID,s.parameter_id),v.token(f::CHANNEL,token(s.channel.token(),s.channel.wire())),v.token(f::UNIT,token(s.unit.token(),s.unit.wire())),v.f32(f::VALUE,s.value)
         }
         DualMonoFader=>fader |s,v,_o,f| [4] {v.f32(f::LEFT_DB,s.left_db),v.f32(f::RIGHT_DB,s.right_db),v.bool(f::LEFT_MUTE,s.left_mute),v.bool(f::RIGHT_MUTE,s.right_mute)}
-        Submix=>submix |s,v,o,f| [5+s.console.len() as u32] {
+        Submix=>submix |s,v,o,f| [5+s.console.len() as u32; strip_arm(&s.matrix_or_pan)] {
           v.id(f::ID,&s.id),s.builtins.record(Some(f::BUILTINS),o,v),array(f::CONSOLE,&s.console,o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),
           {let k=match s.matrix_or_pan {MatrixOrPan::Pan{..}=>f::PAN,MatrixOrPan::Matrix{..}=>f::MATRIX};s.matrix_or_pan.record(Some(k),o,v)}
         }
@@ -283,32 +308,32 @@ mod walk {
 
     variants! {
       EffectIdentity=>identity |v,f,_o| {
-        [Self::Native { effect_id }]=>2 {v.token(f::KIND,token("native",1)),v.id(f::EFFECT_ID,effect_id)}
-        [Self::ThirdPartyCid { cid }]=>2 {v.token(f::KIND,token("cid",2)),v.text(f::CID,cid)}
+        [Self::Native { effect_id }]=>2 "native" {v.token(f::KIND,token("native",1)),v.id(f::EFFECT_ID,effect_id)}
+        [Self::ThirdPartyCid { cid }]=>2 "cid" {v.token(f::KIND,token("cid",2)),v.text(f::CID,cid)}
       }
       SidechainDeclaration=>sidechain |v,f,o| {
-        [Self::None]=>1 {v.token(f::KIND,token("none",1))}
-        [Self::Routed(s)]=>3 {v.token(f::KIND,token("routed",2)),s.source.record(Some(f::SOURCE),o,v),v.id(f::PORT_ID,&s.port_id)}
+        [Self::None]=>1 "none" {v.token(f::KIND,token("none",1))}
+        [Self::Routed(s)]=>3 "routed" {v.token(f::KIND,token("routed",2)),s.source.record(Some(f::SOURCE),o,v),v.id(f::PORT_ID,&s.port_id)}
       }
       MatrixOrPan=>matrix_or_pan |v,f,_o| {
-        [Self::Pan { left, right, smoothing_samples }]=>4 {v.wire_tag(token("pan",1)),v.f32(f::LEFT,*left),v.f32(f::RIGHT,*right),v.u32(f::PAN_SMOOTHING,*smoothing_samples)}
-        [Self::Matrix { ll, lr, rl, rr, smoothing_samples }]=>6 {
+        [Self::Pan { left, right, smoothing_samples }]=>4 "pan" {v.wire_tag(token("pan",1)),v.f32(f::LEFT,*left),v.f32(f::RIGHT,*right),v.u32(f::PAN_SMOOTHING,*smoothing_samples)}
+        [Self::Matrix { ll, lr, rl, rr, smoothing_samples }]=>6 "matrix" {
           v.wire_tag(token("matrix",2)),v.f32(f::LL,*ll),v.f32(f::LR,*lr),v.f32(f::RL,*rl),v.f32(f::RR,*rr),v.u32(f::MATRIX_SMOOTHING,*smoothing_samples)
         }
       }
       Option<ControlSmoothing> => control_smoothing |v,f,_o| {
-        [None]=>1 {v.token(f::KIND,token("default",1))}
-        [Some(ControlSmoothing { mute_ms, fader_ms, pan_ms })]=>4 {
+        [None]=>1 "default" {v.token(f::KIND,token("default",1))}
+        [Some(ControlSmoothing { mute_ms, fader_ms, pan_ms })]=>4 "explicit" {
           v.token(f::KIND,token("explicit",2)),v.f32(f::MUTE_MS,*mute_ms),v.f32(f::FADER_MS,*fader_ms),v.f32(f::PAN_MS,*pan_ms)
         }
       }
       RouteSource=>route_source |v,f,_o| {
-        [Self::Track { track_id, tap }]=>3 {v.token(f::KIND,token("track",1)),v.id(f::TRACK_ID,track_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
-        [Self::Submix { submix_id, tap }]=>3 {v.token(f::KIND,token("submix",2)),v.id(f::SUBMIX_ID,submix_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
+        [Self::Track { track_id, tap }]=>3 "track" {v.token(f::KIND,token("track",1)),v.id(f::TRACK_ID,track_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
+        [Self::Submix { submix_id, tap }]=>3 "submix" {v.token(f::KIND,token("submix",2)),v.id(f::SUBMIX_ID,submix_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
       }
       RouteDestination=>route_destination |v,f,_o| {
-        [Self::SubmixInput { submix_id }]=>2 {v.token(f::KIND,token("submix_input",1)),v.id(f::SUBMIX_ID,submix_id)}
-        [Self::OutputInput { output_id }]=>2 {v.token(f::KIND,token("output_input",2)),v.id(f::OUTPUT_ID,output_id)}
+        [Self::SubmixInput { submix_id }]=>2 "submix_input" {v.token(f::KIND,token("submix_input",1)),v.id(f::SUBMIX_ID,submix_id)}
+        [Self::OutputInput { output_id }]=>2 "output_input" {v.token(f::KIND,token("output_input",2)),v.id(f::OUTPUT_ID,output_id)}
       }
     }
 }

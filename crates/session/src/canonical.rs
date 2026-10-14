@@ -274,7 +274,7 @@ mod tests {
         StableId::parse(value).expect("valid corpus ID")
     }
 
-    fn full_surface_document() -> String {
+    fn full_surface_model() -> crate::SessionModel {
         let source = fs::read_to_string(corpus_path("fixtures/session/v1/canonical.json"))
             .expect("read representative session");
         let mut model = parse_session_json(&source).expect("parse representative session");
@@ -473,7 +473,27 @@ mod tests {
             fader_ms: 12.5,
             pan_ms: 1000.0,
         });
-        canonical_session_json(&model).expect("full tagged surface canonicalizes")
+        model
+    }
+
+    fn full_surface_document() -> String {
+        canonical_session_json(&full_surface_model()).expect("full tagged surface canonicalizes")
+    }
+
+    /// The full surface with the track's matrix and the submix's pan exchanged, so the corpus
+    /// walks both arms of `matrix_or_pan` under both strip records (#1569).
+    fn exchanged_strips_document() -> String {
+        let mut model = full_surface_model();
+        let matrix = std::mem::replace(
+            &mut model.tracks[0].matrix_or_pan,
+            MatrixOrPan::Pan {
+                left: 0.75,
+                right: -0.75,
+                smoothing_samples: 8,
+            },
+        );
+        model.submixes[0].matrix_or_pan = matrix;
+        canonical_session_json(&model).expect("exchanged strips canonicalize")
     }
 
     #[test]
@@ -497,6 +517,10 @@ mod tests {
             json!({
                 "id": "canonical-full-surface",
                 "canonical": full_surface_document(),
+            }),
+            json!({
+                "id": "canonical-exchanged-strips",
+                "canonical": exchanged_strips_document(),
             }),
         ];
 
