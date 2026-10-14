@@ -168,3 +168,22 @@ D2's "size stays 80" is superseded: `WebStatus` is 88 bytes, set by *Report sour
 
 **Root Q5.** D3's accessor is `PlanQueries::watermark()` (`crates/control-plane/src/plan.rs:111`).
 Dependency #1381 means #1381a.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Gate 1 and gate 3 use a live edit.** Until *#1562b*, the browser refuses a rebuild-path frame
+  with `web.apply.rebuild_pending` before commit (ruling B), so the rebuild script of #1314's gate
+  2 cannot run through the browser host. Gates 1 and 3 drive a live `SET_CONTROL` edit instead:
+  the status words stay at the initial revision until the block that applies the edit and then
+  read `(r2, that block's first sample, EXACT)`, equal to the C ABI's
+  `miso_engine_v1_plan_watermark` for the same script and to the record that
+  `miso_engine_web_v1_watermark_read` copies (#1381a D5, `WebPlanWatermark`). The rebuild leg of
+  gate 1 moves to #1562b's gates.
+- **Anchors.** `WebStatus` is `hosts/host-web/src/lib.rs:1172` (88 bytes; `reserved: [u64; 3]` at
+  56-72, `source_underrun_blocks` at 80). The control-side watermark record already exists:
+  `WebPlanWatermark` and `miso_engine_web_v1_watermark_{read,ptr}` (`ffi.rs:4022`, `:4030`).
+  D3 holds unchanged: this slice adds no export.
+- **Realtime edit.** D1 edits `crates/engine/src/realtime/plan_exchange.rs`. Per root, one attempt;
+  if the permission system refuses it, the slice stops and waits.
