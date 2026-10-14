@@ -264,6 +264,7 @@ function wrapEngineProcessor(Base) {
      */
     attachSharedRings(rings) {
       if (!Array.isArray(rings)) return
+      this.rebindMemoryViews()
       const bound = []
       const incoming = []
       for (let index = 0; index < rings.length; index += 1) {
@@ -291,6 +292,30 @@ function wrapEngineProcessor(Base) {
         Atomics.store(bound[index].control, CONTROL_ATTACHED, 1)
       }
       this.sabRings = kept.concat(bound)
+    }
+
+    /**
+     * The engine processor re-cuts its own views when a control call grows the
+     * module's memory; the rings hold one more view of that memory, the
+     * staging-buffer id view each ring cut at attach, so it is re-cut here, in
+     * the same message handler and never in `process()`. The engine's
+     * `rebindMemoryViews` is the single entry both its handlers and this
+     * class's between-block handler call.
+     */
+    rebindMemoryViews() {
+      const before = this.memoryBuffer
+      super.rebindMemoryViews()
+      if (this.memoryBuffer === before) return
+      const rings = this.sabRings ?? []
+      for (let index = 0; index < rings.length; index += 1) {
+        const ring = rings[index]
+        ring.idTarget = new Uint8Array(
+          this.memoryBuffer,
+          this.sourceIdPointer,
+          Math.min(ring.idLength, this.sourceIdCapacity)
+        )
+        ring.idTargetBuffer = this.memoryBuffer
+      }
     }
 
     /** Unbind exactly the rings an attach node brought, and nothing else. */
@@ -471,7 +496,9 @@ function wrapEngineProcessor(Base) {
 
     /** Consumer-owned stale release, called only by the attachment port between blocks. */
     prepareSharedSeeks(delivered, seeks) {
-      if (!this.ready || this.disposed || this.stickyResult !== RESULT_OK || this.exports.memory.buffer !== this.memoryBuffer || !Array.isArray(seeks) || seeks.length !== delivered.length) return { kind: "refused", result: RESULT_WRONG_STATE }
+      // A growth of the module's memory is no fault: re-cut the views here, between blocks.
+      this.rebindMemoryViews()
+      if (!this.ready || this.disposed || this.stickyResult !== RESULT_OK || !Array.isArray(seeks) || seeks.length !== delivered.length) return { kind: "refused", result: RESULT_WRONG_STATE }
       const rings = delivered.map((shared) => this.sabRings.find((ring) => ring.shared === shared))
       if (rings.some((ring) => !ring || ring.idTargetBuffer !== this.memoryBuffer || ring.idTarget.length !== ring.idLength)) return { kind: "refused", result: RESULT_WRONG_STATE }
       const matches = (ring, seek) => seek && seek.epoch !== 0 && Atomics.load(ring.control, CONTROL_SEEK_EPOCH) === seek.epoch && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION) === seek.generation && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME) === seek.frame
@@ -538,6 +565,7 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
         this.delivered = []
       } else if (data.op === "prepare-seek") {
         const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered, data.seeks)
+        registry.engine?.rebindMemoryViews()
         this.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...result })
       }
     }

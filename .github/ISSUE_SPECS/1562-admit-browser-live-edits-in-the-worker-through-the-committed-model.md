@@ -292,9 +292,19 @@ The slice is split. Both pieces stay in this issue.
   sends more transactions than the lane holds is refused; the batch lands whole, so this is
   #1570b's to close before the flip is reachable.
 - **Memory growth.** `control_command` allocates (the transaction, the classifier's model clone and
-  JSON, the catalog stage). The worklet treats a moved `memory.buffer` as sticky
-  (`reprepareRequired`) as it does everywhere; the boot's transient peak, which stays in the
-  allocator's free lists, is larger than a control frame's.
+  JSON, the catalog stage), and on a small session the first live transaction grows the module's
+  memory (reproduced: 46 to 48 pages). Growth is not a fault (#1332 D5, root ruling A of the batch 7
+  CI round, which replaces this note's earlier "a moved `memory.buffer` is sticky
+  (`reprepareRequired`)"): the worklet re-binds and continues. `rebindMemoryViews` re-cuts every
+  persistent view over the memory at the end of every message-handler path that can call into the
+  module (control, service, event drain, observation, track response, spectrum, source submit and
+  seek, and the feed's attach and prepare-seek handler), and `process()` never creates a view: it
+  compares the buffers, and on a mismatch renders silence for that quantum and counts it in the
+  status's `staleViewQuanta`. Growth stays counted on the control side
+  (`singleModeControlAllocations`); the render-locked allocation count stays exactly 0. A refused
+  or failed call keeps its previous behaviour (a typed refusal is a reply, a trap or malformed
+  message is sticky); only the growth stopped being sticky. The host accepts a status whose
+  `memoryBytes` is the boot size or a larger whole number of pages.
 
 ### Evidence
 
@@ -348,8 +358,12 @@ The slice is split. Both pieces stay in this issue.
   saw the frame.
 - Worklet harness (`scripts/test-web-audioworklet.mjs`): the control message stages the frame, runs
   the export, returns the response unchanged with the revision, carries a typed refusal without
-  going sticky, refuses a frame the staging refuses, goes sticky on a malformed message and on a
-  moved memory; the host sends a copy with the buffer transferred, refuses a bad frame locally, and
+  going sticky, refuses a frame the staging refuses, goes sticky on a malformed message; a command
+  that grows the memory is re-bound and continues (every registered view is cut against the new
+  buffer, the reply is whole, the next `process()` renders the engine's non-silent output through
+  the new views, a later request is served, and the status reports the grown memory and a zero
+  `staleViewQuanta`); `process()` on a moved memory with no handler since renders silence, is not
+  sticky, counts the quantum, and resumes after the next handler; the host sends a copy with the buffer transferred, refuses a bad frame locally, and
   fails on a malformed reply.
 - `check-sdk-headless.sh`: 25 failing subtests, the number #1381a recorded; all of them send the old
   command kinds or read their effects. #1563B (the SDK sends `SET_CONTROL`) restores the edit-driven

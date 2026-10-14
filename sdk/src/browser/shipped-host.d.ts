@@ -742,6 +742,8 @@ export interface MisoStatus {
   /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). Every value reaches
   /// the engine through `control()` (issue #1565), the one path the C ABI takes.
   readonly liveValuesSuperseded: bigint;
+  /// The module's memory size now: at least the boot size (`MisoAudioWorkletHost.memoryBytes`),
+  /// larger after a control call grew it.
   readonly memoryBytes: number;
   /// The allocator calls the instance made outside its render-locked windows (issue 1381a, issue
   /// 1332 D1): its boot, its control messages and its service steps. In this module's `single`
@@ -749,6 +751,10 @@ export interface MisoStatus {
   /// engine allocates on an audio thread; the render-locked count (`renderAllocationCount()`)
   /// stays exactly zero.
   readonly singleModeControlAllocations: number;
+  /// The quanta the worklet's `process()` silenced because the module's memory had moved before a
+  /// message handler re-bound its views (a control call may grow the memory, which is no fault).
+  /// Zero while every growth is re-bound in the handler that caused it.
+  readonly staleViewQuanta: number;
 }
 
 /// The instance's render-locked allocator count (issue 1333 D3). Decision 15 requires zero.

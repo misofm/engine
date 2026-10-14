@@ -1007,7 +1007,7 @@ class MisoAudioWorkletHost {
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
-          "memoryBytes", "singleModeControlAllocations",
+          "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
@@ -1115,8 +1115,13 @@ class MisoAudioWorkletHost {
       && message.quantumFrames === this.#quantumFrames
       && validU64(message.nextAbsoluteSample) && validU64(message.renderedQuanta)
       && validU64(message.liveValuesSuperseded)
-      && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes === this.memoryBytes
+      // The module's memory only grows, and a control call may grow it (counted on the control
+      // side, no fault; the worklet re-binds its views), so the live size is the boot size or more,
+      // in whole 64 KiB Wasm pages.
+      && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes >= this.memoryBytes
+      && message.memoryBytes % 65536 === 0
       && validU32(message.singleModeControlAllocations)
+      && validU32(message.staleViewQuanta)
     );
     const validRenderAllocations = pending.response !== "renderAllocations"
       || (message.result === RESULT_OK && validU32(message.count));

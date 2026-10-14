@@ -192,7 +192,7 @@ async function testMainRealm() {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
             lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
-            memoryBytes: 65536, singleModeControlAllocations: 3,
+            memoryBytes: 65536, singleModeControlAllocations: 3, staleViewQuanta: 0,
           };
           if (statusMutation !== null) response = statusMutation(response);
         } else if (received.tag === "miso.renderallocations.v1") {
@@ -1332,6 +1332,7 @@ async function testMainRealm() {
       3,
       "the status reply carries the single-mode control allocation count",
     );
+    assert.equal(status.staleViewQuanta, 0, "the status reply carries the stale-view quantum count");
 
     // Issue #1562a D1, gate 7's host half: a control frame is copied, posted whole as one
     // `miso.control.v1` message with its buffer transferred, and the reply is the engine's
@@ -1620,6 +1621,11 @@ async function testMainRealm() {
       (reply) => ({ ...reply, liveValuesSuperseded: 7 }),
       (reply) => ({ ...reply, liveValuesSuperseded: -1n }),
       (reply) => ({ ...reply, liveValuesSuperseded: 1n << 64n }),
+      // The stale-view count: absent, negative, and a memory smaller than the boot size (memory
+      // only grows, so a shrink is a corrupt reply).
+      ({ staleViewQuanta: _dropped, ...rest }) => rest,
+      (reply) => ({ ...reply, staleViewQuanta: -1 }),
+      (reply) => ({ ...reply, memoryBytes: 32768 }),
     ]) {
       const refused = await countHost();
       statusMutation = mutation;
@@ -1630,6 +1636,9 @@ async function testMainRealm() {
     const wide = await countHost();
     statusMutation = (reply) => ({ ...reply, liveValuesSuperseded: (1n << 64n) - 1n });
     assert.equal((await wide.status()).liveValuesSuperseded, (1n << 64n) - 1n);
+    // A memory a control call grew since boot is a valid status, not a corrupt reply.
+    statusMutation = (reply) => ({ ...reply, memoryBytes: 131072 });
+    assert.equal((await wide.status()).memoryBytes, 131072);
     statusMutation = null;
     await wide.dispose();
 
@@ -2520,7 +2529,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
-  const status = new DataView(memory.buffer, statusPointer, 80);
+  let status = new DataView(memory.buffer, statusPointer, 80);
   status.setUint32(0, 80, true);
   status.setUint32(4, 0x00010000, true);
   status.setUint32(8, 2, true);
@@ -2545,7 +2554,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // Issue #1562a D1: the control frames the fake received, the result it answers with, the
     // response it leaves, the committed revision, and whether it grows its memory under a command.
     control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
-    controlGrowsMemory: false, controlRequestRefusals: 0,
+    controlGrowsMemory: false, controlRequestRefusals: 0, growths: 0,
     // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
     // `control_event` call the fake received, and the result it answers with.
     events: [[], []], eventCalls: [], eventResult: 0,
@@ -2586,7 +2595,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   meterHeader.setBigUint64(24, 768n, true);
   meterHeader.setBigUint64(48, 1n, true);
   meterHeader.setBigUint64(56, 0xbn, true);
-  const report = new DataView(memory.buffer, reportPointer, 48);
+  let report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
@@ -2624,6 +2633,16 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     }
     calls.bootResult = 0;
     return 1;
+  };
+  // A real linear-memory growth: the old buffer is detached in a browser, the new one holds the
+  // same bytes at the same addresses, and the fake's own views follow it.
+  const growMemory = () => {
+    const grown = new ArrayBuffer(memory.buffer.byteLength * 2);
+    new Uint8Array(grown).set(new Uint8Array(memory.buffer));
+    memory.buffer = grown;
+    status = new DataView(grown, statusPointer, 80);
+    report = new DataView(grown, reportPointer, 48);
+    calls.growths += 1;
   };
   const exports = {
     memory,
@@ -2772,7 +2791,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       });
       new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
         .set(calls.controlResponse);
-      if (calls.controlGrowsMemory) memory.buffer = new ArrayBuffer(65536 + 65536);
+      if (calls.controlGrowsMemory) growMemory();
       currentEvent = null;
       return calls.controlResult;
     },
@@ -2799,7 +2818,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     },
   };
   return {
-    exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader,
+    exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader, growMemory,
   };
 }
 
@@ -3720,23 +3739,70 @@ async function testProcessor() {
       }
     }
     {
-      // The module's memory moving under a command detaches every view: sticky, as elsewhere.
+      // Root ruling A (#1332 D5, "growth is not a fault"): the module's memory moving under a
+      // command detaches every cached view, and the handler re-cuts them all before it ends. The
+      // reply is posted whole, the worklet stays ready, a later request is served, and the next
+      // `process()` renders the engine's output through the new views.
       const { processor, fake } = makeProcessor();
+      const before = fake.exports.memory.buffer;
       fake.calls.controlGrowsMemory = true;
       processor.port.onmessage({
         data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
       });
-      // The reply was read from the new buffer and is posted whole, then the instance goes sticky
-      // with RESULT_REPREPARE_REQUIRED (9): the committed frame is never lost to a detached view.
+      assert.equal(fake.calls.growths, 1);
+      assert.notEqual(fake.exports.memory.buffer, before, "the fake really grew its memory");
       const posts = processor.port.posts.map((post) => post.message);
-      const reply = posts.at(-2);
+      const reply = posts.at(-1);
       assert.equal(reply.tag, "miso.control.v1");
       assert.equal(reply.requestId, 1);
-      const failure = posts.at(-1);
-      assert.equal(failure.tag, "miso.error.v1");
-      assert.equal(failure.result, 9);
-      assert.equal(failure.requestId, 1);
-      assert.equal(processor.ready, false);
+      assert.deepEqual([...reply.response], [9, 8, 7], "the reply was read from the new buffer");
+      assert(!posts.some((post) => post.tag === "miso.error.v1"), "a growth posts no error");
+      assert.equal(processor.ready, true);
+      assert.equal(processor.stickyResult, 0);
+      // Every view the instance holds is cut against the new buffer, the feed's too.
+      for (const spec of processor.viewSpecs) {
+        assert.equal(
+          processor[spec.field].buffer,
+          fake.exports.memory.buffer,
+          `${spec.field} is re-bound to the grown memory`,
+        );
+      }
+      assert(processor.viewSpecs.length >= 12, "every persistent view is registered");
+      const left = new Float32Array(64).fill(1);
+      const right = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.deepEqual(fake.calls.render, [64], "the next quantum renders");
+      assert(left.every((sample) => sample === 0.25), "non-silent output through the new views");
+      assert(right.every((sample) => sample === -0.25));
+      // A later request is served: another control call (growing again) and the status.
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([2]) },
+      });
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.control.v1");
+      assert.equal(processor.port.posts.at(-1).message.requestId, 2);
+      assert.equal(processor.ready, true);
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 3 } });
+      const status = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.status.v1").at(-1);
+      assert.equal(status.result, 0);
+      assert.equal(status.memoryBytes, 65536 * 4, "the status reports the grown memory");
+      assert.equal(status.renderedQuanta, 1n, "the status reads the grown memory");
+      assert.equal(status.staleViewQuanta, 0, "no quantum ran on a detached view");
+      assert.equal(processor.process([], [[left.fill(1), right.fill(1)]]), true);
+      assert(left.every((sample) => sample === 0.25));
+      assert.deepEqual(fake.calls.render, [64, 64]);
+    }
+    {
+      // A typed refusal keeps its behaviour when the same call also grew the memory: replied
+      // whole, not sticky. Only the growth stopped being a fault.
+      const { processor, fake } = makeProcessor();
+      fake.calls.controlGrowsMemory = true;
+      fake.calls.controlResult = 10;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]) },
+      });
+      assert.equal(processor.port.posts.at(-1).message.result, 10, "the refusal is replied whole");
+      assert.equal(processor.ready, true, "a typed refusal is not sticky, grown or not");
     }
 
     // Issue #1570b D4, gate 4's worklet half: after a `control` message and after a service tick
@@ -3873,15 +3939,37 @@ async function testProcessor() {
     }
 
     {
+      // Root ruling A: `process()` never re-binds. A memory that moved with no handler since
+      // renders silence for the quantum, counts it, and is no fault; the next message handler
+      // re-binds and the quantum after renders again.
       const { processor, fake } = makeProcessor();
-      fake.exports.memory.buffer = new ArrayBuffer(65536);
+      fake.growMemory();
       const left = new Float32Array(64).fill(1);
       const right = new Float32Array(64).fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
-      assert.deepEqual(fake.calls.render, []);
+      assert.deepEqual(fake.calls.render, [], "no render on a detached view");
       assert(left.every((sample) => sample === 0 && !Object.is(sample, -0)));
       assert(right.every((sample) => sample === 0 && !Object.is(sample, -0)));
-      assert.equal(processor.stickyResult, 9);
+      assert.equal(processor.stickyResult, 0, "a moved memory is not sticky");
+      assert.equal(processor.ready, true);
+      assert.equal(processor.staleViewQuanta, 1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.staleViewQuanta, 2, "every silenced quantum is counted");
+      assert.equal(
+        processor.outputLeft.buffer === fake.exports.memory.buffer,
+        false,
+        "process() did not re-bind",
+      );
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      const status = processor.port.posts.map((post) => post.message)
+        .filter((message) => message.tag === "miso.status.v1").at(-1);
+      assert.equal(status.staleViewQuanta, 2, "the status reports the silenced quanta");
+      assert.equal(status.memoryBytes, 131072);
+      left.fill(1);
+      right.fill(1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.deepEqual(fake.calls.render, [64], "the handler re-bound and render resumed");
+      assert(left.every((sample) => sample === 0.25));
     }
 
     {

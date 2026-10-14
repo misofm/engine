@@ -258,17 +258,30 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryDeadlineMisses = 0;
     this.observations = Object.freeze([]);
     this.observationSelectionView = null;
+    // Issue #1562 (batch 7 CI fold): every persistent view over the module's memory is registered
+    // here by `bindView`, so a growth of that memory (a control allocation, counted on the control
+    // side and no fault) re-cuts them all in `rebindMemoryViews`, in a message handler and never
+    // in `process()`. `staleViewQuanta` counts the quanta `process()` silenced because it found
+    // the memory moved before a handler re-bound; the status reports it.
+    this.viewSpecs = [];
+    this.staleViewQuanta = 0;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
     // `miso.service.v1` tick included, so a displaced plan is reclaimed here and never in render.
     this.port.onmessage = (event) => {
-      this.receive(event.data);
-      // A service tick is no request: an error it finds belongs to none, never to the last request
-      // the page already saw answered.
-      const requestId = event.data?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
-      this.serviceControl(requestId);
-      this.drainControlEvents(requestId);
+      try {
+        this.receive(event.data);
+        this.rebindMemoryViews();
+        // A service tick is no request: an error it finds belongs to none, never to the last
+        // request the page already saw answered.
+        const requestId = event.data?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+        this.serviceControl(requestId);
+        this.rebindMemoryViews();
+        this.drainControlEvents(requestId);
+      } finally {
+        this.rebindMemoryViews();
+      }
     };
     try {
       const result = this.initialize(options?.processorOptions);
@@ -359,16 +372,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return RESULT_INTERNAL;
     }
     this.memoryBuffer = this.exports.memory.buffer;
-    this.trackResponseRequestView = new DataView(
-      this.memoryBuffer,
-      trackResponseRequestPointer,
-      trackResponseRequestBytes,
-    );
-    this.trackResponseTrackIdView = new Uint8Array(
-      this.memoryBuffer,
-      trackResponseTrackIdPointer,
-      trackResponseTrackIdCapacity,
-    );
+    this.bindView("trackResponseRequestView", DataView,
+      trackResponseRequestPointer, trackResponseRequestBytes);
+    this.bindView("trackResponseTrackIdView", Uint8Array,
+      trackResponseTrackIdPointer, trackResponseTrackIdCapacity);
     this.trackResponseSnapshotPointer = trackResponseSnapshotPointer;
     this.trackResponseSnapshotCapacity = trackResponseSnapshotCapacity;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
@@ -391,8 +398,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         || !u32(outputPointer) || outputPointer === 0
         || !u32(statusPointer) || statusPointer === 0
         || !u32(resourcePointer) || resourcePointer === 0) return RESULT_INTERNAL;
-    this.statusView = new DataView(this.memoryBuffer, statusPointer, 80);
-    this.resourceView = new DataView(this.memoryBuffer, resourcePointer, 224);
+    this.bindView("statusView", DataView, statusPointer, 80);
+    this.bindView("resourceView", DataView, resourcePointer, 224);
     const status = this.readStatus();
     this.sampleRateHz = status.sampleRateHz;
     this.quantumFrames = status.quantumFrames;
@@ -403,17 +410,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return RESULT_REPREPARE_REQUIRED;
     }
     this.maximumSourceChannels = sourcePcmCapacity / (this.quantumFrames * 4);
-    this.sourcePcm = new Float32Array(
-      this.memoryBuffer,
-      this.sourcePcmPointer,
-      sourcePcmCapacity / 4,
-    );
-    this.outputLeft = new Float32Array(this.memoryBuffer, outputPointer, this.quantumFrames);
-    this.outputRight = new Float32Array(
-      this.memoryBuffer,
-      outputPointer + this.quantumFrames * 4,
-      this.quantumFrames,
-    );
+    this.bindView("sourcePcm", Float32Array, this.sourcePcmPointer, sourcePcmCapacity / 4);
+    this.bindView("outputLeft", Float32Array, outputPointer, this.quantumFrames);
+    this.bindView("outputRight", Float32Array,
+      outputPointer + this.quantumFrames * 4, this.quantumFrames);
     this.resources = this.readResources();
     const expectedBackend = 1;
     if (this.resources.backend !== expectedBackend || status.backend !== expectedBackend
@@ -435,6 +435,27 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     });
     this.ready = true;
     return RESULT_OK;
+  }
+
+  /// Cut one persistent view over the module's memory and remember how, so a growth of that memory
+  /// can cut it again. Control side only.
+  bindView(field, Constructor, pointer, length) {
+    this.viewSpecs.push({ field, Constructor, pointer, length });
+    this[field] = new Constructor(this.memoryBuffer, pointer, length);
+  }
+
+  /// Issue #1562 (batch 7 CI fold, root ruling A, #1332 D5 "growth is not a fault"): a control
+  /// call may grow the module's linear memory, which detaches every view cut before. Re-cut them
+  /// all against the live buffer. The module's addresses are stable across a growth, so each view
+  /// keeps its pointer and length. Runs at the end of every message-handler path that can call
+  /// into the module, and never in `process()`, which only compares the buffers and silences.
+  rebindMemoryViews() {
+    const buffer = this.exports?.memory.buffer;
+    if (buffer === undefined || buffer === this.memoryBuffer) return;
+    this.memoryBuffer = buffer;
+    for (const spec of this.viewSpecs) {
+      this[spec.field] = new spec.Constructor(buffer, spec.pointer, spec.length);
+    }
   }
 
   stageSpectrumRequest(options) {
@@ -576,11 +597,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     );
     const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
     if (!u32(reportPointer) || reportPointer === 0) return false;
-    this.commandReport = new DataView(this.memoryBuffer, reportPointer, COMMAND_REPORT_BYTES);
+    this.bindView("commandReport", DataView, reportPointer, COMMAND_REPORT_BYTES);
     if (this.liveControlsAttached) {
       if (!u32(commandPointer) || commandPointer === 0
           || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
-      this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
+      this.bindView("commandStaging", Uint8Array, commandPointer, commandCapacity);
     } else if (commandPointer !== 0 || commandCapacity !== 0) {
       // Released live controls must own no staging at all; a nonzero row here would mean the engine
       // charged for a buffer the ABI says does not exist.
@@ -713,11 +734,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         || !u32(observationSelectionCapacity)
         || observationSelectionCapacity < 1
         || observationSelectionCapacity > MAXIMUM_OBSERVATION_READS) return false;
-    this.observationSelectionView = new DataView(
-      this.memoryBuffer,
-      observationSelectionPointer,
-      observationSelectionCapacity * observationSelectionBytes,
-    );
+    this.bindView("observationSelectionView", DataView, observationSelectionPointer,
+      observationSelectionCapacity * observationSelectionBytes);
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
@@ -735,7 +753,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       // strip in the same order and the master's. The header says how many submixes it holds.
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
-      this.meterHeaderView = new DataView(this.memoryBuffer, headerPointer, METER_HEADER_BYTES);
+      this.bindView("meterHeaderView", DataView, headerPointer, METER_HEADER_BYTES);
       if (this.meterHeaderView.getUint32(0, true) !== METER_HEADER_BYTES
           || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION
           || this.meterHeaderView.getUint32(8, true) !== this.trackCount) {
@@ -747,36 +765,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       const strips = this.trackCount + this.submixCount;
       if (!u32(framePointer) || framePointer === 0
           || frameCapacity !== (strips * 3 + 3) * 4) return false;
-      this.meterView = new Float32Array(this.memoryBuffer, framePointer, frameCapacity / 4);
+      this.bindView("meterView", Float32Array, framePointer, frameCapacity / 4);
       // Fixed views over the one buffer, built here and never again: the frozen render-callback
       // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
       // allocation. With buses the master pair no longer follows the tracks, so the message's
       // `2T + 2` peaks are assembled from the track view and the master view.
-      this.meterTrackPeakView = new Float32Array(
-        this.memoryBuffer,
-        framePointer,
-        this.trackCount * 2,
-      );
-      this.meterSubmixPeakView = new Float32Array(
-        this.memoryBuffer,
-        framePointer + this.trackCount * 2 * 4,
-        this.submixCount * 2,
-      );
-      this.meterMasterPeakView = new Float32Array(
-        this.memoryBuffer,
-        framePointer + strips * 2 * 4,
-        2,
-      );
-      this.meterGainView = new Float32Array(
-        this.memoryBuffer,
-        framePointer + (strips * 2 + 2) * 4,
-        this.trackCount,
-      );
-      this.meterSubmixGainView = new Float32Array(
-        this.memoryBuffer,
-        framePointer + (strips * 2 + 2 + this.trackCount) * 4,
-        this.submixCount,
-      );
+      this.bindView("meterTrackPeakView", Float32Array, framePointer, this.trackCount * 2);
+      this.bindView("meterSubmixPeakView", Float32Array,
+        framePointer + this.trackCount * 2 * 4, this.submixCount * 2);
+      this.bindView("meterMasterPeakView", Float32Array, framePointer + strips * 2 * 4, 2);
+      this.bindView("meterGainView", Float32Array,
+        framePointer + (strips * 2 + 2) * 4, this.trackCount);
+      this.bindView("meterSubmixGainView", Float32Array,
+        framePointer + (strips * 2 + 2 + this.trackCount) * 4, this.submixCount);
       this.meterMasterGainIndex = strips * 3 + 2;
       this.meterMessage = {
         tag: "miso.meter.v1",
@@ -963,10 +964,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     for (const lane of CONTROL_EVENT_LANES) {
       for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
         const result = this.exports.miso_engine_web_v1_control_event(this.handle, lane);
-        if (this.exports.memory.buffer !== this.memoryBuffer) {
-          this.sticky(RESULT_INTERNAL, requestId);
-          return;
-        }
+        this.rebindMemoryViews();
         if (result !== RESULT_OK) {
           this.sticky(result, requestId);
           return;
@@ -1010,10 +1008,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(this.stickyResult, message.requestId, returnedPlanes);
       return;
     }
-    if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId, returnedPlanes);
-      return;
-    }
+    this.rebindMemoryViews();
     if (message?.tag === "miso.source.v1" && exactFields(message, SOURCE_FIELDS)) {
       this.receiveSource(message);
     } else if (message?.tag === "miso.seek.v1" && exactFields(message, SEEK_FIELDS)) {
@@ -1086,6 +1081,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         // windows, which in `single` mode is the one place the engine allocates on an audio
         // thread: boot, control messages and service steps.
         singleModeControlAllocations: this.exports.miso_engine_web_v1_control_allocation_count(),
+        // Quanta `process()` silenced because the module's memory had moved before a message
+        // handler re-bound the views (batch 7 CI fold). Zero when every growth is re-bound in the
+        // handler that caused it.
+        staleViewQuanta: this.staleViewQuanta,
       });
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
@@ -1245,10 +1244,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } catch (_) {
       result = RESULT_INTERNAL;
     }
-    if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
-      return;
-    }
+    this.rebindMemoryViews();
     const resultPointer = this.exports.miso_engine_web_v1_track_response_result_ptr();
     const resultBytes = this.exports.miso_engine_web_v1_track_response_result_bytes();
     if (!u32(resultPointer) || resultPointer === 0 || !u32(resultBytes)
@@ -1322,10 +1318,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       } catch (_) {
         result = RESULT_INTERNAL;
       }
-      if (this.exports.memory.buffer !== this.memoryBuffer) {
-        this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
-        return;
-      }
+      this.rebindMemoryViews();
       if (!streamSelection) {
         this.port.postMessage({
           tag: "miso.spectrum.v1",
@@ -1372,10 +1365,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       } catch (_) {
         result = RESULT_INTERNAL;
       }
-      if (this.exports.memory.buffer !== this.memoryBuffer) {
-        this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
-        return;
-      }
+      this.rebindMemoryViews();
       const metadata = this.readSpectrumStreamMetadata();
       if (metadata === null) {
         this.sticky(RESULT_INTERNAL, message.requestId);
@@ -1436,10 +1426,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } catch (_) {
       result = RESULT_INTERNAL;
     }
-    if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
-      return;
-    }
+    this.rebindMemoryViews();
     let snapshot = new Uint8Array(0);
     if (message.operation === "read" && result === RESULT_OK) {
       const pointer = this.exports.miso_engine_web_v1_spectrum_capture_ptr();
@@ -1462,6 +1449,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   readSpectrumStreamMetadata() {
+    this.rebindMemoryViews();
     const pointer = this.exports.miso_engine_web_v1_spectrum_stream_metadata_ptr();
     const bytes = this.exports.miso_engine_web_v1_spectrum_stream_metadata_bytes();
     if (!u32(pointer) || pointer === 0 || bytes !== SPECTRUM_STREAM_METADATA_BYTES
@@ -1613,15 +1601,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       response: reply.response,
       revision: reply.revision,
     }, [reply.response.buffer]);
-    // The call grew the module's memory (a control allocation), so every view the render path
-    // holds is detached. The reply above was read from the new buffer and is whole; the instance
-    // can render no more and must be prepared again.
-    if (reply.grown) this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
+    // The call may have grown the module's memory (a control allocation, counted on the control
+    // side and no fault): the reply above was read from the new buffer and is whole, and the views
+    // the render path holds are re-cut now, in this handler, before the next quantum renders.
+    this.rebindMemoryViews();
   }
 
   /// Stage `frame`, run it and copy the response out of the module's memory. The module's memory
-  /// may have grown under the call: the reply is then read from the fresh buffer (`grown`), and the
-  /// caller reports it before the instance goes sticky. A frame the staging cannot hold (a zero
+  /// may have grown under the call: the reply is then read from the fresh buffer, and the caller's
+  /// handler re-binds the views (no fault). A frame the staging cannot hold (a zero
   /// pointer) has no response: the previous command's bytes are not its reply.
   readControlCommand(frame) {
     const length = frame.byteLength;
@@ -1632,7 +1620,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       result = this.exports.miso_engine_web_v1_control_command(this.handle, length);
     }
     const buffer = this.exports.memory.buffer;
-    const grown = buffer !== this.memoryBuffer;
+    // A growth under the call is no fault: the reply is read from the live buffer, and every
+    // view is re-cut by the caller's handler before it ends.
     let response = new Uint8Array(0);
     if (pointer !== 0) {
       const responsePointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
@@ -1643,7 +1632,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
     }
     const revision = this.exports.miso_engine_web_v1_control_revision(this.handle);
-    return { result, response, revision, grown };
+    return { result, response, revision };
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).
@@ -1792,9 +1781,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.silence(outputs);
       return true;
     }
+    // Memory moved and no handler has re-bound yet: the cached views are detached. Render nothing
+    // for this quantum, count it, and wait for the handler to re-bind. This never re-binds here.
     if (this.exports.memory.buffer !== this.memoryBuffer) {
-      this.stickyResult = RESULT_REPREPARE_REQUIRED;
-      this.ready = false;
+      this.staleViewQuanta += 1;
       this.silence(outputs);
       return true;
     }
