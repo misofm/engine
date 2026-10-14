@@ -138,3 +138,29 @@ Checked against `12d4a4f9d`.
 - **Anchors.** `SvfSection::design` is now `crates/builtins/src/lib.rs:837-875`; the test counter
   is `FILTER_DESIGN_CALLS` (`:839`). #1407 has landed; #1602 retired the input-design bound cache.
 - Realtime policy as in draft 07's amendment.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Root's rulings (README "Root's rulings (2026-10-14)").
+
+- **F1 is decided: option A.** Render designs a section at events with D1's function, the one the
+  control plane and preparation call; D4's count per block is bounded (draft 16b D4) and the render
+  call sits in a realtime-policy region; live edits keep designing off render. The hazard "F1 is not
+  confirmed yet" and the dependency "Root's confirmation of README finding F1" are met.
+- **D5 (new). The contract amendment, for owner review.** This slice changes the texts that say
+  targets are designed off render, for stored automation only:
+  - `docs/EFFECT_CONTRACT_V1.md` (the prepared-target section: "prepares fixed targets off render"
+    gains the stored-automation exception: render designs at bounded events with the owner's own
+    designer and check);
+  - the trait's doc sentences in `crates/effect-contract/src/prepared_target.rs` ("Render-side code
+    never calls this method" gains the same exception; comments only, no code change);
+  - `docs/rulings/builtins-input-liveness-d2.md` (one paragraph: stored automation designs in
+    render; live edits keep #808's off-render rule);
+  - one line against decision 17 C6 in `docs/rulings/one-control-abstraction-2026-10-13.md`: "strip
+    input ... through prepared filter targets designed off render" holds for live edits; stored
+    automation designs in render (F1 = A).
+  Each changed text says "for owner review (root's application, 2026-10-14)". The amendment is
+  root's application, subject to the owner's review, as decision 17's classifications are; root
+  tells the owner. An owner refusal reopens this slice, draft 16b and draft 20. The EQ's own
+  render-path comments (`crates/parametric-eq/src/lib.rs`) are draft 20's (its D8).
+- **Authorized paths** gain the four documents and the doc comments above.

@@ -210,3 +210,9 @@ Checked against `12d4a4f9d`.
   `hosts/host-web/src/tests.rs`'s VCA oracles were deleted (#1565): the browser leg goes through
   `hosts/host-web/tests/control_parity.rs`.
 - **Must-land group** is 09a, 09b, 10, 11 and 11b.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **VCA automation renders in draft 13e** (root's F20 ruling, README "Root's rulings
+  (2026-10-14)"). It extends this slice's offsets cell and write: automated VCA curves add to `S` at
+  each event. This slice's non-goal stands for itself.

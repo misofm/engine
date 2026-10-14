@@ -269,3 +269,12 @@ Checked against `12d4a4f9d`.
   (#1566), not #1335's function. Draft 03a's gate 3 no longer exists (03a is obsolete); the
   step-only rule for `enabled` and `kind` is amended draft 02's.
 - **Dependencies.** #1337 is open; #1345 has landed.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **F1 is decided: option A** (README "Root's rulings (2026-10-14)"). The hazard "Finding F1" and the
+  dependency on root's confirmation are met.
+- **D8 is narrower.** Draft 16a (D5 of its batch-10 amendment) changes `docs/EFFECT_CONTRACT_V1.md`
+  and the trait's sentences in `crates/effect-contract/src/prepared_target.rs`, for owner review.
+  This slice changes only the EQ's own render-path comments (`crates/parametric-eq/src/lib.rs`, the
+  refusal comment and the render-path notes), with the same "for owner review" note.

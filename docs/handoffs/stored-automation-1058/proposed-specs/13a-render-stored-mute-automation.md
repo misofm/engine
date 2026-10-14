@@ -183,3 +183,9 @@ Checked against `12d4a4f9d`.
   `controls::effective` (`crates/controls/src/effective.rs`). Authorized paths change to
   `crates/controls/src/effective.rs` (read) and `crates/host-core/src/live_delta.rs`.
 - **The jump length** is `LiveRamps::for_row(Mute)` (draft 07, amended).
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **Automated VCA mutes** (root's F20 ruling) compose with this slice's `curve || terms` in draft
+  13e: the stage mute of a member lane gains `|| vca_curve(τ)` for each reaching VCA whose mute is
+  automated. This slice's `terms` word keeps the static VCA mutes.

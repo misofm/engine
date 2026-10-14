@@ -7,8 +7,8 @@ to file. Code anchors verified on `6ee64f484`. Batch P1.
 
 ## Product outcome
 
-After drafts 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch* and
-21b *Retire the AUTOMATION_CANCELED event and the cancellation path*, nothing enqueues into the
+After #1627 *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch* and
+#1628 *Retire the AUTOMATION_CANCELED event and the cancellation path*, nothing enqueues into the
 protocol's automation queue. This slice deletes it: the
 32-byte record codec, the batch slot, the queue and its admission state, its configuration and
 report, queue kind 2 and the five automation counters. Every C ABI session stops allocating the
@@ -30,14 +30,13 @@ never holds a queue that nothing calls.
   its helpers (`:1062-1194`). `AUTOMATION_RECORD_BYTES` is `crates/protocol/src/lib.rs:64-65`.
 - **Configuration.** `ProtocolQueueConfig::{automation_batch_slots, per_block_automation_density,
   quantum_frames}` (`queue.rs:527-528`, `:535-538`); `quantum_frames` is "used only for
-  control-side density admission". After draft 21a no capability field reads them.
+  control-side density admission". After #1627 no capability field reads them.
 - **Queue kind 2.** `QueueKind::Automation` (`queue.rs:576-577`), mapped to
   `BackpressureQueueKind::Automation = 2` (`crates/protocol/src/message_wire.rs:769-770`, decode
   `:785`) at `crates/protocol/src/controller.rs:3169`; `docs/CONTROL_PROTOCOL_REGISTRY.md:13`.
 - **Counters 2, 11-14.** `CounterId::{AutomationBackpressure = 2, LateAutomation = 11,
   CanceledAutomation = 12, AutomationTimePast = 13, AutomationOrderReject = 14}`
-  (`message_wire.rs:628`, `:637-640`; `parse_counter_id`, `:2035`, `:2044-2047`). After drafts
-  21a and 21b nothing writes any of them (21b removes `record_canceled_automation`). No corpus row
+  (`message_wire.rs:628`, `:637-640`; `parse_counter_id`, `:2035`, `:2044-2047`). After #1627 and #1628 nothing writes any of them (#1628 removes `record_canceled_automation`). No corpus row
   or test configures
   them (`tools/audit/src/protocol.rs:305` and `crates/capi/src/runtime/tests.rs:2030` use counter
   1).
@@ -106,25 +105,25 @@ never holds a queue that nothing calls.
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   `docs/CONTROL_PROTOCOL_SIZING.md`, `docs/REALTIME_MEMORY.md`
 - `docs/C_ABI_V1_QUALIFICATION.md` (the retained-byte rows that included the queue; Hazards)
-- `crates/capi/src/runtime/tests.rs` (only a use of `protocol::AutomationRecord` that drafts 21a
-  and 21b leave, such as `:1915` and `:2370` on `6ee64f484`)
+- `crates/capi/src/runtime/tests.rs` (only a use of `protocol::AutomationRecord` that #1627
+  and #1628 leave, such as `:1915` and `:2370` on `6ee64f484`)
 
 ## Non-goals
 
-- Wire identities, dispatch, capabilities and the corpus hash (drafts 21a and 21b).
+- Wire identities, dispatch, capabilities and the corpus hash (#1627 and #1628).
 - The C limit `maximum_automation_spans_per_block` (draft 22).
 - The other queues and their configuration.
 
 ## Hazards
 
-- **Batch P1.** This slice deletes what drafts 21a and 21b leave unreachable; it cannot merge
-  before them (21a's dispatch enqueues, 21b's cancellation dequeues), and they must not reach
+- **Batch P1.** This slice deletes what #1627 and #1628 leave unreachable; it cannot merge
+  before them (#1627's dispatch enqueues, #1628's cancellation dequeues), and they must not reach
   `main` without it.
 - **#1351.** *Report each configured counter's own value in the C ABI counter snapshot* (#1351) is
   amended (README amendment row) never to serve `CANCELED_AUTOMATION`, so the merge order of #1351
   and this slice does not matter and no served counter is removed later.
 - **Retained-byte rows.** Any exact C ABI resource figure in docs that included the queue
-  (`docs/C_ABI_V1_QUALIFICATION.md` tables) moves; list each with the reason "draft 21c deletes the
+  (`docs/C_ABI_V1_QUALIFICATION.md` tables) moves; list each with the reason "#1629 deletes the
   automation queue". A ceiling that still holds is not lowered here.
 
 ## Objective gates
@@ -168,11 +167,10 @@ never holds a queue that nothing calls.
 
 Batch P1. Direct dependency:
 
-- Draft 21b *Retire the AUTOMATION_CANCELED event and the cancellation path*, which brings draft
-  21a.
+- #1628 *Retire the AUTOMATION_CANCELED event and the cancellation path*, which brings #1627.
 
 *Extract the C ABI control plane into a portable crate both hosts call* (#1309) arrives through
-draft 21a. Draft 22 *Reserve the C ABI's automation span limit* follows this draft.
+#1627. Draft 22 *Reserve the C ABI's automation span limit* follows this draft.
 
 ## Amendment (controls coordinator, 2026-10-14)
 
@@ -183,6 +181,6 @@ Checked against `12d4a4f9d`.
   through `control_limits` (`hosts/host-web/src/lib.rs:4494`). The report row is
   `crates/control-plane/src/control.rs:252-253`, `:929`. D4 applies to both hosts.
 - **#1351 has landed** and serves `CANCELED_AUTOMATION`; this slice retires counter 12 as written.
-- **The record line** is `docs/CONTROL_PROTOCOL_REGISTRY.md:93` (not `:45`); draft 01 gives the hold
+- **The record line** is `docs/CONTROL_PROTOCOL_REGISTRY.md:93` (not `:45`); #1626 gives the hold
   rule its new home first.
 - Batch P1, ready.

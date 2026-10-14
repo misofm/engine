@@ -39,7 +39,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
   `ratio` (minimum 0.1 or 1).
 - **Frozen effect codes.** `docs/EFFECT_CONTRACT_V1.md:206-229` ("Stable diagnostics"); #1335 D6
   adds `effect.automation.rate`.
-- **Session and builtin rules** are drafts 01 and 02: one entry per lane, pan or matrix by strip
+- **Session and builtin rules** are #1626 and draft 02: one entry per lane, pan or matrix by strip
   kind, discontinuity spacing, and builtin unit, domain, shape and filter order.
 - **Checked-in documents.** `fixtures/session/v1/canonical.json` automates an insert of the
   unregistered identity `parametric-eq` (#1335's skip applies); the skill's
@@ -60,7 +60,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 - **D2. One fault, one diagnostic.** An entry refused as `effect.automation.rate` gets none of
   these. #1335's skips apply unchanged.
 - **D3. Frozen codes.** The three codes join `docs/EFFECT_CONTRACT_V1.md`'s frozen list beside
-  `effect.automation.rate`. The `author-session` skill's automation refusal table (draft 01) gains
+  `effect.automation.rate`. The `author-session` skill's automation refusal table (#1626) gains
   them at stage `prepare-effects`.
 - **D4. No classifier code.** #1335 D4 routes a C ABI automation edit with any diagnostic of the
   function to the rebuild, whose preparation refuses it.
@@ -84,7 +84,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 
 ## Non-goals
 
-- The rate rule (#1335). Session-level and builtin rules (drafts 01, 02).
+- The rate rule (#1335). Session-level and builtin rules (#1626, draft 02).
 - The SDK mirror (draft 03b) and submix authoring (draft 03c).
 - Rendering effect automation (slices 17a to 20).
 
@@ -137,7 +137,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 
 ## Dependencies
 
-- Draft 01 *Validate stored automation lanes in the session crate and state the hold rule* (the
+- #1626 *Validate stored automation lanes in the session crate and state the hold rule* (the
   skill's automation refusal table).
 - Draft 02 *Validate builtin automation targets against their rows at preparation* (the builtin
   rules these effect rules complete, the shared path form and the classifier call beside which

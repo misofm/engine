@@ -25,7 +25,7 @@ with #1306, which sizes the span windows.
   `channel` (`crates/session/src/model.rs:874-955`). The session crate checks that it names a
   declared `(parameter_id, channel)` (`crates/session/src/validate.rs:890-967`).
 - #1335 refuses a target that is not `automatable` with `AutomationRate::Block`. Draft 03a adds the
-  unit, domain and shape rules. Draft 01 adds one entry per lane and the hold rule.
+  unit, domain and shape rules. #1626 adds one entry per lane and the hold rule.
 - Nothing renders the table (`docs/SESSION_SCHEMA_V1.md:220-225`).
 
 **The launch `Block` parameters** (`sdk/assets/miso-engine-v1-parameter-metadata.json`): 56 in
@@ -155,7 +155,7 @@ and 09b give it to the fader stage.
 - The classifier, the one rule for a live edit of an automated cell on both hosts, and carry across a swap
   (draft 19). Until draft 19, an effect automation edit stays model-only.
 - The window sizing function itself (#1306).
-- `AUTOMATION_ENQUEUE` (drafts 21a, 21c, 22). Sample-rate parameters (none at launch, #1335 D1).
+- `AUTOMATION_ENQUEUE` (#1627, #1629, draft 22). Sample-rate parameters (none at launch, #1335 D1).
 
 ## Hazards
 

@@ -99,7 +99,7 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
     "acknowledged with no effect" in #1315's sense: the edit sets the committed document's fallback
     value, the response names the path, and the value is rendered when the automation goes.
 - **D4. Docs.** The sentences that say automation edits are model-only, in the text that P1
-  (draft 21a D5) and *Report each transaction's edit path in its response* (#1313, which rewrites
+  (#1627 D5) and *Report each transaction's edit path in its response* (#1313, which rewrites
   the header paragraph) leave in the C ABI header, `CONTROL_PROTOCOL_SEMANTICS.md` and
   `C_ABI_V1_QUALIFICATION.md` (on `6ee64f484`: `miso_engine_v1.h:41-43`,
   `CONTROL_PROTOCOL_SEMANTICS.md:15`, `C_ABI_V1_QUALIFICATION.md:268-274`), say: a fader automation edit rebuilds and carries; a

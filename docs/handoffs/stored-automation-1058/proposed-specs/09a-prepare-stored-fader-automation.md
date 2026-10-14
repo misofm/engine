@@ -51,7 +51,7 @@ admission path remains that could write a live record onto an automated lane.
   (`crates/lane/src/fpenv.rs:287-290`; the wasm form `:369-372` changes nothing), entered at
   `crates/host-core/src/render_session.rs:111`; preparation runs in the host's environment (README
   finding F11).
-- **What this slice builds on.** Drafts 01 and 02 (one entry per lane, the hold rule, the fader's
+- **What this slice builds on.** #1626 and draft 02 (one entry per lane, the hold rule, the fader's
   unit and domain), 07 (the builder, its byte report and the jump-length key), 08 (`SetGain`), 12
   (the plan cell that holds the jump lengths, seeded from #1054's
   `control_smoothing_samples()`). #1285 D2 records each node's floored input arrival `a(n)`. #1312
@@ -267,7 +267,7 @@ admission path remains that could write a live record onto an automated lane.
 
 ## Dependencies
 
-- Draft 01 *Validate stored automation lanes in the session crate and state the hold rule*.
+- #1626 *Validate stored automation lanes in the session crate and state the hold rule*.
 - Draft 02 *Validate builtin automation targets against their rows at preparation*.
 - Draft 07 *Compile stored automation into per-cell events in node time*.
 - Draft 08 *Apply timed operations inside a block on the strip fader stage*.

@@ -27,7 +27,7 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
   `crates/gate-expander/src/lib.rs:563`, `crates/soft-clip/src/lib.rs:622`,
   `crates/true-peak-limiter/src/lib.rs:3847`; the graph's check `crates/graph/src/lib.rs:6641`).
   Stored automation stages only `Point` spans (#1058 A1.6). The "later protocol capability" was
-  `AUTOMATION_ENQUEUE`, which drafts 21a-21c retire (#1058 A9). No launch descriptor declares
+  `AUTOMATION_ENQUEUE`, which #1627-#1629 retire (#1058 A9). No launch descriptor declares
   `Sample`: its uses are test fixtures (`crates/effect-contract/src/lib.rs:2608-2624`, `:2711`;
   `crates/conformance/src/effect.rs:51`) and the mappings in
   `crates/host-core/src/control_provider.rs:656` and `tools/parameter-metadata/src/lib.rs:830`.
@@ -105,7 +105,7 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
 ## Non-goals
 
 - `Point` spans and every effect's span handling, which stay. Stored automation (A1).
-- The protocol command (drafts 21a-21c).
+- The protocol command (#1627-#1629).
 
 ## Hazards
 
@@ -150,7 +150,7 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
 
 Batch P1. Direct dependency:
 
-- Draft 21c *Delete the protocol automation queue, its records and counters*: its record codec
+- #1629 *Delete the protocol automation queue, its records and counters*: its record codec
   carries the span kind (`AutomationKind`, `crates/protocol/src/queue.rs:30-44`), so the protocol's last producer of the moving kinds leaves first.
 
 ## Amendment (controls coordinator, 2026-10-14)

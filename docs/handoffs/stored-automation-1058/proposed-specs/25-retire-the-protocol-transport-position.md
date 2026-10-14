@@ -34,8 +34,8 @@ and never renumbered.
   only the host can do. The owner ruled that code nothing uses is removed
   (`docs/rulings/engine-footprint-2026-09-28.md:20-21`).
 - **The locate cancellation** that read the position (`controller.rs:3050-3056`) is gone after
-  draft 21b.
-- **Retirement machinery** as in draft 21a: `schema_spec_retiring`
+  #1628.
+- **Retirement machinery** as in #1627: `schema_spec_retiring`
   (`crates/protocol/src/btlv.rs:240-248`) and `retired_code_rows`
   (`crates/conformance/src/protocol_corpus.rs:359-372`).
 - **Corpus rows:** `command.transport_set` (`protocol_corpus.rs:827`), `response.transport_get`
@@ -106,7 +106,7 @@ and never renumbered.
 
 ## Hazards
 
-- **Corpus re-pin order** as in draft 21a.
+- **Corpus re-pin order** as in #1627.
 
 ## Objective gates
 
@@ -123,7 +123,7 @@ and never renumbered.
    `bash scripts/run-protocol-allocation-audit.sh target/release/audit` and
    `./target/release/audit capi` with zero allocations, locks and syscalls, and the same
    `pcm_digest` as base (PR evidence).
-4. **Commands:** as draft 21a's gate 6, which includes `bash scripts/check-cross-targets.sh`
+4. **Commands:** as #1627's gate 6, which includes `bash scripts/check-cross-targets.sh`
    (README F19, the iOS memset rule: no new `memset_pattern16` call; fix one in code, never by a
    ceiling).
 
@@ -136,7 +136,7 @@ and never renumbered.
 
 Batch P1. Direct dependency:
 
-- Draft 21b *Retire the AUTOMATION_CANCELED event and the cancellation path*: it removes the locate
+- #1628 *Retire the AUTOMATION_CANCELED event and the cancellation path*: it removes the locate
   cancellation, the last reader of a set position.
 
 ## Amendment (controls coordinator, 2026-10-14)

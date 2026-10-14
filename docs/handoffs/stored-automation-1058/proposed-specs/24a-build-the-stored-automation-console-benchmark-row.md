@@ -79,7 +79,7 @@ is descriptive: no threshold, no tuning.
     `[0, (PREROLL + OBSERVATIONS + 1) · 128)` from the lane's static value to the same value.
     **`moving`:** the same segments from the static value to a target: fader `-6` dB from it, pan
     `0.5`, EQ gain `-1.5` and `0.5` dB, threshold `-18` dB. Every value lies in its row's domain,
-    so drafts 01, 02 and 03a admit all three documents.
+    so #1626 and drafts 02 and 03a admit all three documents.
   - The session's `control_smoothing` is `{ "kind": "default" }`, as in the fixture after #1054.
 - **D2. The C ABI driver.** In `tools/bench/src/console.rs`, `StoredAutomationMeasurement`
   compiles each arm with `miso_engine_v1_compile_session` and the reference limits, submits the
@@ -206,7 +206,7 @@ Batch Q. Direct dependencies:
 - Draft 20 *Render stored parametric EQ automation*.
 
 The rendering slices the row measures (09a-09b, 14a-14b, 18a-18b) land in batches R1 to R3, before
-batch Q. Drafts 01, 02 and 03a (the documents must validate) and *Session `controlSmoothing`:
+batch Q. #1626 and drafts 02 and 03a (the documents must validate) and *Session `controlSmoothing`:
 configurable ramp lengths for live mute, fader and pan changes* (#1054), for the document's
 `control_smoothing` key, arrive through draft 20. Draft
 24b *Record the stored-automation console benchmark baseline* follows it.

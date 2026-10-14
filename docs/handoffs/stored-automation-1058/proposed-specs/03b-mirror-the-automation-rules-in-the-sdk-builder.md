@@ -10,7 +10,7 @@ to file. Code anchors verified on `6ee64f484`.
 ## Product outcome
 
 The SDK builder refuses, at the field the author wrote and with the engine's own code, every
-stored automation the engine refuses under drafts 01, 02 and 03a. An author learns of a duplicate
+stored automation the engine refuses under #1626 and drafts 02 and 03a. An author learns of a duplicate
 lane, a fader ride to +30 dB or an HPF that crosses the LPF at the `.automation()` call that wrote
 it, not at boot. The builder never builds a session the engine refuses, and never refuses one it
 accepts.
@@ -29,7 +29,7 @@ accepts.
 - **The catalog** gives each builtin row its `domain`, `minimum`, `maximum`, `maximumByRate`,
   `disabledValue` and `unitName` (`sdk/src/generated/catalog.ts:261`, the `builtins.parameters`
   rows), and each effect row its `domainName`, `minimum`, `maximum` and `unitName`.
-- **The engine rules mirrored here.** Draft 01 D1-D3: `automation.duplicate_lane`, pan or matrix by
+- **The engine rules mirrored here.** #1626 D1-D3: `automation.duplicate_lane`, pan or matrix by
   strip kind (`reference.missing_entity` at the parameter), `automation.discontinuity_spacing`.
   Draft 02 D1-D2: `builtin.automation.{unit,domain,shape}` and `builtin.filter.order` over curves.
   Draft 03a D1: `effect.automation.{unit,domain,shape}`.
@@ -40,15 +40,15 @@ accepts.
 ## Decisions frozen for this slice
 
 - **D1. The rules, at the author's path, with the engine's code** (each code added to `CODE`):
-  - duplicate lane (draft 01 D1): when `automation()` adds an entry whose lane an entry already
+  - duplicate lane (#1626 D1): when `automation()` adds an entry whose lane an entry already
     in the builder holds, the builder refuses the call with `automation.duplicate_lane` at
     `automation("<id>").target.channel`, where `<id>` is the entry the engine refuses: of the
     overlapping pair, the one whose `id` is greater (later in canonical order), whichever call
     came first. The new entry is not added. So the code and the refused entry match the engine's
     for every call order;
-  - discontinuity spacing (draft 01 D3): `automation.discontinuity_spacing` at
+  - discontinuity spacing (#1626 D3): `automation.discontinuity_spacing` at
     `.segments[<k>].startSample` or `.endSample`;
-  - pan on a matrix strip, matrix on a pan strip (draft 01 D2): `reference.missing_entity` at
+  - pan on a matrix strip, matrix on a pan strip (#1626 D2): `reference.missing_entity` at
     `.target.parameter`;
   - builtin domain and shape (draft 02 D1): `builtin.automation.domain` through the same tests as
     `builtinNumber` and `builtinFilter` at the session rate, and `builtin.automation.shape`;
@@ -72,7 +72,7 @@ accepts.
 
 ## Non-goals
 
-- Any engine rule (drafts 01, 02, 03a). Submix authoring (draft 03c).
+- Any engine rule (#1626, drafts 02, 03a). Submix authoring (draft 03c).
 - A type-level narrowing of `AutomationTarget.parameter` (#1335's non-goal stands).
 
 ## Hazards
@@ -115,7 +115,7 @@ accepts.
 
 ## Dependencies
 
-- Draft 01 *Validate stored automation lanes in the session crate and state the hold rule*,
+- #1626 *Validate stored automation lanes in the session crate and state the hold rule*,
   draft 02 *Validate builtin automation targets against their rows at preparation* and draft 03a
   *Validate effect automation units, domains and shapes at preparation*: D1 mirrors their rules,
   so each must be on `main` first.

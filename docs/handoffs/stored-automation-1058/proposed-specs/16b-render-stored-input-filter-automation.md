@@ -60,7 +60,7 @@ refused with `builtin.filter.order`, with nothing changed.
 - **D4. Bounded work.** Per section group and block, at most
   `(⌈q/64⌉ + 1) + Σ_cells(⌈q/64⌉ + 1) + 1 seek + 1 cell change` designs: the grid events of the
   group's cells share one 64-sample grid (`⌈q/64⌉ + 1`), each automated cell adds its jumps
-  (`⌈q/64⌉ + 1` per cell and block, draft 01's spacing rule), and one seek and one group-cell change
+  (`⌈q/64⌉ + 1` per cell and block, #1626's spacing rule), and one seek and one group-cell change
   add one each. Section 0 designs only at HPF events and section 1 only at LPF events, so each
   section group has one cell, and a strip lane designs at most `2·(2⌈q/64⌉ + 4)` times per block.
 - **D5. Tail.** A strip with filter automation reports `input_section_live_bound(rate)` (#1329 D5),
@@ -212,3 +212,10 @@ Checked against `12d4a4f9d`.
   (`crates/host-core/src/control_preparation.rs`); `COMMAND_INPUT_FILTERS` is deleted (#1565).
   #1262, #1329 and #1346 have landed.
 - **F1** as in draft 16a's amendment.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **F1 is decided: option A** (README "Root's rulings (2026-10-14)"). The hazard "F1 is not confirmed
+  yet" and the dependency on root's confirmation are met. D4's per-block bound is the bound F1's
+  condition 2 names; its gate stays. The contract text is draft 16a's (D5 of its batch-10
+  amendment), for owner review.

@@ -208,3 +208,27 @@ Commands: `cargo test --locked -p session -p protocol -p controls`, `cargo test 
   (#1569) are open; whichever lands first, the other covers the new keys (ordering only).
 - Draft 15 (amended) gives the trim its render half and flips D3 for trim when it adds the trim row.
 - Batch R1.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Root's ruling (README "Root's rulings (2026-10-14)"): a send's `gain_db` is a level control, so a
+hand move of an automated send gain writes an offset, the same as the fader and the trim. The
+owner's answer covers level controls, and the DAW trim modes include sends.
+
+- **D1, a shared row.** Route row 1 `gain_db` is shared (`lane: both`). Its entry holds one offset:
+  `left_db` and `right_db` are equal. A `SET_CONTROL` on it writes both fields with the one value.
+- **D2.** `takes_offset` is true for builtins `fader_db` and `trim_db` and for route `gain_db` on a
+  route into a submix (the only routes whose rows are automatable). `control.automation.offset`
+  also refuses an entry on a shared row whose two fields differ. The domain is the route gain's,
+  `[-144, 24]` dB (`ROUTE_GAIN_DB_MINIMUM`, `ROUTE_GAIN_DB_MAXIMUM`), the same as the fader's.
+- **D3.** The route `gain_db` row's accessor reads and writes the offset from the slice that renders
+  send automation (draft 13d), as the trim's does from draft 15. Before 13d the stored offset is
+  inert, as D3's last bullet says for every not-yet-rendered row.
+- **D5.** For an automated send gain, the classifier's route lowering writes the route's
+  seven-word cell (draft 13d, amended), with `LiveRamps::resolve(SendGain, the edit's ramp)`. That
+  lowering is draft 13d's; this slice adds only the field, the rule and the row binding switch.
+- **D7 and Non-goals.** "Send gain is 'automation wins' (draft 13d)" is replaced: send gain takes
+  an offset; on a send's matrix rows automation wins (draft 13d D4). A VCA's `offset_db` is a level
+  control too; draft 13e adds it to `takes_offset` (a reading of root's ruling for root to confirm).
+- **Gate 1** gains: an entry on a send `gain_db` whose two offset fields differ is refused
+  `control.automation.offset`; a non-zero offset on a send matrix row is refused.

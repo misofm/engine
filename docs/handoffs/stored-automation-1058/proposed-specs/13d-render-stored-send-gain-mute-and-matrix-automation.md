@@ -155,3 +155,41 @@ Commands: `cargo test --locked -p host-core --features test-support`, `cargo tes
 - Draft 10 D1 (`automation_row_renders`), draft 11b D4 (`automated` in the list), amended draft 02
   (the shape rule).
 - Batch R2, after 13c. It is a complete outcome alone; it is not in a must-land group.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Root's rulings (README "Root's rulings (2026-10-14)"): a send gain is a level control and takes a
+hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation wins;
+`follows_mute` is not automatable (TBD22).
+
+- **D1, gain cell.** For an automated `gain_db`, the seven-word cell's `gain` word holds the hand
+  offset in dB (`f32` bits; draft 11b's offset field, amended for the send gain), not the static
+  gain, which is the fallback and is not heard. At each gain event the route op computes
+  `g = clamp(f64(curve) + f64(offset), -144, 24)`, rounded once to `f32`, and passes `g` to the
+  route's own dB conversion (`route_transform`). An offset of `±0.0` gives the bits of no offset:
+  `f64(v) + (±0.0)` differs from `v` only in the sign of a zero, the clamp changes nothing for a
+  curve value in the route gain domain, and the conversion of `±0` is the same gain (gate 1 holds
+  it).
+- **D4 is replaced for the gain.** A `SET_CONTROL` on an automated send `gain_db` writes the entry's
+  offset (draft 11b D3, amended) and the seven-word cell's `gain` word, with the ramp
+  `LiveRamps::resolve(SendGain, the edit's ramp)`; the path is `live`. Render reads the new word at
+  the next block entry and retargets on the indexed route ramp over the cell's ramp word, only if
+  the coefficients' bits change (draft 11 D3's rule on the route). On an automated matrix row D4
+  stands: the edit stores the fallback and commits `model_only`.
+- **D5 is confirmed** by root: a hand send mute ORs with the automated send mute. D5's "a
+  reading for root to confirm" and its alternative are void.
+- **D7 is replaced.** `follows_mute` is not automatable (placeholder
+  `.github/ISSUE_SPECS/TBD22-make-send-follows-mute-and-matrix-mode-non-automatable.md`): the row
+  rule refuses an entry on route row 7 with `control.automation.target`, so this slice renders none
+  and its flags word gains no automated `follows_mute` bit.
+- **Gate 3** becomes: a send automation edit gives path `rebuild` and completes `exact`; a
+  `SET_CONTROL` on an automated send gain of `+3` gives `live` and, after its ramp, the bits of a
+  fresh plan whose entry carries offset `+3`; a `SET_CONTROL` on an automated send matrix row gives
+  `model_only` and moves no bit; a `SET_CONTROL` on the same send's un-automated `matrix_lr` gives
+  `live` and, after its ramp, the bits of a fresh plan with that value. Gate 4 tests D5 as written.
+  Gate 1 adds a flat gain ride with offset `0` and with offset `-0.0`.
+- **Test value** gains: gate 3 turns red if a hand send gain move writes the fallback (automation
+  wins) instead of the offset, or if the offset reaches the matrix.
+- **Non-goals.** "VCA automation (README F20)" is draft 13e.
+- **Dependencies** gain draft 11b's amended field and rule (batch R1) and TBD22 (ordering only: its
+  row rule refuses the `follows_mute` entry this slice no longer renders).

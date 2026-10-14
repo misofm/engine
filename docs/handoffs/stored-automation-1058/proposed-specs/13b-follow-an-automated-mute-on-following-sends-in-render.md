@@ -208,3 +208,10 @@ Checked against `12d4a4f9d`.
   from `route_records` (`crates/host-core/src/live_delta.rs:1416`) and `RouteControlProducer`
   (`crates/host-core/src/route_controls.rs:201`); `live_route_state.rs` is gone.
 - **Dependencies.** #1284 is open; #1347 has landed.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **Automated VCA mutes** (draft 13e): a route into a submix whose source lane is reached by a VCA
+  with an automated mute also uses this slice's seven-word cell, and its follow term ORs those VCA
+  curves, evaluated in the tap's node time. Draft 13e adds it on this slice's route op; this slice
+  needs no change for it.

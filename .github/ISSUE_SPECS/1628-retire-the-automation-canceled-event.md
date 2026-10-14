@@ -7,14 +7,14 @@ to file. Code anchors verified on `6ee64f484`. Batch P1.
 
 ## Product outcome
 
-After draft 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*, no
+After #1627 *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*, no
 batch can enter the automation queue, so nothing can be canceled. This slice removes the
 cancellation: the event `AUTOMATION_CANCELED` (`0x8002`) and its reason enum are retired, a
 revision change or a transport locate cancels nothing, and a transaction commit reserves only its
 `SESSION_COMMITTED` event. No endpoint advertises `0x8002`. The retired ID is refused and never
 reallocated.
 
-This is the second of three slices that retire the command, all in batch P1 (one push). Draft 21c
+This is the second of three slices that retire the command, all in batch P1 (one push). #1629
 *Delete the protocol automation queue, its records and counters* follows it.
 
 ## Context
@@ -52,7 +52,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
 - protocol: `controller/tests.rs`
   `transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch` (`:2433`)
   exists only for the cancellation; `c2b2_event_egress_emits_all_six_schema_closed_full_frames`
-  (`:3185`) touches it; the `typed_frame.rs` tests that 21a rewrote lose their event rows.
+  (`:3185`) touches it; the `typed_frame.rs` tests that #1627 rewrote lose their event rows.
 - C ABI (#1315 gate 4 names the first): `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`
   (`crates/capi/src/runtime/tests.rs:1857`, pinned `RESPONSES` at `:1858-1873`) and
   `a_live_edit_emits_the_commit_events_of_a_rebuild`
@@ -73,14 +73,14 @@ This is the second of three slices that retire the command, all in batch P1 (one
 - **D4. Tests.** A test that exists only for the cancellation is deleted. The C ABI event test
   becomes `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes` (no path raises
   `0x8002`); `a_live_edit_emits_the_commit_events_of_a_rebuild` expects `SESSION_COMMITTED` alone.
-- **D5. Re-pins**, each with the reason "draft 21b retires `AUTOMATION_CANCELED`":
+- **D5. Re-pins**, each with the reason "#1628 retires `AUTOMATION_CANCELED`":
   `COMPLETE_SCHEMA_HASH` and its history line (the corpus loses the event row), the wasm-parity
   self-test strings, the fuzz manifest, the conformance record, and the C ABI vectors.
   `retired_code_rows` gains a row for `0x8002`.
 - **D6. Docs.** The registry lists `0x8002` as retired with this slice as the reason; the
   semantics doc loses the cancellation paragraph (`:19`).
 - **D7. The acked-batch question: can an ack ever precede a drop?** No. No batch can be admitted
-  (draft 21a), so there is nothing to cancel, and draft 21c removes the queue.
+  (#1627), so there is nothing to cancel, and #1629 removes the queue.
 
 ## Deliverables
 
@@ -100,14 +100,14 @@ This is the second of three slices that retire the command, all in batch P1 (one
 
 ## Non-goals
 
-- The command (draft 21a). The queue, its records, config and counters (draft 21c). The transport
+- The command (#1627). The queue, its records, config and counters (#1629). The transport
   position (draft 25).
 
 ## Hazards
 
-- **Batch P1.** After this slice the queue has no producer and no consumer; draft 21c deletes it
+- **Batch P1.** After this slice the queue has no producer and no consumer; #1629 deletes it
   in the same push.
-- **Corpus re-pin order** as in draft 21a.
+- **Corpus re-pin order** as in #1627.
 
 ## Objective gates
 
@@ -126,7 +126,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
    `bash scripts/run-protocol-allocation-audit.sh target/release/audit` and
    `./target/release/audit capi` with zero allocations, locks and syscalls, and the same
    `pcm_digest` as base (PR evidence).
-6. **Commands:** as draft 21a's gate 6, which includes `bash scripts/check-cross-targets.sh`
+6. **Commands:** as #1627's gate 6, which includes `bash scripts/check-cross-targets.sh`
    (README F19, the iOS memset rule: no new `memset_pattern16` call; fix one in code, never by a
    ceiling).
 
@@ -142,9 +142,9 @@ This is the second of three slices that retire the command, all in batch P1 (one
 
 Batch P1. Direct dependency:
 
-- Draft 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*.
+- #1627 *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*.
 
-Draft 21c *Delete the protocol automation queue, its records and counters* depends on this draft.
+#1629 *Delete the protocol automation queue, its records and counters* depends on this draft.
 
 ## Amendment (controls coordinator, 2026-10-14)
 
