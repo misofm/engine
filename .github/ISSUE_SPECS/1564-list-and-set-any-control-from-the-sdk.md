@@ -154,3 +154,49 @@ generated catalog type (`sdk/src/generated/controls.ts:4313`). `ControlList.cont
 - **(B)** D4, the generated builders. Gate 3. Dependency: (A).
 - **(C)** D5 and D6: strip order from the list, the `direct-oracle.mjs` timeline and the native
   parity leg. Gates 5 and 6. Dependency: (A). #1565B needs (C).
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Dependencies.** #1549, #1550, #1551 and #1563 are closed. #1563A landed in batch 5
+  (`d3b364446`); #1563B and #1562a landed in the flip, batch 7 (`0c6fdff1a`, `365482eb8`). #1562b is
+  in the blocked carry chain. No piece of this issue needs it (gates 2 and 4 below).
+- **Anchors.** The builders in `sdk/src/core/live-controls.ts` are now `TrackEdits` `:693`,
+  `SubmixEdits` `:715`, `RouteEdits` `:726`, `VcaEdits` `:775` and `EffectEdits` `:805`; the
+  engine's entry is `liveControls().edit` (`:944`). `WebBoundary.shape()` is
+  `sdk/src/core/boundary.ts:457`; it reads the index exports at `:473-482`. The worklet reads the
+  strip order at `hosts/host-web/web/miso-engine-v1-audio-worklet.js:611-645` and answers
+  `miso.sessionmap.v1` at `:1024-1038`. The browser SDK reads that map at
+  `sdk/src/browser/live-controls.ts:98`. The #106 F4 native leg is `hosts/host-web/src/tests.rs:1504`.
+- **Name.** #1563B left no `ControlEdit` type. One edit is `ControlFrameEdit`
+  (`sdk/src/core/control-frame.ts:63`: wire address, value, `rampSamples`). A builder returns a
+  `ControlEditSet` (`live-controls.ts:134`). D3 and gate 3 read `ControlFrameEdit`. `edit.set`
+  converts the generated `ControlAddress` to the `ControlWireAddress` of that type.
+- **D1 path.** The list and state reads are not transactions. They use the endpoint's transport
+  and its one request-ID allocator (`ControlRequestIds`, `sdk/src/core/control-queue.ts:83`). They
+  do not go through the batching of `ControlTransactionQueue`, which merges edits.
+- **D6 is done; #1564C shrinks.** #1565A (`5576cdc56`) replaced the command-record timeline of
+  `direct-oracle.mjs` with `runSetControlTimeline`. It sends four committed frames
+  (`hosts/host-web/tests/browser-v1/set-control-frames/frame-{1,2,3,4}.bin`: a fader, a pan, the EQ
+  band 1 gain and one refused out-of-domain fader value). The native twin is
+  `tests::native_set_control_timeline_digest_pins_the_wasm_parity`, and
+  `tests::set_control_frames_are_the_committed_fixtures` holds the frames to their encoder.
+  `expected.json` has `setControlTimeline`, and `check-browser-expected-resources.py` checks it
+  (`:123`, `:585`). Gate 6 is met on `main`: PR #1614's chromium, firefox and webkit legs passed.
+  #1564C keeps D5 and gate 5 only. Its authorized paths lose `direct-oracle.mjs`, `expected.json`,
+  the F4 test and `check-browser-expected-resources.py`.
+- **Gate 2.** Both SDK engines run the host-web module, which refuses a rebuild-path frame with
+  `web.apply.rebuild_pending` until #1562b. So "a structural transaction" reads "a transaction that
+  advances `structure_epoch`". Use a live `matrix_mode` switch (it changes descriptors) or a session
+  ramp-length change. Both advance the epoch without a rebuild
+  (`replace_session_catalog`, `crates/host-core/src/control_provider.rs:452-458`). The claim of the
+  gate does not change.
+- **Gate 4.** Use a live row for each owner kind and section. A route into the output is
+  rebuild-only, and the browser refuses it until #1562b
+  (`hosts/host-web/tests/control_parity.rs:685-688`): use a send into a submix. Add one case:
+  `edit.set` on a rebuild-only row (for example `delay_samples`) rejects with diagnostic code
+  `web.apply.rebuild_pending`, so the SDK passes the core's refusal through and does not refuse on
+  its own.
+- **#1565B** still needs (C): it deletes the `live_control_{track,submix}_{count,id}` exports after
+  D5.

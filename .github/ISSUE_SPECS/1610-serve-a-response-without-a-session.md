@@ -115,3 +115,22 @@ response_get`, `cargo test --locked -p protocol`.
 ## Size
 
 Half a day, one sonnet-high implementer.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Anchors.** Batch 7 changed `control_provider.rs` only in its catalog-staging code
+  (`ModelView`, `verify_stages`). `serve_response` did not change, but its lines moved:
+  `serve_response` is `crates/host-core/src/control_provider.rs:619-784`; the target refusal
+  `:624-629`; `check_response_request` `:646-647`; the session rule `:649-651`; the query's rate
+  and quantum `:738-739`; the reply bound `:748-765`; `SessionControlProvider::response_get`
+  `:838-844`; `response_get_asks_the_core_first_and_names_a_bad_bypass` `:2207`. The controller
+  calls it at `crates/protocol/src/controller.rs:3291-3300`. The `crates/capi/tests/response_get.rs`
+  anchors did not move.
+- **Decisions.** D1-D5 hold. The model still gives only `sample_rate_hz` and `quantum_frames`.
+- **Scope note.** Since the flip, the browser's session runs the same control plane and provider
+  (`control_plane::compile_children`, `ProviderFeatures::ALL` at
+  `crates/control-plane/src/compile.rs:974`). The split therefore also serves the browser's session
+  `RESPONSE_GET`. D4's "same bytes" holds there too; gate 1's harness stays on the C ABI.
+- **Gate 1 base.** "The branch's parent" is now `32cee58d0` or later.

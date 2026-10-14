@@ -187,3 +187,48 @@ Commands: as #1591's gate list.
 ## Supersedes and shrinks
 
 - None.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Dependencies met.** #1591 merged in batch 6 (`44ff8004c`, review fold `9625fe263`). #1165
+  merged in batch 4 (`e2371f932`): `SpectrumCaptureCollection::select` now moves the old entry's
+  checked cadence to the new entry (`crates/host-core/src/spectrum.rs:997-1012`). The Context
+  bullet on #1165 is history. Gate 2's "holds only with #1165 on `main`" is now unconditional.
+- **`spectrum.rs` anchors** (the file has not changed since batch 6). The single forms keep their
+  lines (`:601`, `:618`, `:665`, `:717`, `:742`, `:757`, `:765`). The rest moved by two lines: the
+  collection forms `:1043`, `:1061`, `:1080`, `:1087`, `:1096`, `:1103`, `:1119`;
+  `begin_continuous(cadence, true)` `:1056`, `:1075`; `SpectrumHop` `:1153`, `SpectrumCadence`
+  `:1176`, `SpectrumContinuousWindow` `:1267`, `SpectrumContinuousReadError` `:1309`,
+  `SpectrumContinuousCaptureError` `:1332`, `SpectrumSmoothingConfig` `:2355`,
+  `SpectrumAnalysisHistory` `:2395` (`reset` `:2423`, `analysis_epoch` `:2435`),
+  `SpectrumAnalysisMetadata` `:2472`, `analyze_continuous` `:2547`.
+- **`hosts/host-web/src/ffi.rs` anchors** (lines moved because the flip deleted code above them):
+  `SpectrumStaging` `:136-165`, which already holds #1591's `analysis: Option<SpectrumAnalysis>`
+  (`:150`); its stream fields `:157-163`; `SpectrumStreamWindowFacts` `:167`;
+  `stream_metadata_profile` `:1105`, `stream_metadata_error` `:1128`,
+  `imported_stream_configuration` `:1153`; `select_spectrum_with_smoothing` `:2826`; the exports
+  `spectrum_stream_select` `:2967`, `_start` `:3026`, `_read` `:3107`, `_analysis` `:3262`,
+  `_analysis_configure` `:3280`, `_reset` `:3306`, `_stop` `:3322`; the stream refusal of
+  `spectrum_cancel` `:3385`; `boot_staged_with_spectrum_hop` `:3753` and
+  `miso_engine_web_v1_boot_with_spectrum_hop` `:3774`.
+- **`hosts/host-web/src/lib.rs` anchors.** The status codes `:251-263`; `WebSpectrumStreamMetadata`
+  `:358`; #1591's result mapping `spectrum_result` `:409`; the host's `spectrum_hop` `:1692`;
+  `start_spectrum_stream` `:2381` (its cadence mapping `:2405-2414`), `restart_spectrum_stream`
+  `:2419`, `read_spectrum_stream` `:2438`, `stop_spectrum_stream` `:2454`,
+  `spectrum_stream_cadence` `:2470`, `spectrum_stream_epoch` `:2480`. The worklet's stream
+  operations are `miso-engine-v1-audio-worklet.js:1345-1411` (select `:1270-1330`); the SDK's
+  analysis instance is `sdk/src/core/spectrum.ts:699-754`, called from
+  `sdk/src/browser/response-worker.ts:109`.
+- **#1591's hand-off ends here.** `SpectrumService::captures_mut` and `end_caller_arm`
+  (`crates/host-core/src/spectrum_service.rs:502-509`) exist for this slice. Today host-web calls
+  `end_caller_arm` after a successful start (`lib.rs:2402-2404`): that is the "the arm was
+  discarded" behaviour that D4 changes. When `start_stream` owns the start, delete
+  `end_caller_arm` and the stream use of `captures_mut`.
+- **Decisions and gates hold.** The slice touches no browser rebuild path, deleted command kind,
+  host mirror or carry-chain code. The flip did not change spectrum behaviour.
+- **Lane.** D7 is host-web code, which only lane W edits (STREAMS.md, controls program, "Lanes").
+  #1565B also edits `lib.rs` and `ffi.rs` in batch 8; the later of the two rebases. The old note
+  "rebase after stream H" reads: stream H's open host-web work is the Worker deployment (batch
+  table, row "later"); whichever of it and this slice lands second rebases.

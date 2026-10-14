@@ -144,3 +144,43 @@ advertises command `0x0006` (`crates/protocol/src/message_wire.rs:3496`, `:3512`
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for D3's path.
 
 **Decision 17 amendment (2026-10-13).** Which values stored automation may target is decided by each control row's computed `automatable` (#1566); `BUILTIN_AUTOMATION_TARGETS` and `effect_automation_diagnostics` are deleted. `AUTOMATION_ENQUEUE` addresses by a table of control addresses (#1567), and this issue's refusal of the command (D1-D3) stays until automation renders.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14)
+
+Checked against `main` at `32cee58d0`.
+
+- **Anchors (D1-D3).** `ProviderFeatures` is `crates/protocol/src/controller.rs:111-136`; it has
+  `controls` and `response` now, and still no `automation`. `execute`'s feature match is
+  `:3139-3157`; the `AutomationEnqueue` arm `:3302-3347` (`validate_automation_domains` `:3849`);
+  `capability_registry` `:3704`. `ProtocolQueues::try_dequeue_automation`
+  (`crates/protocol/src/queue.rs:801`) still has no production caller. `automation_batch_slots:
+  one` is `crates/control-plane/src/compile.rs:199` and `provider_features: ProviderFeatures::ALL`
+  is `:974`. The wire rule is `crates/protocol/src/message_wire.rs:4340`, `:4356`, `:4367`. The
+  "Delivery status" paragraph is `docs/CONTROL_PROTOCOL_SEMANTICS.md:19`; decision 14's IO-5 is
+  `:206`. Gate 4's tests are `crates/capi/src/runtime/tests.rs:2099` and `:2492`.
+- **D1-D3 hold, and now cover the browser.** Since the flip (#1381a, #1562a, #1570b) the browser
+  builds its session through the same `control_plane::compile_children`, so the one
+  `ProviderFeatures::ALL` at `compile.rs:974` serves both hosts. The browser now acks
+  `AUTOMATION_ENQUEUE` and renders nothing, the same defect as the C ABI. D3's one change refuses it
+  on both hosts. `hosts/host-web/tests/protocol_cross_host.rs` step 11 (`:704-718`) already sends it
+  to both hosts and compares the bytes; it stays green with both refusing `UNAVAILABLE` and is the
+  browser leg of gate 1. D5's sentence names both hosts.
+- **D4 no longer holds and leaves this slice.** #1565A (`5576cdc56`) deleted the browser's
+  `COMMAND_EFFECT_BYPASS` with every value kind. A bypass lift is now a `SET_CONTROL` on the
+  effect's bypass row. For the delay and the multiband compressor that row is rebuild-only
+  (`crates/controls/src/effect_rows.rs:199-201`, through `lowers_session_bypass`,
+  `crates/effect-compiler/src/prepare.rs:314`), so the core classifies the lift
+  `LiveRebuild::RebuildOnly` with the row's reason (`crates/host-core/src/live_delta.rs:220-224`;
+  `LiveRebuild::PreparedBypass` is gone). The C ABI rebuilds. The browser refuses the frame
+  `web.apply.rebuild_pending` before commit until #1562b, and rebuilds after it. No host acks a
+  lift that render does not reach. These hold the claim:
+  `crates/host-core/tests/live_delta.rs::a_prepared_bypass_change_needs_a_rebuild` (#1266 gate 1),
+  `hosts/host-web/tests/control_admission.rs::a_rebuild_frame_is_refused_before_commit_and_changes_nothing`,
+  and the delay and multiband bypass parity rows that #1562b owes (#1562, batch 7 amendment).
+- **Gates and paths that change.** Gate 3 is deleted. The authorized paths lose
+  `crates/effect-compiler/src/prepare.rs` and `hosts/host-web/src/{lib.rs,tests.rs}`. Gate 5 loses
+  `cargo test -p effect-compiler`, `check-command-reason-vocabulary.py` and
+  `check-web-audioworklet.sh`; it keeps `cargo test --locked -p host-web --features test-support`
+  for `protocol_cross_host.rs`.
+- **What remains.** D1-D3 and D5 in `protocol`, `control-plane`, the `capi` tests and the two docs;
+  gates 1, 2, 4 and 5. #1567 depends on it ("Still not served", its gate 4).
