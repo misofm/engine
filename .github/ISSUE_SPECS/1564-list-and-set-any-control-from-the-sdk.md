@@ -272,3 +272,60 @@ endpoint, one allocator. Tests that change the structure mid-read do it inside `
 names of the control tables, such as `threshold_db`, differ from the catalog's builder names, such
 as `threshold`), D5 (strip order from `controls().headers`: owner headers of kind `track`, then
 `submix`, in list order, and a re-read when a reply's `structureEpoch` differs).
+
+## Decision record: piece B, generated builders (batch 8)
+
+**Shipped.** `sdk/codegen/generate.mjs` emits `sdk/src/generated/control-builders.ts`: `StripEdits`,
+`TrackEdits`, `SubmixEdits`, `RouteEdits`, `VcaEdits`, `SessionEdits` (one method per settable row of
+the strip, route, VCA and session tables) and `EffectControlBuilders<E>` (`parameter`, `bypass`,
+`linkMode`), plus `CONTROL_BUILDERS` (a manifest of every builder and the rows it writes) and the
+effect row tables. Every method builds the row's address and calls `set` (the engine's
+`LiveControlEdits.set`, reached through a `ControlSetter`), so a builder stages what `edit.set`
+stages. The hand-written bodies in `live-controls.ts` are gone (1174 to about 650 lines): it keeps
+`LiveControlEdits` (owner selection, `set`, the row-name resolver), `EffectEdits` (observation and
+the instance's section; it extends the generated class), the layout checks and `EngineLiveControls`.
+The strip's `effect()`, `console()` and `insert()` addressing moved to `StripAddressing` in the new
+`sdk/src/core/control-builder-support.ts` (also the option and edit types and the value helpers), a
+base the generated `StripEdits` extends; `LiveControlEdits` hands each strip a `StripContext`
+(`set` and an effect factory), which breaks the runtime import cycle.
+
+**One source of truth.** Addresses come from the core's control tables (`controls`); a row is named
+by its machine name there (`threshold_db`). The catalog's parameter names (`threshold`) stay the
+keys of `parameter()`, so the public names are stable. The generator joins the two documents by the
+numeric ID they share and throws if a catalog parameter has no control row, a different display name,
+a different value domain or different enumeration choices. An effect instance knows its effect, so
+`EffectEdits` addresses a row by its number (`effectControlId`) and needs no session; the named form
+of `set` still needs `withSession()`, as in piece A.
+
+**What the generator decides** (the public names #1563 left; each is checked against the tables and
+throws on a missing row): `METHOD_NAMES` (the VCA's `offset_db` is `faderDb`), `TRACK_ONLY` (`solo`:
+a bus is solo-safe), and `COMPOSITES` (`pan`, `matrix`, `inputFilters`, each several rows in one
+transaction). Every other method is the camel case of the row name. The existing surface is
+unchanged (`RouteEdits` and `VcaEdits` keep exactly their `keyof` the type probes pin).
+
+**Departures from the text.**
+
+- New methods, because the tables have the rows: strip `matrixMode`, `panWindowSamples`,
+  `delaySamples` (rebuild-only; the core refuses it), `edit.session()` with `faderMs`, `muteMs`,
+  `panMs`, and `linkMode` on an effect instance (an insert only: a console slot has no link-mode row
+  and the core refuses it; an effect with no choice of it has `never` as the label type).
+- A derived row has no builder (`set` refuses it with `control.read_only`).
+- A per-row option shape follows the row: per-lane with a ramp takes `channel` and
+  `smoothingSamples`, per-lane with a fixed ramp takes `channel`, shared with a ramp takes
+  `smoothingSamples`, shared with a fixed ramp takes none. `InputFilterOptions` is kept as an alias
+  of the new `ChannelOptions`.
+- The public constructors of `TrackEdits`, `SubmixEdits`, `RouteEdits`, `VcaEdits` and `EffectEdits`
+  take the `set` function (and the strip's context); only `LiveControlEdits` constructs them.
+- Gate 3 is a hand-written eval over the generated manifest and the tables, not a generated test
+  file: a row without a builder, or a builder that writes another row, lane or ramp, fails it.
+
+**Gates and tests** (`sdk/test/control-builders-evals.mjs`, 28 tests): `every settable row of the
+control tables has a builder, and no builder names a missing row`; one test per builder (`<owner>
+<method> (<rows>) is set over its rows`, every option bag and every value); `a track offers solo and
+a submix does not`; `every parameter, bypass and link mode row of every effect has a generated
+builder row`; `inserts:` and `console: parameter, bypass and link mode stage what set stages`
+(every parameter of every effect, positional and object form, four option bags). Red check: changing
+`trimDb`'s lane in the generated file fails `strip trimDb`. Type probes added to
+`sdk/test/live-controls-types.ts`. Run, with the artifacts of piece A: `check-sdk-types.sh`,
+`check-sdk-generated.sh`, `check-sdk-headless.sh` (521 tests, 520 pass, 1 todo from before),
+`sdk-package.sh check`, `check-sdk-deletions.py`, `check-workspace-policy.sh`.

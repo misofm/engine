@@ -320,6 +320,15 @@ row can be set are the core's: an edit of a derived row rejects `control.read_on
 rebuild-only row is refused with the core's own code (on the browser host today,
 `web.apply.rebuild_pending`).
 
+The typed builders are generated from the same control tables (`src/generated/control-builders.ts`),
+one method per settable row: a strip's own rows and builtins (`faderDb`, `mute`, `trimDb`, `pan`,
+`matrix`, `matrixMode`, ...) on `edit.track(id)` and `edit.submix(id)`, a send's on `edit.route(id)`,
+a VCA's on `edit.vca(id)`, the session's own on `edit.session()`, and an effect instance's
+`parameter`, `bypass` and `linkMode` on `insert(id, effectId)` or `console(slot, effectId)`. Each is
+sugar over `set`: it stages the edit `set` stages for the row's address and value. A row the core
+gains reaches the builders when you regenerate. `pan`, `matrix` and `inputFilters` write several
+rows in one transaction.
+
 ## Observe the rendered mix
 
 Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery

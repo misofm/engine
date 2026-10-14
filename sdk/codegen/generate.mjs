@@ -269,6 +269,599 @@ function renderAddress(address) {
       .join("\n") + `;\n`;
 }
 
+
+/**
+ * The typed builders (decision 17, slice S11b, D4): one method per row of the core's control
+ * tables, generated into `control-builders.ts`. Every method builds the row's address and calls the
+ * engine's `set` with it, so a builder stages exactly the edit `edit.set` stages for that address
+ * and value; none of them carries a row number, a range or a name the tables do not.
+ *
+ * # One source of truth
+ *
+ * The addresses come from the core's control tables (`controls`): a row is addressed by its
+ * machine name there (`threshold_db`). The catalog's parameter names (`threshold`) are the names the
+ * public `parameter()` builder has always taken, so they stay the builder's keys; they are bound to
+ * the control rows by the numeric ID the two documents share, and generation throws if a catalog
+ * parameter has no control row of that ID, a different display name, or a different value domain.
+ * A row the core gains therefore reaches the builders by regenerating, with no code written here.
+ *
+ * # What this file decides
+ *
+ * Only the public names #1563 left, which the tables cannot say: a method is the camel case of the
+ * row's name unless {@link METHOD_NAMES} names it, a few rows are written together
+ * ({@link COMPOSITES}: a pan's two lanes, a matrix's four coefficients, the input filters), and
+ * {@link TRACK_ONLY} lists the rows a bus does not offer (a bus is solo-safe). Each is checked
+ * against the tables; one that names a row the core no longer has throws.
+ */
+
+/** The method of a row whose name is not its camel case: the VCA's offset is its fader. */
+const METHOD_NAMES = { "vca/own/offset_db": "faderDb" };
+
+/** Rows a submix does not offer: the core refuses the solo of a bus. */
+const TRACK_ONLY = ["strip/own/solo"];
+
+/**
+ * Rows written together, by the owner and section kind that lists them. `lanePair` takes one value
+ * per lane of a per-lane row; `group` takes an object of values for different rows. `replaces`
+ * drops the members' own methods (a matrix is not set one coefficient at a time).
+ */
+const COMPOSITES = {
+  "strip/builtins": [
+    { method: "pan", kind: "lanePair", row: "pan", replaces: true },
+    {
+      method: "matrix",
+      kind: "group",
+      type: "MatrixValues",
+      fields: { ll: "matrix_ll", lr: "matrix_lr", rl: "matrix_rl", rr: "matrix_rr" },
+      replaces: true,
+    },
+    {
+      method: "inputFilters",
+      kind: "group",
+      type: "InputFilterValues",
+      fields: { hpfHz: "hpf_hz", lpfHz: "lpf_hz" },
+      replaces: false,
+    },
+  ],
+  "route/own": [
+    {
+      method: "matrix",
+      kind: "group",
+      type: "MatrixValues",
+      fields: { ll: "matrix_ll", lr: "matrix_lr", rl: "matrix_rl", rr: "matrix_rr" },
+      replaces: true,
+    },
+  ],
+};
+
+/** The tables a builder class draws on, by owner and section kind, in the order they are listed. */
+const BUILDER_TABLES = [
+  ["strip", "own", (controls) => controls.stripOwn],
+  ["strip", "builtins", (controls) => controls.builtins],
+  ["route", "own", (controls) => controls.routeOwn],
+  ["vca", "own", (controls) => controls.vcaOwn],
+  ["session", "own", (controls) => controls.sessionOwn],
+];
+
+function camelCase(name) {
+  return name.replace(/_([a-z0-9])/g, (_, character) => character.toUpperCase());
+}
+
+/** A row's class: a route row carries one per target (a send into a submix, or into the output). */
+function rowClasses(row) {
+  if (row.class !== undefined) return [row.class];
+  if (row.intoSubmix !== undefined && row.intoOutput !== undefined) {
+    return [row.intoSubmix.class, row.intoOutput.class];
+  }
+  throw new Error(`control row ${row.name} has neither a class nor a class per route target`);
+}
+
+function isDerived(row) {
+  return rowClasses(row).every((rowClass) => rowClass === "derived");
+}
+
+/** How a row's builder takes its value. */
+function valueKindOf(row) {
+  switch (row.kind) {
+    case "toggle":
+      return "boolean";
+    case "enumeration":
+      return "enumeration";
+    case "continuous":
+      return "number";
+    default:
+      throw new Error(`control row ${row.name} has a value kind (${row.kind}) the builders do not know`);
+  }
+}
+
+function choicesOf(row) {
+  return row.choices.map((choice) => [choice.label, choice.value]);
+}
+
+function choicesLiteral(choices) {
+  return `[${choices.map(([label, value]) => `[${JSON.stringify(label)}, ${value}]`).join(", ")}]`;
+}
+
+/**
+ * The options a row's builder takes, from the row's lanes and ramp: a per-lane row selects a lane,
+ * a row with a ramp of its own takes `smoothingSamples`, and a shared row with a fixed ramp takes
+ * none.
+ */
+function optionsOf(row) {
+  const lanes = row.lanes === "perLane";
+  const ramp = row.ramp !== "fixed";
+  if (lanes) return ramp ? "lane" : "channel";
+  return ramp ? "smoothing" : "none";
+}
+
+const OPTION_TYPES = {
+  lane: "LaneOptions",
+  channel: "ChannelOptions",
+  smoothing: "SmoothingOptions",
+  none: null,
+};
+
+function docOf(row, extra) {
+  const unit = row.displayUnit === "" ? "" : ` (${row.displayUnit})`;
+  const notes = [];
+  if (rowClasses(row).includes("rebuildOnly")) {
+    notes.push("A rebuild-only row: the core says whether a live write is accepted.");
+  }
+  if (extra !== undefined) notes.push(extra);
+  return `/** \`${row.name}\`: ${row.displayName}${unit}.${notes.length > 0 ? ` ${notes.join(" ")}` : ""} */`;
+}
+
+/**
+ * The builders of one owner and section kind, as entries: `{ method, section, ...shape }`. A
+ * composite replaces its members' own methods when it says so.
+ */
+function entriesOf(ownerKind, sectionKind, rows, controlsDocument) {
+  const key = `${ownerKind}/${sectionKind}`;
+  const byName = new Map(rows.map((row) => [row.name, row]));
+  const composites = COMPOSITES[key] ?? [];
+  const consumed = new Set();
+  const entries = [];
+  for (const composite of composites) {
+    const memberNames = composite.kind === "lanePair" ? [composite.row] : Object.values(composite.fields);
+    for (const name of memberNames) {
+      if (!byName.has(name)) {
+        throw new Error(`COMPOSITES ${key} ${composite.method}: the core has no row ${name}`);
+      }
+    }
+    const members = memberNames.map((name) => byName.get(name));
+    if (members.some(isDerived)) {
+      throw new Error(`COMPOSITES ${key} ${composite.method}: a derived row cannot be written`);
+    }
+    if (members.some((member) => valueKindOf(member) !== "number")) {
+      throw new Error(`COMPOSITES ${key} ${composite.method}: every member must be a number row`);
+    }
+    const shapes = new Set(members.map((member) => `${member.lanes}/${optionsOf(member)}`));
+    if (shapes.size !== 1) {
+      throw new Error(`COMPOSITES ${key} ${composite.method}: the members disagree on lanes or ramp`);
+    }
+    if (composite.replaces) for (const name of memberNames) consumed.add(name);
+    entries.push({
+      method: composite.method,
+      section: sectionKind,
+      shape: composite.kind,
+      composite,
+      members,
+      options: composite.kind === "lanePair" ? (optionsOf(members[0]) === "none" ? "none" : "smoothing")
+        : optionsOf(members[0]),
+      valueKind: "number",
+    });
+  }
+  for (const row of rows) {
+    if (isDerived(row) || consumed.has(row.name)) continue;
+    const method = METHOD_NAMES[`${key}/${row.name}`] ?? camelCase(row.name);
+    entries.push({
+      method,
+      section: sectionKind,
+      shape: "row",
+      row,
+      options: optionsOf(row),
+      valueKind: valueKindOf(row),
+    });
+  }
+  for (const named of Object.keys(METHOD_NAMES)) {
+    if (named.startsWith(`${key}/`) && !byName.has(named.slice(key.length + 1))) {
+      throw new Error(`METHOD_NAMES ${named}: the core has no such row`);
+    }
+  }
+  void controlsDocument;
+  return entries;
+}
+
+/** The expression a builder passes as the edit's value, from the argument name it declares. */
+function valueExpression(entry, name) {
+  switch (entry.valueKind) {
+    case "boolean":
+      return `flag(${name})`;
+    case "enumeration":
+      return `enumValue(${choicesLiteral(choicesOf(entry.row))}, ${name}, ${JSON.stringify(entry.method)})`;
+    default:
+      return name;
+  }
+}
+
+function valueType(entry) {
+  switch (entry.valueKind) {
+    case "boolean":
+      return "boolean";
+    case "enumeration":
+      return entry.row.choices.map((choice) => JSON.stringify(choice.label)).join(" | ");
+    default:
+      return "number";
+  }
+}
+
+/** One method of a builder class; `call` and `owner` are how the class reaches `set` and its owner. */
+function renderEntry(entry, ownerKind, call, owner) {
+  const section = `{ kind: "${entry.section}" }`;
+  const address = (control, lane) =>
+    `{ owner: ${owner}, section: ${section}, control: "${control}", lane${lane === "lane" ? "" : `: ${lane}`} }`;
+  const optionType = OPTION_TYPES[entry.options];
+  const optionParameter = optionType === null ? "" : `, options: ${optionType} = {}`;
+  const laneOption = entry.options === "lane" || entry.options === "channel";
+  const rampOption = entry.options === "lane" || entry.options === "smoothing";
+  if (entry.shape === "row") {
+    const lane = laneOption ? "laneOf(options.channel)" : `"both"`;
+    const name = entry.valueKind === "boolean" ? "enabled" : "value";
+    const doc = docOf(entry.row);
+    const rampArgument = rampOption ? ", rampOptions(options)" : "";
+    return `  ${doc}\n`
+      + `  ${entry.method}(${name}: ${valueType(entry)}${optionParameter}): ControlEditSet {\n`
+      + `    return ${call}(\n`
+      + `      ${address(entry.row.name, lane)},\n`
+      + `      ${valueExpression(entry, name)}${rampArgument},\n`
+      + `    );\n`
+      + `  }\n`;
+  }
+  const rampLine = rampOption ? `    const ramp = rampOptions(options);\n` : "";
+  const rampArgument = rampOption ? ", ramp" : "";
+  if (entry.shape === "lanePair") {
+    const row = entry.members[0];
+    return `  /** \`${row.name}\` of each lane: \`left\` on the left lane and \`right\` on the right. */\n`
+      + `  ${entry.method}(left: number, right: number${optionParameter}): ControlEditSet {\n`
+      + rampLine
+      + `    return mergeEdits(\n`
+      + `      ${call}(\n        ${address(row.name, `"left"`)},\n        left${rampArgument},\n      ),\n`
+      + `      ${call}(\n        ${address(row.name, `"right"`)},\n        right${rampArgument},\n      ),\n`
+      + `    );\n`
+      + `  }\n`;
+  }
+  const fieldNames = Object.keys(entry.composite.fields);
+  const lane = laneOption ? "lane" : `"both"`;
+  const laneLine = laneOption ? `    const lane = laneOf(options.channel);\n` : "";
+  const parameter = entry.composite.type === "MatrixValues" ? "matrix" : "filters";
+  const cells = fieldNames.map((field) =>
+    `      ${call}(\n        ${address(entry.composite.fields[field], lane)},\n        ${parameter}.${field}${rampArgument},\n      ),\n`);
+  return `  /** ${fieldNames.map((field) => `\`${entry.composite.fields[field]}\``).join(", ")} in one transaction. */\n`
+    + `  ${entry.method}(${parameter}: ${entry.composite.type}${optionParameter}): ControlEditSet {\n`
+    + `    requireGroup(${parameter}, ${JSON.stringify(entry.method)}, ${JSON.stringify(fieldNames)});\n`
+    + laneLine
+    + rampLine
+    + `    return mergeEdits(\n`
+    + cells.join("")
+    + `    );\n`
+    + `  }\n`;
+}
+
+const GROUP_TYPES = {
+  MatrixValues: ["ll", "lr", "rl", "rr"],
+  InputFilterValues: ["hpfHz", "lpfHz"],
+};
+
+function renderOwnedClass(name, ownerKind, doc, entries) {
+  const ownerType = `Extract<ControlOwner, { readonly kind: "${ownerKind}" }>`;
+  const body = entries.map((entry) => renderEntry(entry, ownerKind, "this.#set", "this.#owner")).join("\n");
+  const constructorParameter = ownerKind === "session" ? "" : `${ownerKind}Id: string, `;
+  const ownerValue = ownerKind === "session" ? `{ kind: "session" }` : `{ kind: "${ownerKind}", id: ${ownerKind}Id }`;
+  return `${doc}\n`
+    + `export class ${name} {\n`
+    + `  readonly #owner: ${ownerType};\n`
+    + `  readonly #set: ControlSetter;\n\n`
+    + `  constructor(${constructorParameter}set: ControlSetter) {\n`
+    + `    this.#owner = ${ownerValue};\n`
+    + `    this.#set = set;\n`
+    + `  }\n\n`
+    + body
+    + `}\n`;
+}
+
+/** What the catalog and the control tables must agree on for the effect builders to join them. */
+function effectTables(catalog) {
+  const parameters = {};
+  const linkModes = {};
+  const controlEffects = catalog.controls.effects;
+  for (const effect of catalog.effects) {
+    const table = controlEffects[effect.id];
+    if (table === undefined) throw new Error(`the control tables have no effect ${effect.id}`);
+    if (table.bypass.name !== "bypass" || table.bypass.control !== 0) {
+      throw new Error(`${effect.id}: the bypass row is not control 0 named bypass`);
+    }
+    const byControl = new Map(table.parameters.map((row) => [row.control, row]));
+    const rows = {};
+    for (const parameter of effect.parameters) {
+      const row = byControl.get(parameter.id);
+      if (row === undefined) {
+        throw new Error(`${effect.id}: the catalog parameter ${parameter.name} (${parameter.id}) has no control row`);
+      }
+      if (row.displayName !== parameter.name) {
+        throw new Error(
+          `${effect.id}: control ${row.name} is displayed ${row.displayName}, but the catalog calls ID ${parameter.id} ${parameter.name}`,
+        );
+      }
+      const expected = { boolean: "toggle", enumeration: "enumeration", continuous: "continuous" }[parameter.domainName];
+      if (row.kind !== expected) {
+        throw new Error(`${effect.id}.${parameter.name}: the catalog says ${parameter.domainName}, the control row ${row.kind}`);
+      }
+      const catalogChoices = JSON.stringify(parameter.enumChoices.map((choice) => [choice.label, choice.value]));
+      if (row.kind === "enumeration" && JSON.stringify(choicesOf(row)) !== catalogChoices) {
+        throw new Error(`${effect.id}.${parameter.name}: the catalog and the control row list different choices`);
+      }
+      rows[parameter.name] = {
+        control: row.name,
+        kind: parameter.domainName,
+        choices: row.kind === "enumeration" ? choicesOf(row) : [],
+      };
+    }
+    parameters[effect.id] = rows;
+    if (table.linkMode !== null && table.linkMode !== undefined) {
+      if (table.linkMode.kind !== "enumeration") {
+        throw new Error(`${effect.id}: the link mode row is not an enumeration`);
+      }
+      linkModes[effect.id] = { control: table.linkMode.name, choices: choicesOf(table.linkMode) };
+    }
+  }
+  return { parameters, linkModes };
+}
+
+function renderControlBuilders(catalog) {
+  const controls = catalog.controls;
+  const entriesByOwner = new Map();
+  for (const [ownerKind, sectionKind, select] of BUILDER_TABLES) {
+    const list = entriesByOwner.get(ownerKind) ?? [];
+    list.push(...entriesOf(ownerKind, sectionKind, select(controls), controls));
+    entriesByOwner.set(ownerKind, list);
+  }
+  for (const [ownerKind, list] of entriesByOwner) {
+    const seen = new Set();
+    for (const entry of list) {
+      if (seen.has(entry.method)) throw new Error(`${ownerKind}: two builders are named ${entry.method}`);
+      seen.add(entry.method);
+    }
+  }
+  const stripEntries = entriesByOwner.get("strip");
+  const trackOnly = stripEntries.filter((entry) => entry.shape === "row"
+    && TRACK_ONLY.includes(`strip/${entry.section}/${entry.row.name}`));
+  for (const named of TRACK_ONLY) {
+    if (!trackOnly.some((entry) => `strip/${entry.section}/${entry.row.name}` === named)) {
+      throw new Error(`TRACK_ONLY ${named}: the core has no such strip row`);
+    }
+  }
+  const sharedEntries = stripEntries.filter((entry) => !trackOnly.includes(entry));
+  const { parameters, linkModes } = effectTables(catalog);
+
+  const manifest = [];
+  const addManifest = (entry, owner, only) => {
+    manifest.push({
+      owner,
+      ...(only === undefined ? {} : { only }),
+      section: entry.section,
+      method: entry.method,
+      shape: entry.shape,
+      valueKind: entry.valueKind,
+      options: entry.options,
+      rows: (entry.shape === "row" ? [entry.row] : entry.members).map((row) => row.name),
+      ...(entry.shape === "group" ? { fields: Object.keys(entry.composite.fields) } : {}),
+      ...(entry.valueKind === "enumeration" ? { choices: choicesOf(entry.row) } : {}),
+    });
+  };
+  for (const entry of sharedEntries) addManifest(entry, "strip");
+  for (const entry of trackOnly) addManifest(entry, "strip", "track");
+  for (const owner of ["route", "vca", "session"]) {
+    for (const entry of entriesByOwner.get(owner)) addManifest(entry, owner);
+  }
+
+  const groupTypes = new Set();
+  for (const list of entriesByOwner.values()) {
+    for (const entry of list) if (entry.shape === "group") groupTypes.add(entry.composite.type);
+  }
+  for (const type of groupTypes) {
+    if (GROUP_TYPES[type] === undefined) throw new Error(`no declaration for the group type ${type}`);
+  }
+
+  const strip = (entries) => entries.map((entry) => renderEntry(entry, "strip", "this.setControl", "this.controlOwner()")).join("\n");
+  const linkModeUnion = Object.keys(linkModes).length === 0
+    ? "never"
+    : Object.entries(linkModes)
+      .map(([effect, row]) => `    E extends ${JSON.stringify(effect)} ? ${row.choices.map(([label]) => JSON.stringify(label)).join(" | ")} :`)
+      .join("\n");
+
+  return `// @generated by sdk/codegen/generate.mjs from sdk/assets/miso-engine-v1-parameter-metadata.json; DO NOT EDIT.\n`
+    + `// One builder per row of the core's control tables (its \`controls\` object): each builds the row's\n`
+    + `// address and calls \`set\`, so it stages the edit \`edit.set\` stages for that address and value.\n`
+    + `// Run \`npm run assets\` then \`npm run codegen\` in sdk/ to refresh.\n\n`
+    + `import type { ControlLane, ControlOwner } from "./controls.ts";\n`
+    + `import type { EffectId } from "./catalog.ts";\n`
+    + `import { MisoUsageError } from "../core/errors.ts";\n`
+    + `import {\n`
+    + `  StripAddressing,\n`
+    + `  enumValue,\n`
+    + `  flag,\n`
+    + `  laneOf,\n`
+    + `  mergeEdits,\n`
+    + `  normalizeParameterEdit,\n`
+    + `  parameterScalar,\n`
+    + `  rampOptions,\n`
+    + `  requireGroup,\n`
+    + `} from "../core/control-builder-support.ts";\n`
+    + `import type {\n`
+    + `  ChannelOptions,\n`
+    + `  ControlEditSet,\n`
+    + `  ControlSetter,\n`
+    + `  EffectParameterRow,\n`
+    + `  LaneOptions,\n`
+    + `  LiveControlLayout,\n`
+    + `  LiveEffectParameterEdit,\n`
+    + `  LiveEffectParameterName,\n`
+    + `  LiveEffectParameterOptions,\n`
+    + `  LiveEffectParameterValue,\n`
+    + `  RuntimeParameterOptions,\n`
+    + `  SetControlOptions,\n`
+    + `  SmoothingOptions,\n`
+    + `  StripContext,\n`
+    + `} from "../core/control-builder-support.ts";\n\n`
+    + [...groupTypes].map((type) =>
+      `export interface ${type} {\n${GROUP_TYPES[type].map((field) => `  readonly ${field}: number;\n`).join("")}}\n`).join("\n")
+    + `\n`
+    + `/**\n`
+    + ` * Every live edit a strip -- a track or a submix -- shares. Methods build data and never mutate\n`
+    + ` * the engine: each is \`edit.set\` over the address of one row of the strip's own or builtin table.\n`
+    + ` *\n`
+    + ` * \`pan\`, \`matrix\`, \`faderDb\`, \`mute\`, \`trimDb\` and \`polarityInvert\` take an optional\n`
+    + ` * \`smoothingSamples\`, sent as the edit's \`ramp_samples\`; absent, the core ramps over the session's\n`
+    + ` * own length for the row. The input filters (\`hpfHz\`, \`lpfHz\`, \`inputFilters\`) have a fixed ramp\n`
+    + ` * and take none.\n`
+    + ` *\n`
+    + ` * \`pan\` writes the strip's two pan lanes and \`matrix\` its four coefficients. A strip in the other\n`
+    + ` * shape is refused by the core with \`control.inactive\`.\n`
+    + ` */\n`
+    + `export abstract class StripEdits extends StripAddressing {\n`
+    + strip(sharedEntries)
+    + `}\n\n`
+    + `/** A track strip's live edits: every strip edit, plus \`solo\`. */\n`
+    + `export class TrackEdits extends StripEdits {\n`
+    + `  constructor(\n`
+    + `    trackId: string,\n`
+    + `    trackIndex: number | undefined,\n`
+    + `    layout: LiveControlLayout | undefined,\n`
+    + `    context: StripContext,\n`
+    + `  ) {\n`
+    + `    super("track", trackId, trackIndex, layout, context);\n`
+    + `  }\n\n`
+    + strip(trackOnly)
+    + `}\n\n`
+    + `/**\n`
+    + ` * A submix strip's live edits: every strip edit and no \`solo\` (a bus is solo-safe; the core refuses\n`
+    + ` * the solo of a submix). \`LiveControlEdits.submix(id)\` also finds the submix's strip index,\n`
+    + ` * \`T + j\`, for observation.\n`
+    + ` */\n`
+    + `export class SubmixEdits extends StripEdits {\n`
+    + `  constructor(\n`
+    + `    submixId: string,\n`
+    + `    stripIndex: number | undefined,\n`
+    + `    layout: LiveControlLayout | undefined,\n`
+    + `    context: StripContext,\n`
+    + `  ) {\n`
+    + `    super("submix", submixId, stripIndex, layout, context);\n`
+    + `  }\n`
+    + `}\n\n`
+    + renderOwnedClass("RouteEdits", "route",
+      `/**\n * A live send's edits: its gain, its mute, its follow-mute flag and its 2x2 matrix, each over an\n`
+      + ` * optional \`smoothingSamples\` (omitted, the core's ramp for the row). A route is addressed by its\n`
+      + ` * stable ID. Only routes into submixes are live: the core refuses an output route.\n */`,
+      entriesByOwner.get("route")) + `\n`
+    + renderOwnedClass("VcaEdits", "vca",
+      `/**\n * A VCA's live edits: its per-lane fader offset and mute, built as a strip's \`faderDb\` and \`mute\`\n`
+      + ` * are, over an optional lane and \`smoothingSamples\`. A VCA has no audio path: the engine adds the\n`
+      + ` * offset to every member's own fader, and its mute mutes every member.\n */`,
+      entriesByOwner.get("vca")) + `\n`
+    + renderOwnedClass("SessionEdits", "session",
+      `/**\n * The session's own live settings: the lengths of the default fader, mute and pan ramps.\n */`,
+      entriesByOwner.get("session")) + `\n`
+    + `/** One effect parameter's row in the control tables, by the catalog's name for it. */\n`
+    + `export const EFFECT_PARAMETER_ROWS: Readonly<Record<string, Readonly<Record<string, EffectParameterRow>>>> =\n`
+    + `  ${JSON.stringify(parameters, null, 2).replace(/\n/g, "\n  ")};\n\n`
+    + `/** The link mode row of each effect that has a choice of it. */\n`
+    + `export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {\n`
+    + `  readonly control: string;\n`
+    + `  readonly choices: readonly (readonly [string, number])[];\n`
+    + `}>> =\n`
+    + `  ${JSON.stringify(linkModes, null, 2).replace(/\n/g, "\n  ")};\n\n`
+    + `/** The link mode labels of an effect; \`never\` for an effect with no choice of it. */\n`
+    + `export type EffectLinkModeLabel<E extends EffectId> =\n`
+    + (Object.keys(linkModes).length === 0
+      ? `  never;\n\n`
+      : `${linkModeUnion}\n    never;\n\n`)
+    + `/**\n`
+    + ` * The edits of one effect instance: each parameter, its bypass and its link mode, as \`edit.set\`\n`
+    + ` * over the row of the instance's own control table. The parameter keys are the catalog's names.\n`
+    + ` */\n`
+    + `export abstract class EffectControlBuilders<E extends EffectId> {\n`
+    + `  protected abstract readonly effectId: E;\n\n`
+    + `  /** \`edit.set\` over this instance's address: the row's machine name, the lane and the ramp. */\n`
+    + `  protected abstract setRow(\n`
+    + `    control: string,\n`
+    + `    value: number,\n`
+    + `    lane: ControlLane,\n`
+    + `    options?: SetControlOptions,\n`
+    + `  ): ControlEditSet;\n\n`
+    + `  parameter<N extends LiveEffectParameterName<E>>(\n`
+    + `    name: N,\n`
+    + `    value: LiveEffectParameterValue<E, N>,\n`
+    + `    options?: LiveEffectParameterOptions<E, N>,\n`
+    + `  ): ControlEditSet;\n`
+    + `  parameter(edit: LiveEffectParameterEdit<E>): ControlEditSet;\n`
+    + `  parameter(\n`
+    + `    keyOrEdit: string | LiveEffectParameterEdit<E>,\n`
+    + `    value?: unknown,\n`
+    + `    options: RuntimeParameterOptions = {},\n`
+    + `  ): ControlEditSet {\n`
+    + `    const normalized = normalizeParameterEdit(keyOrEdit, value, options);\n`
+    + `    const row = EFFECT_PARAMETER_ROWS[this.effectId]?.[normalized.key];\n`
+    + `    if (row === undefined) {\n`
+    + `      throw new MisoUsageError(\`\${this.effectId} has no parameter '\${normalized.key}'\`);\n`
+    + `    }\n`
+    + `    // The value is made a number the frame can hold; whether it is in the row's domain is the\n`
+    + `    // core's to say.\n`
+    + `    const scalar = parameterScalar(this.effectId, normalized.key, row, normalized.value);\n`
+    + `    return this.setRow(\n`
+    + `      row.control,\n`
+    + `      scalar,\n`
+    + `      laneOf(normalized.options.channel),\n`
+    + `      rampOptions(normalized.options),\n`
+    + `    );\n`
+    + `  }\n\n`
+    + `  /**\n`
+    + `   * Set or lift this instance's bypass (control \`0\` of the instance). The core crossfades it on\n`
+    + `   * both hosts and refuses what it cannot do.\n`
+    + `   */\n`
+    + `  bypass(enabled: boolean): ControlEditSet {\n`
+    + `    return this.setRow("bypass", flag(enabled), "both");\n`
+    + `  }\n\n`
+    + `  /**\n`
+    + `   * The link mode of an insert of an effect that has a choice of it. A console slot has no link\n`
+    + `   * mode row, and the core refuses the edit.\n`
+    + `   */\n`
+    + `  linkMode(mode: EffectLinkModeLabel<E>): ControlEditSet {\n`
+    + `    const row = EFFECT_LINK_MODE_ROWS[this.effectId];\n`
+    + `    if (row === undefined) throw new MisoUsageError(\`\${this.effectId} has no link mode\`);\n`
+    + `    return this.setRow(row.control, enumValue(row.choices, mode, \`\${this.effectId} link mode\`), "both");\n`
+    + `  }\n`
+    + `}\n\n`
+    + `/** One builder of the manifest: where it lives and which rows of the tables it writes. */\n`
+    + `export interface ControlBuilderEntry {\n`
+    + `  readonly owner: "strip" | "route" | "vca" | "session";\n`
+    + `  /** Present for a builder a track has and a submix does not. */\n`
+    + `  readonly only?: "track";\n`
+    + `  readonly section: "own" | "builtins";\n`
+    + `  readonly method: string;\n`
+    + `  readonly shape: "row" | "lanePair" | "group";\n`
+    + `  readonly valueKind: "number" | "boolean" | "enumeration";\n`
+    + `  readonly options: "lane" | "channel" | "smoothing" | "none";\n`
+    + `  /** The machine names of the rows it writes, in the order it writes them. */\n`
+    + `  readonly rows: readonly string[];\n`
+    + `  /** A group builder's argument fields, one per row. */\n`
+    + `  readonly fields?: readonly string[];\n`
+    + `  readonly choices?: readonly (readonly [string, number])[];\n`
+    + `}\n\n`
+    + `/** Every builder above, by the rows it writes, so a gate can hold each to \`set\`. */\n`
+    + `export const CONTROL_BUILDERS: readonly ControlBuilderEntry[] =\n`
+    + `  ${JSON.stringify(manifest, null, 2).replace(/\n/g, "\n  ")};\n`;
+}
+
 function renderProvenance(catalog, abi) {
   const value = {
     abiVersion: abi.abiVersion,
@@ -307,6 +900,7 @@ async function expectedModules() {
     modules.push([resolve(generated, `${kind}.ts`), renderModule(kind, sourceName, symbol, value)]);
   }
   modules.push([resolve(generated, "controls.ts"), renderControls(parsed.catalog)]);
+  modules.push([resolve(generated, "control-builders.ts"), renderControlBuilders(parsed.catalog)]);
   modules.push([resolve(generated, "provenance.ts"), renderProvenance(parsed.catalog, parsed.abi)]);
   return modules;
 }
