@@ -174,7 +174,7 @@ impl Policy {
             "hosts/host-web/src/ffi.rs",
             "hosts/host-web/src/render_lock.rs",
             "hosts/host-web/tests/boot_transient_budget.rs",
-            "hosts/host-web/tests/control_smoothing_parity.rs",
+            "hosts/host-web/tests/control_parity.rs",
             "tools/bench-support/src/alloc.rs",
             "tools/audit/src/capi.rs",
         ];
