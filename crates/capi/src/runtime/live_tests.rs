@@ -2385,12 +2385,11 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
             SessionEdit::UpsertAutomation {
                 automation: session::Automation {
                     id: id("fader-ride"),
-                    target: session::AutomationTarget {
-                        entity_id: model.tracks[0].id.clone(),
-                        rack: session::RackName::Builtins,
-                        effect_id: id(session::BUILTIN_AUTOMATION_EFFECT_ID),
-                        parameter_id: 5,
-                        channel: session::ParameterChannel::Both,
+                    target: session::ControlAddress {
+                        owner: session::Owner::Strip(model.tracks[0].id.clone()),
+                        section: session::Section::Builtins,
+                        control: 5,
+                        lane: session::ParameterChannel::Both,
                     },
                     segments: vec![session::AutomationSegment {
                         shape: session::AutomationShape::Linear,
@@ -4364,8 +4363,8 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
 
 // Issue #1335: stored automation on an effect parameter the plan keeps prepared.
 
-/// An `UpsertAutomation` of one step on `eq_session`'s `eq0` console EQ, on a `(parameter_id,
-/// channel)` that `eq0` declares.
+/// An `UpsertAutomation` of one step on `eq_session`'s `eq0` console EQ, on the row `parameter_id`
+/// at `channel`.
 fn eq_automation_edit(
     parameter_id: u32,
     channel: session::ParameterChannel,
@@ -4375,12 +4374,11 @@ fn eq_automation_edit(
     SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("eq-ride"),
-            target: session::AutomationTarget {
-                entity_id: id("eq0"),
-                rack: session::RackName::Console,
-                effect_id: id("eq"),
-                parameter_id,
-                channel,
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(id("eq0")),
+                section: session::Section::Console(id("eq")),
+                control: parameter_id,
+                lane: channel,
             },
             segments: vec![session::AutomationSegment {
                 shape: session::AutomationShape::Step,
@@ -4396,7 +4394,7 @@ fn eq_automation_edit(
 
 /// #1335 gate 3. On a playing engine, a transaction that only adds an automation on the console
 /// EQ's `band-1-enabled` (`automation_rate` `None`) is refused with the compile rejection a
-/// rebuild's preparation gives (`effect.automation.rate`): the revision, the committed model and
+/// rebuild's preparation gives (`control.automation.target`): the revision, the committed model and
 /// the reliable lane do not move, no candidate is prepared, and the following blocks are
 /// bit-identical to an engine that never received it. The same transaction on the block-rate
 /// `band-1-gain` commits live, as #1260 D2 made it.
@@ -4431,7 +4429,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
         "the refusal is preparation's diagnostic"
     );
     assert!(
-        String::from_utf8_lossy(&failure.diagnostics).contains("effect.automation.rate"),
+        String::from_utf8_lossy(&failure.diagnostics).contains("control.automation.target"),
         "{}",
         String::from_utf8_lossy(&failure.diagnostics)
     );

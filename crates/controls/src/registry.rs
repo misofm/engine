@@ -3,7 +3,6 @@
 use session::{SessionModel, StableId, StripRef};
 
 use crate::Family;
-use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
 use crate::effective::{
     Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorWrite, effective,
@@ -12,6 +11,7 @@ use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
 use crate::view::ModelView;
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
+use session::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 
 /// One control of a session: where it is, what it is, and its committed value.
 #[derive(Clone, Debug, PartialEq)]

@@ -252,3 +252,88 @@ stored automation target can be refused with, the same code `SET_CONTROL` uses f
 D6's code set is the four filed codes plus `control.inactive`, and a gate shows one inactive
 automatable row refused with it. `ControlError` gains the automation-target variant this slice
 needs.
+
+## Decision record: S12a (batch 9)
+
+**What shipped.** A stored automation's target is a `session::ControlAddress`. D1-D8 as filed and
+amended, with root's ruling: `control.inactive` is the fifth code of the stored-target rule, and
+`ControlError` gains `AutomationTarget` (`control.automation.target`).
+
+- **Model and grammar.** `address.rs` moved whole to `session::address` (`ControlAddress`, `Owner`,
+  `Section`, `Lane`, `OwnerKind`, `SectionKind`; `controls` re-exports all six). `AutomationTarget`,
+  `BUILTIN_AUTOMATION_EFFECT_ID` and `BUILTIN_AUTOMATION_TARGETS` are deleted, with
+  `builtin_automation_targets.rs`. `parse_target` reads D3's six keys (`slot_id` required for
+  `console` and `inserts`, `reject_key` for `own` and `builtins`; `owner: "session"` is an invalid
+  enum). `keys::target` has `control_address`'s field IDs, and the walk is `variants!` with one arm
+  per section (`own`, `builtins`, `console`, `inserts`), so the SDK key tables regenerate to four
+  `target` arms.
+- **Wire.** `schema::session::automation_target` and its two codecs are deleted; `tx_automation_target`
+  and `parse_automation_target` call `write_set_control_address` and `decode_set_control_address` and
+  refuse owner kind session. The #1568 pairing row is `target` -> `control_address::SPEC`.
+- **Validation.** `validate_automation_target` (session) checks structure only: owner exists in its
+  namespace (an `Index.routes` set joins the graph map), a route or VCA owner uses `own`
+  (`schema.invalid_enum`), a console slot is one the strip carries, an insert is one of the strip's.
+- **The row rule.** `controls::automation_diagnostics(model, sample_rate)` with `ControlDiagnostic`:
+  `control.address.unknown`, `control.automation.target`, `control.inactive`, `control.lane`,
+  `control.domain` (unit differs from the row's, or `check` refuses a segment value). A target is
+  reported once and hides its segments' faults.
+- **Where it runs.** `effect_automation_diagnostics` is deleted from `effect-compiler`. host-core's
+  session preparation merges the rule's diagnostics with the effect diagnostics (one sorted
+  `EffectDiagnosticSet`); the classifier calls it in step 2; `session-validator` stage 5 merges it
+  the same way (new `controls` dependency, `Cargo.lock`). `effect.automation.rate` no longer exists.
+- **SDK.** `AutomationTarget` is `ControlAddress | ControlWireAddress`; `AutomationRack` is removed.
+  The builder checks D5 only, finds the row (by machine name or numeric ID) in `CONTROLS` for the
+  span's unit, and writes D3's keys; domain checks of span values are gone (the engine's rule).
+  `enginectl`'s request parser takes the same address.
+
+**Departures from the text.**
+
+1. Gate 3, `slot_id` on `own`: it is a parse refusal (`schema.unknown_field` at `target.slot_id`,
+   D3's `reject_key`), not a validation code; the model cannot hold a slot on `Own`.
+2. A target in an effect that has no rows (a `cid` effect, or a native effect the launch registry
+   lacks) is not reported by the rule: effect preparation refuses that effect with its own code
+   (`effect.third_party.unavailable_at_launch`, `effect.native.unavailable`), as #1335 D2 did for
+   the rate code. One fault, one report.
+3. `fixtures/session/v1/builtins-automation.json`: the `matrix-ll` automation on a pan strip is
+   `control.inactive` now, so it became `pan-ride` (builtin 12, left). The fixture also gained a
+   transparent submix `bus`, a send `send` into it, a VCA `riders` and `route-ride` and `vca-ride`
+   automations, so one engine-written document holds a route and a VCA target (gate 6). The
+   canonical-writer corpus's full-surface document gained the VCA, route, builtins and console
+   targets (`canonical-full-surface` and `canonical-exchanged-strips` changed; they walk all four
+   arms). `canonical.json` changed only in its target.
+4. `COMPLETE_SCHEMA_HASH` is re-pinned once (`0x4f6a_80fb_52c1_2aed`, from `0xcdfd_b054_0f09_3424`): the
+   transaction fixture's automation edits carry the address message. The retired-rack rows for the
+   target (`retired.rack_code_{1,3}.set_automation_target`) patch the address `section` and meet
+   `INVALID_FIELD` (the address decoder's status for an unallocated section), not `MALFORMED_FRAME`.
+5. Effect parameters with `AutomationRate::Sample`: the old rule refused them, and the row says
+   `Live` for any rate but `None` (`effect_rows::parameter_descriptor`), so the new rule accepts a
+   target on one. No launch effect has such a parameter; the test double that held the case is
+   deleted with its test. Successor: decide whether the row class must follow `Block` only.
+6. Files outside the authorized list, all mechanical: `sdk/src/cli/session-request.ts` (the request
+   parser's target), `scripts/check-effect-runtime-policy.sh` and
+   `scripts/test-effect-runtime-policy.sh` (the required-diagnostic list lost
+   `effect.automation.rate`).
+
+**Gates and tests.**
+
+1. `controls/tests/automation.rs::the_row_decides_what_can_be_automated`.
+2. `controls/tests/automation.rs::lane_unit_domain_and_unknown_rows_are_refused_with_the_validators_codes`
+   (includes `control.inactive`), `::every_automation_is_judged_and_a_refused_target_reports_once`,
+   `::a_target_in_an_unavailable_effect_is_reported_by_the_effect_alone`.
+3. `session/tests/automation_target.rs` (`a_target_must_name_things_that_exist`,
+   `slot_id_exists_exactly_in_a_console_or_inserts_section`) and the migrated `invalid_matrix`,
+   `diagnostic_parity`, `submix_strip`, `vca` rows.
+4. `session/tests/automation_target.rs::{the_retired_target_keys_are_unknown,
+   every_owner_and_section_round_trips}`; `canonical_writer_corpus_is_rust_generated_and_current`;
+   `session_schema_lists_exactly_the_walked_keys`; `protocol` session-wire corpus round trip with a
+   target per owner kind and section; `an_automation_target_cannot_be_owned_by_the_session`;
+   `session-validator` `canonical_output_reproduces_the_checked_in_canonical_fixtures`.
+5. `host-core/tests/stored_automation.rs::preparation_refuses_an_automation_the_row_refuses`;
+   `capi` `an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack` (the C ABI
+   transaction's diagnostic equals preparation's, `control.automation.target`);
+   `session-validator` `an_automation_on_a_prepared_effect_parameter_fails_effect_preparation`.
+6. `sdk/test/builder-evals.mjs` "the builder reproduces a checked-in canonical fixture byte for byte"
+   (route and VCA targets included) and "the builder resolves a target's row and leaves the row rule
+   to the engine" (the engine's own codes through `validate()`).
+
+Measured numbers: none (no performance claim).

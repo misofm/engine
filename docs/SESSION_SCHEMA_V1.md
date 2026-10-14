@@ -69,8 +69,8 @@ strings: a non-array is `schema.wrong_type` at `$.vcas[<i>].members`, and a non-
 `schema.wrong_type`, a malformed one `id.invalid`, at `$.vcas[<i>].members[<j>]`. It may be empty.
 A VCA's ID joins the graph-entity namespace; a collision with a track, submix, output or another
 VCA is `id.duplicate` at `$.vcas[<i>].id`, and a VCA ID never satisfies a lookup that wants a strip
-or an output (a route source or destination, a sidechain source, an automation target's
-`entity_id`): each is `reference.missing_entity`, as an unknown ID is. Every member names a declared
+or an output (a route source or destination, a sidechain source, a `strip` automation target's
+`owner_id`; a VCA is an `owner: "vca"` target): each is `reference.missing_entity`, as an unknown ID is. Every member names a declared
 track, submix or VCA (`reference.missing_entity` at `$.vcas[<i>].members[<j>]` otherwise, an output
 included), and appears once in its VCA (`id.duplicate` at the later occurrence); one strip may sit in
 several VCAs. Membership is acyclic: a VCA on a membership cycle among VCAs, a self-member included,
@@ -247,23 +247,32 @@ model's field registry keeps every ID: track field 7 is now `inserts` (was `dyna
 field 15 and track field 11, with registries of its own for the slot declaration (`slot` 1,
 `identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3).
 
-An automation target's `rack` is one of three tokens, with explicit wire codes: `inserts` (2,
-the retired `dynamic` rack's code), `builtins` (4) and `console` (5). Codes 1 (`simd1`) and 3
-(`simd2`) are retired and refused, never reallocated, and the retired spellings are unknown
-tokens. `console` addresses a slot by `effect_id: <slot>` in either section; `inserts` addresses a
-strip's insert by its ID. An automation target's `entity_id` names a track or a submix (#1199),
-and a `console` target may name a submix: it addresses that submix's entry for the slot (#1202).
-A submix's target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is
-the strip's own fixed section. The strip is a chassis rather than a rack of instances, so it has
-no `effect_id` to identify; the key is required all the same (V1 has no optional fields) and
-carries the fixed validated literal `"strip"`. Its `parameter_id` is a builtin parameter ABI id,
-restricted to the rows that declare `blockTarget`: `polarity_invert` (1), `trim_db` (2), `hpf_hz` (3), `lpf_hz` (4),
-`fader_db` (5), `mute` (6), the four `matrix_*` coefficients (7-10), and `pan` (12).
-That is **eleven** rows; `BUILTIN_AUTOMATION_TARGETS` in
-`crates/session/src/validate.rs` is the authority. Issue #808 adds the two filter
-rows. The prepared-only `delay_samples` (11) remains refused. The seven per-lane
-rows accept `left`, `right` or `both`; the four shared matrix coefficients accept
-only `both`.
+An automation target is a control address (#1566, decision 17 C2): the address `SET_CONTROL` and the
+control list use, as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;
+`session` is not a token, because no session row is automatable), `owner_id` (the strip, route or VCA
+ID), `section` (`own`, `builtins`, `console` or `inserts`), `slot_id` (the console slot or the insert),
+`control` (a `u32`, the row ID inside the section) and `lane` (`left`, `right` or `both`). `slot_id`
+is required in a `console` or `inserts` section and refused (`schema.unknown_field`) in `own` and
+`builtins`; every other key is required. The old keys (`entity_id`, `rack`, `effect_id`,
+`parameter_id`, `channel`) are unknown keys. The wire message is the `SET_CONTROL` address message
+(fields `owner` 1, `owner_id` 2, `section` 3, `slot_id` 4, `control` 5 and `lane` 6; owner kind
+strip 2, route 3, VCA 4 and section inserts 2, builtins 4, console 5, own 6, the retired rack codes
+1 and 3 never allocated), and the session wire refuses owner kind session.
+
+Session validation checks the structure of a target, and nothing about its row: the `strip` owner is
+a declared track or submix (`reference.missing_entity` at `target.owner_id` otherwise; a VCA ID is
+not a strip), a `route` owner is a declared route and a `vca` owner a declared VCA, a route or VCA
+owner uses the `own` section (`schema.invalid_enum` at `target.section` otherwise), a `console`
+`slot_id` is a console slot the strip carries and an `inserts` `slot_id` one of that strip's inserts
+(`reference.missing_entity` at `target.slot_id`). Whether the row exists, is automatable, takes the
+lane and takes the segment's unit and values is the control core's rule
+(`controls::automation_diagnostics`), reported by host preparation and `session-validator` stage 5
+beside the effect diagnostics: `control.address.unknown` (no row), `control.automation.target`
+(the row is rebuild-only, derived, a monitor row or a setting), `control.inactive` (the owner's shape
+does not use the row), `control.lane` (`left` or `right` on a shared row) and `control.domain` (a
+segment whose unit is not the row's, or a value the row refuses). A console target on a submix
+addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
+value for the row it automates: the row exists whether or not the session states it.
 
 **The automation table is consumed by nothing today.** No lowering reads it, for the strip, a
 console slot or an insert: a valid target is valid-and-inert syntax that authors, round-trips

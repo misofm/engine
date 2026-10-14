@@ -37,10 +37,7 @@ use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
     Owner, RebuildReason, Section,
 };
-use effect_compiler::{
-    LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
-    resolve_initial_values,
-};
+use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
@@ -230,10 +227,10 @@ pub enum LiveRebuild {
     /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
     /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
     RebuildOnly(RebuildReason),
-    /// The stored automation changes and `next` automates an effect parameter that the plan keeps
-    /// prepared ([`effect_automation_diagnostics`] is not empty, decision 15 E1, #1335 D4). The
-    /// rebuild's preparation refuses it with `effect.automation.rate`; the classifier only
-    /// routes, so the refusal has one author and no live commit can ack it first.
+    /// The stored automation changes and one of `next`'s automations names a row that its rule
+    /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
+    /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
+    /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
 }
 
@@ -251,8 +248,8 @@ pub enum LiveRebuild {
 ///    `current`'s. Bytes, never `PartialEq`: the canonical `f32` spelling keeps a zero's sign. A
 ///    canonical JSON error is structural too.
 /// 2. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
-///    [`effect_automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
-///    #1335 D4). An unchanged automation table is never re-checked: it was prepared. An accepted
+///    [`controls::automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
+///    #1335 D4, #1566 D6). An unchanged automation table is never re-checked: it was prepared. An accepted
 ///    change stays live with no records, as #1260 D2 made it.
 /// 3. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
@@ -372,11 +369,10 @@ pub fn classify_live_delta_with_monitor<'a>(
     drop(masked);
 
     // Step 2.
-    if current.automation != next.automation {
-        let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
-        if !effect_automation_diagnostics(next, registry).is_empty() {
-            return Err(LiveRebuild::AutomationTarget);
-        }
+    if current.automation != next.automation
+        && !controls::automation_diagnostics(next, next.sample_rate_hz).is_empty()
+    {
+        return Err(LiveRebuild::AutomationTarget);
     }
 
     // Step 3. A VCA added or removed has no row in the diff, so the lists decide whether the

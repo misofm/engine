@@ -1,10 +1,10 @@
 //! Issue-004-owned invalid semantic and exact diagnostic-path matrix.
 
 use session::{
-    AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, Output, ParameterChannel,
-    ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
-    SidechainDeclaration, StableId, Submix, canonical_session_json, compile_session,
-    estimate_session_resources, parse_session_json,
+    AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, Output, ParameterUnit,
+    RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
+    StableId, Submix, canonical_session_json, compile_session, estimate_session_resources,
+    parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -353,14 +353,14 @@ fn stable_id_category_has_20_distinct_cases() {
             "$.automation[0].id",
         ),
         (
-            "entity_id = \"vocal\"",
-            "entity_id = \"Bad\"",
-            "$.automation[0].target.entity_id",
+            "owner_id = \"vocal\"",
+            "owner_id = \"Bad\"",
+            "$.automation[0].target.owner_id",
         ),
         (
-            "effect_id = \"eq\", parameter_id",
-            "effect_id = \"Bad\", parameter_id",
-            "$.automation[0].target.effect_id",
+            "slot_id = \"eq\", control",
+            "slot_id = \"Bad\", control",
+            "$.automation[0].target.slot_id",
         ),
     ] {
         parse_case(
@@ -920,27 +920,34 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
     }
     model_case(
         &mut count,
-        |s| s.automation[0].target.entity_id = id("missing-track"),
+        |s| s.automation[0].target.owner = session::Owner::Strip(id("missing-track")),
         DiagnosticCode::MissingEntityReference,
-        "$.automation[0].target.entity_id",
+        "$.automation[0].target.owner_id",
     );
     model_case(
         &mut count,
-        |s| s.automation[0].target.effect_id = id("missing-effect"),
+        |s| s.automation[0].target.section = session::Section::Inserts(id("missing-effect")),
         DiagnosticCode::MissingEntityReference,
-        "$.automation[0].target.effect_id",
+        "$.automation[0].target.slot_id",
+    );
+    // A route owner that no route declares, and a route owner in a section it does not have.
+    model_case(
+        &mut count,
+        |s| {
+            s.automation[0].target.owner = session::Owner::Route(id("missing-route"));
+            s.automation[0].target.section = session::Section::Own;
+        },
+        DiagnosticCode::MissingEntityReference,
+        "$.automation[0].target.owner_id",
     );
     model_case(
         &mut count,
-        |s| s.automation[0].target.parameter_id = 999,
-        DiagnosticCode::MissingEntityReference,
-        "$.automation[0].target.parameter_id",
-    );
-    model_case(
-        &mut count,
-        |s| s.automation[0].target.channel = ParameterChannel::Left,
-        DiagnosticCode::MissingEntityReference,
-        "$.automation[0].target.parameter_id",
+        |s| {
+            s.automation[0].target.owner = session::Owner::Route(id("to-main"));
+            s.automation[0].target.section = session::Section::Builtins;
+        },
+        DiagnosticCode::InvalidEnum,
+        "$.automation[0].target.section",
     );
     assert_eq!(count, 20);
 }
@@ -1077,18 +1084,18 @@ fn automation_category_has_20_distinct_cases() {
     );
     parse_case(
         &mut count,
-        &replaced("rack = \"inserts\"", "rack = \"master\""),
+        &replaced("section = \"inserts\"", "section = \"master\""),
         DiagnosticCode::InvalidEnum,
-        "$.automation[0].target.rack",
+        "$.automation[0].target.section",
     );
     parse_case(
         &mut count,
         &replaced(
-            "channel = \"both\" }, segments",
-            "channel = \"middle\" }, segments",
+            "lane = \"both\" }, segments",
+            "lane = \"middle\" }, segments",
         ),
         DiagnosticCode::InvalidEnum,
-        "$.automation[0].target.channel",
+        "$.automation[0].target.lane",
     );
     let unit = compact_json(EXAMPLE).replacen("\"unit\":\"db\"", "\"unit\":\"seconds\"", 2);
     parse_case(

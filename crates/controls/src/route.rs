@@ -10,12 +10,12 @@ use session::{
     RouteDestination, SessionModel, StableId,
 };
 
-use crate::address::{Owner, Section};
 use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control};
 use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
+use session::{Owner, Section};
 
 const GAIN_DB: u32 = 1;
 const MUTE: u32 = 2;

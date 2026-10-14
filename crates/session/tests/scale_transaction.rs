@@ -33,8 +33,8 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
         track_id: StableId::parse("track-0").expect("generated route ID"),
         tap: session::SendTap::PostPan,
     };
-    session.automation[0].target.entity_id =
-        StableId::parse("track-0").expect("generated automation entity ID");
+    session.automation[0].target.owner =
+        session::Owner::Strip(StableId::parse("track-0").expect("generated automation entity ID"));
 
     let estimate =
         estimate_session_resources(&session).expect("large estimate uses checked arithmetic");

@@ -8,9 +8,9 @@
 
 use session::{OwnerSlots, SessionModel};
 
-use crate::address::{ControlAddress, Owner};
 use crate::error::ControlError;
 use crate::view::position;
+use session::{ControlAddress, Owner};
 
 /// Why an edit is not one the owners model can hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

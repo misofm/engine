@@ -1,8 +1,8 @@
 use super::*;
 use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U32, WIRE_UTF8};
 use session::{
-    LinkMode, ParameterChannel, ParameterUnit, RenderMode, SendTap, Sidechain, Track,
-    parse_session_json,
+    ControlAddress, LinkMode, Owner, ParameterChannel, ParameterUnit, RenderMode, Section, SendTap,
+    Sidechain, Track, parse_session_json,
 };
 
 pub(crate) fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
@@ -253,18 +253,43 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             automation_id: automation.id.clone(),
             segments: automation.segments.clone(),
         },
-        // Issue #178, ruled by #210's D2: the strip's own automation target. It is in the
-        // round-trip corpus rather than in a test of its own because the fourth `RackName`
-        // token changes no message shape -- `RACK` was already a `Wire::U8` -- so the thing
-        // worth proving is that the byte still survives encode/decode with the new value.
+        // #1566: the target is the control address `SET_CONTROL` carries, so each owner kind and
+        // each section is a round trip of its own: the strip's builtins and own sections, a
+        // console slot, a route's gain and a VCA's offset.
         SessionEdit::SetAutomationTarget {
             automation_id: automation.id.clone(),
-            target: AutomationTarget {
-                entity_id: automation.target.entity_id.clone(),
-                rack: RackName::Builtins,
-                effect_id: id("strip"),
-                parameter_id: 2,
-                channel: ParameterChannel::Left,
+            target: ControlAddress {
+                owner: Owner::Strip(id("vocal")),
+                section: Section::Builtins,
+                control: 2,
+                lane: ParameterChannel::Left,
+            },
+        },
+        SessionEdit::SetAutomationTarget {
+            automation_id: automation.id.clone(),
+            target: ControlAddress {
+                owner: Owner::Strip(id("vocal")),
+                section: Section::Console(id("desk-eq")),
+                control: 4,
+                lane: ParameterChannel::Right,
+            },
+        },
+        SessionEdit::SetAutomationTarget {
+            automation_id: automation.id.clone(),
+            target: ControlAddress {
+                owner: Owner::Route(id("to-main")),
+                section: Section::Own,
+                control: 1,
+                lane: ParameterChannel::Both,
+            },
+        },
+        SessionEdit::SetAutomationTarget {
+            automation_id: automation.id.clone(),
+            target: ControlAddress {
+                owner: Owner::Vca(id("group")),
+                section: Section::Own,
+                control: 1,
+                lane: ParameterChannel::Both,
             },
         },
     ];
@@ -1908,4 +1933,69 @@ fn set_control_refuses_an_address_that_breaks_its_rules() {
     ] {
         assert_eq!(result, Err(DecodeError::InvalidField), "{name}");
     }
+}
+
+/// #1566 D4: a stored automation target is the `SET_CONTROL` address message, minus the session
+/// owner. No session row is automatable, so a session address has no spelling as a target: the
+/// decoder refuses it and the encoder refuses to write one, while the same address is valid for a
+/// `SET_CONTROL` write.
+///
+/// Red if the target codec accepts what the control list accepts (a session-owned row) or stops
+/// being the one address codec.
+#[test]
+fn an_automation_target_cannot_be_owned_by_the_session() {
+    use schema::control_address as a;
+    let field =
+        |spec: FieldSpec, value: &[u8]| (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec());
+    let session_address = raw_message(vec![
+        field(a::OWNER_KIND, &[1]),
+        field(a::SECTION, &[6]),
+        field(a::CONTROL, &2_u32.to_le_bytes()),
+        field(a::LANE, &[3]),
+    ]);
+    assert!(
+        parse_control_address(Message::nested(&session_address).expect("nested")).is_ok(),
+        "a SET_CONTROL write may name a session row"
+    );
+    assert_eq!(
+        parse_automation_target(Message::nested(&session_address).expect("nested")),
+        Err(DecodeError::InvalidField)
+    );
+    let strip_address = raw_message(vec![
+        field(a::OWNER_KIND, &[2]),
+        field(a::OWNER_ID, b"vocal"),
+        field(a::SECTION, &[4]),
+        field(a::CONTROL, &5_u32.to_le_bytes()),
+        field(a::LANE, &[1]),
+    ]);
+    assert_eq!(
+        parse_automation_target(Message::nested(&strip_address).expect("nested")),
+        Ok(ControlAddress {
+            owner: Owner::Strip(id("vocal")),
+            section: Section::Builtins,
+            control: 5,
+            lane: ParameterChannel::Left,
+        })
+    );
+
+    let edits = [SessionEdit::SetAutomationTarget {
+        automation_id: id("eq-gain"),
+        target: ControlAddress {
+            owner: Owner::Session,
+            section: Section::Own,
+            control: 2,
+            lane: ParameterChannel::Both,
+        },
+    }];
+    let transaction = SessionTransactionFrame {
+        request_id: RequestId::new(9).expect("request"),
+        expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+        edits: &edits,
+    };
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0; 4096];
+    assert_eq!(
+        codec.encode_session_transaction(&transaction, &mut bytes),
+        Err(EncodeError::InvalidField)
+    );
 }

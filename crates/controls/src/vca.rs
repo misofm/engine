@@ -4,12 +4,12 @@
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, SessionModel, StableId, Vca};
 
-use crate::address::{Owner, Section};
 use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::registry::{ControlRow, Resolved, push_control};
 use crate::{ControlKind, Family, LiveRampRow, Taper};
+use session::{Owner, Section};
 
 const OFFSET_DB: u32 = 1;
 const MUTE: u32 = 2;

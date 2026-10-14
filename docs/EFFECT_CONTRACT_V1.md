@@ -376,7 +376,6 @@ effect.prepare.failed
 effect.metadata.mismatch
 effect.state.invalid
 effect.third_party.unavailable_at_launch
-effect.automation.rate
 effect.tail_bound.inconsistent
 ```
 
@@ -388,9 +387,10 @@ registry before preparing any effect, a host observes the same refusal as before
 (issue #1462, see *Tail and exact rest*), so it joins the frozen list on the same terms as
 `effect.descriptor.invalid`.
 
-`effect.automation.rate` refuses a stored automation whose `inserts` or `console` target parameter
-is not `automatable` or whose `automation_rate` is not `Block` (decision 15 E1, issue #1335). Its
-path is `$.automation[id=<automation id>].target.parameter_id`.
+Stored automation is not judged by effect preparation. `controls::automation_diagnostics` holds each
+automation to the control row its target names (#1566): a parameter that is not `automatable` or
+whose `automation_rate` is `None` is a row that is not live, refused with `control.automation.target`.
+Host preparation and `session-validator` stage 5 report it beside the diagnostics above.
 
 ## Evidence contract
 

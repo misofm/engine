@@ -8,9 +8,9 @@ use core::fmt;
 use std::collections::BTreeMap;
 
 use session::{
-    Automation, AutomationSegment, AutomationTarget, CompileCaps, CompiledSession, Console,
-    ConsoleEntry, EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectQuality,
-    Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination, RouteSource,
+    Automation, AutomationSegment, CompileCaps, CompiledSession, Console, ConsoleEntry,
+    EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectQuality, Output,
+    OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination, RouteSource,
     SessionModel, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix, Vca,
     compile_session,
 };
@@ -319,7 +319,7 @@ pub enum SessionEdit {
     /// Set an existing automation target.
     SetAutomationTarget {
         automation_id: StableId,
-        target: AutomationTarget,
+        target: session::ControlAddress,
     },
     /// Replace an existing automation's complete nonempty ordered segment sequence.
     SetAutomationSegments {

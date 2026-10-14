@@ -232,10 +232,11 @@ mod tests {
 
     use super::{write_f32, write_quoted};
     use crate::{
-        ChannelBuiltins, ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins,
-        DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
-        ParameterChannel, ParameterUnit, Rack, Route, RouteDestination, RouteSource, SendTap,
-        Sidechain, SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
+        Automation, AutomationSegment, AutomationShape, ChannelBuiltins, ChannelMatrix, Console,
+        ConsoleEntry, ConsoleSlot, ControlAddress, DualMonoBuiltins, DualMonoFader, Effect,
+        EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan, Owner, ParameterChannel,
+        ParameterUnit, Rack, Route, RouteDestination, RouteSource, Section, SendTap, Sidechain,
+        SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
     };
     #[test]
     fn canonical_string_escaping_is_frozen() {
@@ -274,7 +275,7 @@ mod tests {
         StableId::parse(value).expect("valid corpus ID")
     }
 
-    fn full_surface_document() -> String {
+    fn full_surface_model() -> crate::SessionModel {
         let source = fs::read_to_string(corpus_path("fixtures/session/v1/canonical.json"))
             .expect("read representative session");
         let mut model = parse_session_json(&source).expect("parse representative session");
@@ -473,7 +474,81 @@ mod tests {
             fader_ms: 12.5,
             pan_ms: 1000.0,
         });
-        canonical_session_json(&model).expect("full tagged surface canonicalizes")
+        // One stored automation per address section (#1566): `canonical.json` already automates an
+        // insert; these add the builtins, console and own (route and VCA) targets, so the corpus
+        // walks every arm of the target record. Declared out of ID order.
+        let ride = |name: &str, target: ControlAddress| Automation {
+            id: id(name),
+            target,
+            segments: vec![AutomationSegment {
+                shape: AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 480,
+                start_value: 0.0,
+                end_value: -3.0,
+                unit: ParameterUnit::Db,
+            }],
+        };
+        model.automation.insert(
+            0,
+            ride(
+                "vca-offset",
+                ControlAddress {
+                    owner: Owner::Vca(id("group")),
+                    section: Section::Own,
+                    control: 1,
+                    lane: ParameterChannel::Both,
+                },
+            ),
+        );
+        model.automation.push(ride(
+            "route-gain",
+            ControlAddress {
+                owner: Owner::Route(id("to-main")),
+                section: Section::Own,
+                control: 1,
+                lane: ParameterChannel::Both,
+            },
+        ));
+        model.automation.push(ride(
+            "fader-ride",
+            ControlAddress {
+                owner: Owner::Strip(id("vocal")),
+                section: Section::Builtins,
+                control: 5,
+                lane: ParameterChannel::Left,
+            },
+        ));
+        model.automation.push(ride(
+            "desk-gain",
+            ControlAddress {
+                owner: Owner::Strip(id("mix")),
+                section: Section::Console(id("desk-eq")),
+                control: 4,
+                lane: ParameterChannel::Right,
+            },
+        ));
+        model
+    }
+
+    fn full_surface_document() -> String {
+        canonical_session_json(&full_surface_model()).expect("full tagged surface canonicalizes")
+    }
+
+    /// The full surface with the track's matrix and the submix's pan exchanged, so the corpus
+    /// walks both arms of `matrix_or_pan` under both strip records (#1569).
+    fn exchanged_strips_document() -> String {
+        let mut model = full_surface_model();
+        let matrix = std::mem::replace(
+            &mut model.tracks[0].matrix_or_pan,
+            MatrixOrPan::Pan {
+                left: 0.75,
+                right: -0.75,
+                smoothing_samples: 8,
+            },
+        );
+        model.submixes[0].matrix_or_pan = matrix;
+        canonical_session_json(&model).expect("exchanged strips canonicalize")
     }
 
     #[test]
@@ -497,6 +572,10 @@ mod tests {
             json!({
                 "id": "canonical-full-surface",
                 "canonical": full_surface_document(),
+            }),
+            json!({
+                "id": "canonical-exchanged-strips",
+                "canonical": exchanged_strips_document(),
             }),
         ];
 

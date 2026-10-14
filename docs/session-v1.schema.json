@@ -194,8 +194,12 @@
       "then": { "properties": { "follows_mute": { "const": false } } }
     },
     "automation_target": {
-      "type": "object", "additionalProperties": false, "required": ["entity_id", "rack", "effect_id", "parameter_id", "channel"],
-      "properties": { "entity_id": { "$ref": "#/$defs/id" }, "rack": { "enum": ["inserts", "builtins", "console"] }, "effect_id": { "$ref": "#/$defs/id" }, "parameter_id": { "$ref": "#/$defs/u32" }, "channel": { "$ref": "#/$defs/channel" } }
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["owner", "owner_id", "section", "control", "lane"],
+          "properties": { "owner": { "enum": ["strip", "route", "vca"] }, "owner_id": { "$ref": "#/$defs/id" }, "section": { "enum": ["own", "builtins"] }, "control": { "$ref": "#/$defs/u32" }, "lane": { "$ref": "#/$defs/channel" } } },
+        { "type": "object", "additionalProperties": false, "required": ["owner", "owner_id", "section", "slot_id", "control", "lane"],
+          "properties": { "owner": { "const": "strip" }, "owner_id": { "$ref": "#/$defs/id" }, "section": { "enum": ["console", "inserts"] }, "slot_id": { "$ref": "#/$defs/id" }, "control": { "$ref": "#/$defs/u32" }, "lane": { "$ref": "#/$defs/channel" } } }
+      ]
     },
     "automation_segment": {
       "type": "object", "additionalProperties": false, "required": ["shape", "start_sample", "end_sample", "start_value", "end_value", "unit"],

@@ -87,7 +87,12 @@ function finish(builder, tap = "post_pan") {
     })
     .automation({
       id: "ride",
-      target: { trackId: "t", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
+      target: {
+        owner: { kind: "strip", id: "t" },
+        section: { kind: "console", slot: "eq" },
+        control: "band_1_gain_db",
+        lane: "both",
+      },
       segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -2, endValue: 0 }],
     });
 }
@@ -120,7 +125,13 @@ function nativeInsert(effectId, fields = {}) {
 function ride(target) {
   return stripBase().track("t", { source: "stem", console: stripEntries() }).automation({
     id: "ride",
-    target: { trackId: "t", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both", ...target },
+    target: {
+      owner: { kind: "strip", id: "t" },
+      section: { kind: "console", slot: "eq" },
+      control: "band_1_gain_db",
+      lane: "both",
+      ...target,
+    },
     segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue: 0, endValue: 0 }],
   });
 }
@@ -331,30 +342,29 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
     {
       name: "a console automation target naming no slot",
       code: "reference.missing_entity",
-      build: () => ride({ rack: "console", slotId: "ghost", parameter: "band-1-gain" }),
-      edit: (model) => { model.automation[0].target.effect_id = "ghost"; },
+      build: () => ride({ section: { kind: "console", slot: "ghost" } }),
+      edit: (model) => { model.automation[0].target.slot_id = "ghost"; },
     },
     {
       name: "an insert automation target naming no insert",
       code: "reference.missing_entity",
-      build: () => ride({ rack: "inserts", slotId: "ghost", parameter: "band-1-gain" }),
-      edit: (model) => { model.automation[0].target.rack = "inserts"; model.automation[0].target.effect_id = "ghost"; },
+      build: () => ride({ section: { kind: "inserts", effect: "ghost" } }),
+      edit: (model) => {
+        model.automation[0].target.section = "inserts";
+        model.automation[0].target.slot_id = "ghost";
+      },
     },
     {
-      name: "an automation target on a parameter its instance does not declare",
-      code: "reference.missing_entity",
-      build: () => ride({ rack: "console", slotId: "eq", parameter: "band-1-frequency" }),
-      edit: (model) => { model.automation[0].target.parameter_id = 3; },
+      name: "an automation target on a control its section has no row for",
+      code: "control.address.unknown",
+      build: () => ride({ control: "no_such_row" }),
+      edit: (model) => { model.automation[0].target.control = 9_999; },
     },
     {
       name: "a retired automation rack",
       code: "schema.invalid_enum",
-      build: () => stripBase().track("t", { source: "stem", console: stripEntries() }).automation({
-        id: "ride",
-        target: { trackId: "t", rack: "simd1", slotId: "eq", parameter: "band-1-gain", channel: "both" },
-        segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue: 0, endValue: 0 }],
-      }),
-      edit: (model) => { model.automation[0].target.rack = "simd1"; },
+      build: () => ride({ section: { kind: "simd1", slot: "eq" } }),
+      edit: (model) => { model.automation[0].target.section = "simd1"; },
     },
   ];
 

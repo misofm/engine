@@ -164,3 +164,42 @@ Checked against `main` at `7feb27800`.
   dependency today. Add it (and update `Cargo.lock`); both are authorized paths for this slice.
 - **Edit order.** After #1568. Before #1566 (shared `visit.rs`, `session-json.ts` and the canonical
   writer corpus): #1566 then regenerates the key tables and adds its target arms to D4's table.
+
+## Decision record: S13b session key tables (batch 9)
+
+**Shipped.** D1: `ModelVisitor::record_schema(module, arm)` (defaulted), called by `records!` and
+`rec!` right after `record_begin`; `session::VARIANT_ARMS` lists every variant record's arm. D2:
+`tools/parameter-metadata/src/session_keys.rs` (`--print-session-keys`, `Recorder`, `build`,
+`load_corpus`). D3: `sdk/assets/miso-engine-v1-session-keys.json`, `sdk/src/generated/session-keys.ts`,
+and `session-json.ts` now holds no key list. D4: `session_schema_lists_exactly_the_walked_keys`.
+`docs/session-v1.schema.json` needed no edit: the test is green on the current document.
+
+**Departures from the text, and why.**
+
+- **Track and submix are variant records.** Their key list differs by `pan` or `matrix`, so the walk
+  names them with arms `pan` and `matrix` (`records!` takes an optional arm expression). Without it
+  the generator's "one shape, two key lists" rule fails on any corpus that has both.
+- **A new corpus document.** No corpus document walked a pan track or a matrix submix. The Rust test
+  that writes the corpus gained `canonical-exchanged-strips` (`crates/session/src/canonical.rs`, a
+  mechanical addition to an unlisted path; the corpus JSON is regenerated from it).
+- **`u64` is its own kind.** Kinds are `integer` (`u8`, `u32`, `source_bit_depth`), `u64`, `float`,
+  `boolean`, `id`, `text`, `token`, `record`, `array`. A `u64` is a JSON string, so the SDK keeps
+  refusing a bare number there, as the hand copy did.
+- **The key tables are not in `--write`/`--check DIR`.** The release artifact set is exactly six
+  files (`check-web-audioworklet.sh`, the package manifest) and the key tables are an SDK source, not
+  a shipped artifact. `assets.mjs` renders the document with cargo and leaves it out of a check
+  against an artifact directory (that check runs no cargo); `session_keys_asset_is_current` holds
+  the asset to the generator in `cargo test`.
+- **Variant-arm coverage.** The generator also fails when an arm in `VARIANT_ARMS` is never walked
+  (message `matrix_or_pan/matrix`), before the key-level check.
+- `serde_json` moved from a dev dependency to a dependency of `parameter-metadata` (the corpus
+  manifest is read as data); `session` was added; `Cargo.lock` updated.
+
+**Gates.** (1) `check-sdk-generated.sh` with and without the artifact directory, and the SDK
+headless suite (`check-sdk-headless.sh`, 524 pass, 0 fail, including the canonical writer corpus
+eval), `check-sdk-types.sh` and `sdk-package.sh check`. (2) `a_corpus_without_the_matrix_arm_is_refused_by_name`,
+`a_numeric_key_walked_as_two_kinds_is_refused_by_name`, `one_shape_walked_with_two_key_lists_is_refused`,
+`a_tie_must_agree_on_key_order_and_kinds`. (3) `session_schema_lists_exactly_the_walked_keys`;
+renaming `follows_mute` in the `route` def's `required` makes it red (`$defs/route: required
+differs`). (4) A scratch swap of `mute` and `follows_mute` in the `Route` walk changed only the
+generated document (and, by regeneration, its module); reverted.

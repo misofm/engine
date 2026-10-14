@@ -2,9 +2,9 @@
 
 use session::{
     AutomationShape, CompileCaps, Console, ConsoleEntry, ConsoleSlot, DiagnosticCode,
-    DiagnosticSet, EffectIdentity, MatrixOrPan, Output, ParameterChannel, ParameterUnit, RackName,
-    RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
-    StableId, canonical_session_json, compile_session, parse_session_json,
+    DiagnosticSet, EffectIdentity, MatrixOrPan, Output, ParameterUnit, RouteDestination,
+    RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId,
+    canonical_session_json, compile_session, parse_session_json,
 };
 
 const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -586,47 +586,23 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
         case!(
             "automation-console-slot",
             MissingEntityReference,
-            "$.automation[0].target.effect_id",
+            "$.automation[0].target.slot_id",
             |s| {
                 with_console(s);
-                s.automation[0].target.rack = RackName::Console;
-                s.automation[0].target.effect_id = id("eq");
-            }
-        ),
-        case!(
-            "automation-console-param",
-            MissingEntityReference,
-            "$.automation[0].target.parameter_id",
-            |s| {
-                with_console(s);
-                s.automation[0].target.rack = RackName::Console;
-                s.automation[0].target.effect_id = id("desk-limit");
-                s.automation[0].target.parameter_id = 999;
+                s.automation[0].target.section = session::Section::Console(id("eq"));
             }
         ),
         case!(
             "automation-entity",
             MissingEntityReference,
-            "$.automation[0].target.entity_id",
-            |s| s.automation[0].target.entity_id = id("missing-track")
+            "$.automation[0].target.owner_id",
+            |s| s.automation[0].target.owner = session::Owner::Strip(id("missing-track"))
         ),
         case!(
             "automation-effect",
             MissingEntityReference,
-            "$.automation[0].target.effect_id",
-            |s| s.automation[0].target.effect_id = id("missing-effect")
-        ),
-        case!(
-            "automation-param",
-            MissingEntityReference,
-            "$.automation[0].target.parameter_id",
-            |s| s.automation[0].target.parameter_id = 999
-        ),
-        case!(
-            "automation-channel",
-            MissingEntityReference,
-            "$.automation[0].target.parameter_id",
-            |s| s.automation[0].target.channel = ParameterChannel::Left
+            "$.automation[0].target.slot_id",
+            |s| s.automation[0].target.section = session::Section::Inserts(id("missing-effect"))
         ),
         case!(
             "duplicate-automation",
