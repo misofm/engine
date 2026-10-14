@@ -3192,7 +3192,7 @@ pub fn install_builtin_strip_carry(
     Ok(())
 }
 
-pub use rack::EffectLaneLayout;
+pub use rack::{EffectLaneKind, EffectLaneLayout};
 
 /// One console effect lane a successor takes from its predecessor at the swap block: the whole
 /// state of the lane at `predecessor` in the displaced plan is moved into `successor` (issue
@@ -3205,8 +3205,8 @@ pub struct GraphEffectMove {
     pub predecessor: GraphLaneLocation,
 }
 
-/// One banked effect lane of a bound graph plan that a swap can move (issue #1279 D1): a populated
-/// lane of a bank stage with no live control lane.
+/// One banked effect lane of a bound graph plan that a swap can move (issues #1279 D1, #1280): a
+/// populated lane of a bank stage, with or without a live control lane.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphEffectLane {
     /// The rack the effect sits in: `Simd1` for a `pre_insert` console slot, `Simd2` for a
@@ -3218,12 +3218,14 @@ pub struct GraphEffectLane {
     pub location: GraphLaneLocation,
     /// What the lane must share with the lane it is moved to or from.
     pub layout: EffectLaneLayout,
+    /// The kind of stage and control lane the lane has: the lane it is moved to or from must have
+    /// the same (#1280).
+    pub kind: EffectLaneKind,
 }
 
-/// Every banked effect lane of a bound graph plan whose stage has no live control lane, as
-/// `(strip ID, lane)` pairs in program order (issue #1279 D1); `None` for any other plan. A lane
-/// whose bank has a live control lane or a lowered bypass is a `LiveControlEffectBankStage` lane
-/// and is not listed (#1280). Read off the render thread, before publication: a successor's
+/// Every banked effect lane of a bound graph plan, as `(strip ID, lane)` pairs in program order
+/// (issues #1279 D1, #1280); `None` for any other plan. A lane of a bank with a live control lane
+/// or a lowered bypass is listed with its own kind. Read off the render thread, before publication: a successor's
 /// preparation joins its own lanes with its predecessor's (recorded when that plan was prepared)
 /// by owner key, never by location.
 pub fn bank_effect_lanes(
@@ -3238,8 +3240,8 @@ pub fn bank_effect_lanes(
 /// and preallocate the payload scratch at the largest carried payload.
 ///
 /// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
-/// program, a successor location is not a populated lane of an effect bank without a live control
-/// lane, or a successor or predecessor location repeats. Predecessor locations and layouts are
+/// program, a successor location is not a populated lane of an effect bank, or a successor or
+/// predecessor location repeats. Predecessor locations and layouts are
 /// checked against the predecessor at the swap block, where one that does not resolve refuses the
 /// whole hand-over. The moves are kept sorted by predecessor location, so the swap block
 /// disengages each predecessor chain once.

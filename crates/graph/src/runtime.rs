@@ -4314,17 +4314,104 @@ fn strip_lane_mut(
     }
 }
 
-/// The effect bank stage slot `slot` of `chain` holds, if that slot is one with no live control
-/// lane (issue #1279). Allocation-free: a slot borrow and one downcast.
-fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<&mut rack::EffectBankStage> {
-    chain
-        .slot_stage_mut(slot)?
-        .as_any_mut()?
-        .downcast_mut::<rack::EffectBankStage>()
+/// An effect bank stage a plan swap can move lanes of: one with no live control lane or lowered
+/// bypass ([`rack::EffectBankStage`]), or the live-control twin ([`rack::LiveControlEffectBankStage`],
+/// #1280).
+pub(crate) enum EffectStageMut<'a> {
+    /// A stage with no control lane at all.
+    Plain(&'a mut rack::EffectBankStage),
+    /// A stage whose lanes hold a live channel or a lowered session bypass.
+    Live(&'a mut rack::LiveControlEffectBankStage),
 }
 
-/// The populated lane at `at` of an effect bank stage with no live control lane: its chain, slot
-/// and lane (issue #1279 D1). A padded lane is not populated: it has no member.
+impl EffectStageMut<'_> {
+    /// The layout a swap checks before it moves a lane in or out.
+    fn layout(&self) -> rack::EffectLaneLayout {
+        match self {
+            Self::Plain(stage) => stage.layout(),
+            Self::Live(stage) => stage.layout(),
+        }
+    }
+
+    /// The stage's lanes, populated or padded.
+    fn lanes(&self) -> usize {
+        match self {
+            Self::Plain(stage) => stage.lanes(),
+            Self::Live(stage) => stage.lanes(),
+        }
+    }
+
+    /// The kind of lane `lane`, if it exists.
+    fn lane_kind(&self, lane: usize) -> Option<rack::EffectLaneKind> {
+        match self {
+            Self::Plain(stage) => (lane < stage.lanes()).then_some(rack::EffectLaneKind::Plain),
+            Self::Live(stage) => stage.lane_kind(lane),
+        }
+    }
+
+    /// Restores a plan swap's carry refused on this stage.
+    fn carry_refused(&self) -> u64 {
+        match self {
+            Self::Plain(stage) => stage.carry_refused(),
+            Self::Live(stage) => stage.carry_refused(),
+        }
+    }
+
+    /// [`rack::EffectBankStage::can_carry_lane_from`] or its live twin; a pair of unlike stage
+    /// types joins nothing.
+    fn can_carry_lane_from(
+        &self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch_bytes: usize,
+    ) -> bool {
+        match (self, predecessor) {
+            (Self::Plain(into), Self::Plain(from)) => {
+                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+            }
+            (Self::Live(into), Self::Live(from)) => {
+                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+            }
+            _ => false,
+        }
+    }
+
+    /// [`rack::EffectBankStage::carry_lane_from`] or its live twin, for a checked pair.
+    fn carry_lane_from(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch: &mut [u8],
+    ) -> bool {
+        match (self, predecessor) {
+            (Self::Plain(into), Self::Plain(from)) => {
+                into.carry_lane_from(lane, from, predecessor_lane, scratch)
+            }
+            (Self::Live(into), Self::Live(from)) => {
+                into.carry_lane_from(lane, from, predecessor_lane, scratch)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The effect bank stage slot `slot` of `chain` holds, of either type (issues #1279, #1280).
+/// Allocation-free: a slot borrow and one downcast.
+fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<EffectStageMut<'_>> {
+    let any = chain.slot_stage_mut(slot)?.as_any_mut()?;
+    if any.is::<rack::EffectBankStage>() {
+        any.downcast_mut::<rack::EffectBankStage>()
+            .map(EffectStageMut::Plain)
+    } else {
+        any.downcast_mut::<rack::LiveControlEffectBankStage>()
+            .map(EffectStageMut::Live)
+    }
+}
+
+/// The populated lane at `at` of an effect bank stage of either type: its chain, slot and lane
+/// (issues #1279 D1, #1280). A padded lane is not populated: it has no member.
 fn effect_lane_mut(
     units: &mut [crate::runtime::RuntimeUnit],
     at: crate::GraphLaneLocation,
@@ -4436,9 +4523,9 @@ impl crate::runtime::Runtime {
         lanes
     }
 
-    /// Every banked effect lane of this runtime whose stage has no live control lane:
-    /// `(strip ID, lane)`, in program order (issue #1279 D1). Read off the render thread, after
-    /// bind.
+    /// Every banked effect lane of this runtime, of a stage with or without a live control lane:
+    /// `(strip ID, lane)`, in program order (issues #1279 D1, #1280). Read off the render thread,
+    /// after bind.
     pub(crate) fn bank_effect_lanes(&mut self) -> Vec<(Box<str>, crate::GraphEffectLane)> {
         let mut lanes = Vec::new();
         for binding in &self.response_bindings {
@@ -4467,10 +4554,13 @@ impl crate::runtime::Runtime {
                 continue;
             };
             let location = crate::GraphLaneLocation { unit, slot, lane };
-            let Some((chain, slot, _)) = effect_lane_mut(&mut self.units, location) else {
+            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, location) else {
                 continue;
             };
             let Some(stage) = effect_stage_mut(chain, slot) else {
+                continue;
+            };
+            let Some(kind) = stage.lane_kind(lane) else {
                 continue;
             };
             lanes.push((
@@ -4480,6 +4570,7 @@ impl crate::runtime::Runtime {
                     effect_id: binding.stable_id.clone(),
                     location,
                     layout: stage.layout(),
+                    kind,
                 },
             ));
         }
@@ -4707,7 +4798,7 @@ impl crate::runtime::Runtime {
                 return false;
             };
             effect_stage_mut(chain, slot).is_some_and(|from| {
-                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+                into.can_carry_lane_from(lane, &from, predecessor_lane, scratch_bytes)
             })
         })
     }
@@ -4744,14 +4835,13 @@ impl crate::runtime::Runtime {
             let Some(from) = effect_stage_mut(chain, slot) else {
                 continue;
             };
-            let from: &rack::EffectBankStage = from;
             let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
                 continue;
             };
-            let Some(into) = effect_stage_mut(chain, slot) else {
+            let Some(mut into) = effect_stage_mut(chain, slot) else {
                 continue;
             };
-            if into.carry_lane_from(lane, from, predecessor_lane, scratch) {
+            if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                 chain.inherit_channel_agreement(agree);
             }
         }
