@@ -453,6 +453,192 @@ describe("the browser open sequence", () => {
     assert.equal(contextCloses, 1, "a rejected close is still not replayed");
   });
 
+  // Issue #1532: every wait of close() that can hang is bounded at 10 s. These tests tick the
+  // mocked setTimeout; the only deadline they cross is the close bound itself (the scripted
+  // host and context set none).
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const never = () => new Promise(() => {});
+
+  async function boundedCloseEngine({ dispose, close }) {
+    const calls = { dispose: 0, close: 0 };
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: () => { calls.close += 1; return close(); },
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        dispose: () => { calls.dispose += 1; return dispose(); },
+      }),
+    });
+    return { engine, calls };
+  }
+
+  /** Collect `unhandledRejection` events for the length of a test. */
+  function watchUnhandled(t) {
+    const seen = [];
+    const listener = (reason) => { seen.push(reason); };
+    process.on("unhandledRejection", listener);
+    t.after(() => process.off("unhandledRejection", listener));
+    return seen;
+  }
+
+  const isTimeout = (code, step) => (error) => {
+    assert.ok(error instanceof MisoEngineError, "a typed SDK error");
+    assert.equal(error.phase, "lifecycle");
+    assert.equal(error.code, code);
+    assert.equal(error.result, undefined, "an SDK-side code carries no engine result");
+    assert.match(error.message, new RegExp(step));
+    return true;
+  };
+
+  test("a host dispose that never settles rejects close() at 10 s and still closes the context",
+    { timeout: 5_000 }, async (t) => {
+      const { engine, calls } = await boundedCloseEngine({ dispose: never, close: async () => {} });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let settled = false;
+      const closing = engine.close().then(() => { settled = true; }, () => { settled = true; });
+      await flush();
+      t.mock.timers.tick(9_999);
+      await flush();
+      assert.equal(settled, false, "still waiting one millisecond before the bound");
+      assert.equal(calls.close, 0, "the context closes only after the dispose step ends");
+      t.mock.timers.tick(1);
+      await closing;
+      assert.equal(settled, true);
+      assert.equal(calls.dispose, 1);
+      assert.equal(calls.close, 1, "the context close is attempted after a dispose timeout");
+      await assert.rejects(() => engine.close(), isTimeout("hostDisposeTimeout", "worklet host dispose"));
+    });
+
+  test("an AudioContext close that never settles rejects close() at 10 s",
+    { timeout: 5_000 }, async (t) => {
+      const { engine, calls } = await boundedCloseEngine({ dispose: async () => {}, close: never });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const closing = engine.close();
+      const outcome = assert.rejects(closing, isTimeout("contextCloseTimeout", "AudioContext close"));
+      await flush();
+      t.mock.timers.tick(10_000);
+      await outcome;
+      assert.equal(calls.dispose, 1);
+      assert.equal(calls.close, 1);
+    });
+
+  test("a timed-out close is not retried: the same error comes back and nothing runs again",
+    { timeout: 5_000 }, async (t) => {
+      const { engine, calls } = await boundedCloseEngine({ dispose: never, close: async () => {} });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const first = engine.close().then(() => undefined, (error) => error);
+      await flush();
+      t.mock.timers.tick(10_000);
+      const error = await first;
+      assert.ok(error instanceof MisoEngineError);
+      const second = await engine.close().then(() => undefined, (rejection) => rejection);
+      assert.equal(second, error, "the memoized rejection is returned as is");
+      assert.equal(calls.dispose, 1);
+      assert.equal(calls.close, 1);
+    });
+
+  test("a step that settles after its timeout is observed and leaves no unhandled rejection",
+    { timeout: 5_000 }, async (t) => {
+      const unhandled = watchUnhandled(t);
+      let rejectDispose;
+      const { engine } = await boundedCloseEngine({
+        dispose: () => new Promise((_, reject) => { rejectDispose = reject; }),
+        close: async () => {},
+      });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const closing = engine.close();
+      const outcome = assert.rejects(closing, isTimeout("hostDisposeTimeout", "worklet host dispose"));
+      await flush();
+      t.mock.timers.tick(10_000);
+      await outcome;
+      rejectDispose(new Error("late port failure"));
+      await flush();
+      await flush();
+      assert.deepEqual(unhandled, [], "the late rejection never reaches process");
+    });
+
+  test("a settled close leaves no timer behind", { timeout: 5_000 }, async () => {
+    const timers = () => process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+    const { engine } = await boundedCloseEngine({ dispose: async () => {}, close: async () => {} });
+    const before = timers();
+    await engine.close();
+    assert.ok(timers() <= before, `timers after close ${timers()} exceed ${before} before it`);
+  });
+
+  describe("the boot-path context closes are bounded too", () => {
+    const SCRIPTED_SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
+    const scripted = async () => SCRIPTED_SHAPE;
+
+    test("a wrong-rate candidate whose close never settles rejects createEngine at 10 s",
+      { timeout: 5_000 }, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        let constructed = 0;
+        const opening = createEngine({
+          document: "opaque",
+          simd128ModuleUrl: "/wasm",
+          workletModuleUrl: "/worklet",
+          scratchBoot: scripted,
+          contextAttempts: 2,
+          createContext: () => {
+            constructed += 1;
+            return { sampleRate: 44_100, renderQuantumSize: 128, state: "running", close: never, audioWorklet: { addModule: async () => {} } };
+          },
+        });
+        const outcome = assert.rejects(opening, isTimeout("contextCloseTimeout", "AudioContext close"));
+        await flush();
+        t.mock.timers.tick(10_000);
+        await outcome;
+        assert.equal(constructed, 1, "no second candidate is built after the close timeout");
+      });
+
+    test("a quantum refusal reaches the caller after the bound, not the close timeout",
+      { timeout: 5_000 }, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const opening = createEngine({
+          document: "opaque",
+          simd128ModuleUrl: "/wasm",
+          workletModuleUrl: "/worklet",
+          scratchBoot: scripted,
+          createContext: () => ({ sampleRate: 48_000, renderQuantumSize: 256, state: "running", close: never, audioWorklet: { addModule: async () => {} } }),
+        });
+        const outcome = assert.rejects(opening, (error) => {
+          assert.ok(error instanceof MisoEngineError);
+          assert.equal(error.code, "reprepareRequired");
+          assert.equal(error.diagnosticPath, "$.quantum_frames");
+          return true;
+        });
+        await flush();
+        t.mock.timers.tick(10_000);
+        await outcome;
+      });
+
+    test("a worklet boot failure reaches the caller after the bound, not the close timeout",
+      { timeout: 5_000 }, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const failure = new Error("worklet refused");
+        const opening = createEngine({
+          document: "opaque",
+          simd128ModuleUrl: "/wasm",
+          workletModuleUrl: "/worklet",
+          scratchBoot: scripted,
+          createContext: () => ({ sampleRate: 48_000, renderQuantumSize: 128, state: "running", close: never, audioWorklet: { addModule: async () => {} } }),
+          createHost: async () => { throw failure; },
+        });
+        const outcome = assert.rejects(opening, (error) => error === failure);
+        await flush();
+        t.mock.timers.tick(10_000);
+        await outcome;
+      });
+  });
+
   test("a 32f source refuses before any context is constructed", async () => {
     let constructed = 0;
     await assert.rejects(

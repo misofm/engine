@@ -54,6 +54,25 @@ export type {
   SpectrumStreamStatus,
 } from "../core/spectrum.ts";
 export { EngineLiveControls } from "../core/live-controls.ts";
+export { ControlTransactionQueue } from "../core/control-queue.ts";
+export type {
+  ControlAppliedReport,
+  ControlQueueOptions,
+  ControlRefusedReport,
+  ControlReport,
+  ControlSend,
+} from "../core/control-queue.ts";
+export { decodeControlReply, encodeControlTransaction } from "../core/control-frame.ts";
+export type {
+  ControlBackpressure,
+  ControlDiagnostic,
+  ControlEditPath,
+  ControlFrameEdit,
+  ControlReply,
+  ControlStatusName,
+  ControlTransactionRequest,
+  ControlWireAddress,
+} from "../core/control-frame.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
   CommandReport,
@@ -67,11 +86,12 @@ export type {
 export type { BootOptions } from "../core/abi.ts";
 export { defaultSourceRingFrames } from "../core/abi.ts";
 export {
+  MisoControlRefusal,
   MisoEngineError,
   MisoUsageError,
   resultName,
   parseDiagnostics,
 } from "../core/errors.ts";
-export type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
+export type { ErrorPhase, MisoDiagnostic, MisoErrorCode, SdkTimeoutCode } from "../core/errors.ts";
 export { assertSameSession, effect, session, SessionBuilder } from "../core/session.ts";
 export type { SessionLike, SessionModel, SessionOptions } from "../core/session.ts";

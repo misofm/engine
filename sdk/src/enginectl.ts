@@ -14,7 +14,7 @@ type ExitCode = 2 | 3 | 4 | 5 | 70;
 
 interface ErrorExtra {
   readonly phase?: string;
-  readonly result?: number;
+  readonly result?: number | undefined;
   readonly diagnostics?: readonly unknown[];
 }
 

@@ -152,11 +152,17 @@ export interface ObservationSubscriptionTransport {
     /** The longest one managed submission waits for renders, across all of its resends. */
     readonly boundMs: number;
     /**
-     * Resolves `true` once the engine has rendered a block after this call, and `false` when
-     * `timeoutMs` passes first or the engine is closed or replaced. It never waits longer than
-     * `timeoutMs`.
+     * Reads the engine's render position. The owner asks for it before it sends a submission, so
+     * a block rendered between that send and the refusal reaching the owner still counts as a
+     * render after the send (it may have drained the slot).
      */
-    next(timeoutMs: number): Promise<boolean>;
+    mark(): Promise<bigint>;
+    /**
+     * Resolves `true` once the engine has rendered a block after `since` (a `mark()` read before
+     * the refused send), and `false` when `timeoutMs` passes first or the engine is closed or
+     * replaced. It never waits longer than `timeoutMs`.
+     */
+    next(timeoutMs: number, since: bigint): Promise<boolean>;
   };
   /** Optional live-response capture/evaluation seam owned by the same lifetime. */
   readonly responseRead?: (
@@ -891,6 +897,10 @@ export class ObservationSubscriptionOwner {
     let deadline: number | undefined;
     for (let attempt = 0; ; attempt += 1) {
       this.#assertEpoch(epoch);
+      // The position is requested before the send, in the same synchronous turn, so the host
+      // answers it first. A block rendered after it and before the refusal returns is then seen.
+      const since = wait?.mark();
+      since?.catch(() => undefined);
       const report = managedSubmit === undefined
         ? await liveControls!.submit(...edits)
         : await managedSubmit.call(liveControls, ...edits);
@@ -909,7 +919,7 @@ export class ObservationSubscriptionOwner {
       deadline ??= Date.now() + wait.boundMs;
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw commandFailure("observation transaction was refused", report);
-      const rendered = await wait.next(remaining);
+      const rendered = await wait.next(remaining, await since!);
       this.#assertEpoch(epoch);
       if (!rendered) throw commandFailure("observation transaction was refused", report);
     }

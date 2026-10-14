@@ -681,7 +681,7 @@ export async function createSpectrum(options: BrowserSpectrumOptions): Promise<B
 }
 
 function deserializeError(error: ResponseWorkerError): Error {
-  if (error.kind === "engine" && error.phase !== undefined && error.code !== undefined && error.result !== undefined) {
+  if (error.kind === "engine" && error.phase !== undefined && error.code !== undefined) {
     const init: MisoEngineErrorInit = {
       phase: error.phase as MisoEngineErrorInit["phase"],
       code: error.code as MisoEngineErrorInit["code"],

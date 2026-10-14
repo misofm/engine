@@ -11,7 +11,18 @@ export type { ErrorPhase, ResultCodeName, BootResultAliasName };
  * rejected the options block -- so the vocabulary a caller sees is the union of both spellings and
  * the SDK chooses by context. Adopted ruling 5462139867 finding 2.
  */
-export type MisoErrorCode = ResultCodeName | BootResultAliasName;
+export type MisoErrorCode = ResultCodeName | BootResultAliasName | SdkTimeoutCode;
+
+/**
+ * A code the SDK itself raises when a bounded wait does not settle. It comes from the SDK, not
+ * from the engine, so an error that carries it has no engine `result`.
+ *
+ * - `spectrumCloseTimeout`: the spectrum Worker's close did not settle while `close()` waited.
+ * - `hostDisposeTimeout`: the worklet host did not answer its dispose request.
+ * - `contextCloseTimeout`: `AudioContext.close()` did not settle (it also covers the boot-path
+ *   context closes).
+ */
+export type SdkTimeoutCode = "spectrumCloseTimeout" | "hostDisposeTimeout" | "contextCloseTimeout";
 
 const RESULT_NAMES: ReadonlyMap<number, ResultCodeName> = new Map(
   ABI_LAYOUT.constants.resultCodes.map((row) => [row.value, row.name] as const),
@@ -72,7 +83,8 @@ export function parseDiagnostics(text: string): readonly MisoDiagnostic[] {
 export interface MisoEngineErrorInit {
   readonly phase: ErrorPhase;
   readonly code: MisoErrorCode;
-  readonly result: number;
+  /** The engine's result code; absent when the SDK itself raised `code` (an `SdkTimeoutCode`). */
+  readonly result?: number | undefined;
   readonly diagnostics?: readonly MisoDiagnostic[];
 }
 
@@ -88,7 +100,8 @@ export interface MisoEngineErrorInit {
 export class MisoEngineError extends Error {
   readonly phase: ErrorPhase;
   readonly code: MisoErrorCode;
-  readonly result: number;
+  /** The engine's result code, or `undefined` when the SDK raised `code` and the engine returned none. */
+  readonly result: number | undefined;
   readonly diagnostics: readonly MisoDiagnostic[];
 
   constructor(message: string, init: MisoEngineErrorInit) {
@@ -131,5 +144,63 @@ export class MisoUsageError extends Error {
     super(diagnosticCode === undefined ? message : `${message} (${diagnosticCode})`);
     this.name = "MisoUsageError";
     this.diagnosticCode = diagnosticCode;
+  }
+}
+
+/**
+ * A control transaction the core refused (#1563 D4).
+ *
+ * `code` is the core's own, the first diagnostic's stable dotted code (`control.domain`,
+ * `control.address.unknown`, ...), or the reply's status name (`revision_conflict`, `backpressure`,
+ * ...) when the core sent no diagnostic. The SDK adds no code of its own. A refused transaction
+ * changed nothing and is not retried. `revision` is the revision the core reported with the refusal.
+ */
+export class MisoControlRefusal extends Error {
+  readonly code: string;
+  /** The reply's status name, such as `validation_failed`. */
+  readonly status: string;
+  readonly revision: bigint;
+  /** The index, in the transaction that was sent, of the edit the first diagnostic names. */
+  readonly editIndex: number | undefined;
+  readonly diagnostics: readonly {
+    readonly code: string;
+    readonly detail: string | undefined;
+    readonly operationIndex: number | undefined;
+  }[];
+  /** The refusal as a `ControlReport` (`ok: false`). */
+  readonly report: {
+    readonly ok: false;
+    readonly revision: bigint;
+    readonly code: string;
+    readonly editIndex?: number;
+  };
+
+  constructor(init: {
+    readonly code: string;
+    readonly status: string;
+    readonly revision: bigint;
+    readonly editIndex: number | undefined;
+    readonly diagnostics: MisoControlRefusal["diagnostics"];
+  }) {
+    super(
+      `the core refused the control transaction: ${init.code}`
+        + (init.editIndex === undefined ? "" : ` at edit ${init.editIndex}`),
+    );
+    this.name = "MisoControlRefusal";
+    this.code = init.code;
+    this.status = init.status;
+    this.revision = init.revision;
+    this.editIndex = init.editIndex;
+    this.diagnostics = Object.freeze([...init.diagnostics]);
+    this.report = Object.freeze(
+      init.editIndex === undefined
+        ? { ok: false as const, revision: init.revision, code: init.code }
+        : { ok: false as const, revision: init.revision, code: init.code, editIndex: init.editIndex },
+    );
+  }
+
+  /** The core's code, as `MisoEngineError` and `MisoUsageError` spell it. */
+  get diagnosticCode(): string {
+    return this.code;
   }
 }

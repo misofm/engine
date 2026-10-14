@@ -168,4 +168,44 @@ Half a day to one day, one sonnet-high implementer.
 
 ## Decision record
 
-- (empty)
+- **Implementation (batch 5 lane K, base `26248b419`).** D1-D7 as frozen. `ControlCatalog` holds
+  `owners`, `sections`, `descriptors` (a `Vec<ControlRow>`, value `0.0`), `rows` (16-byte
+  `RowRecord`: parent index, control ID, descriptor index, kind, lane) and `values`. A section
+  header's name and an owner header's name are derived from the stored ID (`own`, `builtins`,
+  the slot ID; `session` or the owner ID), so no name string is stored twice. The build finds
+  duplicates through `Shape`, a copyable key of every wire field (each `f32` as bits, strings as
+  `&'static str`), so a row is looked up without allocating its strings; a transient
+  `HashMap<Shape, u32>` (zero-keyed `DefaultHasher`, `try_reserve`) is freed before `build`
+  returns, and `descriptors` is filled in first-occurrence order. `replace_session_catalog`
+  compares `owners`, `sections`, `rows` and `descriptors` (`same_descriptor`: `==` plus the bits of
+  every `f32`). `ControlProvider::control_row` returns `&ControlRow`; the mock returns
+  `UnsupportedTarget` for a header, which the controller maps to `INVALID_FIELD`, as before.
+  `window` resolves an owner filter to an owner index once.
+- **Gate 1, wire bytes (PR evidence, scratch test not committed).** The harness sent
+  `CONTROL_LIST_GET` and `CONTROL_STATE_GET` through the C ABI at `limit` 1, 7 and 256 from handle
+  0 to `eof`, plus the same with one owner filter per owner kind (session, strip, route, VCA), and
+  concatenated every response frame. Sessions: the reference session (`parametric-eq-nine-track`)
+  and `control_list_session()`, each before (phase 0) and after (phase 1) a live `matrix_mode`
+  switch of the first track. SHA-256 of the concatenated frames, identical on `26248b419` and on
+  the change:
+  - reference, phase 0: `6a847a099cc41507ccc09a3f86f6c5eae8e96975826aec6f37df255fd7624b32` (2,000,784 bytes)
+  - reference, phase 1: `93ef16e402f37a950a869da25c95fcc51c23baf92206145c105b9d591d2c9886`
+  - control_list_session, phase 0: `57ddc80dcd72bd17e988bad76f063dc193e008805bbbbbc3b23e60f5c6baa46a` (986,016 bytes)
+  - control_list_session, phase 1: `3361c877ef95c1f140940b7c5af5ce4edf77a5adf71afa0b688cf45e0d55e175`
+- **Gate 4, memory (x86-64, eight lanes; no AArch64 run is available here).**
+
+  | | before (`26248b419`) | after |
+  |---|---|---|
+  | reference catalog `retained_bytes` | 340,804 | 39,982 |
+  | reference catalog largest allocation | 253,504 | 14,912 |
+  | `capi_retained_bytes` | 503,819 | 197,105 |
+  | `largest_named_allocation_bytes` | 253,504 | 48,915 (the engine's, not the catalog's) |
+  | 1 MiB worst browser document (`worst_boot_document`, 192 tracks x 4 inserts) catalog `retained_bytes` | 21,235,552 | 1,262,968 |
+  | worst document catalog largest allocation | 15,094,096 | 887,888 |
+
+  The worst-document figures are native `ControlCatalog::build` on that document at its sample
+  rate; the wasm high-water growth (the boot budget pin) is not measured here, because the browser
+  preparer does not build the catalog yet (#1400b). New ceilings: `capi_retained_bytes` 216,832
+  at both widths; `largest_named_allocation_bytes` 53,824 at eight lanes. The four-lane ceiling of
+  that row stays 278,912, because the row's largest allocation is now the engine's, whose
+  AArch64 size only CI prints.

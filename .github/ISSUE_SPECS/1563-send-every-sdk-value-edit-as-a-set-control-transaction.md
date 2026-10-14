@@ -76,9 +76,11 @@ builders keep their names and arguments.
 - **D5. The writer.** `LiveControlWriter` keeps its role (stage, coalesce, flush) over D4's queue,
   keyed by address. `encodeLaneEdits` and `LaneEdit` keep only the observation kinds 7 and 8,
   which stay browser monitor operations until the later browser-feature phase (ruling C9).
-- **D6. The report.** `submit` and `flush` resolve with `ControlReport { ok: boolean, revision:
-  bigint, path: "live" | "model_only" | "rebuild" | "monitor", code?: string, editIndex?: number }`.
-  `CommandReport` stays for the observation kinds only. This is a breaking type change of the
+- **D6. The report.** `submit` and `flush` resolve with a `ControlReport` for an applied
+  transaction: `{ ok: true, revision: bigint, path: "live" | "model_only" | "rebuild" | "monitor",
+  appliedOperations }`. A refusal REJECTS the submit with `MisoControlRefusal`, which carries the
+  core's report (`{ ok: false, revision, code, editIndex? }`) as `report`; it does not resolve with
+  `ok: false` (as built, see the #1563A record). `CommandReport` stays for the observation kinds only. This is a breaking type change of the
   submit result; releases own the version (`docs/RELEASE.md`).
 - **D7. Transports.** Browser: the queue posts #1562's `control` message. Headless: the queue calls
   the `miso_engine_web_v1_control_*` exports in-process. Both decode the same reply bytes with D1.
@@ -190,3 +192,61 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
   D1's "if #1383 is on `main` first" clause does not apply.
 
 **Flip batch 6W (root ruling A1).** #1381a, #1562a, #1570b, #1563B and #1565A land together, in one batch of lane W. Each slice keeps its own commits and tests and is green at its own boundary; the batch runs the full CI-equivalent gate set once. If one slice fails, the batch stops: `main` never gets a partial flip, so it never has two writers of one plan's revision gate and cells. No transitional API lends `SessionState`'s producers or revision to the old command path.
+
+## Decision record: #1563A as built
+
+Built on `codex/controls-batch-5k` (main `205a8d2b4` + batch 4 lane K + #1532). Gates 1 and 4 only.
+
+- **Fixture (gate 1).** `crates/protocol/tests/set_control_frames.rs` writes
+  `crates/protocol/tests/fixtures/set-control-frames.json` from the protocol codec: six command
+  frames (every owner kind and section shape in every lane with the ramp absent, `0` and `480`; a
+  `u32::MAX` ramp; identifier lengths 1 to 9; NaN, infinities, `-0.0`; `u64` request IDs and
+  revisions) and seven reply frames (applied on each of the three Rust edit paths, two refusals with
+  diagnostics, a revision conflict, backpressure). The test fails when the checked-in file differs
+  from what the codec writes; `MISO_ENGINE_BLESS_FIXTURES=1` rewrites it. It also decodes each frame it
+  writes with the Rust decoder. `sdk/test/control-frame-evals.mjs` encodes the same edits and compares
+  bytes, and decodes the replies. Values travel as `valueBits` (hex of the binary32), so the canonical NaN
+  is compared by bits (canonical NaN only).
+- **The encoder takes a numeric row ID.** `ControlWireAddress` is `{ owner, section, control: number,
+  lane }`. The generated `ControlAddress` names a control by machine name, and an effect row's number
+  depends on the effect type, which the address (an insert's stable ID) does not carry. Resolving a
+  name to a row ID is the builders' work (D2, #1563B); the codec stays a pure wire encoder.
+- **The edit path `monitor` (4)** is accepted by the reply decoder; the Rust `EditPath` has codes 1 to
+  3 until #1559 allocates 4, so the fixture holds no monitor reply and the eval patches the byte.
+- **The report (D6).** `ControlReport` is a union: `{ ok: true, revision, path, appliedOperations }`
+  and `{ ok: false, revision, code, editIndex? }`. `path` is absent on a refusal, because a refused
+  transaction took no path. `ControlTransactionQueue.submit` and `flush` resolve with the first form and
+  reject a refused transaction with `MisoControlRefusal` (D4: "rejects its submit with the core's
+  code"); the error carries the second form as `report`, the core's first diagnostic code as `code`
+  (the status name when the core sent no diagnostic) and `editIndex`. No SDK code of its own.
+- **The queue lives in `sdk/src/core/control-queue.ts`** (new; the spec's path list names no file for
+  it) and `MisoControlRefusal` in `errors.ts`. Staging validates encodability only (D3's list), so an
+  unencodable edit never sits staged. All waiters of one coalesced transaction share its one report.
+  Request IDs count from 1 and never repeat, also across `reset()`.
+- **The headless engine owns the queue.** `OfflineEngine.controlTransactions()` returns the engine's
+  one queue (made on first use); `loadSession()` resets it to revision `0` (a booted session) and
+  `dispose()` closes it. Its transport is `WasmBoundary.controlFrame`, which calls the four
+  `miso_engine_web_v1_control_*` exports as #1562 D1 freezes them, looked up by name when called. This
+  tree's module does not export them (#1562a lands in batch 6W), so a transaction sent today refuses
+  with `unsupported`; no eval runs a transaction through the real module until #1562a, and the queue is
+  judged against a scripted core that answers with the Rust codec's reply frames. #1563B's gate 3 is
+  the first end-to-end run.
+- **Not done here (#1563B):** the builders, the writer, `LaneEdit`, `CommandReport`, the SDK's own
+  value checks, `PREPARED_BYPASS_EFFECTS`, the prepared-control asset, the browser transport, the
+  evals' migration, `sdk/README.md` and the qualification rows.
+
+## Open points recorded for #1563B and #1562a (batch 5 review fold)
+
+- **Coalescing mixes callers (#1563B must decide).** The queue coalesces submits from different
+  callers into one transaction, so one caller's out-of-domain edit refuses the whole transaction
+  and drops the other callers' edits, and `editIndex` indexes the transaction that was sent, not the
+  caller's own submit. #1563B's builders and writer must decide isolation: for example flush before
+  staging into a batch that holds a foreign submit, or map `editIndex` back to each submit and
+  resend the edits that did not refuse.
+- **Seed the queue's revision after boot (#1563B, #1562a).** After a successful boot or reboot the
+  queue must take its revision from the core's committed revision, not reset to `0` before the
+  reboot result is known. Today `loadSession()` resets to `0` first (a booted session is at `0`),
+  which holds only while the core starts every session at revision `0`.
+- **One request-ID allocator for the whole `SessionState::command` endpoint (#1562a).** The
+  queue's transaction IDs and the catalog reads (and any other command through that endpoint) draw
+  from one allocator, so no two requests on the endpoint share an ID.

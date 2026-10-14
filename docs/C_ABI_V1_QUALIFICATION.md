@@ -237,7 +237,7 @@ IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
 (`CONTROL_LIST_GET`, `CONTROL_STATE_GET`, capability flag bit 7; decision 17, C4) from the core: its
 catalog is `host_core::ControlCatalog`, built from the compiled session's `controls::list` with an
 owner header before each owner's rows and a section header before each section's, each entry at its
-handle (from 1, in list order) and its committed value beside it. The list therefore covers every
+handle (from 1, in list order) and its committed value beside it. The catalog holds owners, sections and the distinct control descriptors once each in three shared tables (descriptors compared by bits) and one 16-byte record per entry, and a page builds its wire entries from them (#1599). The list therefore covers every
 control of the session (strips, builtins, console slots, inserts, routes, VCAs and the session's
 own rows), and can never disagree with what `controls` validates. Every commit replaces the
 catalog with the committed model's (a live commit builds it before its first write and publishes it
@@ -249,7 +249,7 @@ control row's descriptor (every field except `value`) differs from the previous 
 request that names another epoch is `REVISION_CONFLICT` with `control.list.stale`. The page
 `revision` is the committed session revision. A page holds at most `limit` rows and fewer when its
 response would exceed the endpoint's response bound (the page then is not the end of the list).
-Automation domain checks read the catalog row by handle; until #1567 only an effect parameter is a
+Automation domain checks read the shared descriptor of the row by handle; until #1567 only an effect parameter is a
 target of `AUTOMATION_ENQUEUE`, and a handle that names any other row is `INVALID_FIELD` with
 `automation.target.unsupported`. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.

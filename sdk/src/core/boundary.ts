@@ -1215,6 +1215,64 @@ export class WasmBoundary {
     });
   }
 
+  /**
+   * Run one command frame through the core's control entry and return the reply frame (#1562 D1).
+   *
+   * The entry is the same `SessionState::command` the C ABI calls: the frame is a complete BTLV
+   * command and the reply a complete BTLV response, refusals included. The four exports are looked
+   * up when called, not at load, because a module built before #1562 does not export them; such a
+   * module refuses here with the typed `unsupported`.
+   *
+   * A malformed reply after the core committed rejects although the edit was applied; values are
+   * absolute, so a resend is safe.
+   */
+  controlFrame(frame: Uint8Array): Uint8Array {
+    const handle = this.#live();
+    const request = optionalExport(this.#exports, "miso_engine_web_v1_control_request_ptr");
+    const command = optionalExport(this.#exports, "miso_engine_web_v1_control_command");
+    const responsePointer = optionalExport(this.#exports, "miso_engine_web_v1_control_response_ptr");
+    const responseBytes = optionalExport(this.#exports, "miso_engine_web_v1_control_response_bytes");
+    if (
+      request === undefined || command === undefined
+      || responsePointer === undefined || responseBytes === undefined
+    ) {
+      throw new MisoEngineError("the engine module has no control entry", {
+        phase: "asset",
+        code: "unsupported",
+        result: constantValue("resultCodes", "unsupported"),
+        diagnostics: [{ code: "sdk.asset.export", path: "miso_engine_web_v1_control_command" }],
+      });
+    }
+    const memory = this.#exports.memory;
+    const staging = Number(request(handle, frame.length));
+    if (staging === 0 || staging + frame.length > memory.buffer.byteLength) {
+      throw new MisoEngineError("the engine staged no buffer for this control frame", {
+        phase: "lifecycle",
+        code: "bufferTooSmall",
+        result: constantValue("resultCodes", "bufferTooSmall"),
+      });
+    }
+    new Uint8Array(memory.buffer, staging, frame.length).set(frame);
+    const result = Number(command(handle, frame.length));
+    if (result !== constantValue("resultCodes", "ok")) {
+      throw new MisoEngineError("the engine refused a control frame", {
+        phase: "lifecycle",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    const pointer = Number(responsePointer(handle));
+    const length = Number(responseBytes(handle));
+    if (pointer === 0 || pointer + length > memory.buffer.byteLength) {
+      throw new MisoEngineError("the engine returned a malformed control reply buffer", {
+        phase: "lifecycle",
+        code: "internal",
+        result: constantValue("resultCodes", "internal"),
+      });
+    }
+    return new Uint8Array(memory.buffer, pointer, length).slice();
+  }
+
   /** Stage `count` already-encoded 48-byte command records and submit them as one transaction. */
   submitCommands(records: Uint8Array, count: number): CommandReport {
     return this.#submitPreparedCommands(records, count);

@@ -5,6 +5,7 @@ import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect, session } from "../../../sdk/src/core/session.ts";
+import { MisoEngineError } from "../../../sdk/src/core/errors.ts";
 import type { ObservationReadResult } from "../../../sdk/src/core/observation.ts";
 import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts";
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
@@ -1561,12 +1562,32 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   }
 }
 
-async function createResidentObservationBrowser(): Promise<SdkEngine> {
+/** One `host.command` call of the observation wait instances (#1530 D4): its ack and its records. */
+interface ObservationWaitCommand {
+  readonly result: number;
+  readonly reason: number;
+  /** `request.commands` as JSON, with each bigint spelled `<digits>n`. */
+  readonly records: string;
+}
+
+/** Issue #1530 D2: the three arguments the wait instances add; the resident call passes none. */
+interface ResidentObservationOptions {
+  readonly workload?: string;
+  readonly requestDeadlineMs?: number;
+  readonly commandLog?: ObservationWaitCommand[];
+}
+
+async function createResidentObservationBrowser(
+  residentOptions: ResidentObservationOptions = {},
+): Promise<SdkEngine> {
   const document = observationDocumentWithGate(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine("resident-observation", {
+  const commandLog = residentOptions.commandLog;
+  const browser = await createSdkEngine(residentOptions.workload ?? "resident-observation", {
     document,
+    ...(residentOptions.requestDeadlineMs === undefined
+      ? {} : { requestDeadlineMs: residentOptions.requestDeadlineMs }),
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
     } },
@@ -1584,15 +1605,190 @@ async function createResidentObservationBrowser(): Promise<SdkEngine> {
       Object.defineProperty(context, "close", { value: async () => {} });
       return context;
     },
-    createHost: (request) => createDefaultHost({
-      ...request,
-      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
-    }),
+    createHost: async (request) => {
+      const host = await createDefaultHost({
+        ...request,
+        hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+      });
+      if (commandLog !== undefined) {
+        // D4: log each command batch and its ack; nothing else in the host is wrapped.
+        const command = Object.getPrototypeOf(host).command as (this: typeof host, ...args: never[]) => Promise<{
+          readonly result: number;
+          readonly reason: number;
+        }>;
+        Object.defineProperty(host, "command", {
+          configurable: true,
+          writable: true,
+          value: async (commandRequest: { readonly commands: unknown }) => {
+            const ack = await command.call(host, commandRequest as never);
+            commandLog.push({
+              result: ack.result,
+              reason: ack.reason,
+              records: JSON.stringify(commandRequest.commands, (_key, item) =>
+                typeof item === "bigint" ? `${item}n` : item),
+            });
+            return ack;
+          },
+        });
+      }
+      return host;
+    },
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
   return browser;
+}
+
+/** The 16 source blocks the resident flow submits, sent before any render (#1530 D3). */
+async function submitObservationSourceBlocks(browser: SdkEngine, label: string): Promise<void> {
+  for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+    const acknowledgement = await browser.host.submitSource({
+      sourceId: "live-control-source",
+      generation: 1n,
+      startFrame: BigInt(block * 128),
+      sampleRateHz: 48_000,
+      planes: observationPlanes(block),
+      frames: 128,
+      endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+    });
+    if (acknowledgement.result !== 0) throw new Error(`${label}: source submission refused`);
+  }
+}
+
+async function renderedQuantaOf(browser: SdkEngine): Promise<string> {
+  return String((await browser.host.status()).renderedQuanta);
+}
+
+/**
+ * Settle one `close()` within a guard (#1530 D5): a guard that fires records `settled: false`, so
+ * a defect is a named red gate and never a page timeout. `began` is `performance.now()` taken just
+ * before the `close()` call.
+ */
+async function settleWithinGuard(closing: Promise<void>, began: number, guardMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    closing.then(
+      () => ({ settled: true, error: undefined as unknown }),
+      (error: unknown) => ({ settled: true, error }),
+    ),
+    new Promise<{ settled: false; error: undefined }>((resolve) => {
+      timer = globalThis.setTimeout(() => resolve({ settled: false, error: undefined }), guardMs);
+    }),
+  ]);
+  if (timer !== undefined) globalThis.clearTimeout(timer);
+  const elapsedMs = performance.now() - began;
+  const error = outcome.error;
+  return {
+    settled: outcome.settled,
+    resolved: outcome.settled && error === undefined,
+    typed: error instanceof MisoEngineError,
+    errorCode: error instanceof MisoEngineError ? error.code : error === undefined ? null : String(error),
+    elapsedMs,
+  };
+}
+
+/**
+ * Issue #1530: the browser SDK's wait on observation backpressure against the shipped worklet.
+ * Each instance owns an `OfflineAudioContext`, which renders nothing until `startRendering()`
+ * (D1) and renders once, so each case has its own instance.
+ */
+async function runObservationWaitQualification(): Promise<Record<string, unknown>> {
+  return { deadline: await runObservationWaitDeadline(), render: await runObservationWaitRender() };
+}
+
+async function subscribeWaitTap(browser: SdkEngine) {
+  // D3: one selection, the bound's maximum cadence so the timer never reads during the case.
+  const subscription = await browser.subscribeObservations({
+    selections: [observationSelection("comp")],
+    windowBlocks: 2,
+    cadenceMs: 60_000,
+  });
+  await submitObservationSourceBlocks(browser, "observation wait");
+  return subscription;
+}
+
+async function runObservationWaitDeadline(): Promise<Record<string, unknown>> {
+  const commandLog: ObservationWaitCommand[] = [];
+  const browser = await createResidentObservationBrowser({
+    workload: "observation-wait-deadline",
+    requestDeadlineMs: 250,
+    commandLog,
+  });
+  try {
+    const subscription = await subscribeWaitTap(browser);
+    const renderedQuantaBefore = await renderedQuantaOf(browser);
+    const began = performance.now();
+    const refusal = await settleWithinGuard(subscription.close(), began, 10_000);
+    const renderedQuantaAfterRefusal = await renderedQuantaOf(browser);
+    let handleOpenAfterRefusal = true;
+    try { subscription.readLatest(); } catch { handleOpenAfterRefusal = false; }
+    const commandsBeforeRender = commandLog.map((entry) => ({ ...entry }));
+    await browser.context.startRendering();
+    const secondBegan = performance.now();
+    const second = await settleWithinGuard(subscription.close(), secondBegan, 10_000);
+    const renderedQuantaAfterRender = await renderedQuantaOf(browser);
+    return {
+      requestDeadlineMs: 250,
+      settled: refusal.settled,
+      typed: refusal.typed,
+      errorCode: refusal.errorCode,
+      elapsedMs: refusal.elapsedMs,
+      renderedQuantaBefore,
+      renderedQuantaAfterRefusal,
+      handleOpenAfterRefusal,
+      commandsBeforeRender,
+      closeAfterRender: { resolved: second.resolved, elapsedMs: second.elapsedMs },
+      renderedQuantaAfterRender,
+      commands: commandLog.map((entry) => ({ ...entry })),
+    };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
+  } finally {
+    await closeSdkEngine(browser);
+  }
+}
+
+async function runObservationWaitRender(): Promise<Record<string, unknown>> {
+  const commandLog: ObservationWaitCommand[] = [];
+  const browser = await createResidentObservationBrowser({
+    workload: "observation-wait-render",
+    requestDeadlineMs: 10_000,
+    commandLog,
+  });
+  try {
+    const subscription = await subscribeWaitTap(browser);
+    const renderedQuantaBefore = await renderedQuantaOf(browser);
+    const began = performance.now();
+    const closing = settleWithinGuard(subscription.close(), began, 15_000);
+    // The arm is log entry 0; the close's first send is entry 1, and it is the refusal.
+    const seenBy = performance.now() + 5_000;
+    while (commandLog.length < 2 && performance.now() < seenBy) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 1));
+    }
+    const refusalSeenBeforeRender = commandLog.length >= 2 && commandLog[1]?.result !== 0;
+    const rendering = browser.context.startRendering();
+    rendering.catch(() => undefined);
+    const close = await closing;
+    await rendering;
+    const renderedQuantaAfterRender = await renderedQuantaOf(browser);
+    const commands = commandLog.map((entry) => ({ ...entry }));
+    return {
+      requestDeadlineMs: 10_000,
+      refusalSeenBeforeRender,
+      settled: close.settled,
+      resolved: close.resolved,
+      elapsedMs: close.elapsedMs,
+      renderedQuantaBefore,
+      renderedQuantaAfterRender,
+      commands,
+      resendIdentical: commands.length === 3 && commands[1]?.records === commands[2]?.records,
+    };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
+  } finally {
+    await closeSdkEngine(browser);
+  }
 }
 
 async function runResidentObservationQualification(): Promise<Record<string, unknown>> {
@@ -1736,6 +1932,7 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
 
 async function runSdkObservationQualification(): Promise<Record<string, unknown>> {
   const resident = await runResidentObservationQualification();
+  const wait = await runObservationWaitQualification();
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
@@ -1892,6 +2089,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
         closedRefused: liveClosedRefused,
       },
       resident,
+      wait,
       managedResponse,
     };
   } catch (error) {

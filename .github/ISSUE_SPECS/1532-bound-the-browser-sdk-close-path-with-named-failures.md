@@ -244,7 +244,26 @@ row today.
 
 ## Attempt record
 
-*(empty: to be filled by the implementer)*
+Gates 1-6 and 8: implemented and green locally (`node --test test/browser-evals.mjs
+test/spectrum-browser-evals.mjs`: 39 pass; `check-sdk-headless.sh` on a fresh artifact build: 393
+pass; `check-sdk-types.sh`, `check-sdk-generated.sh`, `check-sdk-deletions.py`,
+`check-workspace-policy.sh` pass). Gate 7 (mutations) moved to #1605 and was not run. Gate 9 (real
+browsers) runs in CI; no local browser run (sprint mode).
+
+## Decision record
+
+- **Result type readers.** Making `MisoEngineError.result` `number | undefined` also widened
+  `ValidationResult.result` (`headless/engine.ts`), `ErrorExtra.result` (`enginectl.ts`) and
+  `ResponseWorkerError.result` (`response-worker.ts`); `deserializeError` (`response.ts`) no
+  longer requires a `result` to rebuild a `MisoEngineError`. No reader switches on the value.
+- **Type eval.** D2 asks the type evals to cover both shapes; that needed one new file,
+  `sdk/test/error-types.ts` (compile-only, run by `check-sdk-types.sh`), outside the authorized
+  path list.
+- **Boot-path closes at the quantum refusal and the worklet boot failure** swallow any failure of
+  the bounded close (a timeout or a rejection), so the boot error always reaches the caller (D7).
+  Before, a rejecting `context.close()` there replaced the boot error.
+- **Gate 3 clock.** The spectrum test ticks past close()'s 10 s bound and then the query's 60 s
+  deadline; it crosses no other timer. Gates 1, 2, 4, 5(a) and 6 cross only the 10 s bound.
 
 ## Amendment (decision 17, root 2026-10-13)
 

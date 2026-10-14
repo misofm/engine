@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
+import { MisoEngineError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 
 const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
@@ -500,6 +501,45 @@ test("browser spectrum Worker initialization uses the total query deadline", asy
     await engine.close();
   }
 });
+
+test("a spectrum Worker that never answers cannot hold close() past 10 s, whatever the query deadline",
+  { timeout: 5_000 }, async (t) => {
+    // Issue #1532. The ticks cross two timers: close()'s 10 s step bound and the query's 60 s
+    // spectrum deadline (the Worker initialization and the total query deadline).
+    const unhandled = [];
+    const onUnhandled = (reason) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    t.after(() => process.off("unhandledRejection", onUnhandled));
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+    const worker = new SpectrumWorker({ silent: true });
+    let disposes = 0;
+    let contextCloses = 0;
+    const engine = await browserEngine(hostWithCapture({ async dispose() { disposes += 1; } }), worker, {
+      createContext: () => ({ ...context(), async close() { contextCloses += 1; } }),
+    });
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const query = engine.querySpectrum({ ...PREPARED, spectrumLimits: { requestDeadlineMs: 60_000 } })
+      .then(() => undefined, (error) => error);
+    await flush();
+    assert.ok(worker.messages.some((message) => message.type === "spectrum-init"), "the query started the Worker");
+    const closing = assert.rejects(engine.close(), (error) => {
+      assert.ok(error instanceof MisoEngineError);
+      assert.equal(error.phase, "lifecycle");
+      assert.equal(error.code, "spectrumCloseTimeout");
+      assert.match(error.message, /spectrum close/);
+      return true;
+    });
+    await flush();
+    t.mock.timers.tick(10_000);
+    await closing;
+    assert.equal(disposes, 1, "the host is still disposed after the spectrum timeout");
+    assert.equal(contextCloses, 1, "the context is still closed after the spectrum timeout");
+    t.mock.timers.tick(60_000);
+    assert.ok(await query, "the query ends with its own deadline");
+    await flush();
+    assert.equal(worker.terminated, true, "the late Worker is terminated");
+    assert.deepEqual(unhandled, []);
+  });
 
 test("collection selection deadline retires only its stream and holds late cleanup", async () => {
   const worker = new SpectrumWorker();

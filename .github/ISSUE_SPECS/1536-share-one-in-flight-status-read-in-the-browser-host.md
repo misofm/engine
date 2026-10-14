@@ -189,7 +189,14 @@ Recommended: **stream H** (product risk), early in its queue and before H #1332.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- Attempt 1 (lane W, batch 5): implemented D2-D5. Gate 1 ran red on the unchanged host (the second
+  concurrent call rejected with result 6; the harness died on the unhandled rejection), then green
+  on the change. Gates 1-4 are the `#1536` block in `scripts/test-web-audioworklet.mjs`; the
+  superseded `assertBoundedNoBurn("status", ...)` case is deleted. Sprint mode: no mutation runs
+  and no local browser run (the CI browser rows run gate 6). Local checks green:
+  `test-web-audioworklet.sh`, `check-web-audioworklet.sh` (built artifact set and named twin),
+  `check-sdk-types.sh`, `check-sdk-headless.sh` (428 pass), `check-sdk-generated.sh`,
+  `check-browser-expected-resources.py`, `check-workspace-policy.sh`.
 
 ## Root rulings (2026-10-13)
 
@@ -199,3 +206,21 @@ Recommended: **stream H** (product risk), early in its queue and before H #1332.
 - **R3. #1332.** #1332's spec gets a one-line dependency note ("the shared status read of this
   issue must hold when control moves to a Worker"), not a copy of the rule.
 - **R4. Placement.** Stream H, early, before #1332.
+
+## Decision record
+
+- **Dispose in D3.** `dispose()` is not an authorized edit and does not settle a pending status
+  read: the worklet answers in arrival order, so a read sent before the dispose request settles
+  normally (resolves) before the dispose acknowledgement. The adaptation, all inside `status()` and
+  the shared-read helpers: once a dispose request is pending, a new `status()` call and a queued
+  follow-up caller both reject with result 3 (`webError(3)`, request ID 0) and no follow-up read is
+  posted behind the dispose request. Gate 3's disposal half therefore checks that the in-flight read
+  resolves, the follow-up caller rejects with 3, and dispose is the last request posted. A host
+  failure (`#fail`) rejects the in-flight read, its joined callers and the follow-up callers with the
+  same error (gate 3, failure halves).
+- **Where the state lives.** `#statusRead` (`{ requestId, promise }`) and `#statusFollow` replace
+  `#inFlightStatus`. `#release` clears the read and sends the follow-up synchronously (before the
+  first read's callers resume), so a caller resuming from the first reply joins the new read.
+  `#sendStatus` registers a read only when `#request` kept it (a refusal or a synchronous post
+  failure leaves nothing in flight). Helper `deferred()` and private `#disposePending`,
+  `#sendStatus`, `#sendStatusFollow` are the shared-read state; no other method changed.

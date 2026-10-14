@@ -631,6 +631,41 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
     CompileFailure::Diagnostics(diagnostics.into_bytes())
 }
 
+/// The adapter's choice in preparing a plan (issue #1400 D1): how the host-core pipeline is called,
+/// and nothing else.
+///
+/// The session prepares every plan through the preparer its adapter supplies, at boot and for
+/// every structural transaction. The control plane chooses the live lanes
+/// ([`controls::live_lanes`], decision 17 C6) and passes them in; the preparer chooses the live
+/// request (its queue depth, its meters, its spectrum capture) and which host-core entry to call.
+/// Everything else stays in the crate's `prepare_runtime`, in this order: the shape check before
+/// the call, then the strip lanes, the effect producers, the resource projection and the limits
+/// after it.
+///
+/// A preparer holds no per-plan state: the session calls it once for the boot plan and once for
+/// each structural successor, always on a control thread. `successor` is `Some` for a successor,
+/// and the preparer then prepares through the host-core entry that takes the base, so the
+/// unchanged sources carry their rings. `bound_cache` is the design-bound cache the preparation
+/// reads and fills, and `superseded` is the session's `live_values_superseded` count; the preparer
+/// passes both to host-core as they are.
+pub trait RuntimePreparer: Send {
+    /// Prepare the plan for `compiled`, or refuse with host-core's diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// The host-core preparation's diagnostics, unchanged: the session maps them to its
+    /// adapter's failure.
+    fn prepare(
+        &self,
+        compiled: &CompiledSession,
+        caps: &HostPrepareCaps,
+        lanes: HostLiveLanes,
+        successor: Option<SuccessorBase<'_>>,
+        bound_cache: &mut InputBoundCache<'_>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
+}
+
 /// Prepare one plan plus its source producers, and project its resource accounting.
 ///
 /// The shared pipeline is `host-core`; the control plane adds only what is its own: its retained
@@ -645,6 +680,7 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 /// and closes before the capi rows are read, on every path, so the designs the preparation used
 /// are the new plan's seed (`PreparedRuntime::bound_seed`, charged as an epoch row, D4).
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
+    preparer: &dyn RuntimePreparer,
     compiled: &CompiledSession,
     limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
@@ -662,28 +698,16 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     //
     // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
     // transaction left unchanged is prepared vacant to carry its predecessor's ring.
-    let live = HostLiveControlRequest::default();
     let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
     bound_cache.begin_journal();
-    let prepared = match successor {
-        Some(base) => prepare_host_runtime_with_live_lanes_successor(
-            compiled,
-            &caps,
-            &live,
-            lanes,
-            base,
-            Some(&mut *bound_cache),
-            superseded,
-        ),
-        None => prepare_host_runtime_with_live_lanes(
-            compiled,
-            &caps,
-            &live,
-            lanes,
-            Some(&mut *bound_cache),
-            superseded,
-        ),
-    };
+    let prepared = preparer.prepare(
+        compiled,
+        &caps,
+        lanes,
+        successor,
+        &mut *bound_cache,
+        superseded,
+    );
     let bound_seed = bound_cache.take_journal();
     let (prepared, handles) = prepared.map_err(prepare_failure)?;
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
@@ -793,6 +817,9 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 ///
 /// The adapter keeps its own per-session diagnostic storage; it builds that after this returns.
 ///
+/// `preparer` (issue #1400 D2) is the adapter's preparation: the session stores it and prepares
+/// the boot plan and every structural successor through it, and through nothing else.
+///
 /// `engine_cache` (#1471) is the host's design-bound cache: the compile reads and fills it. The
 /// first epoch owns the designs this compile used, journaled at the time of use with their stored
 /// charges (`InputBoundCache::begin_journal`) as its `bound_seed`, which the first structural
@@ -802,6 +829,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
+    preparer: Box<dyn RuntimePreparer>,
     engine_cache: Option<&mut InputBoundCache>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
@@ -828,6 +856,7 @@ where
     // Made here, with the session's other fixed rows, and charged by `capi_resources`.
     let live_values_superseded = host_core::LiveValuesSuperseded::default();
     let runtime = prepare_runtime::<A>(
+        &*preparer,
         store.compiled(),
         limits,
         None,
@@ -955,6 +984,7 @@ where
             publisher,
             retirer,
             limits,
+            preparer,
             live_values_superseded,
             decode_fields: decode_fields.into_boxed_slice(),
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,

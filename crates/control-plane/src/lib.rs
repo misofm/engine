@@ -40,10 +40,9 @@ pub(crate) use engine::realtime::{
     RenderIo, WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
 };
 pub(crate) use host_core::{
-    ControlCatalog, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy,
-    PlanStateInventory, PrepareDiagnostics, SessionControlProvider, SourceControlError,
-    SourceControlSet, SuccessorBase, parse_host_session, prepare_host_runtime_with_live_lanes,
-    prepare_host_runtime_with_live_lanes_successor,
+    ControlCatalog, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,
+    PrepareDiagnostics, SessionControlProvider, SourceControlError, SourceControlSet,
+    SuccessorBase, parse_host_session,
 };
 pub(crate) use protocol::{
     CommandFrameProcessError, ControllerRetainedCapacity, DecodeScratch, EncodeError,
@@ -60,7 +59,7 @@ mod error;
 mod plan;
 
 pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
-pub use compile::{CompiledChildren, compile_children};
+pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{CommandError, EventError, EventLane, SessionState, SourceFailure};
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).

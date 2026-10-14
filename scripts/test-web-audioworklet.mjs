@@ -1377,6 +1377,151 @@ async function testMainRealm() {
     statusMutation = null;
     await schemaHost.dispose();
 
+    // #1536: concurrent status calls share one read and are never refused for being in flight.
+    const sharedStatusHost = async () => createMisoAudioWorkletHost({
+      context,
+      document: new Uint8Array(),
+      options: limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    const settleTicks = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const releaseOne = async () => {
+      heldAll.shift()();
+      await settleTicks();
+    };
+    // Attach the handler at the call so a rejection that lands while the test awaits a release is
+    // never unhandled; `rejected` then checks the stored outcome like `errorResult`.
+    const watch = (promise) => promise.then((value) => ({ value }), (error) => ({ error }));
+    const rejected = async (watched, result) => {
+      const outcome = await watched;
+      assert(outcome.error !== undefined, "expected rejection");
+      assert.deepEqual(Object.keys(outcome.error).sort(), ["requestId", "result", "tag"]);
+      assert.equal(outcome.error.result, result);
+      return outcome.error;
+    };
+    const requestsSince = (from, tag) => events.slice(from).filter((event) => event[1] === tag);
+    {
+      // Gate 1. Test value: a refused second call (the defect that fails an overlapping managed
+      // observation close), or one posted read per call (an unbounded in-flight count).
+      const host = await sharedStatusHost();
+      const from = events.length;
+      holdAll = true;
+      const calls = [host.status(), host.status(), host.status()];
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1, "three calls post one read");
+      holdAll = false;
+      await releaseOne();
+      const replies = await Promise.all(calls);
+      assert.equal(new Set(replies.map((reply) => reply.requestId)).size, 1, "one shared reply");
+      assert.equal(replies[0], replies[1], "the joined callers share the frozen reply");
+      assert.equal(
+        (await host.renderAllocationCount()).requestId, replies[0].requestId + 1,
+        "joined callers allocated no IDs",
+      );
+      await host.dispose();
+    }
+    {
+      // Gate 2. Test value: joining a read sent before a request the caller already sent.
+      const host = await sharedStatusHost();
+      const from = events.length;
+      holdAll = true;
+      const a = host.status();
+      const other = host.renderAllocationCount();
+      const b = host.status();
+      const c = host.status();
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1, "one read on the port");
+      await releaseOne();
+      const first = await a;
+      const reads = requestsSince(from, "miso.status.v1");
+      assert.equal(reads.length, 2, "exactly one follow-up read is posted");
+      assert.equal(first.requestId, reads[0][2]);
+      assert(reads[1][2] > events.slice(from).find((event) => event[1] === "miso.renderallocations.v1")[2],
+        "the follow-up is newer than the other request");
+      await releaseOne();
+      await releaseOne();
+      holdAll = false;
+      const [replyB, replyC] = await Promise.all([b, c]);
+      await other;
+      assert.equal(replyB.requestId, reads[1][2], "b reads after the other request");
+      assert.equal(replyB, replyC, "b and c share the follow-up");
+      await host.dispose();
+    }
+    {
+      // Gate 3a. Test value: a joined caller left pending for ever, or a read per caller after fail.
+      const host = await sharedStatusHost();
+      const from = events.length;
+      holdAll = true;
+      const calls = [host.status(), host.status(), host.status()].map(watch);
+      statusMutation = (reply) => ({ ...reply, memoryBytes: 65537 });
+      await releaseOne();
+      statusMutation = null;
+      holdAll = false;
+      for (const call of calls) await rejected(call, 255);
+      const posted = events.length;
+      assert.equal((await errorResult(host.status(), 255)).tag, "miso.error.v1", "sticky");
+      assert.equal(events.length, posted, "the sticky error posts nothing");
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1);
+      await host.dispose().catch(() => undefined);
+    }
+    {
+      // Gate 3b. Test value: a follow-up caller left pending when the host fails, or a follow-up
+      // read posted after the host failed.
+      const host = await sharedStatusHost();
+      const node = FakeNode.latest;
+      holdAll = true;
+      const calls = [
+        host.status(), host.status(), host.renderAllocationCount(), host.status(),
+      ].map(watch);
+      const posted = events.length;
+      holdAll = false;
+      node.onprocessorerror();
+      for (const call of calls) await rejected(call, 255);
+      assert.equal(events.length, posted, "nothing is posted after the failure");
+      heldAll.length = 0;
+      await host.dispose().catch(() => undefined);
+    }
+    {
+      // Gate 3c. Test value: a follow-up read posted behind the dispose request, or a follow-up
+      // caller left pending for ever once disposal starts.
+      const host = await sharedStatusHost();
+      const from = events.length;
+      holdAll = true;
+      const read = host.status();
+      const other = host.renderAllocationCount();
+      const follow = watch(host.status());
+      const disposal = host.dispose();
+      assert.equal((await localErrorResult(host.status(), 3)).result, 3, "status after dispose was sent");
+      await releaseOne();
+      await releaseOne();
+      await releaseOne();
+      holdAll = false;
+      assert.equal((await read).result, 0, "the read sent before dispose settles normally");
+      await other;
+      assert.equal((await rejected(follow, 3)).requestId, 0);
+      await disposal;
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1, "no read after dispose");
+      assert.equal(
+        events.slice(from).findLastIndex((event) => event[1] === "miso.dispose.v1"),
+        events.length - from - 1,
+        "dispose is the last request posted",
+      );
+    }
+    {
+      // Gate 4. Test value: dropping or cancelling a read when its first caller stops waiting (the
+      // awaitSpectrum deadline), which hangs the next caller or posts a second read.
+      const host = await sharedStatusHost();
+      const from = events.length;
+      holdAll = true;
+      const abandoned = Promise.race([host.status(), new Promise((resolve) => setTimeout(resolve, 1, "timeout"))]);
+      assert.equal(await abandoned, "timeout");
+      const later = host.status();
+      assert.equal(requestsSince(from, "miso.status.v1").length, 1, "the later call joined");
+      holdAll = false;
+      await releaseOne();
+      assert.equal((await later).result, 0);
+      await host.dispose();
+    }
+
     // #1399 gate 3: the reply's field set and the count's type are checked. A reply without the
     // count, and one whose count is not a u64 `bigint`, fail the whole host with 255; a count at
     // the top of the u64 range is accepted and read back whole.
@@ -1718,9 +1863,6 @@ async function testMainRealm() {
       assert.equal(next.requestId, first.requestId + 1, `${label}: refusal did not burn an ID`);
       return next;
     };
-    await assertBoundedNoBurn(
-      "status", () => liveControlHost.status(), () => liveControlHost.status(), () => liveControlHost.status(),
-    );
     await assertBoundedNoBurn(
       "sessionMap", () => liveControlHost.sessionMap(), () => liveControlHost.sessionMap(),
       () => liveControlHost.sessionMap(),

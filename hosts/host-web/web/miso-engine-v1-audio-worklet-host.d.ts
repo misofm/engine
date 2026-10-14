@@ -102,9 +102,12 @@
 //
 // The gain-reduction section is recomputed from the taps armed when each frame is polled. An
 // unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-// has published. `masterGrDb` is `null` when the designated strip has none.
+// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an armed
+// tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame leaves
+// that tap out until a window that opens at or after that sample closes. A strip's slot
+// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at or
+// after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is `null`
+// when the designated strip has none.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
@@ -154,9 +157,9 @@
 // Sources stream just-in-time into bounded per-source rings. One message carries exactly one
 // quantum of planar PCM (the final chunk of a region may be shorter). Up to
 // `sourceRingFrames / quantumFrames` chunks may be unsettled per source ID at once -- there is
-// nowhere for a further chunk to go -- plus one unsettled seek per source and one unsettled status.
-// A request over its bound rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so
-// the caller keeps its planes and can retry.
+// nowhere for a further chunk to go -- plus one unsettled seek per source. A request over its bound
+// rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so the caller keeps its planes
+// and can retry. Status is never refused for being in flight: see `status()`.
 //
 // The default ring covers a 100 ms main-thread stall: `(ceil(100ms * fs / quantum) + 2) * quantum`
 // frames, which is 5 120 frames (40 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. It is
@@ -687,9 +690,12 @@ export interface MisoMeterFrame {
   ///
   /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
   /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-  /// `result === 0` acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`)
-  /// is the maximum over its still-armed taps' latest windows, and `0` when none is armed or none
-  /// has published. `masterGrDb` is `null` when the designated strip has none.
+  /// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an
+  /// armed tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame
+  /// leaves that tap out until a window that opens at or after that sample closes. A strip's slot
+  /// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at
+  /// or after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is
+  /// `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
   /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///
@@ -952,6 +958,11 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  /// Reads the engine status. Concurrent calls share one read, and a reply reflects every request
+  /// the host sent before the call: a call joins the in-flight read while no later request was
+  /// sent, and otherwise joins the one follow-up read sent when that read settles. A joined read
+  /// settles every joined caller with the same reply or the same rejection, and a caller that stops
+  /// waiting does not cancel it. `status()` is never refused for being in flight.
   status(): Promise<MisoStatus>;
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
