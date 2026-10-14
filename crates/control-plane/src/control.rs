@@ -369,6 +369,9 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) publisher: PlanPublisher,
     pub(crate) retirer: PlanRetirer,
     pub(crate) limits: ControlLimits,
+    /// The adapter's preparation (issue #1400 D2): the boot plan and every structural successor
+    /// are prepared through it.
+    pub(crate) preparer: Box<dyn RuntimePreparer>,
     /// The session's `live_values_superseded` count (#1312 D2): one for every plan the session
     /// prepares. Render adds to it; the control plane copies it into the provider's counters in
     /// the service step (D8).
@@ -1251,6 +1254,7 @@ where
                 // and journals its own, which the candidate epoch owns. Nothing is written to the
                 // newest seed, so a refused or abandoned rebuild leaves every seed as it was.
                 let prepared_runtime = prepare_runtime::<A>(
+                    &*self.preparer,
                     prepared.get().prospective_session().compiled(),
                     self.limits,
                     Some(SuccessorBase {

@@ -17,6 +17,8 @@ default = []
 control-plane.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
+# #1400: `CapiPreparer` calls the two host-core preparation entries.
+host-core.workspace = true
 lane.workspace = true
 
 [dev-dependencies]
@@ -27,7 +29,6 @@ builtins = { workspace = true, features = ["test-support"] }
 # feature never reaches the release `capi` build (`scripts/check-capi-abi.sh` builds `-p capi`).
 control-plane = { workspace = true, features = ["test-support"] }
 graph.workspace = true
-host-core.workspace = true
 # The tests write control values by row name (`control_core::{row_address, fader_edits, ...}`).
 protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true

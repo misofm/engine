@@ -77,6 +77,47 @@ impl ControlAdapter for CapiAdapter {
     ];
 }
 
+/// capi's preparation (issue #1400 D3): today's live request and the lanes the control plane
+/// chose, through the same two host-core entries the control plane called before the preparer
+/// existed. It holds no lane constant: the lanes arrive as an argument (decision 17 C6).
+pub(crate) struct CapiPreparer;
+
+impl control_plane::RuntimePreparer for CapiPreparer {
+    fn prepare(
+        &self,
+        compiled: &host_core::CompiledSession,
+        caps: &host_core::HostPrepareCaps,
+        lanes: host_core::HostLiveLanes,
+        successor: Option<host_core::SuccessorBase<'_>>,
+        bound_cache: &mut control_plane::InputBoundCache<'_>,
+        superseded: &host_core::LiveValuesSuperseded,
+    ) -> Result<
+        (host_core::PreparedHost, host_core::HostLiveControlHandles),
+        host_core::PrepareDiagnostics,
+    > {
+        let live = host_core::HostLiveControlRequest::default();
+        match successor {
+            Some(base) => host_core::prepare_host_runtime_with_live_lanes_successor(
+                compiled,
+                caps,
+                &live,
+                lanes,
+                base,
+                Some(bound_cache),
+                superseded,
+            ),
+            None => host_core::prepare_host_runtime_with_live_lanes(
+                compiled,
+                caps,
+                &live,
+                lanes,
+                Some(bound_cache),
+                superseded,
+            ),
+        }
+    }
+}
+
 /// The control-protocol session capi's `Session` handle owns.
 pub(crate) type SessionState = control_plane::SessionState<CapiAdapter>;
 /// The render-thread plan capi's `Plan` handle owns.
@@ -104,6 +145,7 @@ pub(crate) fn compile_children(
         control_plane::compile_children::<CapiAdapter>(
             document,
             ControlLimits::from(limits),
+            Box::new(CapiPreparer),
             engine_cache,
         )?;
     Ok(CompiledChildren {

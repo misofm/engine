@@ -212,3 +212,32 @@ Split, both in this issue:
 
 - **(a)** the trait, `CapiPreparer`, engine D4 (`HostAttachment`), gates 1 and 3.
 - **(b)** `WebRuntimePreparer` and `RenderCompanions` (D5), gates 2 and 4. Dependency: (a).
+
+## Decision record
+
+**Part (a), 2026-10-14 (batch 5 lane W).**
+
+- **The trait takes `lanes`.** Amendment 2 says the core chooses the live lanes
+  (`controls::live_lanes`) and `CapiPreparer` passes them through. capi does not depend on
+  `controls`, and "passes them through" needs them to arrive, so
+  `RuntimePreparer::prepare(compiled, caps, lanes, successor, bound_cache, superseded)` takes
+  `lanes: HostLiveLanes` beside the five parameters of `prepare_runtime`. `prepare_runtime`
+  computes them once, as before, and still validates the shape first. The browser preparer of
+  part (b) may use the argument or compute its own (D5); that is its choice.
+- **The live request is the preparer's.** `CapiPreparer` builds `HostLiveControlRequest::default()`;
+  `LIVE_QUEUE_DEPTH` and `C_ABI_LIVE_LANES` no longer exist on `main`, so nothing moves.
+- **Signature order.** `compile_children::<A>(document, limits, preparer, engine_cache)`;
+  the session stores `preparer: Box<dyn RuntimePreparer>` in `SessionState` and
+  `prepare_runtime::<A>(&dyn RuntimePreparer, ..)` is the one call into the preparer. The crate no
+  longer imports `prepare_host_runtime_with_live_lanes[_successor]` or `HostLiveControlRequest`.
+- **capi depends on host-core directly.** `CapiPreparer` names host-core's types and calls its two
+  entries (D3), so `host-core` moves from capi's `[dev-dependencies]` to `[dependencies]` (it
+  was already in the build through `control-plane`).
+- **host-web's cross-host test** (`hosts/host-web/tests/strip_cells_cross_host.rs`) calls
+  `compile_children`, so it gains a test-local preparer with the same body as `CapiPreparer`.
+  Part (b) replaces it with `WebRuntimePreparer` if it chooses.
+- **Gate 3** is `crates/control-plane/tests/runtime_preparer.rs`. The refused shape is a
+  `source_ring_frames` that is not a multiple of the quantum, at boot: the structural arm cannot
+  change the quantum or the ring, so the boot compile is the only place the refusal can occur.
+- **D4 (`HostAttachment`) is not done in this commit.** It edits
+  `crates/engine/src/realtime/plan.rs`, under the realtime-directory rule; see the lane report.

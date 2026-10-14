@@ -353,6 +353,7 @@ fn success_reply(
         EditPath::Live => "live",
         EditPath::ModelOnly => "model_only",
         EditPath::Rebuild => "rebuild",
+        EditPath::Monitor => "monitor",
     };
     Reply {
         name,
