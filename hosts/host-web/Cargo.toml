@@ -31,7 +31,9 @@ control-plane.workspace = true
 controls.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
-host-core.workspace = true
+# The session-less response entry (#1574) is `host_core::serve_response_frame`; name its feature here
+# rather than rely on feature unification through `control-plane`.
+host-core = { workspace = true, features = ["control-provider"] }
 session.workspace = true
 # Issue #143 R4: the one linear-to-decibel conversion the design permits, on the control plane.
 math.workspace = true

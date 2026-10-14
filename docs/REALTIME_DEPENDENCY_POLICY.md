@@ -355,10 +355,13 @@ Approved unsafe code that runs on a render thread, per entry:
   reads `spectrum_read`, `spectrum_stream_read` and `track_response_capture` reach only
   `copy_live_record`, through `write_spectrum_window` and `spectrum_failure` (the two spectrum
   reads) and through `run_live_response_capture`, `live_response_failure` and
-  `LiveResponseCaptureSink` (the capture). `read_live_record` and `response_header_bytes` are
-  reached only from the worker-side analysis and query exports (`spectrum_analysis`,
-  `spectrum_stream_analysis`, `spectrum_stream_analysis_configure`, `track_response_analysis` and
-  `response_query`), none of which is render-locked or called by either worklet. Its
+  `LiveResponseCaptureSink` (the capture). `read_live_record` is reached only from the
+  worker-side analysis exports (`spectrum_analysis`, `spectrum_stream_analysis`,
+  `spectrum_stream_analysis_configure` and `track_response_analysis`), none of which is
+  render-locked or called by either worklet. The five session-less `response_frame_*` exports
+  (#1574) are control work of the response-preview instance of the same kind: they stage one
+  `RESPONSE_GET` frame and answer one frame through `host_core::serve_response_frame`, and no
+  worklet calls them. Its
   `CountingAllocator` is test-only.
 - `render_lock.rs`: its allocator methods run on every allocator call the browser module makes. They
   count a call exactly when it is made inside a render-locked window, at boot or after it; the count

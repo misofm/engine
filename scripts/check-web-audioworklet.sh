@@ -310,17 +310,11 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_observation_track_index \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
-  miso_engine_web_v1_response_close \
-  miso_engine_web_v1_response_effect_id_capacity \
-  miso_engine_web_v1_response_effect_id_ptr \
-  miso_engine_web_v1_response_parameter_bytes \
-  miso_engine_web_v1_response_parameter_capacity \
-  miso_engine_web_v1_response_parameter_ptr \
-  miso_engine_web_v1_response_query \
-  miso_engine_web_v1_response_request_bytes \
-  miso_engine_web_v1_response_request_ptr \
-  miso_engine_web_v1_response_result_bytes \
-  miso_engine_web_v1_response_result_ptr \
+  miso_engine_web_v1_response_frame_close \
+  miso_engine_web_v1_response_frame_ptr \
+  miso_engine_web_v1_response_frame_reply_bytes \
+  miso_engine_web_v1_response_frame_reply_ptr \
+  miso_engine_web_v1_response_frame_submit \
   miso_engine_web_v1_resource_ptr \
   miso_engine_web_v1_service \
   miso_engine_web_v1_source_channels \

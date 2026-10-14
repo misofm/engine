@@ -864,3 +864,35 @@ fn the_message_is_advertised_and_a_replayed_read_does_not_run_again() {
     );
     assert!(matches!(decode(&second), Reply::Result(_)));
 }
+
+/// #1574 gate 1: the session-less frame entry the browser preview uses answers the payload a C ABI
+/// session answers for the same request, byte for byte. This is a wire format.
+#[test]
+fn the_sessionless_frame_entry_answers_the_payload_of_a_session() {
+    let mut endpoint = Endpoint::new(1 << 20);
+    let mut query = request(eq_target(), 96);
+    query.overrides = vec![
+        row(BAND_1_GAIN, ParameterChannel::Left, 6.0),
+        row(BAND_1_GAIN, ParameterChannel::Right, -4.0),
+        row(BAND_2_ENABLED, ParameterChannel::Both, 1.0),
+        row(BAND_2_GAIN, ParameterChannel::Both, -3.0),
+        row(RESPONSE_BYPASS_CONTROL, ParameterChannel::Both, 0.0),
+    ];
+    let session_frame = {
+        let bytes = endpoint.encode(CommandPayload::ResponseGet(&query));
+        endpoint.submit(&bytes)
+    };
+    query.sample_rate_hz = Some(RATE);
+    query.quantum_frames = Some(QUANTUM);
+    let request_bytes = endpoint.encode(CommandPayload::ResponseGet(&query));
+    let mut reply = Vec::new();
+    host_core::serve_response_frame(&request_bytes, &mut reply).expect("a command frame");
+    assert!(session_frame.len() > protocol::OUTER_HEADER_BYTES);
+    assert_eq!(
+        &reply[protocol::OUTER_HEADER_BYTES..],
+        &session_frame[protocol::OUTER_HEADER_BYTES..],
+    );
+    // The header differs only in the revision: the same request, a revision of 0.
+    let decoded = decode(&reply);
+    assert!(matches!(decoded, Reply::Result(ResponseResult::Curves(_))));
+}

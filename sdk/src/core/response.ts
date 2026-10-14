@@ -1,6 +1,13 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import { MisoEngineError, MisoUsageError, resultName } from "./errors.ts";
+import type { MisoDiagnostic } from "./errors.ts";
+import {
+  decodeResponseReply,
+  encodeResponseRequest,
+  responseRefusalResult,
+} from "./response-frame.ts";
+import type { ResponseFrameCurves, ResponseFrameOverride, ResponseFrameRequest } from "./response-frame.ts";
 import { parameterRows } from "./session.ts";
 import type { Channel, EffectDecl } from "./types.ts";
 
@@ -91,31 +98,23 @@ export interface ResponsePreviewResult {
 }
 
 type RawExports = Record<string, unknown> & { readonly memory: WebAssembly.Memory };
-type ResponseField = Readonly<{ readonly name: string; readonly offset: number }>;
 
-const responseRequestFields = ABI_LAYOUT.structures.responseRequest.fields as readonly ResponseField[];
-const responseParameterFields = ABI_LAYOUT.structures.responseParameter.fields as readonly ResponseField[];
-const responseResultFields = ABI_LAYOUT.structures.responseResult.fields as readonly ResponseField[];
-
-function offset(fields: readonly ResponseField[], name: string): number {
-  const field = fields.find((candidate) => candidate.name === name);
-  if (field === undefined) throw new Error(`generated ABI is missing response field ${name}`);
-  return field.offset;
-}
-
-const requestOffset = (name: string) => offset(responseRequestFields, name);
-const parameterOffset = (name: string) => offset(responseParameterFields, name);
-const resultOffset = (name: string) => offset(responseResultFields, name);
-
-const TARGET_EFFECT = ABI_LAYOUT.constants.responseTargets.find((row) => row.name === "effect")?.value ?? 1;
-const TARGET_INPUT_FILTERS = ABI_LAYOUT.constants.responseTargets.find((row) => row.name === "inputFilters")?.value ?? 2;
-const GRID_LINEAR = ABI_LAYOUT.constants.responseGrids.find((row) => row.name === "linear")?.value ?? 1;
-const GRID_LOGARITHMIC = ABI_LAYOUT.constants.responseGrids.find((row) => row.name === "logarithmic")?.value ?? 2;
-const CHANNEL_LEFT = ABI_LAYOUT.constants.responseChannels.find((row) => row.name === "left")?.value ?? 1;
-const CHANNEL_RIGHT = ABI_LAYOUT.constants.responseChannels.find((row) => row.name === "right")?.value ?? 2;
-const CHANNEL_BOTH = ABI_LAYOUT.constants.responseChannels.find((row) => row.name === "both")?.value ?? 3;
-const FIELD_TOTAL = ABI_LAYOUT.constants.responseFields.find((row) => row.name === "total")?.value ?? 1;
-const FIELD_SECTIONS = ABI_LAYOUT.constants.responseFields.find((row) => row.name === "sections")?.value ?? 2;
+/** The most request frame bytes the engine's session-less response entry takes. */
+const MAXIMUM_REQUEST_FRAME_BYTES = 1 << 20;
+const FRAME_EXPORTS = [
+  "miso_engine_web_v1_response_frame_ptr",
+  "miso_engine_web_v1_response_frame_submit",
+  "miso_engine_web_v1_response_frame_reply_ptr",
+  "miso_engine_web_v1_response_frame_reply_bytes",
+  "miso_engine_web_v1_response_frame_close",
+] as const;
+const RESULT_VALUES: ReadonlyMap<string, number> = new Map(
+  ABI_LAYOUT.constants.resultCodes.map((row) => [row.name, row.value] as const),
+);
+const HPF_CONTROL = CATALOG.builtins.parameters.find((row) => row.name === "hpf_hz")?.id;
+const LPF_CONTROL = CATALOG.builtins.parameters.find((row) => row.name === "lpf_hz")?.id;
+/** The control ID of the effect-wide bypass in a response request: lane `both`, value 0 or 1. */
+const BYPASS_CONTROL = 0;
 
 const capabilityRows: ResponsePreviewCapability[] = [];
 for (const descriptor of CATALOG.effects) {
@@ -174,35 +173,32 @@ function u64(value: number | bigint, name: string): bigint {
   return normalized;
 }
 
-function channelBits(channel: Channel | undefined): number {
-  if (channel === undefined) return CHANNEL_BOTH;
-  if (channel === "left") return CHANNEL_LEFT;
-  if (channel === "right") return CHANNEL_RIGHT;
-  if (channel === "both") return CHANNEL_BOTH;
+function channelName(channel: Channel | undefined): Channel {
+  if (channel === undefined) return "both";
+  if (channel === "left" || channel === "right" || channel === "both") return channel;
   throw new MisoUsageError("channels must be left, right, or both");
 }
 
-function fieldBits(fields: ResponsePreviewQuery["fields"]): number {
-  if (fields === undefined || fields === "totalAndSections") return FIELD_TOTAL | FIELD_SECTIONS;
-  if (fields === "total") return FIELD_TOTAL;
+function wantsSections(fields: ResponsePreviewQuery["fields"]): boolean {
+  if (fields === undefined || fields === "totalAndSections") return true;
+  if (fields === "total") return false;
   throw new MisoUsageError("fields must be total or totalAndSections");
 }
 
-function gridValue(kind: unknown): number {
-  if (kind === "linear") return GRID_LINEAR;
-  if (kind === "logarithmic") return GRID_LOGARITHMIC;
+function gridName(kind: unknown): "linear" | "logarithmic" {
+  if (kind === "linear" || kind === "logarithmic") return kind;
   throw new MisoUsageError("grid.kind must be linear or logarithmic");
 }
 
-function qualityValue(value: EffectDecl["options"]["quality"]): number {
+function qualityName(value: EffectDecl["options"]["quality"]): "normal" {
   if (value !== "normal") throw new MisoUsageError("response previews support only normal native quality");
-  return 2;
+  return "normal";
 }
 
-function linkModeValue(value: EffectDecl["options"]["linkMode"]): number {
-  if (value === "dual_mono") return 1;
-  if (value === "maximum") return 2;
-  return 3;
+function linkModeName(value: EffectDecl["options"]["linkMode"]): "dual_mono" | "maximum" | "average" {
+  if (value === "dual_mono") return "dual_mono";
+  if (value === "maximum") return "maximum";
+  return "average";
 }
 
 function asF32(value: number | undefined, name: string): number {
@@ -217,23 +213,17 @@ function isInputFilters(
   return "kind" in configuration && configuration.kind === "inputFilters";
 }
 
+function resultValue(name: string): number {
+  return RESULT_VALUES.get(name) ?? (RESULT_VALUES.get("internal") as number);
+}
+
+/** A refusal of the module itself (the frame never reached the core's response code). */
 function responseError(result: number): MisoEngineError {
   return new MisoEngineError("the response query was refused", {
     phase: "output",
     code: resultName(result, "call"),
     result,
   });
-}
-
-function copyF32(memory: WebAssembly.Memory, pointer: number, count: number): Float32Array {
-  if (!Number.isSafeInteger(pointer) || pointer < 0 || count < 0) throw new MisoUsageError("invalid response vector bounds");
-  const bytes = count * 4;
-  if (!Number.isSafeInteger(bytes) || pointer + bytes > memory.buffer.byteLength) {
-    throw new MisoEngineError("the response result exceeded Wasm memory", {
-      phase: "output", code: "bufferTooSmall", result: 4,
-    });
-  }
-  return new Float32Array(memory.buffer.slice(pointer, pointer + bytes));
 }
 
 function normalizedConfiguration(configuration: ResponsePreviewConfiguration): ResponsePreviewConfiguration {
@@ -264,25 +254,6 @@ function normalizedConfiguration(configuration: ResponsePreviewConfiguration): R
   }) as ResponsePreviewConfiguration;
 }
 
-function responseParameterRows(
-  descriptor: (typeof CATALOG.effects)[number],
-  name: string,
-  value: unknown,
-  channel: Channel,
-  path: string,
-): readonly ReturnType<typeof parameterRows>[number][] {
-  const rows = parameterRows(descriptor, name, value, channel, path);
-  const declaration = descriptor.parameters.find((candidate) => candidate.name === name);
-  if (declaration?.channelPolicyName === "perLane" && channel === "both"
-      && rows.length === 1 && rows[0]?.channel === "both") {
-    return [
-      ...parameterRows(descriptor, name, value, "left", path),
-      ...parameterRows(descriptor, name, value, "right", path),
-    ];
-  }
-  return rows;
-}
-
 /** A synchronous query client around one analysis-only Wasm instance. */
 export class ResponsePreviewModule {
   readonly #exports: RawExports;
@@ -296,6 +267,7 @@ export class ResponsePreviewModule {
   };
   #closed = false;
   #busy = false;
+  #nextRequestId = 1n;
 
   constructor(instance: WebAssembly.Instance, responseLimits: ResponsePreviewLimits = {}) {
     this.#exports = rawExports(instance);
@@ -307,12 +279,7 @@ export class ResponsePreviewModule {
       maximumResultBytes: finiteInteger(responseLimits.maximumResultBytes ?? (16 << 20), "maximumResultBytes", 1, 16 << 20),
       requestDeadlineMs: finiteInteger(responseLimits.requestDeadlineMs ?? 5000, "requestDeadlineMs", 1, 2_147_483_647),
     };
-    for (const name of [
-      "miso_engine_web_v1_response_request_ptr", "miso_engine_web_v1_response_effect_id_ptr",
-      "miso_engine_web_v1_response_parameter_ptr", "miso_engine_web_v1_response_query",
-      "miso_engine_web_v1_response_result_ptr", "miso_engine_web_v1_response_result_bytes",
-      "miso_engine_web_v1_response_close",
-    ]) callable(this.#exports, name);
+    for (const name of FRAME_EXPORTS) callable(this.#exports, name);
   }
 
   get capabilities(): readonly ResponsePreviewCapability[] { return RESPONSE_CAPABILITIES; }
@@ -330,7 +297,7 @@ export class ResponsePreviewModule {
 
   close(): void {
     if (this.#closed) return;
-    callable(this.#exports, "miso_engine_web_v1_response_close")();
+    callable(this.#exports, "miso_engine_web_v1_response_frame_close")();
     this.#closed = true;
   }
 
@@ -339,135 +306,148 @@ export class ResponsePreviewModule {
     finiteInteger(request.sampleRateHz, "sampleRateHz", 1, 0xffff_ffff);
     finiteInteger(request.quantumFrames, "quantumFrames", 1, 0xffff_ffff);
     finiteInteger(request.grid.points, "grid.points", 2, 0xffff_ffff);
-    const grid = gridValue(request.grid.kind);
+    const grid = gridName(request.grid.kind);
     if (!Number.isFinite(request.grid.minimumHz) || !Number.isFinite(request.grid.maximumHz)) throw new MisoUsageError("grid endpoints must be finite");
-    if (grid === GRID_LOGARITHMIC && request.grid.minimumHz <= 0) throw new MisoUsageError("logarithmic grid minimumHz must be positive");
-    const channels = channelBits(request.channels);
-    const fields = fieldBits(request.fields);
+    if (grid === "logarithmic" && request.grid.minimumHz <= 0) throw new MisoUsageError("logarithmic grid minimumHz must be positive");
+    const channels = channelName(request.channels);
+    const sections = wantsSections(request.fields);
     const configuration = normalizedConfiguration(request.configuration);
-    const inputFilters = isInputFilters(configuration);
-    const requestPtr = callable(this.#exports, "miso_engine_web_v1_response_request_ptr")();
+    const requestId = this.#nextRequestId;
+    this.#nextRequestId += 1n;
+    const frame = encodeResponseRequest({
+      requestId,
+      ...this.#target(configuration),
+      grid,
+      points: request.grid.points,
+      minimumHz: asF32(request.grid.minimumHz, "grid.minimumHz"),
+      maximumHz: asF32(request.grid.maximumHz, "grid.maximumHz"),
+      channels,
+      sections,
+      configurationId: request.configurationId,
+      sampleRateHz: request.sampleRateHz,
+      quantumFrames: request.quantumFrames,
+      maximumPreparedBytes: this.#responseLimits.maximumPreparedBytes,
+      maximumStateBytes: this.#responseLimits.maximumTotalStateBytes,
+      maximumScratchBytes: this.#responseLimits.maximumScratchBytes,
+      maximumAutomationSpans: this.#responseLimits.maximumAutomationSpansPerBlock,
+      maximumReplyBytes: this.#responseLimits.maximumResultBytes,
+    });
+    if (frame.length > MAXIMUM_REQUEST_FRAME_BYTES) throw new MisoUsageError("the response request exceeds the frame bound");
     const memory = this.#exports.memory;
-    const view = new DataView(memory.buffer);
-    const setU32 = (name: string, value: number) => view.setUint32(requestPtr + requestOffset(name), value >>> 0, true);
-    const setF32 = (name: string, value: number) => view.setFloat32(requestPtr + requestOffset(name), value, true);
-    const setU64 = (name: string, value: bigint) => view.setBigUint64(requestPtr + requestOffset(name), value, true);
-    setU32("structSize", ABI_LAYOUT.structures.responseRequest.bytes);
-    setU32("abiVersion", ABI_LAYOUT.abiVersion);
-    setU32("target", inputFilters ? TARGET_INPUT_FILTERS : TARGET_EFFECT);
-    setU32("grid", grid);
-    setU32("channels", channels);
-    setU32("fields", fields);
-    setU32("points", request.grid.points);
-    setU32("sampleRateHz", request.sampleRateHz);
-    setU32("quantumFrames", request.quantumFrames);
-    setF32("minimumHz", asF32(request.grid.minimumHz, "grid.minimumHz"));
-    setF32("maximumHz", asF32(request.grid.maximumHz, "grid.maximumHz"));
-    setU64("configurationId", request.configurationId);
-    setU64("maximumPreparedBytes", this.#responseLimits.maximumPreparedBytes);
-    setU64("maximumTotalStateBytes", this.#responseLimits.maximumTotalStateBytes);
-    setU64("maximumScratchBytes", this.#responseLimits.maximumScratchBytes);
-    setU32("maximumAutomationSpansPerBlock", this.#responseLimits.maximumAutomationSpansPerBlock);
-    setU32("maximumResultBytes", this.#responseLimits.maximumResultBytes);
-    const idPtr = callable(this.#exports, "miso_engine_web_v1_response_effect_id_ptr")();
-    const parameterPtr = callable(this.#exports, "miso_engine_web_v1_response_parameter_ptr")();
-    const bytes = new Uint8Array(memory.buffer);
-    let parameterCount = 0;
-    if (inputFilters) {
-      setU32("effectIdBytes", 0);
-      setU32("parameterCount", 0);
-      setF32("leftHpfHz", asF32(configuration.left.hpfHz, "left.hpfHz"));
-      setF32("leftLpfHz", asF32(configuration.left.lpfHz, "left.lpfHz"));
-      setF32("rightHpfHz", asF32(configuration.right.hpfHz, "right.hpfHz"));
-      setF32("rightLpfHz", asF32(configuration.right.lpfHz, "right.lpfHz"));
-    } else {
-      const effectId = new TextEncoder().encode(configuration.effectId);
-      const maxId = Number(ABI_LAYOUT.constants.maximumResponseEffectIdBytes);
-      if (effectId.length === 0 || effectId.length > maxId) throw new MisoUsageError("effect ID exceeds the response bound");
-      bytes.set(effectId, idPtr);
-      setU32("effectIdBytes", effectId.length);
-      const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
-      if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
-      const rows = Object.entries(configuration.parameters)
-        .flatMap(([name, value]) => responseParameterRows(
-          descriptor,
-          name,
-          value,
-          configuration.options.channel,
-          `response.${name}`,
-        ));
-      const parameterBytes = Number(ABI_LAYOUT.structures.responseParameter.bytes);
-      if (rows.length > Number(ABI_LAYOUT.constants.maximumResponseParameterOverrides)) throw new MisoUsageError("too many response parameter overrides");
-      for (const row of rows) {
-        const at = parameterPtr + parameterCount * parameterBytes;
-        const parameterView = new DataView(memory.buffer);
-        parameterView.setUint32(at + parameterOffset("parameterId"), Number(row.parameter_id), true);
-        parameterView.setUint32(at + parameterOffset("channel"), row.channel === "left" ? CHANNEL_LEFT : row.channel === "right" ? CHANNEL_RIGHT : CHANNEL_BOTH, true);
-        parameterView.setFloat32(at + parameterOffset("value"), Number(row.value), true);
-        parameterView.setUint32(at + parameterOffset("reserved"), 0, true);
-        parameterCount += 1;
-      }
-      setU32("parameterCount", parameterCount);
-      setU32("quality", qualityValue(configuration.options.quality));
-      setU32("linkMode", linkModeValue(configuration.options.linkMode));
-      setU32("bypass", configuration.options.bypass ? 1 : 0);
-    }
-    const result = callable(this.#exports, "miso_engine_web_v1_response_query")();
+    const requestPtr = callable(this.#exports, "miso_engine_web_v1_response_frame_ptr")(frame.length);
+    if (requestPtr === 0) throw responseError(resultValue("refusedBudget"));
+    new Uint8Array(memory.buffer, requestPtr, frame.length).set(frame);
+    const result = callable(this.#exports, "miso_engine_web_v1_response_frame_submit")(frame.length);
     if (result !== 0) throw responseError(result);
-    const resultPtr = callable(this.#exports, "miso_engine_web_v1_response_result_ptr")();
-    const resultBytes = callable(this.#exports, "miso_engine_web_v1_response_result_bytes")();
-    const resultView = new DataView(this.#exports.memory.buffer, resultPtr, resultBytes);
-    const resultHeaderBytes = ABI_LAYOUT.structures.responseResult.bytes;
-    if (resultBytes < resultHeaderBytes) throw new MisoUsageError("response result header is truncated");
-    const points = resultView.getUint32(resultOffset("points"), true);
-    const sectionCount = resultView.getUint32(resultOffset("sectionCount"), true);
-    const copyAt = (field: string, count: number): Float32Array | undefined => {
-      const pointer = resultView.getUint32(resultOffset(field), true);
-      return pointer === 0 ? undefined : copyF32(this.#exports.memory, resultPtr + pointer, count);
+    const replyPtr = callable(this.#exports, "miso_engine_web_v1_response_frame_reply_ptr")();
+    const replyBytes = callable(this.#exports, "miso_engine_web_v1_response_frame_reply_bytes")();
+    const reply = new Uint8Array(memory.buffer.slice(replyPtr, replyPtr + replyBytes));
+    const decoded = decodeResponseReply(reply);
+    if (decoded.requestId !== requestId) {
+      throw new MisoEngineError("the response reply answers another request", {
+        phase: "output", code: "internal", result: resultValue("internal"),
+      });
+    }
+    if (!decoded.ok) {
+      const resultName = responseRefusalResult(decoded.status);
+      const diagnostics: readonly MisoDiagnostic[] = decoded.diagnostics.map((row) => ({ code: row.code, path: "" }));
+      throw new MisoEngineError("the response query was refused", {
+        phase: "output",
+        code: (diagnostics[0]?.code ?? resultName) as MisoEngineError["code"],
+        result: resultValue(resultName),
+        diagnostics,
+      });
+    }
+    return this.#result(request, configuration, decoded.curves, sections, BigInt(reply.length));
+  }
+
+  /** The target and override rows of a configuration, as the frame names them. */
+  #target(
+    configuration: ResponsePreviewConfiguration,
+  ): Pick<ResponseFrameRequest, "target" | "overrides"> {
+    if (isInputFilters(configuration)) {
+      if (HPF_CONTROL === undefined || LPF_CONTROL === undefined) {
+        throw new MisoUsageError("the generated catalog has no input-filter rows");
+      }
+      const row = (control: number, lane: "left" | "right", value: number | undefined): ResponseFrameOverride => ({
+        control, lane, value: asF32(value, `${lane}.cutoff`),
+      });
+      return {
+        target: { kind: "inputFilters" },
+        overrides: [
+          row(HPF_CONTROL, "left", configuration.left.hpfHz),
+          row(LPF_CONTROL, "left", configuration.left.lpfHz),
+          row(HPF_CONTROL, "right", configuration.right.hpfHz),
+          row(LPF_CONTROL, "right", configuration.right.lpfHz),
+        ],
+      };
+    }
+    const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
+    if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
+    const overrides: ResponseFrameOverride[] = Object.entries(configuration.parameters)
+      .flatMap(([name, value]) => parameterRows(
+        descriptor,
+        name,
+        value,
+        configuration.options.channel,
+        `response.${name}`,
+      ))
+      .map((row) => ({ control: Number(row.parameter_id), lane: row.channel as Channel, value: Number(row.value) }));
+    if (configuration.options.bypass) overrides.push({ control: BYPASS_CONTROL, lane: "both", value: 1 });
+    return {
+      target: {
+        kind: "effect",
+        effect: configuration.effectId,
+        quality: qualityName(configuration.options.quality),
+        linkMode: linkModeName(configuration.options.linkMode),
+      },
+      overrides,
     };
-    const frequenciesHz = copyAt("frequenciesOffset", points) ?? new Float32Array();
-    const left = (channels & CHANNEL_LEFT) !== 0 ? copyAt("totalLeftOffset", points) : undefined;
-    const right = (channels & CHANNEL_RIGHT) !== 0 ? copyAt("totalRightOffset", points) : undefined;
-    const sections: ResponsePreviewSection[] = [];
-    const capability = inputFilters
+  }
+
+  #result(
+    request: ResponsePreviewQuery,
+    configuration: ResponsePreviewConfiguration,
+    curves: ResponseFrameCurves,
+    sections: boolean,
+    resultBytes: bigint,
+  ): ResponsePreviewResult {
+    const points = curves.frequenciesHz.length;
+    const sectionCount = curves.sectionCount;
+    const capability = isInputFilters(configuration)
       ? RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "builtins")
       : RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "effect" && candidate.target === configuration.effectId);
-    for (let index = 0; (fields & FIELD_SECTIONS) !== 0 && index < sectionCount; index += 1) {
+    const returned: ResponsePreviewSection[] = [];
+    for (let index = 0; sections && index < sectionCount; index += 1) {
       const declaration = capability?.sections[index];
       if (declaration === undefined) continue;
-      const leftDb = (channels & CHANNEL_LEFT) !== 0
-        ? copyAt("sectionsLeftOffset", points * sectionCount)?.slice(index * points, (index + 1) * points)
-        : undefined;
-      const rightDb = (channels & CHANNEL_RIGHT) !== 0
-        ? copyAt("sectionsRightOffset", points * sectionCount)?.slice(index * points, (index + 1) * points)
-        : undefined;
-      sections.push(Object.freeze({
+      const leftDb = curves.sectionsLeftDb?.slice(index * points, (index + 1) * points);
+      const rightDb = curves.sectionsRightDb?.slice(index * points, (index + 1) * points);
+      returned.push(Object.freeze({
         id: declaration.id,
         name: declaration.name,
         ...(leftDb === undefined ? {} : { leftDb }),
         ...(rightDb === undefined ? {} : { rightDb }),
       }));
     }
-    const enabledLeftMask = resultView.getUint32(resultOffset("enabledLeft"), true);
-    const enabledRightMask = resultView.getUint32(resultOffset("enabledRight"), true);
-    const enabledLeft = Object.freeze(Array.from({ length: sectionCount }, (_, index) => (enabledLeftMask & (1 << index)) !== 0));
-    const enabledRight = Object.freeze(Array.from({ length: sectionCount }, (_, index) => (enabledRightMask & (1 << index)) !== 0));
+    const enabledLeft = Object.freeze(Array.from({ length: sectionCount }, (_, index) => (curves.enabledLeft & (1 << index)) !== 0));
+    const enabledRight = Object.freeze(Array.from({ length: sectionCount }, (_, index) => (curves.enabledRight & (1 << index)) !== 0));
     return Object.freeze({
       requestedConfiguration: configuration,
-      configurationId: resultView.getBigUint64(resultOffset("configurationId"), true),
-      sampleRateHz: resultView.getUint32(resultOffset("sampleRateHz"), true),
+      configurationId: curves.configurationId,
+      sampleRateHz: curves.sampleRateHz,
       mode: "requestedConfiguration" as const,
       ...(request.targetCorrelation === undefined ? {} : { targetCorrelation: Object.freeze({ ...request.targetCorrelation }) }),
-      frequenciesHz,
-      ...(left === undefined ? {} : { totalLeftDb: left }),
-      ...(right === undefined ? {} : { totalRightDb: right }),
-      sections: Object.freeze(sections),
-      floorDb: resultView.getFloat32(resultOffset("floorDb"), true),
-      bypass: resultView.getUint32(resultOffset("bypass"), true) !== 0,
+      frequenciesHz: curves.frequenciesHz,
+      ...(curves.leftDb === undefined ? {} : { totalLeftDb: curves.leftDb }),
+      ...(curves.rightDb === undefined ? {} : { totalRightDb: curves.rightDb }),
+      sections: Object.freeze(returned),
+      floorDb: curves.floorDb,
+      bypass: curves.bypass,
       enabledLeft,
       enabledRight,
-      retainedBytes: resultView.getBigUint64(resultOffset("retainedBytes"), true),
-      resultBytes: resultView.getBigUint64(resultOffset("resultBytes"), true),
+      retainedBytes: curves.retainedBytes,
+      resultBytes,
     });
   }
 }
