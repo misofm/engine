@@ -319,7 +319,9 @@ export class OfflineEngine {
    * each event, in arrival order, `lane` `0` for the reliable lane and `1` for the lossy lane. The
    * engine is read for events after every control frame, because a commit queues two and the next
    * commit waits for them to be read; an event that arrives with no listener is dropped and counted
-   * in `discardedControlEvents`. Returns the unsubscribe function.
+   * in `discardedControlEvents`. A listener that throws never loses the reply of the frame that
+   * produced the event: the throw is counted in `controlListenerFailures` and reported
+   * asynchronously. Returns the unsubscribe function.
    */
   onControlEvent(listener: (event: ControlEvent) => void): () => void {
     return this.#boundary.onControlEvent(listener);
@@ -328,6 +330,11 @@ export class OfflineEngine {
   /** The number of control events dropped because no listener was subscribed. */
   get discardedControlEvents(): number {
     return this.#boundary.discardedControlEvents;
+  }
+
+  /** The number of times a control event listener threw; the throw is reported outside the control call. */
+  get controlListenerFailures(): number {
+    return this.#boundary.controlListenerFailures;
   }
 
   nextAbsoluteSample(): bigint {

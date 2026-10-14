@@ -315,6 +315,7 @@ export class WasmBoundary {
   #handle: number;
   readonly #controlListeners = new Set<(event: ControlEvent) => void>();
   #discardedControlEvents = 0;
+  #controlListenerFailures = 0;
   #optionBytes: Uint8Array;
   #metersAttached: boolean;
   #trackResponse: TrackResponseModule | undefined;
@@ -1252,6 +1253,11 @@ export class WasmBoundary {
     };
   }
 
+  /** The number of times a control event listener threw. The throw never reaches the caller of a control frame. */
+  get controlListenerFailures(): number {
+    return this.#controlListenerFailures;
+  }
+
   /** The number of control events dropped because no listener was subscribed. */
   get discardedControlEvents(): number {
     return this.#discardedControlEvents;
@@ -1291,7 +1297,16 @@ export class WasmBoundary {
         }
         const frame = new Uint8Array(memory.buffer, pointer, length).slice();
         const delivered = Object.freeze({ lane: lane as 0 | 1, frame });
-        for (const listener of [...this.#controlListeners]) listener(delivered);
+        // A listener that throws loses nothing: the reply the core committed is still returned. The
+        // failure is counted and reported outside this call.
+        for (const listener of [...this.#controlListeners]) {
+          try {
+            listener(delivered);
+          } catch (error: unknown) {
+            this.#controlListenerFailures += 1;
+            reportAsynchronously(error);
+          }
+        }
       }
     }
   }
@@ -1401,6 +1416,22 @@ export interface ControlEvent {
 
 /** The most `control_event` calls one drain makes on a lane (#1570b D4). */
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
+
+/**
+ * Report an error outside the current call, as an event target does for a listener that throws:
+ * `reportError` where the global has one (browsers and workers), otherwise an uncaught throw from a
+ * microtask, which Node surfaces as `uncaughtException`.
+ */
+function reportAsynchronously(error: unknown): void {
+  const report = (globalThis as { reportError?: (error: unknown) => void }).reportError;
+  if (typeof report === "function") {
+    queueMicrotask(() => report.call(globalThis, error));
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
+  }
+}
 
 export interface CommandReport {
   /** Whole-batch admission. A refusal admits nothing and names the first offending record. */
