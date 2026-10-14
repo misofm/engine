@@ -15,11 +15,10 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterChannel, ParameterHandle, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
-    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
-    TelemetryConfiguration, TelemetryCounters, TransportSetRequest, TransportSnapshot,
-    TransportState,
+    EnumChoice, ParameterChannel, ParameterProviderError, ParameterUnit as ProtocolUnit,
+    ResponseConfiguration, ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseProviderError,
+    ResponseResult, ResponseTarget, SampleTime, StatusCode, TelemetryConfiguration,
+    TelemetryCounters, TransportSetRequest, TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -1070,28 +1069,6 @@ impl ControlProvider for SessionControlProvider {
         request: &ResponseGetRequest,
     ) -> Result<ResponseResult, ResponseProviderError> {
         serve_response(self.maximum_reply_bytes, model, request)
-    }
-
-    fn control_row(
-        &mut self,
-        handle: ParameterHandle,
-    ) -> Result<&ControlRow, ParameterProviderError> {
-        let record = usize::try_from(handle.0)
-            .ok()
-            .and_then(|handle| handle.checked_sub(1))
-            .and_then(|index| self.catalog.rows.get(index))
-            .ok_or(ParameterProviderError::NotFound)?;
-        // Until #1567 only an effect parameter is a target of `AUTOMATION_ENQUEUE`: no other
-        // row has a render record that a timed value could reach.
-        if record.kind == RowKind::Control
-            && record.control != controls::BYPASS_CONTROL
-            && record.control != controls::LINK_MODE_CONTROL
-            && let Some(row) = self.catalog.descriptors.get(record.descriptor as usize)
-            && row.family == ControlFamily::Effect
-        {
-            return Ok(row);
-        }
-        Err(ParameterProviderError::UnsupportedTarget)
     }
 
     fn counters(
@@ -3214,60 +3191,6 @@ mod tests {
                 .err(),
             Some(ParameterProviderError::Stale)
         );
-    }
-
-    #[test]
-    fn only_an_effect_parameter_is_an_automation_target() {
-        let model = nine_track();
-        let (mut provider, _clock) = provider_of(&model);
-        let list = whole_list(&mut provider, 256);
-        let parameter = list
-            .iter()
-            .find(|entry| {
-                matches!(&entry.body, ControlBody::Control(row)
-                    if row.family == ControlFamily::Effect && row.automatable)
-                    && entry.address.control != Some(controls::BYPASS_CONTROL)
-            })
-            .expect("a live effect parameter");
-        let ControlBody::Control(listed) = &parameter.body else {
-            unreachable!("matched as a control row");
-        };
-        let mut descriptor = listed.clone();
-        descriptor.value = 0.0;
-        assert_eq!(
-            provider
-                .control_row(ParameterHandle(parameter.handle))
-                .expect("a parameter"),
-            &descriptor,
-            "the lent row is the stored descriptor, whose value is 0.0"
-        );
-        let others = [
-            // The bypass, the fader (a strip builtin), a header and a handle past the end.
-            list.iter().find(|entry| {
-                entry.address.control == Some(controls::BYPASS_CONTROL)
-                    && matches!(entry.body, ControlBody::Control(_))
-            }),
-            list.iter().find(|entry| {
-                matches!(&entry.body, ControlBody::Control(row)
-                    if row.family == ControlFamily::StripLevel)
-            }),
-            list.first(),
-        ];
-        for entry in others {
-            let entry = entry.expect("a row");
-            assert_eq!(
-                provider.control_row(ParameterHandle(entry.handle)).err(),
-                Some(ParameterProviderError::UnsupportedTarget),
-                "{:?}",
-                entry.address
-            );
-        }
-        for handle in [0, list.len() as u32 + 1] {
-            assert_eq!(
-                provider.control_row(ParameterHandle(handle)).err(),
-                Some(ParameterProviderError::NotFound)
-            );
-        }
     }
 
     #[test]

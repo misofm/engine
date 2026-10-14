@@ -6,15 +6,14 @@
 
 use crate::btlv::{CountSink, MessageMeasure, Sink, SliceSink};
 use crate::{
-    AutomationCanceled, AutomationEnqueue, AutomationEnqueued, Capabilities, CommandHeader,
-    ControlListPage, ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
-    CountersRequest, DecodeError, DecodeScratch, DecodedAutomationEnqueue, DecodedCapabilities,
-    DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
-    EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse, OUTER_HEADER_BYTES,
-    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseResult, SessionCommitted,
-    SessionEdit, SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode,
-    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent,
+    AutomationCanceled, Capabilities, CommandHeader, ControlListPage, ControlListRequest,
+    ControlStatePage, CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError,
+    DecodeScratch, DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent,
+    DiagnosticsPage, DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId,
+    MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ProtocolCodec, RequestId, ResponseGetRequest,
+    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionRevision,
+    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -43,7 +42,6 @@ pub enum CommandPayload<'a> {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
     SessionTransactionApply(&'a [SessionEdit]),
-    AutomationEnqueue(AutomationEnqueue<'a>),
     TransportGet,
     TransportSet(TransportSetRequest),
     TelemetryConfigure(&'a TelemetryConfiguration),
@@ -68,7 +66,6 @@ pub enum SuccessResponsePayload<'a> {
     Capabilities(Capabilities<'a>),
     SessionSnapshot(SessionSnapshot<'a>),
     SessionTransactionApplied(TransactionApplied),
-    AutomationEnqueued(AutomationEnqueued),
     TransportGetSnapshot(TransportSnapshot),
     TransportSetSnapshot(TransportSnapshot),
     TelemetryConfiguration(TelemetryConfiguration),
@@ -117,11 +114,10 @@ pub struct TypedEventFrame<'a> {
 
 /// A strictly decoded complete typed command payload.
 #[allow(missing_docs)]
-pub enum DecodedCommandPayload<'a> {
+pub enum DecodedCommandPayload {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
     SessionTransactionApply(Vec<SessionEdit>),
-    AutomationEnqueue(DecodedAutomationEnqueue<'a>),
     TransportGet,
     TransportSet(TransportSetRequest),
     TelemetryConfigure(TelemetryConfiguration),
@@ -134,9 +130,9 @@ pub enum DecodedCommandPayload<'a> {
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
 #[allow(missing_docs)]
-pub struct DecodedTypedCommandFrame<'a> {
+pub struct DecodedTypedCommandFrame {
     pub header: CommandHeader,
-    pub payload: DecodedCommandPayload<'a>,
+    pub payload: DecodedCommandPayload,
 }
 
 /// A strictly decoded successful response payload.
@@ -145,7 +141,6 @@ pub enum DecodedSuccessResponsePayload<'a> {
     Capabilities(DecodedCapabilities<'a>),
     SessionSnapshot(SessionSnapshot<'a>),
     SessionTransactionApplied(TransactionApplied),
-    AutomationEnqueued(AutomationEnqueued),
     TransportGetSnapshot(TransportSnapshot),
     TransportSetSnapshot(TransportSnapshot),
     TelemetryConfiguration(TelemetryConfiguration),
@@ -193,7 +188,6 @@ impl<'a> CommandPayload<'a> {
             Self::CapabilitiesGet => MessageId::CapabilitiesGet,
             Self::SessionSnapshotGet(_) => MessageId::SessionSnapshotGet,
             Self::SessionTransactionApply(_) => MessageId::SessionTransactionApply,
-            Self::AutomationEnqueue(_) => MessageId::AutomationEnqueue,
             Self::TransportGet => MessageId::TransportGet,
             Self::TransportSet(_) => MessageId::TransportSet,
             Self::TelemetryConfigure(_) => MessageId::TelemetryConfigure,
@@ -212,7 +206,6 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::Capabilities(_) => MessageId::CapabilitiesGet,
             Self::SessionSnapshot(_) => MessageId::SessionSnapshotGet,
             Self::SessionTransactionApplied(_) => MessageId::SessionTransactionApply,
-            Self::AutomationEnqueued(_) => MessageId::AutomationEnqueue,
             Self::TransportGetSnapshot(_) => MessageId::TransportGet,
             Self::TransportSetSnapshot(_) => MessageId::TransportSet,
             Self::TelemetryConfiguration(_) => MessageId::TelemetryConfigure,
@@ -371,20 +364,20 @@ impl ProtocolCodec {
     }
 
     /// Decode a complete command and select its one exact registered schema.
-    pub fn decode_typed_command<'a>(
+    pub fn decode_typed_command(
         &self,
-        input: &'a [u8],
+        input: &[u8],
         scratch: &mut DecodeScratch<'_>,
-    ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
+    ) -> Result<DecodedTypedCommandFrame, DecodeError> {
         self.decode_typed_command_with_transaction_limit(input, scratch, None, true)
     }
 
-    pub(crate) fn decode_typed_command_limited<'a>(
+    pub(crate) fn decode_typed_command_limited(
         &self,
-        input: &'a [u8],
+        input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         maximum_transaction_edits: u32,
-    ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
+    ) -> Result<DecodedTypedCommandFrame, DecodeError> {
         self.decode_typed_command_with_transaction_limit(
             input,
             scratch,
@@ -393,13 +386,13 @@ impl ProtocolCodec {
         )
     }
 
-    fn decode_typed_command_with_transaction_limit<'a>(
+    fn decode_typed_command_with_transaction_limit(
         &self,
-        input: &'a [u8],
+        input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         maximum_transaction_edits: Option<u32>,
         enforce_exact_revision: bool,
-    ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
+    ) -> Result<DecodedTypedCommandFrame, DecodeError> {
         let decoded = self.decode_header(input)?;
         let header = decoded
             .header
@@ -430,9 +423,6 @@ impl ProtocolCodec {
                     .decode_session_transaction_frame_limited(decoded, maximum_transaction_edits)?;
                 DecodedCommandPayload::SessionTransactionApply(transaction.edits)
             }
-            MessageId::AutomationEnqueue => DecodedCommandPayload::AutomationEnqueue(
-                self.decode_automation_enqueue(decoded.payload, header.tlv_count)?,
-            ),
             MessageId::TransportGet => {
                 self.decode_transport_get_request(decoded.payload, header.tlv_count)?;
                 DecodedCommandPayload::TransportGet
@@ -494,9 +484,6 @@ impl ProtocolCodec {
                     self.decode_transaction_applied(decoded.payload, header.tlv_count)?,
                 )
             }
-            MessageId::AutomationEnqueue => DecodedSuccessResponsePayload::AutomationEnqueued(
-                self.decode_automation_enqueued(decoded.payload, header.tlv_count)?,
-            ),
             MessageId::TransportGet => DecodedSuccessResponsePayload::TransportGetSnapshot(
                 self.decode_transport_snapshot(decoded.payload, header.tlv_count)?,
             ),
@@ -571,7 +558,6 @@ const fn command_message_requires_exact(message_id: MessageId) -> bool {
     matches!(
         message_id,
         MessageId::SessionTransactionApply
-            | MessageId::AutomationEnqueue
             | MessageId::TransportSet
             | MessageId::TelemetryConfigure
     )
@@ -666,9 +652,6 @@ fn write_command_payload(
         CommandPayload::SessionTransactionApply(_) => {
             unreachable!("handled as a complete transaction frame")
         }
-        CommandPayload::AutomationEnqueue(value) => {
-            crate::message_wire::write_automation_enqueue(sink, *value)
-        }
         CommandPayload::TransportGet => {
             sink.check_field_count(crate::schema::transport_get::SPEC.field_count(&[])?)
         }
@@ -707,9 +690,6 @@ fn write_success_payload(
         }
         SuccessResponsePayload::SessionTransactionApplied(value) => {
             crate::message_wire::write_transaction_applied(sink, *value)
-        }
-        SuccessResponsePayload::AutomationEnqueued(value) => {
-            crate::message_wire::write_automation_enqueued(sink, *value)
         }
         SuccessResponsePayload::TransportGetSnapshot(value)
         | SuccessResponsePayload::TransportSetSnapshot(value) => {
@@ -783,23 +763,19 @@ mod tests {
             maximum_tlvs: 1024,
             maximum_string_bytes: 1024,
             maximum_nesting: 4,
-            maximum_automation_records: 256,
             control_command_slots: 1,
             control_command_bytes: 64,
-            automation_batch_slots: 1,
             reliable_response_slots: 1,
             reliable_event_slots: 1,
             telemetry_slots: 1,
             replay_entries: 1,
             replay_bytes: 64,
             maximum_cached_response_bytes: 64,
-            per_block_automation_density: 1,
-            admission_quantum_frames: 1,
             maximum_control_page_items: 256,
             maximum_diagnostic_page_items: 256,
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
-            supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
             supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
             flags: crate::CapabilityFlags::B4_BASE,
         }
@@ -966,14 +942,6 @@ mod tests {
             maximum_automation_spans: None,
             maximum_reply_bytes: None,
         };
-        let records = [crate::AutomationRecord {
-            kind: crate::AutomationKind::Point,
-            handle: crate::ParameterHandle(1),
-            start: crate::SampleTime(1),
-            end: crate::SampleTime(1),
-            start_value: 0.0,
-            end_value: 0.0,
-        }];
         let telemetry = TelemetryConfiguration {
             meter_handles: Vec::new(),
             meter_period_blocks: 0,
@@ -1013,16 +981,6 @@ mod tests {
                     payload: CommandPayload::SessionTransactionApply(&edits),
                 },
                 MessageId::SessionTransactionApply,
-            ),
-            (
-                TypedCommandFrame {
-                    request_id: request_id(),
-                    expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
-                    payload: CommandPayload::AutomationEnqueue(AutomationEnqueue {
-                        records: &records,
-                    }),
-                },
-                MessageId::AutomationEnqueue,
             ),
             (
                 TypedCommandFrame {
@@ -1150,19 +1108,6 @@ mod tests {
                     ),
                 },
                 MessageId::SessionTransactionApply,
-            ),
-            (
-                TypedSuccessResponseFrame {
-                    request_id: request_id(),
-                    revision: SessionRevision(7),
-                    payload: SuccessResponsePayload::AutomationEnqueued(AutomationEnqueued {
-                        accepted_records: 1,
-                        occupancy: 0,
-                        capacity: 1,
-                        generation: 1,
-                    }),
-                },
-                MessageId::AutomationEnqueue,
             ),
             (
                 TypedSuccessResponseFrame {
@@ -1318,8 +1263,6 @@ mod tests {
             StatusCode::ValidationFailed,
             StatusCode::NotFound,
             StatusCode::Unavailable,
-            StatusCode::TimeInPast,
-            StatusCode::AutomationOrder,
             StatusCode::PcmForbidden,
             StatusCode::Internal,
         ];

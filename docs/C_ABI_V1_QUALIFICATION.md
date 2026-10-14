@@ -255,11 +255,7 @@ control row's descriptor (every field except `value`) differs from the previous 
 request that names another epoch is `REVISION_CONFLICT` with `control.list.stale`. The page
 `revision` is the committed session revision. A page holds at most `limit` rows and fewer when its
 response would exceed the endpoint's response bound (the page then is not the end of the list).
-The C ABI serves no automation, so `AUTOMATION_ENQUEUE` is refused `UNAVAILABLE` before any check and
-`CAPABILITIES_GET` lists no command `0x0006` and clears flag bit 5 (#1315). The provider's automation domain
-checks, which a later enabling (#1058) reaches, read the shared descriptor of the row by handle; until #1567 only an effect
-parameter is a target, and a handle that names any other row is `INVALID_FIELD` with
-`automation.target.unsupported` (host-core's `only_an_effect_parameter_is_an_automation_target` holds it). Current/effective sample reads the active
+`AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
 provider's counter and diagnostic pages. The five provider-owned counters (the two telemetry counters, canceled automation,

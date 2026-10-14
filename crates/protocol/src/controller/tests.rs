@@ -330,74 +330,6 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     assert!(limited.replay.is_empty());
 }
 
-#[test]
-fn public_b1b_automation_replay_uses_the_ordinary_queue() {
-    let records = [crate::AutomationRecord {
-        kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(AUTOMATABLE_CONTROL),
-        start: SampleTime(0),
-        end: SampleTime(0),
-        start_value: 0.25,
-        end_value: 0.25,
-    }];
-    let input = full_command(
-        1,
-        ExpectedRevision::Exact(SessionRevision(7)),
-        crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue { records: &records }),
-    );
-    let mut endpoint = controller(8, 2);
-    let first = endpoint
-        .process_b1b_btlv(&input, &mut DecodeScratch::new(&mut [0_u16; 32]))
-        .expect("ordinary B1b automation");
-    assert_eq!(first.status, StatusCode::Ok);
-    assert_eq!(
-        endpoint
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy,
-        1
-    );
-
-    let replay = endpoint
-        .process_b1b_btlv(&input, &mut DecodeScratch::new(&mut [0_u16; 32]))
-        .expect("ordinary B1b automation replay");
-    assert_eq!(replay, first);
-    assert_eq!(
-        endpoint
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy,
-        1
-    );
-
-    let changed_records = [crate::AutomationRecord {
-        start_value: 0.5,
-        end_value: 0.5,
-        ..records[0]
-    }];
-    let changed = full_command(
-        1,
-        ExpectedRevision::Exact(SessionRevision(7)),
-        crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue {
-            records: &changed_records,
-        }),
-    );
-    assert_eq!(
-        endpoint
-            .process_b1b_btlv(&changed, &mut DecodeScratch::new(&mut [0_u16; 32]))
-            .expect("ordinary B1b changed reuse")
-            .status,
-        StatusCode::RequestIdReuse
-    );
-    assert_eq!(
-        endpoint
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy,
-        1
-    );
-}
-
 fn egress_controller(
     reliable_event_slots: usize,
     telemetry_slots: usize,
@@ -552,8 +484,8 @@ fn capability<'a>(request_id: u64, bytes: &'a [u8]) -> ControllerRequest<'a> {
     }
 }
 
-fn batch(request_id: u64, sample: u64) -> AutomationBatchSlot {
-    AutomationBatchSlot::new(
+fn batch(request_id: u64, sample: u64) -> crate::AutomationBatchSlot {
+    crate::AutomationBatchSlot::new(
         SessionRevision(7),
         id(request_id),
         &[crate::AutomationRecord {
@@ -613,14 +545,6 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
         limit: 8,
         owner: None,
     };
-    let automation_records = [crate::AutomationRecord {
-        kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(AUTOMATABLE_CONTROL),
-        start: SampleTime(0),
-        end: SampleTime(0),
-        start_value: 0.5,
-        end_value: 0.5,
-    }];
     let telemetry = TelemetryConfiguration {
         meter_handles: vec![1],
         meter_period_blocks: 1,
@@ -676,16 +600,6 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
                 1,
                 ExpectedRevision::Any,
                 crate::CommandPayload::ControlStateGet(&control_request),
-            ),
-        ),
-        (
-            MessageId::AutomationEnqueue,
-            full_command(
-                1,
-                revision,
-                crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue {
-                    records: &automation_records,
-                }),
             ),
         ),
         (
@@ -758,37 +672,29 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
 
 #[test]
 fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
-    let records = [crate::AutomationRecord {
-        kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(AUTOMATABLE_CONTROL),
-        start: SampleTime(0),
-        end: SampleTime(0),
-        start_value: 0.25,
-        end_value: 0.25,
-    }];
     let input = full_command(
         1,
         ExpectedRevision::Exact(SessionRevision(7)),
-        crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue { records: &records }),
+        crate::CommandPayload::TransportSet(TransportSetRequest {
+            state: TransportState::Playing,
+            position: Some(SampleTime(48)),
+        }),
     );
     let mut endpoint = controller(8, 2);
     let first = process_full_command(&mut endpoint, &input);
-    assert_eq!(
+    let events = |endpoint: &mut ProtocolController<MockProvider>| {
         endpoint
             .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy,
-        1
-    );
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy
+    };
+    assert_eq!(events(&mut endpoint), 1, "the set raised its state event");
     let replay = process_full_command(&mut endpoint, &input);
     assert_eq!(replay, first);
     assert_eq!(
-        endpoint
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy,
+        events(&mut endpoint),
         1,
-        "replay must not enqueue a second batch"
+        "replay must not apply the set a second time"
     );
 
     let changed = full_command(
@@ -2028,7 +1934,7 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 2 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 3 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
@@ -2296,18 +2202,6 @@ fn every_non_ok_status_has_a_canonical_common_response_payload() {
             decoder_error: None,
         },
         Case {
-            name: "time in past",
-            status: StatusCode::TimeInPast,
-            top_level_tlvs: 2,
-            decoder_error: None,
-        },
-        Case {
-            name: "automation order",
-            status: StatusCode::AutomationOrder,
-            top_level_tlvs: 2,
-            decoder_error: None,
-        },
-        Case {
             name: "PCM forbidden",
             status: StatusCode::PcmForbidden,
             top_level_tlvs: 2,
@@ -2364,38 +2258,6 @@ fn every_non_ok_status_has_a_canonical_common_response_payload() {
             case.name
         );
     }
-}
-
-#[test]
-fn backpressure_is_cached_without_second_enqueue() {
-    let mut controller = controller(4, 1);
-    let first = ControllerRequest {
-        request_id: id(1),
-        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"first-automation",
-        command: ControlCommand::AutomationEnqueue { batch: batch(1, 0) },
-    };
-    assert_eq!(controller.process(first).status, StatusCode::Ok);
-    let second = ControllerRequest {
-        request_id: id(2),
-        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"second-automation",
-        command: ControlCommand::AutomationEnqueue { batch: batch(2, 1) },
-    };
-    let rejected = controller.process(second);
-    assert_eq!(rejected.status, StatusCode::Backpressure);
-    let _ = controller
-        .queues_mut()
-        .try_dequeue_automation()
-        .expect("first remains");
-    let retry = ControllerRequest {
-        request_id: id(2),
-        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"second-automation",
-        command: ControlCommand::AutomationEnqueue { batch: batch(2, 1) },
-    };
-    assert_eq!(controller.process(retry), rejected);
-    assert!(controller.queues_mut().try_dequeue_automation().is_err());
 }
 
 #[test]
@@ -2661,117 +2523,6 @@ fn decoded_invalid_automation_rolls_back_after_final_compilation() {
     assert_eq!(response.status, StatusCode::ValidationFailed);
     assert_eq!(controller.session().revision(), SessionRevision(7));
     assert_eq!(controller.session().canonical_snapshot(), before);
-}
-
-#[test]
-fn endpoint_owned_current_sample_rejects_past_automation_without_client_time() {
-    let mut controller = controller_at_sample(4, 1, SampleTime(5));
-    let request = ControllerRequest {
-        request_id: id(1),
-        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-        canonical_bytes: b"endpoint-current-sample",
-        command: ControlCommand::AutomationEnqueue { batch: batch(1, 4) },
-    };
-    assert_eq!(controller.process(request).status, StatusCode::TimeInPast);
-    assert!(controller.queues_mut().try_dequeue_automation().is_err());
-}
-
-#[test]
-fn b2b_btlv_automation_uses_header_identity_typed_domains_and_backpressure() {
-    fn frame(request_id: u64, sample: u64, value: f32) -> Vec<u8> {
-        let codec = ProtocolCodec::default();
-        let records = [crate::AutomationRecord {
-            kind: crate::AutomationKind::Point,
-            handle: crate::ParameterHandle(AUTOMATABLE_CONTROL),
-            start: SampleTime(sample),
-            end: SampleTime(sample),
-            start_value: value,
-            end_value: value,
-        }];
-        let payload_len = codec
-            .encoded_automation_enqueue_len(crate::AutomationEnqueue { records: &records })
-            .expect("payload length");
-        let mut result = vec![0_u8; crate::OUTER_HEADER_BYTES + payload_len];
-        codec
-            .write_outer_header(
-                &mut result,
-                crate::FrameKind::Command,
-                MessageId::AutomationEnqueue,
-                StatusCode::Ok,
-                request_id,
-                7,
-                0,
-                payload_len as u32,
-                3,
-            )
-            .expect("header");
-        codec
-            .encode_automation_enqueue(
-                crate::AutomationEnqueue { records: &records },
-                &mut result[crate::OUTER_HEADER_BYTES..],
-            )
-            .expect("payload");
-        result
-    }
-
-    let mut controller = controller(8, 1);
-    let first = frame(1, 0, 1.0);
-    let response = controller
-        .process_b1b_btlv(&first, &mut DecodeScratch::new(&mut [0_u16; 3]))
-        .expect("BTLV admission");
-    assert_eq!(response.status, StatusCode::Ok);
-    assert_eq!(
-        ProtocolCodec::default()
-            .decode_automation_enqueued(response.payload(), 4)
-            .expect("success payload"),
-        AutomationEnqueued {
-            accepted_records: 1,
-            occupancy: 1,
-            capacity: 1,
-            generation: 2,
-        }
-    );
-    let full = frame(2, 1, 1.0);
-    let response = controller
-        .process_b1b_btlv(&full, &mut DecodeScratch::new(&mut [0_u16; 3]))
-        .expect("BTLV backpressure");
-    assert_eq!(response.status, StatusCode::Backpressure);
-    assert_eq!(
-        ProtocolCodec::default()
-            .decode_non_ok_payload(response.payload(), 2)
-            .expect("typed backpressure")
-            .backpressure
-            .expect("backpressure"),
-        crate::Backpressure {
-            queue_kind: crate::BackpressureQueueKind::Automation,
-            capacity: 1,
-            occupancy: 1,
-            requested_items: 1,
-            generation: Some(2),
-            retry_boundary: None,
-            requested_bytes: None,
-            available_bytes: None,
-        }
-    );
-    let _ = controller
-        .queues_mut()
-        .try_dequeue_automation()
-        .expect("first batch");
-    let invalid_domain = frame(3, 2, 2.0);
-    assert_eq!(
-        controller
-            .process_b1b_btlv(&invalid_domain, &mut DecodeScratch::new(&mut [0_u16; 3]))
-            .expect("domain response")
-            .status,
-        StatusCode::InvalidField
-    );
-    let mut past = controller_at_sample(8, 1, SampleTime(5));
-    assert_eq!(
-        past.process_b1b_btlv(&frame(1, 4, 1.0), &mut DecodeScratch::new(&mut [0_u16; 3]))
-            .expect("past response")
-            .status,
-        StatusCode::TimeInPast
-    );
 }
 
 #[test]
@@ -3363,7 +3114,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
         endpoint.set_provider_features(features);
         let response = endpoint.process(capability(1, b"features"));
         let decoded = codec
-            .decode_capabilities(response.payload(), 27)
+            .decode_capabilities(response.payload(), 23)
             .expect("capabilities");
         if required_command != 0 {
             assert!(
@@ -3387,7 +3138,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
     endpoint.set_provider_features(ProviderFeatures::NONE);
     let caps = endpoint.process(capability(1, b"none"));
     let decoded = codec
-        .decode_capabilities(caps.payload(), 27)
+        .decode_capabilities(caps.payload(), 23)
         .expect("none caps");
     assert_eq!(decoded.flags.0 & !((1 << 7) - 1), 0);
     assert_eq!(
@@ -3421,7 +3172,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
     endpoint.config.maximum_transaction_edits = 0;
     let caps = endpoint.process(capability(1, b"zero-edit-limit"));
     let decoded = codec
-        .decode_capabilities(caps.payload(), 27)
+        .decode_capabilities(caps.payload(), 23)
         .expect("zero-edit capabilities");
     assert_eq!(decoded.maximum_transaction_edits, 0);
     assert!(
@@ -4366,7 +4117,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     let ids = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
         let response = endpoint.process(capability(request_id, b"registry"));
         let decoded = ProtocolCodec::default()
-            .decode_capabilities(response.payload(), 27)
+            .decode_capabilities(response.payload(), 23)
             .expect("capabilities");
         let commands = decoded
             .supported_commands
@@ -4380,7 +4131,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     let mut endpoint = controller(8, 1);
     assert_eq!(
         ids(&mut endpoint, 1),
-        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14], true)
+        (vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14], true)
     );
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
@@ -4388,7 +4139,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     });
     assert_eq!(
         ids(&mut endpoint, 2),
-        (vec![1, 2, 3, 6, 7, 8, 9, 10, 11, 14], false)
+        (vec![1, 2, 3, 7, 8, 9, 10, 11, 14], false)
     );
     for (request_id, payload) in [
         (
@@ -4410,167 +4161,67 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     }
 }
 
-/// #1315 gate 2. With the `automation` provider feature clear, `AUTOMATION_ENQUEUE` is
-/// `UNAVAILABLE` before the revision and domain checks and queues nothing, and the capabilities
-/// record lists no command `0x0006` and clears flag bit 5 while still listing event `0x8002`; with
-/// it set (the default) the same batch is served and both are listed.
+/// #1627 gate 1. A complete command frame under the retired message ID `0x0006`
+/// (`AUTOMATION_ENQUEUE`), carrying the payload the command had, is refused at decode as an
+/// unsupported message: nothing is written, the revision, the replay cache and every queue stay as
+/// they were, and the request ID is not consumed (the next frame with that ID is served). The
+/// capabilities record lists neither the ID nor flag bit 5.
 ///
-/// Red if the feature switch leaks into the protocol's own automation semantics (the enabled batch
-/// stops being served), a disabled controller still acks or queues the batch, or the registry
-/// advertises a command the controller refuses or breaks the wire rule tying bit 5 to `0x0006`.
+/// Red if the retired ID dispatches again, if the refusal spends state before it fails (an ack
+/// before a drop), or if a registry advertises the command or its flag.
 #[test]
-fn a_controller_without_the_automation_feature_refuses_and_does_not_advertise_the_command() {
-    let records = [crate::AutomationRecord {
-        kind: crate::AutomationKind::Point,
-        handle: ParameterHandle(AUTOMATABLE_CONTROL),
-        start: SampleTime(0),
-        end: SampleTime(0),
-        start_value: 0.25,
-        end_value: 0.25,
-    }];
-    let capabilities = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
-        let response = endpoint.process(capability(request_id, b"registry"));
-        let decoded = ProtocolCodec::default()
-            .decode_capabilities(response.payload(), 27)
-            .expect("a capabilities record that passes the wire validator");
-        let ids = |bytes: &[u8]| {
-            bytes
-                .chunks_exact(2)
-                .map(|id| u16::from_le_bytes([id[0], id[1]]))
-                .collect::<Vec<_>>()
-        };
-        (
-            ids(decoded.supported_commands),
-            ids(decoded.supported_events),
-            decoded.flags.0 & (1 << 5) != 0,
-        )
-    };
-    let enqueue = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
-        let input = full_command(
-            request_id,
-            ExpectedRevision::Exact(SessionRevision(7)),
-            crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue {
-                records: &records,
-            }),
-        );
-        let output = process_full_command(endpoint, &input);
-        match decode_response(&output) {
-            crate::DecodedTypedResponseFrame::Success { .. } => StatusCode::Ok,
-            crate::DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
-        }
-    };
-    let occupancy = |endpoint: &mut ProtocolController<MockProvider>| {
-        endpoint
-            .queues_mut()
-            .report(crate::QueueKind::Automation)
-            .occupancy
-    };
-
-    let mut endpoint = controller(8, 4);
-    let (commands, events, bit) = capabilities(&mut endpoint, 1);
-    assert!(commands.contains(&6) && events.contains(&0x8002) && bit);
-    endpoint.set_provider_features(ProviderFeatures {
-        automation: false,
-        ..ProviderFeatures::ALL
-    });
-    let (commands, events, bit) = capabilities(&mut endpoint, 2);
-    assert!(!commands.contains(&6), "{commands:?}");
-    assert!(!bit, "flag bit 5");
-    assert!(events.contains(&0x8002), "the session family keeps 0x8002");
+fn a_frame_under_the_retired_automation_id_is_refused_before_any_state_changes() {
+    let row = conformance::retired_code_rows()
+        .into_iter()
+        .find(|row| row.name == "retired.message_id_0x0006")
+        .expect("the conformance rows carry the retired automation ID");
     assert!(
-        commands.contains(&3),
-        "the rest of the registry is unchanged"
+        row.bytes.len() > crate::OUTER_HEADER_BYTES,
+        "a former payload"
     );
-    assert_eq!(enqueue(&mut endpoint, 3), StatusCode::Unavailable);
-    assert_eq!(
-        occupancy(&mut endpoint),
-        0,
-        "a refused batch queues nothing"
-    );
-    endpoint.set_provider_features(ProviderFeatures::ALL);
-    assert_eq!(enqueue(&mut endpoint, 4), StatusCode::Ok);
-    assert_eq!(occupancy(&mut endpoint), 1);
-}
+    let mut endpoint = controller(8, 2);
+    let reports = |endpoint: &mut ProtocolController<MockProvider>| {
+        [
+            crate::QueueKind::ControlCommand,
+            crate::QueueKind::Automation,
+            crate::QueueKind::ReliableResponse,
+            crate::QueueKind::ReliableEvent,
+            crate::QueueKind::Telemetry,
+        ]
+        .map(|kind| endpoint.queues_mut().report(kind))
+    };
+    let before = reports(&mut endpoint);
+    let snapshot = endpoint.session().canonical_snapshot().to_owned();
+    let mut output = [0x5a_u8; 2048];
+    let refusal = endpoint
+        .process_command_frame_into(
+            &row.bytes,
+            &mut DecodeScratch::new(&mut [0_u16; 32]),
+            &mut output,
+        )
+        .expect_err("the retired ID is refused");
+    let CommandFrameProcessError::Uncorrelatable(error) = refusal else {
+        panic!("refused for another reason: {refusal:?}");
+    };
+    assert_eq!(error.status(), StatusCode::UnsupportedMessage);
+    assert_eq!(output, [0x5a; 2048], "nothing is written");
+    assert_eq!(endpoint.session().revision(), SessionRevision(7));
+    assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+    assert!(endpoint.replay().is_empty(), "no replay entry is spent");
+    assert_eq!(reports(&mut endpoint), before, "no queue moved");
 
-/// `AUTOMATION_ENQUEUE` keeps its domain rules over the control row the provider lends: only an
-/// automatable control row admits a record, a toggle admits `0` and `1`, an enumeration admits its
-/// choices, and a header or a missing handle is refused.
-///
-/// Red if the automation check reads a header row as a control, admits a value outside a toggle's
-/// or an enumeration's domain, or admits a record for a row that is not automatable.
-#[test]
-fn automation_keeps_its_domain_rules_over_the_control_row() {
-    let mut endpoint = controller(8, 4);
-    let mut template = match mock_controls().remove(2).body {
-        crate::ControlBody::Control(row) => row,
-        _ => panic!("the third fixture row is a control"),
-    };
-    let row_entry = |handle: u32, row: crate::ControlRow| crate::ControlEntry {
-        handle,
-        address: mock_controls().remove(2).address,
-        body: crate::ControlBody::Control(row),
-    };
-    let mut toggle = template.clone();
-    toggle.kind = crate::ControlKind::Toggle;
-    toggle.minimum = 0.0;
-    toggle.maximum = 1.0;
-    let mut choices = template.clone();
-    choices.kind = crate::ControlKind::Enumeration;
-    choices.choices = vec![
-        crate::EnumChoice {
-            value: 0.0,
-            label: "a".to_owned(),
-        },
-        crate::EnumChoice {
-            value: 2.0,
-            label: "b".to_owned(),
-        },
-    ];
-    choices.default = 0.0;
-    choices.value = 0.0;
-    template.class = crate::ControlClass::RebuildOnly;
-    template.reason = Some(crate::ControlReason::NewGraph);
-    template.reopen = Some("never".to_owned());
-    template.automatable = false;
-    let mut rows = mock_controls();
-    rows.push(row_entry(4, toggle));
-    rows.push(row_entry(5, choices));
-    rows.push(row_entry(6, template));
-    endpoint.provider.controls = rows;
-    let mut next_request = 0_u64;
-    let mut attempt = |endpoint: &mut ProtocolController<MockProvider>, handle: u32, value: f32| {
-        next_request += 1;
-        let request = endpoint.process(ControllerRequest {
-            request_id: id(next_request),
-            expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
-            canonical_bytes: b"automation",
-            command: ControlCommand::AutomationEnqueue {
-                batch: AutomationBatchSlot::new(
-                    SessionRevision(7),
-                    id(next_request),
-                    &[crate::AutomationRecord {
-                        kind: crate::AutomationKind::Point,
-                        handle: ParameterHandle(handle),
-                        start: SampleTime(0),
-                        end: SampleTime(0),
-                        start_value: value,
-                        end_value: value,
-                    }],
-                )
-                .expect("batch"),
-            },
-        });
-        let status = request.status;
-        let _ = endpoint.queues_mut().try_dequeue_automation();
-        status
-    };
-    assert_eq!(attempt(&mut endpoint, 4, 1.0), StatusCode::Ok);
-    assert_eq!(attempt(&mut endpoint, 4, 0.5), StatusCode::InvalidField);
-    assert_eq!(attempt(&mut endpoint, 5, 2.0), StatusCode::Ok);
-    assert_eq!(attempt(&mut endpoint, 5, 1.0), StatusCode::InvalidField);
-    assert_eq!(attempt(&mut endpoint, 6, 0.0), StatusCode::InvalidField);
-    assert_eq!(attempt(&mut endpoint, 1, 0.0), StatusCode::InvalidField);
-    assert_eq!(attempt(&mut endpoint, 99, 0.0), StatusCode::NotFound);
+    let response = endpoint.process(capability(1, b"after the refusal"));
+    assert_eq!(response.status, StatusCode::Ok, "request ID 1 is unspent");
+    let decoded = ProtocolCodec::default()
+        .decode_capabilities(response.payload(), 23)
+        .expect("a capabilities record that passes the wire validator");
+    let commands = decoded
+        .supported_commands
+        .chunks_exact(2)
+        .map(|id| u16::from_le_bytes([id[0], id[1]]))
+        .collect::<Vec<_>>();
+    assert!(!commands.contains(&6), "{commands:?}");
+    assert_eq!(decoded.flags.0 & (1 << 5), 0, "flag bit 5");
 }
 
 fn response_request(points: u32) -> crate::ResponseGetRequest {
@@ -4700,10 +4351,10 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
     let codec = ProtocolCodec::default();
     let mut endpoint = controller(8, 1);
     let response = endpoint.process(capability(1, b"tie"));
-    assert!(codec.decode_capabilities(response.payload(), 27).is_ok());
+    assert!(codec.decode_capabilities(response.payload(), 23).is_ok());
     // Re-encode the registry with one side of the tie removed.
     let decoded = codec
-        .decode_capabilities(response.payload(), 27)
+        .decode_capabilities(response.payload(), 23)
         .expect("registry");
     let commands = decoded
         .supported_commands
@@ -4723,18 +4374,14 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
             maximum_tlvs: decoded.maximum_tlvs,
             maximum_string_bytes: decoded.maximum_string_bytes,
             maximum_nesting: decoded.maximum_nesting,
-            maximum_automation_records: decoded.maximum_automation_records,
             control_command_slots: decoded.control_command_slots,
             control_command_bytes: decoded.control_command_bytes,
-            automation_batch_slots: decoded.automation_batch_slots,
             reliable_response_slots: decoded.reliable_response_slots,
             reliable_event_slots: decoded.reliable_event_slots,
             telemetry_slots: decoded.telemetry_slots,
             replay_entries: decoded.replay_entries,
             replay_bytes: decoded.replay_bytes,
             maximum_cached_response_bytes: decoded.maximum_cached_response_bytes,
-            per_block_automation_density: decoded.per_block_automation_density,
-            admission_quantum_frames: decoded.admission_quantum_frames,
             maximum_control_page_items: decoded.maximum_control_page_items,
             maximum_diagnostic_page_items: decoded.maximum_diagnostic_page_items,
             maximum_telemetry_handles: decoded.maximum_telemetry_handles,

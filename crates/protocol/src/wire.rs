@@ -102,8 +102,6 @@ pub enum MessageId {
     SessionSnapshotGet = 0x0002,
     /// `SESSION_TRANSACTION_APPLY`.
     SessionTransactionApply = 0x0003,
-    /// `AUTOMATION_ENQUEUE`.
-    AutomationEnqueue = 0x0006,
     /// `TRANSPORT_GET`.
     TransportGet = 0x0007,
     /// `TRANSPORT_SET`.
@@ -136,9 +134,10 @@ pub enum MessageId {
 
 /// The command message IDs that were allocated and are retired: `PARAMETER_METADATA_GET`
 /// (`0x0004`) and `PARAMETER_STATE_GET` (`0x0005`), replaced by `CONTROL_LIST_GET` and
-/// `CONTROL_STATE_GET` (decision 17, C4). A retired ID decodes to `UnsupportedMessage`, is never
-/// advertised and is never reallocated.
-pub const RETIRED_MESSAGE_IDS: [u16; 2] = [0x0004, 0x0005];
+/// `CONTROL_STATE_GET` (decision 17, C4), and `AUTOMATION_ENQUEUE` (`0x0006`), retired because
+/// every sample-timed change is a stored automation edit (`0x0600`-`0x0603`; #1627). A retired ID
+/// decodes to `UnsupportedMessage`, is never advertised and is never reallocated.
+pub const RETIRED_MESSAGE_IDS: [u16; 3] = [0x0004, 0x0005, 0x0006];
 
 /// Whether `value` is a retired message ID.
 #[must_use]
@@ -170,7 +169,6 @@ impl MessageId {
             0x0001 => Self::CapabilitiesGet,
             0x0002 => Self::SessionSnapshotGet,
             0x0003 => Self::SessionTransactionApply,
-            0x0006 => Self::AutomationEnqueue,
             0x0007 => Self::TransportGet,
             0x0008 => Self::TransportSet,
             0x0009 => Self::TelemetryConfigure,
@@ -233,10 +231,6 @@ pub enum StatusCode {
     NotFound = 13,
     /// `UNAVAILABLE`.
     Unavailable = 14,
-    /// `TIME_IN_PAST`.
-    TimeInPast = 15,
-    /// `AUTOMATION_ORDER`.
-    AutomationOrder = 16,
     /// `PCM_FORBIDDEN`.
     PcmForbidden = 17,
     /// `INTERNAL`.
@@ -261,8 +255,6 @@ impl StatusCode {
             12 => Ok(Self::ValidationFailed),
             13 => Ok(Self::NotFound),
             14 => Ok(Self::Unavailable),
-            15 => Ok(Self::TimeInPast),
-            16 => Ok(Self::AutomationOrder),
             17 => Ok(Self::PcmForbidden),
             18 => Ok(Self::Internal),
             _ => Err(DecodeError::InvalidStatus),
@@ -964,6 +956,36 @@ mod tests {
             codec.decode_typed_command(&frame, &mut DecodeScratch::new(&mut [0_u16; 1])),
             Err(DecodeError::UnknownRequiredField)
         ));
+    }
+
+    /// #1627: statuses 15 (`TIME_IN_PAST`) and 16 (`AUTOMATION_ORDER`) belonged to
+    /// `AUTOMATION_ENQUEUE`. They are retired, never reallocated: a response that carries one is an
+    /// invalid status, while the allocated numbers around them still decode.
+    ///
+    /// Red if a retired status number decodes again, or a neighbour stopped decoding.
+    #[test]
+    fn retired_status_codes_are_invalid_statuses() {
+        let (mut slots, codec) = scratch();
+        for (status, decodes) in [
+            (14_u16, true),
+            (15, false),
+            (16, false),
+            (17, true),
+            (18, true),
+        ] {
+            let mut frame = EMPTY_CAPABILITIES_RESPONSE;
+            frame[18..20].copy_from_slice(&status.to_le_bytes());
+            let decoded = codec.decode(&frame, &mut DecodeScratch::new(&mut slots));
+            if decodes {
+                assert!(decoded.is_ok(), "status {status}");
+            } else {
+                assert_eq!(
+                    decoded.err(),
+                    Some(DecodeError::InvalidStatus),
+                    "status {status}"
+                );
+            }
+        }
     }
 
     #[test]

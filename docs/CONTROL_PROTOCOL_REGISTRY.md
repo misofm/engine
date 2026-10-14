@@ -6,13 +6,13 @@ This freezes the semantic registry referenced by [the wire specification](CONTRO
 
 | Commands and echoed response IDs | Events |
 | --- | --- |
-| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
-
-Command `0006` and capability flag bit 5 are advertised together and only by an endpoint that serves automation. The control plane both hosts build serves none (#1315): `AUTOMATION_ENQUEUE` is refused `UNAVAILABLE`, `CAPABILITIES_GET` lists no `0006` and clears bit 5, and event `8002` stays listed with the session family (the wire rule ties it to `8001`).
+| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
 
 Message IDs `0004` (parameter metadata get) and `0005` (parameter state get) are **retired** by decision 17 (C4, #1551): the decoder refuses them as `UNSUPPORTED_MESSAGE`, no capability registry lists them, and they are never reallocated (`RETIRED_MESSAGE_IDS`; a conformance row pins each). `CONTROL_LIST_GET` and `CONTROL_STATE_GET` replace them.
 
-Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupported message, `4` unknown required field, `5` invalid field, `6` limit exceeded, `7` revision conflict, `8` revision exhausted, `9` request ID reuse, `10` replay expired, `11` backpressure, `12` validation failed, `13` not found, `14` unavailable, `15` time in past, `16` automation order, `17` PCM forbidden, `18` internal.
+Message ID `0006` (automation enqueue) is **retired** the same way (#1627): every sample-timed change is a stored automation edit (`0600`-`0603`), so the command, its success response, statuses `15` and `16`, capability flag bit 5 and capability fields `9`, `12`, `19` and `20` are retired. The decoder refuses `0006` as `UNSUPPORTED_MESSAGE` before any state changes (it is in `RETIRED_MESSAGE_IDS` and pinned by a conformance row), no capability registry lists it or sets bit 5 (a set bit 5 is an unknown flag and refused), a status number `15` or `16` is an invalid status, and a capabilities response that carries field `9`, `12`, `19` or `20` is refused in either flag form, never skipped as an unknown optional field. None is ever reallocated or renumbered. The capabilities record has 23 fields.
+
+Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupported message, `4` unknown required field, `5` invalid field, `6` limit exceeded, `7` revision conflict, `8` revision exhausted, `9` request ID reuse, `10` replay expired, `11` backpressure, `12` validation failed, `13` not found, `14` unavailable, `17` PCM forbidden, `18` internal; `15` and `16` are retired (#1627) and never reallocated.
 
 `QueueKind` is control command `1`, automation `2`, reliable response `3`, reliable event `4`, telemetry `5`, replay cache `6`. Diagnostic severity is info `1`, warning `2`, error `3`. Transport state is stopped `1` or playing `2`. Parameter enums are: rack inserts/builtins/console `2`/`4`/`5` (decision 12, #1093: `inserts` kept the retired `dynamic` code and `console` is appended; `1` (SIMD1) and `3` (SIMD2) are retired and refused, never reallocated; `builtins` is the strip's own fixed section, appended by issue #178; the same table is the session edits' rack name and an automation target's rack); channel left/right/both `1..3`; unit dB/Hz/ms/samples/linear/ratio `1..6`. Transaction edit path (`0003` response field `2`, #1313, #1559) is live/model_only/rebuild/monitor `1..4`: records on the running plan's live lanes, nothing for render to do, a successor plan prepared and published, and writes to the host's monitor overlay only (solo: no model change, no revision change, no `SESSION_COMMITTED`); zero and every unallocated value reject. Meter component is left/right/aggregate `1..3`; meter flags are valid/clipped/held bits `0..2`. All unallocated bits reject.
 
@@ -26,10 +26,9 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 
 | ID | Command fields | Success response fields |
 | ---: | --- | --- |
-| `0001` | empty, revision-any | v1 min/max, effective frame/TLV/string/depth limits, batch/page/transaction limits, all queue/replay caps, density/quantum, packed command/event IDs, capability flags |
+| `0001` | empty, revision-any | v1 min/max, effective frame/TLV/string/depth limits, page/transaction limits, queue/replay caps, packed command/event IDs, capability flags (23 fields; `9`, `12`, `19` and `20` are retired) |
 | `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-JSON BYTES R`, `4:eof BOOL R` |
 | `0003` | `1:SessionEdit MESSAGE R*`; exact revision, nonempty | `1:applied-operations U32 R`, `2:edit-path U8 R` |
-| `0006` | count `1:U16 R`, stride `2:U16=32 R`, records `3:BYTES R`; exact revision | accepted count `1:U16 R`, occupancy `2:U64 R`, capacity `3:U64 R`, generation `4:U64 R` |
 | `0007` | empty | transport snapshot below |
 | `0008` | state `1:U8 R`, absolute position `2:U64 O`; exact revision | transport snapshot below |
 | `0009` | meter handles `1:PACKED_U32 R`, meter period `2:U32 R`, counter IDs `3:PACKED_U32 R`, counter period `4:U32 R`, diagnostics enabled `5:BOOL R`, minimum severity `6:U8 R`; exact revision | canonical echo of those six fields |

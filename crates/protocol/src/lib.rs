@@ -17,14 +17,13 @@ mod typed_frame;
 mod wire;
 
 pub use message_wire::{
-    AutomationCanceled, AutomationCancellationReason, AutomationEnqueue, AutomationEnqueued,
-    Backpressure, BackpressureQueueKind, CONTROL_PAGE_ITEMS, CONTROL_STATE_RECORD_BYTES,
-    Capabilities, CapabilityFlags, ControlAddress, ControlBody, ControlClass, ControlEntry,
-    ControlFamily, ControlKind, ControlListPage, ControlListRequest, ControlOwnerFilter,
-    ControlOwnerHeader, ControlOwnerHeaderKind, ControlOwnerKind, ControlRampRow, ControlReason,
-    ControlRouteEnds, ControlRow, ControlScope, ControlSection, ControlSectionHeader,
-    ControlStatePage, ControlStateRecord, ControlTaper, CounterId, CounterSnapshot,
-    CounterSnapshotRef, CounterValue, CountersRequest, DecodedAutomationEnqueue,
+    AutomationCanceled, AutomationCancellationReason, Backpressure, BackpressureQueueKind,
+    CONTROL_PAGE_ITEMS, CONTROL_STATE_RECORD_BYTES, Capabilities, CapabilityFlags, ControlAddress,
+    ControlBody, ControlClass, ControlEntry, ControlFamily, ControlKind, ControlListPage,
+    ControlListRequest, ControlOwnerFilter, ControlOwnerHeader, ControlOwnerHeaderKind,
+    ControlOwnerKind, ControlRampRow, ControlReason, ControlRouteEnds, ControlRow, ControlScope,
+    ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord, ControlTaper,
+    CounterId, CounterSnapshot, CounterSnapshotRef, CounterValue, CountersRequest,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticSeverity,
     DiagnosticsPage, DiagnosticsRequest, EditPath, EnumChoice, MeterBatch, MeterComponent,
     MeterRecord, NonOkResponse, ParameterChannel, ParameterRack, ParameterUnit, PathSegment,

@@ -547,7 +547,6 @@ impl Legs {
         let expected = if matches!(
             payload,
             CommandPayload::SessionTransactionApply(_)
-                | CommandPayload::AutomationEnqueue(_)
                 | CommandPayload::TransportSet(_)
                 | CommandPayload::TelemetryConfigure(_)
         ) {
@@ -701,34 +700,15 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         }),
     );
 
-    // 11. AUTOMATION_ENQUEUE with one record.
-    let record = protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(1),
-        start: SampleTime(1),
-        end: SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
-    };
-    let automation = legs.command(
-        "11 automation",
-        CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
-            records: core::slice::from_ref(&record),
-        }),
+    // 11. A frame with message ID 0x0006, the retired `AUTOMATION_ENQUEUE` (#1627): refused as an
+    // unsupported message at decode on both hosts, before any state moves.
+    let mut retired_automation = frame(
+        legs.next(),
+        ExpectedRevision::Any,
+        CommandPayload::TransportGet,
     );
-    // Neither host renders stored automation, so both refuse it with a type before any ack (#1315):
-    // equal bytes alone would also hold if both hosts acked it and dropped it.
-    let mut fields = [0_u16; 64];
-    assert!(
-        matches!(
-            ProtocolCodec::default()
-                .decode_typed_response(&automation, &mut protocol::DecodeScratch::new(&mut fields))
-                .expect("the automation response"),
-            protocol::DecodedTypedResponseFrame::NonOk { header, .. }
-                if header.status == protocol::StatusCode::Unavailable
-        ),
-        "AUTOMATION_ENQUEUE is UNAVAILABLE on both hosts"
-    );
+    retired_automation[16..18].copy_from_slice(&0x0006_u16.to_le_bytes());
+    legs.both("11 message 0x0006", &retired_automation);
 
     // 12. A frame with message ID 0x0004.
     let mut unknown_message = frame(

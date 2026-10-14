@@ -28,8 +28,8 @@ fn deterministic_mutations_cover_complete_schema_closed_dispatch(mutation_runs: 
     let seeds = complete_schema_corpus();
     assert_eq!(
         seeds.len(),
-        50,
-        "12 commands (including all-opcode transaction) + 14 success + 18 non-OK + 6 events"
+        46,
+        "11 commands (including all-opcode transaction) + 13 success + 16 non-OK + 6 events"
     );
     assert!(seeds.iter().any(|seed| {
         seed.name == "command.session_transaction_apply"

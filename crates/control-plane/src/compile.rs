@@ -935,13 +935,7 @@ where
         ProtocolControllerConfig {
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
-            // No host serves stored automation: nothing drains the automation queue into render,
-            // so the command is refused `UNAVAILABLE` on both hosts and not advertised (#1315).
-            // Flip it in the slice that wires the render-side drain (#1058, answer A9).
-            provider_features: ProviderFeatures {
-                automation: false,
-                ..ProviderFeatures::ALL
-            },
+            provider_features: ProviderFeatures::ALL,
         },
         retained_capacity,
     )

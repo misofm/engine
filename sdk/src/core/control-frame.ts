@@ -431,12 +431,15 @@ export type ControlStatusName =
   | "validation_failed"
   | "not_found"
   | "unavailable"
-  | "time_in_past"
-  | "automation_order"
   | "pcm_forbidden"
   | "internal";
 
-const STATUS_NAMES: readonly ControlStatusName[] = [
+/**
+ * The status names, indexed by the wire number. Numbers 15 and 16 were `TIME_IN_PAST` and
+ * `AUTOMATION_ORDER`, retired with `AUTOMATION_ENQUEUE` and never reallocated: a frame that
+ * carries one is "not registered", like any other unallocated number.
+ */
+const STATUS_NAMES: readonly (ControlStatusName | undefined)[] = [
   "ok",
   "malformed_frame",
   "unsupported_version",
@@ -452,8 +455,8 @@ const STATUS_NAMES: readonly ControlStatusName[] = [
   "validation_failed",
   "not_found",
   "unavailable",
-  "time_in_past",
-  "automation_order",
+  undefined,
+  undefined,
   "pcm_forbidden",
   "internal",
 ];

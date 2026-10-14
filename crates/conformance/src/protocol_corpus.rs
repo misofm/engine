@@ -290,7 +290,7 @@ pub fn console_session_fixture() -> SessionModel {
 /// One wire conformance row for decision 12's retired and refused codes (#1094).
 ///
 /// `bytes` is one complete command frame, request ID 1: a `SESSION_TRANSACTION_APPLY` at exact
-/// revision 7, or, for the two retired message IDs, an empty frame under the retired ID, which
+/// revision 7, or, for the three retired message IDs, a frame under the retired ID (empty, or for `0x0006` carrying the payload the command had), which
 /// the endpoint refuses with the decoder's `UNSUPPORTED_MESSAGE` and no response frame. An endpoint whose session is [`console_session_fixture`] answers it with `status`
 /// and exactly the diagnostic codes in `diagnostic`: the endpoint's generic `protocol.failure` for
 /// a frame refused at decode, the edit's own code for an edit refusal, none for a success. A
@@ -324,8 +324,9 @@ pub struct RetiredCodeRow {
 ///   (`VALIDATION_FAILED`, `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
 ///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
-///   C4): `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
-///   no message leaves no safe request identity, so these two rows carry the status the decoder
+///   C4), and `0x0006` (`AUTOMATION_ENQUEUE`, #1627, a frame with the payload the command had):
+///   `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
+///   no message leaves no safe request identity, so these three rows carry the status the decoder
 ///   maps the refusal to, no diagnostic, and the endpoint writes no response frame for them.
 ///
 /// The last row, `control.unknown_optional_track_field_12`, is the splice's control: the same
@@ -416,7 +417,7 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         status: VALIDATION_FAILED,
         diagnostic: Some("session.edit.value_op_retired"),
     });
-    for retired in [0x0004_u16, 0x0005] {
+    for retired in [0x0004_u16, 0x0005, 0x0006] {
         let mut bytes = vec![0; OUTER_HEADER_BYTES];
         ProtocolCodec::default()
             .encode_command_frame_into(
@@ -429,6 +430,11 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             )
             .expect("an empty command frame encodes");
         bytes[16..18].copy_from_slice(&retired.to_le_bytes());
+        if retired == 0x0006 {
+            // `AUTOMATION_ENQUEUE` is refused by its ID alone, whatever the payload: carry the
+            // payload the command had, so the row is the frame a peer of the old build sent.
+            add_former_automation_enqueue_payload(&mut bytes);
+        }
         rows.push(RetiredCodeRow {
             name: format!("retired.message_id_{retired:#06x}"),
             bytes,
@@ -443,6 +449,41 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         diagnostic: None,
     });
     rows
+}
+
+/// Append the payload `AUTOMATION_ENQUEUE` carried (#1627) to an empty command frame: `count`
+/// (field 1, `U16`), `record_bytes` (field 2, `U16`) and `records` (field 3, `Bytes`), one valid
+/// 32-byte point record. The result is the complete frame the retired command had.
+fn add_former_automation_enqueue_payload(bytes: &mut Vec<u8>) {
+    let record = AutomationRecord {
+        kind: AutomationKind::Point,
+        handle: ParameterHandle(1),
+        start: SampleTime(1),
+        end: SampleTime(1),
+        start_value: 0.0,
+        end_value: 0.0,
+    };
+    let mut record_bytes = [0_u8; AUTOMATION_RECORD_BYTES];
+    record
+        .encode_le(&mut record_bytes)
+        .expect("the former fixture record is valid");
+    let mut field = |id: u16, wire: u8, value: &[u8]| {
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&[wire, 1]);
+        bytes.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("a short value")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(value);
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
+    };
+    field(1, 2, &1_u16.to_le_bytes());
+    field(2, 2, &(AUTOMATION_RECORD_BYTES as u16).to_le_bytes());
+    field(3, 10, &record_bytes);
+    let payload_len = u32::try_from(bytes.len() - OUTER_HEADER_BYTES).expect("a short frame");
+    bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());
+    bytes[40..44].copy_from_slice(&3_u32.to_le_bytes());
 }
 
 /// The value ops decision 17 retired (C5, #1561). Their codes are refused at decode and never
@@ -754,7 +795,12 @@ pub enum ConformanceDecoder {
 /// is the `SET_CONTROL` address message (`owner_kind`, `owner_id`, `section`, `slot_id`,
 /// `control`, `lane`) and no longer the five-field strip target, so the `UpsertAutomation` and
 /// `SetAutomationTarget` edits of the transaction carry it. The frame count stays 50.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x4f6a_80fb_52c1_2aed;
+/// Issue #1627 (draft 21a) repinned it from `4f6a80fb52c12aed`: `AUTOMATION_ENQUEUE` (`0x0006`),
+/// statuses 15 (`TIME_IN_PAST`) and 16 (`AUTOMATION_ORDER`) and capability fields 9, 12, 19 and 20
+/// are retired and never reallocated, so the corpus loses the `command.automation_enqueue` and
+/// `response.automation` frames and the two status frames, and the capabilities response carries
+/// 23 fields and lists no command `0x0006` (flag bit 5 clear). The frame count is 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xcfa5_8ab7_b7bb_b7c4;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -812,14 +858,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_automation_spans: Some(4096),
         maximum_reply_bytes: Some(65_536),
     };
-    let automation = [AutomationRecord {
-        kind: AutomationKind::Point,
-        handle: ParameterHandle(1),
-        start: SampleTime(1),
-        end: SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
-    }];
     let telemetry = TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
@@ -884,12 +922,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "command.response_get",
         CommandPayload::ResponseGet(&response_request)
     );
-    command!(
-        "command.automation_enqueue",
-        CommandPayload::AutomationEnqueue(AutomationEnqueue {
-            records: &automation
-        })
-    );
     command!("command.transport_get", CommandPayload::TransportGet);
     command!(
         "command.transport_set",
@@ -922,23 +954,19 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_tlvs: 1024,
         maximum_string_bytes: 1024,
         maximum_nesting: 4,
-        maximum_automation_records: 256,
         control_command_slots: 1,
         control_command_bytes: 64,
-        automation_batch_slots: 1,
         reliable_response_slots: 1,
         reliable_event_slots: 1,
         telemetry_slots: 1,
         replay_entries: 1,
         replay_bytes: 64,
         maximum_cached_response_bytes: 64,
-        per_block_automation_density: 1,
-        admission_quantum_frames: 1,
         maximum_control_page_items: 256,
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
         supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
@@ -1015,15 +1043,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         SuccessResponsePayload::ResponseResult(ResponseResult::Tag(77))
     );
     success!(
-        "response.automation",
-        SuccessResponsePayload::AutomationEnqueued(AutomationEnqueued {
-            accepted_records: 1,
-            occupancy: 0,
-            capacity: 1,
-            generation: 1
-        })
-    );
-    success!(
         "response.transport_get",
         SuccessResponsePayload::TransportGetSnapshot(TransportSnapshot {
             state: TransportState::Stopped,
@@ -1073,8 +1092,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         StatusCode::ValidationFailed,
         StatusCode::NotFound,
         StatusCode::Unavailable,
-        StatusCode::TimeInPast,
-        StatusCode::AutomationOrder,
         StatusCode::PcmForbidden,
         StatusCode::Internal,
     ] {
@@ -1442,8 +1459,6 @@ fn status_name(status: StatusCode) -> &'static str {
         StatusCode::ValidationFailed => "response.validation_failed",
         StatusCode::NotFound => "response.not_found",
         StatusCode::Unavailable => "response.unavailable",
-        StatusCode::TimeInPast => "response.time_in_past",
-        StatusCode::AutomationOrder => "response.automation_order",
         StatusCode::PcmForbidden => "response.pcm_forbidden",
         StatusCode::Internal => "response.internal",
     }

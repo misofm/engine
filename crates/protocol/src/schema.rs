@@ -580,29 +580,6 @@ pub(crate) mod response_result {
     };
 }
 
-pub(crate) mod automation_enqueued {
-    use super::*;
-    pub(crate) const ACCEPTED_RECORDS: FieldSpec = FieldSpec::req(1, Wire::U16);
-    pub(crate) const OCCUPANCY: FieldSpec = FieldSpec::req(2, Wire::U64);
-    pub(crate) const CAPACITY: FieldSpec = FieldSpec::req(3, Wire::U64);
-    pub(crate) const GENERATION: FieldSpec = FieldSpec::req(4, Wire::U64);
-    pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "AutomationEnqueued",
-        fields: &[ACCEPTED_RECORDS, OCCUPANCY, CAPACITY, GENERATION],
-    };
-}
-
-pub(crate) mod automation_enqueue {
-    use super::*;
-    pub(crate) const COUNT: FieldSpec = FieldSpec::req(1, Wire::U16);
-    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(2, Wire::U16);
-    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(3, Wire::Bytes);
-    pub(crate) static SPEC: MessageSpec = MessageSpec {
-        name: "AutomationEnqueue",
-        fields: &[COUNT, RECORD_BYTES, RECORDS],
-    };
-}
-
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -847,18 +824,17 @@ pub(crate) mod capabilities {
     pub(crate) const MAXIMUM_TLVS: FieldSpec = FieldSpec::req(6, Wire::U32);
     pub(crate) const MAXIMUM_STRING_BYTES: FieldSpec = FieldSpec::req(7, Wire::U64);
     pub(crate) const MAXIMUM_NESTING: FieldSpec = FieldSpec::req(8, Wire::U8);
-    pub(crate) const MAXIMUM_AUTOMATION_RECORDS: FieldSpec = FieldSpec::req(9, Wire::U16);
+    // Fields 9 (`maximum_automation_records`), 12 (`automation_batch_slots`), 19
+    // (`per_block_automation_density`) and 20 (`admission_quantum_frames`) are retired with the
+    // `AUTOMATION_ENQUEUE` command (#1627) and never reallocated; see `RETIRED`.
     pub(crate) const CONTROL_COMMAND_SLOTS: FieldSpec = FieldSpec::req(10, Wire::U64);
     pub(crate) const CONTROL_COMMAND_BYTES: FieldSpec = FieldSpec::req(11, Wire::U64);
-    pub(crate) const AUTOMATION_BATCH_SLOTS: FieldSpec = FieldSpec::req(12, Wire::U64);
     pub(crate) const RELIABLE_RESPONSE_SLOTS: FieldSpec = FieldSpec::req(13, Wire::U64);
     pub(crate) const RELIABLE_EVENT_SLOTS: FieldSpec = FieldSpec::req(14, Wire::U64);
     pub(crate) const TELEMETRY_SLOTS: FieldSpec = FieldSpec::req(15, Wire::U64);
     pub(crate) const REPLAY_ENTRIES: FieldSpec = FieldSpec::req(16, Wire::U64);
     pub(crate) const REPLAY_BYTES: FieldSpec = FieldSpec::req(17, Wire::U64);
     pub(crate) const MAXIMUM_CACHED_RESPONSE_BYTES: FieldSpec = FieldSpec::req(18, Wire::U64);
-    pub(crate) const PER_BLOCK_AUTOMATION_DENSITY: FieldSpec = FieldSpec::req(19, Wire::U64);
-    pub(crate) const ADMISSION_QUANTUM_FRAMES: FieldSpec = FieldSpec::req(20, Wire::U64);
     pub(crate) const MAXIMUM_CONTROL_PAGE_ITEMS: FieldSpec = FieldSpec::req(21, Wire::U16);
     pub(crate) const MAXIMUM_DIAGNOSTIC_PAGE_ITEMS: FieldSpec = FieldSpec::req(22, Wire::U16);
     pub(crate) const MAXIMUM_TELEMETRY_HANDLES: FieldSpec = FieldSpec::req(23, Wire::U16);
@@ -877,18 +853,14 @@ pub(crate) mod capabilities {
             MAXIMUM_TLVS,
             MAXIMUM_STRING_BYTES,
             MAXIMUM_NESTING,
-            MAXIMUM_AUTOMATION_RECORDS,
             CONTROL_COMMAND_SLOTS,
             CONTROL_COMMAND_BYTES,
-            AUTOMATION_BATCH_SLOTS,
             RELIABLE_RESPONSE_SLOTS,
             RELIABLE_EVENT_SLOTS,
             TELEMETRY_SLOTS,
             REPLAY_ENTRIES,
             REPLAY_BYTES,
             MAXIMUM_CACHED_RESPONSE_BYTES,
-            PER_BLOCK_AUTOMATION_DENSITY,
-            ADMISSION_QUANTUM_FRAMES,
             MAXIMUM_CONTROL_PAGE_ITEMS,
             MAXIMUM_DIAGNOSTIC_PAGE_ITEMS,
             MAXIMUM_TELEMETRY_HANDLES,
@@ -896,6 +868,17 @@ pub(crate) mod capabilities {
             SUPPORTED_COMMANDS,
             SUPPORTED_EVENTS,
             FLAGS,
+        ],
+    };
+    /// The retired capability fields (#1627): a peer that sends one is refused in either flag
+    /// form, never skipped as an unknown optional field.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "CapabilitiesRetiredFields",
+        fields: &[
+            FieldSpec::opt(9, Wire::U16),
+            FieldSpec::opt(12, Wire::U64),
+            FieldSpec::opt(19, Wire::U64),
+            FieldSpec::opt(20, Wire::U64),
         ],
     };
 }
@@ -1806,8 +1789,6 @@ mod tests {
             &response_override::SPEC,
             &response_request::SPEC,
             &response_result::SPEC,
-            &automation_enqueue::SPEC,
-            &automation_enqueued::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_snapshot::SPEC,
@@ -1826,6 +1807,7 @@ mod tests {
             &diagnostics_page::SPEC,
             &diagnostic_event::SPEC,
             &capabilities::SPEC,
+            &capabilities::RETIRED,
         ];
         fn validate(spec: &'static MessageSpec) {
             assert!(!spec.name.is_empty());
