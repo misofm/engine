@@ -2867,6 +2867,8 @@ pub(crate) struct EffectiveDiff<'a> {
     /// [`SessionModel::vca_reach`] of `next`: per strip, the reaching VCAs' indices in ascending
     /// VCA-ID order.
     reach: Vec<Vec<usize>>,
+    /// The same for `current`, per strip of `current`: the reach the strip had before the change.
+    reach_before: Vec<Vec<usize>>,
     ramps: LiveRamps,
     edit_ramps: &'a EditRamps,
     /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
@@ -2904,6 +2906,7 @@ impl<'a> EffectiveDiff<'a> {
             before_strips: current.strips().collect(),
             after_strips: next.strips().collect(),
             reach: next.vca_reach(),
+            reach_before: current.vca_reach(),
             ramps,
             edit_ramps,
             solo_before: solo_terms(current, monitor.committed),
@@ -2986,11 +2989,7 @@ impl<'a> EffectiveDiff<'a> {
             let muted = |fader: &session::DualMonoFader| [fader.left_mute, fader.right_mute][lane];
             if muted(own_before) != muted(own_after) {
                 self.ramps.resolve(LiveRampRow::Mute, edit.mute)
-            } else if solo_moved
-                && !self.reach[after]
-                    .iter()
-                    .any(|&vca| self.vca_changed(&self.next.vcas[vca], lane, true))
-            {
+            } else if solo_moved && !self.vca_mute_moved(before, after, lane) {
                 self.ramps.resolve(LiveRampRow::Solo, self.solo_ramp)
             } else {
                 self.ramps
@@ -2998,6 +2997,25 @@ impl<'a> EffectiveDiff<'a> {
             }
         });
         LevelLengths { fader, mute }
+    }
+
+    /// Whether a VCA moved the strip's mute on `lane`: a reaching VCA's mute differs from the
+    /// committed model's, or a change in reach (a member added or removed, a VCA added or removed)
+    /// changes whether any reaching VCA holds the lane muted. Both are the model's cause (#1559
+    /// D7: a change in VCA reach is the model's), so the mute record takes the model's length
+    /// beside a solo with its own.
+    fn vca_mute_moved(&self, before: usize, after: usize, lane: usize) -> bool {
+        let holds = |vcas: &[session::Vca], reach: &[usize]| {
+            reach.iter().any(|&vca| {
+                let fader = &vcas[vca].fader;
+                [fader.left_mute, fader.right_mute][lane]
+            })
+        };
+        self.reach[after]
+            .iter()
+            .any(|&vca| self.vca_changed(&self.next.vcas[vca], lane, true))
+            || holds(&self.current.vcas, &self.reach_before[before])
+                != holds(&self.next.vcas, &self.reach[after])
     }
 
     /// Whether `vca`'s offset (or its mute) on `lane` differs from the committed model's, or the

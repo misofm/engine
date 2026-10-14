@@ -4007,3 +4007,57 @@ fn a_change_of_the_monitor_overlay_alone_is_the_other_strips_mutes_and_the_follo
     );
     assert_eq!(routes, vec![(send_id, closed, true, 3)]);
 }
+
+/// #1559 D7 with #1558 D7. A transaction that changes a strip's VCA reach and a solo with an
+/// explicit ramp gives the strip's mute record the model's length: a change in VCA reach is the
+/// model's cause, and the solo's ramp keeps only a mute that the overlay alone moved. Here the
+/// second track joins a muted VCA while the first track is soloed (which also mutes the second);
+/// the record takes the VCA mute's default length, not the solo's 9. The same solo with no
+/// membership change still takes its own 9.
+///
+/// Red if the solo's ramp wins over a membership change: the check for a model cause looks only
+/// at VCAs whose own value changed, so a strip that joins a VCA that already held its mute is
+/// missed.
+#[test]
+fn a_vca_reach_change_beside_a_solo_takes_the_models_ramp() {
+    let current = with_vca(0.0, 0.0, [true, true]);
+    let (first, second) = (track_id(&current, 0), track_id(&current, 1));
+    let ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 40,
+        pan_samples: 200,
+        link_samples: 100,
+    };
+    let none = controls::MonitorOverlay::new();
+    let soloed = controls::MonitorOverlay::with_soloed([id(&first)]);
+    let mute_of = |join: bool, ramp: Option<u32>| {
+        let (strips, _) = classify_monitor(
+            &current,
+            |next| {
+                if join {
+                    let member = next.tracks[1].id.clone();
+                    next.vcas[0].members.push(member);
+                }
+            },
+            ramps,
+            &EditRamps::new(),
+            [&none, &soloed],
+            ramp,
+        )
+        .expect("live");
+        strips
+            .into_iter()
+            .find(|strip| strip.0 == second)
+            .map(|strip| strip.1)
+    };
+    // The solo alone: the second track mutes over the solo's length.
+    assert_eq!(
+        mute_of(false, Some(9)),
+        Some(vec![mute(BuiltinLaneSelector::Both, true, 9)])
+    );
+    // The same solo with the second track joining the muted VCA: the model's length.
+    assert_eq!(
+        mute_of(true, Some(9)),
+        Some(vec![mute(BuiltinLaneSelector::Both, true, 40)])
+    );
+}
