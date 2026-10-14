@@ -17544,3 +17544,77 @@ fn a_send_command_that_repeats_the_committed_value_writes_no_record() {
     assert_eq!(host.submit_commands(2), RESULT_OK);
     assert_eq!(writes(&host), start + 5);
 }
+
+/// A refused batch leaves the strips' value mirror where it was (#1560): the same value, sent again
+/// in the next batch, still writes its cell. The mirror decides whether a record is staged, so a
+/// mirror that kept the refused batch's value would swallow the retry and the render plane would
+/// never hear an edit the host had answered as refused-then-accepted.
+///
+/// The batch is `[edit, record with a polarity value that is neither 0 nor 1]`: refused whole, with
+/// the edit staged before the refusal. A twin takes the clean retry alone, and the subject's cells
+/// must equal the twin's, for a fader, a matrix and a trim.
+///
+/// Test value: red if the strip mirror's `rollback` is dropped from a refusal (the retry compares
+/// equal to the refused value and writes nothing). Gate `a_strip_command_that_repeats_the_committed_value_writes_no_cell`
+/// sees only admitted batches, and `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone`
+/// counts only the refused batch's own cells.
+#[test]
+fn a_refused_batch_leaves_the_strip_mirror_so_the_retry_still_writes() {
+    let counts = |host: &AudioWorkletEngineHost| {
+        let controls = &host.ready.as_ref().expect("ready").controls[0];
+        (
+            controls.fader.test_only_write_counts(),
+            controls.producer.test_only_write_count(),
+            controls
+                .input
+                .as_ref()
+                .expect("input lane")
+                .test_only_write_counts(),
+        )
+    };
+    let edits: [(&str, u32, u8, [f32; 4]); 3] = [
+        ("fader", COMMAND_FADER_DB, 2, [-18.0, 0.0, 0.0, 0.0]),
+        ("matrix", COMMAND_MATRIX, 255, [0.5, 0.0, 0.0, 1.0]),
+        ("trim", COMMAND_TRIM_DB, 2, [-9.0, 0.0, 0.0, 0.0]),
+    ];
+    for (name, kind, channel, values) in edits {
+        let mut subject = live_control_host(128, 0);
+        let mut twin = live_control_host(128, 0);
+        let start = counts(&subject);
+
+        stage_command(&mut subject, 0, kind, 255, channel, 0, 0, 0, 64, values);
+        // The second record is refused by the ABI: a polarity value that is neither 0.0 nor 1.0.
+        stage_command(
+            &mut subject,
+            1,
+            COMMAND_POLARITY_INVERT,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [0.25, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            subject.submit_commands(2),
+            RESULT_INVALID_ARGUMENT,
+            "{name}"
+        );
+        assert_eq!(subject.command_report().rejected_index, 1, "{name}");
+        assert_eq!(counts(&subject), start, "{name}: the refused batch wrote");
+
+        // The retry, alone: it must write, exactly as the twin's first submission does.
+        stage_command(&mut subject, 0, kind, 255, channel, 0, 0, 0, 64, values);
+        assert_eq!(subject.submit_commands(1), RESULT_OK, "{name}");
+        assert_eq!(subject.command_report().admitted, 1, "{name}");
+        stage_command(&mut twin, 0, kind, 255, channel, 0, 0, 0, 64, values);
+        assert_eq!(twin.submit_commands(1), RESULT_OK, "{name}");
+        assert_ne!(counts(&twin), start, "{name}: the edit writes at all");
+        assert_eq!(
+            counts(&subject),
+            counts(&twin),
+            "{name}: the retry after a refused batch wrote like a first submission"
+        );
+    }
+}

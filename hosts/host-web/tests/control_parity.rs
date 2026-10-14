@@ -334,8 +334,9 @@ const fn unchanged(block: u64, edit: Edit, ramp: u32) -> Step {
 }
 
 /// The script. Every accepted row is live on both hosts and every edit but the two named ramps
-/// gives no length. Two fader edits share block 4 so the second replaces the first's write, and
-/// the refusals come last so the render after them is still the accepted edits'.
+/// gives no length. Two fader edits share block 4, two `t1` pans block 16 and two compressor
+/// thresholds block 24, so each second replaces the first's write (fader, matrix and effect
+/// cells all count a superseded write), and the refusals come last so the render after them is still the accepted edits'.
 fn script() -> Vec<Step> {
     vec![
         // Strip level.
@@ -406,6 +407,16 @@ fn script() -> Vec<Step> {
                 right: -0.3,
             },
         ),
+        // A second pan of the same strip before the same block: the first write is superseded
+        // (the matrix cell's count, which the browser and the core must agree on).
+        live(
+            16,
+            Edit::Pan {
+                strip: T1,
+                left: 0.4,
+                right: -0.1,
+            },
+        ),
         live(
             18,
             Edit::Matrix {
@@ -446,6 +457,17 @@ fn script() -> Vec<Step> {
                 parameter: 1,
                 lanes: Lanes::Left,
                 value: -30.0,
+            },
+        ),
+        // A second threshold of the same insert before the same block: an effect cell's
+        // superseded write.
+        live(
+            24,
+            Edit::Parameter {
+                insert: COMPRESSOR,
+                parameter: 1,
+                lanes: Lanes::Left,
+                value: -34.0,
             },
         ),
         live(
@@ -1843,6 +1865,27 @@ fn browser_blocks(rate: u32, steps: &[Step]) -> Vec<Vec<u32>> {
         .collect()
 }
 
+/// Whether `later`, submitted in the same block, writes the cell that `earlier` writes.
+fn replaces(earlier: &Edit, later: &Edit) -> bool {
+    match (earlier, later) {
+        (Edit::Fader { strip: a, .. }, Edit::Fader { strip: b, .. })
+        | (Edit::Pan { strip: a, .. }, Edit::Pan { strip: b, .. }) => a.id == b.id,
+        (
+            Edit::Parameter {
+                insert: a,
+                parameter: pa,
+                ..
+            },
+            Edit::Parameter {
+                insert: b,
+                parameter: pb,
+                ..
+            },
+        ) => a.id == b.id && pa == pb,
+        _ => false,
+    }
+}
+
 /// Every accepted edit changes the render on its own: the script with that edit left out differs
 /// from the full script in some block, so no row of the parity run is a silent no-op on both hosts
 /// (a row that edited nothing would pass the comparison above on any defect).
@@ -1857,10 +1900,14 @@ fn every_scripted_edit_is_heard() {
         .collect();
     let all = browser_blocks(rate, &full);
     for omitted in 0..full.len() {
-        // Step 0 is replaced by step 1 in the same block, before any render reads it: its value is
-        // superseded by design (that is what the equal superseded counts check), so it is never
-        // heard.
-        if !matches!(full[omitted].outcome, Outcome::Accepted) || omitted == 0 {
+        // A step that a later step of the same block replaces (same strip's fader, same strip's
+        // pan, same insert parameter) is superseded by design, before any render reads it: that
+        // is what the equal superseded counts check, so it is never heard.
+        if !matches!(full[omitted].outcome, Outcome::Accepted)
+            || full[omitted + 1..].iter().any(|later| {
+                later.block == full[omitted].block && replaces(&full[omitted].edit, &later.edit)
+            })
+        {
             continue;
         }
         let rest: Vec<Step> = full
