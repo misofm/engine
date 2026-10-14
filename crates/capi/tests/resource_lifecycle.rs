@@ -1325,7 +1325,9 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
         row: "largest_named_allocation_bytes",
         value: |report| report.largest_named_allocation_bytes,
         eight_lanes: 53_824,
-        four_lanes: 278_912,
+        // Four lanes: the aarch64-debug CI print of PR #1607 measured 48,915 bytes (the engine's
+        // own allocation since #1599), plus 10 %, rounded up to 64.
+        four_lanes: 53_824,
     },
 ];
 
