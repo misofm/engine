@@ -157,3 +157,40 @@ it left all 94 capi tests green. This issue owns the requirement, so it gains ga
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348): the service step
   that refreshes the counters (D3).
+
+## Decision record (batch 4, lane K)
+
+- **Planner note verified.** The #1348 refresh had landed (`SessionState::service` refreshes before
+  and after `collect_render_activity`); the defect was still there: `collect_render_activity`
+  filled every configured counter with the render sequence. `LIVE_VALUES_SUPERSEDED = 16` was
+  already in the registry, so `TransitionReprepareRefusals = 17` (D6) joins after it.
+- **D2 and #1583.** `telemetry_configure` returns `Result<TelemetryConfiguration,
+  ParameterProviderError>`; only the counter refusal (`NotFound`) is implemented. The meter-table
+  refusals and `InvalidField` are #1583's. No meter staging changed.
+- **Cadence (D4).** `SessionState::counter_snapshot_sequence` holds the render sequence at the
+  last staged snapshot. While no counter snapshot is configured it follows render, so a
+  configuration counts its period from the call that accepted it (the service step runs first in
+  that call), not from the first block ever rendered. `stage_counter_snapshot` is a new private
+  helper that `collect_render_activity` calls where it staged the snapshot before.
+- **Values (D3).** The snapshot reads the provider through `ControlProvider::counters` for the
+  configured IDs in order (configured IDs are ascending and unique by decode), after the first
+  refresh. A snapshot therefore does not count the drops its own staging causes; the second refresh
+  does, for the next call.
+- **Gate 1 reading.** "COUNTERS_GET at that call" is read just before the block is rendered: the
+  telemetry counters change only inside a service step, so that is the value the call's first
+  refresh sees. The test uses meters `[1, 2]` beside the counters so the lossy lane overflows, and
+  compares each value the lane kept (the lane may keep part of a snapshot) by ID. Every control
+  call there is a `source_submit`.
+- **Gate 5.** The oracle test configured `ControlCommandBackpressure`, which is now unserved
+  (`NOT_FOUND`). It configures `TelemetryDropped` instead; the response echo (counter ID 6) and the
+  `0x8021` event (ID 6, value 1, the real dropped count; was the render sequence 4) are re-pinned.
+- `capi_controller_dispatches_every_advertised_command_family` also pins the `COUNTERS_GET` `all`
+  response (now five served counters, ID 17 added); re-pinned from the run, for this issue's D1/D6.
+- **Gate 7** lives in `live_tests.rs` (it needs `Rig`), not `tests.rs`; its shared helpers
+  `counter_telemetry_for` and `lossy_counter_snapshots` are in `tests.rs`. Mutation (one run,
+  not committed): removing the first `refresh_provider_counters` in `service` turns it red.
+- **Files beyond the authorized list**, all mechanical: `crates/control-plane/src/compile.rs` (the
+  new field's initializer), `crates/capi/src/runtime/live_tests.rs` (gate 7),
+  `crates/protocol/src/message_wire/tests.rs` (gate 4's round trip), the host-core provider's unit
+  test (fifth counter), `docs/CONTROL_PROTOCOL_REGISTRY.md` ("IDs run 1 to 17").
+- No schema hash moved: `check-protocol-wasm-parity.sh` passes unchanged.

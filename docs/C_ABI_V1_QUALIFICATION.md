@@ -254,9 +254,23 @@ target of `AUTOMATION_ENQUEUE`, and a handle that names any other row is `INVALI
 `automation.target.unsupported`. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The four provider-owned counters (the two telemetry counters, canceled automation, and
-`live_values_superseded`, #1312 D8) retain an independent four-slot minimum even when the
-frame-derived telemetry configuration capacity is smaller.
+provider's counter and diagnostic pages. The five provider-owned counters (the two telemetry counters, canceled automation,
+`live_values_superseded`, #1312 D8, and `transition_reprepare_refusals`, #1351 D6) retain an independent
+five-slot minimum even when the frame-derived telemetry configuration capacity is smaller.
+
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those five
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all five and a read of
+any of them is never `NOT_FOUND`. `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+`MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
+is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
+event (`0x8021`) reports, for each configured ID in order, the same value `COUNTERS_GET` returns for it
+at that call. The service step reads the provider after its first refresh, so a counter that render
+changed since the previous call reaches the snapshot that the next call stages, whichever control
+call that is. A snapshot is staged once render has completed at least `counter_period_blocks` blocks
+since the last one (a configuration counts its period from the call that accepted it), with the render
+sample at that point; blocks rendered with no control call between them yield one snapshot at the
+next call, and skipped periods are not replayed. The lane is lossy: the lossy queue may keep only part
+of a snapshot.
 Candidate catalogs allocate before structural commit and are included in double-live resource
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.

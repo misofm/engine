@@ -19,9 +19,19 @@ use protocol::{
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
-/// The counters the provider holds itself: the two telemetry counters, the canceled-automation
-/// count and `live_values_superseded` (#1312 D8).
-const PROVIDER_COUNTER_SLOTS: usize = 4;
+/// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
+/// counters, the canceled-automation count, `live_values_superseded` (#1312 D8) and
+/// `transition_reprepare_refusals` (D6). Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 5] = [
+    CounterId::TelemetryCoalesced,
+    CounterId::TelemetryDropped,
+    CounterId::CanceledAutomation,
+    CounterId::LiveValuesSuperseded,
+    CounterId::TransitionReprepareRefusals,
+];
+
+/// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
+const PROVIDER_COUNTER_SLOTS: usize = SERVED_COUNTERS.len();
 
 /// Read-only, thread-safe projection of the active render plan's next absolute sample.
 pub trait PlanSampleSource: Send + Sync {
@@ -227,6 +237,11 @@ impl SessionControlProvider {
             .counter_snapshot
             .try_reserve_exact(retained.counter_ids.max(PROVIDER_COUNTER_SLOTS))
             .map_err(|_| SessionControlProviderError)?;
+        for id in SERVED_COUNTERS {
+            provider
+                .counter_snapshot
+                .push(CounterValue { id, value: 0 });
+        }
         provider
             .diagnostics
             .try_reserve_exact(diagnostic_capacity)
@@ -537,7 +552,16 @@ impl ControlProvider for SessionControlProvider {
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> TelemetryConfiguration {
+    ) -> Result<TelemetryConfiguration, ParameterProviderError> {
+        // A counter this provider does not serve can never report; refuse it before anything
+        // changes (#1351 D2).
+        if configuration
+            .counter_ids
+            .iter()
+            .any(|id| !SERVED_COUNTERS.contains(id))
+        {
+            return Err(ParameterProviderError::NotFound);
+        }
         self.telemetry_configuration.meter_handles.clear();
         self.telemetry_configuration
             .meter_handles
@@ -551,7 +575,7 @@ impl ControlProvider for SessionControlProvider {
         self.telemetry_configuration.diagnostics_enabled = configuration.diagnostics_enabled;
         self.telemetry_configuration.minimum_diagnostic_severity =
             configuration.minimum_diagnostic_severity;
-        configuration
+        Ok(configuration)
     }
 }
 
@@ -1684,6 +1708,11 @@ mod tests {
         assert_eq!(counters.values[2].value, 11);
         assert_eq!(counters.values[3].id, CounterId::LiveValuesSuperseded);
         assert_eq!(counters.values[3].value, 13);
+        assert_eq!(
+            counters.values[4].id,
+            CounterId::TransitionReprepareRefusals
+        );
+        assert_eq!(counters.values[4].value, 0);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

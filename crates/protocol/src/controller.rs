@@ -623,10 +623,13 @@ pub trait ControlProvider {
     /// Apply an idempotent absolute typed transport set and return its effective snapshot.
     fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot;
     /// Persist and echo one complete typed endpoint-local telemetry configuration idempotently.
+    ///
+    /// A provider refuses a configuration it can never serve with a typed error and changes
+    /// nothing (#1351 D2): a counter ID it does not report is [`ParameterProviderError::NotFound`].
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> TelemetryConfiguration;
+    ) -> Result<TelemetryConfiguration, ParameterProviderError>;
 }
 
 /// Typed bounded provider fixture failure; providers never return raw BTLV payload bytes.
@@ -897,7 +900,7 @@ impl ControlProvider for MockProvider {
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> TelemetryConfiguration {
+    ) -> Result<TelemetryConfiguration, ParameterProviderError> {
         self.telemetry_configuration.meter_handles.clear();
         self.telemetry_configuration
             .meter_handles
@@ -911,7 +914,7 @@ impl ControlProvider for MockProvider {
         self.telemetry_configuration.diagnostics_enabled = configuration.diagnostics_enabled;
         self.telemetry_configuration.minimum_diagnostic_severity =
             configuration.minimum_diagnostic_severity;
-        configuration
+        Ok(configuration)
     }
 }
 
@@ -3142,7 +3145,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
-                let configured = self.provider.telemetry_configure(configuration.clone());
+                let configured = match self.provider.telemetry_configure(configuration.clone()) {
+                    Ok(configured) => configured,
+                    // A refused configuration changes nothing: the stored one stays (#1351 D2).
+                    Err(error) => return self.non_ok(status_for_parameter(error), None),
+                };
                 self.telemetry_configuration.meter_handles.clear();
                 self.telemetry_configuration
                     .meter_handles

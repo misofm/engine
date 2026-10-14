@@ -380,6 +380,10 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) response_scratch: Box<[u8]>,
     pub(crate) shared: Arc<SharedPlanState<A::Row>>,
     pub(crate) observed_render_sequence: u64,
+    /// The render sequence at which the counter snapshot was last staged, or while no counter is
+    /// configured the latest one the service step saw: the baseline of the configured period
+    /// (#1351 D4).
+    pub(crate) counter_snapshot_sequence: u64,
     pub(crate) render_diagnostics: Box<[RenderDiagnosticSlot]>,
     pub(crate) render_diagnostic_head: usize,
     pub(crate) render_diagnostic_len: usize,
@@ -682,9 +686,55 @@ where
             .store(observed, Ordering::Relaxed);
     }
 
+    /// Stages the `COUNTER_SNAPSHOT` event once render has completed at least the configured
+    /// `counter_period_blocks` blocks since the last staged one (#1351 D4; the render sequence
+    /// counts blocks). Its values are, for each configured ID in order, the provider's current
+    /// value for that ID, which the service step refreshed first (D3). Blocks rendered with no
+    /// control call in between yield one snapshot at the next call: the lane is lossy and skipped
+    /// periods are not replayed.
+    fn stage_counter_snapshot(
+        &mut self,
+        sequence: u64,
+        observed_sample: protocol::SampleTime,
+        revision: protocol::SessionRevision,
+    ) {
+        let telemetry = self.controller.telemetry_configuration();
+        if telemetry.counter_ids.is_empty()
+            || telemetry.counter_period_blocks == 0
+            || sequence.saturating_sub(self.counter_snapshot_sequence)
+                < u64::from(telemetry.counter_period_blocks)
+        {
+            return;
+        }
+        let ids = telemetry.counter_ids.iter().map(|&id| id as u32).collect();
+        self.counter_snapshot_sequence = sequence;
+        let Ok(snapshot) = protocol::ControlProvider::counters(
+            self.controller.provider_mut(),
+            &protocol::CountersRequest { all: false, ids },
+        ) else {
+            return;
+        };
+        let _ = self.controller.stage_counter_snapshot_event(
+            revision,
+            &protocol::CounterSnapshot {
+                observed_sample,
+                values: snapshot.values,
+            },
+        );
+    }
+
     pub(crate) fn collect_render_activity(&mut self) {
         self.refresh_render_peak_gate();
         let sequence = self.shared.render_sequence.load(Ordering::Acquire);
+        // While no counter snapshot is configured the baseline follows render, so a
+        // configuration counts its period from the call that accepted it, never from the first
+        // block ever rendered.
+        {
+            let telemetry = self.controller.telemetry_configuration();
+            if telemetry.counter_ids.is_empty() || telemetry.counter_period_blocks == 0 {
+                self.counter_snapshot_sequence = sequence;
+            }
+        }
         if sequence == self.observed_render_sequence {
             return;
         }
@@ -718,23 +768,7 @@ where
                 }],
             );
         }
-        let counter_ids = &self.controller.telemetry_configuration().counter_ids;
-        if !counter_ids.is_empty() {
-            let values = counter_ids
-                .iter()
-                .map(|&id| protocol::CounterValue {
-                    id,
-                    value: sequence,
-                })
-                .collect();
-            let _ = self.controller.stage_counter_snapshot_event(
-                revision,
-                &protocol::CounterSnapshot {
-                    observed_sample,
-                    values,
-                },
-            );
-        }
+        self.stage_counter_snapshot(sequence, observed_sample, revision);
         let diagnostics_enabled = {
             let configuration = self.controller.telemetry_configuration();
             configuration.diagnostics_enabled

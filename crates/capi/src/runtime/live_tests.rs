@@ -7,7 +7,8 @@
 use super::tests::{
     SESSION, add_muted_track, automation_status, automation_target, boxed_c_children_with_limits,
     command_bytes, command_bytes_at_revision, command_c, control_list_all_c, control_list_c,
-    control_state_all_c, control_state_c, event_c, generated_parity_session, limits, submit_c,
+    control_state_all_c, control_state_c, counter_telemetry_for, event_c, generated_parity_session,
+    limits, lossy_counter_snapshots, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -1288,6 +1289,68 @@ fn forty_fader_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
     // Nothing is pending now: another block replaces nothing.
     rig.step();
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 78);
+}
+
+/// Issue #1351 gate 7 (#1348 verdict N-3): the service step refreshes the provider's counters
+/// before it stages the snapshot, so a counter that render changed since the last call reaches the
+/// snapshot that the next call stages. Three fader edits on one track, then one block, replace two
+/// writes of each of the two fader cells: render adds `2 x 2 = 4` to `LIVE_VALUES_SUPERSEDED`
+/// (#1312 D2), and the next call, a `source_submit`, stages exactly that.
+///
+/// Test value: red if the service step stages the snapshot before refreshing the provider (the
+/// snapshot then reads the stale 0), which no other counter shows because the telemetry counters
+/// change only inside the step itself.
+#[test]
+fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
+    let mut rig = Rig::new(&long_session(10, 48_000));
+    rig.step();
+    let request = rig.next_request();
+    let configure = counter_telemetry_for(
+        request,
+        SessionRevision(rig.summary().0),
+        vec![protocol::CounterId::LiveValuesSuperseded],
+        1,
+    );
+    assert_eq!(rig.send(&configure).0, crate::RESULT_OK);
+    for edit in 0..3 {
+        let fader = DualMonoFader {
+            left_db: -1.0 - edit as f32,
+            right_db: -1.0 - edit as f32,
+            left_mute: false,
+            right_mute: false,
+        };
+        assert_eq!(
+            rig.apply(&[fader_edit("eq0", fader)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert!(
+        lossy_counter_snapshots(rig.session).is_empty(),
+        "no block was rendered since the configuration, so nothing is staged"
+    );
+    rig.render();
+    // The next call is a source submit, not a command.
+    let [left, right] = source_chunk(rig.fed, rig.quantum);
+    submit_c(
+        rig.session,
+        rig.generation,
+        rig.fed,
+        rig.rate,
+        &left,
+        &right,
+        false,
+    );
+    let snapshots = lossy_counter_snapshots(rig.session);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].values,
+        vec![protocol::CounterValue {
+            id: protocol::CounterId::LiveValuesSuperseded,
+            value: 4,
+        }]
+    );
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 4);
 }
 
 /// Gate 3 (c): an exact replay of a live edit returns the cached response and writes nothing.
