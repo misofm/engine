@@ -281,6 +281,9 @@ enum Edit {
 enum Outcome {
     /// Accepted: `live` on the C ABI (`monitor` for solo), admitted on the browser.
     Accepted,
+    /// Accepted and a no-op: the edit repeats the committed value, so the C ABI answers
+    /// `model_only` and writes no record, and the browser admits the command and writes none.
+    Unchanged,
     /// Refused: the C ABI's control code and the browser's `COMMAND_REASON_*`.
     Refused { code: &'static str, reason: u32 },
 }
@@ -318,6 +321,15 @@ const fn refused(block: u64, edit: Edit, code: &'static str, reason: u32) -> Ste
         edit,
         ramp: None,
         outcome: Outcome::Refused { code, reason },
+    }
+}
+
+const fn unchanged(block: u64, edit: Edit, ramp: u32) -> Step {
+    Step {
+        block,
+        edit,
+        ramp: Some(ramp),
+        outcome: Outcome::Unchanged,
     }
 }
 
@@ -563,6 +575,82 @@ fn script() -> Vec<Step> {
                 muted: false,
             },
         ),
+        // Repeats: each writes the value its row already holds, one block after the write and
+        // over a new ramp length, while the first ramp is still in flight. The core writes no
+        // record for an equal value (`model_only`), so the ramp goes on; a host that wrote the
+        // record would restart it. The send mute at block 39 is the case #1560 found: the matrix
+        // ramp of block 38 is in flight, and the mute was already false.
+        unchanged(
+            5,
+            Edit::Fader {
+                strip: T1,
+                lanes: Lanes::Both,
+                db: -9.0,
+            },
+            480,
+        ),
+        unchanged(
+            7,
+            Edit::Fader {
+                strip: T2,
+                lanes: Lanes::Left,
+                db: -10.0,
+            },
+            480,
+        ),
+        unchanged(
+            9,
+            Edit::Mute {
+                strip: T3,
+                lanes: Lanes::Both,
+                muted: true,
+            },
+            480,
+        ),
+        unchanged(
+            15,
+            Edit::Pan {
+                strip: T2,
+                left: -0.2,
+                right: 0.7,
+            },
+            480,
+        ),
+        unchanged(
+            19,
+            Edit::Matrix {
+                strip: T3,
+                values: [0.7, 0.3, -0.2, 0.9],
+            },
+            480,
+        ),
+        unchanged(
+            21,
+            Edit::Trim {
+                strip: T1,
+                lanes: Lanes::Both,
+                db: -5.0,
+            },
+            480,
+        ),
+        unchanged(
+            22,
+            Edit::Polarity {
+                strip: T2,
+                lanes: Lanes::Right,
+                inverted: true,
+            },
+            480,
+        ),
+        unchanged(37, Edit::SendGain { db: -6.0 }, 480),
+        unchanged(
+            39,
+            Edit::SendMatrix {
+                values: [0.5, 0.5, 0.2, 0.8],
+            },
+            480,
+        ),
+        unchanged(39, Edit::SendMute { muted: false }, 480),
         // Refusals: one each, in the order the table in the doc names them.
         refused(
             58,
@@ -1663,6 +1751,26 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
                         "{label}: the browser admits the command live"
                     );
                 }
+                Outcome::Unchanged => {
+                    assert_eq!(
+                        c,
+                        CVerdict::Applied(if matches!(step.edit, Edit::Solo { .. }) {
+                            EditPath::Monitor
+                        } else {
+                            EditPath::ModelOnly
+                        }),
+                        "{label}: the C ABI path"
+                    );
+                    assert_eq!(
+                        b,
+                        BrowserVerdict {
+                            result: RESULT_OK,
+                            reason: COMMAND_REASON_NONE,
+                            admitted: 1,
+                        },
+                        "{label}: the browser admits the command"
+                    );
+                }
                 Outcome::Refused { code, reason } => {
                     assert!(
                         matches!(&c, CVerdict::Refused(codes) if codes.iter().any(|c| c == code)),
@@ -1741,7 +1849,12 @@ fn browser_blocks(rate: u32, steps: &[Step]) -> Vec<Vec<u32>> {
 #[test]
 fn every_scripted_edit_is_heard() {
     let rate = 48_000;
-    let full = script();
+    // The repeats are left out: with the edit they repeat omitted, a repeat is a change on the
+    // browser leg alone, which is not what this test asks.
+    let full: Vec<Step> = script()
+        .into_iter()
+        .filter(|step| !matches!(step.outcome, Outcome::Unchanged))
+        .collect();
     let all = browser_blocks(rate, &full);
     for omitted in 0..full.len() {
         // Step 0 is replaced by step 1 in the same block, before any render reads it: its value is

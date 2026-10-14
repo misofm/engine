@@ -111,6 +111,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+pub mod strip_values;
 pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
@@ -188,6 +189,10 @@ pub use spectrum::{
     SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
     spectrum_capture_collection_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
+};
+pub use strip_values::{
+    LiveStripValues, LiveStripValuesError, StripValues, changed_lane_records, covers_lane,
+    fader_gain_bits, trim_gain_bits,
 };
 pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 

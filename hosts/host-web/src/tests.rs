@@ -1007,7 +1007,10 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
         };
         // #1364 D2: the per-strip pan windows the browser keeps beside the session's ramp table.
-        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()) as u64;
+        // #1560: and the strips' mirrored values, with their transaction shadow.
+        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()
+            + 2 * shape.track_count as usize * size_of::<host_core::StripValues>())
+            as u64;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
@@ -3631,7 +3634,10 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             .checked_mul(size_of::<Box<[u64]>>() as u64)
             .expect("observation arm table arithmetic");
         // #1364 D2: the per-strip pan windows the browser keeps beside the session's ramp table.
-        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()) as u64;
+        // #1560: and the strips' mirrored values, with their transaction shadow.
+        let ramp_table_bytes = (shape.track_count as usize * size_of::<u32>()
+            + 2 * shape.track_count as usize * size_of::<host_core::StripValues>())
+            as u64;
         let effect_payload = string_payload + owner_payload;
         let effect_largest = string_largest.max(owner_largest);
         let effect_retained = dense_table + effect_payload;
@@ -8241,29 +8247,24 @@ fn a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect() {
     render_pair_and_compare(&mut batched, &mut net, 4, 1, -0.25, "coalesced vs net");
 }
 
-/// The class-A OFF gate, in the one form a unit test can carry: with no solo command ever
-/// admitted, a mute gesture puts byte-for-byte what it always put on the wire -- including the
-/// wart.
+/// A mute that repeats the value the render plane holds stages no record (#1560, decision 17 C1),
+/// as the core's classifier writes none for it.
 ///
-/// This has to be an **absolute** oracle, not a two-host comparison: a mutation of the mute path
-/// would move both arms of a comparison identically and escape it. So it pins the exact bits
-/// today's engine renders for the one gesture a net-emission rule would be tempted to collapse --
-/// a *redundant* re-mute of an already-settled-muted lane, with a nonzero window, on a negative
-/// input. The fader stage retargets unconditionally, so that gesture re-enters the ramp kernel
-/// (which multiplies by the current gain) instead of the settled kernel (which fills the plane),
-/// and `gain * negative` is `-0.0` for every sample but the one the ramp assigns its target on.
-/// That is what ships today, and solo does not get to quietly improve it: "improving" it is a
-/// digest change on a path no solo command touched.
+/// The fader stage retargets unconditionally, so a *redundant* re-mute of an already-settled-muted
+/// lane, with a nonzero window, would re-enter the ramp kernel (which multiplies by the current
+/// gain) instead of the settled kernel (which fills the plane), and `gain * negative` is `-0.0`
+/// for every sample but the one the ramp assigns its target on. The browser used to stage that
+/// record and render the `-0.0` block; the C ABI never did, because an equal value is `model_only`
+/// there. The two hosts now agree: the re-mute writes no cell, and the plane stays exact `+0.0`.
 ///
-/// The rest of the OFF gate is the sweep and the wasm legs, which compare digests across builds.
+/// This is an **absolute** oracle: the bits of the plane, the cell write counts and the mirror,
+/// not a two-host comparison.
 ///
-/// Red mutation: route mute through the coalesced net emission (stage nothing per command, let the
-/// delta pass decide) -> the redundant re-mute stages nothing, the plane stays `+0.0`, and this
-/// fails at sample zero.
+/// Red on the revert (the mute arm staging its record without comparing the emitted mirror): the
+/// re-mute writes both mute cells and the block's samples before the last are `-0.0`.
 #[test]
-fn live_controls_that_never_solo_render_what_they_always_did() {
+fn a_redundant_remute_stages_no_record_and_the_plane_stays_settled() {
     const QUANTUM: u32 = 128;
-    let quantum = QUANTUM as usize;
     let mut host = live_control_host(QUANTUM, 0);
     feed_and_render(&mut host, 1, 0, -0.5);
 
@@ -8277,23 +8278,25 @@ fn live_controls_that_never_solo_render_what_they_always_did() {
             .all(|value| value.to_bits() == 0.0_f32.to_bits()),
         "a zero-window mute settles to exact positive zero",
     );
+    let written = |host: &AudioWorkletEngineHost| {
+        host.ready.as_ref().expect("ready ownership").controls[0]
+            .fader
+            .test_only_write_counts()
+    };
+    let before = written(&host);
 
-    // The redundant re-mute, with a window. Today: the ramp path, and `-0.0` until it settles.
+    // The redundant re-mute, with a window: no record, no cell write, no ramp.
     stage_mute(&mut host, 0, 0, true, QUANTUM);
     assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(host.command_report().admitted, 1);
+    assert_eq!(written(&host), before, "the repeated mute wrote no cell");
     feed_and_render(&mut host, 1, 2, -0.5);
-    let block = host.output_pcm().expect("output").to_vec();
-    for (index, value) in block[..quantum - 1].iter().enumerate() {
-        assert_eq!(
-            value.to_bits(),
-            (-0.0_f32).to_bits(),
-            "sample {index}: the pre-solo mute path is not the one that ran",
-        );
-    }
-    assert_eq!(
-        block[quantum - 1].to_bits(),
-        0.0_f32.to_bits(),
-        "the ramp assigns its target exactly on the frame it settles on",
+    assert!(
+        host.output_pcm()
+            .expect("output")
+            .iter()
+            .all(|value| value.to_bits() == 0.0_f32.to_bits()),
+        "the settled lane stays exact positive zero",
     );
 
     let state = host.live_control_solo().expect("solo state");
@@ -11700,14 +11703,50 @@ fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
                 RESULT_OK,
                 "{what}"
             );
+            // A record is written exactly when the edit moves the send's target (#1560): the
+            // folded coefficients or the silenced flag, so a repeated value, and a gain or matrix
+            // edit on a send that stays silenced, write nothing. The expectation replays the
+            // edits over the seeds with the core's own record builder.
             let mut expected = before;
-            for (_, route, _) in &edits {
-                expected[*route] += 1;
+            let mut staged = vec![false; SEEDED_SENDS.len()];
+            let mut replay = seeds.clone();
+            let lanes: Vec<[bool; 2]> = (0..SEEDED_SENDS.len())
+                .map(|route| {
+                    live.ready
+                        .as_ref()
+                        .expect("ready")
+                        .routes
+                        .get(route)
+                        .expect("a live send")
+                        .source_lane_muted
+                })
+                .collect();
+            let record = |values: &SendValues, lanes: [bool; 2]| {
+                host_core::route_record(values.gain_db, values.matrix, values.mute, lanes, 0)
+                    .expect("a seeded send record")
+            };
+            for (kind, route, values) in &edits {
+                let prior = record(&replay[*route], lanes[*route]);
+                match *kind {
+                    COMMAND_ROUTE_GAIN_DB => replay[*route].gain_db = values[0],
+                    COMMAND_ROUTE_MUTE => replay[*route].mute = values[0] == 1.0,
+                    _ => replay[*route].matrix = *values,
+                }
+                let next = record(&replay[*route], lanes[*route]);
+                // A repeat after an earlier record of the same send in the batch still writes, so
+                // its ramp length replaces the earlier one's, as the core's last edit does.
+                if staged[*route]
+                    || prior.mute() != next.mute()
+                    || prior.target().map(f32::to_bits) != next.target().map(f32::to_bits)
+                {
+                    staged[*route] = true;
+                    expected[*route] += 1;
+                }
             }
             assert_eq!(
                 send_write_counts(&live),
                 expected,
-                "{what}: each record in its own send's cell"
+                "{what}: each record that moves a send's target in its own send's cell"
             );
             // 480 samples settle within four 128-frame blocks of the batch.
             for block in 2..7 {
@@ -13967,10 +14006,12 @@ fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
             "un-mute drums and bass, both lanes"
         );
         let after = follow_fader_room(&live);
-        // Drums split into two lane records and bass takes one both-lane record; each writes the
-        // two mute cells once, since a cell has no queue slot a split could double.
-        assert_eq!(after[1] - writes[1], 2, "drums: both mute cells");
-        assert_eq!(after[0] - writes[0], 2, "bass: both mute cells");
+        // Neither strip was user-muted, so no lane's effective mute changes: the VCA-muted lane
+        // of drums stays closed and every other lane stays open. The core writes no record for
+        // an equal value, so the browser writes no cell (#1560); a record built from the first
+        // covered lane would show here as a write.
+        assert_eq!(after[1] - writes[1], 0, "drums: no mute cell");
+        assert_eq!(after[0] - writes[0], 0, "bass: no mute cell");
         let ready = live.ready.as_ref().expect("ready");
         let solo = &ready.solo;
         let drums = SOLO_FOLLOW_DRUMS as usize;
@@ -17266,4 +17307,240 @@ fn the_browsers_staged_values_equal_the_cores_effective_values() {
         "{staged_faders} {staged_mutes}"
     );
     assert!(staged_follows > 2, "{staged_follows}");
+}
+
+/// A strip command that repeats the value the render plane holds writes no cell (#1560, decision
+/// 17 C1): the core classifies an equal value `model_only` and writes no record, and a record
+/// would restart the cell's ramp.
+///
+/// One strip, one command per submission, counted in the strip's own cells: the session's own
+/// value is a repeat (the mirror is seeded), a changed value writes once, its repeat over a new
+/// ramp length writes nothing, a one-lane command whose lane already holds the value writes
+/// nothing while the other lane's write reaches only that lane's cell, and a repeat that follows a
+/// change in the *same* batch still writes, so the last ramp length of a batch is the one that
+/// stays.
+///
+/// Test value: red if any strip arm stages its record without comparing the mirror, or compares
+/// by the wrong bits (a `-0.0` fader against `0.0` is one gain), or drops the second record of a
+/// batch (the explicit last ramp would be lost).
+#[test]
+fn a_strip_command_that_repeats_the_committed_value_writes_no_cell() {
+    let mut host = live_control_host(128, 0);
+    let counts = |host: &AudioWorkletEngineHost| {
+        let controls = &host.ready.as_ref().expect("ready").controls[0];
+        (
+            controls.fader.test_only_write_counts(),
+            controls.producer.test_only_write_count(),
+            controls
+                .input
+                .as_ref()
+                .expect("input lane")
+                .test_only_write_counts(),
+        )
+    };
+    let submit = |host: &mut AudioWorkletEngineHost, records: u32| {
+        assert_eq!(host.submit_commands(records), RESULT_OK);
+        assert_eq!(host.command_report().admitted, records);
+    };
+    let one = |host: &mut AudioWorkletEngineHost, kind, channel, smoothing, values| {
+        stage_command(host, 0, kind, 255, channel, 0, 0, 0, smoothing, values);
+        submit(host, 1);
+    };
+    let start = counts(&host);
+
+    // The session's own values: unity fader (a `-0.0` spelling included), identity matrix, no
+    // trim, no polarity, unmuted.
+    one(&mut host, COMMAND_FADER_DB, 2, 64, [0.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_FADER_DB, 2, 64, [-0.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_MUTE, 2, 64, [0.0; 4]);
+    one(&mut host, COMMAND_TRIM_DB, 2, 64, [0.0; 4]);
+    one(&mut host, COMMAND_POLARITY_INVERT, 2, 64, [0.0; 4]);
+    let seeded = host
+        .ready
+        .as_ref()
+        .expect("ready")
+        .strip_values
+        .get(0)
+        .expect("strip 0")
+        .matrix;
+    one(
+        &mut host,
+        COMMAND_MATRIX,
+        255,
+        64,
+        seeded.map(f32::from_bits),
+    );
+    assert_eq!(
+        counts(&host),
+        start,
+        "the session's own values write nothing"
+    );
+
+    // A change writes once, its repeat over another ramp length writes nothing.
+    one(&mut host, COMMAND_FADER_DB, 2, 64, [-6.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_MUTE, 2, 64, [1.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_TRIM_DB, 2, 64, [-3.0, 0.0, 0.0, 0.0]);
+    one(
+        &mut host,
+        COMMAND_POLARITY_INVERT,
+        2,
+        64,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    one(&mut host, COMMAND_MATRIX, 255, 64, [0.5, 0.0, 0.0, 1.0]);
+    let changed = counts(&host);
+    assert_eq!(changed.0, [1, 1, 1, 1], "fader and mute: both lanes, once");
+    assert_eq!(changed.1, start.1 + 1, "matrix: once");
+    assert_eq!(
+        changed.2[..4],
+        [1, 1, 1, 1],
+        "trim and polarity: both lanes"
+    );
+    one(&mut host, COMMAND_FADER_DB, 2, 480, [-6.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_MUTE, 2, 480, [1.0, 0.0, 0.0, 0.0]);
+    one(&mut host, COMMAND_TRIM_DB, 2, 480, [-3.0, 0.0, 0.0, 0.0]);
+    one(
+        &mut host,
+        COMMAND_POLARITY_INVERT,
+        2,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    one(&mut host, COMMAND_MATRIX, 255, 480, [0.5, 0.0, 0.0, 1.0]);
+    assert_eq!(counts(&host), changed, "the repeats write nothing");
+
+    // One lane: the right lane already holds -6 dB, so a left-lane write of -6 changes nothing,
+    // and a right-lane write of -9 reaches the right cell alone.
+    one(&mut host, COMMAND_FADER_DB, 1, 64, [-6.0, 0.0, 0.0, 0.0]);
+    assert_eq!(counts(&host), changed);
+    one(&mut host, COMMAND_FADER_DB, 1, 64, [-9.0, 0.0, 0.0, 0.0]);
+    assert_eq!(counts(&host).0, [1, 2, 1, 1], "only the right fader cell");
+    // A `Both` command whose left lane already holds the value writes the right lane alone.
+    one(&mut host, COMMAND_FADER_DB, 2, 64, [-6.0, 0.0, 0.0, 0.0]);
+    assert_eq!(counts(&host).0, [1, 3, 1, 1], "only the right fader cell");
+
+    // A repeat that follows a change in the same batch writes: the batch's last ramp stays.
+    let before = counts(&host);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        200,
+        [0.25, 0.0, 0.0, 1.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        480,
+        [0.25, 0.0, 0.0, 1.0],
+    );
+    submit(&mut host, 2);
+    assert_eq!(counts(&host).1, before.1 + 2, "both records of the batch");
+}
+
+/// A send command that repeats the committed value writes no record (#1560): the case the parity
+/// test found, a `SendMute false` on a send that is not muted, while the matrix ramp of an earlier
+/// edit is in flight. The mirror still moves, so a gain or matrix edit on a muted send (whose
+/// silenced target is the same `+0.0`) writes nothing now and is carried by the later unmute.
+///
+/// Test value: red if the send arm stages the folded record without comparing it with the held
+/// one, which restarts the send's ramp over the repeat's length; or if it skips the mirror update
+/// together with the record, which would lose the muted send's new gain at the unmute.
+#[test]
+fn a_send_command_that_repeats_the_committed_value_writes_no_record() {
+    let seeds = seeded_send_values();
+    let mut host = strip_boot(
+        &seeded_send_document(&seeds, false),
+        strip_options(16, 0, 0),
+    );
+    let send = 0_usize;
+    let writes = |host: &AudioWorkletEngineHost| send_write_counts(host)[send];
+    let submit = |host: &mut AudioWorkletEngineHost, kind, smoothing, values| {
+        stage_send(host, 0, kind, send as u32, smoothing, values);
+        assert_eq!(host.submit_commands(1), RESULT_OK);
+        assert_eq!(host.command_report().admitted, 1);
+    };
+    let start = writes(&host);
+
+    // The session's own values.
+    let own = &seeds[send];
+    submit(
+        &mut host,
+        COMMAND_ROUTE_GAIN_DB,
+        480,
+        [own.gain_db, 0.0, 0.0, 0.0],
+    );
+    submit(&mut host, COMMAND_ROUTE_MUTE, 480, [0.0; 4]);
+    submit(&mut host, COMMAND_ROUTE_MATRIX, 480, own.matrix);
+    assert_eq!(
+        writes(&host),
+        start,
+        "the session's own values write nothing"
+    );
+
+    // A new matrix writes once; the mute that is already false, over the mute's own ramp, then
+    // writes nothing (the parity case), and neither does the matrix again.
+    let matrix = [0.5, 0.5, 0.2, 0.8];
+    submit(&mut host, COMMAND_ROUTE_MATRIX, 480, matrix);
+    assert_eq!(writes(&host), start + 1);
+    submit(&mut host, COMMAND_ROUTE_MUTE, 128, [0.0; 4]);
+    submit(&mut host, COMMAND_ROUTE_MATRIX, 128, matrix);
+    assert_eq!(writes(&host), start + 1, "the repeats write nothing");
+
+    // Mute: one record. A gain edit on the muted send moves the mirror and writes nothing; the
+    // unmute writes once and carries it.
+    submit(&mut host, COMMAND_ROUTE_MUTE, 128, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(writes(&host), start + 2);
+    submit(
+        &mut host,
+        COMMAND_ROUTE_GAIN_DB,
+        128,
+        [-20.0, 0.0, 0.0, 0.0],
+    );
+    submit(&mut host, COMMAND_ROUTE_MATRIX, 128, [0.1, 0.2, 0.3, 0.4]);
+    assert_eq!(
+        writes(&host),
+        start + 2,
+        "a muted send's target is unchanged"
+    );
+    let mirror = &send_mirror(&host)[send];
+    assert_eq!(mirror.gain_db, -20.0);
+    assert_eq!(mirror.matrix, [0.1, 0.2, 0.3, 0.4]);
+    submit(&mut host, COMMAND_ROUTE_MUTE, 128, [0.0; 4]);
+    assert_eq!(
+        writes(&host),
+        start + 3,
+        "the unmute writes the held values"
+    );
+
+    // A repeat after a change in the same batch writes, so the batch's last ramp stays.
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        send as u32,
+        200,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(
+        &mut host,
+        1,
+        COMMAND_ROUTE_GAIN_DB,
+        send as u32,
+        480,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    assert_eq!(writes(&host), start + 5);
 }
