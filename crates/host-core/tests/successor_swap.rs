@@ -23,6 +23,8 @@
 
 #[path = "support/successor.rs"]
 mod successor;
+#[path = "support/mod.rs"]
+mod support;
 
 use builtins_compiler::TestOnlyWriteGate;
 use engine::realtime::{CarryOutcome, SwapOutcome};
@@ -3928,7 +3930,8 @@ fn a_preparation_without_a_retarget_stamps_nothing() {
 // A console slot with no live control lane is an `EffectBankStage`; the carry moves each lane
 // through the payload calls (D3), recomputes the witness the stage caches for it (D5) and counts a
 // refusal (D6). These cases prepare their plans with no live controls, the form that stage has.
-// A slot with live controls is #1280's.
+// A slot with live controls is a `LiveControlEffectBankStage` and moves the same way (#1280, the
+// cases at the end of this file).
 
 use session::{
     ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode,
@@ -4770,13 +4773,14 @@ fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes(
     an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
 }
 
-/// Root amendment of 2026-10-12 to #1277 D6 and #1279: no insert lane carries yet (#1281, #1282),
-/// so a strip whose insert survives the swap restarts that insert at rest and is in
-/// `restarted_strips()`, while a strip without an insert is not. A structural swap adds a muted
-/// track to a session whose `eq3` and `eq5` each hold an unchanged insert: the list is exactly
-/// those two, and every console slot of every strip still carries (the insert is transparent, so
-/// the swapped run equals a fresh B on every block only if the console state continued and the
-/// restarted insert changes no sample).
+/// An insert carries when it is a lane of a bank in both plans (#1280a), and the compressor insert
+/// here is not: it sits on two of nine strips, so it runs per node, and a per-node insert has no
+/// carry yet (#1281, #1282). A strip whose insert survives the swap but is not banked restarts
+/// that insert at rest and is in `restarted_strips()`, while a strip without an insert is not. A
+/// structural swap adds a muted track to a session whose `eq3` and `eq5` each hold an unchanged
+/// insert: the list is exactly those two, and every console slot of every strip still carries (the
+/// insert is transparent, so the swapped run equals a fresh B on every block only if the console
+/// state continued and the restarted insert changes no sample).
 fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     let mut with_inserts = console_session(false, &ALL_SLOTS);
     for strip in ["eq3", "eq5"] {
@@ -4877,60 +4881,289 @@ fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
     a_removed_console_slot_restarts_every_strip(Backend::Simd4);
 }
 
-/// A console slot with live controls is an effect stage with a control lane, which this slice does
-/// not carry (#1280): the plan records no effect lane, the swap prepares and carries what it does
-/// carry, and every strip that has the slot is in the restart set.
-fn a_console_slot_with_live_controls_restarts_its_strip(backend: Backend) {
-    let slots = ["eq", "comp"];
-    let a = Session::compile(console_session(false, &slots));
-    let b = Session::compile(with_muted_track(console_session(false, &slots)));
-    let mut plan = LivePlan::fresh(&a, backend);
-    assert_eq!(
-        plan.prepared.inventory.effect_lane_count(),
-        0,
-        "{backend:?}"
-    );
-    let feed = Feed::new(SOURCE, 3);
-    plan.submit(&feed, QUANTUM, 0);
-    for block in 0..SWAP_BLOCK {
-        plan.submit(&feed, QUANTUM, block + 1);
-        plan.render(QUANTUM);
+// ---------------------------------------------------------------------------------------------
+// Issue #1280a: a live-controlled effect lane keeps its state, its unread live values, its bypass
+// crossfade and its dry shunt through a plan swap.
+//
+// A console slot or a banked insert of a plan prepared with live controls is a
+// `LiveControlEffectBankStage` lane. Every case writes through the plan's own producers, stamped
+// on the plan's own gate, and compares the swapped run with the post-edit session prepared fresh
+// and fed the same values at the same blocks. A live difference between the two sessions is not
+// carried yet (#1280c), so every case leaves the sessions' values equal and moves its values
+// through the cells.
+
+use effect_contract::{BypassSwitch, EffectControlRecord};
+use host_core::LiveEffectAddress;
+
+/// The parametric EQ's `band-1-gain`: parameter id 4, index 3 of its table.
+const BAND_GAIN_INDEX: u32 = 3;
+
+/// What an [`EffectWrite`] puts in a cell.
+#[derive(Clone, Copy, Debug)]
+enum EffectValue {
+    /// A `PerLane` block-rate parameter, by index into the descriptor's table, set to one value
+    /// on both channels (a left and a right cell).
+    Parameter { index: u32, value: f32 },
+    /// The parametric EQ's first band gain, on both channels (two prepared targets).
+    BandGain(f32),
+    /// The bypass cell with its crossfade ramp.
+    Bypass(BypassSwitch),
+}
+
+/// A value written to one effect's cells before block `block` renders.
+#[derive(Clone, Copy, Debug)]
+struct EffectWrite {
+    block: usize,
+    strip: &'static str,
+    address: LiveEffectAddress,
+    value: EffectValue,
+}
+
+/// One transaction on `plan`'s own gate: the value is written to the addressed effect's cells and
+/// its revision is published.
+fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
+    let LivePlan { handles, gate, .. } = plan;
+    let producer = handles
+        .effect_control_mut(write.strip, write.address)
+        .expect("a control channel for the addressed effect");
+    match write.value {
+        EffectValue::Parameter { index, value } => {
+            for channel in [
+                effect_contract::ParameterChannel::Left,
+                effect_contract::ParameterChannel::Right,
+            ] {
+                support::write_effect(
+                    producer,
+                    gate,
+                    EffectControlRecord::Parameter {
+                        parameter_index: index,
+                        channel,
+                        value,
+                    },
+                );
+            }
+        }
+        EffectValue::BandGain(value) => {
+            for channel in [
+                effect_contract::ParameterChannel::Left,
+                effect_contract::ParameterChannel::Right,
+            ] {
+                support::push_eq_parameter(producer, gate, BAND_GAIN_INDEX, channel, value);
+            }
+        }
+        EffectValue::Bypass(switch) => {
+            producer
+                .preflight_bypass(switch)
+                .expect("a ramp the cell holds");
+            let revision = gate.last_published() + 1;
+            let stamp = gate.stamp(revision).expect("a legal revision");
+            producer.write_bypass(stamp, switch).expect("preflighted");
+            gate.publish(revision);
+        }
     }
-    let mut successor = LivePlan::successor(&b, &plan.prepared.inventory, &a.model, backend);
-    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+}
+
+/// What an [`effect_run`] hands back.
+struct EffectRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    /// The successor's `restarted_strips()`.
+    restarted: Vec<Box<str>>,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+    /// The `live_values_superseded` count of the plan that rendered the swap block, read just
+    /// after it: the successor's own count, which counts for the retired plan's cells too (#1280
+    /// D2).
+    superseded: u64,
+    /// The successor's `carry_refusal_count()` after the swap block.
+    refusals: u64,
+    /// Effect lanes the predecessor's inventory records.
+    effect_lanes: usize,
+}
+
+/// Render `a` for [`SWAP_BLOCK`] blocks and write `writes` to the plan that renders their block
+/// next; with `b`, prepare it as `a`'s successor at [`SWAP_BLOCK`], write `successor_writes` to
+/// its cells, hand over and render on. Without `b` this is the reference run: `a` rendered from
+/// frame 0 to [`BLOCKS`], fed `writes` and `successor_writes` at the same blocks.
+fn effect_run(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    writes: &[EffectWrite],
+    successor_writes: &[EffectWrite],
+    backend: Backend,
+) -> EffectRun {
+    use bench_support::alloc as bench_alloc;
+    let quantum = a.model.quantum_frames as usize;
+    let mut plan = LivePlan::fresh(a, backend);
+    let effect_lanes = plan.prepared.inventory.effect_lane_count();
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut restarted = Vec::new();
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    let mut superseded = 0;
+    let mut refusals = 0;
+    plan.submit(feed, quantum, 0);
+    for block in 0..BLOCKS {
+        for write in writes.iter().filter(|write| write.block == block) {
+            write_effect_value(&mut plan, write);
+        }
+        if let (SWAP_BLOCK, Some((session, committed))) = (block, b) {
+            let mut successor =
+                LivePlan::successor(session, &plan.prepared.inventory, committed, backend);
+            restarted = successor.prepared.restarted_strips().to_vec();
+            for write in successor_writes {
+                write_effect_value(&mut successor, write);
+            }
+            assert_eq!(
+                successor
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.prepared.sources),
+                1
+            );
+            if block + 1 < BLOCKS {
+                successor.submit(feed, quantum, block + 1);
+            }
+            let mut output = vec![f32::NAN; quantum * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.prepared.plan);
+            successor.render_into(&mut output, quantum);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            superseded = successor.handles.live_values_superseded.get();
+            refusals =
+                graph::carry_refusal_count(&mut successor.prepared.plan).expect("a graph plan");
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if b.is_none() && block == SWAP_BLOCK {
+            for write in successor_writes {
+                write_effect_value(&mut plan, write);
+            }
+        }
+        if block + 1 < BLOCKS {
+            plan.submit(feed, quantum, block + 1);
+        }
+        blocks.push(plan.render(quantum));
+        if block == SWAP_BLOCK {
+            superseded = plan.handles.live_values_superseded.get();
+        }
+    }
+    EffectRun {
+        blocks,
+        carry,
+        restarted,
+        swap_allocator,
+        superseded,
+        refusals,
+        effect_lanes,
+    }
+}
+
+fn first_effect_difference(left: &EffectRun, right: &EffectRun) -> Option<usize> {
+    assert_eq!(left.blocks.len(), right.blocks.len());
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+/// The console slot addresses of [`ALL_SLOTS`].
+const EQ_ADDRESS: LiveEffectAddress = LiveEffectAddress::console(0);
+const COMP_ADDRESS: LiveEffectAddress = LiveEffectAddress::console(1);
+/// The compressor's `threshold`: parameter id 1, index 0.
+const THRESHOLD_INDEX: u32 = 0;
+
+fn live_console_pair() -> (Session, Session) {
+    let slots = ["eq", "comp"];
+    (
+        Session::compile(console_session(false, &slots)),
+        Session::compile(with_muted_track(console_session(false, &slots))),
+    )
+}
+
+/// Gate 1: nine tracks with a live console EQ and compressor. A value is rendered in A, and a
+/// different one is written to A's cells just before the swap and not rendered. B is the same
+/// session plus a muted track, so every lane moves. Every block of the swapped run equals B
+/// prepared fresh and fed the same values at the same blocks, nothing restarts, and no restore is
+/// refused.
+fn unrendered_live_writes_survive_the_swap(backend: Backend, address: LiveEffectAddress) {
+    let (a, b) = live_console_pair();
+    let feed = bursty_feed(SOURCE, 5);
+    let value = |level: f32| match address {
+        COMP_ADDRESS => EffectValue::Parameter {
+            index: THRESHOLD_INDEX,
+            value: level,
+        },
+        _ => EffectValue::BandGain(level),
+    };
+    let (rendered, unread) = match address {
+        COMP_ADDRESS => (-30.0, -5.0),
+        _ => (-6.0, 3.0),
+    };
+    let writes = |unread_too: bool| {
+        let mut writes = Vec::new();
+        for strip in ["eq1", "eq4", "eq8"] {
+            writes.push(EffectWrite {
+                block: 3,
+                strip,
+                address,
+                value: value(rendered),
+            });
+            if unread_too {
+                writes.push(EffectWrite {
+                    block: SWAP_BLOCK,
+                    strip,
+                    address,
+                    value: value(unread),
+                });
+            }
+        }
+        writes
+    };
+    let reference = effect_run(&b, None, &feed, &writes(true), &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes(true), &[], backend);
     assert_eq!(
-        successor.prepared.restarted_strips(),
-        &every_strip[..],
-        "{backend:?}"
-    );
-    assert_eq!(
-        successor
-            .prepared
-            .sources
-            .adopt_persisting(&mut plan.prepared.sources),
-        1
-    );
-    successor.submit(&feed, QUANTUM, SWAP_BLOCK + 1);
-    assert_eq!(
-        successor
-            .prepared
-            .plan
-            .adopt_predecessor_plan(&mut plan.prepared.plan),
+        run.carry,
         CarryOutcome::Carried,
-        "{backend:?}"
+        "{backend:?} {address:?}: the swap block"
     );
-    successor.render(QUANTUM);
     assert_eq!(
-        graph::carry_refusal_count(&mut successor.prepared.plan),
-        Some(0),
-        "{backend:?}"
+        first_effect_difference(&run, &reference),
+        None,
+        "{backend:?} {address:?}: every block equals the post-edit session fed the same values"
+    );
+    assert_eq!(
+        run.restarted,
+        Vec::<Box<str>>::new(),
+        "{backend:?} {address:?}"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?} {address:?}");
+    // Not vacuous: the value that stays unread in A at the swap changes B's output, so a carry
+    // that loses it (or applies the value A rendered) renders a different block.
+    let lost = effect_run(&b, None, &feed, &writes(false), &[], backend);
+    assert_ne!(
+        lost.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{backend:?} {address:?}: the unread value is audible in the swap block"
     );
 }
 
 #[cfg(target_feature = "avx2")]
 #[test]
-fn a_console_slot_with_live_controls_restarts_its_strip_at_eight_lanes() {
-    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd8);
+fn unrendered_live_writes_survive_the_swap_at_eight_lanes() {
+    unrendered_live_writes_survive_the_swap(Backend::Simd8, EQ_ADDRESS);
+    unrendered_live_writes_survive_the_swap(Backend::Simd8, COMP_ADDRESS);
 }
 
 #[test]
@@ -4939,6 +5172,373 @@ fn a_console_slot_with_live_controls_restarts_its_strip_at_eight_lanes() {
     ignore = "a console effect bank binds only at the width its build executes, and four lanes \
               is the NEON and simd128 width (#1017)"
 )]
-fn a_console_slot_with_live_controls_restarts_its_strip_at_four_lanes() {
-    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd4);
+fn unrendered_live_writes_survive_the_swap_at_four_lanes() {
+    unrendered_live_writes_survive_the_swap(Backend::Simd4, EQ_ADDRESS);
+    unrendered_live_writes_survive_the_swap(Backend::Simd4, COMP_ADDRESS);
+}
+
+/// Every swap block of the gates below makes no allocator call and no render-audit allocation or
+/// free (gate 6), and the carry refuses no restore.
+fn assert_clean_swap(run: &EffectRun, what: &str) {
+    assert_eq!(run.carry, CarryOutcome::Carried, "{what}: the swap block");
+    assert_eq!(
+        run.swap_allocator,
+        ((0, 0, 0), (0, 0)),
+        "{what}: allocator and render audit over the swap block"
+    );
+    assert_eq!(run.refusals, 0, "{what}: no restore was refused");
+}
+
+/// Gate 2: at quantum 32 a compressor threshold change written at block 5 ramps over 64 samples,
+/// so the ramp is half done at the swap block and finishes in its first block. A carry that
+/// re-derives the ramp, or that applies the written value as a step, moves bits there.
+fn a_live_ramp_in_flight_finishes_after_the_swap(backend: Backend) {
+    let slots = ["eq", "comp"];
+    let a = Session::compile(at_quantum(console_session(false, &slots), 32));
+    let b = Session::compile(at_quantum(
+        with_muted_track(console_session(false, &slots)),
+        32,
+    ));
+    let feed = bursty_feed(SOURCE, 5);
+    let writes: Vec<EffectWrite> = ["eq1", "eq4", "eq8"]
+        .into_iter()
+        .map(|strip| EffectWrite {
+            block: SWAP_BLOCK - 1,
+            strip,
+            address: COMP_ADDRESS,
+            value: EffectValue::Parameter {
+                index: THRESHOLD_INDEX,
+                value: -40.0,
+            },
+        })
+        .collect();
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session fed the same value"
+    );
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    // Not vacuous: the threshold change is audible in the blocks the ramp spans.
+    let unchanged = effect_run(&b, None, &feed, &[], &[], backend);
+    assert_ne!(
+        unchanged.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{backend:?}: the ramp is in flight in the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_live_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
+    a_live_ramp_in_flight_finishes_after_the_swap(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_live_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
+    a_live_ramp_in_flight_finishes_after_the_swap(Backend::Simd4);
+}
+
+/// Gate 3: 40 values of one compressor parameter are written to A's cells after A's last block,
+/// the successor is published, and 40 more are written to its cells. Every write succeeds. The
+/// successor's first block equals a twin that was written only the last value, and the count
+/// grows by 40 for A's cell and 39 for the successor's own, per cell (the parameter has a left
+/// and a right cell). With nothing written to the successor, the carried value applies and the
+/// count grows by 39 per cell.
+fn the_newest_value_wins_and_the_count_is_exact(backend: Backend) {
+    let (a, b) = live_console_pair();
+    let feed = bursty_feed(SOURCE, 5);
+    let strip = "eq4";
+    let thresholds =
+        |first: f32| -> Vec<f32> { (0..40).map(|i| first - 0.25 * i as f32).collect() };
+    let write = |block: usize, value: f32| EffectWrite {
+        block,
+        strip,
+        address: COMP_ADDRESS,
+        value: EffectValue::Parameter {
+            index: THRESHOLD_INDEX,
+            value,
+        },
+    };
+    let a_writes: Vec<EffectWrite> = thresholds(-20.0)
+        .into_iter()
+        .map(|value| write(SWAP_BLOCK, value))
+        .collect();
+    let b_writes: Vec<EffectWrite> = thresholds(-25.0)
+        .into_iter()
+        .map(|value| write(SWAP_BLOCK, value))
+        .collect();
+    let cells = 2_u64;
+    // Both written: the successor's newer values win.
+    let twin = effect_run(&b, None, &feed, &[], &b_writes[39..], backend);
+    let run = effect_run(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &a_writes,
+        &b_writes,
+        backend,
+    );
+    assert_clean_swap(&run, &format!("{backend:?} both"));
+    assert_eq!(
+        first_effect_difference(&run, &twin),
+        None,
+        "{backend:?}: the successor's newest value wins"
+    );
+    assert_eq!(twin.superseded, 0, "{backend:?}: the twin replaced nothing");
+    assert_eq!(
+        run.superseded,
+        cells * (40 + 39),
+        "{backend:?}: A's 40 carried values and 39 of the successor's own, per cell"
+    );
+    // Only A written: the carried value applies.
+    let twin = effect_run(&b, None, &feed, &[], &a_writes[39..], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &a_writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?} carried"));
+    assert_eq!(
+        first_effect_difference(&run, &twin),
+        None,
+        "{backend:?}: the carried value applies"
+    );
+    assert_eq!(
+        run.superseded,
+        cells * 39,
+        "{backend:?}: the 39 values the carried one replaced, per cell"
+    );
+    // Not vacuous: the carried and the successor's values differ in the swap block.
+    let other = effect_run(&b, None, &feed, &[], &b_writes[39..], backend);
+    assert_ne!(
+        twin.blocks[SWAP_BLOCK], other.blocks[SWAP_BLOCK],
+        "{backend:?}: the two last values sound different"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn the_newest_value_wins_and_the_count_is_exact_at_eight_lanes() {
+    the_newest_value_wins_and_the_count_is_exact(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn the_newest_value_wins_and_the_count_is_exact_at_four_lanes() {
+    the_newest_value_wins_and_the_count_is_exact(Backend::Simd4);
+}
+
+/// The filtered fixture cut to its first `tracks` tracks, each with a true-peak limiter insert and
+/// its own knobs. The limiter reports a lookahead latency, so its bank keeps a dry shunt line. Every
+/// track has the insert, so no route needs a delay to match another's latency: a route's delay
+/// line is a state of its own, which no carry moves yet.
+fn limiter_insert_session(tracks: usize) -> SessionModel {
+    let mut model = filtered_session(false);
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(tracks)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.inserts.effects.push(Effect {
+            id: id("lim"),
+            identity: EffectIdentity::Native {
+                effect_id: id("miso.true-peak-limiter"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::Maximum,
+            params: console_params("limiter", index, false),
+            sidechain: SidechainDeclaration::None,
+        });
+    }
+    model
+}
+
+/// Gate 4: a true-peak limiter insert on a full bank of tracks (four at four lanes, eight at eight),
+/// one lane bypassed live before the swap. The swap block is the sixth, so the predecessor's line
+/// cursor sits a nonzero number of frames into the line (768 frames against the limiter's 240
+/// frames of lookahead), while the successor's starts at zero. The added track has no insert, so the
+/// bank stays full. The bypassed lane keeps its delayed dry signal, so the swapped run equals the
+/// post-edit session fed the same switch.
+fn a_bypassed_lane_keeps_its_delayed_dry_signal(backend: Backend, tracks: usize) {
+    let a = Session::compile(limiter_insert_session(tracks));
+    let mut b_model = with_muted_track(limiter_insert_session(tracks));
+    track_mut(&mut b_model, MUTED_TRACK).inserts.effects.clear();
+    let b = Session::compile(b_model);
+    let feed = bursty_feed(SOURCE, 5);
+    let switch = |strip, block, bypassed| EffectWrite {
+        block,
+        strip,
+        address: LiveEffectAddress::insert(0),
+        value: EffectValue::Bypass(BypassSwitch::step(bypassed)),
+    };
+    let writes = [switch("eq2", 3, true)];
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    let what = format!("{backend:?}");
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.effect_lanes, tracks,
+        "{what}: the inserts are banked lanes of the predecessor"
+    );
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the post-edit session fed the same switch"
+    );
+    // Not vacuous: the bypass is audible, and so is a dry line that starts at rest.
+    let active = effect_run(&b, None, &feed, &[], &[], backend);
+    assert_ne!(
+        active.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{what}: the bypass is audible in the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_bypassed_lane_keeps_its_delayed_dry_signal_at_eight_lanes() {
+    a_bypassed_lane_keeps_its_delayed_dry_signal(Backend::Simd8, 8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_bypassed_lane_keeps_its_delayed_dry_signal_at_four_lanes() {
+    a_bypassed_lane_keeps_its_delayed_dry_signal(Backend::Simd4, 4);
+}
+
+/// #1341 gate 6: a swap at a block inside a bypass crossfade renders bit-identically to the same
+/// session without the swap. The 480-frame ramp starts at block 4 (frame 512) and the swap block
+/// starts at frame 768, 256 frames into it. Once for a zero-latency effect (the console
+/// compressor) and once for a lane with latency (the console limiter, whose dry line the first
+/// blocks after the swap read).
+fn a_bypass_crossfade_in_flight_continues_after_the_swap(backend: Backend, slot: &str) {
+    let slots = ["comp", "limiter"];
+    let a = Session::compile(console_session(false, &slots));
+    let b = Session::compile(with_muted_track(console_session(false, &slots)));
+    let feed = bursty_feed(SOURCE, 5);
+    let address = LiveEffectAddress::console(slots.iter().position(|s| *s == slot).unwrap() as u32);
+    let writes: Vec<EffectWrite> = ["eq1", "eq4", "eq8"]
+        .into_iter()
+        .map(|strip| EffectWrite {
+            block: 4,
+            strip,
+            address,
+            value: EffectValue::Bypass(BypassSwitch {
+                bypassed: true,
+                ramp_samples: 480,
+            }),
+        })
+        .collect();
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    let what = format!("{backend:?} {slot}");
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the session without the swap"
+    );
+    // Not vacuous: the crossfade is audible after the swap, and it is not a step.
+    let step: Vec<EffectWrite> = writes
+        .iter()
+        .map(|write| EffectWrite {
+            value: EffectValue::Bypass(BypassSwitch::step(true)),
+            ..*write
+        })
+        .collect();
+    let stepped = effect_run(&b, None, &feed, &step, &[], backend);
+    assert_ne!(
+        stepped.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{what}: the ramp is in flight in the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_bypass_crossfade_in_flight_continues_after_the_swap_at_eight_lanes() {
+    for slot in ["comp", "limiter"] {
+        a_bypass_crossfade_in_flight_continues_after_the_swap(Backend::Simd8, slot);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_bypass_crossfade_in_flight_continues_after_the_swap_at_four_lanes() {
+    for slot in ["comp", "limiter"] {
+        a_bypass_crossfade_in_flight_continues_after_the_swap(Backend::Simd4, slot);
+    }
+}
+
+/// D1: a lane carries into a lane of its own kind only. A predecessor with live controls and a
+/// successor without them (or the reverse) hold the same console slots as different stage types, so
+/// the join moves no effect lane, every strip with a slot restarts, and the hand-over still
+/// succeeds: a join that ignored the kind would name a move the swap block refuses, which refuses
+/// the whole hand-over, sources included.
+fn a_changed_control_kind_carries_no_effect_lane(backend: Backend) {
+    let (a, b) = live_console_pair();
+    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+    // Live -> plain.
+    let live = LivePlan::fresh(&a, backend);
+    let plain = b
+        .prepare_successor(&live.prepared.inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    assert_eq!(plain.restarted_strips(), &every_strip[..], "{backend:?}");
+    // Plain -> live.
+    let plain = a.prepare(backend);
+    let live = LivePlan::successor(&b, &plain.inventory, &a.model, backend);
+    assert_eq!(
+        live.prepared.restarted_strips(),
+        &every_strip[..],
+        "{backend:?}"
+    );
+    // The control: the same kind on both sides carries every slot of every strip.
+    let live = LivePlan::fresh(&a, backend);
+    let successor = LivePlan::successor(&b, &live.prepared.inventory, &a.model, backend);
+    assert!(
+        successor.prepared.restarted_strips().is_empty(),
+        "{backend:?}"
+    );
+    assert_eq!(
+        live.prepared.inventory.effect_lane_count(),
+        18,
+        "{backend:?}"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_changed_control_kind_carries_no_effect_lane_at_eight_lanes() {
+    a_changed_control_kind_carries_no_effect_lane(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_changed_control_kind_carries_no_effect_lane_at_four_lanes() {
+    a_changed_control_kind_carries_no_effect_lane(Backend::Simd4);
 }

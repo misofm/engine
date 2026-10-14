@@ -815,6 +815,58 @@ impl EffectLaneLayout {
     }
 }
 
+/// What kind of stage and control lane an effect bank lane has (#1280): a plan swap moves a lane
+/// into a successor lane of the same kind only. The kinds differ in what the lane holds besides
+/// the effect's own state, so a pair of unlike kinds has nothing to join.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EffectLaneKind {
+    /// A lane of an [`EffectBankStage`]: no live control and no lowered bypass.
+    Plain,
+    /// A lane of a [`LiveControlEffectBankStage`] that has no control lane: neither a live channel
+    /// nor a lowered bypass applies to it.
+    Uncontrolled,
+    /// A lane of a [`LiveControlEffectBankStage`] whose control lane has no cells: it carries a
+    /// session bypass lowered at preparation and nothing a control plane can write.
+    BypassOnly,
+    /// A lane of a [`LiveControlEffectBankStage`] with live cells (and a bypass cell).
+    Cells,
+}
+
+// REALTIME_POLICY_BEGIN
+/// The payload move of a plan swap's effect carry (#1279 D3), for both stage types: snapshot
+/// `predecessor`'s lane `predecessor_lane` into `scratch` and restore it into `into`'s lane
+/// `lane`. Returns whether the restored payload's left and right sections agree, or `None` when a
+/// step refused (a restore validates the whole payload before it commits, so a refused one changes
+/// nothing). Allocation-free and bounded by the prepared state size.
+fn carry_payload(
+    into: &mut dyn PreparedNativeEffectBank,
+    lane: usize,
+    predecessor: &dyn PreparedNativeEffectBank,
+    predecessor_lane: usize,
+    layout: &EffectLaneLayout,
+    scratch: &mut [u8],
+) -> Option<bool> {
+    let sizes = layout.state_sizes;
+    let (common, rest) = scratch.split_at_mut_checked(sizes.common_bytes as usize)?;
+    let (left, rest) = rest.split_at_mut_checked(sizes.left_bytes as usize)?;
+    let right = rest.get_mut(..sizes.right_bytes as usize)?;
+    predecessor
+        .snapshot_track_state_payload(
+            u32::try_from(predecessor_lane).ok()?,
+            StatePayloadOutput::new(common, left, right, sizes).ok()?,
+        )
+        .ok()?;
+    let (common, left, right): (&[u8], &[u8], &[u8]) = (common, left, right);
+    into.restore_track_state_payload(
+        u32::try_from(lane).ok()?,
+        layout.state_layout_version,
+        StatePayloadInput::new(common, left, right, sizes).ok()?,
+    )
+    .ok()?;
+    Some(effect_contract::payload_sections_agree(left, right))
+}
+// REALTIME_POLICY_END
+
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
 ///
 /// Width, quantum and the automation offsets are fixed here once (#96 F8): the render path reads
@@ -949,31 +1001,19 @@ impl EffectBankStage {
         predecessor_lane: usize,
         scratch: &mut [u8],
     ) -> bool {
-        let sizes = self.layout.state_sizes;
-        let taken = (|| {
-            if !self.can_carry_lane_from(lane, predecessor, predecessor_lane, scratch.len()) {
-                return None;
-            }
-            let (common, rest) = scratch.split_at_mut_checked(sizes.common_bytes as usize)?;
-            let (left, rest) = rest.split_at_mut_checked(sizes.left_bytes as usize)?;
-            let right = rest.get_mut(..sizes.right_bytes as usize)?;
-            predecessor
-                .processor
-                .snapshot_track_state_payload(
-                    u32::try_from(predecessor_lane).ok()?,
-                    StatePayloadOutput::new(common, left, right, sizes).ok()?,
-                )
-                .ok()?;
-            let (common, left, right): (&[u8], &[u8], &[u8]) = (common, left, right);
-            self.processor
-                .restore_track_state_payload(
-                    u32::try_from(lane).ok()?,
-                    self.layout.state_layout_version,
-                    StatePayloadInput::new(common, left, right, sizes).ok()?,
-                )
-                .ok()?;
-            Some(effect_contract::payload_sections_agree(left, right))
-        })();
+        let taken = if self.can_carry_lane_from(lane, predecessor, predecessor_lane, scratch.len())
+        {
+            carry_payload(
+                &mut *self.processor,
+                lane,
+                &*predecessor.processor,
+                predecessor_lane,
+                &self.layout,
+                scratch,
+            )
+        } else {
+            None
+        };
         match taken {
             Some(restored) => {
                 self.witness[lane] =
@@ -1198,6 +1238,16 @@ pub struct LiveControlEffectBankStage {
     staged_spans: usize,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
     unbound: u64,
+    /// One bit per lane, set when the lane's last restored payload had left and right sections that
+    /// differ (clear for a lane never restored): the `RESTORED` term of the witness, held as
+    /// [`EffectBankStage`] holds it and set by a plan swap's carry. A bank has at most eight
+    /// lanes, so a byte holds it and the stage allocates nothing more.
+    unrestored: u8,
+    /// The layout a plan swap checks before it moves a lane in or out (#1280).
+    layout: EffectLaneLayout,
+    /// Restores a plan swap's carry refused on this stage: each left its lane as prepared, at rest
+    /// (#1279 D6). Saturating; read after render.
+    carry_refused: u64,
 }
 
 impl LiveControlEffectBankStage {
@@ -1224,8 +1274,8 @@ impl LiveControlEffectBankStage {
         latency: usize,
     ) -> Result<Self, RackError> {
         let mut lanes = lanes;
-        // Issue #1461: the bank's metadata is read here, at bind, and none of it is kept; the
-        // render path reads the width, quantum and window this builds.
+        // Issue #1461: the bank's metadata is read here, at bind, and only what a stage method
+        // reads is kept: the lane layout a plan swap checks (#1280).
         let PreparedEffectBank {
             processor,
             metadata,
@@ -1239,6 +1289,7 @@ impl LiveControlEffectBankStage {
         if quantum == 0 {
             return Err(RackError::ZeroQuantum);
         }
+        let layout = EffectLaneLayout::of(&metadata.program_key);
         let lane_count = width.lanes() as usize;
         // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
         // channel-less -- session bypasses with no live controls attached -- holds no window at
@@ -1321,8 +1372,149 @@ impl LiveControlEffectBankStage {
             samples,
             staged_spans: 0,
             unbound: 0,
+            unrestored: 0,
+            layout,
+            carry_refused: 0,
         })
     }
+
+    /// The layout a plan swap checks before it moves a lane in or out (#1280).
+    #[must_use]
+    pub const fn layout(&self) -> EffectLaneLayout {
+        self.layout
+    }
+
+    /// The bank's lanes, populated or padded.
+    #[must_use]
+    pub const fn lanes(&self) -> usize {
+        self.width.lanes() as usize
+    }
+
+    /// Restores a plan swap's carry refused on this stage (#1279 D6). Saturating.
+    #[must_use]
+    pub const fn carry_refused(&self) -> u64 {
+        self.carry_refused
+    }
+
+    /// The kind of lane `lane` is, if it exists: what it holds besides the effect's state, which
+    /// a plan swap's join requires to agree between the two plans (#1280).
+    #[must_use]
+    pub fn lane_kind(&self, lane: usize) -> Option<EffectLaneKind> {
+        let channel = self.lanes.get(lane)?;
+        Some(match channel {
+            None => EffectLaneKind::Uncontrolled,
+            Some(channel) if channel.has_channel() => EffectLaneKind::Cells,
+            Some(_) => EffectLaneKind::BypassOnly,
+        })
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether [`Self::carry_lane_from`] would take `predecessor`'s lane `predecessor_lane` into
+    /// this stage's lane `lane` with a scratch of `scratch_bytes`: both lanes exist and are of one
+    /// kind, both banks run one layout, the two control lanes have one cell shape, and the scratch
+    /// holds the payload. Allocation-free and bounded.
+    #[must_use]
+    pub fn can_carry_lane_from(
+        &self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch_bytes: usize,
+    ) -> bool {
+        let shapes_agree = match (
+            self.lanes.get(lane).and_then(Option::as_ref),
+            predecessor
+                .lanes
+                .get(predecessor_lane)
+                .and_then(Option::as_ref),
+        ) {
+            (Some(into), Some(from)) => into.can_carry_from(from),
+            (None, None) => true,
+            _ => false,
+        };
+        lane < self.lanes()
+            && predecessor_lane < predecessor.lanes()
+            && self.lane_kind(lane) == predecessor.lane_kind(predecessor_lane)
+            && shapes_agree
+            && self.layout == predecessor.layout
+            && usize::try_from(self.layout.payload_bytes())
+                .is_ok_and(|payload| payload <= scratch_bytes)
+    }
+
+    /// Move `predecessor`'s lane `predecessor_lane` into this stage's lane `lane` at the swap
+    /// block (#1280): its whole state payload through `scratch` (#1279 D3, a ramp in flight
+    /// included), then its control lane ([`EffectControlLane::carry_from`]: the applied bypass and
+    /// its crossfade, the live symmetry terms and the writes the predecessor's cells held
+    /// unread), then its words of the dry shunt's latency line, taken relative to each bank's
+    /// shared cursor (D5), and last the witness this stage holds for the lane, recomputed after
+    /// the restore. Returns whether the lane was taken.
+    ///
+    /// The caller has checked [`Self::can_carry_lane_from`], and has disengaged `predecessor`'s
+    /// chain ([`BankChain::disengage_for_carry`]), as [`EffectBankStage::carry_lane_from`]
+    /// requires. A snapshot or a restore that refuses leaves this lane as prepared, at rest, takes
+    /// nothing else of the lane and counts in [`Self::carry_refused`] (D6). Allocation-free and
+    /// bounded by the prepared state size and the latency.
+    pub fn carry_lane_from(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch: &mut [u8],
+    ) -> bool {
+        let taken = if self.can_carry_lane_from(lane, predecessor, predecessor_lane, scratch.len())
+        {
+            carry_payload(
+                &mut *self.processor,
+                lane,
+                &*predecessor.processor,
+                predecessor_lane,
+                &self.layout,
+                scratch,
+            )
+        } else {
+            None
+        };
+        let Some(restored) = taken else {
+            self.carry_refused = self.carry_refused.saturating_add(1);
+            return false;
+        };
+        if let (Some(into), Some(from)) = (
+            self.lanes.get_mut(lane).and_then(Option::as_mut),
+            predecessor
+                .lanes
+                .get(predecessor_lane)
+                .and_then(Option::as_ref),
+        ) {
+            let carried = into.carry_from(from);
+            debug_assert!(carried, "a checked control lane carries");
+        }
+        // A lane whose bank keeps no latency line in either plan has no dry history to move: the
+        // lane's kind says it can never be bypassed live there (#1280 D5).
+        if let (Some(into), Some(from)) = (
+            self.shunt.as_mut().filter(|shunt| shunt.feeds_line()),
+            predecessor
+                .shunt
+                .as_ref()
+                .filter(|shunt| shunt.feeds_line()),
+        ) {
+            let carried = into.carry_line_lane_from(
+                lane,
+                self.width.lanes() as usize,
+                from,
+                predecessor_lane,
+                predecessor.width.lanes() as usize,
+            );
+            debug_assert!(carried, "a checked shunt line carries");
+        }
+        self.designed[lane] = self.processor.lane_channel_symmetry(lane);
+        if restored {
+            self.unrestored &= !(1_u8 << lane);
+        } else {
+            self.unrestored |= 1_u8 << lane;
+        }
+        true
+    }
+    // REALTIME_POLICY_END
 
     /// `Observe` records refused because this slot has no observation capacity. Read off render.
     #[must_use]
@@ -1433,7 +1625,13 @@ impl BankStage for LiveControlEffectBankStage {
     /// [`Self::process`] maintains: a lane with no live-control channel has no live writes at all
     /// and contributes only the designed term.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
-        let designed = witness_of_designed(self.designed.get(lane).copied().unwrap_or(false));
+        let designed = lane_witness(
+            self.designed.get(lane).copied().unwrap_or(false),
+            u32::try_from(lane)
+                .ok()
+                .and_then(|lane| self.unrestored.checked_shr(lane))
+                .is_none_or(|bits| bits & 1 == 0),
+        );
         match self.lanes.get(lane).and_then(Option::as_ref) {
             Some(channel) => designed.and(channel.symmetry()),
             None => designed,
@@ -1454,6 +1652,10 @@ impl BankStage for LiveControlEffectBankStage {
 
     fn channels_agree(&self) -> bool {
         self.processor.channels_agree()
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
     }
 
     fn begin_block(
