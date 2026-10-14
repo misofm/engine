@@ -395,3 +395,15 @@ rows to the parity script, each compared per step by reply bytes and per block b
 into the output (gain and mute), the delay and multiband prepared bypass, `delay_samples`, and an
 audio-rate effect parameter if a launch effect declares one. Until #1562b lands this is the one
 known host difference, and it is a sequenced refusal, not a divergent result.
+
+## Amendment (controls coordinator, batch 8, 2026-10-14): for #1562b
+
+- **Meter strip order after a structural edit.** Since #1564C the SDK takes strip order from the
+  core's control list and re-reads it when the structure epoch moves, but the browser meter feed
+  keeps the strip IDs of the boot-time shape and `meterProjection` refuses a frame of another
+  shape. Nothing can move strips before #1562b, because the browser refuses rebuild-path frames.
+  #1562b's gates include a rebuild that adds or removes a strip, after which meters and observation
+  follow the new list order.
+- **Watermark rebuild leg.** #1349's gate 1 ran with a live edit (rebuild refused). #1562b adds the
+  rebuild leg: a rebuild, then a live edit before the swap; the browser status words stay at the
+  initial revision until the swap block and then equal the C ABI's `miso_engine_v1_plan_watermark`.
