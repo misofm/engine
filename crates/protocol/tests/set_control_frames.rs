@@ -7,7 +7,7 @@
 //! (`sdk/test/control-frame-evals.mjs`) encodes the same edits in TypeScript and compares bytes, and
 //! decodes the same replies. This is a wire format, so a byte comparison is the right gate.
 //!
-//! Run with `MISO_BLESS_FIXTURES=1` to rewrite the fixture after a deliberate codec change.
+//! Run with `MISO_ENGINE_BLESS_FIXTURES=1` to rewrite the fixture after a deliberate codec change.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -514,7 +514,7 @@ fn render() -> String {
 fn the_checked_in_fixture_is_what_the_codec_writes() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     let rendered = render();
-    if std::env::var_os("MISO_BLESS_FIXTURES").is_some() {
+    if std::env::var_os("MISO_ENGINE_BLESS_FIXTURES").is_some() {
         std::fs::create_dir_all(path.parent().expect("a parent directory"))
             .expect("fixture directory");
         std::fs::write(&path, &rendered).expect("write the fixture");
@@ -523,6 +523,6 @@ fn the_checked_in_fixture_is_what_the_codec_writes() {
     let checked_in = std::fs::read_to_string(&path).expect("the checked-in fixture exists");
     assert!(
         checked_in == rendered,
-        "{FIXTURE} differs from the codec's frames; rerun with MISO_BLESS_FIXTURES=1 after a deliberate change"
+        "{FIXTURE} differs from the codec's frames; rerun with MISO_ENGINE_BLESS_FIXTURES=1 after a deliberate change"
     );
 }

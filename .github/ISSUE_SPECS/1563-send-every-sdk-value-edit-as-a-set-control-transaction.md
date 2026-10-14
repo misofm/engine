@@ -203,7 +203,7 @@ Built on `codex/controls-batch-5k` (main `205a8d2b4` + batch 4 lane K + #1532). 
   `u32::MAX` ramp; identifier lengths 1 to 9; NaN, infinities, `-0.0`; `u64` request IDs and
   revisions) and seven reply frames (applied on each of the three Rust edit paths, two refusals with
   diagnostics, a revision conflict, backpressure). The test fails when the checked-in file differs
-  from what the codec writes; `MISO_BLESS_FIXTURES=1` rewrites it. It also decodes each frame it
+  from what the codec writes; `MISO_ENGINE_BLESS_FIXTURES=1` rewrites it. It also decodes each frame it
   writes with the Rust decoder. `sdk/test/control-frame-evals.mjs` encodes the same edits and compares
   bytes, and decodes the replies. Values travel as `valueBits` (hex of the binary32), so the canonical NaN
   is compared by bits (canonical NaN only).
