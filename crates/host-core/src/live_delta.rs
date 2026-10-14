@@ -33,8 +33,8 @@ use builtins::{
 };
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use controls::{
-    ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, Owner,
-    RebuildReason, Section,
+    ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
+    Owner, RebuildReason, Section,
 };
 use effect_compiler::{
     LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
@@ -171,6 +171,14 @@ pub struct LiveDelta<'a> {
     /// Whether a row of family `Setting` (the session's `control_smoothing` lengths) differs. Such
     /// a row changes the descriptors of every owner, not only its own (`default_ramp_samples`).
     pub settings_changed: bool,
+    /// The list-order indices of the owners whose **derived** rows the classification reached: the
+    /// strips whose effective fader or mute can differ (their own level, a VCA that reaches them,
+    /// their solo), by strip index, and the sends whose gate can differ, as the strip count plus the
+    /// route index. Ascending. `Some` only when the classification was made from the rows the edits
+    /// name (TBD9, TBD10), which also means the models list the same owners in the same order; a
+    /// control catalog then stages the derived rows of these owners and of `changed_owners` and no
+    /// others. `None` when the classification compared the whole models: every derived row is read.
+    pub derived_owners: Option<Vec<usize>>,
 }
 
 impl LiveDelta<'_> {
@@ -191,6 +199,7 @@ impl LiveDelta<'_> {
             // records: a model-only commit moves values and has no record.
             changed_owners: _,
             settings_changed: _,
+            derived_owners: _,
         } = self;
         strips.is_empty() && effects.is_empty() && routes.is_empty()
     }
@@ -405,11 +414,19 @@ pub fn classify_live_delta_with_monitor<'a>(
         ..LiveDelta::default()
     };
     let diff = diff.as_ref().map(|diff| diff as &dyn LevelDiff);
-    lower_strips(current, next, ramps, edit_ramps, diff, strips, &mut delta)?;
+    lower_strips(
+        current,
+        ModelView::whole(next),
+        ramps,
+        edit_ramps,
+        diff,
+        strips,
+        &mut delta,
+    )?;
     if let Some(diff) = diff {
         lower_routes(
             current,
-            next,
+            ModelView::whole(next),
             ramps,
             edit_ramps,
             diff,
@@ -464,24 +481,59 @@ pub fn classify_live_edit<'a>(
     rows: Option<&[ControlAddress]>,
 ) -> Result<LiveDelta<'a>, LiveRebuild> {
     if let Some(rows) = rows
-        && let Some(delta) = classify_rows(current, next, ramps, edit_ramps, monitor, rows)
+        && let Some(delta) = classify_live_staged(
+            current,
+            ModelView::whole(next),
+            ramps,
+            edit_ramps,
+            monitor,
+            rows,
+        )
     {
-        #[cfg(feature = "test-support")]
-        FAST_CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
         return Ok(delta);
     }
     classify_live_delta_with_monitor(current, next, ramps, edit_ramps, monitor)
 }
 
-/// The fast path of [`classify_live_edit`]: `None` when it cannot answer.
-fn classify_rows<'a>(
+/// The fast path of [`classify_live_edit`] over a [`ModelView`] (TBD10): the classification of a
+/// transaction of `SetControl`s whose model `next` is the committed model `current` with the owners
+/// the transaction edited, read as one model, so that no prospective model is built. `None` when it
+/// cannot answer, and the caller then has the full classifier decide on a whole model, which it
+/// first builds ([`ModelView::to_model`], or the full preparation of the transaction).
+///
+/// `rows` are the rows the edits wrote ([`protocol`'s `set_control_rows`]); the view must hold every
+/// owner they name. For a whole view it is [`classify_live_edit`]'s fast path, with the cost the
+/// rows have and the answers the full classifier has.
+///
+/// The `Ok` delta carries [`LiveDelta::derived_owners`].
+///
+/// # Allocation
+///
+/// As [`classify_live_edit`].
+pub fn classify_live_staged<'a>(
     current: &SessionModel,
-    next: &'a SessionModel,
+    next: ModelView<'a>,
     ramps: LiveRamps,
     edit_ramps: &EditRamps,
     monitor: MonitorBase<'_>,
     rows: &[ControlAddress],
 ) -> Option<LiveDelta<'a>> {
+    let delta = classify_rows(current, next, ramps, edit_ramps, monitor, rows)?;
+    #[cfg(feature = "test-support")]
+    FAST_CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
+    Some(delta)
+}
+
+/// The fast path of [`classify_live_edit`]: `None` when it cannot answer.
+fn classify_rows<'a>(
+    current: &SessionModel,
+    view: ModelView<'a>,
+    ramps: LiveRamps,
+    edit_ramps: &EditRamps,
+    monitor: MonitorBase<'_>,
+    rows: &[ControlAddress],
+) -> Option<LiveDelta<'a>> {
+    let next = view.structure();
     let rate = next.sample_rate_hz;
     // The edits wrote their rows and nothing else, so the two models' strips, routes and effects
     // are the same ones; a count that differs is not a transaction of this kind.
@@ -501,7 +553,12 @@ fn classify_rows<'a>(
     ordered.dedup_by(|later, earlier| later.0 == earlier.0);
     let mut changes: Vec<ChangedControl> = Vec::new();
     for (_, address) in ordered {
-        changes.extend(controls::changed_rows(current, next, address, rate)?);
+        changes.extend(controls::changed_rows(
+            current,
+            view.owners(),
+            address,
+            rate,
+        )?);
     }
 
     let mut accumulated = Changes {
@@ -554,7 +611,7 @@ fn classify_rows<'a>(
     // Step 4 of the full classifier, for the strips whose rows changed.
     for item in &accumulated.work {
         let index = controls::strip_index(next, &item.strip)?;
-        let (before, after) = (strip_at(current, index), strip_at(next, index));
+        let (before, after) = (strip_at(current, index), view.strip(index));
         if before.id != after.id || refuse_unresolvable_strip(next, &before, &after).is_err() {
             return None;
         }
@@ -564,7 +621,7 @@ fn classify_rows<'a>(
         Some(LocalDiff::new(
             LevelRules {
                 current,
-                next,
+                next: view,
                 ramps,
                 edit_ramps,
                 solo_ramp: monitor.ramp,
@@ -586,18 +643,21 @@ fn classify_rows<'a>(
         for index in diff.level_changed_strips() {
             items
                 .entry(index)
-                .or_insert_with(|| Work::new(strip_at(next, index).id.clone()));
+                .or_insert_with(|| Work::new(view.strip(index).id.clone()));
         }
     }
     let mut delta = LiveDelta {
         changed_owners: core::mem::take(&mut accumulated.changed_owners),
         settings_changed: accumulated.settings_changed,
+        derived_owners: Some(diff.map_or_else(Vec::new, |diff| {
+            diff.derived_owners(next.tracks.len() + next.submixes.len())
+        })),
         ..LiveDelta::default()
     };
     let level: Option<&dyn LevelDiff> = diff.map(|diff| diff as &dyn LevelDiff);
     lower_strips(
         current,
-        next,
+        view,
         ramps,
         edit_ramps,
         level,
@@ -608,7 +668,7 @@ fn classify_rows<'a>(
     if let (Some(diff), Some(level)) = (diff, level) {
         lower_routes(
             current,
-            next,
+            view,
             ramps,
             edit_ramps,
             level,
@@ -771,7 +831,7 @@ impl Changes {
 /// (strip order), into `delta`. `index` counts [`SessionModel::strips`] in both models.
 fn lower_strips<'a>(
     current: &SessionModel,
-    next: &'a SessionModel,
+    next: ModelView<'a>,
     ramps: LiveRamps,
     edit_ramps: &EditRamps,
     diff: Option<&dyn LevelDiff>,
@@ -779,7 +839,7 @@ fn lower_strips<'a>(
     delta: &mut LiveDelta<'a>,
 ) -> Result<(), LiveRebuild> {
     for (index, mut item) in items {
-        let after = strip_at(next, index);
+        let after = next.strip(index);
         item.level = diff.is_some_and(|diff| diff.level_changed(index));
         if !(item.level || item.matrix || item.input || !item.instances.is_empty()) {
             continue;
@@ -844,7 +904,7 @@ fn lower_strips<'a>(
 )]
 fn lower_routes<'a>(
     current: &SessionModel,
-    next: &'a SessionModel,
+    next: ModelView<'a>,
     ramps: LiveRamps,
     edit_ramps: &EditRamps,
     diff: &dyn LevelDiff,
@@ -860,7 +920,10 @@ fn lower_routes<'a>(
         diff: Some(diff),
     };
     for index in indices {
-        let after = next.routes.get(index).ok_or(LiveRebuild::Structure)?;
+        if index >= next.structure().routes.len() {
+            return Err(LiveRebuild::Structure);
+        }
+        let after = next.route(index);
         let before = current
             .routes
             .get(index)
@@ -978,7 +1041,8 @@ struct LocalDiff<'a> {
 impl<'a> LocalDiff<'a> {
     /// `None` when a strip or send of the seeds is not in both models.
     fn new(rules: LevelRules<'a>, monitor: MonitorBase<'_>, seeds: LocalSeeds) -> Option<Self> {
-        let (current, next) = (rules.current, rules.next);
+        let (current, view) = (rules.current, rules.next);
+        let next = view.structure();
         let strip_count = next.tracks.len() + next.submixes.len();
         let any_before = controls::any_solo_in(current, monitor.committed);
         let any_after = controls::any_solo_in(next, monitor.next);
@@ -1001,7 +1065,7 @@ impl<'a> LocalDiff<'a> {
         let mut strips = Vec::with_capacity(indices.len());
         for index in indices {
             let before = LocalInputs::new(current, monitor.committed, index)?;
-            let after = LocalInputs::new(next, monitor.next, index)?;
+            let after = LocalInputs::of(view, monitor.next, index)?;
             strips.push(LocalStrip {
                 index,
                 before: controls::effective_strip(&before, index, any_before),
@@ -1038,7 +1102,7 @@ impl<'a> LocalDiff<'a> {
 
         let mut routes = Vec::with_capacity(route_indices.len());
         for index in route_indices {
-            let (before, after) = (current.routes.get(index)?, next.routes.get(index)?);
+            let (before, after) = (current.routes.get(index)?, view.route(index));
             let source = route_source_strip(next, after)?;
             if before.id != after.id || route_source_strip(current, before)? != source {
                 return None;
@@ -1046,15 +1110,19 @@ impl<'a> LocalDiff<'a> {
             let at = strips
                 .binary_search_by_key(&source, |strip| strip.index)
                 .ok()?;
-            let gate = |model, overlay, effective: &EffectiveStrip| {
-                let inputs = LocalInputs::new(model, overlay, source)?;
+            let gate = |model: ModelView<'_>, overlay, effective: &EffectiveStrip| {
+                let inputs = LocalInputs::of(model, overlay, source)?;
                 Some(controls::effective_gate(&inputs, index, effective))
             };
             routes.push((
                 index,
                 [
-                    gate(current, monitor.committed, &strips[at].before)?,
-                    gate(next, monitor.next, &strips[at].after)?,
+                    gate(
+                        ModelView::whole(current),
+                        monitor.committed,
+                        &strips[at].before,
+                    )?,
+                    gate(view, monitor.next, &strips[at].after)?,
                 ],
             ));
         }
@@ -1073,7 +1141,7 @@ impl<'a> LocalDiff<'a> {
     }
 
     fn change<'s>(&'s self, strip: &'s LocalStrip) -> StripChange<'s> {
-        let after = strip_at(self.rules.next, strip.index);
+        let after = self.rules.next.strip(strip.index);
         StripChange {
             own_before: strip_at(self.rules.current, strip.index).fader,
             own_after: after.fader,
@@ -1097,6 +1165,16 @@ impl<'a> LocalDiff<'a> {
     /// The sends the diff holds, ascending.
     fn route_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.routes.iter().map(|(index, _)| *index)
+    }
+
+    /// The owners whose derived rows the diff reaches, in list order: the strips it holds, then
+    /// its sends as `strip_count + route index`.
+    fn derived_owners(&self, strip_count: usize) -> Vec<usize> {
+        self.strips
+            .iter()
+            .map(|strip| strip.index)
+            .chain(self.route_indices().map(|route| strip_count + route))
+            .collect()
     }
 }
 
@@ -1135,7 +1213,7 @@ impl LevelDiff for LocalDiff<'_> {
         own_edit: Option<u32>,
         gates: [[bool; 2]; 2],
     ) -> Option<u32> {
-        let source = self.strip(route_source_strip(self.rules.next, after)?)?;
+        let source = self.strip(route_source_strip(self.rules.next.structure(), after)?)?;
         Some(
             self.rules
                 .gate_length(before, after, own_edit, &self.change(source), gates),
@@ -1176,7 +1254,7 @@ fn strip_of<'m>(model: &'m SessionModel, id: &StableId) -> Option<StripRef<'m>> 
 /// What a lowering reads besides its target.
 struct Context<'m> {
     current: &'m SessionModel,
-    next: &'m SessionModel,
+    next: ModelView<'m>,
     ramps: LiveRamps,
     edit: StripEditRamps,
     /// The effective values of both models; present whenever a derived value can differ.
@@ -1304,7 +1382,7 @@ fn lower<'a>(
         Family::StripInput => input_records(
             before.builtins,
             after.builtins,
-            ctx.next.sample_rate_hz,
+            ctx.next.structure().sample_rate_hz,
             ctx.ramps,
             ctx.edit,
         )
@@ -1609,7 +1687,7 @@ fn effect_records<'a>(
     section: &Section,
 ) -> Result<Option<LiveEffectRecords<'a>>, LiveRebuild> {
     let racks_before = ctx.current.lower_strip(&target.before);
-    let racks_after = ctx.next.lower_strip(&target.after);
+    let racks_after = ctx.next.structure().lower_strip(&target.after);
     let (address, rack, index) = locate(&racks_after, section).ok_or(LiveRebuild::Structure)?;
     let (address_before, rack_before, index_before) =
         locate(&racks_before, section).ok_or(LiveRebuild::Structure)?;
@@ -1628,7 +1706,11 @@ fn effect_records<'a>(
     let (mut records, targets) = if same_params(&effect_before.params, &effect_after.params) {
         (Vec::new(), None)
     } else {
-        parameter_records(effect_before, effect_after, ctx.next.sample_rate_hz)?
+        parameter_records(
+            effect_before,
+            effect_after,
+            ctx.next.structure().sample_rate_hz,
+        )?
     };
     if let Some(bypass) = bypass {
         records.insert(0, EffectControlRecord::Bypass(bypass));
@@ -1772,7 +1854,7 @@ mod tests {
         let (current, next) = (&current, &next);
         let ctx = Context {
             current,
-            next,
+            next: ModelView::whole(next),
             ramps: LiveRamps::for_session(next),
             edit: StripEditRamps::default(),
             diff: None,

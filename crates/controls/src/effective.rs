@@ -17,6 +17,8 @@ use core::fmt;
 
 use session::{Route, RouteSource, SessionModel, StableId, vca_effective_db};
 
+use crate::view::ModelView;
+
 /// The host-local monitor values. They are not part of the session: they never reach a snapshot.
 ///
 /// In this slice it holds only the soloed strips, as a sorted set of IDs. A soloed ID that names a
@@ -454,11 +456,14 @@ pub fn any_solo_in(model: &SessionModel, overlay: &MonitorOverlay) -> bool {
 /// sorted strip IDs (tracks, then submixes), so the model must be a compiled session's normalized
 /// model.
 ///
+/// The model is read through a [`ModelView`] (TBD10), so the strip, the VCAs and the routes are the
+/// ones the view holds edited.
+///
 /// [`EffectiveInputs::reach`] answers for the strip given to [`Self::new`] only; a call for another
 /// strip is a caller fault (a debug assertion).
 #[derive(Clone, Debug)]
 pub struct LocalInputs<'a> {
-    model: &'a SessionModel,
+    view: ModelView<'a>,
     overlay: &'a MonitorOverlay,
     strip: usize,
     reach: Vec<usize>,
@@ -469,12 +474,18 @@ impl<'a> LocalInputs<'a> {
     /// such strip.
     #[must_use]
     pub fn new(model: &'a SessionModel, overlay: &'a MonitorOverlay, strip: usize) -> Option<Self> {
-        let id = strip_id_at(model, strip)?;
+        Self::of(ModelView::whole(model), overlay, strip)
+    }
+
+    /// [`Self::new`] over a [`ModelView`].
+    #[must_use]
+    pub fn of(view: ModelView<'a>, overlay: &'a MonitorOverlay, strip: usize) -> Option<Self> {
+        let id = strip_id_at(view.structure(), strip)?;
         Some(Self {
-            model,
+            view,
             overlay,
             strip,
-            reach: model.vca_reach_of(id),
+            reach: view.structure().vca_reach_of(id),
         })
     }
 
@@ -499,16 +510,12 @@ fn strip_id_at(model: &SessionModel, strip: usize) -> Option<&StableId> {
 
 impl EffectiveInputs for LocalInputs<'_> {
     fn strip_count(&self) -> usize {
-        self.model.tracks.len() + self.model.submixes.len()
+        let model = self.view.structure();
+        model.tracks.len() + model.submixes.len()
     }
 
     fn own_fader(&self, strip: usize) -> ([f32; 2], [bool; 2]) {
-        let tracks = self.model.tracks.len();
-        let fader = if strip < tracks {
-            &self.model.tracks[strip].fader
-        } else {
-            &self.model.submixes[strip - tracks].fader
-        };
+        let fader = self.view.strip(strip).fader;
         (
             [fader.left_db, fader.right_db],
             [fader.left_mute, fader.right_mute],
@@ -516,11 +523,11 @@ impl EffectiveInputs for LocalInputs<'_> {
     }
 
     fn soloed(&self, strip: usize) -> bool {
-        strip_id_at(self.model, strip).is_some_and(|id| self.overlay.is_soloed(id))
+        strip_id_at(self.view.structure(), strip).is_some_and(|id| self.overlay.is_soloed(id))
     }
 
     fn solo_safe(&self, strip: usize) -> bool {
-        strip >= self.model.tracks.len()
+        strip >= self.view.structure().tracks.len()
     }
 
     fn reach(&self, strip: usize) -> &[usize] {
@@ -532,7 +539,7 @@ impl EffectiveInputs for LocalInputs<'_> {
     }
 
     fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]) {
-        let fader = &self.model.vcas[vca].fader;
+        let fader = &self.view.vca(vca).fader;
         (
             [fader.left_db, fader.right_db],
             [fader.left_mute, fader.right_mute],
@@ -540,20 +547,20 @@ impl EffectiveInputs for LocalInputs<'_> {
     }
 
     fn route_count(&self) -> usize {
-        self.model.routes.len()
+        self.view.structure().routes.len()
     }
 
     fn route(&self, route: usize) -> EffectiveRouteInput {
-        let model = &self.model.routes[route];
-        let id = source_id(model);
-        let tracks = self.model.tracks.len();
-        let source_strip = self
-            .model
+        let model = self.view.structure();
+        let edited = self.view.route(route);
+        let id = source_id(&model.routes[route]);
+        let tracks = model.tracks.len();
+        let source_strip = model
             .tracks
             .binary_search_by(|track| track.id.cmp(id))
             .ok()
             .or_else(|| {
-                self.model
+                model
                     .submixes
                     .binary_search_by(|submix| submix.id.cmp(id))
                     .ok()
@@ -561,9 +568,109 @@ impl EffectiveInputs for LocalInputs<'_> {
             })
             .unwrap_or(self.strip_count());
         EffectiveRouteInput {
-            mute: model.mute,
-            follows_mute: model.follows_mute,
+            mute: edited.mute,
+            follows_mute: edited.follows_mute,
             source_strip,
         }
+    }
+}
+
+/// A source of the effective values [`crate::owner_rows_in`] and [`crate::derived_rows_in`] read: the
+/// dense [`Effective`] of a whole model, or [`LocalEffective`], which computes one strip's or route's
+/// values when asked (TBD10). Both come from the one set of rules above.
+pub trait EffectiveSource {
+    /// Strip number `index`'s effective values.
+    fn strip(&self, index: usize) -> EffectiveStrip;
+    /// Route number `index`'s effective gate, per source lane.
+    fn route_gate(&self, index: usize) -> [bool; 2];
+}
+
+impl EffectiveSource for Effective {
+    fn strip(&self, index: usize) -> EffectiveStrip {
+        self.strips[index]
+    }
+
+    fn route_gate(&self, index: usize) -> [bool; 2] {
+        self.routes[index].gate
+    }
+}
+
+/// The effective values of **the strips and routes asked for**, with no table of the others (TBD10):
+/// [`effective_strip`], [`effective_follow`] and [`effective_gate`] over [`LocalInputs`], with the
+/// solo term from [`any_solo_in`]. The values are those [`effective`] gives for the same model and
+/// overlay.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalEffective<'a> {
+    view: ModelView<'a>,
+    overlay: &'a MonitorOverlay,
+    any_solo: bool,
+}
+
+impl<'a> LocalEffective<'a> {
+    /// The effective values of the model `view` stands for under `overlay`.
+    #[must_use]
+    pub fn new(view: ModelView<'a>, overlay: &'a MonitorOverlay) -> Self {
+        Self {
+            view,
+            overlay,
+            any_solo: any_solo_in(view.structure(), overlay),
+        }
+    }
+
+    /// Strip number `index`'s effective values.
+    ///
+    /// # Panics
+    ///
+    /// If the model has no such strip.
+    #[must_use]
+    pub fn strip(&self, index: usize) -> EffectiveStrip {
+        let inputs =
+            LocalInputs::of(self.view, self.overlay, index).expect("the model has the strip");
+        effective_strip(&inputs, index, self.any_solo)
+    }
+
+    /// Route number `index`'s effective gate and follow.
+    ///
+    /// # Panics
+    ///
+    /// If the model has no such route.
+    #[must_use]
+    pub fn route(&self, index: usize) -> EffectiveRoute {
+        let source = {
+            let probe = self.view.structure();
+            // The source strip of the route, and an unvalidated model's missing one.
+            let id = source_id(&probe.routes[index]);
+            crate::registry::strip_index(probe, id)
+        };
+        let Some(source) = source else {
+            return EffectiveRoute::default_gate(self.view.route(index));
+        };
+        let strip = self.strip(source);
+        let inputs = LocalInputs::of(self.view, self.overlay, source).expect("the source exists");
+        EffectiveRoute {
+            gate: effective_gate(&inputs, index, &strip),
+            follow: effective_follow(&inputs, index, &strip),
+        }
+    }
+}
+
+impl EffectiveRoute {
+    /// The gate of a route whose source names no strip: its own mute, with nothing to follow. The
+    /// dense [`effective`] gives a missing source the default strip (unmuted), so the same.
+    fn default_gate(route: &Route) -> Self {
+        Self {
+            gate: [route.mute; 2],
+            follow: [false; 2],
+        }
+    }
+}
+
+impl EffectiveSource for LocalEffective<'_> {
+    fn strip(&self, index: usize) -> EffectiveStrip {
+        LocalEffective::strip(self, index)
+    }
+
+    fn route_gate(&self, index: usize) -> [bool; 2] {
+        self.route(index).gate
     }
 }

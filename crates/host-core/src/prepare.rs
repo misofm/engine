@@ -2880,7 +2880,9 @@ pub(crate) struct StripChange<'s> {
 #[derive(Clone, Copy)]
 pub(crate) struct LevelRules<'a> {
     pub(crate) current: &'a SessionModel,
-    pub(crate) next: &'a SessionModel,
+    /// The model after the change, read through a view so that a transaction of values need not
+    /// build it (TBD10).
+    pub(crate) next: controls::ModelView<'a>,
     pub(crate) ramps: LiveRamps,
     pub(crate) edit_ramps: &'a EditRamps,
     /// The ramp length of a mute record that only the overlay change produced (#1559 D7).
@@ -2902,7 +2904,7 @@ impl LevelRules<'_> {
             strip
                 .reach
                 .iter()
-                .map(|&vca| &self.next.vcas[vca])
+                .map(|&vca| self.next.vca(vca))
                 .find(|vca| self.vca_changed(vca, lane, mute))
                 .and_then(|vca| {
                     let row = if mute {
@@ -2950,17 +2952,16 @@ impl LevelRules<'_> {
     /// D7: a change in VCA reach is the model's), so the mute record takes the model's length
     /// beside a solo with its own.
     fn vca_mute_moved(&self, strip: &StripChange<'_>, lane: usize) -> bool {
-        let holds = |vcas: &[session::Vca], reach: &[usize]| {
-            reach.iter().any(|&vca| {
-                let fader = &vcas[vca].fader;
-                [fader.left_mute, fader.right_mute][lane]
-            })
-        };
+        let holds = |vca: &session::Vca| [vca.fader.left_mute, vca.fader.right_mute][lane];
         strip
             .reach
             .iter()
-            .any(|&vca| self.vca_changed(&self.next.vcas[vca], lane, true))
-            || holds(&self.current.vcas, strip.reach_before) != holds(&self.next.vcas, strip.reach)
+            .any(|&vca| self.vca_changed(self.next.vca(vca), lane, true))
+            || strip
+                .reach_before
+                .iter()
+                .any(|&vca| holds(&self.current.vcas[vca]))
+                != strip.reach.iter().any(|&vca| holds(self.next.vca(vca)))
     }
 
     /// Whether `vca`'s offset (or its mute) on `lane` differs from the committed model's, or the
@@ -3054,7 +3055,7 @@ impl<'a> EffectiveDiff<'a> {
         Self {
             rules: LevelRules {
                 current,
-                next,
+                next: controls::ModelView::whole(next),
                 ramps,
                 edit_ramps,
                 solo_ramp: monitor.ramp,
@@ -3070,7 +3071,7 @@ impl<'a> EffectiveDiff<'a> {
 
     /// What the ramp rules read about the strip at `before` in `current` and `after` in `next`.
     fn change(&self, before: usize, after: usize) -> StripChange<'_> {
-        let after_strip = strip_at(self.rules.next, after);
+        let after_strip = self.rules.next.strip(after);
         StripChange {
             own_before: strip_at(self.rules.current, before).fader,
             own_after: after_strip.fader,
@@ -3147,7 +3148,7 @@ impl<'a> EffectiveDiff<'a> {
     ) -> Option<(usize, usize)> {
         Some((
             route_source_strip(self.rules.current, before)?,
-            route_source_strip(self.rules.next, after)?,
+            route_source_strip(self.rules.next.structure(), after)?,
         ))
     }
 }

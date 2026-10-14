@@ -258,14 +258,21 @@ impl Rig {
             let (result, response) = command_c(self.session, &bytes);
             assert_eq!(result, crate::RESULT_OK);
             let mut fields = [0_u16; 64];
+            let decoded = ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("snapshot response");
             let protocol::DecodedTypedResponseFrame::Success {
                 payload: protocol::DecodedSuccessResponsePayload::SessionSnapshot(page),
                 ..
-            } = ProtocolCodec::default()
-                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-                .expect("snapshot response")
+            } = decoded
             else {
-                panic!("expected a snapshot page")
+                let protocol::DecodedTypedResponseFrame::NonOk { header, payload } = decoded else {
+                    panic!("expected a snapshot page")
+                };
+                panic!(
+                    "expected a snapshot page, got {:?} {:?}",
+                    header.status, payload.diagnostics
+                )
             };
             json.extend_from_slice(page.canonical_json_chunk);
             if page.eof {
@@ -7577,5 +7584,511 @@ mod set_control {
             let block = first as usize + offset;
             assert_eq!(bits(pcm), bits(&prepared[block]), "rebuild, block {block}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// TBD10: a live-only transaction committed in place
+// ---------------------------------------------------------------------------------------------
+
+/// A small deterministic generator (xorshift64*).
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % bound
+    }
+
+    fn unit(&mut self) -> f32 {
+        self.next(1 << 20) as f32 / (1 << 20) as f32
+    }
+}
+
+/// A value for `row` that its domain may accept: a toggle, a choice, the disabled value, or a point
+/// of the range.
+fn drawn_value(draw: &mut Draw, row: &protocol::ControlRow) -> f32 {
+    match row.kind {
+        protocol::ControlKind::Toggle => draw.next(2) as f32,
+        protocol::ControlKind::Enumeration => row.choices[draw.next(row.choices.len())].value,
+        protocol::ControlKind::Continuous => {
+            if let Some(disabled) = row.disabled_value
+                && draw.next(6) == 0
+            {
+                return disabled;
+            }
+            let value = row.minimum + (row.maximum - row.minimum) * draw.unit();
+            if row.unit == protocol::ParameterUnit::Samples {
+                value.floor()
+            } else {
+                value
+            }
+        }
+    }
+}
+
+/// What a command leaves behind: its result and response, then every event of both lanes.
+fn command_and_events(rig: &Rig, bytes: &[u8]) -> (u32, Vec<u8>, Vec<Vec<u8>>) {
+    let (result, response) = command_c(rig.session, bytes);
+    let mut events = Vec::new();
+    for lane in [crate::EVENT_LANE_RELIABLE, crate::EVENT_LANE_LOSSY] {
+        loop {
+            let (code, frame) = event_c(rig.session, lane);
+            assert_eq!(code, crate::RESULT_OK);
+            if frame.is_empty() {
+                break;
+            }
+            events.push(frame);
+        }
+    }
+    (result, response, events)
+}
+
+/// The snapshot, the control list with its epoch and revision, and the control values.
+type Observed = (
+    String,
+    (Vec<protocol::ControlEntry>, u64, u64),
+    Vec<(u32, u32)>,
+);
+
+/// Everything a host can read of a session's model: the committed snapshot and the whole control
+/// list and its values.
+fn observed(rig: &mut Rig) -> Observed {
+    let snapshot = rig.snapshot();
+    let list = control_list_all_c(rig.session, &mut rig.request, 256);
+    let state = control_state_all_c(rig.session, &mut rig.request, 256);
+    (snapshot, list, state)
+}
+
+/// TBD10 gate 1, through the C ABI. Two sessions of one document are given the same stream of
+/// transactions of one to three edits drawn from the control list (every row of every class, the
+/// solo rows, with and without a ramp): the first prepares each by the full path (a clone of the
+/// model, compiled), the second in place. Every command gives the same result, the same response
+/// bytes and the same events; the plans render the same samples; and the sessions read the same:
+/// snapshot, control list with its epoch, control values, summary and watermark.
+///
+/// Red if the in-place commit differs anywhere a host can see, or if the stream did not take the
+/// in-place form for the rows it exists for and the full one for the rest.
+#[test]
+fn in_place_commands_equal_full_commands_through_the_c_abi() {
+    let document = control_list_session();
+    let mut full = Rig::new(&document);
+    let mut fast = Rig::new(&document);
+    full.step();
+    fast.step();
+    let (list, ..) = control_list_all_c(fast.session, &mut fast.request, 256);
+    let rows: Vec<(&protocol::ControlEntry, &protocol::ControlRow)> = list
+        .iter()
+        .filter_map(|entry| control_of(entry).map(|row| (entry, row)))
+        .filter(|(_, row)| row.class != protocol::ControlClass::Derived && row.active)
+        .collect();
+    assert!(
+        rows.len() > 300,
+        "the session lists its controls: {}",
+        rows.len()
+    );
+    let mut draw = Draw(0xC0FF_EE15_BADC_0DED);
+    control_plane::test_take_in_place_counts();
+    let (mut in_place, mut materialized, mut refused) = (0_usize, 0_usize, 0_usize);
+    for step in 0..500_u64 {
+        let mut edits = Vec::new();
+        for _ in 0..1 + draw.next(3) {
+            let (entry, row) = rows[draw.next(rows.len())];
+            let value = drawn_value(&mut draw, row);
+            let ramp =
+                (row.ramp_row.is_some() && draw.next(3) == 0).then(|| [0, 64, 480][draw.next(3)]);
+            edits.push(SessionEdit::SetControl {
+                address: protocol::control_core::ControlAddress::try_from(&entry.address)
+                    .expect("a listed address"),
+                value,
+                ramp_samples: ramp,
+            });
+        }
+        // One request ID for both sessions: their replay caches then see the same stream.
+        let request = full.request.max(fast.request);
+        (full.request, fast.request) = (request, request);
+        let bytes = full.transaction(&edits);
+        fast.request = full.request;
+        control_plane::test_force_full_preparation(true);
+        let expected = command_and_events(&full, &bytes);
+        control_plane::test_force_full_preparation(false);
+        control_plane::test_take_in_place_counts();
+        let actual = command_and_events(&fast, &bytes);
+        let (commits, falls) = control_plane::test_take_in_place_counts();
+        in_place += commits;
+        materialized += falls;
+        refused += usize::from(expected.0 != crate::RESULT_OK);
+        assert_eq!(actual, expected, "step {step}: {edits:?}");
+        if step % 40 == 0 && expected.0 == crate::RESULT_OK {
+            // An exact retry of a committed command returns its recorded response and commits
+            // nothing, on either path (the replay cache the commit completed, D15-17).
+            control_plane::test_force_full_preparation(true);
+            let replayed_full = command_and_events(&full, &bytes);
+            control_plane::test_force_full_preparation(false);
+            let replayed_fast = command_and_events(&fast, &bytes);
+            assert_eq!(replayed_fast, replayed_full, "step {step}: the replay");
+            assert_eq!(
+                replayed_fast.1, expected.1,
+                "step {step}: the recorded response"
+            );
+            assert!(
+                replayed_fast.2.is_empty(),
+                "step {step}: a replay emits no event"
+            );
+        }
+        // The plans render alike while the stream goes on (the source starts over when it ends).
+        if fast.fed + 2 * fast.quantum as u64 > SOURCE_FRAMES {
+            fast.seek_to_start();
+            full.seek_to_start();
+        }
+        assert_eq!(
+            bits(&fast.step()),
+            bits(&full.step()),
+            "step {step}: the rendered block"
+        );
+        if step % 25 == 0 {
+            assert_eq!(observed(&mut fast), observed(&mut full), "step {step}");
+            assert_eq!(watermark(&fast), watermark(&full), "step {step}");
+            assert_eq!(fast.summary(), full.summary(), "step {step}");
+        }
+    }
+    assert_eq!(observed(&mut fast), observed(&mut full), "the end");
+    println!("in place {in_place}, materialized {materialized}, refused {refused}");
+    assert!(in_place > 120, "commits made in place: {in_place}");
+    assert!(
+        materialized > 5,
+        "rows the fast classification hands over: {materialized}"
+    );
+    assert!(refused > 3, "refusals alike: {refused}");
+}
+
+/// A session of `tracks` tracks: the control-list session's submix, sends, VCA, console slot and
+/// inserts, with plain copies of its second track. Its VCA and sends do not grow with `tracks`.
+fn grown_session(tracks: usize) -> String {
+    with_model(&control_list_session(), |model| {
+        let template = model
+            .tracks
+            .iter()
+            .find(|track| track.id.as_str() == "eq1")
+            .expect("eq1")
+            .clone();
+        let route = model
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "eq1-main")
+            .expect("eq1-main")
+            .clone();
+        for index in 0..tracks.saturating_sub(model.tracks.len()) {
+            let name = format!("g{index:04}");
+            let mut track = template.clone();
+            track.id = StableId::parse(&name).expect("track ID");
+            let mut main = route.clone();
+            main.id = StableId::parse(&format!("{name}-main")).expect("route ID");
+            if let RouteSource::Track { track_id, .. } = &mut main.source {
+                *track_id = track.id.clone();
+            }
+            model.tracks.push(track);
+            model.routes.push(main);
+        }
+    })
+}
+
+/// The limits of a session of a few hundred tracks.
+fn grown_limits() -> CompileLimits {
+    let mut raised = limits();
+    raised.maximum_document_bytes = 50_000_000;
+    raised.maximum_tracks = 1_000;
+    raised.maximum_routes = 2_000;
+    raised.maximum_effects = 20_000;
+    raised.maximum_submixes = 8;
+    raised.maximum_vcas = 8;
+    raised.maximum_capi_retained_bytes = 400_000_000;
+    raised.maximum_graph_session_plus_plan_bytes = 4_000_000_000;
+    raised.maximum_named_allocation_bytes = 400_000_000;
+    raised
+}
+
+fn strip_row(
+    strip: &str,
+    section: protocol::control_core::Section,
+    control: u32,
+    lane: protocol::control_core::Lane,
+) -> protocol::control_core::ControlAddress {
+    protocol::control_core::ControlAddress {
+        owner: protocol::control_core::Owner::Strip(StableId::parse(strip).expect("strip")),
+        section,
+        control,
+        lane,
+    }
+}
+
+/// TBD10 gate 2. The allocations and frees of one whole `SESSION_TRANSACTION_APPLY` that edits live
+/// values, through the C ABI's control entry, are the same at 64 and 256 tracks, for each kind of
+/// live row: and the commit was made in place. With the full preparation forced, the count at 256
+/// tracks is larger than at 64, so the gate sees what it guards.
+///
+/// Red if a live-only commit clones, compiles, lists or walks the session: one allocation per
+/// strip, route or VCA of the session moves the count with the track count.
+#[test]
+fn the_cost_of_a_live_only_command_does_not_grow_with_the_session() {
+    use protocol::control_core::{ControlAddress, Lane, Owner, Section};
+    bench_support::alloc::assert_installed();
+    // The debug-build check that a values-only stage equals a full build builds the whole catalog.
+    control_plane::test_verify_catalog_stages(false);
+    let sizes = [64_usize, 256];
+    let mut rigs: Vec<Rig> = sizes
+        .iter()
+        .map(|&tracks| Rig::with_limits(&grown_session(tracks), grown_limits()))
+        .collect();
+    for rig in &mut rigs {
+        rig.step();
+    }
+    let template_is_matrix = {
+        let model = rigs[0].model();
+        matches!(
+            model
+                .tracks
+                .iter()
+                .find(|track| track.id.as_str() == "g0004")
+                .expect("g0004")
+                .matrix_or_pan,
+            MatrixOrPan::Matrix { .. }
+        )
+    };
+    fn both(strip: &str, control: u32) -> ControlAddress {
+        strip_row(strip, Section::Builtins, control, Lane::Both)
+    }
+    let route = |id: &str, control: u32| ControlAddress {
+        owner: Owner::Route(StableId::parse(id).expect("route")),
+        section: Section::Own,
+        control,
+        lane: Lane::Both,
+    };
+    let vca = |id: &str, control: u32, lane: Lane| ControlAddress {
+        owner: Owner::Vca(StableId::parse(id).expect("vca")),
+        section: Section::Own,
+        control,
+        lane,
+    };
+    let shaped = move |value: f32| -> Vec<SessionEdit> {
+        if template_is_matrix {
+            (7..11)
+                .map(|control| SessionEdit::set_control(both("g0004", control), value * 0.1, None))
+                .collect()
+        } else {
+            [Lane::Left, Lane::Right]
+                .into_iter()
+                .map(|lane| {
+                    SessionEdit::set_control(
+                        strip_row("g0004", Section::Builtins, 12, lane),
+                        value * 0.1,
+                        None,
+                    )
+                })
+                .collect()
+        }
+    };
+    type Kind = (&'static str, Box<dyn Fn(f32) -> Vec<SessionEdit>>);
+    let kinds: Vec<Kind> = vec![
+        (
+            "fader",
+            Box::new(move |value| vec![SessionEdit::set_control(both("g0007", 5), -value, None)]),
+        ),
+        (
+            "mute",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(
+                    both("g0006", 6),
+                    (value > 0.5) as u8 as f32,
+                    None,
+                )]
+            }),
+        ),
+        ("pan or matrix", Box::new(shaped)),
+        (
+            "trim",
+            Box::new(move |value| vec![SessionEdit::set_control(both("g0005", 2), -value, None)]),
+        ),
+        (
+            "effect parameter",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(
+                    strip_row(
+                        "g0003",
+                        Section::Inserts(StableId::parse("comp").expect("comp")),
+                        1,
+                        Lane::Both,
+                    ),
+                    -10.0 - value,
+                    None,
+                )]
+            }),
+        ),
+        (
+            "send gain",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(route("eq0-bus", 1), -value, None)]
+            }),
+        ),
+        (
+            "send mute",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(
+                    route("eq0-bus", 2),
+                    (value > 0.5) as u8 as f32,
+                    None,
+                )]
+            }),
+        ),
+        (
+            "VCA offset",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(
+                    vca("vca", 1, Lane::Both),
+                    -value,
+                    None,
+                )]
+            }),
+        ),
+        (
+            "VCA mute",
+            Box::new(move |value| {
+                vec![SessionEdit::set_control(
+                    vca("vca", 2, Lane::Left),
+                    (value > 0.5) as u8 as f32,
+                    None,
+                )]
+            }),
+        ),
+    ];
+    // Each call is made twice before it is counted: a first write of a parameter adds its entry,
+    // which is the full path's, and the first call of the process warms its statics.
+    let measure = |rig: &mut Rig, edits: Vec<SessionEdit>| -> (u64, u64, (usize, usize)) {
+        let bytes = rig.transaction(&edits);
+        control_plane::test_take_in_place_counts();
+        let mark = bench_support::alloc::current_thread_counters();
+        let (result, _) = command_c(rig.session, &bytes);
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(result, crate::RESULT_OK);
+        rig.drain_reliable();
+        (
+            used.allocations,
+            used.deallocations,
+            control_plane::test_take_in_place_counts(),
+        )
+    };
+    for (name, edits) in &kinds {
+        let mut counts = Vec::new();
+        for rig in &mut rigs {
+            measure(rig, edits(2.0));
+            measure(rig, edits(3.0));
+            counts.push(measure(rig, edits(4.0)));
+        }
+        println!("{name}: {counts:?}");
+        assert!(
+            counts.iter().all(|count| count.2 == (1, 0)),
+            "{name}: in place {counts:?}"
+        );
+        assert!(counts[0].0 > 0, "{name}: the call is counted");
+        assert!(
+            counts
+                .iter()
+                .all(|count| count.0 == counts[0].0 && count.1 == counts[0].1),
+            "{name}: the allocations depend on the track count {sizes:?}: {counts:?}"
+        );
+    }
+    // The solo of a strip while another is soloed moves one strip.
+    let solo = |strip: &str, on: bool| {
+        vec![SessionEdit::set_control(
+            strip_row(strip, Section::Own, 2, Lane::Both),
+            f32::from(u8::from(on)),
+            None,
+        )]
+    };
+    let mut counts = Vec::new();
+    for rig in &mut rigs {
+        measure(rig, solo("g0001", true));
+        measure(rig, solo("g0002", true));
+        measure(rig, solo("g0002", false));
+        counts.push(measure(rig, solo("g0002", true)));
+    }
+    println!("solo: {counts:?}");
+    assert!(
+        counts.iter().all(|count| count.2 == (1, 0)),
+        "solo in place {counts:?}"
+    );
+    assert!(
+        counts
+            .iter()
+            .all(|count| count.0 == counts[0].0 && count.1 == counts[0].1),
+        "solo: the allocations depend on the track count: {counts:?}"
+    );
+    // The same fader edit by the full preparation grows with the session.
+    control_plane::test_force_full_preparation(true);
+    let forced: Vec<u64> = rigs
+        .iter_mut()
+        .map(|rig| {
+            measure(
+                rig,
+                vec![SessionEdit::set_control(both("g0007", 5), -6.0, None)],
+            );
+            measure(
+                rig,
+                vec![SessionEdit::set_control(both("g0007", 5), -7.0, None)],
+            )
+            .0
+        })
+        .collect();
+    control_plane::test_force_full_preparation(false);
+    println!("full preparation, fader: {forced:?} allocations at {sizes:?} tracks");
+    assert!(
+        forced[1] > forced[0],
+        "the full preparation grows with the session: {forced:?}"
+    );
+}
+
+/// The timing line of the whole command, before (the full preparation forced) and after (in place),
+/// for a fader edit at 64 and 256 tracks: `cargo test --release -p capi -- --ignored --nocapture
+/// timing_line`.
+#[test]
+#[ignore = "descriptive timing"]
+fn in_place_command_timing_line() {
+    for tracks in [64_usize, 256] {
+        let mut rig = Rig::with_limits(&grown_session(tracks), grown_limits());
+        rig.step();
+        let fader = |db: f32| {
+            vec![SessionEdit::set_control(
+                strip_row(
+                    "g0007",
+                    protocol::control_core::Section::Builtins,
+                    5,
+                    protocol::control_core::Lane::Both,
+                ),
+                db,
+                None,
+            )]
+        };
+        for (label, force) in [("full", true), ("in place", false)] {
+            control_plane::test_force_full_preparation(force);
+            let calls = 200_u32;
+            let mut spent = std::time::Duration::ZERO;
+            for call in 0..calls + 1 {
+                let bytes = rig.transaction(&fader(if call % 2 == 0 { -6.0 } else { -3.0 }));
+                let start = std::time::Instant::now();
+                let (result, _) = command_c(rig.session, &bytes);
+                if call > 0 {
+                    spent += start.elapsed();
+                }
+                assert_eq!(result, crate::RESULT_OK);
+                rig.drain_reliable();
+            }
+            println!(
+                "fader edit, {tracks} tracks, {label}: {:?} per command",
+                spent / calls
+            );
+        }
+        control_plane::test_force_full_preparation(false);
     }
 }

@@ -5,9 +5,12 @@ use session::{SessionModel, StableId, StripRef};
 use crate::Family;
 use crate::address::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
-use crate::effective::{Effective, EffectiveStrip, MonitorOverlay, MonitorWrite, effective};
+use crate::effective::{
+    Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorWrite, effective,
+};
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
+use crate::view::ModelView;
 use crate::{builtin_rows, effect_rows, route, session_rows, strip, vca};
 
 /// One control of a session: where it is, what it is, and its committed value.
@@ -149,7 +152,7 @@ fn owner_slot(model: &SessionModel, owner: usize) -> OwnerSlot {
 }
 
 /// The strip at `index` of [`SessionModel::strips`] order: the tracks, then the submixes.
-fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
+pub(crate) fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
     match model.tracks.get(index) {
         Some(track) => StripRef::track(track),
         None => StripRef::submix(&model.submixes[index - model.tracks.len()]),
@@ -172,22 +175,44 @@ pub fn owner_rows_with(
     sample_rate: u32,
     out: &mut Vec<ControlRow>,
 ) {
+    owner_rows_in(
+        ModelView::whole(model),
+        effective,
+        overlay,
+        owner,
+        sample_rate,
+        out,
+    );
+}
+
+/// [`owner_rows_with`] over a [`ModelView`] and any source of effective values: the rows of owner
+/// number `owner` of the model the view stands for, read from the committed model and the owners the
+/// view holds edited, with the effective values of `effective` (TBD10). The one body of both.
+pub fn owner_rows_in(
+    view: ModelView<'_>,
+    effective: &impl EffectiveSource,
+    overlay: &MonitorOverlay,
+    owner: usize,
+    sample_rate: u32,
+    out: &mut Vec<ControlRow>,
+) {
+    let model = view.structure();
     match owner_slot(model, owner) {
         OwnerSlot::Strip(index) => {
-            let strip = strip_at(model, index);
+            let strip = view.strip(index);
             strip::push_rows(
                 out,
                 &model.console,
                 &strip,
-                &effective.strips[index],
+                &effective.strip(index),
                 overlay.is_soloed(strip.id),
                 sample_rate,
             );
         }
         OwnerSlot::Route(index) => {
-            route::push_rows(out, &model.routes[index], effective.routes[index].gate);
+            route::push_rows(out, view.route(index), effective.route_gate(index));
         }
-        OwnerSlot::Vca(index) => vca::push_rows(out, &model.vcas[index]),
+        OwnerSlot::Vca(index) => vca::push_rows(out, view.vca(index)),
         OwnerSlot::Session => session_rows::push_rows(out, model),
         OwnerSlot::None => {}
     }
@@ -205,12 +230,22 @@ pub fn derived_rows_with(
     owner: usize,
     out: &mut Vec<ControlRow>,
 ) {
-    match owner_slot(model, owner) {
+    derived_rows_in(ModelView::whole(model), effective, owner, out);
+}
+
+/// [`derived_rows_with`] over a [`ModelView`] and any source of effective values (TBD10).
+pub fn derived_rows_in(
+    view: ModelView<'_>,
+    effective: &impl EffectiveSource,
+    owner: usize,
+    out: &mut Vec<ControlRow>,
+) {
+    match owner_slot(view.structure(), owner) {
         OwnerSlot::Strip(index) => {
-            strip::push_derived_rows(out, &strip_at(model, index), &effective.strips[index]);
+            strip::push_derived_rows(out, &view.strip(index), &effective.strip(index));
         }
         OwnerSlot::Route(index) => {
-            route::push_derived_rows(out, &model.routes[index], effective.routes[index].gate);
+            route::push_derived_rows(out, view.route(index), effective.route_gate(index));
         }
         OwnerSlot::Vca(_) | OwnerSlot::Session | OwnerSlot::None => {}
     }

@@ -87,11 +87,16 @@ Design (this slice):
   **all** hold, else it runs the full preparation and returns that, so the full path alone reports
   every refusal and its order:
   1. every edit is a `SetControl`; a monitor row (solo) goes to `monitor_edits` as today;
-  2. every model row's owner is a strip, route or VCA (not the session);
+  2. every model row writes that row alone (`controls::writes_only_its_row`: not a session row, not
+     a strip's `matrix_mode`) and names a strip, route or VCA the committed model holds;
   3. `controls::set` accepts each edit, in order, on the owners-edited model (the same function, the
      same checks, the same value normalization as the full path);
-  4. the session's value validators (`session::owners_values_valid`, the existing
-     `validate_*` helpers for finite values, ranges, units, filter pairs) accept every edited owner;
+  4. the session's own value validators accept every edited owner
+     (`session::owners_values_valid`: the helpers `validate_strip_values`, `validate_vca_values`,
+     `validate_route_values` and `validate_params` that `validate_session` itself calls). This is a
+     guard: after `controls::check` no row reaches a value the validators refuse today, and
+     `crates/session/tests/in_place.rs` holds the validators and `compile_session` to one verdict
+     per owner kind;
   5. the edited owners have the same counts as the committed ones (console entries, inserts,
      parameter entries per effect, members): a `params` entry added changes the estimate and the
      canonical order, so it is the full path;
@@ -125,15 +130,16 @@ Design (this slice):
   edit_ramps, monitor, rows) -> Option<LiveDelta<'_>>` is #TBD9's fast path over the view; `None`
   when it cannot judge. #TBD9's `classify_live_edit(current, next, .., rows)` stays (it is the
   differential's subject for two whole models) and calls the same body with the view of `next`.
-  `LiveDelta` gains `reach: Option<LiveReach>`: the owner indices (strips, then routes) whose derived
-  rows the classification reached, set by the fast path only.
-- **D7. The catalog stage and the admission.** `ControlCatalog::stage_live` takes the view. With a
-  `reach` it skips `lists_owners_of` (the transaction cannot change the owner list), computes the
+  `LiveDelta` gains `derived_owners: Option<Vec<usize>>`: the owner indices (strips, then routes as
+  strip count plus route index) whose derived rows the classification reached, set by the fast path
+  only.
+- **D7. The catalog stage and the admission.** `ControlCatalog::stage_live` takes the view. With
+  `derived_owners` it skips `lists_owners_of` (the transaction cannot change the owner list), computes the
   effective values of the owners it stages with `controls::LocalEffective` (the existing
   `effective_strip`, `effective_follow` and `effective_gate` rules over `LocalInputs`, no table),
-  and writes only the changed owners' rows and the `reach` owners' derived rows;
-  `owner_rows_with` and `derived_rows_with` become thin callers of one body over the view. Without a
-  `reach` the stage is today's. `live_admission` for an in-place form skips `check_counts` (no count
+  and writes only the changed owners' rows and the `derived_owners`' derived rows;
+  `owner_rows_with` and `derived_rows_with` become thin callers of one body over the view. Without
+  `derived_owners` the stage is today's. `live_admission` for an in-place form skips `check_counts` (no count
   can change; a debug build asserts it) and charges `compiled_model_admission` from the committed and
   the next estimate: the same figures the full path charges.
 - **D8. The fast path is optimistic.** `commit_live` takes an in-place token through the fast
@@ -161,8 +167,10 @@ Design (this slice):
    view-based catalog stage; the existing suites unchanged.
 5. `crates/control-plane`: `commit_live` over the view, the materialize fallback, the admission, the
    test-support switch.
-6. Tests: `crates/host-core/tests/in_place_commit.rs` (gate 1), `crates/capi/tests/in_place_commit.rs`
-   (gate 2), `hosts/host-web/tests/control_command_timing.rs` (gate 3).
+6. Tests: `crates/host-core/tests/in_place_commit.rs` (gate 1, the store and the classifier),
+   `crates/capi/src/runtime/live_tests.rs` (gate 1 through the C ABI, gate 2 and the timing pair),
+   `crates/session/tests/in_place.rs` and `crates/controls/tests/owner_edits.rs` (the pieces),
+   `hosts/host-web/tests/control_command_timing.rs` (gate 3).
 7. This spec's implementation record.
 
 ## Authorized paths
@@ -173,7 +181,9 @@ Design (this slice):
 - `crates/host-core/src/{live_delta.rs,prepare.rs,control_provider.rs,lib.rs}`,
   `crates/host-core/tests/*`.
 - `crates/control-plane/src/{control.rs,compile.rs,lib.rs}`.
-- `crates/capi/tests/*`.
+- `crates/capi/src/runtime/live_tests.rs` (the new tests at its end; no production code of `capi`).
+- `crates/host-core/tests/support/edit_sessions.rs` (the sessions, the parity script and the
+  generator that #TBD9's test file held, moved so that both tests share them).
 - `hosts/host-web/tests/control_command_timing.rs` (no `hosts/host-web/src`, no `sdk/`).
 - This spec.
 
@@ -250,4 +260,112 @@ clone and the compile), the second makes the stage local.
 
 ## Implementation record
 
-(To be written with the implementation.)
+### Deviations from the brief
+
+- **`ModelView` lives in `controls`, not `host-core`.** The catalog stage's row functions
+  (`owner_rows_with`, `derived_rows_with`) are `controls`'s, and `host-core`, `protocol` and the
+  control plane all read the view, so it sits at the bottom: `controls::{ModelView, OwnerEdits,
+  LocalEffective, EffectiveSource, owner_rows_in, derived_rows_in, writes_only_its_row}`. The
+  session's pieces (`OwnerSlots`, `OwnerRef`, `canonical_owner_bytes`, `owners_values_valid`,
+  `owners_counts_equal`, `CompiledSession::{swap_owners, finish_in_place}`) are `session`'s, as D1
+  to D4 say.
+- **No `LiveReach` type:** the field is `LiveDelta::derived_owners: Option<Vec<usize>>`.
+- **Two protocol conveniences beside the brief:** `SessionStore::apply_transaction_with_monitor` and
+  `apply_transaction_in_place` (the stores' commits, which `commit_prepared` keeps private), so that
+  the differential commits both chains through public API. `SessionStore::materialize` is the
+  store's half of D8; `ProtocolController::materialize_prepared` the controller's.
+- **`check_counts` is skipped for an in-place token** and not asserted in a debug build: the
+  assertion would walk the model and break the allocation gate in the test build. The differential
+  holds the claim instead: the estimates (which count entities, effects, parameters and strings)
+  equal the full path's after every commit.
+- **The catalog's debug check is switchable.** `stage_live` already compared a values-only stage
+  with a full build in test builds (#1600); that comparison builds the whole catalog and so
+  allocates with the session. `host_core::verify_stages(false)` (and
+  `control_plane::test_verify_catalog_stages(false)`) turns it off for one thread; only the
+  allocation gate does, and every other test keeps it on, so the stage of every in-place commit of
+  the differentials is compared with a full restage (R4).
+- **`#TBD9`'s test file shares its builders.** The sessions, the parity script and the generator moved
+  to `crates/host-core/tests/support/edit_sessions.rs`; `live_edit_classifier.rs` imports them and
+  now says, per case, that the fast path set `derived_owners` and the full path did not.
+- **The brief's `crates/capi/tests/in_place_commit.rs` is `live_tests.rs` of `capi`'s runtime
+  tests**, which hold the C ABI harness (`Rig`, the control list and state readers, the watermark).
+- **The `Co-Authored-By` trailer of the commits is the session's own (Claude Sonnet 5.5)**, not
+  the one the brief names.
+
+### What falls back
+
+`prepare_transaction_in_place` hands the transaction to the full preparation, and returns its answer
+(refusals included), for: any edit that is not a `SetControl`; a session row; a strip's
+`matrix_mode`; an owner the committed model does not hold; any edit `controls::set` refuses; a
+value the validators refuse; a parameter entry that does not exist yet (the first write of a
+parameter adds it, and the estimate counts it); a ramp over a second; a canonical text over its
+bound. A prepared in-place token whose fast classification answers `None` (a rebuild-only row such
+as an insert's link mode or an EQ band's kind, a delay's bypass, a lowering refusal) is
+materialized and goes on as any token: `commit_live` returns `Rebuild` with a compiled token.
+
+### Evidence
+
+Native release, x86-64 (AVX2), a fader edit, 200 calls after one warm-up.
+
+Whole `control_command` of `hosts/host-web/tests/control_command_timing.rs` (one source, route and
+no insert per track; the browser host's entry, which is `SessionState::command` and so the C ABI's):
+
+| tracks | after #TBD9 (recorded there) | in place |
+| --- | --- | --- |
+| 64 | 267 us | 18.4 us |
+| 256 | 1.11 ms | 19.0 us |
+
+The C ABI pair on `grown_session(n)` (the control-list session's submix, sends, VCAs, console slot
+and a compressor insert on every track), `in_place_command_timing_line` in `capi`'s runtime tests,
+the same session with the full preparation forced and then in place:
+
+| tracks | full preparation | in place |
+| --- | --- | --- |
+| 64 | 524 us | 49 us |
+| 256 | 1.86 ms | 50 us |
+
+Allocations and frees of one whole command through the C ABI (debug test build, the audited
+allocator's thread-scoped counters; the same at 64 and 256 tracks for every kind): fader 555/528,
+pan or matrix 549/522, trim 544/517, effect parameter 574/541, solo 511/504, mute 67/45, send gain
+120/104, send mute 50/36, VCA offset 96/84, VCA mute 48/36. The same fader edit by the forced full
+preparation: 2,151 at 64 tracks and 6,761 at 256. The ~500 allocations of a fader, pan, trim,
+parameter or solo edit are the rows of the one changed strip that the catalog stage reads again
+(about a hundred control rows, each with its descriptor); a mute that does not change the value
+(`>0.5` repeated) reads no row.
+
+The differentials: `crates/host-core/tests/in_place_commit.rs` plays the #1560 parity script (with
+its solo steps) at 48 and 96 kHz and a seeded walk of 2,600 transactions of one to four edits over a
+rich and a plain session through both chains, committing or abandoning each; after every commit the
+model, the canonical text, the estimate and the revision of the two stores are equal, and the walk
+stages values (not the whole catalog) for 40 commits out of 41. Through the C ABI,
+`in_place_commands_equal_full_commands_through_the_c_abi` gives two sessions 500 transactions, one
+prepared in place (217 commits; 98 materialized; 10 refusals) and one by the full path forced, and
+compares each command's result, response bytes and events, an exact retry, the rendered block, and
+every 25 steps the snapshot, the whole control list (with its epoch and revision) and every control
+value, the watermark and the summary.
+
+Mutation checks, each red and restored: the counts check removed (the estimates differ at the first
+parameter entry added: `in_place_commit.rs`, both tests); the revision's digits left out of the
+canonical length (the walk, at revision 10); the catalog stage reading no derived row (the debug
+comparison with a full build, both tests); a clone of the committed model in the in-place
+preparation (the allocation gate: 1,355 and 3,659 allocations at 64 and 256 tracks). Removing the
+validators' call is green: `controls::check` refuses every value they refuse (fractional samples
+included), so the call is a guard, held to `compile_session` by `crates/session/tests/in_place.rs`.
+
+Gates run on this head: `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+--no-deps`; `cargo test --locked` for `controls`, `session`, `protocol --all-features`,
+`conformance`, `host-core --all-features`, `control-plane --features test-support`, `capi` and
+`host-web --features test-support`; `realtime_policy`; `scripts/check-protocol-wasm-parity.sh`;
+`scripts/run-protocol-allocation-audit.sh`; `audit capi` (pcm `76525e7ef9e78cf4`, 0 violations) and
+`audit protocol`; `scripts/check-workspace-policy.sh`, `check-host-core-policy.sh`,
+`check-protocol-control-policy.sh`, `check-session-policy.sh`, `check-conformance-boundaries.sh`.
+
+### Successor (for root)
+
+What a live-only command still does that grows with nothing but is not free: the catalog stage reads
+every row of each changed owner again (a hundred rows for a strip with inserts) where the edit
+changed one row; writing the row's one entry (and the derived rows it reaches) would cut a fader
+edit from ~550 to a few dozen allocations. And the removal of the 24-byte stand-in and the replay
+cache clone per command are the protocol's own constant. Neither changes a classification or a
+commit.

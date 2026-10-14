@@ -122,7 +122,9 @@ pub use control_provider::{
     SessionControlProviderError, SessionControlProviderResources, StagedCatalog, StagedValues,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
-pub use control_provider::{fail_next_stages, take_response_counts, take_stage_counts};
+pub use control_provider::{
+    fail_next_stages, take_response_counts, take_stage_counts, verify_stages,
+};
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
@@ -134,7 +136,7 @@ pub use engine::realtime::{
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
-    classify_live_delta_with_monitor, classify_live_edit,
+    classify_live_delta_with_monitor, classify_live_edit, classify_live_staged,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};

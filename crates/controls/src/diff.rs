@@ -77,6 +77,19 @@ pub fn changed_controls(
     Some(changed)
 }
 
+/// Whether a write to the row at `address` changes that row alone: the session's rows do not (a ramp
+/// length changes every owner's descriptors) and a strip's `matrix_mode` does not (the switch flips
+/// which rows are active and rewrites the pan or the matrix). A host that applies a transaction of
+/// single-row writes in place, and [`changed_rows`], need exactly this rule (TBD9, TBD10).
+#[must_use]
+pub fn writes_only_its_row(address: &ControlAddress) -> bool {
+    !match (&address.owner, &address.section) {
+        (Owner::Session, _) => true,
+        (Owner::Strip(_), Section::Own) => address.control == strip::MATRIX_MODE,
+        _ => false,
+    }
+}
+
 /// The controls of the one row `address` names whose value bits differ between `current` and `next`,
 /// one change per listed lane, exactly as [`changed_controls`] gives them for that row (TBD9 D4).
 /// The lane of `address` does not matter: the row's lanes are all compared.
@@ -97,12 +110,7 @@ pub fn changed_rows(
     address: &ControlAddress,
     sample_rate: u32,
 ) -> Option<Vec<ChangedControl>> {
-    let moves_more_than_itself = match (&address.owner, &address.section) {
-        (Owner::Session, _) => true,
-        (Owner::Strip(_), Section::Own) => address.control == strip::MATRIX_MODE,
-        _ => false,
-    };
-    if moves_more_than_itself {
+    if !writes_only_its_row(address) {
         return None;
     }
     let before = resolve(current, address, sample_rate).ok()?;

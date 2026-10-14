@@ -458,6 +458,24 @@ fn validate_strip<'a>(
     strip: StripValues<'a>,
     local: &mut LocalUniqueness<'a>,
 ) {
+    validate_strip_values(diagnostics, path, &strip);
+    validate_rack(
+        diagnostics,
+        index,
+        strip.inserts,
+        &path.key("inserts"),
+        local,
+    );
+}
+
+/// The numeric half of a strip's validation: the input section, the fader and the pan or matrix.
+/// It reads the strip alone, so a host that changes values can check the strip it changed without
+/// the session's cross-reference index (TBD10).
+fn validate_strip_values(
+    diagnostics: &mut Vec<Diagnostic>,
+    path: &PathRef<'_>,
+    strip: &StripValues<'_>,
+) {
     for (channel, values) in [
         ("left", &strip.builtins.left),
         ("right", &strip.builtins.right),
@@ -500,13 +518,6 @@ fn validate_strip<'a>(
             }
         }
     }
-    validate_rack(
-        diagnostics,
-        index,
-        strip.inserts,
-        &path.key("inserts"),
-        local,
-    );
 }
 
 fn validate_rack<'a>(
@@ -605,13 +616,7 @@ fn validate_vcas(
     let mut seen = HashSet::new();
     for (position, vca) in session.vcas.iter().enumerate() {
         let path = vcas_path.index(position);
-        let fader_path = path.key("fader");
-        for (field, value) in [
-            ("left_db", vca.fader.left_db),
-            ("right_db", vca.fader.right_db),
-        ] {
-            validate_finite_range(diagnostics, value, -144.0, 24.0, &fader_path.key(field));
-        }
+        validate_vca_values(diagnostics, &path, vca);
         let members_path = path.key("members");
         let mut nested = Vec::new();
         seen.clear();
@@ -648,6 +653,17 @@ fn validate_vcas(
                 "VCA membership must be acyclic",
             );
         }
+    }
+}
+
+/// A VCA's offset range (#1240 D2): the numeric half of its validation.
+fn validate_vca_values(diagnostics: &mut Vec<Diagnostic>, path: &PathRef<'_>, vca: &crate::Vca) {
+    let fader_path = path.key("fader");
+    for (field, value) in [
+        ("left_db", vca.fader.left_db),
+        ("right_db", vca.fader.right_db),
+    ] {
+        validate_finite_range(diagnostics, value, -144.0, 24.0, &fader_path.key(field));
     }
 }
 
@@ -734,39 +750,49 @@ fn validate_routes(
             &route.destination,
             &path.key("destination"),
         );
+        validate_route_values(diagnostics, &path, route);
+    }
+}
+
+/// A route's numeric half of validation: the gain range, where `follows_mute` is legal and the
+/// matrix coefficients (#1237, #1218).
+fn validate_route_values(
+    diagnostics: &mut Vec<Diagnostic>,
+    path: &PathRef<'_>,
+    route: &crate::Route,
+) {
+    validate_finite_range(
+        diagnostics,
+        route.gain_db,
+        ROUTE_GAIN_DB_MINIMUM,
+        ROUTE_GAIN_DB_MAXIMUM,
+        &path.key("gain_db"),
+    );
+    // A route into the output is never live, so a follow there could only be prepared, and a
+    // live unmute of its source would leave the strip's main route silent (#1218 D1, DESIGN
+    // P11). The boolean is legal in general and illegal in this context.
+    if route.follows_mute && matches!(route.destination, RouteDestination::OutputInput { .. }) {
+        error(
+            diagnostics,
+            DiagnosticCode::InvalidEnum,
+            &path.key("follows_mute"),
+            "follows_mute applies only to a route into a submix",
+        );
+    }
+    let matrix_path = path.key("channel_matrix");
+    for (field, value) in [
+        ("ll", route.channel_matrix.ll),
+        ("lr", route.channel_matrix.lr),
+        ("rl", route.channel_matrix.rl),
+        ("rr", route.channel_matrix.rr),
+    ] {
         validate_finite_range(
             diagnostics,
-            route.gain_db,
-            ROUTE_GAIN_DB_MINIMUM,
-            ROUTE_GAIN_DB_MAXIMUM,
-            &path.key("gain_db"),
+            value,
+            -ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
+            ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
+            &matrix_path.key(field),
         );
-        // A route into the output is never live, so a follow there could only be prepared, and a
-        // live unmute of its source would leave the strip's main route silent (#1218 D1, DESIGN
-        // P11). The boolean is legal in general and illegal in this context.
-        if route.follows_mute && matches!(route.destination, RouteDestination::OutputInput { .. }) {
-            error(
-                diagnostics,
-                DiagnosticCode::InvalidEnum,
-                &path.key("follows_mute"),
-                "follows_mute applies only to a route into a submix",
-            );
-        }
-        let matrix_path = path.key("channel_matrix");
-        for (field, value) in [
-            ("ll", route.channel_matrix.ll),
-            ("lr", route.channel_matrix.lr),
-            ("rl", route.channel_matrix.rl),
-            ("rr", route.channel_matrix.rr),
-        ] {
-            validate_finite_range(
-                diagnostics,
-                value,
-                -ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
-                ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
-                &matrix_path.key(field),
-            );
-        }
     }
 }
 
@@ -1161,4 +1187,46 @@ fn error(
         return;
     }
     diagnostics.push(Diagnostic::at(code, path, None, message));
+}
+
+/// Whether the numeric values of one owner pass the checks `validate_session` makes of them
+/// (TBD10): a strip's input section, fader, pan or matrix and the parameters of its console entries
+/// and inserts; a VCA's offsets; a route's gain, matrix and `follows_mute`. The owner's references
+/// to other entities are not read.
+pub(crate) fn owner_values_valid(owner: crate::OwnerRef<'_>) -> bool {
+    let mut diagnostics = Vec::new();
+    let root = PathRef::ROOT;
+    let mut local = LocalUniqueness::default();
+    let mut strip = |values: StripValues<'_>, console: &[ConsoleEntry]| {
+        validate_strip_values(&mut diagnostics, &root, &values);
+        for entry in console {
+            validate_params(&mut diagnostics, &entry.params, &root, &mut local);
+        }
+        for effect in &values.inserts.effects {
+            validate_params(&mut diagnostics, &effect.params, &root, &mut local);
+        }
+    };
+    match owner {
+        crate::OwnerRef::Track(track) => strip(
+            StripValues {
+                builtins: &track.builtins,
+                inserts: &track.inserts,
+                fader: &track.fader,
+                matrix_or_pan: &track.matrix_or_pan,
+            },
+            &track.console,
+        ),
+        crate::OwnerRef::Submix(submix) => strip(
+            StripValues {
+                builtins: &submix.builtins,
+                inserts: &submix.inserts,
+                fader: &submix.fader,
+                matrix_or_pan: &submix.matrix_or_pan,
+            },
+            &submix.console,
+        ),
+        crate::OwnerRef::Vca(vca) => validate_vca_values(&mut diagnostics, &root, vca),
+        crate::OwnerRef::Route(route) => validate_route_values(&mut diagnostics, &root, route),
+    }
+    diagnostics.is_empty()
 }

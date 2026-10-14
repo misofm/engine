@@ -1,10 +1,15 @@
-//! TBD9, descriptive: the time of one whole `control_command` (the browser's one entry for a
-//! `SET_CONTROL` transaction, which is the control plane's `SessionState::command` and so the C
-//! ABI's too) for a fader edit on a session of many tracks, native.
+//! TBD9 and TBD10, descriptive: the time of one whole `control_command` (the browser's one entry
+//! for a `SET_CONTROL` transaction, which is the control plane's `SessionState::command` and so the
+//! C ABI's too) for a fader edit on a session of many tracks, native.
 //!
 //! Ignored: it prints one line per size and asserts nothing about time.
 //! `cargo test --release -p host-web --features test-support --test control_command_timing --
 //! --ignored --nocapture`
+//!
+//! Recorded on this box (release, x86-64): after TBD9 (the classifier from the rows, the model still
+//! cloned and compiled) 267 us at 64 tracks and 1.11 ms at 256; after TBD10 (the edit committed in
+//! place) about 19 us at both. The C ABI's pair, with the full preparation forced on the same
+//! session, is `in_place_command_timing_line` in `crates/capi/src/runtime/live_tests.rs`.
 
 #![cfg(feature = "test-support")]
 

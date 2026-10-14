@@ -92,16 +92,23 @@ pub(crate) fn compiled_model_admission(
     current: &CompiledSession,
     prospective: &CompiledSession,
 ) -> Result<CompiledModelAdmission, CompileFailure> {
+    compiled_model_admission_between(current.resource_estimate(), prospective.resource_estimate())
+}
+
+/// [`compiled_model_admission`] from the two models' resource estimates, for a prospective model
+/// that is not held as a compilation (TBD10).
+pub(crate) fn compiled_model_admission_between(
+    current: session::ResourceEstimate,
+    prospective: session::ResourceEstimate,
+) -> Result<CompiledModelAdmission, CompileFailure> {
     Ok(CompiledModelAdmission {
         retained_bytes: current
-            .resource_estimate()
             .compiled_model_bytes
-            .checked_add(prospective.resource_estimate().compiled_model_bytes)
+            .checked_add(prospective.compiled_model_bytes)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         largest_allocation_bytes: current
-            .resource_estimate()
             .single_allocation_bytes
-            .max(prospective.resource_estimate().single_allocation_bytes),
+            .max(prospective.single_allocation_bytes),
     })
 }
 
