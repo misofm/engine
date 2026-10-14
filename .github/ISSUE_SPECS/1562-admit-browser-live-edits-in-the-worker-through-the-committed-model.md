@@ -407,3 +407,12 @@ known host difference, and it is a sequenced refusal, not a divergent result.
 - **Watermark rebuild leg.** #1349's gate 1 ran with a live edit (rebuild refused). #1562b adds the
   rebuild leg: a rebuild, then a live edit before the swap; the browser status words stay at the
   initial revision until the swap block and then equal the C ABI's `miso_engine_v1_plan_watermark`.
+- **Named effect rows (batch 8 review).** `sdk/src/core/live-controls.ts` (`#effectRowId`) resolves
+  an effect row's name through the session the SDK built, checked against the booted bytes. After
+  #1562b a rebuild can change an insert's effect, and a named edit could land on another effect's
+  row with the same number. #1562b resolves named effect rows from the control list's section
+  headers (the effect ID) and re-reads them when the structure epoch moves.
+- **Meter frames and the structure epoch (batch 8 review).** `pollMeters` (`sdk/src/core/boundary.ts`)
+  re-reads the strip order only when a frame's `trackCount` differs, so after #1562b a structural
+  edit that keeps the count would name the wrong strips. #1562b carries the structure epoch in the
+  meter header (or an equal signal) and re-reads the strip order when it differs.
