@@ -319,8 +319,8 @@ pub struct RetiredCodeRow {
 ///   `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507` and `0x0702`, spliced into a frame that
 ///   otherwise carries a `SET_CONTROL` payload: an unallocated opcode, refused at decode
 ///   (`MALFORMED_FRAME`) whatever the payload holds;
-/// - a `SetTrackConsole` in a transaction with no `SetConsole` before it (`VALIDATION_FAILED`,
-///   `session.edit.value_op_retired`);
+/// - a `SetTrackConsole` in a transaction with no `SetConsole` before it that changes the console
+///   (`VALIDATION_FAILED`, `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
 ///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
 ///   C4): `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
@@ -738,7 +738,11 @@ pub enum ConformanceDecoder {
 /// ops (`0x0008`, `0x0203`, `0x020a`, `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507`, `0x0702`) are
 /// retired and never reallocated, so the transaction carries 35 edits, one per allocated opcode.
 /// The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x0433_af90_5dc6_18bc;
+/// Batch 4 review fold (decision 17, #1559) repinned it from `0433af905dc618bc`: the corpus gains
+/// `response.session_transaction_monitor`, a `TransactionApplied` with `edit_path` `monitor` (4),
+/// so the response frame for the fourth path is covered by the typed decoders and the Wasm
+/// golden. The frame count is 47.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x7de4_0861_2b83_7afd;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -915,6 +919,13 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
             applied_operations: 42,
             edit_path: EditPath::Rebuild
+        })
+    );
+    success!(
+        "response.session_transaction_monitor",
+        SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+            applied_operations: 1,
+            edit_path: EditPath::Monitor
         })
     );
     let (control_page, state_page) = control_corpus_pages();

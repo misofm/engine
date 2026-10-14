@@ -835,7 +835,6 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
             sidechain: high.sidechain.clone(),
         },
     ]);
-    edits.extend([]);
     let bytes = encode(&edits);
     let codec = ProtocolCodec::default();
     let mut scratch = [0_u16; 64];
