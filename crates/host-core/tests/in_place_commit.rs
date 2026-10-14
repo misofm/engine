@@ -133,7 +133,10 @@ impl Pair {
         assert_eq!(full.set_control_rows(), fast.set_control_rows());
 
         let current_full = self.full.compiled().normalized_model();
-        let next_full = full.compiled().normalized_model();
+        let next_full = full
+            .compiled()
+            .expect("a compiled transaction")
+            .normalized_model();
         let change = self.overlay.after(full.monitor_edits(), next_full);
         let fast_change = self.overlay.after(
             fast.monitor_edits(),

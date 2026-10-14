@@ -37,7 +37,10 @@ fn prepare(
         .ok()?;
     let change = committed.after(
         prepared.monitor_edits(),
-        prepared.compiled().normalized_model(),
+        prepared
+            .compiled()
+            .expect("a compiled transaction")
+            .normalized_model(),
     );
     Some((prepared, change.overlay, change.ramp))
 }
@@ -58,7 +61,10 @@ fn judge(
     ramp: Option<u32>,
 ) -> Verdict {
     let current = store.compiled().normalized_model();
-    let next = prepared.compiled().normalized_model();
+    let next = prepared
+        .compiled()
+        .expect("a compiled transaction")
+        .normalized_model();
     let monitor = MonitorBase {
         committed,
         next: overlay,
@@ -253,7 +259,10 @@ fn allocations(
 ) -> (u64, u64, bool) {
     let (prepared, overlay, ramp) = prepare(store, edits, committed).expect("the edit applies");
     let current = store.compiled().normalized_model();
-    let next = prepared.compiled().normalized_model();
+    let next = prepared
+        .compiled()
+        .expect("a compiled transaction")
+        .normalized_model();
     let monitor = MonitorBase {
         committed,
         next: &overlay,
@@ -407,7 +416,10 @@ fn timing_line() {
         let none = MonitorOverlay::default();
         let (prepared, overlay, ramp) = prepare(&store, &edits, &none).expect("applies");
         let current = store.compiled().normalized_model();
-        let next = prepared.compiled().normalized_model();
+        let next = prepared
+            .compiled()
+            .expect("a compiled transaction")
+            .normalized_model();
         let monitor = MonitorBase {
             committed: &none,
             next: &overlay,

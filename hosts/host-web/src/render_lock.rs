@@ -60,7 +60,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 thread_local! {
     static RENDER_LOCKED: Cell<bool> = const { Cell::new(false) };
@@ -68,8 +68,10 @@ thread_local! {
 
 static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
 
-/// The allocator calls made while no render-locked window was open (#1381a).
-static CONTROL_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
+/// The allocator calls made while no render-locked window was open (#1381a). Wide, so that a long
+/// session cannot wrap it to a small number; the export that reports it is 32 bits and saturates
+/// (batch 7 review).
+static CONTROL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// A global allocator that counts every call made while the current thread is render-locked, and
 /// every other call in the control counter, then forwards it unchanged to the wrapped allocator.
@@ -150,9 +152,10 @@ pub(crate) fn render_allocation_count() -> u32 {
 }
 
 /// The number of allocator calls made outside render-locked windows since this instance started
-/// (#1381a): its boot, control messages and service steps.
+/// (#1381a): its boot, control messages and service steps. It saturates at `u32::MAX` and never
+/// wraps.
 pub(crate) fn control_allocation_count() -> u32 {
-    CONTROL_ALLOCATIONS.load(Ordering::Relaxed)
+    u32::try_from(CONTROL_ALLOCATIONS.load(Ordering::Relaxed)).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -239,5 +242,11 @@ mod tests {
             moved.0, 0,
             "a window on another thread counts nothing in the render counter"
         );
+        // The control counter is wide and its reader saturates: past `u32::MAX` calls it reads
+        // `u32::MAX` and never wraps to a small number.
+        CONTROL_ALLOCATIONS.store(u64::from(u32::MAX) - 1, Ordering::Relaxed);
+        exercise(false);
+        assert_eq!(control_allocation_count(), u32::MAX);
+        CONTROL_ALLOCATIONS.store(0, Ordering::Relaxed);
     }
 }

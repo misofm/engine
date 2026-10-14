@@ -19,8 +19,9 @@ program is the one it had before the feature existed.
 Each input lane applies polarity, trim, an optional RBJ-second-order-Butterworth-response HPF,
 then an optional LPF.
 
-**Polarity and trim are live since issue #210 phase 3** (command kinds 11 and 10, builtin
-parameter rows 1 and 2, both `BlockTarget` with `LinearNUpdates`). They are one coefficient:
+**Polarity and trim are live since issue #210 phase 3** (first as command kinds 11 and 10,
+which #1565 deleted; today the builtin rows 1 and 2 of a strip, set by `SET_CONTROL`, both
+`BlockTarget` with `LinearNUpdates`). They are one coefficient:
 `InputLane::trim_signed` carries the trim magnitude in its value and the polarity in its sign, so a
 trim ride retargets the magnitude, a polarity flip retargets the sign, and both declick through the
 same linear ramp -- a flip is the ramp passing through zero, which is why it costs no DSP of its

@@ -276,7 +276,7 @@ band 1 gain, and one refused out-of-domain fader value) committed as
 `control_command`, with the events drained the way the worklet drains them. The native twin is
 `tests::native_set_control_timeline_digest_pins_the_wasm_parity`; the frames are pinned to their
 encoder by `tests::set_control_frames_are_the_committed_fixtures` (set
-`MISO_WRITE_SET_CONTROL_FRAMES=1` to rewrite them). `expected.json` lost `commandTimeline` and
+`MISO_ENGINE_WRITE_SET_CONTROL_FRAMES=1` to rewrite them). `expected.json` lost `commandTimeline` and
 `nativeCommandTimelinePcmF32leSha256` and gained `setControlTimeline` and
 `nativeSetControlTimelinePcmF32leSha256`. The observation timeline's no-taps leg now reports
 `unsupportedKind` (7), not `observationUnbound` (11).

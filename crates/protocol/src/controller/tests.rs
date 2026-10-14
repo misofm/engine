@@ -1226,6 +1226,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         prepared
             .prospective_session()
             .compiled()
+            .expect("a compiled transaction")
             .canonical_json()
             .contains("prepared-session")
     );
@@ -1413,7 +1414,11 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
             SessionRevision(7)
         );
         assert_eq!(
-            prepared.prospective_session().compiled().canonical_json(),
+            prepared
+                .prospective_session()
+                .compiled()
+                .expect("a compiled transaction")
+                .canonical_json(),
             snapshot,
             "the model is the committed one"
         );

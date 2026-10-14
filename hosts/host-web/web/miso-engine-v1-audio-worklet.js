@@ -264,8 +264,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // `miso.service.v1` tick included, so a displaced plan is reclaimed here and never in render.
     this.port.onmessage = (event) => {
       this.receive(event.data);
-      this.serviceControl();
-      this.drainControlEvents();
+      // A service tick is no request: an error it finds belongs to none, never to the last request
+      // the page already saw answered.
+      const requestId = event.data?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
+      this.serviceControl(requestId);
+      this.drainControlEvents(requestId);
     };
     try {
       const result = this.initialize(options?.processorOptions);
@@ -940,10 +943,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// Issue #1381a D5, D6: one control-plane service step. It commits and acknowledges nothing, so a
   /// success posts nothing; an epoch failure is sticky. Its allocations and frees are the
   /// instance's control allocations, which the status reports.
-  serviceControl() {
+  serviceControl(requestId = this.lastRequestId) {
     if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
     const result = this.exports.miso_engine_web_v1_service(this.handle);
-    if (result !== RESULT_OK) this.sticky(result, this.lastRequestId);
+    if (result !== RESULT_OK) this.sticky(result, requestId);
   }
 
   /// Issue #1570b D4: drain the engine's two event lanes after a message and its service step, in
@@ -955,24 +958,24 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// takes the error path once: it is sticky for the host, never a retry loop. Nothing here
   /// decodes a frame, and a commit's reliable events are what keeps the next commit from
   /// backpressure, so this drain is what lets a page send unlimited transactions.
-  drainControlEvents() {
+  drainControlEvents(requestId = this.lastRequestId) {
     if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
     for (const lane of CONTROL_EVENT_LANES) {
       for (let calls = 0; calls < MAXIMUM_CONTROL_EVENTS_PER_LANE; calls += 1) {
         const result = this.exports.miso_engine_web_v1_control_event(this.handle, lane);
         if (this.exports.memory.buffer !== this.memoryBuffer) {
-          this.sticky(RESULT_INTERNAL, this.lastRequestId);
+          this.sticky(RESULT_INTERNAL, requestId);
           return;
         }
         if (result !== RESULT_OK) {
-          this.sticky(result, this.lastRequestId);
+          this.sticky(result, requestId);
           return;
         }
         const bytes = this.exports.miso_engine_web_v1_control_response_bytes(this.handle);
         if (bytes === 0) break;
         const pointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
         if (pointer === 0) {
-          this.sticky(RESULT_INTERNAL, this.lastRequestId);
+          this.sticky(RESULT_INTERNAL, requestId);
           return;
         }
         const frame = new Uint8Array(bytes);
@@ -1603,10 +1606,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return;
     }
     const reply = this.readControlCommand(frame);
-    if (reply === null) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
     this.port.postMessage({
       tag: "miso.control.v1",
       requestId: message.requestId,
@@ -1614,11 +1613,16 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       response: reply.response,
       revision: reply.revision,
     }, [reply.response.buffer]);
+    // The call grew the module's memory (a control allocation), so every view the render path
+    // holds is detached. The reply above was read from the new buffer and is whole; the instance
+    // can render no more and must be prepared again.
+    if (reply.grown) this.sticky(RESULT_REPREPARE_REQUIRED, message.requestId);
   }
 
-  /// Stage `frame`, run it and copy the response out of the module's memory. `null` when the
-  /// module's memory moved under the call (a control allocation grew it), which the caller reports
-  /// as a sticky internal failure like every other detached view.
+  /// Stage `frame`, run it and copy the response out of the module's memory. The module's memory
+  /// may have grown under the call: the reply is then read from the fresh buffer (`grown`), and the
+  /// caller reports it before the instance goes sticky. A frame the staging cannot hold (a zero
+  /// pointer) has no response: the previous command's bytes are not its reply.
   readControlCommand(frame) {
     const length = frame.byteLength;
     const pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
@@ -1627,15 +1631,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       new Uint8Array(this.exports.memory.buffer, pointer, length).set(frame);
       result = this.exports.miso_engine_web_v1_control_command(this.handle, length);
     }
-    if (this.exports.memory.buffer !== this.memoryBuffer) return null;
-    const responsePointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
-    const responseBytes = this.exports.miso_engine_web_v1_control_response_bytes(this.handle);
-    const response = new Uint8Array(responsePointer === 0 ? 0 : responseBytes);
-    if (responsePointer !== 0) {
-      response.set(new Uint8Array(this.memoryBuffer, responsePointer, responseBytes));
+    const buffer = this.exports.memory.buffer;
+    const grown = buffer !== this.memoryBuffer;
+    let response = new Uint8Array(0);
+    if (pointer !== 0) {
+      const responsePointer = this.exports.miso_engine_web_v1_control_response_ptr(this.handle);
+      const responseBytes = this.exports.miso_engine_web_v1_control_response_bytes(this.handle);
+      if (responsePointer !== 0) {
+        response = new Uint8Array(responseBytes);
+        response.set(new Uint8Array(buffer, responsePointer, responseBytes));
+      }
     }
     const revision = this.exports.miso_engine_web_v1_control_revision(this.handle);
-    return { result, response, revision };
+    return { result, response, revision, grown };
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).

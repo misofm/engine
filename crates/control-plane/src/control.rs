@@ -1298,6 +1298,7 @@ where
                         .get()
                         .prospective_session()
                         .compiled()
+                        .ok_or(CommandError::Internal)?
                         .normalized_model(),
                 );
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
@@ -1307,7 +1308,11 @@ where
                 // newest seed, so a refused or abandoned rebuild leaves every seed as it was.
                 let prepared_runtime = prepare_runtime::<A>(
                     &*self.preparer,
-                    prepared.get().prospective_session().compiled(),
+                    prepared
+                        .get()
+                        .prospective_session()
+                        .compiled()
+                        .ok_or(CommandError::Internal)?,
                     self.limits,
                     Some(SuccessorBase {
                         inventory: &self.newest_providers().inventory,
@@ -1365,7 +1370,11 @@ where
                     prospective_capi,
                     compiled_model_admission(
                         self.controller.session().compiled(),
-                        prepared.get().prospective_session().compiled(),
+                        prepared
+                            .get()
+                            .prospective_session()
+                            .compiled()
+                            .ok_or(CommandError::Internal)?,
                     )
                     .map_err(CommandError::CompileRejected)?,
                     self.limits,
@@ -1572,7 +1581,12 @@ where
         let view = match (transaction.edited_owners(), in_place) {
             (Some(owners), _) => controls::ModelView::edited(committed, owners),
             (None, true) => controls::ModelView::whole(committed),
-            (None, false) => controls::ModelView::whole(transaction.compiled().normalized_model()),
+            (None, false) => controls::ModelView::whole(
+                transaction
+                    .compiled()
+                    .expect("a compiled transaction")
+                    .normalized_model(),
+            ),
         };
         let next = view.structure();
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
@@ -2005,8 +2019,11 @@ where
             host_core::check_counts(view.structure(), &prepare_caps(self.limits)).map_err(
                 |diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)),
             )?;
-            compiled_model_admission(committed, transaction.compiled())
-                .map_err(CommandError::CompileRejected)?
+            compiled_model_admission(
+                committed,
+                transaction.compiled().ok_or(CommandError::Internal)?,
+            )
+            .map_err(CommandError::CompileRejected)?
         };
         // The new catalog, before anything is written. A VCA added live adds rows to it, so it
         // can outgrow the catalog the epochs were prepared with.
@@ -2179,14 +2196,36 @@ where
     }
 
     /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
-    /// (#1381a): the adapter reaches an effect's observation queue through them, for the
-    /// browser's observe kinds 7 and 8 (ruling C9).
+    /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
+    /// observation queue. The adapter reaches an effect's observation queue for the browser's
+    /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
+    /// else of a producer, so it cannot write a live value or open an owner behind the commit.
     ///
     /// These are the producers of the plan that renders, not a pending candidate's: a
     /// subscription must reach the observer the active plan's readers belong to. The browser's
     /// feature phase deletes this accessor together with those kinds.
-    pub fn effect_producers_mut(&mut self) -> &mut [host_core::EffectControlProducer] {
-        &mut self.providers.effects
+    #[must_use]
+    pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
+        &self.providers.effects
+    }
+
+    /// Queues one observation record on the effect producer at `position` of
+    /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
+    ///
+    /// # Errors
+    ///
+    /// `None` for a position past the list, else the producer's refusal (no queue, or full).
+    pub fn push_effect_observe(
+        &mut self,
+        position: usize,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Option<Result<(), effect_contract::ObservePushError>> {
+        self.providers
+            .effects
+            .get_mut(position)
+            .map(|producer| producer.try_push_observe(tap_index, armed, window_blocks))
     }
 
     /// Feeds a source of the newest committed session. A source that persists across a pending

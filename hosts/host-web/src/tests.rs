@@ -1696,7 +1696,7 @@ fn set_control_timeline_frames() -> Vec<Vec<u8>> {
 ///
 /// Test value: red if the encoder or the protocol changes a byte of a frame without the fixtures
 /// the raw-Wasm oracle sends moving with it, so the native leg and the shipped artifact would
-/// digest different timelines. Set `MISO_WRITE_SET_CONTROL_FRAMES=1` to rewrite the files.
+/// digest different timelines. Set `MISO_ENGINE_WRITE_SET_CONTROL_FRAMES=1` to rewrite the files.
 #[test]
 fn set_control_frames_are_the_committed_fixtures() {
     let directory = concat!(
@@ -1704,7 +1704,7 @@ fn set_control_frames_are_the_committed_fixtures() {
         "/tests/browser-v1/set-control-frames"
     );
     let frames = set_control_timeline_frames();
-    if std::env::var_os("MISO_WRITE_SET_CONTROL_FRAMES").is_some() {
+    if std::env::var_os("MISO_ENGINE_WRITE_SET_CONTROL_FRAMES").is_some() {
         std::fs::create_dir_all(directory).expect("fixture directory");
         for (index, frame) in frames.iter().enumerate() {
             std::fs::write(format!("{directory}/frame-{}.bin", index + 1), frame)
@@ -2065,11 +2065,10 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     let mut host = observed_effect_live_control_host(QUANTUM);
     // The observed compressor declares one tap, so its observation queue holds one subscription
     // between two renders (#1345 D2: one slot per declared tap).
-    let queue_depth = host
-        .ready
-        .as_mut()
-        .expect("ready")
-        .effect_producer_mut(0)
+    let ready = host.ready.as_ref().expect("ready");
+    let queue_depth = ready
+        .effect_producer_position(0)
+        .and_then(|position| ready.control.effect_producers().get(position))
         .map(|producer| producer.observe_capacity())
         .expect("the compressor's producer");
     assert_eq!(queue_depth, 1);

@@ -178,16 +178,22 @@ impl CompiledSession {
     /// If a slot is out of range of either model.
     pub fn swap_owners(&mut self, owners: &mut SessionModel, slots: &OwnerSlots) {
         let model = &mut self.normalized.0;
+        // A slot pair that names two different owners would put one owner's values in another's
+        // place; the slots come from the same IDs, so a debug build checks it.
         for &(at, committed) in &slots.tracks {
+            debug_assert_eq!(model.tracks[committed].id, owners.tracks[at].id);
             core::mem::swap(&mut model.tracks[committed], &mut owners.tracks[at]);
         }
         for &(at, committed) in &slots.submixes {
+            debug_assert_eq!(model.submixes[committed].id, owners.submixes[at].id);
             core::mem::swap(&mut model.submixes[committed], &mut owners.submixes[at]);
         }
         for &(at, committed) in &slots.vcas {
+            debug_assert_eq!(model.vcas[committed].id, owners.vcas[at].id);
             core::mem::swap(&mut model.vcas[committed], &mut owners.vcas[at]);
         }
         for &(at, committed) in &slots.routes {
+            debug_assert_eq!(model.routes[committed].id, owners.routes[at].id);
             core::mem::swap(&mut model.routes[committed], &mut owners.routes[at]);
         }
     }

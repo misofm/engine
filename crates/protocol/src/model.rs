@@ -942,18 +942,14 @@ struct InPlaceEdit {
 impl PreparedSessionTransaction {
     /// Borrow the prospective immutable compilation without making it authoritative.
     ///
-    /// # Panics
-    ///
-    /// For a transaction prepared in place ([`SessionStore::prepare_transaction_in_place`] and
-    /// [`Self::is_in_place`]): it has no compilation of its own. A host that prepares in place
+    /// `None` for a transaction prepared in place ([`SessionStore::prepare_transaction_in_place`]
+    /// and [`Self::is_in_place`]): it has no compilation of its own. A host that prepares in place
     /// reads [`Self::edited_owners`] and the committed compilation instead.
     #[must_use]
-    pub fn compiled(&self) -> &CompiledSession {
+    pub fn compiled(&self) -> Option<&CompiledSession> {
         match &self.form {
-            TransactionForm::Compiled(compiled) => compiled,
-            TransactionForm::InPlace(_) | TransactionForm::Monitor(_) => {
-                panic!("a transaction prepared in place has no compilation of its own")
-            }
+            TransactionForm::Compiled(compiled) => Some(compiled),
+            TransactionForm::InPlace(_) | TransactionForm::Monitor(_) => None,
         }
     }
 
@@ -1736,8 +1732,11 @@ mod tests {
             .expect("prepares");
         assert_eq!(materialized.revision(), oracle.revision());
         assert_eq!(
-            materialized.compiled().normalized_model(),
-            oracle.compiled().normalized_model()
+            materialized
+                .compiled()
+                .expect("materialized")
+                .normalized_model(),
+            oracle.compiled().expect("compiled").normalized_model()
         );
         assert_eq!(
             fast.apply_transaction_in_place(revision, &edits),

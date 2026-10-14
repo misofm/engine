@@ -361,6 +361,21 @@ Gates run on this head: `cargo fmt --all --check`; `cargo clippy --locked --work
 `audit protocol`; `scripts/check-workspace-policy.sh`, `check-host-core-policy.sh`,
 `check-protocol-control-policy.sh`, `check-session-policy.sh`, `check-conformance-boundaries.sh`.
 
+### What stays linear (batch 7 review)
+
+Two costs of an in-place commit still grow with the session, and are recorded so that no reader
+takes "no clone, no compile" for "constant":
+
+- **A session row.** A `Setting` row (for example `pan_window_samples`) sets `settings_changed` in
+  the classifier's delta, and `ControlCatalog::stage_values` answers `None` for it
+  (`control_provider.rs`), so the commit stages the whole catalog (`StagedCatalog::Full`), which is
+  linear in the session's rows, not the values the edit changed. The commit is still in place (no
+  clone, no compile); only the catalog stage is dense.
+- **The first snapshot read after the commit.** `CompiledSession::finish_in_place` drops the
+  canonical text, and `canonical_json()` writes it again from the model at the next read
+  (`SESSION_SNAPSHOT_GET` or the document a caller reads). That read pays one serialization of the
+  session, once per run of commits; the commits themselves pay none.
+
 ### Successor (for root)
 
 What a live-only command still does that grows with nothing but is not free: the catalog stage reads

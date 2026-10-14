@@ -41,12 +41,12 @@ use control_plane::{
 use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut};
 use host_core::{
-    CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
-    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection,
-    PreparedHost, SourceControlError, SourceSubmission, SuccessorBase, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
-    prepare_host_runtime_with_live_controls_and_spectrum, source_id_arena_bytes,
+    CompiledSession, EffectObservationHandle, HostLiveControlRequest, HostLiveLanes,
+    HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
+    MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
+    SourceSubmission, SuccessorBase, compile_host_model, compiled_session_shape,
+    control_table_bytes, parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
+    source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumCadence,
@@ -946,11 +946,13 @@ pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
 /// Deliberately **not** `UNKNOWN_PARAMETER`: a parameter and a tap are different namespaces on the
 /// same effect, and a caller that confuses them learns which one it got wrong.
 pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
-/// The tap exists and the address is right, but this session bound no observation capacity.
+/// The tap exists and the address is right, but this effect instance holds no observation lane.
 ///
 /// The honest form of "you asked for a subscription this preparation cannot deliver": the effect
-/// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
-/// none. A caller fixes it by preparing with `live_control_observation_taps` set, not by retrying.
+/// is there and the tap is declared, but the plan bound no lane to arm for it. A session that
+/// bound no observation capacity at all (`live_control_observation_taps == 0`) has no command
+/// staging, and refuses every submission `COMMAND_REASON_UNSUPPORTED_KIND` before it reads a
+/// record (#1565C); this reason is only reachable with capacity bound.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
@@ -1331,7 +1333,7 @@ pub use host_core::SpectrumPreparation as SpectrumPreparationRequest;
 /// The queries that name an effect read this table, and only the window reads reach the
 /// attachment; an observe record reaches the instance's observation queue through `producer`.
 struct EffectInstance {
-    /// The position of this effect's producer in [`SessionState::effect_producers_mut`].
+    /// The position of this effect's producer in [`SessionState::effect_producers`].
     producer: u32,
     /// The position of this effect's [`EffectObservationHandle`] in `RenderCompanions`'s list, or
     /// `None` for an effect that declares no tap.
@@ -1588,18 +1590,18 @@ impl ReadyOwnership {
         (slot < self.effect_instances.len()).then_some(slot)
     }
 
-    /// The control plane's producer of the effect at dense slot `effect` (#1381a): the one way the
-    /// observation records reach an effect's observation queue (ruling C9).
-    fn effect_producer_mut(&mut self, effect: usize) -> Option<&mut EffectControlProducer> {
+    /// The position, in the control plane's producer list, of the effect at dense slot `effect`
+    /// (#1381a): the one way the observation records reach an effect's observation queue (ruling
+    /// C9).
+    fn effect_producer_position(&self, effect: usize) -> Option<usize> {
         let position = self.effect_instances.get(effect)?.as_ref()?.producer;
-        self.control
-            .effect_producers_mut()
-            .get_mut(position as usize)
+        Some(position as usize)
     }
 
     /// The free room of one effect's observation queue (one slot per declared tap, #1345 D2).
-    fn queue_available(&mut self, effect: usize) -> Option<u32> {
-        let producer = self.effect_producer_mut(effect)?;
+    fn queue_available(&self, effect: usize) -> Option<u32> {
+        let position = self.effect_producer_position(effect)?;
+        let producer = self.control.effect_producers().get(position)?;
         u32::try_from(producer.observe_available_capacity()).ok()
     }
 
@@ -1609,9 +1611,15 @@ impl ReadyOwnership {
         let effect = staged.effect as usize;
         // Issue #143: the armed set is control-plane state and is updated here, where the record
         // is admitted, so it can never disagree with what the render side was told.
-        self.effect_producer_mut(effect)
+        let position = self.effect_producer_position(effect).ok_or(())?;
+        self.control
+            .push_effect_observe(
+                position,
+                staged.tap_index,
+                staged.armed,
+                staged.window_blocks,
+            )
             .ok_or(())?
-            .try_push_observe(staged.tap_index, staged.armed, staged.window_blocks)
             .map_err(|_| ())?;
         if let Some(mask) = self.observation_armed.get_mut(effect)
             && staged.tap_index < u32::BITS
@@ -5112,7 +5120,7 @@ fn compile_ready(
     let allow_rebuild = Arc::clone(&preparer.allow_rebuild);
     let limits = control_limits(caps, memory_budget);
     let control_plane::CompiledChildren {
-        session: mut control,
+        session: control,
         mut plan,
     } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
         .map_err(|failure| boot_refusal(&failure, &record))?;
@@ -5135,7 +5143,7 @@ fn compile_ready(
         Box<str>,
         &'static effect_contract::EffectDescriptor,
     )> = control
-        .effect_producers_mut()
+        .effect_producers()
         .iter()
         .map(|producer| {
             (
