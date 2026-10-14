@@ -184,7 +184,7 @@ checks.
   -> #1334 -> #1380 -> #1332 -> #1387) lands after #1565A.
 - **#1331b, the iOS leg.** D6, D5's iOS record and D7 on iOS. Gate 2. It is an owner-scheduled
   human step: it needs a person with a real iPhone. It is not in the post-sprint heavy-gate
-  successor (#TBD5). D9's iOS clause is judged on its record: an iOS failure stops the Worker
+  successor (#1605). D9's iOS clause is judged on its record: an iOS failure stops the Worker
   deployment (#1332) for a decision 15 re-ruling; `single` mode is not affected.
 
 The issue closes when both pieces have their records.

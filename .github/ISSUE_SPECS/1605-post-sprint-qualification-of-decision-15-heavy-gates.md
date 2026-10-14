@@ -1,7 +1,7 @@
 # Post-sprint qualification of decision 15's heavy gates
 
 Successor of #1530, #1532 and #1535 (root, 2026-10-13, Q8). Stream H. Issue number: assigned at
-filing (written here as #TBD5). Not feature sprint work: it runs in the testing phase after the
+filing (written here as #1605). Not feature sprint work: it runs in the testing phase after the
 sprint (owner, 2026-10-13).
 
 ## Product outcome

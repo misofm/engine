@@ -257,4 +257,4 @@ batch merge as #1345.
 
 ## Amendment (decision 17, root 2026-10-13)
 
-Gate 6 (soak) moves to #TBD5, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on its other gates with its CI rows green.
+Gate 6 (soak) moves to #1605, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on its other gates with its CI rows green.

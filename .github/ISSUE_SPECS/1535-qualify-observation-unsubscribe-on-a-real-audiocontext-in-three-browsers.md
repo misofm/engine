@@ -384,4 +384,4 @@ These override any conflicting text above.
 
 ## Amendment (decision 17, root 2026-10-13)
 
-Gate 8 (loaded paired A/B acceptance) moves to #TBD5, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on gates 1-7 and 9 with its CI rows green.
+Gate 8 (loaded paired A/B acceptance) moves to #1605, *Post-sprint qualification of decision 15's heavy gates* (root, 2026-10-13, Q8). This slice closes on gates 1-7 and 9 with its CI rows green.

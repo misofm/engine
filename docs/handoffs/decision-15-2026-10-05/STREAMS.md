@@ -725,5 +725,5 @@ batch after J3 merges, so "the whole set" here means J3 plus that batch.)
 
   Off the critical path: #1290b (after stream B's #1310, #1344, #1398); #1383 (after #1563);
   #1331b (owner); the heavy decision-15 gates of #1530 (gate 6), #1532 (gate 7) and #1535 (gate
-  8), which move to *Post-sprint qualification of decision 15's heavy gates* (#TBD5) after the
+  8), which move to *Post-sprint qualification of decision 15's heavy gates* (#1605) after the
   sprint.
