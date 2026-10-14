@@ -246,3 +246,12 @@ observer carries of #1327 (`ObserverCarry`, `ObserverKind`, `observer_carries`),
 `scripts/check-web-audioworklet-callgraph.py`. One attempt; if the permission system refuses it,
 the slice stops and root is told at once. #1395 and #1381b make no edit of their own in
 `crates/engine/src/realtime`.
+
+## Ruling (root, 2026-10-14): the acknowledged subscribe
+
+Since #1280b, a pending Observe record of a carried lane is applied at the carry to the
+predecessor's `ObservationLane`, but the tap it arms is not carried to the successor until this
+issue: an acknowledged subscribe can be dropped at a swap (an ack that precedes a drop). #1327b's
+gates include that case: a subscribe admitted and acknowledged before a swap is armed on the
+successor's tap after the swap, and the successor publishes the window the predecessor would have
+published, with zero allocations and frees on the swap block.
