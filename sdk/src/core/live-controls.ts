@@ -1,5 +1,7 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
+import { CONTROLS } from "../generated/controls.ts";
+import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
 import type {
   EffectId,
   EffectDescriptor,
@@ -8,11 +10,14 @@ import type {
   TapName,
 } from "../generated/catalog.ts";
 import type { CommandReport, SessionMap } from "./boundary.ts";
+import type { ControlFrameEdit } from "./control-frame.ts";
+import type { ControlAppliedReport, ControlTransactionQueue } from "./control-queue.ts";
 import { MisoUsageError } from "./errors.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
-import { checkedRampLength } from "../internal/ramp.ts";
-import type { LaneEdit } from "./writer.ts";
+import { requireU32 } from "../internal/ramp.ts";
+import { LiveControlWriter } from "./writer.ts";
+import type { ControlWriterOptions, LaneEdit } from "./writer.ts";
 
 /**
  * Where a live effect edit lands (owner decision 12, S1c's live address).
@@ -28,10 +33,11 @@ export type LiveControlChannel = "left" | "right" | "both";
 
 export interface SmoothingOptions {
   /**
-   * The ramp length in samples. Omitted, the edit ramps over the session's own length for its
-   * kind (`controlSmoothing`, or the default table at the session's sample rate). An explicit
-   * value overrides it, and `0` is a hard step. `4294967295` is refused: it is
-   * {@link SESSION_DEFAULT_RAMP}, not a length.
+   * The ramp length in samples, sent as the edit's `ramp_samples`. Omitted, the field is absent and
+   * the core ramps over the session's own length for the row (`controlSmoothing`, or the default
+   * table at the session's sample rate). An explicit value overrides it, and `0` is a hard step.
+   * The SDK resolves no ramp and checks only that it is an integer in `[0, 4294967295]`; a row
+   * whose ramp is fixed refuses an explicit one with the core's `control.ramp.fixed`.
    */
   readonly smoothingSamples?: number;
 }
@@ -40,13 +46,13 @@ export interface LaneOptions extends SmoothingOptions {
   readonly channel?: LiveControlChannel;
 }
 
-/** The two cutoff values carried atomically by one prepared input-filter command. */
+/** The two cutoff values carried by one `inputFilters` edit set. */
 export interface InputFilterValues {
   readonly hpfHz: number;
   readonly lpfHz: number;
 }
 
-/** Input-filter edits select a lane but use the builtin fixed 64-update policy. */
+/** Input-filter edits select a lane. The filters ramp over the row's fixed policy. */
 export interface InputFilterOptions {
   readonly channel?: LiveControlChannel;
 }
@@ -119,18 +125,27 @@ export interface MatrixValues {
   readonly rr: number;
 }
 
-export type LiveControlSubmit = (
-  edits: readonly LaneEdit[],
-) => CommandReport | Promise<CommandReport>;
 
 /**
- * Optional owner hook used to serialize observation edits with managed subscriptions.
- *
- * The hook sees the edits as the builders made them. A ramped-kind builder edit given no explicit
- * `smoothingSamples` shows `smoothingSamples` as `undefined`: the encoder resolves the absent
- * length (the session's ramp for a ramped kind, `0` for the others), not the builder. A bypass or
- * input-filter edit also shows `undefined` and encodes `0`. An effect-parameter edit shows the
- * length it was given, or `0`, and an observation edit shows its window.
+ * One value edit as a builder returns it: the `SET_CONTROL` edits that go in one transaction. A
+ * fader or a mute is one edit; a pan is its two lanes, a matrix its four coefficients and the input
+ * filters their two cutoffs, and they apply together or not at all.
+ */
+export interface ControlEditSet {
+  readonly edits: readonly ControlFrameEdit[];
+}
+
+/** What live controls send through: the engine's one transaction queue, and the observation records. */
+export interface LiveControlTransport {
+  /** Every value edit goes here, as a `SET_CONTROL` transaction. */
+  readonly queue: ControlTransactionQueue;
+  /** Observation records (kinds 7 and 8) stay 48-byte commands until the browser-feature phase. */
+  readonly observe: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
+}
+
+/**
+ * Optional owner hook used to serialize observation edits with managed subscriptions. It sees the
+ * observation edits as the builders made them.
  */
 export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
@@ -144,34 +159,14 @@ function rackCode(name: string): number {
 }
 
 /**
- * The command record's rack byte, from the generated layout's `racks` table (S1c): `1` inserts,
+ * The observation record's rack byte, from the generated layout's `racks` table (S1c): `1` inserts,
  * `3` console and `255` not applicable. The retired `0` and `2` are never written.
  */
 const RACKS: Readonly<Record<LiveControlRack, number>> = Object.freeze({
   console: rackCode("console"),
   inserts: rackCode("inserts"),
 });
-const CHANNELS = Object.freeze({ left: 0, right: 1, both: 2 } as const);
 const NONE = rackCode("notApplicable");
-
-/**
- * The native effects whose session bypass stays a prepared bypass (S1c; issues #1087, #1100).
- *
- * Every other launch effect lowers a session bypass to a per-lane shunt, so a live bypass edit
- * both sets and lifts it. These two do not: the delay never banks (the engine's
- * `effect_compiler::NEVER_BANKED_EFFECTS`), and the multiband keeps its prepared bypass so a
- * bypassed lane cannot silence its bank-mates (`PREPARED_BYPASS_EFFECTS`). A live un-bypass of a
- * session-bypassed instance of either is admitted by the engine and changes nothing, so
- * `EffectEdits.bypass(false)` refuses it whenever the SDK knows the instance's authored bypass.
- *
- * The metadata does not publish the list, so the SDK holds a copy, and `console-evals.mjs` holds
- * the copy to the engine: it lifts a session bypass live on every catalog effect and requires the
- * render to stay bypassed on exactly these.
- */
-export const PREPARED_BYPASS_EFFECTS: readonly EffectId[] = Object.freeze([
-  "miso.delay",
-  "miso.multiband-compressor",
-]);
 
 /** One addressable effect instance, as the session the SDK built declares it. */
 interface LayoutRow {
@@ -303,39 +298,23 @@ function assertBootedSession(session: SessionLike, booted: Uint8Array): void {
   );
 }
 
-function u32(value: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
-    throw new MisoUsageError(`${name} must be a u32`);
-  }
-  return value;
-}
-
-/**
- * The ramp length of a ramped edit as the builder records it: the given length, checked, or
- * `undefined` when none was given (D1, D3 of #1364). An absent length is resolved to the
- * session-default word where the edit is encoded (`laneEditSmoothingWord` in `src/internal/ramp.ts`),
- * for a hand-written `LaneEdit` as well as for this builder's, so the two cannot disagree.
- */
-function smoothing(options: SmoothingOptions): number | undefined {
-  return checkedRampLength(options.smoothingSamples);
-}
-
 type RuntimeParameterOptions = {
   readonly channel?: unknown;
   readonly smoothingSamples?: unknown;
 };
 
-function runtimeSmoothing(options: RuntimeParameterOptions): number {
-  const sampleCount = options.smoothingSamples ?? 0;
-  if (typeof sampleCount !== "number") {
-    throw new MisoUsageError("smoothingSamples must be a number");
-  }
-  return u32(sampleCount, "smoothingSamples");
+/** The edit's `ramp_samples`: absent when none was given, else an integer in `[0, 2^32 - 1]`. */
+function rampOf(options: { readonly smoothingSamples?: unknown }): number | undefined {
+  const samples = options.smoothingSamples;
+  if (samples === undefined) return undefined;
+  if (typeof samples !== "number") throw new MisoUsageError("smoothingSamples must be a number");
+  return requireU32(samples);
 }
 
-function runtimeChannel(channel: unknown): LiveControlChannel {
-  if (channel === undefined || channel === "both") return "both";
-  if (channel === "left" || channel === "right") return channel;
+/** The lane the encoder writes: `left`, `right` or `both`, the only names the frame can hold. */
+function laneOf(channel: unknown): ControlLane {
+  if (channel === undefined) return "both";
+  if (channel === "left" || channel === "right" || channel === "both") return channel;
   throw new MisoUsageError("channel must be left, right, or both");
 }
 
@@ -383,123 +362,118 @@ function normalizeParameterEdit(
   };
 }
 
-function finite(value: number, name: string, minimum?: number, maximum?: number): number {
-  if (!Number.isFinite(value)) throw new MisoUsageError(`${name} must be finite`);
-  if (minimum !== undefined && value < minimum) {
-    throw new MisoUsageError(`${name} must be at least ${minimum}`);
-  }
-  if (maximum !== undefined && value > maximum) {
-    throw new MisoUsageError(`${name} must be at most ${maximum}`);
-  }
-  return value;
+
+function builtinRow(name: string): number {
+  const row = CONTROLS.builtins.find((candidate) => candidate.name === name);
+  if (row === undefined) throw new MisoUsageError(`the generated controls have no builtin ${name}`);
+  return row.control;
 }
 
-function builtinNumber(name: string, value: number): number {
-  const row = CATALOG.builtins.parameters.find((candidate) => candidate.name === name);
-  if (row === undefined || !row.liveUpdatable) {
-    throw new MisoUsageError(`the generated catalog has no live builtin ${name}`);
-  }
-  return finite(
-    value,
-    name,
-    row.minimum ?? undefined,
-    typeof row.maximum === "number" ? row.maximum : undefined,
-  );
+function ownRow(
+  table: readonly { readonly control: number; readonly name: string }[],
+  name: string,
+): number {
+  const row = table.find((candidate) => candidate.name === name);
+  if (row === undefined) throw new MisoUsageError(`the generated controls have no row ${name}`);
+  return row.control;
 }
 
-function values(a = 0, b = 0, c = 0, d = 0): readonly [number, number, number, number] {
-  return Object.freeze([a, b, c, d]);
+function flag(enabled: boolean): number {
+  return enabled ? 1 : 0;
 }
 
-function lane(options: LaneOptions): number {
-  return CHANNELS[options.channel ?? "both"];
+function editSet(...edits: readonly ControlFrameEdit[]): ControlEditSet {
+  return Object.freeze({ edits: Object.freeze([...edits]) });
 }
 
-function trackEdit(
-  kind: LaneEdit["kind"],
-  trackIndex: number,
-  options: {
-    readonly rack?: number;
-    readonly channel?: number;
-    readonly effectIndex?: number;
-    readonly parameterId?: number;
-    readonly smoothingSamples?: number | undefined;
-    readonly values?: readonly [number, number, number, number];
-  } = {},
-): LaneEdit {
+function controlEdit(
+  owner: ControlOwner,
+  section: ControlSection,
+  control: number,
+  value: number,
+  lane: ControlLane,
+  rampSamples: number | undefined,
+): ControlFrameEdit {
   return Object.freeze({
-    kind,
-    trackIndex,
-    rack: options.rack ?? NONE,
-    channel: options.channel ?? NONE,
-    effectIndex: options.effectIndex ?? 0,
-    parameterId: options.parameterId ?? 0,
-    // Left absent when none was given: the encoder writes 0 for a kind that carries no ramp and
-    // the session-default word for a ramped one.
-    smoothingSamples: options.smoothingSamples,
-    values: options.values ?? values(),
+    address: Object.freeze({ owner, section, control, lane }),
+    value,
+    // Absent when none was given: the core resolves the row's ramp.
+    ...(rampSamples === undefined ? {} : { rampSamples }),
   });
 }
 
+function observationEdit(
+  kind: LaneEdit["kind"],
+  stripIndex: number,
+  options: {
+    readonly rack: number;
+    readonly effectIndex: number;
+    readonly parameterId: number;
+    readonly smoothingSamples: number;
+  },
+): LaneEdit {
+  return Object.freeze({
+    kind,
+    trackIndex: stripIndex,
+    rack: options.rack,
+    channel: NONE,
+    effectIndex: options.effectIndex,
+    parameterId: options.parameterId,
+    smoothingSamples: options.smoothingSamples,
+    values: Object.freeze([0, 0, 0, 0]) as unknown as readonly [number, number, number, number],
+  });
+}
+
+function id(value: unknown, what: string): string {
+  if (typeof value !== "string") throw new MisoUsageError(`${what} must be a string`);
+  return value;
+}
+
 /**
- * A semantic edit builder bound to the engine's canonical session map.
+ * A semantic edit builder bound to the engine's session map.
  *
- * A record's index word is a strip index: the tracks in canonical order (`0..T`), then the
- * submixes (`T + j` for `SessionMap.submixes[j]`). `track(id)` and `submix(id)` resolve an ID in
- * their own list only, so neither can reach the other kind of strip.
+ * Builders address by stable ID and build `SET_CONTROL` edits; they check no value, no lane's
+ * meaning and no index, and send nothing. An ID the engine does not have, a value outside a row's
+ * domain and a lane a row does not allow come back from the core as its own `control.*` code, the
+ * same on the browser and on the headless engine. The session map supplies only the strip order,
+ * for observation records, which address a strip by index.
  *
- * Given the session the SDK built for this engine, it also resolves console slot IDs and insert
- * IDs to live addresses (`console()`, `insert()`) on every strip. Without one, effects are
- * addressed by index through `effect()`.
+ * Given the session the SDK built for this engine, it also resolves console slot IDs and insert IDs
+ * on every strip (`console()`, `insert()`) against the booted session, and an effect addressed by
+ * index (`effect()`) to its stable ID.
  */
 export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
   readonly #submixes: ReadonlyMap<string, number>;
-  readonly #routes: ReadonlyMap<string, number>;
-  readonly #vcas: ReadonlyMap<string, number>;
   readonly #layout: LiveControlLayout | undefined;
 
   constructor(map: SessionMap, session?: SessionLike) {
-    this.#tracks = new Map(map.tracks.map((id, index) => [id, index] as const));
+    this.#tracks = new Map(map.tracks.map((trackId, index) => [trackId, index] as const));
     const trackCount = map.tracks.length;
-    this.#submixes = new Map(map.submixes.map((id, index) => [id, trackCount + index] as const));
-    // Issue #1223 D4: a send's index is its position in the engine's own enumeration, never a
-    // sort of the session's routes here.
-    this.#routes = new Map(map.routes.map((id, index) => [id, index] as const));
-    // Issue #1246 D4: a VCA's index is its position in the engine's own enumeration, never a sort
-    // of the session's VCAs here.
-    this.#vcas = new Map(map.vcas.map((id, index) => [id, index] as const));
+    this.#submixes = new Map(map.submixes.map((submixId, index) => [submixId, trackCount + index] as const));
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
   }
 
+  /**
+   * A track strip's live edits. The ID is not checked here: an unknown strip is refused by the core
+   * with `control.address.unknown`.
+   */
   track(trackId: string): TrackEdits {
-    const index = this.#tracks.get(trackId);
-    if (index === undefined) {
-      throw new MisoUsageError(
-        `the compiled session has no track '${trackId}'; expected one of ${[...this.#tracks.keys()].join(", ")}`,
-      );
-    }
-    return new TrackEdits(index, trackId, this.#layout);
+    return new TrackEdits(id(trackId, "a track ID"), this.#tracks.get(trackId), this.#layout);
   }
 
   /**
    * A submix strip's live edits: everything a track's strip offers except `solo` (a bus is
-   * solo-safe; the engine refuses a solo at a submix index with `notSoloable`).
+   * solo-safe; the core refuses a solo of a submix).
    */
   submix(submixId: string): SubmixEdits {
-    const index = this.#submixes.get(submixId);
-    if (index === undefined) {
-      throw new MisoUsageError(
-        `the compiled session has no submix '${submixId}'; expected one of `
-          + `${[...this.#submixes.keys()].join(", ") || "none"}`,
-      );
-    }
-    return new SubmixEdits(index, submixId, this.#layout);
+    return new SubmixEdits(id(submixId, "a submix ID"), this.#submixes.get(submixId), this.#layout);
   }
 
   /**
    * Either kind of strip by its ID -- a track, else a submix (strip IDs are unique across both) --
    * for an edit every strip shares, such as arming an effect observation. It never offers `solo`.
+   * Observation addresses a strip by its index, so an ID that is neither is refused here.
    */
   strip(stripId: string): StripEdits {
     if (this.#tracks.has(stripId)) return this.track(stripId);
@@ -511,166 +485,133 @@ export class LiveControlEdits {
   }
 
   /**
-   * A live send's edits, by its route ID (issue #1223 D4). Only routes into submixes are live; a
-   * route into the output changes only through the session, and is refused here as the engine
-   * would refuse its index, with `unknownRoute`.
+   * A live send's edits, by its route ID. The ID is not checked here: a route the core does not
+   * enumerate (an unknown ID, a route into the output) is refused with `control.address.unknown`.
    */
   route(routeId: string): RouteEdits {
-    const index = this.#routes.get(routeId);
-    if (index === undefined) {
-      if (this.#layout?.outputRoutes.has(routeId) === true) {
-        throw new MisoUsageError(
-          `route '${routeId}' goes to the output, and output routes are not live: only routes into `
-            + "submixes (sends) take live edits; change an output route through the session",
-          "unknownRoute",
-        );
-      }
-      throw new MisoUsageError(
-        `the compiled session has no live route '${routeId}'; expected one of `
-          + `${[...this.#routes.keys()].join(", ") || "none"}`,
-        "unknownRoute",
-      );
-    }
-    return new RouteEdits(index);
+    return new RouteEdits(id(routeId, "a route ID"));
   }
 
   /**
-   * A VCA's live edits, by its VCA ID (issue #1246 D4): its per-lane fader offset and mute. An ID
-   * the engine did not enumerate -- every ID without live controls -- is refused as the engine
-   * would refuse its index, with `unknownVca`.
+   * A VCA's live edits, by its VCA ID: its per-lane fader offset and mute. The ID is not checked
+   * here: an unknown VCA is refused by the core with `control.address.unknown`.
    */
   vca(vcaId: string): VcaEdits {
-    const index = this.#vcas.get(vcaId);
-    if (index === undefined) {
-      throw new MisoUsageError(
-        `the compiled session has no VCA '${vcaId}'; expected one of `
-          + `${[...this.#vcas.keys()].join(", ") || "none"}`,
-        "unknownVca",
-      );
-    }
-    return new VcaEdits(index);
+    return new VcaEdits(id(vcaId, "a VCA ID"));
   }
 }
 
 const NO_LAYOUT = "this engine was not booted from a session the SDK built, so there is nothing to "
-  + "resolve IDs against (the SDK never parses a document); call liveControls().withSession(session) "
-  + "with the builder, or address the effect by index with effect()";
+  + "resolve an index against (the SDK never parses a document); call liveControls().withSession(session) "
+  + "with the builder, or address the effect by its stable ID with console() or insert()";
 
 /**
  * Every live edit a strip -- a track or a submix -- shares. Methods build data and never mutate
  * the engine. `TrackEdits` adds `solo`; `SubmixEdits` adds nothing.
  *
- * `pan`, `matrix`, `faderDb`, `mute`, `trimDb` and `polarityInvert` ramp. Without
- * `smoothingSamples` they ramp over the session's own length for the edit's kind
- * (`controlSmoothing`, or the default table); an explicit `smoothingSamples`, `0` included,
- * overrides it. The input filters (`hpfHz`, `lpfHz`, `filters`) and `bypass` carry no ramp.
+ * `pan`, `matrix`, `faderDb`, `mute`, `trimDb` and `polarityInvert` take an optional
+ * `smoothingSamples`, sent as the edit's `ramp_samples`; absent, the core ramps over the session's
+ * own length for the row. The input filters (`hpfHz`, `lpfHz`, `inputFilters`) and `bypass` have a
+ * fixed ramp and take none.
+ *
+ * `pan` writes the strip's two pan lanes and `matrix` its four coefficients. A strip in the other
+ * shape is refused by the core with `control.inactive`.
  */
 export abstract class StripEdits {
-  /** The record's index word: a strip index, the tracks then the submixes. */
-  protected readonly stripIndex: number;
+  /** The strip's index in the session map (the tracks, then the submixes), for observation. */
+  protected readonly stripIndex: number | undefined;
+  protected readonly stripId: string;
   /** `track 'kick'` or `submix 'drums'`, for messages. */
   readonly #label: string;
   readonly #layout: LiveControlLayout | undefined;
   readonly #instances: StripInstances | undefined;
 
-  protected constructor(kind: StripKind, stripIndex: number, stripId?: string, layout?: LiveControlLayout) {
+  protected constructor(
+    kind: StripKind,
+    stripId: string,
+    stripIndex: number | undefined,
+    layout?: LiveControlLayout,
+  ) {
+    this.stripId = stripId;
     this.stripIndex = stripIndex;
     this.#label = `${kind} '${stripId}'`;
     this.#layout = layout;
-    this.#instances = stripId === undefined
-      ? undefined
-      : (kind === "track" ? layout?.tracks : layout?.submixes)?.get(stripId);
+    this.#instances = (kind === "track" ? layout?.tracks : layout?.submixes)?.get(stripId);
   }
 
-  pan(left: number, right: number, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("pan", this.stripIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(
-        builtinNumber("matrix_ll", left),
-        builtinNumber("matrix_rr", right),
-      ),
-    });
+  #owner(): ControlOwner {
+    return { kind: "strip", id: this.stripId };
   }
 
-  matrix(matrix: MatrixValues, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("matrix", this.stripIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(
-        builtinNumber("matrix_ll", matrix.ll),
-        builtinNumber("matrix_lr", matrix.lr),
-        builtinNumber("matrix_rl", matrix.rl),
-        builtinNumber("matrix_rr", matrix.rr),
-      ),
-    });
+  #builtin(name: string, value: number, lane: ControlLane, ramp?: number): ControlFrameEdit {
+    return controlEdit(this.#owner(), { kind: "builtins" }, builtinRow(name), value, lane, ramp);
   }
 
-  faderDb(db: number, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("faderDb", this.stripIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(builtinNumber("fader_db", db)),
-    });
+  /** Set the pan of each lane: `left` on the left lane and `right` on the right. */
+  pan(left: number, right: number, options: SmoothingOptions = {}): ControlEditSet {
+    const ramp = rampOf(options);
+    return editSet(
+      this.#builtin("pan", left, "left", ramp),
+      this.#builtin("pan", right, "right", ramp),
+    );
   }
 
-  mute(enabled: boolean, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("mute", this.stripIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
+  matrix(matrix: MatrixValues, options: SmoothingOptions = {}): ControlEditSet {
+    const ramp = rampOf(options);
+    return editSet(
+      this.#builtin("matrix_ll", matrix.ll, "both", ramp),
+      this.#builtin("matrix_lr", matrix.lr, "both", ramp),
+      this.#builtin("matrix_rl", matrix.rl, "both", ramp),
+      this.#builtin("matrix_rr", matrix.rr, "both", ramp),
+    );
   }
 
-  trimDb(db: number, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("trimDb", this.stripIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(builtinNumber("trim_db", db)),
-    });
+  faderDb(db: number, options: LaneOptions = {}): ControlEditSet {
+    return editSet(this.#builtin("fader_db", db, laneOf(options.channel), rampOf(options)));
   }
 
-  polarityInvert(enabled: boolean, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("polarityInvert", this.stripIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
+  mute(enabled: boolean, options: LaneOptions = {}): ControlEditSet {
+    return editSet(this.#builtin("mute", flag(enabled), laneOf(options.channel), rampOf(options)));
   }
 
-  /** Set one lane's HPF cutoff through the prepared input-filter owner. */
-  hpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
-    return trackEdit("inputFilters", this.stripIndex, {
-      channel: lane(options),
-      parameterId: 3,
-      values: values(builtinNumber("hpf_hz", value)),
-    });
+  trimDb(db: number, options: LaneOptions = {}): ControlEditSet {
+    return editSet(this.#builtin("trim_db", db, laneOf(options.channel), rampOf(options)));
   }
 
-  /** Set one lane's LPF cutoff through the prepared input-filter owner. */
-  lpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
-    return trackEdit("inputFilters", this.stripIndex, {
-      channel: lane(options),
-      parameterId: 4,
-      values: values(builtinNumber("lpf_hz", value)),
-    });
+  polarityInvert(enabled: boolean, options: LaneOptions = {}): ControlEditSet {
+    return editSet(
+      this.#builtin("polarity_invert", flag(enabled), laneOf(options.channel), rampOf(options)),
+    );
   }
 
-  /** Set both cutoffs as one indivisible wire edit. */
-  inputFilters(filters: InputFilterValues, options: InputFilterOptions = {}): LaneEdit {
+  /** Set one lane's HPF cutoff. */
+  hpfHz(value: number, options: InputFilterOptions = {}): ControlEditSet {
+    return editSet(this.#builtin("hpf_hz", value, laneOf(options.channel)));
+  }
+
+  /** Set one lane's LPF cutoff. */
+  lpfHz(value: number, options: InputFilterOptions = {}): ControlEditSet {
+    return editSet(this.#builtin("lpf_hz", value, laneOf(options.channel)));
+  }
+
+  /** Set both cutoffs in one transaction. */
+  inputFilters(filters: InputFilterValues, options: InputFilterOptions = {}): ControlEditSet {
     if (filters === null || typeof filters !== "object" || Array.isArray(filters)) {
       throw new MisoUsageError("inputFilters requires an object with hpfHz and lpfHz");
     }
-    return trackEdit("inputFilters", this.stripIndex, {
-      channel: lane(options),
-      values: values(
-        builtinNumber("hpf_hz", filters.hpfHz),
-        builtinNumber("lpf_hz", filters.lpfHz),
-      ),
-    });
+    const lane = laneOf(options.channel);
+    return editSet(
+      this.#builtin("hpf_hz", filters.hpfHz, lane),
+      this.#builtin("lpf_hz", filters.lpfHz, lane),
+    );
   }
 
   /**
-   * Address an effect by its live address: a console slot by its index in the session's slot order
-   * (`pre_insert`, then `post_insert`), or an insert by its index in the strip's chain.
+   * Address an effect by its live index: a console slot by its index in the session's slot order
+   * (`pre_insert`, then `post_insert`), or an insert by its index in the strip's chain. Observation
+   * records address an effect this way. Value edits address it by its stable ID, so the index must
+   * resolve against the session the SDK built (`withSession()`); use `console()` or `insert()`
+   * with an ID otherwise.
    */
   effect<E extends EffectId>(
     rack: LiveControlRack,
@@ -682,27 +623,26 @@ export abstract class StripEdits {
         `rack must be console or inserts, not '${String(rack)}' (simd1, dynamic and simd2 are retired)`,
       );
     }
-    const index = u32(effectIndex, "effectIndex");
-    // With a layout, the instance at this address is known, whatever `effectId` claims, so its
-    // authored bypass is carried to `bypass()`.
-    const instance = this.#instances?.[rack][index];
+    const index = requireU32(effectIndex, "effectIndex");
     return new EffectEdits(
+      this.stripId,
       this.stripIndex,
-      RACKS[rack],
+      rack,
       index,
+      this.#instances?.[rack][index]?.id,
       effectId,
-      instance === undefined ? undefined : authoredInstance(rack, instance, this.#label),
     );
   }
 
   /**
-   * Address a session console slot by its stable slot ID.
-   *
-   * The ID resolves to the slot's index in the session's slot order, which is the live address; the
-   * section is not part of it. `effectId` must be the slot's own effect, and it types the edits.
+   * Address a session console slot by its stable slot ID. `effectId` must be the slot's own effect,
+   * and it types the edits. With a session the SDK built, the slot is checked against it.
    */
   console<E extends EffectId>(slot: string, effectId: E): EffectEdits<E> {
-    if (this.#layout === undefined) throw new MisoUsageError(`console('${slot}'): ${NO_LAYOUT}`);
+    id(slot, "a console slot ID");
+    if (this.#layout === undefined) {
+      return new EffectEdits(this.stripId, this.stripIndex, "console", undefined, slot, effectId);
+    }
     const index = this.#layout.console.findIndex((row) => row.id === slot);
     const declared = this.#layout.console[index];
     if (declared === undefined) {
@@ -717,15 +657,17 @@ export abstract class StripEdits {
   /** Address one of this strip's inserts by its stable ID or its index in chain order. */
   insert<E extends EffectId>(insert: string | number, effectId: E): EffectEdits<E> {
     if (typeof insert === "number") {
+      if (this.#layout === undefined) throw new MisoUsageError(`insert(${insert}): ${NO_LAYOUT}`);
       const row = this.#instances?.inserts[insert];
-      if (this.#layout !== undefined && row === undefined) {
+      if (row === undefined) {
         throw new MisoUsageError(`${this.#label} has no insert at index ${insert}`);
       }
-      return row === undefined
-        ? this.effect("inserts", insert, effectId)
-        : this.#resolved("inserts", insert, row, effectId);
+      return this.#resolved("inserts", insert, row, effectId);
     }
-    if (this.#layout === undefined) throw new MisoUsageError(`insert('${insert}'): ${NO_LAYOUT}`);
+    id(insert, "an insert ID");
+    if (this.#layout === undefined) {
+      return new EffectEdits(this.stripId, this.stripIndex, "inserts", undefined, insert, effectId);
+    }
     const rows = this.#instances?.inserts ?? [];
     const index = rows.findIndex((row) => row.id === insert);
     const row = rows[index];
@@ -755,156 +697,182 @@ export abstract class StripEdits {
 
 /** A track strip's live edits: every strip edit, plus `solo`. */
 export class TrackEdits extends StripEdits {
-  constructor(trackIndex: number, trackId?: string, layout?: LiveControlLayout) {
-    super("track", trackIndex, trackId, layout);
+  constructor(trackId: string, trackIndex?: number, layout?: LiveControlLayout) {
+    super("track", trackId, trackIndex, layout);
   }
 
-  solo(enabled: boolean, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("solo", this.stripIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
+  /** Solo is a monitor overlay: the core reports the edit with the `monitor` path. */
+  solo(enabled: boolean, options: SmoothingOptions = {}): ControlEditSet {
+    return editSet(controlEdit(
+      { kind: "strip", id: this.stripId },
+      { kind: "own" },
+      ownRow(CONTROLS.stripOwn, "solo"),
+      flag(enabled),
+      "both",
+      rampOf(options),
+    ));
   }
 }
 
 /**
- * A submix strip's live edits: every strip edit and no `solo`. `stripIndex` is the submix's strip
- * index, `T + j`; `LiveControlEdits.submix(id)` computes it from the session map.
+ * A submix strip's live edits: every strip edit and no `solo`. `LiveControlEdits.submix(id)` also
+ * finds the submix's strip index, `T + j`, for observation.
  */
 export class SubmixEdits extends StripEdits {
-  constructor(stripIndex: number, submixId?: string, layout?: LiveControlLayout) {
-    super("submix", stripIndex, submixId, layout);
+  constructor(submixId: string, stripIndex?: number, layout?: LiveControlLayout) {
+    super("submix", submixId, stripIndex, layout);
   }
 }
 
 /**
- * A live send's edits (issue #1223 D4): its gain, its mute and its 2x2 matrix, each over an
- * optional `smoothingSamples` (omitted, the session's own length for the kind). `routeIndex` is the send's live-route index, its position in
- * `SessionMap.routes`; `LiveControlEdits.route(id)` computes it. The record's `rack` and
- * `channel` are not applicable (`255`). The engine holds the gain and the matrix to the prepared
- * route's domain and refuses a value outside it with `domain`.
+ * A live send's edits: its gain, its mute, its follow-mute flag and its 2x2 matrix, each over an
+ * optional `smoothingSamples` (omitted, the core's ramp for the row). A route is addressed by its
+ * stable ID. Only routes into submixes are live: the core refuses an output route.
  */
 export class RouteEdits {
-  readonly #routeIndex: number;
+  readonly #routeId: string;
 
-  constructor(routeIndex: number) {
-    this.#routeIndex = u32(routeIndex, "routeIndex");
+  constructor(routeId: string) {
+    this.#routeId = routeId;
   }
 
-  gainDb(db: number, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("routeGainDb", this.#routeIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(finite(db, "gainDb")),
-    });
+  #row(name: string, value: number, ramp: number | undefined): ControlFrameEdit {
+    return controlEdit(
+      { kind: "route", id: this.#routeId },
+      { kind: "own" },
+      ownRow(CONTROLS.routeOwn, name),
+      value,
+      "both",
+      ramp,
+    );
+  }
+
+  gainDb(db: number, options: SmoothingOptions = {}): ControlEditSet {
+    return editSet(this.#row("gain_db", db, rampOf(options)));
   }
 
   /** `true` silences the send, `false` opens it. */
-  mute(enabled: boolean, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("routeMute", this.#routeIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
+  mute(enabled: boolean, options: SmoothingOptions = {}): ControlEditSet {
+    return editSet(this.#row("mute", flag(enabled), rampOf(options)));
   }
 
   /** The send's 2x2 matrix, written `ll, lr, rl, rr`. */
-  matrix(matrix: MatrixValues, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("routeMatrix", this.#routeIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(
-        finite(matrix.ll, "matrix.ll"),
-        finite(matrix.lr, "matrix.lr"),
-        finite(matrix.rl, "matrix.rl"),
-        finite(matrix.rr, "matrix.rr"),
-      ),
-    });
+  matrix(matrix: MatrixValues, options: SmoothingOptions = {}): ControlEditSet {
+    const ramp = rampOf(options);
+    return editSet(
+      this.#row("matrix_ll", matrix.ll, ramp),
+      this.#row("matrix_lr", matrix.lr, ramp),
+      this.#row("matrix_rl", matrix.rl, ramp),
+      this.#row("matrix_rr", matrix.rr, ramp),
+    );
+  }
+
+  /** Whether the send follows its source strip's mute (a send into a submix only). */
+  followsMute(enabled: boolean, options: SmoothingOptions = {}): ControlEditSet {
+    return editSet(this.#row("follows_mute", flag(enabled), rampOf(options)));
   }
 }
 
 /**
- * A VCA's live edits (issue #1246 D4): its per-lane fader offset and mute, built exactly as a
- * strip's `faderDb` and `mute` are, over an optional lane and `smoothingSamples` (omitted, the
- * session's own length for the kind). `vcaIndex` is
- * the VCA's position in `SessionMap.vcas`; `LiveControlEdits.vca(id)` computes it. The record's
- * `rack` is not applicable (`255`). A VCA has no audio path: the engine adds the offset to every
- * member's own fader, and its mute mutes every member.
+ * A VCA's live edits: its per-lane fader offset and mute, built as a strip's `faderDb` and `mute`
+ * are, over an optional lane and `smoothingSamples`. A VCA has no audio path: the engine adds the
+ * offset to every member's own fader, and its mute mutes every member.
  */
 export class VcaEdits {
-  readonly #vcaIndex: number;
+  readonly #vcaId: string;
 
-  constructor(vcaIndex: number) {
-    this.#vcaIndex = u32(vcaIndex, "vcaIndex");
+  constructor(vcaId: string) {
+    this.#vcaId = vcaId;
+  }
+
+  #row(name: string, value: number, options: LaneOptions): ControlFrameEdit {
+    return controlEdit(
+      { kind: "vca", id: this.#vcaId },
+      { kind: "own" },
+      ownRow(CONTROLS.vcaOwn, name),
+      value,
+      laneOf(options.channel),
+      rampOf(options),
+    );
   }
 
   /** The VCA's offset in dB, in the builtin fader's own domain. */
-  faderDb(db: number, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("vcaFaderDb", this.#vcaIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(builtinNumber("fader_db", db)),
-    });
+  faderDb(db: number, options: LaneOptions = {}): ControlEditSet {
+    return editSet(this.#row("offset_db", db, options));
   }
 
   /** `true` mutes every member on the selected lanes, `false` lifts the VCA's mute. */
-  mute(enabled: boolean, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("vcaMute", this.#vcaIndex, {
-      channel: lane(options),
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
+  mute(enabled: boolean, options: LaneOptions = {}): ControlEditSet {
+    return editSet(this.#row("mute", flag(enabled), options));
   }
-}
-
-/**
- * What the session authored for the instance a live edit addresses, when the SDK knows it: the
- * instance's real effect (whatever the caller's `effectId` claims), its session bypass, and a name
- * for messages.
- */
-export interface AuthoredInstance {
-  readonly effectId: string;
-  readonly bypass: boolean;
-  readonly label: string;
-}
-
-function authoredInstance(rack: LiveControlRack, row: InstanceRow, strip: string): AuthoredInstance {
-  return Object.freeze({
-    effectId: row.effectId,
-    bypass: row.bypass,
-    label: `${rack === "console" ? "console slot" : "insert"} '${row.id}' on ${strip}`,
-  });
 }
 
 /** Catalog-derived edits for one effect instance. */
 export class EffectEdits<E extends EffectId> {
-  readonly #trackIndex: number;
-  readonly #rack: number;
-  readonly #effectIndex: number;
+  readonly #stripId: string;
+  readonly #stripIndex: number | undefined;
+  readonly #rack: LiveControlRack;
+  readonly #effectIndex: number | undefined;
+  readonly #stableId: string | undefined;
   readonly #effectId: E;
-  readonly #authored: AuthoredInstance | undefined;
 
   /**
-   * `authored` is the addressed instance as the booted session declares it, when the SDK has that
-   * session; `StripEdits` supplies it. Without it, `bypass(false)` cannot know the instance keeps a
-   * prepared bypass.
+   * `stableId` is the instance's console slot ID or insert ID, which the control address names it
+   * by; `effectIndex` is its live index, which observation records name it by. Either may be
+   * unknown: an instance named by ID without a session has no index, and one named by index
+   * without a session has no ID.
    */
-  constructor(trackIndex: number, rack: number, effectIndex: number, effectId: E, authored?: AuthoredInstance) {
-    this.#trackIndex = trackIndex;
+  constructor(
+    stripId: string,
+    stripIndex: number | undefined,
+    rack: LiveControlRack,
+    effectIndex: number | undefined,
+    stableId: string | undefined,
+    effectId: E,
+  ) {
+    this.#stripId = stripId;
+    this.#stripIndex = stripIndex;
     this.#rack = rack;
     this.#effectIndex = effectIndex;
+    this.#stableId = stableId;
     this.#effectId = effectId;
-    this.#authored = authored;
+  }
+
+  #section(): ControlSection {
+    const stable = this.#stableId;
+    if (stable === undefined) {
+      throw new MisoUsageError(
+        `this ${this.#effectId} was addressed by index, and a value edit names an instance by its `
+          + `stable ID: ${NO_LAYOUT}`,
+      );
+    }
+    return this.#rack === "console"
+      ? { kind: "console", slot: stable }
+      : { kind: "inserts", effect: stable };
+  }
+
+  #edit(control: number, value: number, lane: ControlLane, ramp: number | undefined): ControlEditSet {
+    return editSet(controlEdit(
+      { kind: "strip", id: this.#stripId },
+      this.#section(),
+      control,
+      value,
+      lane,
+      ramp,
+    ));
   }
 
   parameter<N extends LiveEffectParameterName<E>>(
     name: N,
     value: LiveEffectParameterValue<E, N>,
     options?: LiveEffectParameterOptions<E, N>,
-  ): LaneEdit;
-  parameter(edit: LiveEffectParameterEdit<E>): LaneEdit;
+  ): ControlEditSet;
+  parameter(edit: LiveEffectParameterEdit<E>): ControlEditSet;
   parameter<N extends LiveEffectParameterName<E>>(
     keyOrEdit: string | LiveEffectParameterEdit<E>,
     value?: unknown,
     options: RuntimeParameterOptions = {},
-  ): LaneEdit {
+  ): ControlEditSet {
     const normalized = normalizeParameterEdit(keyOrEdit, value, options);
     const name = normalized.key;
     value = normalized.value;
@@ -913,15 +881,17 @@ export class EffectEdits<E extends EffectId> {
     const row = descriptor?.parameters.find(
       (candidate) => candidate.name === name,
     ) as RuntimeParameterRow | undefined;
-    if (row === undefined || !row.liveUpdatable) {
-      throw new MisoUsageError(`${this.#effectId}.${String(name)} is not live-updatable`);
+    if (row === undefined) {
+      throw new MisoUsageError(`${this.#effectId} has no parameter '${String(name)}'`);
     }
+    // The value is made a number the frame can hold; whether it is in the row's domain is the
+    // core's to say.
     let scalar: number;
     if (row.domainName === "boolean") {
       if (typeof value !== "boolean") {
         throw new MisoUsageError(`${this.#effectId}.${row.name} must be boolean`);
       }
-      scalar = value ? 1 : 0;
+      scalar = flag(value);
     } else if (row.domainName === "enumeration") {
       const choice = row.enumChoices.find(
         (candidate) => candidate.label === (value as unknown as string),
@@ -936,54 +906,17 @@ export class EffectEdits<E extends EffectId> {
       if (typeof value !== "number") {
         throw new MisoUsageError(`${this.#effectId}.${row.name} must be numeric`);
       }
-      scalar = finite(
-        value,
-        `${this.#effectId}.${row.name}`,
-        row.minimum ?? undefined,
-        row.maximum ?? undefined,
-      );
+      scalar = value;
     }
-    const requestedChannel = runtimeChannel(options.channel);
-    if (row.channelPolicyName === "shared" && requestedChannel !== "both") {
-      throw new MisoUsageError(`${this.#effectId}.${row.name} is shared and must address both lanes`);
-    }
-    return trackEdit("effectParam", this.#trackIndex, {
-      rack: this.#rack,
-      channel: CHANNELS[requestedChannel],
-      effectIndex: this.#effectIndex,
-      parameterId: row.id,
-      smoothingSamples: runtimeSmoothing(options),
-      values: values(scalar),
-    });
+    return this.#edit(row.id, scalar, laneOf(options.channel), rampOf(options));
   }
 
   /**
-   * Set or lift this instance's bypass, live, through the latency-preserving shunt.
-   *
-   * It can lift a bypass the session authored too, except on the effects in
-   * `PREPARED_BYPASS_EFFECTS` -- the delay and the multiband compressor -- which keep a
-   * session bypass as a prepared one: the engine admits a live un-bypass of either and renders
-   * nothing different. So when the SDK knows the addressed instance (the engine booted from a
-   * builder, or `withSession()` supplied it), `bypass(false)` on a session-bypassed delay or
-   * multiband throws a `MisoUsageError` before anything is sent, rather than let an `ok`
-   * acknowledgement stand for a no-op. Author the instance unbypassed and reload the session to
-   * hear it. Addressed by index with no session, the SDK cannot know, and the lift is sent.
+   * Set or lift this instance's bypass (control `0` of the instance). The core crossfades it on
+   * both hosts and refuses what it cannot do.
    */
-  bypass(enabled: boolean): LaneEdit {
-    const authored = this.#authored;
-    if (!enabled && authored !== undefined && authored.bypass
-      && PREPARED_BYPASS_EFFECTS.includes(authored.effectId as EffectId)) {
-      throw new MisoUsageError(
-        `${authored.label} is a ${authored.effectId} the session bypassed, and it keeps its prepared `
-          + "bypass: the engine would acknowledge a live un-bypass and render nothing different. "
-          + "Author it with bypass false and reload the session to hear it",
-      );
-    }
-    return trackEdit("effectBypass", this.#trackIndex, {
-      rack: this.#rack,
-      effectIndex: this.#effectIndex,
-      values: values(enabled ? 1 : 0),
-    });
+  bypass(enabled: boolean): ControlEditSet {
+    return this.#edit(0, flag(enabled), "both", undefined);
   }
 
   observe(tap: TapName<E>, armed: boolean, windowBlocks = 0): LaneEdit {
@@ -992,40 +925,50 @@ export class EffectEdits<E extends EffectId> {
     if (observation === undefined || !observation.subscribable) {
       throw new MisoUsageError(`${this.#effectId} has no subscribable tap '${String(tap)}'`);
     }
-    return trackEdit(armed ? "observeSubscribe" : "observeUnsubscribe", this.#trackIndex, {
-      rack: this.#rack,
+    if (this.#stripIndex === undefined || this.#effectIndex === undefined) {
+      throw new MisoUsageError(
+        `an observation record names its effect by index, and this ${this.#effectId} has none: `
+          + "address it with liveControls().withSession(session) or effect(rack, index, effectId)",
+      );
+    }
+    return observationEdit(armed ? "observeSubscribe" : "observeUnsubscribe", this.#stripIndex, {
+      rack: RACKS[this.#rack],
       effectIndex: this.#effectIndex,
       parameterId: observation.id,
-      smoothingSamples: u32(windowBlocks, "windowBlocks"),
+      smoothingSamples: requireU32(windowBlocks, "windowBlocks"),
     });
   }
+}
+
+function isEditSet(candidate: unknown): candidate is ControlEditSet {
+  return candidate !== null && typeof candidate === "object"
+    && Array.isArray((candidate as { readonly edits?: unknown }).edits);
 }
 
 /** One transaction-oriented set of live controls over either SDK transport. */
 export class EngineLiveControls {
   readonly edit: LiveControlEdits;
   readonly #map: SessionMap;
-  readonly #submit: LiveControlSubmit;
+  readonly #transport: LiveControlTransport;
   readonly #beforeSubmit: LiveControlBeforeSubmit | undefined;
   readonly #booted: Uint8Array | undefined;
 
   /**
    * `session` is the session the SDK built for this engine, when there is one; it is what lets
-   * `edit.track(id)`'s or `edit.submix(id)`'s `.console(slot, ...)` and `.insert(id, ...)` resolve
-   * stable IDs. `booted` is the
-   * document the engine booted, exactly as it was staged; both SDK engines supply it, and
-   * `withSession()` holds its session to it.
+   * `edit.track(id)`'s or `edit.submix(id)`'s `.console(slot, ...)` and `.insert(id, ...)` check
+   * IDs and indices. `booted` is the document the engine booted, exactly as it was staged; both SDK
+   * engines supply it, and `withSession()` holds its session to it.
    */
   constructor(
     map: SessionMap,
-    submit: LiveControlSubmit,
+    transport: LiveControlTransport,
     beforeSubmit?: LiveControlBeforeSubmit,
     session?: SessionLike,
     booted?: Uint8Array,
   ) {
     this.edit = new LiveControlEdits(map, session);
     this.#map = map;
-    this.#submit = submit;
+    this.#transport = transport;
     this.#beforeSubmit = beforeSubmit;
     this.#booted = booted;
   }
@@ -1048,27 +991,61 @@ export class EngineLiveControls {
       );
     }
     assertBootedSession(session, this.#booted);
-    return new EngineLiveControls(this.#map, this.#submit, this.#beforeSubmit, session, this.#booted);
+    return new EngineLiveControls(this.#map, this.#transport, this.#beforeSubmit, session, this.#booted);
   }
 
-  async submit(...edits: readonly LaneEdit[]): Promise<CommandReport> {
-    return this.#submitChecked(edits, false);
+  /** The engine's one transaction queue, which every value edit goes through. */
+  get queue(): ControlTransactionQueue {
+    return this.#transport.queue;
+  }
+
+  /** A writer that stages, coalesces and flushes `SET_CONTROL` edits through the engine's queue. */
+  writer(options: Omit<ControlWriterOptions, "queue" | "submit" | "submitEdits"> = {}): LiveControlWriter {
+    return new LiveControlWriter({ ...options, queue: this.#transport.queue });
+  }
+
+  /**
+   * Send edits.
+   *
+   * Value edits (what the builders return) go in one `SET_CONTROL` transaction and resolve with the
+   * core's applied report for the transaction that carried them; the core's refusal of them rejects
+   * with `MisoControlRefusal`, whatever other callers staged beside them. Observation edits
+   * (`observe()`) go as command records and resolve with a `CommandReport`. One call sends one
+   * kind.
+   */
+  submit(...edits: readonly ControlEditSet[]): Promise<ControlAppliedReport>;
+  submit(...edits: readonly LaneEdit[]): Promise<CommandReport>;
+  async submit(
+    ...edits: readonly (ControlEditSet | LaneEdit)[]
+  ): Promise<ControlAppliedReport | CommandReport> {
+    if (edits.length === 0) throw new MisoUsageError("a live-control submit needs at least one edit");
+    const sets = edits.filter(isEditSet);
+    if (sets.length === edits.length) {
+      return this.#transport.queue.submit(sets.flatMap((set) => set.edits));
+    }
+    if (sets.length !== 0) {
+      throw new MisoUsageError("one submit sends value edits or observation edits, not both");
+    }
+    return this.#submitObservation(edits as readonly LaneEdit[], false);
   }
 
   /** @internal Managed observation owner submission with an owner-specific guard bypass. */
   async submitManaged(...edits: readonly LaneEdit[]): Promise<CommandReport> {
-    return this.#submitChecked(edits, true);
+    return this.#submitObservation(edits, true);
   }
 
-  async #submitChecked(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
+  async #submitObservation(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
-        `a live-control transaction must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
+        `an observation submit must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
       );
+    }
+    if (edits.some((edit) => edit.kind !== "observeSubscribe" && edit.kind !== "observeUnsubscribe")) {
+      throw new MisoUsageError("a command record carries an observation edit only; value edits are SET_CONTROL");
     }
     const beforeSubmit = this.#beforeSubmit?.(edits, managed);
     if (beforeSubmit !== undefined) await beforeSubmit;
-    const report = await this.#submit(edits);
+    const report = await this.#transport.observe(edits);
     const resultConsistent = report.ok === (report.result === 0);
     const wholeBatch = report.ok
       ? report.admitted === edits.length

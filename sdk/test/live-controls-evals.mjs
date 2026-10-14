@@ -1,18 +1,20 @@
-/** Issue #322: shared semantic live controls and one whole-batch contract over both transports. */
+/**
+ * #1563B: shared semantic live controls over both transports. Every value edit is a `SET_CONTROL`
+ * transaction sent through the engine's one queue; the builders check no value, and the core
+ * refuses the same way on the headless engine and through the browser host.
+ */
 
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
+import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
 import { EngineLiveControls, LiveControlEdits } from "../src/core/live-controls.ts";
-import { MisoUsageError } from "../src/core/errors.ts";
-import { encodeLaneEdits, LiveControlWriter } from "../src/core/writer.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
-import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { effect, session } from "../src/core/session.ts";
+import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
-import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+import { effectEntry, engineHost, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 let asset;
 
@@ -20,9 +22,10 @@ before(async () => {
   asset = await MisoEngineAsset.load(await moduleBytes());
 });
 
-function compressorDocument() {
+function compressorDocument(frames = 4_800) {
   const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
   return sessionDocument({
+    frames,
     effects: {
       preInsert: [effectEntry(
         "compressor",
@@ -52,351 +55,6 @@ function feed(engine, block) {
   }
 }
 
-function encodeBrowserCommands(commands) {
-  const records = new Uint8Array(commands.length * ABI_LAYOUT.commandRecord.bytes);
-  const view = new DataView(records.buffer);
-  const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-  for (const [index, command] of commands.entries()) {
-    const base = index * ABI_LAYOUT.commandRecord.bytes;
-    view.setUint8(base + at("kind"), command.kind);
-    view.setUint8(base + at("rack"), command.rack);
-    view.setUint8(base + at("channel"), command.channel);
-    view.setUint32(base + at("trackIndex"), command.trackIndex, true);
-    view.setUint32(base + at("effectIndex"), command.effectIndex, true);
-    view.setUint32(base + at("parameterId"), command.parameterId, true);
-    view.setUint32(base + at("smoothingSamples"), command.smoothingSamples, true);
-    command.values.forEach((value, valueIndex) => {
-      view.setFloat32(base + at("values") + valueIndex * 4, value, true);
-    });
-  }
-  return records;
-}
-
-describe("issue 322 -- shared semantic live controls", () => {
-  test("every command kind is built by name, and the strip and effect kinds are admitted by live Wasm", async () => {
-    const engine = await createOfflineEngine(compressorDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 },
-    });
-    try {
-      const liveControls = engine.liveControls();
-      const track = liveControls.edit.track("t");
-      const compressor = track.effect("console", 0, "miso.compressor");
-      const first = await liveControls.submit(
-        track.pan(-0.5, 0.5, { smoothingSamples: 16 }),
-        track.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
-        track.faderDb(-3, { channel: "both" }),
-        track.mute(false, { channel: "left" }),
-        track.solo(true),
-        track.trimDb(1.5, { channel: "right" }),
-        track.polarityInvert(false, { channel: "both" }),
-        compressor.parameter("threshold", -24, { channel: "both" }),
-        compressor.bypass(false),
-        compressor.observe("Gain Reduction", true, 2),
-        track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }),
-      );
-      assert.equal(first.ok, true);
-      assert.equal(first.admitted, 11);
-      assert.equal(first.reasonName, "none");
-      assert.equal(first.appliedAtSample, 0n);
-
-      feed(engine, 0);
-      engine.render();
-      const unsubscribe = await liveControls.submit(
-        compressor.observe("Gain Reduction", false, 2),
-      );
-      assert.equal(unsubscribe.ok, true);
-      assert.equal(unsubscribe.admitted, 1);
-      assert.equal(unsubscribe.appliedAtSample, 128n);
-
-      // The send kinds are built by `RouteEdits` and admitted by live Wasm in the issue 1223
-      // evals below, and the VCA kinds by `VcaEdits` in the issue 1246 evals; this session has
-      // neither a send nor a VCA.
-      const kindNames = [
-        "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-        "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-        "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
-      ];
-      assert.deepEqual(
-        [...ABI_LAYOUT.constants.wireCommandKinds.map((row) => row.name)].sort(),
-        [...kindNames].sort(),
-        "the semantic methods cover the generated command vocabulary exactly",
-      );
-
-      feed(engine, 1);
-      engine.render();
-      const refused = await liveControls.submit(
-        liveControls.edit.track("t").effect("console", 99, "miso.compressor").bypass(true),
-      );
-      assert.equal(refused.ok, false);
-      assert.equal(refused.admitted, 0);
-      assert.equal(refused.reasonName, "unknownEffect");
-
-      const recovery = await liveControls.submit(track.faderDb(-6));
-      assert.equal(recovery.ok, true, "a typed refusal is per request, not terminal");
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("unknown tracks and numeric domains refuse before transport", async () => {
-    let calls = 0;
-    const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
-      () => {
-        calls += 1;
-        throw new Error("must not be called");
-      },
-    );
-    assert.throws(() => liveControls.edit.track("missing"), MisoUsageError);
-    assert.throws(() => liveControls.edit.track("t").faderDb(Number.NaN), /finite/);
-    const hpf = liveControls.edit.track("t").hpfHz(80, { channel: "left" });
-    const pair = liveControls.edit.track("t").inputFilters({ hpfHz: 80, lpfHz: 12_000 });
-    assert.equal(hpf.kind, "inputFilters");
-    assert.equal(hpf.parameterId, 3);
-    assert.equal(pair.kind, "inputFilters");
-    assert.deepEqual(pair.values, [80, 12_000, 0, 0]);
-    assert.equal(calls, 0, "authoring a filter edit does not submit it");
-    assert.throws(() => liveControls.edit.track("t").pan(-2, 0), /at least -1/);
-    assert.throws(
-      () => liveControls.edit.track("t").effect("console", 0, "miso.compressor")
-        .parameter("threshold", 100),
-      /at most/,
-    );
-    const compressor = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: -18, unit: "db" }),
-      /unknown field 'unit'/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: true }),
-      /must be numeric/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: Number.NaN }),
-      /finite/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: 100 }),
-      /at most/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "lookahead", value: 1 }),
-      /not live-updatable/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: -18, channel: "diagonal" }),
-      /channel must be left, right, or both/,
-    );
-    assert.throws(
-      () => compressor.parameter({ key: "threshold", value: -18, smoothingSamples: 1.5 }),
-      /smoothingSamples must be a u32/,
-    );
-    const delay = liveControls.edit.track("t").effect("inserts", 0, "miso.delay");
-    assert.throws(
-      () => delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" }),
-      /shared and must address both lanes/,
-    );
-    assert.equal(calls, 0);
-  });
-
-  test("object and positional effect edits share records and change rendered PCM", async () => {
-    async function renderAfter(edit) {
-      const engine = await createOfflineEngine(compressorDocument(), {
-        asset,
-        liveControls: { commandQueueRecords: 64 },
-      });
-      try {
-        const shape = engine.shape();
-        feed(engine, 0);
-        engine.render();
-        const liveControls = engine.liveControls();
-        const parameter = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
-        const report = edit === undefined ? undefined : await liveControls.submit(edit(parameter));
-        const output = [];
-        for (let block = 1; block < 4; block += 1) {
-          feed(engine, block);
-          output.push(engine.render());
-        }
-        return { report, output, quantumFrames: shape.quantumFrames };
-      } finally {
-        engine.dispose();
-      }
-    }
-
-    const baseline = await renderAfter();
-    const object = await renderAfter((parameter) => parameter.parameter({
-      key: "threshold",
-      value: -80,
-      channel: "both",
-      smoothingSamples: 0,
-    }));
-    const positional = await renderAfter((parameter) =>
-      parameter.parameter("threshold", -80, { channel: "both", smoothingSamples: 0 }));
-
-    assert.equal(object.report?.ok, true);
-    assert.equal(object.report?.admitted, 1);
-    assert.equal(object.report?.appliedAtSample, BigInt(object.quantumFrames));
-    for (const [index, block] of object.output.entries()) {
-      assert.deepEqual([...block.left], [...positional.output[index].left], `left block ${index}`);
-      assert.deepEqual([...block.right], [...positional.output[index].right], `right block ${index}`);
-    }
-    assert.notDeepEqual(
-      [...object.output[0].left],
-      [...baseline.output[0].left],
-      "the live object edit must affect the next rendered block",
-    );
-    assert.notDeepEqual(
-      [...object.output.at(-1).left],
-      [...baseline.output.at(-1).left],
-      "the live object edit must remain audible after the compressor settles",
-    );
-  });
-
-  test("browser transport maps the same semantic record and acknowledgement", async () => {
-    let request;
-    const host = {
-      async sessionMap() {
-        return {
-          tag: "miso.sessionmap.v1",
-          requestId: 1,
-          result: 0,
-          tracks: ["t"],
-          sources: [{ id: "s", channels: 2, frames: 4_800n }],
-          metersAttached: false,
-          submixes: [],
-          routes: [],
-          vcas: [],
-        };
-      },
-      async command(value) {
-        request = value;
-        return {
-          tag: "miso.ack.v1",
-          requestId: 2,
-          result: 0,
-          reason: 0,
-          rejectedIndex: 0,
-          admitted: value.commands.length,
-          appliedAtSample: 256n,
-          records: new Uint8Array(value.commands.length * 48),
-        };
-      },
-    };
-    const liveControls = await createBrowserLiveControls(host);
-    const report = await liveControls.submit(
-      liveControls.edit.track("t").faderDb(-6, { channel: "left", smoothingSamples: 32 }),
-    );
-    assert.equal(report.ok, true);
-    assert.equal(report.reasonName, "none");
-    assert.equal(report.appliedAtSample, 256n);
-    assert.deepEqual(request, {
-      commands: [{
-        kind: 3,
-        rack: 255,
-        channel: 0,
-        trackIndex: 0,
-        effectIndex: 0,
-        parameterId: 0,
-        smoothingSamples: 32,
-        values: [-6, 0, 0, 0],
-      }],
-    });
-  });
-
-  test("browser transport carries the object edit record and actual report", async () => {
-    const engine = await createOfflineEngine(compressorDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    let request;
-    const host = {
-      async sessionMap() {
-        return {
-          tag: "miso.sessionmap.v1",
-          requestId: 1,
-          result: 0,
-          ...engine.sessionMap(),
-        };
-      },
-      async command(value) {
-        request = value;
-        const records = encodeBrowserCommands(value.commands);
-        const report = engine.submitCommands(records, value.commands.length);
-        return {
-          tag: "miso.ack.v1",
-          requestId: 2,
-          result: report.result,
-          reason: report.reason,
-          rejectedIndex: report.rejectedIndex,
-          admitted: report.admitted,
-          appliedAtSample: report.appliedAtSample,
-          records,
-        };
-      },
-    };
-    try {
-      const liveControls = await createBrowserLiveControls(host);
-      const parameter = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
-      const objectEdit = parameter.parameter({
-        key: "threshold",
-        value: -18,
-        channel: "both",
-        smoothingSamples: 64,
-      });
-      const positionalEdit = parameter.parameter("threshold", -18, {
-        channel: "both",
-        smoothingSamples: 64,
-      });
-      assert.deepEqual(objectEdit, positionalEdit, "the overloads normalize to one LaneEdit");
-      const report = await liveControls.submit(objectEdit);
-      assert.equal(report.ok, true);
-      assert.equal(report.reasonName, "none");
-      assert.equal(report.appliedAtSample, 0n);
-      assert.deepEqual(request, {
-        commands: [{
-          kind: 5,
-          rack: 3, // console slot 0, the record's appended console code (S1c)
-          channel: 2,
-          trackIndex: 0,
-          effectIndex: 0,
-          parameterId: 1,
-          smoothingSamples: 64,
-          values: [-18, 0, 0, 0],
-        }],
-      });
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a torn acknowledgement is rejected after, never before, transport answers", async () => {
-    let answered = false;
-    const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
-      async () => {
-        answered = true;
-        return {
-          ok: true,
-          result: 0,
-          code: "ok",
-          reason: 0,
-          reasonName: "none",
-          rejectedIndex: 0,
-          admitted: 0,
-          appliedAtSample: 0n,
-        };
-      },
-    );
-    await assert.rejects(
-      () => liveControls.submit(liveControls.edit.track("t").faderDb(-6)),
-      /violated whole-batch admission/,
-    );
-    assert.equal(answered, true, "the SDK inspected an acknowledgement only after transport settled");
-  });
-});
-
-const RACK = Object.fromEntries(ABI_LAYOUT.constants.racks.map((row) => [row.name, row.value]));
 
 /**
  * Issue #1214 gates 1-2: tracks `kick`, `snare` and `vox`, each on its own source; `kick` and
@@ -497,127 +155,6 @@ function builtSubmixSession() {
   return built;
 }
 
-describe("issue 1214 -- live controls drive submix strips", () => {
-  test("a submix encodes its strip index T + j and IDs resolve only in their own list", async () => {
-    // Gate 1. Red if the SDK indexes submixes from 0, resolves them against tracks, or lets a
-    // submix ID through track(); the batch below also proves the shipped module admits every
-    // builtin edit the SDK builds at a bus index.
-    const engine = await createOfflineEngine(submixDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    try {
-      const controls = engine.liveControls();
-      assert.deepEqual(engine.shape().submixes, ["drums", "verb"]);
-      assert.equal(controls.edit.submix("verb").faderDb(-6).trackIndex, 4);
-      assert.equal(controls.edit.submix("drums").pan(-1, 1).trackIndex, 3);
-      assert.equal(controls.edit.track("vox").faderDb(-6).trackIndex, 2);
-      assert.throws(() => controls.edit.submix("kick"), (error) =>
-        error instanceof MisoUsageError && /no submix 'kick'; expected one of drums, verb/.test(error.message));
-      assert.throws(() => controls.edit.submix("nope"), MisoUsageError);
-      assert.throws(() => controls.edit.track("drums"), MisoUsageError);
-      assert.equal("solo" in controls.edit.submix("drums"), false, "a bus has no solo edit");
-
-      const verb = controls.edit.submix("verb");
-      const edits = [
-        verb.pan(-0.5, 0.5),
-        verb.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
-        verb.faderDb(-3, { channel: "left" }),
-        verb.mute(false, { channel: "right" }),
-        verb.trimDb(1.5),
-        verb.polarityInvert(false),
-        verb.hpfHz(40, { channel: "left" }),
-        verb.lpfHz(16_000, { channel: "right" }),
-        verb.inputFilters({ hpfHz: 30, lpfHz: 18_000 }),
-      ];
-      assert.deepEqual(edits.map((edit) => edit.trackIndex), edits.map(() => 4));
-      const report = await controls.submit(...edits);
-      assert.equal(report.ok, true, report.reasonName);
-      assert.equal(report.admitted, edits.length);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a live bus fader equals the bus booted at that fader from the edit's block on", async () => {
-    // Gate 2, through the shipped module. Red if the SDK's record reaches the wrong strip (a track
-    // inside the bus, the other bus) or the wrong band of the right strip.
-    const options = { asset, liveControls: { commandQueueRecords: 64 } };
-    const live = await createOfflineEngine(submixDocument(), options);
-    const booted = await createOfflineEngine(submixDocument({ drumsFaderDb: -6 }), options);
-    try {
-      const boundary = 4;
-      const quantum = live.shape().quantumFrames;
-      let differedBefore = false;
-      for (let block = 0; block < boundary; block += 1) {
-        feedDistinct(live, block);
-        feedDistinct(booted, block);
-        const [a, b] = [live.render(), booted.render()];
-        differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
-      }
-      assert.ok(differedBefore, "the bus fader must be audible, or the comparison proves nothing");
-
-      const controls = live.liveControls();
-      const report = await controls.submit(
-        controls.edit.submix("drums").faderDb(-6, { smoothingSamples: 0 }),
-      );
-      assert.equal(report.ok, true, report.reasonName);
-      assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
-      for (let block = boundary; block < boundary + 4; block += 1) {
-        feedDistinct(live, block);
-        feedDistinct(booted, block);
-        const [a, b] = [live.render(), booted.render()];
-        assert.ok(a.left.some((sample) => sample !== 0), "the mix carries signal");
-        assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
-        assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
-      }
-    } finally {
-      live.dispose();
-      booted.dispose();
-    }
-  });
-
-  test("console slots and inserts resolve by ID on a bus of an SDK-built session", async () => {
-    // Gate 3. Red if layoutOf walks tracks only (no 'glue' on drums), refuses a session with
-    // submixes as mismatched, or resolves a bus insert against another strip's chain.
-    const built = builtSubmixSession();
-    const engine = await createOfflineEngine(built, {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    try {
-      const controls = engine.liveControls();
-      const address = (edit) => [edit.trackIndex, edit.rack, edit.effectIndex];
-      const glue = controls.edit.submix("drums").insert("glue", "miso.compressor")
-        .parameter("threshold", -18);
-      const comp = controls.edit.submix("drums").console("comp", "miso.compressor").bypass(true);
-      assert.deepEqual(address(glue), [1, RACK.inserts, 1]);
-      assert.equal(glue.kind, "effectParam");
-      assert.deepEqual(address(comp), [1, RACK.console, 1]);
-      assert.deepEqual(
-        address(controls.edit.submix("verb").insert("glue", "miso.compressor").bypass(true)),
-        [2, RACK.inserts, 0],
-      );
-      assert.throws(() => controls.edit.submix("drums").insert("ghost", "miso.compressor"),
-        /submix 'drums' has no insert 'ghost'; its inserts are tone, glue/);
-      assert.throws(() => controls.edit.track("kick").insert("glue", "miso.compressor"),
-        /track 'kick' has no insert 'glue'/);
-      const report = await controls.submit(glue, comp);
-      assert.equal(report.ok, true, report.reasonName);
-      assert.equal(report.admitted, 2);
-
-      // The layout is held to the compiled strips: a map that lacks the session's submixes is
-      // refused rather than resolving bus IDs the engine never compiled.
-      assert.throws(
-        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }, built),
-        /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
-      );
-    } finally {
-      engine.dispose();
-    }
-  });
-});
-
 /**
  * Issue #1223: tracks `kick`, `snare` and `vox`, each on its own source; unity buses `drums` and
  * `verb` (no console slot, no insert, an identity input section); four sends declared out of
@@ -659,133 +196,6 @@ function sendSession({ kickVerbDb = 0 } = {}) {
   }
   return built;
 }
-
-describe("issue 1223 -- live controls drive sends", () => {
-  test("a send edit encodes its kind at the engine's live-route index, over both transports", async () => {
-    // Gate 1. Red if the SDK indexes a send by its own order of the session (declaration, or every
-    // route by ID), if the browser map drops the engine's route list, or if a send record's kind,
-    // rack, channel or matrix words are written otherwise.
-    const engine = await createOfflineEngine(sendSession(), {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    let request;
-    const host = {
-      async sessionMap() {
-        return { tag: "miso.sessionmap.v1", requestId: 1, result: 0, ...engine.sessionMap() };
-      },
-      async command(value) {
-        request = value;
-        const records = encodeBrowserCommands(value.commands);
-        const report = engine.submitCommands(records, value.commands.length);
-        return {
-          tag: "miso.ack.v1",
-          requestId: 2,
-          result: report.result,
-          reason: report.reason,
-          rejectedIndex: report.rejectedIndex,
-          admitted: report.admitted,
-          appliedAtSample: report.appliedAtSample,
-          records,
-        };
-      },
-    };
-    try {
-      const routes = engine.sessionMap().routes;
-      assert.deepEqual(routes, ["kick-drums", "kick-verb", "snare-drums", "vox-verb"]);
-      for (const controls of [engine.liveControls(), await createBrowserLiveControls(host)]) {
-        const send = controls.edit.route("kick-verb");
-        const edits = [
-          send.gainDb(-12, { smoothingSamples: 64 }),
-          send.mute(true, { smoothingSamples: 0 }),
-          send.matrix({ ll: 0.5, lr: 0.25, rl: -0.75, rr: 0.125 }, { smoothingSamples: 32 }),
-        ];
-        assert.deepEqual(edits.map((edit) => edit.kind), ["routeGainDb", "routeMute", "routeMatrix"]);
-        assert.deepEqual(edits.map((edit) => edit.trackIndex), edits.map(() => routes.indexOf("kick-verb")));
-        assert.equal(controls.edit.route("vox-verb").gainDb(0).trackIndex, 3);
-        const report = await controls.submit(...edits);
-        assert.equal(report.ok, true, report.reasonName);
-        assert.equal(report.admitted, 3);
-      }
-      const common = { rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0 };
-      assert.deepEqual(request, {
-        commands: [
-          { kind: 13, ...common, smoothingSamples: 64, values: [-12, 0, 0, 0] },
-          { kind: 14, ...common, smoothingSamples: 0, values: [1, 0, 0, 0] },
-          { kind: 15, ...common, smoothingSamples: 32, values: [0.5, 0.25, -0.75, 0.125] },
-        ],
-      });
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("an unknown or output route ID refuses before any record is built", async () => {
-    // Gate 2. Red if the SDK hands an ID it cannot place to some index (a track's, an output
-    // route's, or index 0) instead of refusing, or loses the output-route reason with a session.
-    const built = sendSession();
-    const engine = await createOfflineEngine(built, {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    try {
-      const controls = engine.liveControls();
-      const unknownRoute = (pattern) => (error) =>
-        error instanceof MisoUsageError && error.diagnosticCode === "unknownRoute"
-          && pattern.test(error.message);
-      const listed = /no live route '[^']+'; expected one of kick-drums, kick-verb, snare-drums, vox-verb/;
-      assert.throws(() => controls.edit.route("nope"), unknownRoute(listed));
-      assert.throws(() => controls.edit.route("kick"), unknownRoute(listed));
-      assert.throws(() => controls.edit.route("drums-out"),
-        unknownRoute(/route 'drums-out' goes to the output, and output routes are not live/));
-      // Without the session the SDK cannot tell an output route from a typo, so it lists the
-      // live routes instead.
-      const bare = new LiveControlEdits(engine.sessionMap());
-      assert.throws(() => bare.route("drums-out"), unknownRoute(listed));
-      assert.equal(bare.route("snare-drums").mute(false).trackIndex, 2);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a live send gain equals the session booted at that gain from the edit's block on", async () => {
-    // Gate 3, through the shipped module. Red if the route export, the session map or the
-    // encoding disagrees with the engine about which send an index names, or about the gain word.
-    const options = { asset, liveControls: { commandQueueRecords: 64 } };
-    const live = await createOfflineEngine(sendSession(), options);
-    const booted = await createOfflineEngine(sendSession({ kickVerbDb: -12 }), options);
-    try {
-      const boundary = 4;
-      const quantum = live.shape().quantumFrames;
-      let differedBefore = false;
-      for (let block = 0; block < boundary; block += 1) {
-        feedDistinct(live, block);
-        feedDistinct(booted, block);
-        const [a, b] = [live.render(), booted.render()];
-        differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
-      }
-      assert.ok(differedBefore, "the send gain must be audible, or the comparison proves nothing");
-
-      const controls = live.liveControls();
-      const report = await controls.submit(
-        controls.edit.route("kick-verb").gainDb(-12, { smoothingSamples: 0 }),
-      );
-      assert.equal(report.ok, true, report.reasonName);
-      assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
-      for (let block = boundary; block < boundary + 4; block += 1) {
-        feedDistinct(live, block);
-        feedDistinct(booted, block);
-        const [a, b] = [live.render(), booted.render()];
-        assert.ok(a.left.some((sample) => sample !== 0), "the mix carries signal");
-        assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
-        assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
-      }
-    } finally {
-      live.dispose();
-      booted.dispose();
-    }
-  });
-});
 
 /**
  * Issue #1246: tracks `kick`, `snare` and `vox`, each on its own source; `kick` and `snare` feed
@@ -841,381 +251,509 @@ function vcaDocument() {
   return `${JSON.stringify(model, null, 2)}\n`;
 }
 
-describe("issue 1246 -- live controls drive VCA groups", () => {
-  test("a VCA edit encodes its kind at the engine's VCA index, over both transports", async () => {
-    // Gate 1. Red if the SDK indexes a VCA by its own order of the session (the declaration puts
-    // `drums` at 0), if the engine's export or either session map loses or reorders the VCA list,
-    // or if a VCA record's kind, rack, channel or value words are written otherwise.
-    const document = vcaDocument();
-    assert.deepEqual(JSON.parse(document).vcas.map((vca) => vca.id), ["drums", "fx", "band"],
-      "the document declares the VCAs in an order the index must not follow");
-    const engine = await createOfflineEngine(document, {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    let request;
-    const host = {
-      async sessionMap() {
-        return { tag: "miso.sessionmap.v1", requestId: 1, result: 0, ...engine.sessionMap() };
-      },
-      async command(value) {
-        request = value;
-        const records = encodeBrowserCommands(value.commands);
-        const report = engine.submitCommands(records, value.commands.length);
-        return {
-          tag: "miso.ack.v1",
-          requestId: 2,
-          result: report.result,
-          reason: report.reason,
-          rejectedIndex: report.rejectedIndex,
-          admitted: report.admitted,
-          appliedAtSample: report.appliedAtSample,
-          records,
-        };
-      },
-    };
+
+const OPTIONS = { liveControls: { commandQueueRecords: 64, observationTaps: 1 } };
+
+async function boot(document, extra = {}) {
+  return createOfflineEngine(document, { asset, ...OPTIONS, ...extra });
+}
+
+/** A document with `mutate` applied to its parsed JSON. */
+function variant(document, mutate) {
+  const parsed = JSON.parse(document);
+  mutate(parsed);
+  return JSON.stringify(parsed);
+}
+
+/** The edit a builder made, as the plain address/value the frame carries. */
+function plain(set) {
+  return set.edits.map((edit) => ({
+    owner: edit.address.owner,
+    section: edit.address.section,
+    control: edit.address.control,
+    lane: edit.address.lane,
+    value: edit.value,
+    ...(edit.rampSamples === undefined ? {} : { rampSamples: edit.rampSamples }),
+  }));
+}
+
+const MAP = {
+  tracks: ["t"], sources: [], metersAttached: false, submixes: ["s"], routes: ["r"], vcas: ["v"],
+};
+
+describe("#1563B -- a builder is a set of SET_CONTROL edits at the core's address", () => {
+  // Gate 3's other half: the rows, sections and lanes are the core's, spelled here as numbers so a
+  // builder that moved to another row turns red even if it still read a table.
+  test("every strip, send, VCA and effect builder names its owner, section, row and lane", () => {
+    const edits = new LiveControlEdits(MAP);
+    const track = edits.track("t");
+    const strip = { kind: "strip", id: "t" };
+    const builtins = { kind: "builtins" };
+    const own = { kind: "own" };
+    const row = (control, value, lane = "both", extra = {}) =>
+      ({ owner: strip, section: builtins, control, lane, value, ...extra });
+
+    assert.deepEqual(plain(track.faderDb(-6, { channel: "left", smoothingSamples: 32 })),
+      [row(5, -6, "left", { rampSamples: 32 })]);
+    assert.deepEqual(plain(track.mute(true, { channel: "right" })), [row(6, 1, "right")]);
+    assert.deepEqual(plain(track.trimDb(1.5)), [row(2, 1.5)]);
+    assert.deepEqual(plain(track.polarityInvert(true, { smoothingSamples: 0 })),
+      [row(1, 1, "both", { rampSamples: 0 })]);
+    assert.deepEqual(plain(track.hpfHz(80, { channel: "left" })), [row(3, 80, "left")]);
+    assert.deepEqual(plain(track.lpfHz(12_000)), [row(4, 12_000)]);
+    assert.deepEqual(plain(track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }, { channel: "right" })),
+      [row(3, 80, "right"), row(4, 12_000, "right")]);
+    assert.deepEqual(plain(track.pan(-0.5, 0.25, { smoothingSamples: 16 })),
+      [row(12, -0.5, "left", { rampSamples: 16 }), row(12, 0.25, "right", { rampSamples: 16 })]);
+    assert.deepEqual(plain(track.matrix({ ll: 1, lr: 0.5, rl: -0.5, rr: 0.25 })),
+      [row(7, 1), row(8, 0.5), row(9, -0.5), row(10, 0.25)]);
+    assert.deepEqual(plain(track.solo(true)),
+      [{ owner: strip, section: own, control: 2, lane: "both", value: 1 }]);
+
+    const submix = edits.submix("s");
+    assert.deepEqual(plain(submix.faderDb(-3)),
+      [{ owner: { kind: "strip", id: "s" }, section: builtins, control: 5, lane: "both", value: -3 }]);
+
+    const send = edits.route("r");
+    const route = (control, value, extra = {}) =>
+      ({ owner: { kind: "route", id: "r" }, section: own, control, lane: "both", value, ...extra });
+    assert.deepEqual(plain(send.gainDb(-12, { smoothingSamples: 64 })),
+      [route(1, -12, { rampSamples: 64 })]);
+    assert.deepEqual(plain(send.mute(true)), [route(2, 1)]);
+    assert.deepEqual(plain(send.matrix({ ll: 0.5, lr: 0.25, rl: -0.75, rr: 0.125 })),
+      [route(3, 0.5), route(4, 0.25), route(5, -0.75), route(6, 0.125)]);
+    assert.deepEqual(plain(send.followsMute(true)), [route(7, 1)]);
+
+    const vca = edits.vca("v");
+    const vcaRow = (control, value, lane, extra = {}) =>
+      ({ owner: { kind: "vca", id: "v" }, section: own, control, lane, value, ...extra });
+    assert.deepEqual(plain(vca.faderDb(1.5, { channel: "right", smoothingSamples: 64 })),
+      [vcaRow(1, 1.5, "right", { rampSamples: 64 })]);
+    assert.deepEqual(plain(vca.mute(true, { channel: "left" })), [vcaRow(2, 1, "left")]);
+
+    const compressor = track.console("slot", "miso.compressor");
+    const threshold = CATALOG.effects.find((e) => e.id === "miso.compressor")
+      .parameters.find((p) => p.name === "threshold");
+    assert.deepEqual(plain(compressor.parameter("threshold", -24, { smoothingSamples: 8 })),
+      [{ owner: strip, section: { kind: "console", slot: "slot" }, control: threshold.id, lane: "both", value: -24, rampSamples: 8 }]);
+    assert.deepEqual(plain(track.insert("ins", "miso.compressor").bypass(true)),
+      [{ owner: strip, section: { kind: "inserts", effect: "ins" }, control: 0, lane: "both", value: 1 }]);
+  });
+
+  test("an absent ramp stays absent, an explicit one is carried, 0 included", () => {
+    const track = new LiveControlEdits(MAP).track("t");
+    assert.equal("rampSamples" in track.faderDb(-3).edits[0], false);
+    assert.equal(track.faderDb(-3, { smoothingSamples: 0 }).edits[0].rampSamples, 0);
+    assert.equal(track.faderDb(-3, { smoothingSamples: 4_294_967_295 }).edits[0].rampSamples, 4_294_967_295);
+  });
+
+  test("the builders refuse only what the frame cannot hold", () => {
+    const edits = new LiveControlEdits(MAP);
+    const track = edits.track("t");
+    // A value is a number, a ramp a u32, a lane one of three names, an ID a string.
+    for (const bad of [-1, 1.5, 4_294_967_296, Number.NaN]) {
+      assert.throws(() => track.faderDb(0, { smoothingSamples: bad }), /smoothingSamples must be a u32/);
+    }
+    assert.throws(() => track.faderDb(0, { channel: "diagonal" }), /channel must be left, right, or both/);
+    assert.throws(() => edits.track(1), (error) => error instanceof MisoUsageError);
+    assert.throws(() => edits.route(null), MisoUsageError);
+    assert.throws(() => edits.vca(undefined), MisoUsageError);
+    // Nothing else: a value outside any domain, a lane a row does not allow, a bad ID are built and
+    // left to the core.
+    assert.equal(track.faderDb(30).edits[0].value, 30);
+    assert.equal(track.faderDb(Number.NaN).edits[0].value, Number.NaN);
+    assert.equal(track.pan(-2, 2).edits.length, 2);
+    assert.equal(edits.track("nope").faderDb(0).edits[0].address.owner.id, "nope");
+    assert.equal(edits.route("drums-out").mute(true).edits[0].address.owner.id, "drums-out");
+    const compressor = track.console("slot", "miso.compressor");
+    assert.equal(compressor.parameter("threshold", 100).edits[0].value, 100);
+    assert.equal(compressor.parameter("threshold", -18, { channel: "left" }).edits[0].address.lane, "left");
+    assert.throws(() => compressor.parameter({ key: "threshold", value: true }), /must be numeric/);
+    assert.throws(() => compressor.parameter({ key: "threshold", value: -18, unit: "db" }), /unknown field 'unit'/);
+    assert.throws(() => compressor.parameter({ key: "no-such", value: 1 }), /has no parameter 'no-such'/);
+  });
+
+  test("a value edit needs the instance's stable ID, which an index resolves only with a session", () => {
+    const edits = new LiveControlEdits(MAP);
+    const byIndex = edits.track("t").effect("console", 0, "miso.compressor");
+    assert.throws(() => byIndex.parameter("threshold", -18), /stable ID/);
+    assert.throws(() => byIndex.bypass(true), /stable ID/);
+    assert.throws(() => edits.track("t").console("slot", "miso.compressor")
+      .observe("Gain Reduction", true, 1), /names its effect by index/);
+    assert.throws(() => edits.track("t").insert(0, "miso.compressor"), /nothing to resolve an index against/);
+  });
+});
+
+describe("#1563B gate 2 -- one refusal on both engines", () => {
+  const CASES = [
+    ["a fader of 30 dB", (edit) => edit.track("t").faderDb(30), "control.domain"],
+    ["a pan of 2.0", (edit) => edit.track("t").pan(2, 0), "control.domain"],
+    ["a trim of NaN", (edit) => edit.track("t").trimDb(Number.NaN), "control.domain"],
+    ["a fader on an unknown strip ID", (edit) => edit.track("nope").faderDb(-6), "control.address.unknown"],
+  ];
+
+  async function refuseAndCompare(controls, engine, untouched, set) {
+    const before = await controls.queue.flush();
+    let refusal;
     try {
-      assert.deepEqual(engine.sessionMap().vcas, ["band", "drums", "fx"]);
-      for (const controls of [engine.liveControls(), await createBrowserLiveControls(host)]) {
-        const drums = controls.edit.vca("drums");
-        const edits = [
-          drums.faderDb(-6, { smoothingSamples: 0 }),
-          drums.mute(true, { channel: "left", smoothingSamples: 32 }),
-          controls.edit.vca("band").faderDb(1.5, { channel: "right", smoothingSamples: 64 }),
-        ];
-        assert.deepEqual(edits.map((edit) => edit.kind), ["vcaFaderDb", "vcaMute", "vcaFaderDb"]);
-        assert.deepEqual(edits.map((edit) => edit.trackIndex), [1, 1, 0]);
-        const report = await controls.submit(...edits);
-        assert.equal(report.ok, true, report.reasonName);
-        assert.equal(report.admitted, 3);
+      await controls.submit(set);
+    } catch (error) {
+      refusal = error;
+    }
+    assert.ok(refusal instanceof MisoControlRefusal, "the core refused");
+    for (let block = 0; block < 4; block += 1) {
+      feed(engine, block);
+      feed(untouched, block);
+      const [a, b] = [engine.render(), untouched.render()];
+      assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
+      assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
+    }
+    assert.equal(refusal.revision, before.revision, "a refusal commits no revision");
+    return refusal;
+  }
+
+  for (const transport of ["headless", "browser"]) {
+    test(`${transport}: each refusal carries the core's code, once, and changes nothing`, async () => {
+      for (const [what, build, code] of CASES) {
+        const engine = await boot(compressorDocument());
+        const untouched = await boot(compressorDocument());
+        try {
+          const controls = transport === "headless"
+            ? engine.liveControls()
+            : await createBrowserLiveControls(engineHost(engine));
+          const refusal = await refuseAndCompare(controls, engine, untouched, build(controls.edit));
+          assert.equal(refusal.code, code, what);
+          assert.equal(refusal.status, "validation_failed", what);
+          assert.equal(refusal.editIndex, 0, what);
+        } finally {
+          engine.dispose();
+          untouched.dispose();
+        }
       }
-      const common = { rack: 255, effectIndex: 0, parameterId: 0 };
-      assert.deepEqual(request, {
-        commands: [
-          { kind: 16, ...common, channel: 2, trackIndex: 1, smoothingSamples: 0, values: [-6, 0, 0, 0] },
-          { kind: 17, ...common, channel: 0, trackIndex: 1, smoothingSamples: 32, values: [1, 0, 0, 0] },
-          { kind: 16, ...common, channel: 1, trackIndex: 0, smoothingSamples: 64, values: [1.5, 0, 0, 0] },
-        ],
+    });
+  }
+});
+
+/** Feed one block of a distinct deterministic signal per source, so a gain moves only its own sum. */
+function renderBlocks(engine, from, count) {
+  const out = [];
+  for (let block = from; block < from + count; block += 1) {
+    feedDistinct(engine, block);
+    out.push(engine.render());
+  }
+  return out;
+}
+
+/**
+ * Gate 3, through the shipped module: send `edit` to a live engine, and after the edit has settled
+ * its output is that of an engine booted from the document that holds the value. `exact` rows are
+ * memoryless, so the blocks are equal bit for bit; a row with filter or detector state is held to a
+ * tolerance, because the booted engine's state has a different history.
+ */
+async function liveEqualsBooted({ base, booted, edit, path = "live", exact = true, settle = 24 }) {
+  const live = await boot(base);
+  const reference = await boot(booted);
+  try {
+    const before = [renderBlocks(live, 0, 4), renderBlocks(reference, 0, 4)];
+    assert.ok(
+      before[0].some((block, index) => block.left.some((sample, at) => sample !== before[1][index].left[at])
+        || block.right.some((sample, at) => sample !== before[1][index].right[at])),
+      "the edit must be audible, or the comparison proves nothing",
+    );
+    const controls = live.liveControls();
+    const report = await controls.submit(edit(controls.edit));
+    assert.equal(report.ok, true);
+    assert.equal(report.path, path);
+    renderBlocks(live, 4, settle);
+    renderBlocks(reference, 4, settle);
+    const [a, b] = [renderBlocks(live, 4 + settle, 4), renderBlocks(reference, 4 + settle, 4)];
+    let peak = 0;
+    let worst = 0;
+    a.forEach((block, index) => {
+      for (const side of ["left", "right"]) {
+        block[side].forEach((sample, at) => {
+          peak = Math.max(peak, Math.abs(b[index][side][at]));
+          worst = Math.max(worst, Math.abs(sample - b[index][side][at]));
+          if (exact) assert.equal(sample, b[index][side][at], `${side} block ${index} sample ${at}`);
+        });
+      }
+    });
+    assert.ok(peak > 0, "the mix carries signal");
+    if (!exact) assert.ok(worst <= 1e-2 * peak, `settled to the booted value (error ${worst} of peak ${peak})`);
+  } finally {
+    live.dispose();
+    reference.dispose();
+  }
+}
+
+describe("#1563B gate 3 -- every builder renders as the document that holds its value", () => {
+  const frames = 128 * 64;
+  const doc = () => sessionDocument({ frames });
+  const track = (mutate) => (document) => { mutate(document.tracks[0]); };
+  const both = (track, section, key, value) => {
+    track[section].left[key] = value;
+    track[section].right[key] = value;
+  };
+
+  const ROWS = [
+    ["track fader, both lanes", doc(), track((t) => { t.fader.left_db = -6; t.fader.right_db = -6; }),
+      (e) => e.track("t").faderDb(-6, { smoothingSamples: 0 })],
+    ["track fader, one lane", doc(), track((t) => { t.fader.left_db = -9; }),
+      (e) => e.track("t").faderDb(-9, { channel: "left", smoothingSamples: 0 })],
+    ["track mute, one lane", doc(), track((t) => { t.fader.left_mute = true; }),
+      (e) => e.track("t").mute(true, { channel: "left", smoothingSamples: 0 })],
+    ["track pan", doc(), track((t) => { t.pan.left = -0.25; t.pan.right = 0.75; }),
+      (e) => e.track("t").pan(-0.25, 0.75, { smoothingSamples: 0 })],
+    ["track trim, one lane", doc(), track((t) => { t.builtins.right.trim_db = 3; }),
+      (e) => e.track("t").trimDb(3, { channel: "right", smoothingSamples: 0 })],
+    ["track polarity", doc(), track((t) => both(t, "builtins", "polarity_invert", true)),
+      (e) => e.track("t").polarityInvert(true, { smoothingSamples: 0 })],
+  ];
+  for (const [name, base, mutate, edit] of ROWS) {
+    test(name, () => liveEqualsBooted({ base, booted: variant(base, mutate), edit }));
+  }
+
+  test("track matrix, on a strip in matrix mode", async () => {
+    const matrix = { ll: 0.5, lr: 0.25, rl: -0.25, rr: 0.75, smoothing_samples: 0 };
+    const base = variant(doc(), (d) => {
+      delete d.tracks[0].pan;
+      d.tracks[0].matrix = { ll: 1, lr: 0, rl: 0, rr: 1, smoothing_samples: 0 };
+    });
+    await liveEqualsBooted({
+      base,
+      booted: variant(base, (d) => { d.tracks[0].matrix = matrix; }),
+      edit: (e) => e.track("t").matrix({ ll: 0.5, lr: 0.25, rl: -0.25, rr: 0.75 }, { smoothingSamples: 0 }),
+    });
+  });
+
+  test("a strip in the other shape is refused by the core as inactive", async () => {
+    const engine = await boot(doc());
+    try {
+      const controls = engine.liveControls();
+      const refusal = await controls.submit(
+        controls.edit.track("t").matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
+      ).catch((error) => error);
+      assert.ok(refusal instanceof MisoControlRefusal);
+      assert.equal(refusal.code, "control.inactive");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  const STATEFUL = [
+    ["input HPF", track((t) => both(t, "builtins", "hpf_hz", 400)), (e) => e.track("t").hpfHz(400)],
+    ["input LPF", track((t) => both(t, "builtins", "lpf_hz", 3000)), (e) => e.track("t").lpfHz(3000)],
+    ["both input filters, one lane", track((t) => { t.builtins.left.hpf_hz = 300; t.builtins.left.lpf_hz = 5000; }),
+      (e) => e.track("t").inputFilters({ hpfHz: 300, lpfHz: 5000 }, { channel: "left" })],
+  ];
+  for (const [name, mutate, edit] of STATEFUL) {
+    test(name, () => liveEqualsBooted({ base: doc(), booted: variant(doc(), mutate), edit, exact: false }));
+  }
+
+  const thresholdId = CATALOG.effects.find((row) => row.id === "miso.compressor")
+    .parameters.find((row) => row.name === "threshold").id;
+  const compressor = () => compressorDocument(frames);
+
+  test("effect parameter on a console slot", () => liveEqualsBooted({
+    base: compressor(),
+    booted: variant(compressor(), (d) => {
+      d.tracks[0].console[0].params.find((p) => p.parameter_id === thresholdId).value = -40;
+    }),
+    edit: (e) => e.track("t").console("compressor", "miso.compressor").parameter("threshold", -40),
+    exact: false,
+    settle: 40,
+  }));
+
+  // The bypass is a crossfade in the core (#1341); its row moves to that issue's gates. Until then
+  // the edit is admitted and the output settles to the bypassed render only if the core's live
+  // bypass is the shunt, so this row is recorded and not gating.
+  test("effect bypass on a console slot", { todo: "#1341: the core crossfades the bypass" }, () => liveEqualsBooted({
+    base: compressor(),
+    booted: variant(compressor(), (d) => { d.tracks[0].console[0].bypass = true; }),
+    edit: (e) => e.track("t").console("compressor", "miso.compressor").bypass(true),
+    exact: false,
+  }));
+
+  test("solo reports the monitor path and leaves the mix alone", async () => {
+    const engine = await boot(doc());
+    try {
+      const controls = engine.liveControls();
+      const report = await controls.submit(controls.edit.track("t").solo(true));
+      assert.equal(report.ok, true);
+      assert.equal(report.path, "monitor");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("submix fader", async () => {
+    const base = submixDocument();
+    await liveEqualsBooted({
+      base,
+      booted: submixDocument({ drumsFaderDb: -6 }),
+      edit: (e) => e.submix("drums").faderDb(-6, { smoothingSamples: 0 }),
+    });
+  });
+
+  test("send gain, mute and matrix", async () => {
+    const base = sendSession().toJson();
+    const withRoute = (fields) => variant(base, (d) => {
+      Object.assign(d.routes.find((r) => r.id === "kick-verb"), fields);
+    });
+    await liveEqualsBooted({
+      base, booted: withRoute({ gain_db: -12 }),
+      edit: (e) => e.route("kick-verb").gainDb(-12, { smoothingSamples: 0 }),
+    });
+    await liveEqualsBooted({
+      base, booted: withRoute({ mute: true }),
+      edit: (e) => e.route("kick-verb").mute(true, { smoothingSamples: 0 }),
+    });
+    await liveEqualsBooted({
+      base, booted: withRoute({ channel_matrix: { ll: 0.5, lr: 0.25, rl: 0, rr: 0.75 } }),
+      edit: (e) => e.route("kick-verb").matrix({ ll: 0.5, lr: 0.25, rl: 0, rr: 0.75 }, { smoothingSamples: 0 }),
+    });
+  });
+
+  test("VCA fader and a one-lane mute", async () => {
+    await liveEqualsBooted({
+      base: vcaSession().toJson(),
+      booted: vcaSession({ drums: { leftDb: -6, rightDb: -6 } }).toJson(),
+      edit: (e) => e.vca("drums").faderDb(-6, { smoothingSamples: 0 }),
+    });
+    await liveEqualsBooted({
+      base: vcaSession().toJson(),
+      booted: vcaSession({ fx: { leftMute: true } }).toJson(),
+      edit: (e) => e.vca("fx").mute(true, { channel: "left", smoothingSamples: 0 }),
+    });
+  });
+});
+
+describe("#1563B -- the browser transport posts the same frames and decodes the core's replies", () => {
+  test("a transaction goes out as a control frame at the core's revision, and the reply is the report", async () => {
+    const engine = await boot(compressorDocument());
+    try {
+      const frames = [];
+      const controls = await createBrowserLiveControls(engineHost(engine, { frames }));
+      // The queue starts at the core's committed revision (the document's), not at 0, and the probe
+      // that read it drew request ID 1.
+      assert.equal(controls.queue.revision, engine.controlRevision());
+      assert.ok(controls.queue.revision > 0n);
+      const report = await controls.submit(
+        controls.edit.track("t").faderDb(-6, { channel: "left", smoothingSamples: 32 }),
+        controls.edit.track("t").trimDb(2),
+      );
+      assert.equal(report.ok, true);
+      assert.equal(report.path, "live");
+      assert.equal(report.appliedOperations, 2);
+      assert.equal(report.revision, engine.controlRevision());
+      const ids = frames.map((frame) => new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true));
+      assert.deepEqual(ids, [1n, 2n], "the probe and the transaction share one allocator");
+      assert.equal(controls.queue.requestIds.next(), 3n, "a catalog read would draw the next ID");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a call the host refuses outright is the engine's error with its diagnostics", async () => {
+    const engine = await boot(compressorDocument());
+    try {
+      const host = engineHost(engine);
+      const controls = await createBrowserLiveControls(host);
+      host.control = async () => ({
+        tag: "miso.control.v1", requestId: 9, result: 10,
+        response: new TextEncoder().encode("web.apply.rebuild_pending\t\n"), revision: 1n,
       });
+      await assert.rejects(controls.submit(controls.edit.track("t").faderDb(-6)), (error) =>
+        error.result === 10 && error.diagnostics[0].code === "web.apply.rebuild_pending");
     } finally {
       engine.dispose();
     }
-
-    // Without VCAs, and without live controls, the engine enumerates none.
-    for (const [document, liveControls] of [
-      [sendSession(), { commandQueueRecords: 64 }],
-      [vcaSession(), undefined],
-    ]) {
-      const other = await createOfflineEngine(document, { asset, liveControls });
-      try {
-        assert.deepEqual(other.sessionMap().vcas, []);
-      } finally {
-        other.dispose();
-      }
-    }
   });
 
-  test("an unknown VCA ID refuses with unknownVca before any record is built", async () => {
-    // Gate 1. Red if the SDK hands an ID it cannot place -- a typo, a member strip's ID -- to some
-    // index instead of refusing, or refuses it under a reason other than the engine's.
-    const engine = await createOfflineEngine(vcaSession(), {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
+  test("observation edits stay command records on the browser transport", async () => {
+    const engine = await boot(compressorDocument());
     try {
-      const unknownVca = (pattern) => (error) =>
-        error instanceof MisoUsageError && error.diagnosticCode === "unknownVca"
-          && pattern.test(error.message);
-      const listed = /no VCA '[^']+'; expected one of band, drums, fx/;
-      for (const edits of [engine.liveControls().edit, new LiveControlEdits(engine.sessionMap())]) {
-        assert.throws(() => edits.vca("nope"), unknownVca(listed));
-        assert.throws(() => edits.vca("kick"), unknownVca(listed));
-        assert.throws(() => edits.vca("bus"), unknownVca(listed));
-        assert.equal(edits.vca("fx").mute(false).trackIndex, 2);
-      }
+      const host = engineHost(engine);
+      const controls = await createBrowserLiveControls(host, undefined, undefined, undefined);
+      const compressor = controls.edit.track("t").effect("console", 0, "miso.compressor");
+      const report = await controls.submit(compressor.observe("Gain Reduction", true, 2));
+      assert.equal(report.ok, true);
+      assert.equal(report.admitted, 1);
+      assert.equal(report.reasonName, "none");
+      await assert.rejects(
+        controls.submit(compressor.observe("Gain Reduction", true, 2), controls.edit.track("t").faderDb(0)),
+        /value edits or observation edits, not both/,
+      );
     } finally {
       engine.dispose();
-    }
-    const none = new LiveControlEdits({ tracks: [], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] });
-    assert.throws(() => none.vca("drums"), (error) =>
-      error instanceof MisoUsageError && error.diagnosticCode === "unknownVca"
-        && /expected one of none/.test(error.message));
-  });
-
-  test("a live VCA fader and mute equal the session booted at those values from the edit's block on", async () => {
-    // Gate 2, through the shipped module. Red if the VCA export, the session map or the encoding
-    // disagrees with the engine about which VCA an index names, which kind a record is, which
-    // lane it selects, or the offset word.
-    const options = { asset, liveControls: { commandQueueRecords: 64 } };
-    for (const [what, edit, edited] of [
-      ["fader", (controls) => controls.edit.vca("drums").faderDb(-6, { smoothingSamples: 0 }),
-        { drums: { leftDb: -6, rightDb: -6 } }],
-      ["left-lane mute", (controls) => controls.edit.vca("fx").mute(true, { channel: "left", smoothingSamples: 0 }),
-        { fx: { leftMute: true } }],
-    ]) {
-      const live = await createOfflineEngine(vcaSession(), options);
-      const booted = await createOfflineEngine(vcaSession(edited), options);
-      try {
-        const boundary = 4;
-        const quantum = live.shape().quantumFrames;
-        let differedBefore = false;
-        for (let block = 0; block < boundary; block += 1) {
-          feedDistinct(live, block);
-          feedDistinct(booted, block);
-          const [a, b] = [live.render(), booted.render()];
-          differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
-        }
-        assert.ok(differedBefore, `${what}: the VCA must be audible, or the comparison proves nothing`);
-
-        const controls = live.liveControls();
-        const report = await controls.submit(edit(controls));
-        assert.equal(report.ok, true, `${what}: ${report.reasonName}`);
-        assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
-        for (let block = boundary; block < boundary + 4; block += 1) {
-          feedDistinct(live, block);
-          feedDistinct(booted, block);
-          const [a, b] = [live.render(), booted.render()];
-          assert.ok(a.left.some((sample) => sample !== 0), `${what}: the mix carries signal`);
-          assert.ok(a.right.some((sample) => sample !== 0), `${what}: the right lane carries signal`);
-          assert.deepEqual([...a.left], [...b.left], `${what}: left block ${block}`);
-          assert.deepEqual([...a.right], [...b.right], `${what}: right block ${block}`);
-        }
-      } finally {
-        live.dispose();
-        booted.dispose();
-      }
     }
   });
 });
 
-describe("issue 1364 -- an absent ramp length is the session default", () => {
-  const MARKER = 0xffff_ffff;
-  const map = {
-    tracks: ["t"],
-    sources: [],
-    metersAttached: false,
-    submixes: ["s"],
-    routes: ["r"],
-    vcas: ["v"],
-  };
+describe("#1563B -- callers are isolated in one transaction queue", () => {
+  test("a refused out-of-domain edit does not drop another caller's valid edits", async () => {
+    // Plausible defect: coalescing three callers into one atomic transaction refuses the two valid
+    // submits with the invalid one, or blames the wrong submit.
+    const engine = await boot(sessionDocument({ frames: 128 * 16 }));
+    const untouched = await boot(sessionDocument({ frames: 128 * 16 }));
+    try {
+      const controls = engine.liveControls();
+      const edit = controls.edit.track("t");
+      // The first goes out alone; the next three are staged while it is in flight and share one
+      // transaction.
+      const first = controls.submit(edit.faderDb(-3, { smoothingSamples: 0 }));
+      const bad = controls.submit(edit.trimDb(99));
+      const good = controls.submit(edit.polarityInvert(true, { smoothingSamples: 0 }),
+        edit.trimDb(2, { channel: "left", smoothingSamples: 0 }));
+      const alsoGood = controls.submit(edit.hpfHz(100));
+      const outcomes = await Promise.allSettled([first, bad, good, alsoGood]);
+      assert.deepEqual(outcomes.map((o) => o.status), ["fulfilled", "rejected", "fulfilled", "fulfilled"]);
+      const refusal = outcomes[1].reason;
+      assert.ok(refusal instanceof MisoControlRefusal);
+      assert.equal(refusal.code, "control.domain");
+      assert.equal(refusal.editIndex, 0, "the index is the submit's own edit");
+      assert.equal(outcomes[2].value.appliedOperations, 3, "the valid callers went in one transaction");
 
-  /** Each ramped builder method, given the options to pass. */
-  function rampedEdits(options) {
-    const edits = new LiveControlEdits(map);
-    const track = edits.track("t");
-    const submix = edits.submix("s");
-    const send = edits.route("r");
-    const vca = edits.vca("v");
-    return {
-      pan: track.pan(-0.5, 0.5, options),
-      matrix: track.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, options),
-      faderDb: track.faderDb(-3, options),
-      mute: track.mute(true, options),
-      trimDb: track.trimDb(-3, options),
-      polarityInvert: track.polarityInvert(true, options),
-      solo: track.solo(true, options),
-      submixFaderDb: submix.faderDb(-3, options),
-      routeGainDb: send.gainDb(-3, options),
-      routeMute: send.mute(true, options),
-      routeMatrix: send.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, options),
-      vcaFaderDb: vca.faderDb(-3, options),
-      vcaMute: vca.mute(true, options),
-    };
-  }
-
-  /** The `u32` at the record's `smoothingSamples` offset, as the SDK's record encoder writes it. */
-  function wireWord(edit) {
-    const layout = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples");
-    assert.equal(layout.offset, 16, "the ramp word sits at offset 16 of the 48-byte record");
-    return new DataView(encodeLaneEdits([edit]).buffer).getUint32(layout.offset, true);
-  }
-
-  test("every ramped builder method writes the session-default marker when no length is given, and the given length otherwise", () => {
-    // Red if any method's default is still 0 (a step), if the marker is not 0xFFFFFFFF, if a method
-    // resolves the word itself instead of leaving it to the encoder, or if a
-    // given length -- 0 included -- is replaced.
-    const absent = rampedEdits({});
-    assert.equal(Object.keys(absent).length, 13, "the twelve ramped kinds, and the submix strip fader");
-    for (const [name, edit] of Object.entries(absent)) {
-      assert.equal(edit.smoothingSamples, undefined, `${name} record leaves the length absent`);
-      assert.equal(wireWord(edit), MARKER, `${name} wire`);
-    }
-    for (const given of [0, 37, MARKER - 1]) {
-      for (const [name, edit] of Object.entries(rampedEdits({ smoothingSamples: given }))) {
-        assert.equal(edit.smoothingSamples, given, `${name} record at ${given}`);
-        assert.equal(wireWord(edit), given, `${name} wire at ${given}`);
-      }
-    }
-  });
-
-  test("the kinds that carry no ramp still write 0", () => {
-    // Red if `trackEdit`'s default moved to the marker: the engine refuses a non-zero word on an
-    // input filter or a bypass as malformed.
-    const track = new LiveControlEdits(map).track("t");
-    const compressor = track.effect("console", 0, "miso.compressor");
-    for (const edit of [
-      track.hpfHz(80),
-      track.lpfHz(12_000),
-      track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }),
-      compressor.bypass(true),
-    ]) {
-      assert.equal(wireWord(edit), 0, edit.kind);
-    }
-  });
-
-  test("the marker is not a length: smoothingSamples 4294967295 throws on every ramped method", () => {
-    // Red if the marker passes as an explicit length (the engine would then read it as "default"
-    // and the author's `u32::MAX` would silently mean something else).
-    const names = Object.keys(rampedEdits({}));
-    const attempts = {
-      pan: (o) => new LiveControlEdits(map).track("t").pan(0, 0, o),
-      matrix: (o) => new LiveControlEdits(map).track("t").matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, o),
-      faderDb: (o) => new LiveControlEdits(map).track("t").faderDb(0, o),
-      mute: (o) => new LiveControlEdits(map).track("t").mute(true, o),
-      trimDb: (o) => new LiveControlEdits(map).track("t").trimDb(0, o),
-      polarityInvert: (o) => new LiveControlEdits(map).track("t").polarityInvert(true, o),
-      solo: (o) => new LiveControlEdits(map).track("t").solo(true, o),
-      submixFaderDb: (o) => new LiveControlEdits(map).submix("s").faderDb(0, o),
-      routeGainDb: (o) => new LiveControlEdits(map).route("r").gainDb(0, o),
-      routeMute: (o) => new LiveControlEdits(map).route("r").mute(true, o),
-      routeMatrix: (o) => new LiveControlEdits(map).route("r").matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, o),
-      vcaFaderDb: (o) => new LiveControlEdits(map).vca("v").faderDb(0, o),
-      vcaMute: (o) => new LiveControlEdits(map).vca("v").mute(true, o),
-    };
-    assert.deepEqual(Object.keys(attempts), names);
-    for (const [name, attempt] of Object.entries(attempts)) {
-      assert.throws(
-        () => attempt({ smoothingSamples: MARKER }),
-        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
-        name,
+      // The valid edits landed: an engine given only them renders the same.
+      const lone = untouched.liveControls();
+      await lone.submit(lone.edit.track("t").faderDb(-3, { smoothingSamples: 0 }));
+      await lone.submit(
+        lone.edit.track("t").polarityInvert(true, { smoothingSamples: 0 }),
+        lone.edit.track("t").trimDb(2, { channel: "left", smoothingSamples: 0 }),
+        lone.edit.track("t").hpfHz(100),
       );
-      // The bounds that were already there still hold.
-      for (const bad of [-1, 1.5, 4_294_967_296, Number.NaN]) {
-        assert.throws(() => attempt({ smoothingSamples: bad }), /smoothingSamples must be a u32/, `${name} ${bad}`);
+      for (let block = 0; block < 6; block += 1) {
+        feed(engine, block);
+        feed(untouched, block);
+        const [a, b] = [engine.render(), untouched.render()];
+        assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
+        assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
       }
+    } finally {
+      engine.dispose();
+      untouched.dispose();
     }
   });
 
-  /**
-   * A literal `LaneEdit` (a plain object, as an app writes one), with no `smoothingSamples`. The
-   * effect kinds address an insert (rack `1`); the strip kinds carry no rack (`255`).
-   */
-  function literal(kind, extra = {}) {
-    const effectKind = kind === "effectBypass" || kind === "effectParam" || kind.startsWith("observe");
-    return {
-      kind,
-      trackIndex: 0,
-      rack: effectKind ? 1 : 255,
-      channel: 2,
-      values: [0, 0, 0, 0],
-      ...extra,
-    };
-  }
-  const RAMPED_KINDS = [
-    "pan", "matrix", "faderDb", "mute", "solo", "trimDb", "polarityInvert",
-    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
-  ];
-  const UNRAMPED_KINDS = [
-    "effectBypass", "effectParam", "inputFilters", "observeSubscribe", "observeUnsubscribe",
-  ];
-
-  test("the package root exports the marker and none of the encoder's ramp helpers", async () => {
-    // Red if `SESSION_DEFAULT_RAMP` stops being public, or if `checkedRampLength` or
-    // `laneEditSmoothingWord` (internal, in `src/internal/ramp.ts`) leak back through
-    // `export *` of the writer module: neither name is public API.
-    const root = await import("../src/index.ts");
-    assert.equal(root.SESSION_DEFAULT_RAMP, MARKER);
-    assert.equal("checkedRampLength" in root, false);
-    assert.equal("laneEditSmoothingWord" in root, false);
-  });
-
-  test("a literal LaneEdit without a length encodes the marker through the writer's encoder, by kind", () => {
-    // Red if `encodeLaneEdits` writes `smoothingSamples ?? 0` again (a step on a literal edit, the
-    // path `LiveControlWriter` and the headless engine take): the builder evals above never reach it.
-    const at = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples").offset;
-    const word = (edit) => new DataView(encodeLaneEdits([edit]).buffer).getUint32(at, true);
-    for (const kind of RAMPED_KINDS) {
-      assert.equal(word(literal(kind)), MARKER, `${kind} absent`);
-      assert.equal(word(literal(kind, { smoothingSamples: 0 })), 0, `${kind} explicit 0 is a step`);
-      assert.equal(word(literal(kind, { smoothingSamples: 37 })), 37, `${kind} explicit 37`);
-      assert.throws(
-        () => encodeLaneEdits([literal(kind, { smoothingSamples: MARKER })]),
-        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
-        `${kind} explicit marker`,
-      );
-    }
-    for (const kind of UNRAMPED_KINDS) {
-      assert.equal(word(literal(kind)), 0, `${kind} absent stays 0`);
-    }
-    // The writer refuses the marker when the edit is staged, so it never poisons a later flush.
-    const writer = new LiveControlWriter({ submit: () => ({ ok: true }) });
-    assert.throws(() => writer.stage(literal("faderDb", { smoothingSamples: MARKER })), MisoUsageError);
-    assert.equal(writer.pending, 0);
-  });
-
-  test("a literal LaneEdit without a length reaches the worklet host with the marker, by kind", async () => {
-    // Red if the browser transport writes `smoothingSamples ?? 0` again: a literal fader edit sent
-    // to the worklet would then step under every session table.
-    let request;
-    const host = {
-      async sessionMap() {
-        return {
-          tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"], sources: [],
-          metersAttached: false, submixes: [], routes: [], vcas: [],
-        };
-      },
-      async command(value) {
-        request = value;
-        return {
-          tag: "miso.ack.v1", requestId: 2, result: 0, reason: 0, rejectedIndex: 0,
-          admitted: value.commands.length, appliedAtSample: 0n,
-          records: new Uint8Array(value.commands.length * 48),
-        };
-      },
-    };
-    const controls = await createBrowserLiveControls(host);
-    await controls.submit(controls.edit.track("t").faderDb(-3));
-    assert.equal(request.commands[0].smoothingSamples, MARKER, "a builder edit agrees with a literal one");
-    for (const kind of RAMPED_KINDS) {
-      await controls.submit(literal(kind));
-      assert.equal(request.commands[0].smoothingSamples, MARKER, `${kind} absent`);
-      await controls.submit(literal(kind, { smoothingSamples: 0 }));
-      assert.equal(request.commands[0].smoothingSamples, 0, `${kind} explicit 0`);
-      await assert.rejects(
-        controls.submit(literal(kind, { smoothingSamples: MARKER })),
-        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
-        `${kind} explicit marker`,
-      );
-    }
-    for (const kind of UNRAMPED_KINDS) {
-      await controls.submit(literal(kind));
-      assert.equal(request.commands[0].smoothingSamples, 0, `${kind} absent stays 0`);
+  test("an edit that nobody can place is the submit's own refusal, in its own coordinates", async () => {
+    const engine = await boot(sessionDocument());
+    try {
+      const controls = engine.liveControls();
+      const edit = controls.edit.track("t");
+      const first = controls.submit(edit.faderDb(-3));
+      const second = controls.submit(edit.trimDb(1), edit.pan(0, 2));
+      const refusal = await second.catch((error) => error);
+      await first;
+      assert.ok(refusal instanceof MisoControlRefusal);
+      assert.equal(refusal.code, "control.domain");
+      assert.equal(refusal.editIndex, 2, "trim is edit 0, the left pan edit 1, the right pan edit 2");
+    } finally {
+      engine.dispose();
     }
   });
+});
 
-  test("a literal LaneEdit of an unramped kind with a non-u32 length is refused, as the browser refuses it", () => {
-    // Red if `laneEditSmoothingWord` passes an unramped kind's word through unchecked again: the
-    // headless `DataView.setUint32` would then wrap `-1` to `0xFFFFFFFF` and truncate `1.5` to `1`,
-    // so a headless `observeSubscribe` silently got a 1-block window the browser refuses.
-    const at = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples").offset;
-    const word = (edit) => new DataView(encodeLaneEdits([edit]).buffer).getUint32(at, true);
-    for (const kind of UNRAMPED_KINDS) {
-      for (const bad of [-1, 1.5, 0x1_0000_0000, Number.NaN, Number.POSITIVE_INFINITY]) {
-        assert.throws(
-          () => encodeLaneEdits([literal(kind, { smoothingSamples: bad })]),
-          (error) => error instanceof MisoUsageError && /must be a u32/.test(error.message),
-          `${kind} ${bad}`,
-        );
-      }
-      // Every u32 stays a valid word on an unramped kind, the marker's bit pattern included.
-      assert.equal(word(literal(kind, { smoothingSamples: 5 })), 5, `${kind} 5`);
-      assert.equal(word(literal(kind, { smoothingSamples: MARKER })), MARKER, `${kind} u32 max`);
-    }
-    const writer = new LiveControlWriter({ submit: () => ({ ok: true }) });
-    assert.throws(() => writer.stage(literal("observeSubscribe", { smoothingSamples: 1.5 })), MisoUsageError);
-    assert.equal(writer.pending, 0);
-  });
-
+describe("#1563B -- a ramp the edit does not give is the core's", () => {
   /** The one-track document with `control_smoothing` and a constant fader of `faderDb`. */
   function documentWith(controlSmoothing, faderDb = 0) {
     const document = JSON.parse(sessionDocument({ frames: 128 * 24 }));
@@ -1231,19 +769,15 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
    * -6 dB.
    */
   async function differsFromBooted(controlSmoothing, options) {
-    const live = await createOfflineEngine(documentWith(controlSmoothing), {
-      asset,
-      liveControls: { commandQueueRecords: 64 },
-    });
-    const booted = await createOfflineEngine(documentWith(controlSmoothing, -6), { asset });
+    const live = await boot(documentWith(controlSmoothing));
+    const booted = await boot(documentWith(controlSmoothing, -6));
     try {
       const differs = [];
       for (let block = 0; block < 14; block += 1) {
         if (block === 2) {
           const controls = live.liveControls();
           const report = await controls.submit(controls.edit.track("t").faderDb(-6, options));
-          assert.equal(report.ok, true, report.reasonName);
-          assert.equal(report.appliedAtSample, BigInt(2 * live.shape().quantumFrames));
+          assert.equal(report.ok, true);
         }
         feed(live, block);
         feed(booted, block);
@@ -1262,10 +796,9 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
   }
 
   test("a fader move without a length ramps over the session's fader length and lands on the booted value", async () => {
-    // Gate 2, through the shipped module. Red if the SDK still writes 0 (every block settled, the
-    // first one included), if the engine reads the marker as a length, or if it ignores the
-    // session's table: the default table's 20 ms is 960 samples, 7.5 blocks of 128; 2 ms is 96
-    // samples, inside the first block; an explicit all-zero table is a step.
+    // Red if the SDK resolves a ramp of its own (every block settled, the first one included), or
+    // if the core ignores the session's table: the default table's 20 ms is 960 samples, 7.5 blocks
+    // of 128; 2 ms is 96 samples, inside the first block; an explicit all-zero table is a step.
     const defaultTable = await differsFromBooted({ kind: "default" }, {});
     assert.deepEqual(defaultTable.slice(0, 7), Array(7).fill(true), "ramping through block 8");
     assert.deepEqual(defaultTable.slice(8), Array(4).fill(false), "settled from block 10");
@@ -1285,5 +818,64 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
 
     const explicitZero = await differsFromBooted({ kind: "default" }, { smoothingSamples: 0 });
     assert.deepEqual(explicitZero, Array(12).fill(false), "an explicit 0 steps under the default table");
+  });
+});
+
+describe("#1563B -- console slots and inserts resolve by ID on a bus of an SDK-built session", () => {
+  test("the edit names the instance by its stable ID, whichever way it was addressed", async () => {
+    const built = builtSubmixSession();
+    const engine = await boot(built);
+    try {
+      const controls = engine.liveControls();
+      const drums = controls.edit.submix("drums");
+      const glue = drums.insert("glue", "miso.compressor").parameter("threshold", -18);
+      const byIndex = drums.insert(1, "miso.compressor").parameter("threshold", -18);
+      const comp = drums.console("comp", "miso.compressor").bypass(true);
+      assert.deepEqual(plain(glue), plain(byIndex), "an index and its ID are the same address");
+      assert.deepEqual(plain(glue)[0].section, { kind: "inserts", effect: "glue" });
+      assert.deepEqual(plain(comp)[0].section, { kind: "console", slot: "comp" });
+      assert.deepEqual(plain(controls.edit.submix("verb").insert("glue", "miso.compressor").bypass(true))[0].owner,
+        { kind: "strip", id: "verb" });
+      assert.throws(() => drums.insert("ghost", "miso.compressor"),
+        /submix 'drums' has no insert 'ghost'; its inserts are tone, glue/);
+      assert.throws(() => controls.edit.track("kick").insert("glue", "miso.compressor"),
+        /track 'kick' has no insert 'glue'/);
+      assert.throws(() => drums.insert("tone", "miso.compressor"), /is miso.parametric-eq, not miso.compressor/);
+      const report = await controls.submit(glue, comp);
+      assert.equal(report.ok, true);
+
+      // The layout is held to the compiled strips.
+      assert.throws(
+        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }, built),
+        /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
+      );
+    } finally {
+      engine.dispose();
+    }
+  });
+});
+
+describe("#1563B -- a torn acknowledgement is rejected after, never before, the observation transport answers", () => {
+  test("whole-batch admission is checked on the observation report", async () => {
+    let answered = false;
+    const liveControls = new EngineLiveControls(
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
+      {
+        queue: undefined,
+        observe: async () => {
+          answered = true;
+          return {
+            ok: true, result: 0, code: "ok", reason: 0, reasonName: "none",
+            rejectedIndex: 0, admitted: 0, appliedAtSample: 0n,
+          };
+        },
+      },
+    );
+    const compressor = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
+    await assert.rejects(
+      () => liveControls.submit(compressor.observe("Gain Reduction", true, 1)),
+      /violated whole-batch admission/,
+    );
+    assert.equal(answered, true);
   });
 });

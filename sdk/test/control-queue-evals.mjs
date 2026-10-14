@@ -13,8 +13,8 @@ import { readFile } from "node:fs/promises";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { encodeControlTransaction } from "../src/core/control-frame.ts";
-import { ControlTransactionQueue } from "../src/core/control-queue.ts";
+import { encodeControlTransaction, encodeRevisionProbe } from "../src/core/control-frame.ts";
+import { ControlRequestIds, ControlTransactionQueue } from "../src/core/control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
@@ -373,17 +373,227 @@ describe("the headless engine owns one queue", () => {
     assert.throws(() => queue.stage(edit(vocal, 3, 0)), MisoUsageError);
   });
 
-  test("loadSession starts the queue over at the booted revision", async () => {
+  test("the queue starts at the core's committed revision, and loadSession starts it over at the new session's", async () => {
+    // Plausible defect: a queue that assumes a booted session is at revision 0 sends its first
+    // transaction with a stale expectation, and the core refuses it as a revision conflict. The
+    // document's own revision is 1, and a reloaded one can be any.
     const engine = await createOfflineEngine(sessionDocument(), { asset });
     try {
       const queue = engine.controlTransactions();
-      queue.reset(9n);
-      assert.equal(queue.revision, 9n);
-      engine.loadSession(sessionDocument());
+      assert.equal(queue.revision, 1n, "the document's revision, not 0");
+      assert.equal(queue.revision, engine.controlRevision());
+      const edit = {
+        address: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: 5, lane: "both" },
+        value: -3,
+      };
+      assert.equal((await queue.submit([edit])).revision, 2n);
+
+      const reloaded = JSON.parse(sessionDocument());
+      reloaded.revision = "7";
+      engine.loadSession(JSON.stringify(reloaded));
       assert.equal(engine.controlTransactions(), queue);
-      assert.equal(queue.revision, 0n);
+      assert.equal(queue.revision, 7n);
+      assert.equal(engine.controlRevision(), 7n);
+      assert.equal((await queue.submit([{ ...edit, value: -4 }])).revision, 8n, "accepted at the seeded revision");
+
+      // A refused reboot leaves the queue dropped, never stuck at the old session's revision.
+      assert.throws(() => engine.loadSession("{}"));
+      await assert.rejects(queue.submit([edit]));
     } finally {
       engine.dispose();
     }
+  });
+
+  test("a frame sent through engine.controlFrame shares the queue's request IDs", async () => {
+    const engine = await createOfflineEngine(sessionDocument(), { asset });
+    try {
+      const queue = engine.controlTransactions();
+      const probe = engine.controlFrame(encodeRevisionProbe(queue.requestIds.next()));
+      assert.equal(new DataView(probe.buffer, probe.byteOffset).getBigUint64(32, true), engine.controlRevision());
+      const edit = {
+        address: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: 5, lane: "both" },
+        value: -3,
+      };
+      await queue.submit([edit]);
+      // The probe drew ID 1 and the transaction ID 2: the core's replay cache saw no reuse.
+      assert.equal(queue.requestIds.next(), 3n);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("events the core queues are read after every frame, so the next commit is never refused for them", async () => {
+    // The reliable event lane holds two events; unread, the third commit is refused with
+    // backpressure. Plausible defect: a headless engine that never reads the lane.
+    const engine = await createOfflineEngine(sessionDocument(), { asset });
+    try {
+      const seen = [];
+      const stop = engine.onControlEvent((event) => seen.push(event));
+      const queue = engine.controlTransactions();
+      for (let step = 0; step < 6; step += 1) {
+        const report = await queue.submit([{
+          address: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: 5, lane: "both" },
+          value: -step - 1,
+        }]);
+        assert.equal(report.ok, true);
+      }
+      assert.ok(seen.length >= 6, "each commit queued an event");
+      assert.ok(seen.every((event) => event.lane === 0 || event.lane === 1));
+      stop();
+      await queue.submit([{
+        address: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: 5, lane: "both" },
+        value: -9,
+      }]);
+      assert.ok(engine.discardedControlEvents >= 1, "an event with no listener is counted, not queued");
+    } finally {
+      engine.dispose();
+    }
+  });
+});
+
+describe("callers are isolated in one queue (#1563B)", () => {
+  test("a refusal names one submit, which alone is rejected; the others go again at the refusal's revision", async () => {
+    // Plausible defect: one caller's out-of-domain edit refuses the transaction it was coalesced
+    // into and drops two other callers' valid edits, or blames the wrong submit, or reports an edit
+    // index of the sent transaction instead of the submit's own.
+    const frames = [];
+    const answers = [];
+    const queue = new ControlTransactionQueue((frame) => {
+      frames.push(frame);
+      const requestId = new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
+      // The fixture's refusal names edit 2 of the transaction it answers.
+      const answer = frames.length === 2
+        ? reply("control_domain", requestId, 5n)
+        : reply("applied_live", requestId, BigInt(frames.length));
+      answers.push(answer);
+      return frames.length === 1 ? new Promise((resolve) => { release = () => resolve(answer); }) : answer;
+    });
+    let release;
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const [e0, e1, e2, e3] = [edit(vocal, 2, 0), edit(vocal, 3, 0), edit(vocal, 4, 99), edit(vocal, 5, 0)];
+    const one = queue.submit([e0]);
+    const two = queue.submit([e1, e2]);
+    const three = queue.submit([e3]);
+    release();
+    const outcomes = await Promise.allSettled([first, one, two, three]);
+    assert.deepEqual(outcomes.map((o) => o.status), ["fulfilled", "fulfilled", "rejected", "fulfilled"]);
+    const refusal = outcomes[2].reason;
+    assert.ok(refusal instanceof MisoControlRefusal);
+    assert.equal(refusal.code, "control.domain");
+    assert.equal(refusal.editIndex, 1, "e2 is the second edit of its own submit");
+    assert.equal(frames.length, 3, "the first, the four-edit transaction, and the resend");
+    assert.equal(
+      hexOf(frames[1]),
+      hexOf(encodeControlTransaction({ requestId: 2n, expectedRevision: 1n, edits: [e0, e1, e2, e3] })),
+    );
+    assert.equal(
+      hexOf(frames[2]),
+      hexOf(encodeControlTransaction({ requestId: 3n, expectedRevision: 5n, edits: [e0, e3] })),
+      "the resend leaves out the refused submit whole, and carries the refusal's revision",
+    );
+    assert.equal(outcomes[1].value.revision, 3n);
+    assert.equal(queue.revision, 3n);
+    assert.equal(queue.inFlight, false);
+  });
+
+  test("a submit that is superseded by a refused one still lands its own value", async () => {
+    // Two submits write one address; the later is refused. The earlier one's value was coalesced
+    // away from the first transaction, and it must go in the resend.
+    let calls = 0;
+    const frames = [];
+    let release;
+    const queue = new ControlTransactionQueue((frame) => {
+      frames.push(frame);
+      calls += 1;
+      const requestId = new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
+      if (calls === 1) return new Promise((resolve) => { release = () => resolve(reply("applied_live", requestId, 2n)); });
+      return calls === 2
+        ? reply("control_domain", requestId, 2n) // names edit 2 of the transaction it answers
+        : reply("applied_live", requestId, 3n);
+    });
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    // Three edits so that the fixture's edit index 2 is the later submit's.
+    const early = queue.submit([edit(vocal, 2, -5), edit(vocal, 3, -5)]);
+    const middle = queue.submit([edit(vocal, 4, 0)]);
+    const late = queue.submit([edit(vocal, 2, 99)]);
+    release();
+    await first;
+    const outcomes = await Promise.allSettled([early, middle, late]);
+    assert.deepEqual(outcomes.map((o) => o.status), ["fulfilled", "fulfilled", "rejected"]);
+    assert.equal(outcomes[2].reason.editIndex, 0);
+    // The first transaction held the later value of address 2 last, which is the third edit.
+    assert.equal(
+      hexOf(frames[1]),
+      hexOf(encodeControlTransaction({
+        requestId: 2n, expectedRevision: 2n,
+        edits: [edit(vocal, 3, -5), edit(vocal, 4, 0), edit(vocal, 2, 99)],
+      })),
+    );
+    assert.equal(
+      hexOf(frames[2]),
+      hexOf(encodeControlTransaction({
+        requestId: 3n, expectedRevision: 2n,
+        edits: [edit(vocal, 2, -5), edit(vocal, 3, -5), edit(vocal, 4, 0)],
+      })),
+      "the earlier submit's value of address 2, coalesced away before, goes in the resend",
+    );
+  });
+
+  test("a refusal that names no edit rejects every submit it carried, once", async () => {
+    let calls = 0;
+    const queue = new ControlTransactionQueue((frame) => {
+      calls += 1;
+      const requestId = new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
+      return calls === 1
+        ? new Promise((resolve) => { release = () => resolve(reply("applied_live", requestId, 1n)); })
+        : reply("revision_conflict", requestId, 9n);
+    });
+    let release;
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const a = queue.submit([edit(vocal, 2, 0)]);
+    const b = queue.submit([edit(vocal, 3, 0)]);
+    release();
+    await first;
+    const outcomes = await Promise.allSettled([a, b]);
+    assert.deepEqual(outcomes.map((o) => o.status), ["rejected", "rejected"]);
+    assert.equal(outcomes[0].reason.code, "revision_conflict");
+    assert.equal(calls, 2, "not retried");
+    assert.equal(queue.revision, 9n);
+  });
+
+  test("flush rejects for a staged edit the core refused, not for another caller's", async () => {
+    let calls = 0;
+    const queue = new ControlTransactionQueue((frame) => {
+      calls += 1;
+      const requestId = new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true);
+      // Edit 2 of the first (three-edit) transaction is refused, then everything applies.
+      return calls === 1 ? reply("control_domain", requestId, 1n) : reply("applied_live", requestId, 2n);
+    });
+    queue.stage(edit(vocal, 1, 0));
+    queue.stage(edit(vocal, 2, 0));
+    queue.stage(edit(vocal, 3, 99));
+    await assert.rejects(queue.flush(), MisoControlRefusal);
+
+    calls = 0;
+    const foreign = queue.submit([edit(vocal, 4, 0), edit(vocal, 5, 0), edit(vocal, 6, 99)]);
+    queue.stage(edit(vocal, 7, 0));
+    const flushed = queue.flush();
+    const outcome = await Promise.allSettled([foreign, flushed]);
+    assert.deepEqual(outcome.map((o) => o.status), ["rejected", "fulfilled"], "the foreign refusal is the foreign submit's");
+  });
+});
+
+describe("request IDs come from one allocator", () => {
+  test("a queue draws its transaction IDs from the allocator it was given, and keeps counting", async () => {
+    const ids = new ControlRequestIds();
+    const taken = [ids.next(), ids.next()];
+    assert.deepEqual(taken, [1n, 2n]);
+    const core = fakeCore();
+    const queue = new ControlTransactionQueue(core.send, { requestIds: ids });
+    assert.equal(queue.requestIds, ids);
+    await queue.submit([edit(vocal, 3, 0)]);
+    assert.equal(ids.next(), 4n, "the transaction took 3");
+    const frame = core.frames[0];
+    assert.equal(new DataView(frame.buffer, frame.byteOffset).getBigUint64(24, true), 3n);
   });
 });

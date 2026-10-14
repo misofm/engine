@@ -1352,6 +1352,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         closed = true;
         measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
+        // Edits staged for the host are rejected and no new one is accepted; a transaction already
+        // in flight settles.
+        void semanticLiveControls?.then((controls) => controls.queue.close(), () => undefined);
         closePromise ??= (async () => {
           // The first failure in step order wins; later ones are dropped (D4).
           let failed = false;

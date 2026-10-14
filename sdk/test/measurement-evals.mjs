@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { scriptedControl } from "./control-support.mjs";
 import test from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
@@ -387,6 +388,7 @@ test("browser live controls retain the managed observation conflict hook", async
   const host = fakeHost();
   const commands = [];
   Object.assign(host, {
+    control: scriptedControl(),
     async sessionMap() {
       return {
         tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,

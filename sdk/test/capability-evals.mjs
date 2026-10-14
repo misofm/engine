@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { MisoUsageError } from "../src/core/errors.ts";
+import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
 import { LiveControlWriter } from "../src/core/writer.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
@@ -495,74 +495,44 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
-  test("a bad effect at a bus index is an unknown effect, and only past every strip an unknown track", async () => {
-    // Issue #1213 D5a. The prepared path classifies a refused configuration copy itself; the
-    // index is a strip index, so the bound is `T + S`. Red if the classifier compares against the
-    // track count: the bus's missing insert would then report `unknownTrack`.
+  test("a bad insert on a bus and an unknown strip are the core's one address refusal", async () => {
+    // Issue #1213 D5a, as #1563B restates it: the address names a strip by ID, so a submix is a
+    // strip like a track. Red if the core's address lookup skips submix strips (the bus's own
+    // fader would then be unknown), or answers a missing insert on the bus with another code.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
       liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
     });
     try {
-      const refusal = async (trackIndex) => {
-        const writer = new LiveControlWriter({
-          submit: (records, count) => engine.submitCommands(records, count),
-        });
-        writer.stage({
-          kind: "effectParam",
-          trackIndex,
-          rack: 1, // inserts
-          channel: 2,
-          effectIndex: 7,
-          parameterId: 1,
-          smoothingSamples: 0,
-          values: [-20, 0, 0, 0],
-        });
-        // The writer turns a caller-error refusal into a usage error that names the reason.
-        let reason;
-        await assert.rejects(writer.flush(), (error) => {
-          reason = /refused a batch for (\w+) at record 0/.exec(error.message)?.[1];
-          return error instanceof MisoUsageError && reason !== undefined;
-        });
-        return reason;
-      };
-      assert.equal(await refusal(1), "unknownEffect", "the bus at strip index T + 0");
-      assert.equal(await refusal(2), "unknownTrack", "one past the last strip");
+      const controls = engine.liveControls();
+      const code = (set) => controls.submit(set).then(() => "applied", (error) => error.code);
+      assert.equal(await code(controls.edit.submix("bus").faderDb(-6)), "applied", "the bus is a strip");
+      assert.equal(
+        await code(controls.edit.submix("bus").insert("ghost", "miso.compressor").parameter("threshold", -20)),
+        "control.address.unknown",
+        "the bus has no such insert",
+      );
+      assert.equal(await code(controls.edit.submix("nope").faderDb(-6)), "control.address.unknown");
     } finally {
       engine.dispose();
     }
   });
 
-  test("a solo at a bus index is refused notSoloable with invalidArgument through the shipped module", async () => {
-    // Issue #1213 D4 (and #1212 NIT-2): reason 12 and result 1 together, end to end, from the
-    // real admission rather than a mocked reply. Red if a bus can be soloed, if the refusal
-    // reports another reason, or if reason 12 maps to another result.
+  test("a solo of a bus is refused by the core", async () => {
+    // Issue #1213 D4 (and #1212 NIT-2), as #1563B restates it: a bus is solo-safe, and the core
+    // refuses a solo at a submix from the real address table rather than a mocked reply. Red if a
+    // bus can be soloed.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
       liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
     });
     try {
-      let report;
-      const writer = new LiveControlWriter({
-        submit: (records, count) => (report = engine.submitCommands(records, count)),
-      });
-      writer.stage({
-        kind: "solo",
-        trackIndex: 1, // the bus: one track, then the submix
-        rack: 255,
-        channel: 255,
-        effectIndex: 0,
-        parameterId: 0,
-        smoothingSamples: 0,
-        values: [1, 0, 0, 0],
-      });
-      await assert.rejects(writer.flush(), MisoUsageError);
-      assert.equal(report.reason, 12);
-      assert.equal(report.reasonName, "notSoloable");
-      assert.equal(report.result, 1);
-      assert.equal(report.code, "invalidArgument");
-      assert.equal(report.rejectedIndex, 0);
-      assert.equal(report.admitted, 0);
+      const controls = engine.liveControls();
+      // `track()` does not check the ID, so it can name the bus; `submix()` has no `solo` at all.
+      const refusal = await controls.submit(controls.edit.track("bus").solo(true)).catch((error) => error);
+      assert.ok(refusal instanceof MisoControlRefusal);
+      assert.equal(refusal.code, "control.address.unknown");
+      assert.equal(refusal.editIndex, 0);
     } finally {
       engine.dispose();
     }

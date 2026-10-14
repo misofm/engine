@@ -250,3 +250,66 @@ Built on `codex/controls-batch-5k` (main `205a8d2b4` + batch 4 lane K + #1532). 
 - **One request-ID allocator for the whole `SessionState::command` endpoint (#1562a).** The
   queue's transaction IDs and the catalog reads (and any other command through that endpoint) draw
   from one allocator, so no two requests on the endpoint share an ID.
+
+## Decision record: #1563B as built
+
+Built on `codex/controls-batch-7` (after #1381a, #1562a, #1570b). Gates 2, 3 and 5 (non-isolated
+leg; the browser rows run in CI), and the three open points above.
+
+- **Builders (D2, D3, D9).** Every builder returns a `ControlEditSet` (`{ edits: ControlFrameEdit[] }`),
+  one transaction's edits: a fader is one edit, `pan` its two lanes of the builtin `pan` row (12),
+  `matrix` the four builtin coefficient rows (7 to 10), `inputFilters` the two cutoff rows. Rows come
+  from the generated `CONTROLS` tables (numeric, as #1563A recorded) and the catalog's parameter ID
+  (equal to the control row). Routes gain `followsMute`. The builders check no value, no lane's
+  meaning and no ID: `track()`, `submix()`, `route()` and `vca()` do not look the ID up, so an unknown
+  strip comes back as `control.address.unknown`. They refuse only what the frame cannot hold. `pan`
+  and `matrix` do not send `matrix_mode`: a strip in the other shape is the core's `control.inactive`
+  (the generic setter of #1564 can switch the mode in the same transaction). `PREPARED_BYPASS_EFFECTS`,
+  the range helper, the shared-lane check, the live-updatable check, the route/VCA index maps and the
+  output-route refusal are deleted. `strip(id)` keeps its lookup, because observation records name a
+  strip by index.
+- **Effect instances.** A value edit names the instance by its console slot ID or insert ID, so
+  `console(slot)` and `insert(id)` need no session. An index (`insert(n)`, `effect(rack, n)`) resolves
+  to the ID through the session the SDK built (`withSession()`), and refuses with the stable-ID
+  message without one. Observation records (kinds 7 and 8) keep the index and the 48-byte record.
+- **Queue isolation across callers (open point 1): map the refusal back to the submit and send the
+  rest again.** The queue keeps each `submit()` apart inside a batch. When the core refuses and its
+  first diagnostic names edit `k`, the submit that owns the coalesced edit `k` is rejected with
+  `MisoControlRefusal` (`editIndex` indexes that submit's own edits), and the other submits go again
+  as a new transaction at the revision the refusal reported; each refusal removes one submit, so it
+  ends. A refusal that names no edit (revision conflict, backpressure, malformed) rejects the whole
+  batch, and nothing is retried after it. Chosen over "flush before staging a foreign submit"
+  because that rule makes coalescing (gate 4 of #1563A) depend on who called. A `stage()`d edit that
+  the core refuses rejects its batch's `flush()`; another caller's refusal does not.
+- **Seeding (open point 2).** A booted session is not at revision 0 (the document says 1). The
+  headless queue starts at `miso_engine_web_v1_control_revision` (`WasmBoundary.controlRevision()`),
+  and `loadSession()` resets it to the value after the reboot succeeds (never before). The browser
+  host exposes the revision only in a reply, so `createBrowserControlQueue` reads it with a
+  `CAPABILITIES_GET` probe (`encodeRevisionProbe`, a header and no fields) before the first
+  transaction.
+- **One request-ID allocator (open point 3).** `ControlRequestIds` belongs to the endpoint; the queue
+  draws from it (`queue.requestIds`), the browser probe draws from it, and `engine.controlFrame()`
+  documents it for every other frame.
+- **Edit path 4** (`monitor`) decodes, and the core reports it for solo (gate 3).
+- **Events.** The core queues a reliable event for every commit and holds two; the third commit is
+  refused with `protocol.backpressure` until the host reads them. The headless boundary therefore
+  reads both lanes after every control frame, as the worklet does (#1570b D4); `onControlEvent` and
+  `discardedControlEvents` mirror the host's. Without it a paused headless engine took three
+  transactions.
+- **Writer (D5).** `LiveControlWriter` takes `{ queue }` for value edits and keeps its record-submit
+  forms for observation records; one writer sends one kind. The `backpressure` status is flow control.
+  `controls.writer()` builds one over the engine's queue.
+- **Report (D6).** `submit` resolves with `ControlAppliedReport`; `ControlReport` stays the union
+  `MisoControlRefusal.report` uses.
+- **Deleted.** `sdk/src/assets/prepared-control.{js,d.ts}`, `SESSION_DEFAULT_RAMP`, the per-kind ramp
+  rules, the boundary's prepared-command path. `sdk/codegen/generate.mjs` and the staged package keep
+  `prepared-control.js` in the artifact closure, because host-web still ships it (#1565A).
+- **Qualification rows.** The raw live-control and stall rows (`qualification.js`) send their matrix
+  retarget through the served SDK bundle (`applyMatrixThroughSdk`), so the runner now always builds
+  that bundle (the repository's `sdk/` without `--sdk-root`). Their two session documents hold the
+  strip in matrix mode (identity at boot). The SDK rows compare the browser and headless reports by
+  path and revision, and the live-bypass row names the instances by ID. The bypass row's exact
+  render equalities hold on today's core and move to #1341's gates when the bypass is a crossfade.
+- **Not run here.** The three-browser qualification (CI), and `direct-oracle.mjs`: its command-record
+  timeline (kinds 1 to 6) fails with the module #1562a built (`expected.json` digest), and #1565A
+  removes it.

@@ -260,15 +260,16 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
    * claim is settled by physics rather than by string equality, which is exactly what makes it
    * immune to a formatting bug that happened to be consistent on both sides.
    */
-  async function renderBlocks(document, commands, blocks = 8) {
+  async function renderBlocks(document, edit, blocks = 8) {
     const engine = await createOfflineEngine(document, {
       asset,
       liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
     });
     try {
-      if (commands) {
-        const report = engine.submitCommands(commands.records, commands.count);
-        assert.ok(report.ok, `the command batch was refused: ${report.reasonName}`);
+      if (edit) {
+        const controls = engine.liveControls();
+        const report = await controls.submit(edit(controls.edit));
+        assert.ok(report.ok, "the transaction was refused");
       }
       const shape = engine.shape();
       const rendered = [];
@@ -302,24 +303,9 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
     return hash.digest("hex");
   }
 
-  /** One 48-byte `effectParam` record, written through the generated field offsets. */
-  function effectParamRecord(value) {
-    const bytes = ABI_LAYOUT.commandRecord.bytes;
-    const records = new Uint8Array(bytes);
-    const view = new DataView(records.buffer);
-    const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-    const kind = ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "effectParam");
-    view.setUint8(at("kind"), kind.value);
-    // The EQ is console slot 0, and `console` is the record's rack `3` (S1c).
-    view.setUint8(at("rack"), ABI_LAYOUT.constants.racks.find((row) => row.name === "console").value);
-    view.setUint8(at("channel"), 2); // both
-    view.setUint32(at("trackIndex"), 0, true);
-    view.setUint32(at("effectIndex"), 0, true);
-    view.setUint32(at("parameterId"), 4, true); // band-1 gain
-    view.setUint32(at("smoothingSamples"), 0, true);
-    view.setFloat32(at("values"), value, true);
-    return { records, count: 1 };
-  }
+  /** The EQ's band-1 gain as a live `SET_CONTROL` edit, on console slot `eq`. */
+  const bandOneGain = (value) => (edit) => edit.track("t").console("eq", "miso.parametric-eq")
+    .parameter("band-1-gain", value);
 
   test("set -> render -> digest equals the same document authored with that value", async () => {
     const handle = parameter("miso.parametric-eq", "band-1-gain");
@@ -342,18 +328,17 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
 
     const commanded = await renderBlocks(
       withDefault,
-      effectParamRecord(decimalToFloat32(handle.value)),
+      bandOneGain(decimalToFloat32(handle.value)),
     );
     const declared = await renderBlocks(authored, undefined);
 
     // The claim is about the value, not about when it arrived.
     //
-    // A live retarget and an authored value differ for exactly two blocks, for two reasons that
-    // are both about timing rather than about the number: the batch takes effect at
-    // `appliedAtSample`, the first sample of the *next* rendered block, so block 0 still carries
-    // the old gain; and the band's biquad then carries two samples of state computed under the old
-    // coefficients into block 1. From block 2 the two are bit-identical, and stay so -- which is
-    // the losslessness claim, settled by physics rather than by string comparison.
+    // A live retarget and an authored value differ for the first blocks, for reasons that are
+    // about timing rather than about the number: the transaction takes effect at the first block
+    // that begins after the submit returns, and the band's biquad then carries state computed
+    // under the old coefficients forward. After that the two are bit-identical, and stay so --
+    // which is the losslessness claim, settled by physics rather than by string comparison.
     //
     // Adopted ruling 5462139867 finding 4 makes this the wasm-side leg of eval 4. Its other leg,
     // an engine-resolved oracle through the control protocol, has no subject on this tree: see the
@@ -390,7 +375,7 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
     handle.set("-6.2");
     const moved = await renderBlocks(
       withDefault,
-      effectParamRecord(decimalToFloat32(handle.value)),
+      bandOneGain(decimalToFloat32(handle.value)),
     );
     assert.notEqual(
       digestFrom(moved, SETTLED),

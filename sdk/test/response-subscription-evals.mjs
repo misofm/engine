@@ -120,7 +120,7 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
 
     const semanticLiveControls = engine.liveControls();
     await semanticLiveControls.submit(
-      semanticLiveControls.edit.track("t").effect("console", 0, "miso.parametric-eq")
+      semanticLiveControls.edit.track("t").console("eq", "miso.parametric-eq")
         .parameter("band-1-gain", -3),
     );
     assert.equal(await first.pump(), undefined);

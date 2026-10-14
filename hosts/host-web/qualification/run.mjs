@@ -196,10 +196,10 @@ function validate(browserName, result) {
   // decimated meter stream produced frames of the declared width whose master peak is a real
   // observation of the rendered output rather than a zero.
   const live = result.liveControls;
-  gate(browserName, "control-path", live?.commandResult === 0 && live?.commandReason === 0
-    && live?.commandAdmitted === 1 && live?.appliedAtSample === "0"
+  gate(browserName, "control-path", live?.commandOk === true && live?.commandPath === "live"
+    && live?.commandApplied === 4
     && Array.isArray(live?.tracks) && live.tracks.length === 1,
-  "the live-control command was not admitted");
+  "the live-control SET_CONTROL transaction was not applied on the live path");
   gate(browserName, "control-path", live?.exactRetargetedOutput === true
     && live?.renderedDigest === live?.expectedDigest,
   "the applied parameter change did not produce the exact declared output");
@@ -255,7 +255,7 @@ function validate(browserName, result) {
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
   // path and the meter fold both live across the fault.
-  gate(browserName, "main-thread-stall", stall?.liveControlCommandResult === 0
+  gate(browserName, "main-thread-stall", stall?.liveControlCommandOk === true
     && stall?.liveControlMeterLeaseResult === 0 && stall?.liveControlMeterFrames >= 1,
   "the stall did not carry a live command and meter load");
   gate(browserName, "main-thread-stall", stall?.minimumStallMs === 100
@@ -299,12 +299,16 @@ function validate(browserName, result) {
 }
 
 /**
- * Issue #1097 gate 4: a live bypass toggle on a console slot and on an insert, through the SDK.
+ * Issue #1097 gate 4, as #1563B restates it: a live bypass toggle on a console slot and on an
+ * insert, through the SDK.
  *
  * Bypassing lands on exactly the instance the same bypass authored in the document does, lifting
- * an authored bypass renders the document with none, all four edits apply at the first quantum,
- * and the console slot is addressed by S1c's code `3` at its index in slot order (`post_insert`
- * slot `desk-hi` is slot 1), the insert by `1` at its index.
+ * an authored bypass renders the document with none, all four edits are `SET_CONTROL` transactions
+ * the core applies on its live path before the first quantum, and each names its instance by its
+ * stable ID: the console slot `desk-hi` and the insert `ins-mid`, control `0` (bypass).
+ *
+ * The render equalities are the exact shunt of today's core; #1341 makes the live bypass a
+ * crossfade, and this row moves to that issue's gates then.
  */
 function validateSdkLiveBypass(browserName, live) {
   const digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -319,11 +323,11 @@ function validateSdkLiveBypass(browserName, live) {
   gate(browserName, "sdk-live-bypass", live.insertOffLive === live.insertOff
     && live.insertOnLive === live.base,
   "a live bypass toggle on the insert did not render its authored bypass state");
-  gate(browserName, "sdk-live-bypass", JSON.stringify(live.consoleAddress) === "[3,1]"
-    && JSON.stringify(live.insertAddress) === "[1,0]"
-    && JSON.stringify(live.liftAddresses) === "[[3,1],[1,0]]"
-    && JSON.stringify(live.appliedAtSamples) === JSON.stringify(["0", "0", "0", "0"]),
-  "the live bypass edits did not carry the console/insert addresses or apply at the first quantum");
+  gate(browserName, "sdk-live-bypass", live.consoleAddress === "console:desk-hi:0"
+    && live.insertAddress === "inserts:ins-mid:0"
+    && JSON.stringify(live.liftAddresses) === JSON.stringify(["console:desk-hi:0", "inserts:ins-mid:0"])
+    && JSON.stringify(live.paths) === JSON.stringify(["live", "live", "live", "live"]),
+  "the live bypass edits did not name the console/insert instances or take the core's live path");
 }
 
 /**
@@ -779,7 +783,7 @@ function mutate(result, mutation) {
   if (mutation === "main-thread-stall") copy.stall.measuredStallMs = 0;
   if (mutation === "control-path-applied") copy.liveControls.exactRetargetedOutput = false;
   if (mutation === "control-path-meter") copy.liveControls.masterPeak = 0;
-  if (mutation === "control-path-command") copy.liveControls.commandAdmitted = 0;
+  if (mutation === "control-path-command") copy.liveControls.commandApplied = 0;
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
@@ -1106,8 +1110,10 @@ async function main() {
   }
   const artifactDigest = await sha256(path.join(path.resolve(artifacts), WASM_ARTIFACT));
   const sdkRoot = option("--sdk-root");
-  let sdkBundle;
-  if (sdkRoot !== null) sdkBundle = await buildSdkBundle(path.resolve(sdkRoot));
+  // The bundle is always built and served: the raw live-control rows send their `SET_CONTROL`
+  // transaction through it (#1563B). `--sdk-root` selects which SDK it comes from, and whether the
+  // SDK rows run; without it the repository's own `sdk/` (with its `node_modules`) is bundled.
+  const sdkBundle = await buildSdkBundle(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
 
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);

@@ -261,6 +261,7 @@ test("actual scratch entry and client retain real Wasm refusal and usage error t
 });
 
 import { prepareBrowserSessionWithWorker, prepareBrowserSessionInWorker } from "../src/browser/index.ts";
+import { scriptedControl } from "./control-support.mjs";
 import { sessionDocument, effectEntry, ramp } from "./support.mjs";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
@@ -423,7 +424,7 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
   test(`live-control attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
     const attached = (initialLiveControls?.commandQueueRecords ?? 0) > 0;
     const policy = initialLiveControls === undefined ? {} : { liveControls: { ...initialLiveControls } };
-    let maps = 0; let commands = 0; const closed = [];
+    let maps = 0; const frames = []; const closed = [];
     const engine = await createEngine({
       document: new Uint8Array([1]), policy,
       scratchBoot: async () => {
@@ -437,8 +438,7 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
         assert.equal((request.options.liveControls?.commandQueueRecords ?? 0) > 0, attached);
         return {
           async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }; },
-          async command(request) { commands++; return { result: 0, reason: 0, rejectedIndex: 0,
-            admitted: request.commands.length, appliedAtSample: 128n }; },
+          control: scriptedControl({ frames }),
           async dispose() { closed.push("host"); },
         };
       },
@@ -450,11 +450,12 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
     if (attached) {
       const controls = await pending;
       assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
-      assert.equal(maps, 1); assert.equal(commands, 1);
+      // The probe that reads the core's revision, then the one transaction.
+      assert.equal(maps, 1); assert.equal(frames.length, 2);
     } else {
       await assert.rejects(pending, error => error instanceof MisoUsageError &&
         error.message.includes("no live controls attached") && error.message.includes("policy.liveControls.commandQueueRecords"));
-      assert.equal(maps, 0); assert.equal(commands, 0);
+      assert.equal(maps, 0); assert.equal(frames.length, 0);
     }
     assert.equal(engine.context.state, "running");
     await engine.close(); await engine.close();
@@ -463,12 +464,13 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
 }
 
 test("a browser engine's live controls address a submix by its strip index", async () => {
-  // Issue #1214 gate 4: the browser path builds its own SessionMap from the host's reply, so the
-  // headless evals pass even when this one drops `submixes`. Red if the browser map loses the
-  // submix list (edit.submix() throws) or the record carries the submix's list index (0, which is
-  // track `t`) rather than its strip index T + j. Two submixes pin the order too (#1214 MINOR-2):
-  // red if the browser map reorders the host's list, which would edit the other bus.
-  const received = [];
+  // Issue #1214 gate 4, as #1563B restates it: the browser path builds its own SessionMap from the
+  // host's reply, and observation records address a strip by its index. Red if the browser map
+  // loses the submix list (edit.submix() has no index to observe by) or numbers a submix from 0
+  // (track `t`) rather than T + j. Two submixes pin the order too (#1214 MINOR-2): red if the
+  // browser map reorders the host's list, which would arm the other bus's effect. A value edit
+  // names the strip by ID, and the frame holds that ID.
+  const frames = [];
   const engine = await createEngine({
     document: new Uint8Array([1]), policy: { liveControls: { commandQueueRecords: 64 } },
     scratchBoot: async () => shape,
@@ -476,21 +478,24 @@ test("a browser engine's live controls address a submix by its strip index", asy
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
       async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false, routes: [], vcas: [] }; },
-      async command(request) {
-        received.push(...request.commands);
-        return { result: 0, reason: 0, rejectedIndex: 0, admitted: request.commands.length, appliedAtSample: 128n };
-      },
+      control: scriptedControl({ frames }),
       async dispose() {},
     }),
   });
   try {
     const controls = await engine.liveControls();
     assert.equal((await controls.submit(controls.edit.submix("bus").faderDb(-6))).ok, true);
-    assert.equal(received.length, 1);
-    assert.equal(received[0].trackIndex, 2, "bus is SessionMap.submixes[1], strip index 1 + 1");
-    assert.deepEqual(received[0].values, [-6, 0, 0, 0]);
+    assert.equal(frames.length, 2, "the revision probe, then one transaction");
+    const ids = frames.slice(1).map((frame) => new TextDecoder().decode(frame));
+    assert.ok(ids[0].includes("bus"), "the transaction names the bus by its stable ID");
     assert.equal((await controls.submit(controls.edit.submix("aaa").mute(true))).ok, true);
-    assert.equal(received[1].trackIndex, 1, "aaa is SessionMap.submixes[0], strip index 1 + 0");
+    assert.ok(new TextDecoder().decode(frames[2]).includes("aaa"));
+    // Observation records address a strip by index: the track, then the submixes in the host's order.
+    const record = controls.edit.submix("bus").effect("inserts", 0, "miso.compressor")
+      .observe("Gain Reduction", true, 1);
+    assert.equal(record.trackIndex, 2, "bus is SessionMap.submixes[1], strip index 1 + 1");
+    assert.equal(controls.edit.submix("aaa").effect("inserts", 0, "miso.compressor")
+      .observe("Gain Reduction", true, 1).trackIndex, 1, "aaa is SessionMap.submixes[0], strip index 1 + 0");
   } finally {
     await engine.close();
   }

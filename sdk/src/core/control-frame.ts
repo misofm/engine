@@ -1,6 +1,6 @@
 import { CONTROLS } from "../generated/controls.ts";
 import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
-import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 
 /**
  * The SDK's one encoder of `SESSION_TRANSACTION_APPLY` frames of `SET_CONTROL` edits, and its one
@@ -28,7 +28,10 @@ const PROTOCOL_MAJOR = 1;
 const PROTOCOL_MINOR = 0;
 const KIND_COMMAND = 1;
 const KIND_RESPONSE = 2;
+const MESSAGE_CAPABILITIES_GET = 0x0001;
 const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+/** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
+const FLAG_REVISION_ANY = 1;
 const EDIT_SET_CONTROL = 0x0800;
 const U32_MAXIMUM = 0xffff_ffff;
 const U64_MAXIMUM = 0xffff_ffff_ffff_ffffn;
@@ -218,6 +221,36 @@ function editField(edit: ControlFrameEdit): Uint8Array {
 }
 
 /**
+ * The error a control call that did not return `ok` is, on either transport. The core answers a
+ * failed call with the refusal's diagnostic text (`code\tpath\n` lines, for example
+ * `web.apply.rebuild_pending`) where a successful call answers with the response frame; a refused
+ * transaction is still an `ok` call with a refusal frame. Browser and headless build the same error
+ * from the same bytes.
+ */
+export function controlCallFailure(result: number, response: Uint8Array): MisoEngineError {
+  const text = new TextDecoder("utf-8").decode(response);
+  return new MisoEngineError("the engine refused a control frame", {
+    phase: "lifecycle",
+    code: resultName(result, "call"),
+    result,
+    diagnostics: parseDiagnostics(text),
+  });
+}
+
+/** The address an edit writes: two edits with one key write the same lane of the same control. */
+export function controlEditKey(edit: ControlFrameEdit): string {
+  const { owner, section, control, lane } = edit.address;
+  return JSON.stringify([
+    owner.kind,
+    "id" in owner ? owner.id : "",
+    section.kind,
+    section.kind === "console" ? section.slot : section.kind === "inserts" ? section.effect : "",
+    control,
+    lane,
+  ]);
+}
+
+/**
  * Refuse, with `MisoUsageError`, an edit that cannot be encoded, before it is staged anywhere. It is
  * the same check `encodeControlTransaction` makes, and nothing about the value's domain.
  */
@@ -256,6 +289,28 @@ export function encodeControlTransaction(request: ControlTransactionRequest): Ui
   view.setUint32(40, request.edits.length, true);
   view.setUint32(44, 0, true);
   out.set(payload, HEADER_BYTES);
+  return out;
+}
+
+/**
+ * Encode a `CAPABILITIES_GET` command: a header and no fields, which takes any revision. The reply
+ * to it reports the core's committed revision, which is how an endpoint that cannot read the
+ * revision directly (the browser host) seeds its queue after boot. The caller draws `requestId`
+ * from the endpoint's one allocator.
+ */
+export function encodeRevisionProbe(requestId: bigint): Uint8Array {
+  const id = requireU64(requestId, "requestId");
+  if (id === 0n) throw new MisoUsageError("requestId must not be zero");
+  const out = new Uint8Array(HEADER_BYTES);
+  const view = new DataView(out.buffer);
+  out.set(MAGIC, 0);
+  view.setUint16(8, PROTOCOL_MAJOR, true);
+  view.setUint16(10, PROTOCOL_MINOR, true);
+  view.setUint16(12, HEADER_BYTES, true);
+  out[14] = KIND_COMMAND;
+  out[15] = FLAG_REVISION_ANY;
+  view.setUint16(16, MESSAGE_CAPABILITIES_GET, true);
+  view.setBigUint64(24, id, true);
   return out;
 }
 

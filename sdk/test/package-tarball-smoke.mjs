@@ -290,9 +290,11 @@ const sibling = await imported["./headless"].createOfflineEngine(
 );
 try {
   const controls = engine.liveControls();
-  await assert.rejects(controls.submit(controls.edit.track("track").faderDb(-6)), error =>
-    error.name === "MisoUsageError" && error.message.includes("no live controls attached") &&
-    error.message.includes("liveControls.commandQueueRecords"));
+  // A value edit is a SET_CONTROL transaction to the core, so it needs no command staging; only
+  // the observation records do.
+  const applied = await controls.submit(controls.edit.track("track").faderDb(-6));
+  assert.equal(applied.ok, true);
+  assert.equal(applied.path, "live");
   const browser = await imported["./browser"].createEngine({
     document: builtDocument,
     scratchBoot: async () => engine.shape(),

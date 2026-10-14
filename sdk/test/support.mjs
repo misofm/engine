@@ -10,6 +10,8 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
+
 const ARTIFACT_DIRECTORY_ENV = "MISO_ENGINE_SDK_ARTIFACTS_HEX";
 const WASM_BASENAME = Buffer.from("/miso-engine-v1-audio-worklet.simd128.wasm", "ascii");
 
@@ -139,4 +141,59 @@ export function digestPlanes(blocks) {
     }
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+/**
+ * A `MisoAudioWorkletHost` stand-in whose control plane is a real headless engine's: `control()`
+ * runs the frame through the same core entry the worklet's message handler calls and answers as the
+ * host does (`{ result, response, revision }`, a failed call answering with the diagnostic text), so
+ * the browser transport of the SDK is judged against the real core's reply bytes.
+ * `command` answers the observation records through the engine's command path.
+ */
+export function engineHost(engine, { frames = [] } = {}) {
+  let next = 0;
+  return {
+    async sessionMap() {
+      return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, ...engine.sessionMap() };
+    },
+    async control(frame) {
+      frames.push(frame.slice());
+      const requestId = (next += 1);
+      let result = 0;
+      let response;
+      try {
+        response = engine.controlFrame(frame);
+      } catch (error) {
+        if (typeof error?.result !== "number") throw error;
+        result = error.result;
+        response = new TextEncoder().encode(
+          error.diagnostics.map((row) => `${row.code}\t${row.path}\n`).join(""),
+        );
+      }
+      return { tag: "miso.control.v1", requestId, result, response, revision: engine.controlRevision() };
+    },
+    async command(value) {
+      const requestId = (next += 1);
+      const bytes = new Uint8Array(value.commands.length * ABI_LAYOUT.commandRecord.bytes);
+      const view = new DataView(bytes.buffer);
+      const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+      value.commands.forEach((command, index) => {
+        const base = index * ABI_LAYOUT.commandRecord.bytes;
+        view.setUint8(base + at("kind"), command.kind);
+        view.setUint8(base + at("rack"), command.rack);
+        view.setUint8(base + at("channel"), command.channel);
+        view.setUint32(base + at("trackIndex"), command.trackIndex, true);
+        view.setUint32(base + at("effectIndex"), command.effectIndex, true);
+        view.setUint32(base + at("parameterId"), command.parameterId, true);
+        view.setUint32(base + at("smoothingSamples"), command.smoothingSamples, true);
+        command.values.forEach((v, slot) => view.setFloat32(base + at("values") + slot * 4, v, true));
+      });
+      const report = engine.submitCommands(bytes, value.commands.length);
+      return {
+        tag: "miso.ack.v1", requestId, result: report.result, reason: report.reason,
+        rejectedIndex: report.rejectedIndex, admitted: report.admitted,
+        appliedAtSample: report.appliedAtSample, records: bytes,
+      };
+    },
+  };
 }

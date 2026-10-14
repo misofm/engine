@@ -9,6 +9,7 @@ import { MisoEngineError } from "../src/core/errors.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { createEngine } from "../src/browser/engine.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { scriptedControl } from "./control-support.mjs";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 let asset;
@@ -493,6 +494,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       appliedAtSample: rendered * 128n, records: new Uint8Array(0),
     });
     const host = {
+      control: scriptedControl(),
       async sessionMap() {
         return {
           tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"],
