@@ -808,7 +808,6 @@ fn observation_without_effect_lanes_is_refused() {
         &caps(),
         &request,
         HostLiveLanes::FADER_AND_MATRIX,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .err()

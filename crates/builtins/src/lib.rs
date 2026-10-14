@@ -44,12 +44,10 @@ pub use filter_response::{
     prepare_input_filter_response, query_input_filter_response_into,
     query_input_filter_snapshot_magnitudes_into,
 };
-use tail::CachedDesign;
 pub use tail::{
-    ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
-    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, InputBoundRecord, input_section_flush_law,
-    input_section_live_bound, input_section_live_bound_table, input_section_live_cascade,
-    input_section_live_envelope, input_section_worst_case_pair,
+    ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_SECTION_CHARGE,
+    input_section_flush_law, input_section_live_bound, input_section_live_bound_table,
+    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
 };
 
 use effect_contract::{
@@ -3760,18 +3758,14 @@ pub fn input_section_bound_charged(
 /// nothing. The result
 /// is a function of the session only.
 ///
-/// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored charge
-/// without computing anything, so the result is the same with and without it, cold or warm.
-///
 /// # Errors
 ///
 /// The first strip's error, as [`input_section_bound`] reports it.
 pub fn input_section_bounds(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
-    cache: Option<&mut InputBoundCache>,
 ) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
-    input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES, cache)
+    input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES)
 }
 
 /// [`input_section_bounds`] under a budget of `budget` frame-equivalents. Only the gates choose
@@ -3780,7 +3774,6 @@ fn input_section_bounds_within(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
     budget: u64,
-    mut cache: Option<&mut InputBoundCache>,
 ) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
     let fallback = input_section_live_bound_table(sample_rate).unwrap_or(NodeTailBound::UNBOUNDED);
     let mut remaining = budget;
@@ -3795,7 +3788,7 @@ fn input_section_bounds_within(
                 return Ok(*bound);
             }
             // A memoryless design (both filters disabled on both channels) has no tail and walks
-            // nothing, so it is neither computed, charged nor cached; it states its gain-only
+            // nothing, so it is neither computed nor charged; it states its gain-only
             // composition (#1465), as `input_section_bound` does.
             if lanes
                 .iter()
@@ -3807,28 +3800,10 @@ fn input_section_bounds_within(
             }
             // A spent budget walks nothing more: every other design reports the live bound
             // without a walk.
-            let cached = if remaining == 0 {
-                Some(CachedDesign::ChargeAbove(0))
+            let charged = if remaining == 0 {
+                None
             } else {
-                cache.as_deref_mut().and_then(|cache| cache.lookup(&key))
-            };
-            let charged = match cached {
-                Some(CachedDesign::Bound(hit)) => (hit.charge <= remaining).then_some(hit),
-                // The walk passed `above` frames: under no more budget than that it stops again.
-                Some(CachedDesign::ChargeAbove(above)) if remaining <= above => None,
-                Some(CachedDesign::ChargeAbove(_)) | None => {
-                    let computed = tail::fixed_input_bound(sample_rate, lanes, remaining);
-                    if let Some(cache) = cache.as_deref_mut() {
-                        match computed {
-                            Some(bound) => cache.insert(key, CachedDesign::Bound(bound)),
-                            None if remaining > 0 => {
-                                cache.insert(key, CachedDesign::ChargeAbove(remaining));
-                            }
-                            None => {}
-                        }
-                    }
-                    computed
-                }
+                tail::fixed_input_bound(sample_rate, lanes, remaining)
             };
             let bound = if let Some(charged) = charged {
                 remaining -= charged.charge;
@@ -6035,9 +6010,8 @@ pub mod test_support {
         sample_rate: u32,
         strips: impl IntoIterator<Item = crate::BuiltinParameters>,
         budget: u64,
-        cache: Option<&mut crate::InputBoundCache>,
     ) -> Result<Vec<effect_contract::NodeTailBound>, BuiltinParameterError> {
-        super::input_section_bounds_within(sample_rate, strips, budget, cache)
+        super::input_section_bounds_within(sample_rate, strips, budget)
     }
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.

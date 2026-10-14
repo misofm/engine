@@ -5755,9 +5755,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                 );
             };
 
-        let mut boot_cache = control_plane::InputBoundCache::new();
         let (mut boot, boot_handles) = preparer
-            .prepare(&compiled, &caps, lanes, None, &mut boot_cache, &superseded)
+            .prepare(&compiled, &caps, lanes, None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
         check(&mut boot, &boot_handles, "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
@@ -5813,16 +5812,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             edit_ramps: &edit_ramps,
             monitor: host_core::MonitorBase::NONE,
         };
-        let mut successor_cache = control_plane::InputBoundCache::new();
         let (mut successor, successor_handles) = preparer
-            .prepare(
-                &compiled,
-                &caps,
-                lanes,
-                Some(base),
-                &mut successor_cache,
-                &superseded,
-            )
+            .prepare(&compiled, &caps, lanes, Some(base), &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
         assert!(

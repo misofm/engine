@@ -520,20 +520,6 @@ fn scratch_session() -> String {
     session::canonical_session_json(&model).expect("oracle canonical fixture")
 }
 
-/// The nine-track fixture with three distinct HPF cutoffs, taken by the tracks in turn. Since
-/// #1556 no C ABI strip designs an input bound (its input lane is live), so the plan's design-bound
-/// seed (#1471) stays empty whatever the cutoffs; the document still gives the oracle three
-/// different input sections.
-fn three_cutoff_session() -> String {
-    let mut model = session::parse_session_json(SESSION).expect("oracle fixture");
-    for (index, track) in model.tracks.iter_mut().enumerate() {
-        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
-            lane.hpf_hz = 40.0 + 30.0 * (index % 3) as f32;
-        }
-    }
-    session::canonical_session_json(&model).expect("three-cutoff canonical fixture")
-}
-
 // --- #1060: budgets plus one allocator-observed completeness oracle ----------------------------
 //
 // Owner decision 4 (`docs/rulings/engine-footprint-2026-09-28.md`): memory tests assert budgets
@@ -643,7 +629,6 @@ fn host_half_counting(
             effects: true,
             routes: true,
         },
-        None,
         superseded,
     )
     .unwrap_or_else(|_| panic!("the reference session prepares"));
@@ -685,29 +670,6 @@ impl HostHalf {
 }
 
 impl HostHalf {
-    /// The bytes of the design-bound seed an epoch of this session's plan keeps (#1471
-    /// Amendment 2): the designs a preparation of this session uses, journaled as capi's
-    /// preparation journals them, in an exact-size record. Prepared again here, apart from the
-    /// observed windows, so this half's own owners stay what they were.
-    fn bound_seed_bytes(&self, compile_limits: &CompileLimits) -> u64 {
-        let mut cache = host_core::InputBoundCache::new();
-        cache.begin_journal();
-        host_core::prepare_host_runtime_with_live_lanes(
-            self.store.compiled(),
-            &host_caps(compile_limits),
-            &host_core::HostLiveControlRequest::default(),
-            host_core::HostLiveLanes {
-                strip_input: true,
-                effects: true,
-                routes: true,
-            },
-            Some(&mut cache),
-            &host_core::LiveValuesSuperseded::default(),
-        )
-        .unwrap_or_else(|_| panic!("the session prepares again"));
-        cache.take_journal().retained_bytes()
-    }
-
     /// The two capi terms an epoch adds to a replacement's or a live edit's peak, each from its
     /// owning crate's report: `epoch_retained` and `prepared_protocol_retained`.
     ///
@@ -716,8 +678,7 @@ impl HostHalf {
     /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
     /// owned payload (#1263), from host-core's walk over them, the send producers' graph charge
     /// (#1557, `route_control_resources`), the plan state inventory the
-    /// epoch keeps for its successor (#1273 D5), and the design-bound seed (#1471,
-    /// [`Self::bound_seed_bytes`]). The prepared-protocol term is the
+    /// epoch keeps for its successor (#1273 D5). The prepared-protocol term is the
     /// response buffer, the affine token, the replay cache and the parameter catalog.
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
         let replay =
@@ -747,8 +708,7 @@ impl HostHalf {
             + strips
             + effects
             + self.prepared.report.route_control_resources.total_bytes
-            + self.prepared.report.inventory_retained_bytes
-            + self.bound_seed_bytes(compile_limits);
+            + self.prepared.report.inventory_retained_bytes;
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
             + size_of::<protocol::PreparedStructuralCommand>() as u64
             + replay.retained_payload_bytes
@@ -1028,9 +988,6 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // #1256 MINOR-1, folded into #1258: submix strips and a route into a submix, so the strip
         // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
         ("routed submix", two_track_routed_submix_session()),
-        // #1471 Amendment 2: three distinct enabled input designs, so the design-bound seed is
-        // charged per design and not at one design's size.
-        ("three input cutoffs", three_cutoff_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -1801,7 +1758,6 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             edit_ramps: &session::EditRamps::new(),
             monitor: host_core::MonitorBase::NONE,
         },
-        None,
         &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
@@ -1842,14 +1798,6 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
         + successor.inventory_retained_bytes;
-    // The prospective epoch keeps the design bounds its preparation used (#1471 Amendment 2 D4):
-    // none since #1556, because every strip's input lane is live and designs no bound.
-    assert_eq!(
-        prospective_host.bound_seed_bytes(&limits()),
-        0,
-        "a C ABI plan's preparation designs no input bound"
-    );
-
     let rows: [(&str, u64); 8] = [
         (
             "graph",

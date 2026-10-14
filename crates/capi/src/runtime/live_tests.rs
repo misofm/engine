@@ -2202,7 +2202,7 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_n
 /// so cannot see it.
 #[test]
 fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() {
-    let mut children = compile_children(SESSION, limits(), None).expect("children");
+    let mut children = compile_children(SESSION, limits()).expect("children");
     let mut pcm = [0.0_f32; 256];
     children
         .plan
@@ -2790,7 +2790,6 @@ impl LaneReference {
             &caps,
             &HostLiveControlRequest::default(),
             HostLiveLanes::ALL,
-            None,
             &host_core::LiveValuesSuperseded::default(),
         )
         .expect("lane prepare");
@@ -3122,7 +3121,7 @@ fn eq_session(sample_rate_hz: u32) -> String {
 #[test]
 fn a_session_with_a_console_slot_and_an_insert_carries_the_effect_and_input_lanes() {
     let document = eq_session(48_000);
-    let children = compile_children(&document, limits(), None).expect("EQ session");
+    let children = compile_children(&document, limits()).expect("EQ session");
     let providers = children.session.test_providers();
     let model = parse_session_json(&document).expect("EQ session parses");
     let strips = model.tracks.len() + model.submixes.len();
@@ -4034,7 +4033,7 @@ fn one_transaction_with_more_cells_than_the_old_queue_held_stays_live() {
         multiband.bypass = false;
         model.tracks[0].inserts.effects.push(multiband);
     });
-    let descriptor = compile_children(&document, limits(), None)
+    let descriptor = compile_children(&document, limits())
         .expect("multiband session")
         .session
         .test_providers()
@@ -4423,7 +4422,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     let mut rejected = parse_session_json(&document).expect("model");
     protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
     let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
-    let Err(failure) = compile_children(&rejected, limits(), None) else {
+    let Err(failure) = compile_children(&rejected, limits()) else {
         panic!("an automation on band-1-enabled does not prepare")
     };
     assert_eq!(
@@ -6830,7 +6829,7 @@ mod set_control {
         let over = with_model(&document, |model| {
             model.vcas.push(vca_of("third", &["eq1"]))
         });
-        let Err(failure) = compile_children(&over, capped, None) else {
+        let Err(failure) = compile_children(&over, capped) else {
             panic!("a third VCA does not prepare under a cap of two")
         };
         assert_eq!(rig.last_error(), failure.diagnostics);
@@ -7104,7 +7103,7 @@ mod set_control {
         assert_eq!(rig.apply(&adds), crate::RESULT_OK);
         assert_eq!(rig.summary().3, 0, "the adds are live");
         assert_eq!(retained(&rig), before + growth);
-        let rebuilt = compile_children(&grown, tight, None)
+        let rebuilt = compile_children(&grown, tight)
             .unwrap_or_else(|_| panic!("the grown session compiles"))
             .plan
             .resources()

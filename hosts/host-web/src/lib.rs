@@ -4903,8 +4903,7 @@ pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
 /// plan.
 ///
 /// It attaches the live lanes the control plane chose ([`controls::live_lanes`], passed in as the
-/// `lanes` argument), so the boot word chooses no lane here. It ignores `bound_cache`: no browser
-/// entry reads the input-design bound cache (#1602).
+/// `lanes` argument), so the boot word chooses no lane here.
 pub struct WebRuntimePreparer {
     options: WebBootOptions,
     spectrum: Option<SpectrumPreparationRequest>,
@@ -4948,7 +4947,6 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
         successor: Option<SuccessorBase<'_>>,
-        _bound_cache: &mut control_plane::InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
         let boot = successor.is_none();
@@ -5102,7 +5100,7 @@ fn compile_ready(
     let control_plane::CompiledChildren {
         session: control,
         mut plan,
-    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
+    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
         .map_err(|failure| boot_refusal(&failure, &record))?;
     let (engine, master_track, live_values_superseded) = {
         let mut record = record

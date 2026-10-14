@@ -23,7 +23,7 @@ lane.workspace = true
 
 [dev-dependencies]
 bench-support.workspace = true
-# #1471: the design-bound counters, for the cache test only.
+# #1556: the design-bound counters, for the input-design-bounds test only.
 builtins = { workspace = true, features = ["test-support"] }
 # #1309 D8: the control plane's observers and fault hooks, for capi's tests only. A dev-dependency
 # feature never reaches the release `capi` build (`scripts/check-capi-abi.sh` builds `-p capi`).

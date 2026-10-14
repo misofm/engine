@@ -64,9 +64,6 @@ pub use control::{CommandError, EventError, EventLane, SessionState, SourceFailu
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
 pub use host_core::SourceSubmission;
-/// The design-bound cache a host keeps and passes to [`compile_children`], and the record a
-/// plan's preparation leaves for its successor's (issue #1471).
-pub use host_core::{InputBoundCache, InputBoundRecord};
 pub use plan::{PlanQueries, PlanState};
 
 #[cfg(feature = "test-support")]

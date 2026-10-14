@@ -15,21 +15,21 @@
 //! nothing is retried or tuned. The numbers describe the box they ran on; the issue's attempt
 //! record states which box stood in for the CI-class runner.
 //!
-//! * **Gate 2** (no argument). For each design family at the four launch rates: a first
-//!   preparation (`input_section_bounds` with a fresh `InputBoundCache`), a rebuild with the same
-//!   cache warm, and a preparation with no cache. It prints each one's milliseconds, the frames
-//!   the walks really took, the bounds computed and the strips left on their exact bound. It
-//!   asserts what the gate states: the three results are identical, a preparation walks at most
-//!   the budget, and a warm rebuild walks no frame and computes no bound.
-//!   It also prints each preparation's charge and its design work (the no-cache preparation's
-//!   milliseconds less the warm rebuild's), and per family and rate the median design work of the
+//! * **Gate 2** (no argument). For each design family at the four launch rates: a preparation
+//!   (`input_section_bounds`) and a keying-only preparation under a budget of 0 (it prepares and
+//!   keys every strip and walks no frame: the work a preparation does besides designing). It
+//!   prints each one's milliseconds, the frames the walks really took, the bounds computed and the
+//!   strips left on their exact bound. It asserts what the gate states: a preparation walks at
+//!   most the budget, and the keying-only preparation walks no frame and computes no bound.
+//!   It also prints the preparation's charge and its design work (its milliseconds less the
+//!   keying-only preparation's), and per family and rate the median design work of the
 //!   five measured rounds per frame-equivalent of budget consumed, which confirms the
 //!   frame-equivalent against the families' real work: the consumed amount is the charge when
 //!   every design is exact, and otherwise the budget, which a preparation that leaves a design on
 //!   its live bound has spent to within one design's section charges.
 //! * **Calibrate.** Two fixed-cost measurements, separate from gate 2, that set the charge
 //!   constants. Every sample is a **batch** (root's ruling (c) of 2026-10-08 on #1465): one
-//!   preparation, with a fresh cache and no budget limit, of *different* designs of one class
+//!   preparation, with no budget limit, of *different* designs of one class
 //!   walked back to back in strip order, as a real preparation walks each distinct design once,
 //!   so that every sample lasts at least about 1 ms: 96 designs of one cascade of one section
 //!   (the shortest walks, about 12-14 us each), 64 of one cascade of two sections (about 20 us at
@@ -87,7 +87,7 @@ use builtins::test_support::{
     input_section_bounds_within,
 };
 use builtins::{
-    BuiltinParameters, ChannelParameters, INPUT_BOUND_BUDGET_FRAMES, InputBoundCache,
+    BuiltinParameters, ChannelParameters, INPUT_BOUND_BUDGET_FRAMES,
     builtin_filter_cutoff_maximum_hz, input_section_bounds, input_section_live_bound_table,
 };
 use effect_contract::NodeTailBound;
@@ -286,12 +286,13 @@ struct Run {
     bounds: Vec<NodeTailBound>,
 }
 
-fn prepare(rate: u32, strips: &[BuiltinParameters], cache: Option<&mut InputBoundCache>) -> Run {
+fn prepare(rate: u32, strips: &[BuiltinParameters], budget: u64) -> Run {
     let frames = fixed_input_frames_walked();
     let computed = fixed_input_bounds_computed();
     let charged = fixed_input_charged();
-    let (ms, bounds) =
-        milliseconds(|| input_section_bounds(rate, strips.iter().copied(), cache).expect("bounds"));
+    let (ms, bounds) = milliseconds(|| {
+        input_section_bounds_within(rate, strips.iter().copied(), budget).expect("bounds")
+    });
     Run {
         ms,
         frames: fixed_input_frames_walked() - frames,
@@ -308,7 +309,7 @@ fn gate_two() {
         builtins::INPUT_BOUND_SECTION_CHARGE
     );
     println!(
-        "family | rate | round | first ms | rebuild ms | no-cache ms | design work ms | frames | computed | charged | ns per consumed frame-equivalent | exact"
+        "family | rate | round | preparation ms | keying-only ms | design work ms | frames | computed | charged | ns per consumed frame-equivalent | exact"
     );
     let mut worst: Vec<(f64, String)> = Vec::new();
     // Per family and rate: the median and the largest of the measured rounds' design work (ms),
@@ -321,25 +322,22 @@ fn gate_two() {
             let mut works = Vec::with_capacity(REPEATS);
             let mut consumed_each = None;
             for round in 0..ROUNDS {
-                let mut cache = InputBoundCache::new();
-                let first = prepare(rate, &strips, Some(&mut cache));
-                let rebuild = prepare(rate, &strips, Some(&mut cache));
-                let none = prepare(rate, &strips, None);
+                let none = prepare(rate, &strips, INPUT_BOUND_BUDGET_FRAMES);
+                let keying = prepare(rate, &strips, 0);
                 assert_eq!(
-                    first.bounds, none.bounds,
-                    "{}: first and no cache",
+                    none.bounds,
+                    input_section_bounds(rate, strips.iter().copied()).expect("bounds"),
+                    "{}: the production entry",
                     family.name
                 );
-                assert_eq!(rebuild.bounds, none.bounds, "{}: rebuild", family.name);
                 assert_eq!(
-                    (rebuild.frames, rebuild.computed),
+                    (keying.frames, keying.computed),
                     (0, 0),
-                    "{}: rebuild",
+                    "{}: keying only",
                     family.name
                 );
-                assert_eq!(first.frames, none.frames, "{}: frames", family.name);
                 assert!(
-                    first.frames <= INPUT_BOUND_BUDGET_FRAMES,
+                    none.frames <= INPUT_BOUND_BUDGET_FRAMES,
                     "{}: walked",
                     family.name
                 );
@@ -349,7 +347,7 @@ fn gate_two() {
                 } else {
                     round.to_string()
                 };
-                let design_work = none.ms - rebuild.ms;
+                let design_work = none.ms - keying.ms;
                 let consumed = if exact == strips.len() {
                     none.charged
                 } else {
@@ -364,11 +362,10 @@ fn gate_two() {
                 );
                 let ns_per_charge = design_work * 1e6 / consumed as f64;
                 println!(
-                    "{} | {rate} | {label} | {:.3} | {:.3} | {:.3} | {design_work:.3} | {} | {} | {} | {ns_per_charge:.2} | {exact} / {}",
+                    "{} | {rate} | {label} | {:.3} | {:.3} | {design_work:.3} | {} | {} | {} | {ns_per_charge:.2} | {exact} / {}",
                     family.name,
-                    first.ms,
-                    rebuild.ms,
                     none.ms,
+                    keying.ms,
                     none.frames,
                     none.computed,
                     none.charged,
@@ -376,7 +373,7 @@ fn gate_two() {
                 );
                 if round > 0 {
                     let what = format!("{} at {rate} Hz, round {round}", family.name);
-                    worst.push((first.ms.max(none.ms), what));
+                    worst.push((none.ms, what));
                     works.push(design_work);
                 }
             }
@@ -551,19 +548,17 @@ fn line(points: &[(f64, f64)]) -> (f64, f64) {
     (my - slope * mx, slope)
 }
 
-/// One preparation of `designs` with a fresh cache and no budget limit: its keying, every walk and
-/// every cache insertion, in strip order, as a real preparation spends them. Nanoseconds, frames
+/// One preparation of `designs` with no budget limit: its keying and every walk, in strip order,
+/// as a real preparation spends them. Nanoseconds, frames
 /// walked and sections charged (the charge net of the frames, in units of
 /// `INPUT_BOUND_SECTION_CHARGE`). It asserts that every design is computed: the designs are
-/// different, so none is served from the cache.
+/// different, so none is shared.
 fn preparation(rate: u32, designs: &[BuiltinParameters]) -> (f64, u64, u64) {
-    let mut cache = InputBoundCache::new();
     let frames = fixed_input_frames_walked();
     let charged = fixed_input_charged();
     let computed = fixed_input_bounds_computed();
     let (ms, _) = milliseconds(|| {
-        input_section_bounds_within(rate, designs.iter().copied(), u64::MAX, Some(&mut cache))
-            .expect("bounds")
+        input_section_bounds_within(rate, designs.iter().copied(), u64::MAX).expect("bounds")
     });
     assert_eq!(
         fixed_input_bounds_computed() - computed,

@@ -1,8 +1,8 @@
-//! Issues #1471 and #1556: a C ABI plan bounds no input design, through the exported C ABI.
+//! Issues #1556 and #1602: a C ABI plan bounds no input design, through the exported C ABI.
 //!
 //! Since #1556 every C ABI strip carries the live input lane, whose tail is the rate's live bound
-//! and needs no design, so the engine's and each session's design-bound caches (#1471) are never
-//! asked. The counters are `builtins::test_support`'s, read on this test's thread across one call:
+//! and needs no design, and since #1602 nothing caches a design either, so a compile or rebuild
+//! that designed one would pay for it in full. The counters are `builtins::test_support`'s, read on this test's thread across one call:
 //! a compile and a structural rebuild both run synchronously on the calling thread.
 
 #![allow(unsafe_code)]

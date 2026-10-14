@@ -232,3 +232,58 @@ Checked against `main` at `7feb27800`.
   `host-core/src/prepare.rs` and before #1574 and #1611 in `hosts/host-web/src/lib.rs`. The open
   #1593 also changes `RuntimePreparer` and `host-core/src/prepare.rs`: this slice lands first (it
   only deletes), and #1593 rebases.
+
+## Decision record: #1602 (batch 9)
+
+**Shipped.** The input-design bound cache is gone, whole. `builtins`: `InputBoundCache`,
+`InputBoundRecord`, `CachedDesign`, `INPUT_BOUND_CACHE_ENTRIES`, the journal and the seed are
+deleted; `input_section_bounds(rate, strips)` and
+`test_support::input_section_bounds_within(rate, strips, budget)` lose the `cache` argument. The
+per-preparation dedupe by `InputBoundKey`, the budget, the stopped walk and the live-bound fallback
+are unchanged (a spent budget reports the live bound without a call, as the `ChargeAbove(0)` leg did).
+`builtins-compiler`, `host-core` (the two live-lanes entries and the policy function), the
+`RuntimePreparer::prepare` trait method and `compile_children` in `control-plane`, and
+`Engine::bound_cache` in `capi` lose the parameter. `PreparedRuntime`/`CompiledChildren`'s
+`bound_seed`, the epoch's `bound_seed` and `test_bound_seed`, and the `bound_seed_bytes` epoch row and
+largest-allocation term of `capi_resources` are deleted; the rebuild prepares with no seed. The header's
+"Engine memory" paragraph now says the engine owns no control-thread memory outside the compile limits
+beyond its own handle; ABI, layout, symbols and `ABI_VERSION` are unchanged.
+
+**Departures.**
+- `hosts/host-web/src/lib.rs` also drops the trailing `None` of its `compile_children` call (one
+  argument of the same removal); `tests.rs` drops the two test caches. Nothing else in host-web moved.
+- Mechanical callers outside the listed paths: `crates/builtins-compiler/tests/allocation_tracker.rs`,
+  `crates/graph-compiler/src/lib.rs` (a test call), `crates/host-core/tests/monitor_tick.rs`,
+  `crates/capi/src/runtime/live_peak_tests.rs`.
+- `examples/input_bound_budget.rs` measured "design work" as the no-cache preparation less the warm
+  rebuild. With no cache there is no warm rebuild, so the subtracted leg is now a keying-only
+  preparation under a budget of 0 (it prepares and keys every strip and walks nothing), which is the
+  same non-design work. The example builds; it was not run (benchmark campaigns are out of scope), so
+  `FRAME_EQUIVALENT_NS` and the charge constants are untouched.
+- `a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing` became
+  `a_preparation_walks_at_most_the_budget` (budget leg unchanged, every expected value unchanged).
+
+**Deleted tests (they defended only the cache).** `tail_contract`: `a_full_bound_cache_is_cleared_and_reports_the_same_values`,
+`a_journal_holds_every_design_a_preparation_used_through_a_clear`,
+`a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used`,
+`a_cache_over_a_record_finds_every_design_and_journals_only_what_it_used`; host-core
+`a_design_bound_cache_changes_no_prepared_value`; `resource_lifecycle` "three input cutoffs" case,
+`three_cutoff_session`, `HostHalf::bound_seed_bytes` and its zero-seed assertion. `design_bound_cache.rs`
+became `input_design_bounds.rs` (git rename), keeping `a_c_abi_plan_bounds_no_input_design`.
+`tail_contract`'s `the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` keeps its budget
+legs (the cold/warm/other-budget cache legs are removed).
+
+**Ceilings.** No test pins a ceiling this slice moves: `resource_lifecycle`'s complete-charge checks
+compare the engine's rows with the allocator and with `capi_epoch_terms`, and the seed row left both
+sides (it was 0 bytes on every fixture since #1556, so no measured row changed). The figures that left
+the header and `docs/C_ABI_V1_QUALIFICATION.md` were derived worst cases, not measurements, and
+nothing reached them: the engine's memory outside the compile limits drops from "at most 4,300,720
+bytes of cache plus 947,248 bytes of open journal" to the engine handle alone. No re-pin.
+
+**Gates.** (1) the review grep over `crates/ hosts/ tools/ docs/*.md` returns nothing (only closed
+`docs/handoffs/` records match). (2) `input_design_bounds::a_c_abi_plan_bounds_no_input_design`. (3)
+`tail_contract::the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` and
+`::a_design_walks_at_most_the_budget_it_is_given`, `builtins-compiler`
+`a_preparation_walks_at_most_the_budget`. (4) `resource_lifecycle` complete-charge tests
+(`capi_retained_bytes_charge_every_byte_the_compile_retains` and the replacement oracle). (5)
+`audit capi`. Results are in the implementer's report.

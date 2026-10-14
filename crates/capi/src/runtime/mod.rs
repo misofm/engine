@@ -89,7 +89,6 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         caps: &host_core::HostPrepareCaps,
         lanes: host_core::HostLiveLanes,
         successor: Option<host_core::SuccessorBase<'_>>,
-        bound_cache: &mut control_plane::InputBoundCache<'_>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<
         (host_core::PreparedHost, host_core::HostLiveControlHandles),
@@ -98,21 +97,10 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         let live = host_core::HostLiveControlRequest::default();
         match successor {
             Some(base) => host_core::prepare_host_runtime_with_live_lanes_successor(
-                compiled,
-                caps,
-                &live,
-                lanes,
-                base,
-                Some(bound_cache),
-                superseded,
+                compiled, caps, &live, lanes, base, superseded,
             ),
             None => host_core::prepare_host_runtime_with_live_lanes(
-                compiled,
-                caps,
-                &live,
-                lanes,
-                Some(bound_cache),
-                superseded,
+                compiled, caps, &live, lanes, superseded,
             ),
         }
     }
@@ -135,18 +123,16 @@ pub(crate) struct CompiledChildren {
 
 /// Compiles `document` under capi's validated `limits`: converts them once (#1309 D3), runs the
 /// control plane's compile, and builds the session's diagnostic storage after it, as the last
-/// allocation of the compile. `engine_cache` is the engine's design-bound cache (#1471).
+/// allocation of the compile.
 pub(crate) fn compile_children(
     document: &str,
     limits: CompileLimits,
-    engine_cache: Option<&mut control_plane::InputBoundCache>,
 ) -> Result<CompiledChildren, CompileRejection> {
     let control_plane::CompiledChildren { session, plan } =
         control_plane::compile_children::<CapiAdapter>(
             document,
             ControlLimits::from(limits),
             Box::new(CapiPreparer),
-            engine_cache,
         )?;
     Ok(CompiledChildren {
         session,

@@ -827,7 +827,6 @@ fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
         &caps(),
         &with_lanes,
         HostLiveLanes::ALL,
-        None,
         &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("prepare with the session's count"))

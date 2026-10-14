@@ -242,7 +242,7 @@ pub(super) fn boxed_c_children_with_limits(
     session: &str,
     limits: CompileLimits,
 ) -> (*mut crate::Session, *mut crate::Plan) {
-    let children = compile_children(session, limits, None).expect("C children");
+    let children = compile_children(session, limits).expect("C children");
     (
         Box::into_raw(Box::new(crate::Session::new(
             children.session,
@@ -690,8 +690,8 @@ fn event_c_exact_retry(session: *mut crate::Session, lane: u32, oracle: &[u8]) {
 
 fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
     let session = generated_parity_session(track_count, sample_rate_hz);
-    let mut direct = compile_children(&session, limits(), None).expect("direct children");
-    let wrapped = compile_children(&session, limits(), None).expect("C children");
+    let mut direct = compile_children(&session, limits()).expect("direct children");
+    let wrapped = compile_children(&session, limits()).expect("C children");
     let c_session = Box::into_raw(Box::new(crate::Session::new(
         wrapped.session,
         wrapped.session_error,
@@ -820,7 +820,7 @@ fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
 
 #[test]
 fn generated_session_prepares_independent_source_and_plan_ownership() {
-    let mut children = compile_children(SESSION, limits(), None).unwrap_or_else(|failure| {
+    let mut children = compile_children(SESSION, limits()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(&failure.diagnostics))
     });
     let resources = children.plan.resources();
@@ -880,11 +880,11 @@ fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
 
     let mut zero = limits();
     zero.source_ring_frames = 0;
-    let zero = compile_children(SESSION, zero, None).expect("zero derives");
+    let zero = compile_children(SESSION, zero).expect("zero derives");
 
     let mut explicit = limits();
     explicit.source_ring_frames = derived;
-    let explicit = compile_children(SESSION, explicit, None).expect("explicit derived value");
+    let explicit = compile_children(SESSION, explicit).expect("explicit derived value");
 
     assert_eq!(zero.plan.resources(), explicit.plan.resources());
     assert_eq!(
@@ -902,7 +902,7 @@ fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
 
 #[test]
 fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
-    let mut children = compile_children(SESSION, limits(), None).expect("children");
+    let mut children = compile_children(SESSION, limits()).expect("children");
     let left = [0.25_f32; 128];
     let right = [-0.5_f32; 128];
     children
@@ -1592,7 +1592,7 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     model.tracks[0].source_id = session::StableId::parse("aux-source").expect("source ID");
     let both: [&[u8]; 2] = [b"fixture-source", AUX];
     let document = session::canonical_session_json(&model).expect("canonical");
-    let mut children = compile_children(&document, limits(), None).expect("children");
+    let mut children = compile_children(&document, limits()).expect("children");
     submit_direct(&mut children, &both, 0);
     feed_and_render_direct(&mut children, &both, 0, 6);
     let edits = [
@@ -1656,7 +1656,7 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
             .normalized_model(),
     )
     .expect("committed");
-    let mut reference = compile_children(&committed, limits(), None).expect("reference");
+    let mut reference = compile_children(&committed, limits()).expect("reference");
     submit_direct(&mut reference, &both[..1], 0);
     let expected = feed_and_render_direct(&mut reference, &both[..1], 0, 12);
     assert_bit_identical("removal", 6, &swapped, &expected[6..]);
@@ -1677,7 +1677,7 @@ fn a_refused_structural_transaction_moves_no_producer() {
     let source: [&[u8]; 1] = [b"fixture-source"];
     let model = stateless_session(48_000);
     let document = session::canonical_session_json(&model).expect("canonical");
-    let mut reference = compile_children(&document, limits(), None).expect("reference");
+    let mut reference = compile_children(&document, limits()).expect("reference");
     submit_direct(&mut reference, &source, 0);
     let expected = feed_and_render_direct(&mut reference, &source, 0, 4);
     let edits = add_muted_track(&model, "a-muted");
@@ -1695,7 +1695,7 @@ fn a_refused_structural_transaction_moves_no_producer() {
         BeforeProtocolCommit,
         ProtocolCommit,
     ] {
-        let mut children = compile_children(&document, limits(), None).expect("children");
+        let mut children = compile_children(&document, limits()).expect("children");
         submit_direct(&mut children, &source, 0);
         let mut rendered = feed_and_render_direct(&mut children, &source, 0, 2);
         children
@@ -1754,7 +1754,7 @@ fn control_outcome<T, E: core::fmt::Debug>(result: &Result<T, E>) -> String {
 #[test]
 fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
     let model = parse_session_json(SESSION).expect("fixture");
-    let mut children = compile_children(SESSION, limits(), None).expect("children");
+    let mut children = compile_children(SESSION, limits()).expect("children");
     let left = [0.25_f32; 128];
     let right = [-0.5_f32; 128];
     let mut next_frame = 0_u64;
@@ -1932,12 +1932,12 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     eq.id = session::StableId::parse("eq-insert").expect("insert slot");
     model.tracks[0].inserts.effects.push(eq.clone());
     let full_session = session::canonical_session_json(&model).expect("canonical");
-    let full = compile_children(&full_session, limits(), None)
+    let full = compile_children(&full_session, limits())
         .expect("ten EQs")
         .plan
         .resources()
         .effect_scalar_state_bytes;
-    let reduced = compile_children(&reduced_session, limits(), None)
+    let reduced = compile_children(&reduced_session, limits())
         .expect("nine EQs")
         .plan
         .resources()
@@ -1946,7 +1946,7 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     let mut tight = limits();
     tight.maximum_effect_state_bytes = full + reduced;
 
-    let mut children = compile_children(&full_session, tight, None).expect("tight children");
+    let mut children = compile_children(&full_session, tight).expect("tight children");
     let mut pcm = [0.0_f32; 256];
     children
         .plan
@@ -3051,7 +3051,7 @@ const INPUT_LANE_ONLY: HostLiveLanes = HostLiveLanes {
 /// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session
 /// (#1256 gate 1), and against the C ABI's lane selection without its effect lanes (#1263 gate 1).
 fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
-    let mut c = compile_children(document, limits(), None).unwrap_or_else(|failure| {
+    let mut c = compile_children(document, limits()).unwrap_or_else(|failure| {
         panic!(
             "{label}: compile: {}",
             String::from_utf8_lossy(&failure.diagnostics)
@@ -3109,7 +3109,6 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         &HostLiveControlRequest::default(),
         // The C ABI's selection less its effect lanes: the input rows are live (#1556), no route row is.
         INPUT_LANE_ONLY,
-        None,
         &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("{label}: host prepare without effect lanes"));
@@ -3350,7 +3349,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
         parse_session_json(&generated_parity_session(1, 48_000)).expect("concurrency session");
     model.sources[0].frames = 1_024;
     let session = session::canonical_session_json(&model).expect("canonical");
-    let children = compile_children(&session, limits(), None).expect("concurrent children");
+    let children = compile_children(&session, limits()).expect("concurrent children");
     let session = Box::into_raw(Box::new(crate::Session::new(
         children.session,
         children.session_error,
@@ -3486,7 +3485,7 @@ mod fp_environment {
     fn render_through_the_c_entry(caller: u32) -> (Vec<u32>, u32) {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
-        let children = compile_children(SESSION, limits(), None).expect("C children");
+        let children = compile_children(SESSION, limits()).expect("C children");
         let c_session = Box::into_raw(Box::new(crate::Session::new(
             children.session,
             children.session_error,
@@ -3541,7 +3540,7 @@ mod fp_environment {
     fn render_behind_the_c_entry(caller: u32) -> Vec<u32> {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
-        let mut children = compile_children(SESSION, limits(), None).expect("direct children");
+        let mut children = compile_children(SESSION, limits()).expect("direct children");
 
         // SAFETY: every caller of this function passes a word read from this thread with only
         // FTZ (bit 15) and DAZ (bit 6) set or cleared, so no reserved bit. The test measures the
@@ -3633,7 +3632,7 @@ mod fp_environment {
         // keep, and nothing it may drop.
         let hostile = (saved & !0x6000) | MXCSR_FTZ | MXCSR_DAZ | 0x6000 | 0x0020;
 
-        let children = compile_children(SESSION, limits(), None).expect("C children");
+        let children = compile_children(SESSION, limits()).expect("C children");
         let c_session = Box::into_raw(Box::new(crate::Session::new(
             children.session,
             children.session_error,
@@ -4429,7 +4428,7 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
         &format!("\"revision\": \"{ceiling}\""),
         1,
     );
-    let refused = compile_children(&above, limits(), None)
+    let refused = compile_children(&above, limits())
         .err()
         .expect("above the ceiling");
     assert!(
