@@ -361,6 +361,46 @@ Gates run on this head: `cargo fmt --all --check`; `cargo clippy --locked --work
 `audit protocol`; `scripts/check-workspace-policy.sh`, `check-host-core-policy.sh`,
 `check-protocol-control-policy.sh`, `check-session-policy.sh`, `check-conformance-boundaries.sh`.
 
+### Heap of one live transaction on the small session (flip CI fold, 2026-10-14)
+
+The browser qualification's nine-edit live transaction (seven EQ parameter edits on console slot
+`eq-simd1` plus the two input-filter cutoffs, `sdk-response-entry.ts` "queued response subscription")
+on `observation-session.json` (one track, two console EQ slots, `sourceRingFrames` 2048, four
+observation taps) grew the wasm memory from 46 to 48 pages on its first transaction, which sent the
+worklet sticky until the worklet re-bound its views (#1562, root ruling A: growth is not a fault).
+Measured natively on the head after #1613, release, one `control_command` per call through
+`native_staging::control_command` with a thread-scoped counting allocator (a temporary test, not
+committed; the frames were captured from the SDK's own `EngineLiveControls`, the path is `live`, the
+response is 80 bytes):
+
+| transaction | allocations | requested bytes | peak live above entry |
+|---|---|---|---|
+| first (revision 1 to 2) | 846 | 281,634 | 172,790 |
+| second to fourth, each | 754 | 282,694 | 167,303 |
+
+No call leaves more than 80 bytes live. The peak is what the wasm heap must hold at once, and 167 KB
+is about 2.5 pages, which is the growth the browser saw. The sites, from the allocator's
+large-allocation backtraces (steady state):
+
+- the strip's catalog rows, built into one scratch `Vec<ControlRow>` that grows by doubling:
+  7,424, 14,848, 29,696 and 59,392 bytes (`controls/src/registry.rs:39` under
+  `effect_rows.rs:336`, `strip.rs:269` and `:414`, from `control_provider.rs:1420`), about 111 KB
+  requested and about 89 KB live while the last doubling copies; a `ControlRow` is 232 bytes;
+- the replay-cache clone for the prospective response: 65,536 bytes of storage
+  (`protocol/src/controller.rs:262`, `try_clone_eager`) plus the response frame staging, 16,384
+  bytes (`controller.rs:1851`), the protocol's own constants that the "Successor" below already names;
+- the derived-row scratch in the staging comparison: 4,656 and 9,296 bytes
+  (`control_provider.rs:1590`);
+- the canonical owner text for the estimate arithmetic (D4): two 4,096 and two 8,192-byte writes
+  (`session/src/canonical.rs:194` and `:54`), old text and new text of the one edited owner.
+
+The cause is not one line. Reserving the scratch to the owner's previous row count removes the
+doubling (the strip's rows are ~46 KB at their final size, not 59 KB, and the 52 KB of intermediate
+sizes and the copy peak go), but the replay clone and the response staging are 80 KB of the peak on
+their own, so the peak stays near 125 KB and the first transaction can still grow the heap. It is
+filed as `TBD11-shrink-the-peak-heap-of-a-live-only-commit.md`; the flip does not wait for it, because
+growth is re-bound and counted on the control side.
+
 ### What stays linear (batch 7 review)
 
 Two costs of an in-place commit still grow with the session, and are recorded so that no reader
