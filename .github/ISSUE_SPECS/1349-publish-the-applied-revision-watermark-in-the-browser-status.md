@@ -181,9 +181,58 @@ Checked against `main` at `32cee58d0`.
   `miso_engine_v1_plan_watermark` for the same script and to the record that
   `miso_engine_web_v1_watermark_read` copies (#1381a D5, `WebPlanWatermark`). The rebuild leg of
   gate 1 moves to #1562b's gates.
-- **Anchors.** `WebStatus` is `hosts/host-web/src/lib.rs:1172` (88 bytes; `reserved: [u64; 3]` at
-  56-72, `source_underrun_blocks` at 80). The control-side watermark record already exists:
+- **Anchors.** `WebStatus` is `hosts/host-web/src/lib.rs:1172` (80 bytes on `main`; `reserved: [u64; 3]`
+  at 56-72). The root amendment's 88 bytes assumed #1537, which is still open: the size pin reads
+  80 until #1537 adds offset 80. The control-side watermark record already exists:
   `WebPlanWatermark` and `miso_engine_web_v1_watermark_{read,ptr}` (`ffi.rs:4022`, `:4030`).
   D3 holds unchanged: this slice adds no export.
 - **Realtime edit.** D1 edits `crates/engine/src/realtime/plan_exchange.rs`. Per root, one attempt;
   if the permission system refuses it, the slice stops and waits.
+
+## Decision record: status watermark words (batch 8)
+
+Shipped D1, D2 and D2a. The one attempt at `plan_exchange.rs` was accepted.
+
+- **D1.** `RealtimeRenderReport::watermark: Option<PlanWatermark>`. `WatermarkWriter::advance`
+  (`watermark.rs`) now returns the whole record it published, or `None` when it wrote nothing, so
+  the report carries render's own values and no reader of the seqlock exists. Gate 2:
+  `realtime::tests::watermark::the_render_report_carries_the_watermark_only_on_the_advancing_block`
+  (a plan swap and a live gate edit advance; the blocks between report `None`).
+- **Thick core.** `control_plane::PlanState::render` returns `Result<Option<PlanWatermark>, _>`
+  (it forwards the report's field); `capi`'s one caller matches `Ok(_)`. `render_next` copies the
+  three words only when it is `Some`.
+- **D2.** `WebStatus` words 56, 64, 72 are `watermark_revision`, `watermark_first_sample` and
+  `watermark_outcome_flags`. Boot reads the plan's initial record through `PlanQueries::watermark()`
+  (no render is in flight, so a busy read is a `web.internal.watermark` boot failure, never a
+  silent default).
+- **Departure from the amendment: the size is 80, not 88.** `source_underrun_blocks` (#1537) is not
+  on `main` at `32cee58d0`, so the record is 80 bytes, ending at 80 with the last watermark word at
+  72. #1537 will add offset 80 and move the size; the layout pins here name no size other than 80.
+- **D2a.** `readStatus()` no longer checks a reserved word and returns `appliedRevision`,
+  `appliedSample` and `appliedOutcome`; the main-realm host requires the three as u64 `bigint`s;
+  both `.d.ts` copies are equal; the harness's fake reply carries them.
+- **Mirrors.** `tools/parameter-metadata/src/abi_layout.rs`, regenerated
+  `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`;
+  `scripts/check-abi-layout-v1.py` gains `STATUS_FIELDS` and a self-test mutation ("the status
+  omits a watermark word", 28 mutations caught); its self-test fixture carries the new rows.
+
+Gates and results:
+
+- Gates 1 and 3 (live-edit form of the amendment): `control_parity::
+  the_status_words_carry_the_applied_revision_the_c_abi_reports` at 44.1, 48, 88.2 and 96 kHz:
+  boot `(revision, 0, EXACT)` in both hosts, unchanged until the committing block, then
+  `(revision, 3 * 128, EXACT)` in the browser status, the C ABI's `miso_engine_v1_plan_watermark`
+  and the record `read_watermark` copies; a following block leaves it. `run()` of the same file
+  also compares the status words with the C ABI watermark after every block of the whole #1560
+  script. The rebuild leg stays with #1562b.
+- Gate 4: `frozen_layouts_and_values_are_exact` pins offsets 48, 56, 64, 72 and size 80;
+  `check-abi-layout-v1.py` and `--self-test`, `check-sdk-generated.sh target/ci/qualification-artifacts`
+  and `check-sdk-types.sh` pass.
+- Gate 5: `scripts/test-web-audioworklet.mjs` (status reply carries `(9n, 64n, 1n)`; six refusal
+  mutations; a real processor over a fake status block holding `(r, s, EXACT)` and a wide-value
+  read) passes through `scripts/test-web-audioworklet.sh`.
+- `cargo test --locked -p engine --features engine/realtime-audit`, `-p control-plane --features
+  test-support`, `-p host-web --features host-web/test-support`, `-p capi`, `-p parameter-metadata`,
+  `check-web-audioworklet.sh` (after `build-web-audioworklet.sh --named-twin`), `cargo fmt`, clippy
+  (`-D warnings`, all features, the touched crates) and `check-workspace-policy.sh` pass.
+  `check-cross-targets.sh` was not run.

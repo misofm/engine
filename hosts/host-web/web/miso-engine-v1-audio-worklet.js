@@ -904,8 +904,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   readStatus() {
     const view = this.statusView;
     if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
-        || view.getUint32(28, true) !== 0
-        || [56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
+        || view.getUint32(28, true) !== 0) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -917,6 +916,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
       liveValuesSuperseded: view.getBigUint64(48, true),
+      // Issue #1349 D2: the applied-revision watermark's three words, copied by the engine from
+      // the report of the block that advanced it. The worklet assigns no flag bit of its own.
+      appliedRevision: view.getBigUint64(56, true),
+      appliedSample: view.getBigUint64(64, true),
+      appliedOutcome: view.getBigUint64(72, true),
     });
   }
 

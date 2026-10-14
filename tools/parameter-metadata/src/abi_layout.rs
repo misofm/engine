@@ -294,7 +294,7 @@ fn boot_options_fields() -> [Field; 11] {
     ]
 }
 
-fn status_fields() -> [Field; 12] {
+fn status_fields() -> [Field; 14] {
     [
         ("structSize", offset_of!(WebStatus, struct_size), "u32"),
         ("abiVersion", offset_of!(WebStatus, abi_version), "u32"),
@@ -323,7 +323,21 @@ fn status_fields() -> [Field; 12] {
             offset_of!(WebStatus, live_values_superseded),
             "u64",
         ),
-        ("reserved", offset_of!(WebStatus, reserved), "u64[3]"),
+        (
+            "watermarkRevision",
+            offset_of!(WebStatus, watermark_revision),
+            "u64",
+        ),
+        (
+            "watermarkFirstSample",
+            offset_of!(WebStatus, watermark_first_sample),
+            "u64",
+        ),
+        (
+            "watermarkOutcomeFlags",
+            offset_of!(WebStatus, watermark_outcome_flags),
+            "u64",
+        ),
     ]
 }
 

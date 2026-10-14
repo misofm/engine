@@ -289,12 +289,13 @@ impl<A: ControlAdapter> PlanState<A> {
     ///
     /// Continuity, output shape and clock overflow are core's rules now, reported as typed
     /// [`RenderError`] variants; the adapter maps each one to its own diagnostic code and adds
-    /// nothing.
+    /// nothing. A block that advanced the applied-revision watermark returns the record render
+    /// just published (#1349 D1); every other block returns `None`.
     pub fn render(
         &mut self,
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
-    ) -> Result<(), RenderError> {
+    ) -> Result<Option<PlanWatermark>, RenderError> {
         let report = match self
             .owner
             .render_contiguous(RenderIo { output }, absolute_sample)
@@ -311,7 +312,7 @@ impl<A: ControlAdapter> PlanState<A> {
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
-        Ok(())
+        Ok(report.watermark)
     }
 
     /// Whether the peak scan has a consumer this block (#163 phase 4 item 2).

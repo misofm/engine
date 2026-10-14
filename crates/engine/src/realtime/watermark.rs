@@ -176,16 +176,17 @@ impl WatermarkWriter {
     }
 
     /// Advance to `revision`, in effect from `first_sample`, if it is above the published one;
-    /// otherwise write nothing.
+    /// otherwise write nothing. Returns the whole watermark it just published, or `None` when it
+    /// wrote nothing (#1349 D1).
     ///
     /// An advance from `a` to `b` completes `b - a` revisions. The first advance after a claim
     /// adds the claimed `superseded` count to its counter and sets [`OUTCOME_SUPERSEDED`]; the
     /// rest goes to `exact`, or to `transition_fallback` if the claimed outcome was the fallback,
     /// with its flag. Later advances on the same plan are [`OUTCOME_EXACT`].
     #[inline]
-    pub(crate) fn advance(&mut self, revision: u64, first_sample: u64) {
+    pub(crate) fn advance(&mut self, revision: u64, first_sample: u64) -> Option<PlanWatermark> {
         if revision <= self.current.revision {
-            return;
+            return None;
         }
         let covered = revision - self.current.revision;
         let superseded = core::mem::take(&mut self.pending_superseded);
@@ -213,6 +214,7 @@ impl WatermarkWriter {
         self.current.first_sample = first_sample;
         self.current.outcome_flags = flags;
         self.store(self.current);
+        Some(self.current)
     }
 
     /// Overwrite the record with `watermark`. Wait-free: two counter stores and six word stores.

@@ -742,6 +742,17 @@ export interface MisoStatus {
   /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). Every value reaches
   /// the engine through `control()` (issue #1565), the one path the C ABI takes.
   readonly liveValuesSuperseded: bigint;
+  /// The applied-revision watermark's revision (issue 1349): the highest committed revision in
+  /// effect together with every revision before it, copied from the engine's render report.
+  /// @internal The SDK's `engine.apply` is the public surface.
+  readonly appliedRevision: bigint;
+  /// The absolute render sample of the first block in which `appliedRevision` was in effect.
+  /// @internal
+  readonly appliedSample: bigint;
+  /// The watermark's outcome flags, the C ABI's bits: `EXACT` 1, `TRANSITION_FALLBACK` 2,
+  /// `SUPERSEDED` 4.
+  /// @internal
+  readonly appliedOutcome: bigint;
   /// The module's memory size now: at least the boot size (`MisoAudioWorkletHost.memoryBytes`),
   /// larger after a control call grew it.
   readonly memoryBytes: number;

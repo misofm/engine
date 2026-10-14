@@ -264,9 +264,19 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved",
+          "name": "watermarkRevision",
           "offset": 56,
-          "type": "u64[3]"
+          "type": "u64"
+        },
+        {
+          "name": "watermarkFirstSample",
+          "offset": 64,
+          "type": "u64"
+        },
+        {
+          "name": "watermarkOutcomeFlags",
+          "offset": 72,
+          "type": "u64"
         }
       ]
     },

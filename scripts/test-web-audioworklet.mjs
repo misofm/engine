@@ -192,6 +192,7 @@ async function testMainRealm() {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
             lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
+            appliedRevision: 9n, appliedSample: 64n, appliedOutcome: 1n,
             memoryBytes: 65536, singleModeControlAllocations: 3, staleViewQuanta: 0,
           };
           if (statusMutation !== null) response = statusMutation(response);
@@ -1327,6 +1328,11 @@ async function testMainRealm() {
     assert.equal(status.tag, "miso.status.v1");
     assert.equal(status.memoryBytes, host.memoryBytes);
     assert.equal(status.liveValuesSuperseded, 7n, "the status reply carries the superseded count");
+    assert.deepEqual(
+      [status.appliedRevision, status.appliedSample, status.appliedOutcome],
+      [9n, 64n, 1n],
+      "the status reply carries the applied-revision watermark",
+    );
     assert.equal(
       status.singleModeControlAllocations,
       3,
@@ -1621,6 +1627,13 @@ async function testMainRealm() {
       (reply) => ({ ...reply, liveValuesSuperseded: 7 }),
       (reply) => ({ ...reply, liveValuesSuperseded: -1n }),
       (reply) => ({ ...reply, liveValuesSuperseded: 1n << 64n }),
+      // #1349 gate 5: each of the three watermark words is required and must be a u64 bigint.
+      ({ appliedRevision: _dropped, ...rest }) => rest,
+      ({ appliedSample: _dropped, ...rest }) => rest,
+      ({ appliedOutcome: _dropped, ...rest }) => rest,
+      (reply) => ({ ...reply, appliedRevision: 9 }),
+      (reply) => ({ ...reply, appliedSample: -1n }),
+      (reply) => ({ ...reply, appliedOutcome: 1n << 64n }),
       // The stale-view count: absent, negative, and a memory smaller than the boot size (memory
       // only grows, so a shrink is a corrupt reply).
       ({ staleViewQuanta: _dropped, ...rest }) => rest,
@@ -3893,7 +3906,7 @@ async function testProcessor() {
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply
-    // carries the word. Words 56, 64 and 72 stay required zero: a nonzero one fails construction.
+    // carries the word.
     {
       const fake = createFakeExports(64);
       new DataView(fake.exports.memory.buffer, 16384).setBigUint64(48, 0x0102_0304_0506n, true);
@@ -3910,12 +3923,28 @@ async function testProcessor() {
         "the word is read whole",
       );
     }
-    for (const offset of [56, 64, 72]) {
+    // #1349 gate 5: the worklet's status block holds the engine's watermark `(r, s, EXACT)` at
+    // 56, 64 and 72 from boot on. Construction accepts it and the reply carries the three words
+    // whole, so a reader that still demanded zero there would fail every boot.
+    {
       const fake = createFakeExports(64);
-      new DataView(fake.exports.memory.buffer, 16384).setBigUint64(offset, 1n, true);
+      const block = new DataView(fake.exports.memory.buffer, 16384);
+      block.setBigUint64(56, 0x0102_0304n, true);
+      block.setBigUint64(64, 0x0a0b_0c0dn, true);
+      block.setBigUint64(72, 1n, true);
       const processor = construct(fake);
-      assert.equal(fake.calls.dispose, 1, `a nonzero reserved word at ${offset} fails the boot`);
-      assert.equal(processor.port.posts[0].message.tag, "miso.error.v1");
+      assert.equal(processor.port.posts[0].message.tag, "miso.ready.v1");
+      processor.receive({ tag: "miso.status.v1", requestId: 1 });
+      const status = processor.port.posts.at(-1).message;
+      assert.equal(status.appliedRevision, 0x0102_0304n);
+      assert.equal(status.appliedSample, 0x0a0b_0c0dn);
+      assert.equal(status.appliedOutcome, 1n);
+      block.setBigUint64(56, (1n << 64n) - 1n, true);
+      block.setBigUint64(72, 7n, true);
+      processor.receive({ tag: "miso.status.v1", requestId: 2 });
+      const wide = processor.port.posts.at(-1).message;
+      assert.equal(wide.appliedRevision, (1n << 64n) - 1n, "the revision is read whole");
+      assert.equal(wide.appliedOutcome, 7n, "the flags word is copied, not interpreted");
     }
 
     {

@@ -148,7 +148,9 @@
         { "name": "nextAbsoluteSample", "offset": 32, "type": "u64" },
         { "name": "renderedQuanta", "offset": 40, "type": "u64" },
         { "name": "liveValuesSuperseded", "offset": 48, "type": "u64" },
-        { "name": "reserved", "offset": 56, "type": "u64[3]" }
+        { "name": "watermarkRevision", "offset": 56, "type": "u64" },
+        { "name": "watermarkFirstSample", "offset": 64, "type": "u64" },
+        { "name": "watermarkOutcomeFlags", "offset": 72, "type": "u64" }
       ]
     },
     "resourceReport": {

@@ -1201,8 +1201,16 @@ pub struct WebStatus {
     /// order; a VCA ride on a member that also has a fader command), and the C ABI rebuilds,
     /// writing no cell, for input, route, VCA and submix edits.
     pub live_values_superseded: u64,
-    /// Required-zero expansion words.
-    pub reserved: [u64; 3],
+    /// The applied-revision watermark's revision (#1349 D2): the highest committed revision in
+    /// effect together with every revision before it. Copied from the render report of the block
+    /// that advanced it; the initial revision from boot until then.
+    pub watermark_revision: u64,
+    /// The absolute render sample of the first block in which `watermark_revision` was in effect;
+    /// `0` for the initial revision.
+    pub watermark_first_sample: u64,
+    /// The watermark's outcome flags, in the bits of the C ABI's `miso_engine_v1_watermark`:
+    /// `EXACT = 1`, `TRANSITION_FALLBACK = 2`, `SUPERSEDED = 4`. The browser assigns no bit.
+    pub watermark_outcome_flags: u64,
 }
 
 /// The applied-revision watermark of the plan (#1381a D5), in the order and sizes of the C ABI's
@@ -1851,6 +1859,12 @@ impl AudioWorkletEngineHost {
                 memory_budget,
             ));
         }
+        // #1349 D2: the status opens with the plan's initial watermark, `(initial revision, 0,
+        // EXACT)`. No render is in flight at boot, so the read cannot be busy.
+        let initial_watermark = ready
+            .queries
+            .watermark()
+            .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.internal.watermark"))?;
         let buffers = allocate_buffers(projection)?;
         let backend = selected_backend();
         Ok(Self {
@@ -1867,7 +1881,9 @@ impl AudioWorkletEngineHost {
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
                 live_values_superseded: 0,
-                reserved: [0; 3],
+                watermark_revision: initial_watermark.revision,
+                watermark_first_sample: initial_watermark.first_sample,
+                watermark_outcome_flags: initial_watermark.outcome_flags,
             },
             resources,
             command_report: empty_command_report(),
@@ -3057,7 +3073,14 @@ impl AudioWorkletEngineHost {
         // boundary and continues the clock.
         let result = plan.render(self.status.next_absolute_sample, output);
         match result {
-            Ok(()) => {
+            Ok(watermark) => {
+                // #1349 D1/D2: copied from the report of the block that advanced the watermark;
+                // a block that did not advance it leaves the three words as they were.
+                if let Some(watermark) = watermark {
+                    self.status.watermark_revision = watermark.revision;
+                    self.status.watermark_first_sample = watermark.first_sample;
+                    self.status.watermark_outcome_flags = watermark.outcome_flags;
+                }
                 let next_absolute_sample = plan.owner().next_absolute_sample();
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);

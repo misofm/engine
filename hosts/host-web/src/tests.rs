@@ -301,7 +301,9 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebStatus, state), 8);
     assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
     assert_eq!(offset_of!(WebStatus, live_values_superseded), 48);
-    assert_eq!(offset_of!(WebStatus, reserved), 56);
+    assert_eq!(offset_of!(WebStatus, watermark_revision), 56);
+    assert_eq!(offset_of!(WebStatus, watermark_first_sample), 64);
+    assert_eq!(offset_of!(WebStatus, watermark_outcome_flags), 72);
     assert_eq!(offset_of!(WebResourceReport, options_bytes), 32);
     assert_eq!(offset_of!(WebResourceReport, id_staging_bytes), 64);
     assert_eq!(
