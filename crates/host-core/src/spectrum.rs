@@ -1504,6 +1504,9 @@ struct SpectrumOneShotState {
     /// pushed and moved to `COMPLETE` only after the block that completed it rendered without
     /// failure, and again on each later block end while the queue is full (issue #1609).
     held: bool,
+    /// The held window outlived a block end (its push found the slot full). A later block that
+    /// fails, or is malformed, did not complete it, so it cannot take the window away.
+    survived_block_end: bool,
 }
 
 struct SpectrumContinuousState {
@@ -1691,6 +1694,7 @@ impl SpectrumCaptureObserver {
                 source_underrun: false,
                 latched: 0,
                 held: false,
+                survived_block_end: false,
             },
             continuous: SpectrumContinuousState {
                 shared,
@@ -1865,6 +1869,7 @@ fn one_shot_finish(state: &mut SpectrumOneShotState, first_sample: u64, count: u
     if state.filled == SPECTRUM_WINDOW_FRAMES {
         state.armed = false;
         state.held = true;
+        state.survived_block_end = false;
     }
 }
 
@@ -1905,6 +1910,7 @@ fn one_shot_block_end(state: &mut SpectrumOneShotState, buffers: &mut SpectrumCa
         2 * SPECTRUM_WINDOW_FRAMES,
     );
     if buffers.producer.try_push(record).is_err() {
+        state.survived_block_end = true;
         return;
     }
     state.held = false;
@@ -2027,7 +2033,14 @@ fn one_shot_capture_resident(
 ///
 /// One compare-and-swap from the word just loaded, and only from `ARMED` or `CAPTURING`. A failed
 /// swap means control moved the word (a cancel or a read), which already ended the window.
+///
+/// A window that an earlier, good block completed and a stale record keeps held is not this
+/// block's to take: it stays held for the next block end, and the word stays `CAPTURING`. The
+/// block that completed a window and then fails still drops it (it has not survived a block end).
 fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
+    if state.held && state.survived_block_end {
+        return;
+    }
     state.armed = false;
     state.held = false;
     let word = state.state.load(Ordering::Acquire);
@@ -2043,7 +2056,8 @@ fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
 
 /// A block failed. A window it completed is held, never pushed, so it is dropped here with the
 /// rest of the window; a result an earlier good block published (`COMPLETE`) is left for the
-/// reader.
+/// reader, and so is a window an earlier good block completed that a stale record still holds
+/// (see [`one_shot_invalidate`]).
 fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState) {
     one_shot_invalidate(state);
 }
@@ -3841,6 +3855,48 @@ mod tests {
         observer.block_end();
         let window = capture.try_read().expect("the next block end publishes");
         assert_eq!(window.first_sample, 8_192);
+    }
+
+    /// A window that a good block completed and a stale record keeps held survives a later block
+    /// that fails and a later block that is malformed: the reader gets the window, not `Invalid`.
+    #[test]
+    fn a_held_window_survives_a_later_failed_or_malformed_block() {
+        let (mut observer, mut capture) = one_shot_pair(SpectrumChannels::Left);
+        capture.arm().expect("first arm");
+        capture.cancel();
+        capture.arm().expect("an arm after a cancel is never Busy");
+        let stale = super::SpectrumCapturedRecord {
+            window: window(0.25),
+            stream_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+            arm_generation: 1,
+        };
+        assert!(observer.producer.try_push(stale).is_ok());
+        feed_window(&mut observer, 8_192, 16);
+        observer.block_end();
+        // Later blocks: one fails after the observer ran, one has unequal plane lengths.
+        observer.invalidate_after_failure(10_240);
+        observer.capture(
+            &[0.0; 128],
+            &[0.0; 64],
+            10_240,
+            super::GraphObservationValidity::CLEAR,
+        );
+        assert_eq!(
+            capture
+                .try_read()
+                .expect_err("still held behind the stale record"),
+            SpectrumCaptureReadError::Pending
+        );
+        observer.block_end();
+        assert_eq!(
+            capture
+                .try_read()
+                .expect("the held window was kept")
+                .first_sample,
+            8_192
+        );
     }
 
     /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.

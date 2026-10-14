@@ -831,7 +831,7 @@ fn stream_sequence_one_owner() {
     );
 
     assert_eq!(service.cancel(), Err(SpectrumServiceError::StreamActive));
-    service.stop_stream();
+    service.stop_stream(None);
     assert!(!service.stream_active());
     assert_eq!(metadata(&service).status, SpectrumStreamStatus::Stopped);
     assert!(service.stream_window().is_none());
@@ -896,7 +896,7 @@ fn a_stream_start_never_discards_a_callers_arm() {
     service
         .start_stream(smoothing(0.0), None)
         .expect("a select-made arm is replaced");
-    service.stop_stream();
+    service.stop_stream(None);
     service.cancel().unwrap();
     service.arm().unwrap();
     assert_eq!(
@@ -910,7 +910,7 @@ fn a_stream_start_never_discards_a_callers_arm() {
     service
         .start_stream(smoothing(0.0), None)
         .expect("the read ended the caller's claim");
-    service.stop_stream();
+    service.stop_stream(None);
 
     let (_rig, mut single) = single_service(SpectrumChannels::Left);
     single.arm().unwrap();
@@ -1072,7 +1072,7 @@ fn stream_calls_allocate_and_free_nothing() {
         }
         service.read_stream(None).unwrap();
         service.read_stream(None).unwrap();
-        service.stop_stream();
+        service.stop_stream(None);
         service.cancel().unwrap();
         seen + u64::from(service.stream_cadence().is_none())
     };
@@ -1086,5 +1086,133 @@ fn stream_calls_allocate_and_free_nothing() {
         (delta.allocations, delta.reallocations, delta.deallocations),
         (0, 0, 0),
         "start, select, read, stop or cancel allocated or freed"
+    );
+}
+
+/// Fold (batch 8 review). Turns red if the one target select stops choosing the road by the
+/// stream's state (a host adapter would have to repeat that choice), if a smoothing without a
+/// running stream changes the selection, or if the stop leaves the analysis running or the
+/// metadata without the analysis facts.
+#[test]
+fn one_select_and_one_stop_serve_the_entry_and_the_stream() {
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = Some(SpectrumAnalysis::new());
+    // No stream: the plain entry selection; a smoothing has no stream to change.
+    assert_eq!(
+        service.select_target(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(50.0)),
+            analysis.as_mut()
+        ),
+        Err(SpectrumServiceError::StreamInactive)
+    );
+    assert_eq!(service.selection_epoch(), 0, "a refusal changed the entry");
+    assert_eq!(
+        service.select_target(OUTPUT, SpectrumChannels::Stereo, None, analysis.as_mut()),
+        Ok(false)
+    );
+    assert_eq!(service.selection_epoch(), 1);
+    // A stream: the restarting selection; the same entry is no restart.
+    service
+        .start_stream(smoothing(100.0), analysis.as_mut())
+        .expect("start");
+    assert_eq!(
+        service.select_target(OUTPUT, SpectrumChannels::Stereo, None, analysis.as_mut()),
+        Ok(false)
+    );
+    assert_eq!(
+        service.select_target(TRACK, SpectrumChannels::Left, None, analysis.as_mut()),
+        Ok(true)
+    );
+    assert_eq!(metadata(&service).status, SpectrumStreamStatus::Warming);
+    assert_eq!(metadata(&service).target_kind, INPUT_KIND);
+    assert_eq!(
+        service.select_target(
+            TRACK,
+            SpectrumChannels::Left,
+            Some(smoothing(10.0)),
+            analysis.as_mut()
+        ),
+        Ok(true),
+        "a changed smoothing restarts the stream"
+    );
+    assert_eq!(metadata(&service).smoothing_ms, 10.0);
+    // The stop ends the analysis with the service, and the metadata carries its facts.
+    let mut ready = metadata(&service);
+    for _ in 0..4 {
+        rig.window();
+        ready = read_stream(&mut service, &mut analysis);
+        if ready.status == SpectrumStreamStatus::Ready {
+            break;
+        }
+    }
+    assert_eq!(ready.status, SpectrumStreamStatus::Ready);
+    let window = *service.stream_window().expect("ready window");
+    let (mut out, mut facts) = (SpectrumAnalysisResult::new(), ready);
+    analysis
+        .as_mut()
+        .unwrap()
+        .analyze_stream_into(&window, &mut out, &mut facts)
+        .expect("analysis");
+    assert!(analysis.as_ref().unwrap().has_stream_history());
+    service.stop_stream(analysis.as_mut());
+    let stopped = metadata(&service);
+    assert_eq!(stopped.status, SpectrumStreamStatus::Stopped);
+    let owned = analysis.as_ref().unwrap();
+    assert!(!owned.stream_active());
+    assert_eq!(stopped.analysis_epoch, owned.analysis_epoch());
+    assert_eq!(stopped.history_start_sample, owned.history_start_sample());
+    assert_eq!(stopped.history_start_sample, facts.history_start_sample);
+    assert_eq!(stopped.analysis_epoch, facts.analysis_epoch);
+}
+
+/// Fold (batch 8 review). Turns red if an instance that owns both halves of a stream adopts a
+/// window the metadata does not describe as ready, or reports a stopped or never-started stream
+/// as a missing window (the browser answers the first as invalid input, the second as a wrong
+/// state).
+#[test]
+fn adoption_follows_the_metadata_status() {
+    let with = |status| SpectrumStreamMetadata {
+        status,
+        ..SpectrumStreamMetadata::default()
+    };
+    for status in [
+        SpectrumStreamStatus::Inactive,
+        SpectrumStreamStatus::Stopped,
+    ] {
+        assert_eq!(
+            SpectrumAnalysis::adoption_needed(None, &with(status)),
+            Err(SpectrumServiceError::StreamInactive),
+            "{status:?}"
+        );
+    }
+    for status in [
+        SpectrumStreamStatus::Warming,
+        SpectrumStreamStatus::Pending,
+        SpectrumStreamStatus::Gap,
+        SpectrumStreamStatus::Failed,
+    ] {
+        assert_eq!(
+            SpectrumAnalysis::adoption_needed(Some(&SpectrumAnalysis::new()), &with(status)),
+            Err(SpectrumServiceError::WindowInvalid),
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        SpectrumAnalysis::adoption_needed(None, &with(SpectrumStreamStatus::Ready)),
+        Ok(true)
+    );
+    // An analysis that runs the stream never adopts, whatever the record says.
+    let (mut rig, mut service) = collection_service();
+    let mut analysis = Some(SpectrumAnalysis::new());
+    service.select(OUTPUT, SpectrumChannels::Stereo).unwrap();
+    service
+        .start_stream(smoothing(100.0), analysis.as_mut())
+        .unwrap();
+    rig.window();
+    assert_eq!(
+        SpectrumAnalysis::adoption_needed(analysis.as_ref(), &with(SpectrumStreamStatus::Pending)),
+        Ok(false)
     );
 }

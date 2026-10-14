@@ -294,3 +294,43 @@ while the caller's arm stands (`RESULT_BACKPRESSURE` in the browser).
   read the removed staging stream fields now read the analysis through test helpers.
 - `realtime-policy`: ok, 130 marked regions in 28 files; the two spectrum-service regions now also
   hold the stream calls.
+
+## Fold (batch 8 review)
+
+Findings m3 and m4, folded in `crates/host-core/src/spectrum_service.rs` and
+`hosts/host-web/src/{ffi,lib}.rs`. The rule: logic the C ABI (#1593/#1595) would repeat lives in
+host-core.
+
+- **m3, moved into the core.**
+  - `SpectrumService::select_target(target, channels, smoothing, analysis) -> Result<bool, _>`
+    chooses between the entry selection and the stream's restarting selection by the stream's
+    state, refuses a smoothing without a running stream (`StreamInactive`) and maps a cadence
+    refusal at a restart to `StreamInactive` (the browser's `RESULT_WRONG_STATE`). It returns
+    whether a running stream restarted. The host's `select_spectrum` and `select_spectrum_stream`
+    become one `select_spectrum_target`; the export holds only the byte parsing and the staging
+    resets. `spectrum_stream_active` (no caller left) is removed.
+  - `SpectrumService::stop_stream(analysis)` ends the analysis of the stream in the same call and
+    refreshes the metadata's analysis facts from it. The stop export no longer calls
+    `end_stream` or writes `STOPPED`: it writes the record from `stream_metadata()` like every other
+    export.
+  - `SpectrumAnalysis::adoption_needed(analysis, metadata)` is the adopt-from-a-ready-record
+    rule: `Ok(false)` when the analysis runs the stream, `StreamInactive` for an inactive or
+    stopped record, `WindowInvalid` for a running stream without a ready window, `Ok(true)` for a
+    ready one. The analysis export keeps only the record-word checks and the byte copy.
+  - The reset export maps its error with `spectrum_result` (the old arm that sent every other
+    error to `RESULT_REFUSED_BUDGET` was the same mapping for the only other error, `Exhausted`)
+    and reads `history_start_sample` from the analysis instead of writing 0.
+- **m4, restored.** The analysis export after a read that left the stream `Pending` (or `Warming`,
+  `Gap`, `Failed`) answers `RESULT_INVALID_ARGUMENT` again, as before #1592; a stopped or
+  never-started stream answers `RESULT_WRONG_STATE`. The departure noted in the decision record
+  above ("now answers `RESULT_WRONG_STATE`") no longer holds.
+- **One departure.** Two refusals that were already wrong together now answer in a different
+  order: a smoothing without a running stream used to be checked before the target ID, kind and
+  channel bytes (`RESULT_WRONG_STATE` before `RESULT_INVALID_ARGUMENT`), and the core cannot see
+  the bytes. A call with both faults answers `RESULT_INVALID_ARGUMENT` first. No state changes in
+  either order.
+- **Tests.** `one_select_and_one_stop_serve_the_entry_and_the_stream` and
+  `adoption_follows_the_metadata_status` (crates/host-core/tests/spectrum_service.rs; red if a
+  host adapter must choose the road, or if the stop leaves the analysis running or the metadata
+  without its facts); `stream_analysis_answers_by_the_stream_state` (host-web `ffi.rs`; red on the
+  m4 answer). The tests that called `stop_stream()` now pass `None`.

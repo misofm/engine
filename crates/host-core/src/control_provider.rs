@@ -615,17 +615,18 @@ fn contract_channel(lane: ParameterChannel) -> effect_contract::ParameterChannel
 /// The checks every `RESPONSE_GET` meets first, whatever the endpoint: the target is a
 /// configuration (the address and strip targets are served by later slices), then the core's own
 /// checks in the core's order (rate, points, override count, axis), so the refusal of a request
-/// that is wrong in several ways is the same on every host. It returns the grid the request names.
+/// that is wrong in several ways is the same on every host. It returns the configuration the
+/// request targets and the grid it names.
 fn response_preflight(
     sample_rate_hz: u32,
     request: &ResponseGetRequest,
-) -> Result<ResponsePreviewGrid, ResponseProviderError> {
-    if !matches!(request.target, ResponseTarget::Configuration(_)) {
+) -> Result<(&ResponseConfiguration, ResponsePreviewGrid), ResponseProviderError> {
+    let ResponseTarget::Configuration(configuration) = &request.target else {
         return Err(refuse(
             StatusCode::Unavailable,
             "response.target.unavailable",
         ));
-    }
+    };
     let points = request.points as usize;
     let grid = match request.grid {
         ResponseGrid::Linear => ResponsePreviewGrid::Linear {
@@ -640,70 +641,66 @@ fn response_preflight(
         },
     };
     check_response_request(sample_rate_hz, grid, request.overrides.len()).map_err(query_refusal)?;
-    Ok(grid)
+    Ok((configuration, grid))
 }
 
 /// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
-/// model's, a request that names its own is refused, and everything else is the endpoint-free
-/// serving of [`serve_checked`].
+/// model's, and a request that names its own is refused.
 fn serve_response(
     maximum_reply_bytes: usize,
     model: &SessionModel,
     request: &ResponseGetRequest,
 ) -> Result<ResponseResult, ResponseProviderError> {
-    let grid = response_preflight(model.sample_rate_hz, request)?;
-    // A session endpoint has one rate and one quantum, the session's.
-    if request.sample_rate_hz.is_some() || request.quantum_frames.is_some() {
-        return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
-    }
-    serve_checked(
+    serve_response_at(
         model.sample_rate_hz,
         model.quantum_frames,
         maximum_reply_bytes,
         request,
-        grid,
+        true,
     )
 }
 
-/// Serve one `RESPONSE_GET` for an endpoint that has no session: the caller resolves the rate and
-/// the quantum, and this function reads neither `request.sample_rate_hz` nor
-/// `request.quantum_frames`. The refusals and the curves are the session endpoint's.
-// The caller is #1574's session-less preview; until it lands only the tests reach this function.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the session-less preview (#1574) is the caller")
-)]
+/// Serve one `RESPONSE_GET` at a rate and a quantum the caller resolved: [`response_preflight`],
+/// then the rate rule, then [`serve_checked`], so the refusal of a request that is wrong in
+/// several ways is the same for every endpoint. This function reads neither
+/// `request.sample_rate_hz` nor `request.quantum_frames` for its curves.
+///
+/// `session` is true for an endpoint that has one rate and one quantum, the session's: a request
+/// that names its own is then refused after the preflight (`response.rate.session`). An endpoint
+/// that has no session (#1574) passes false and has resolved the rate and the quantum from the
+/// request itself.
 pub(crate) fn serve_response_at(
     sample_rate_hz: u32,
     quantum_frames: u32,
     maximum_reply_bytes: usize,
     request: &ResponseGetRequest,
+    session: bool,
 ) -> Result<ResponseResult, ResponseProviderError> {
-    let grid = response_preflight(sample_rate_hz, request)?;
+    let (configuration, grid) = response_preflight(sample_rate_hz, request)?;
+    if session && (request.sample_rate_hz.is_some() || request.quantum_frames.is_some()) {
+        return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
+    }
     serve_checked(
         sample_rate_hz,
         quantum_frames,
         maximum_reply_bytes,
         request,
+        configuration,
         grid,
     )
 }
 
 /// Everything after the rate rules: the limits, the bypass rows, the preparation, the reply bound
-/// and the curves. The request has passed [`response_preflight`], so its target is a configuration.
+/// and the curves. The request has passed [`response_preflight`], which returned its
+/// configuration and grid.
 fn serve_checked(
     sample_rate_hz: u32,
     quantum_frames: u32,
     maximum_reply_bytes: usize,
     request: &ResponseGetRequest,
+    configuration: &ResponseConfiguration,
     grid: ResponsePreviewGrid,
 ) -> Result<ResponseResult, ResponseProviderError> {
-    let ResponseTarget::Configuration(configuration) = &request.target else {
-        return Err(refuse(
-            StatusCode::Unavailable,
-            "response.target.unavailable",
-        ));
-    };
     let defaults = ResponsePreviewLimits::default();
     let maximum_prepared_bytes = request
         .maximum_prepared_bytes
@@ -2383,8 +2380,26 @@ mod tests {
         other_rate.sample_rate_hz = Some(RATE);
         other_rate.quantum_frames = Some(64);
         same(
-            serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate)
+            serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate, false)
                 .expect("the core serves"),
+        );
+
+        // A session endpoint refuses the rates the request names, after the preflight and before
+        // anything else: one function serves both endpoints, so the order is the same.
+        let named = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate, true)
+            .expect_err("a session has one rate");
+        assert_eq!(
+            (named.status, named.code),
+            (StatusCode::InvalidField, "response.rate.session")
+        );
+        let mut named_and_short = other_rate.clone();
+        named_and_short.points = 1;
+        let named = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &named_and_short, true)
+            .expect_err("refused");
+        assert_eq!(
+            (named.status, named.code),
+            (StatusCode::InvalidField, "response.points"),
+            "the core's checks come before the session rule"
         );
 
         // A session at the same rate and quantum gives the same curves for the bare request.
@@ -2395,7 +2410,7 @@ mod tests {
 
         // The core's refusals are the session's, in the session's codes.
         let refusal = |request: &ResponseGetRequest| {
-            let error = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, request)
+            let error = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, request, false)
                 .expect_err("refused");
             let session = serve_response(BOUND, &model, request).expect_err("refused");
             assert_eq!((error.status, error.code), (session.status, session.code));

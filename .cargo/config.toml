@@ -4,5 +4,7 @@
 # the pinned features, and `crates/lane/src/lib.rs` fails to compile without them.
 # This is the only approved global ISA configuration (scripts/check-workspace-policy.sh enforces
 # that exact shape); `-C target-cpu` and a global `[build] rustflags` remain forbidden.
+# `.github/workflows/qualification.yml`'s host-core loom step copies the `+avx2,+fma` flags below
+# into its own RUSTFLAGS (a RUSTFLAGS value replaces this file's rustflags): change the two together.
 [target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-feature=+avx2,+fma"]

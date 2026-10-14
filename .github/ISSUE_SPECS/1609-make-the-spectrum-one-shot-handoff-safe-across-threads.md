@@ -234,3 +234,22 @@ D7 untouched.
 
 **Successor candidates.** A mode switch (`commit_continuous`) racing a one-shot push can leave a
 one-shot record in the queue for the continuous reader (D7, pre-existing, unchanged).
+
+## Fold (batch 8 review)
+
+- **A held window survives a later bad block.** A window that a good block completed and a stale
+  record keeps held (D5: the push found the slot full) used to be dropped with `INVALID` if a later
+  block failed (`invalidate_after_failure`) or was malformed (unequal plane lengths, a bad frame
+  count, a non-finite sample). The reader then got `Invalid` for a window that was good. The
+  one-shot state now records that the held window outlived a block end (`survived_block_end`, set
+  by a failed push in `one_shot_block_end`, cleared when a new window is held), and
+  `one_shot_invalidate` leaves such a window held with the word `CAPTURING`; the next block end
+  tries the push again. The block that completed the window and then fails still drops it (D4
+  unchanged: it has not survived a block end). This refines D4's sentence "a held window is dropped
+  with an INVALID CAS": the window of the failed block is.
+- **Test.** `spectrum::tests::a_held_window_survives_a_later_failed_or_malformed_block` (red
+  without the guard: the read answers `Invalid`). The 1,000-seed race test and the loom model pass
+  unchanged (the model never leaves a window held behind a stale record across a failed block).
+- **Loom flags.** `.github/workflows/qualification.yml`'s loom step copies `-C
+  target-feature=+avx2,+fma` from `.cargo/config.toml`; both files now carry a comment that names
+  the coupling.

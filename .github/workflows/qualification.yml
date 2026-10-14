@@ -735,7 +735,9 @@ jobs:
         run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
       # Issue #1609. host-core depends on `lane`, which refuses to compile without the pinned
       # x86-64-v3 features, and a RUSTFLAGS value replaces `.cargo/config.toml`'s rustflags, so this
-      # leg names them. Its own target dir: the flags differ from the engine leg's.
+      # leg names them. The `-C target-feature=+avx2,+fma` below is a copy of `.cargo/config.toml`'s
+      # x86_64 rustflags: change the two together. Its own target dir: the flags differ from the
+      # engine leg's.
       - name: Realtime race model (spectrum handoff loom leg)
         run: CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p host-core --lib spectrum_handoff_loom
       - name: Math M1 exhaustive sweep

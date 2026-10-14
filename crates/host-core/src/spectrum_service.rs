@@ -795,6 +795,42 @@ impl SpectrumService {
         Ok(would_change)
     }
 
+    /// Select one exact prepared entry, the way the caller's state allows: the plain entry
+    /// selection without a stream, the stream's restarting selection with one. Returns whether a
+    /// running stream restarted (its entry or smoothing changed, so its metadata is `Warming`
+    /// and its history is reset); an entry selection without a stream returns `false`.
+    ///
+    /// `smoothing` changes the smoothing of a running stream (`None` keeps it). Without a
+    /// running stream a `Some` smoothing is [`SpectrumServiceError::StreamInactive`] and nothing
+    /// changes. A running stream that cannot restart on a cadence refusal is
+    /// [`SpectrumServiceError::StreamInactive`] too: it cannot keep running as asked.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::select`] without a stream and as [`Self::select_stream`] with one, and
+    /// [`SpectrumServiceError::StreamInactive`] as described.
+    pub fn select_target(
+        &mut self,
+        target: SpectrumTargetRef<'_>,
+        channels: SpectrumChannels,
+        smoothing: Option<SpectrumSmoothingConfig>,
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) -> Result<bool, SpectrumServiceError> {
+        if !self.stream_active {
+            if smoothing.is_some() {
+                return Err(SpectrumServiceError::StreamInactive);
+            }
+            return self.select_entry(target, channels).map(|_| false);
+        }
+        self.select_stream(target, channels, smoothing, analysis)
+            .map_err(|error| match error {
+                SpectrumServiceError::CadenceRate | SpectrumServiceError::CadenceShape => {
+                    SpectrumServiceError::StreamInactive
+                }
+                error => error,
+            })
+    }
+
     /// The monotonic identity of the committed selection, or zero on a single preparation.
     #[must_use]
     pub fn selection_epoch(&self) -> u64 {
@@ -1113,14 +1149,19 @@ impl SpectrumService {
     }
 
     /// Stop the stream, discard its queued window and make the metadata `Stopped`. Allowed
-    /// without a running stream.
-    pub fn stop_stream(&mut self) {
+    /// without a running stream. With `analysis`, the analysis of the stream ends at the same
+    /// call (its history stays, the next stream resets it) and the metadata carries its facts.
+    pub fn stop_stream(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
         self.captures.stop_continuous();
         self.stream_active = false;
         self.stream_cadence = None;
         self.stream_smoothing = None;
         self.stream_window_ready = false;
         self.stream_metadata.status = SpectrumStreamStatus::Stopped;
+        if let Some(analysis) = analysis.as_deref_mut() {
+            analysis.end_stream();
+        }
+        self.refresh_analysis_facts(analysis.as_deref());
     }
     // REALTIME_POLICY_END
 }
@@ -1300,6 +1341,33 @@ impl SpectrumAnalysis {
             return Err(SpectrumServiceError::StreamInactive);
         }
         self.reset_history()
+    }
+
+    /// Whether a stream window that `metadata` describes needs [`Self::configure_imported`]
+    /// before it is analyzed, for an instance that owns both halves of a stream started before
+    /// its analysis existed (`analysis` is `None` or not running the stream). `Ok(false)` when
+    /// `analysis` already runs the stream.
+    ///
+    /// # Errors
+    ///
+    /// [`SpectrumServiceError::StreamInactive`] when the metadata says no stream runs (never
+    /// started, or stopped); [`SpectrumServiceError::WindowInvalid`] when a stream runs but
+    /// `metadata` is not a ready window (warming, pending, a gap or a failure): no window is at
+    /// hand to adopt.
+    pub fn adoption_needed(
+        analysis: Option<&Self>,
+        metadata: &SpectrumStreamMetadata,
+    ) -> Result<bool, SpectrumServiceError> {
+        if analysis.is_some_and(Self::stream_active) {
+            return Ok(false);
+        }
+        match metadata.status {
+            SpectrumStreamStatus::Inactive | SpectrumStreamStatus::Stopped => {
+                Err(SpectrumServiceError::StreamInactive)
+            }
+            SpectrumStreamStatus::Ready => Ok(true),
+            _ => Err(SpectrumServiceError::WindowInvalid),
+        }
     }
 
     /// Adopt the stream that `metadata` describes: its cadence, its smoothing and its window.

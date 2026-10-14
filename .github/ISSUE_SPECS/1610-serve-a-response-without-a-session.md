@@ -165,3 +165,27 @@ neither `request.sample_rate_hz` nor `request.quantum_frames`.
 - Commands: `cargo test --locked -p host-core --all-features`, `cargo test --locked -p capi --test
   response_get`, `cargo test --locked -p protocol` pass; clippy `-D warnings` on host-core and capi
   (all targets, all features) is clean.
+
+## Fold (batch 8 review)
+
+- **The dead-code attribute is gone.** `serve_response` now calls `serve_response_at`, so the
+  function is live: `serve_response_at(rate, quantum, max_reply_bytes, request, session)` runs the
+  preflight, then (with `session` true) the rule that a session endpoint refuses a request that
+  names its own rate or quantum (`response.rate.session`), then `serve_checked`. The session path
+  passes the model's rate and quantum and `true`; #1574 passes its resolved rate and quantum and
+  `false`. Departure from D1's signature: one `bool` parameter (an enum would leave one variant
+  unconstructed outside tests, which is the same dead-code warning). Refusal order is unchanged
+  (target, rate, points, override count, axis; then the session rule; then the rest), and no check
+  runs twice.
+- `response_preflight` returns the configuration and the grid, so `serve_checked` takes the
+  configuration and no longer repeats the unreachable target `let ... else`.
+- **Gate 1 again.** Scratch harness (not committed, restored): every response frame the five
+  tests of `crates/capi/tests/response_get.rs` receive from `miso_engine_v1_submit_command`, each
+  written as an 8-byte little-endian length and the frame, one file per test, concatenated in file
+  name order, SHA-256. With `control_provider.rs` of the base `d82de9a9d`:
+  `0b913e21e5d73f5231838ba6f92a8923b331189c6297e7ae34ccb2e207f73f1e`. After the fold:
+  `0b913e21e5d73f5231838ba6f92a8923b331189c6297e7ae34ccb2e207f73f1e`. Equal (byte-compared as
+  well). The earlier digest `3d4d5122...` came from a different framing and is not comparable.
+- **Test.** The existing `the_core_serves_without_a_session_and_refuses_as_the_session_does`
+  gains the session cases: a named rate is `response.rate.session`, and a request that is both
+  named-rate and one-point is `response.points` (the core's checks come first).

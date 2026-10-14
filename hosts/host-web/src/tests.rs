@@ -4791,8 +4791,8 @@ fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
     )
     .expect("collection explicit-hop boot");
     assert_eq!(
-        collection.select_spectrum(target.as_ref(), SpectrumChannels::Stereo),
-        RESULT_OK
+        collection.select_spectrum_target(target.as_ref(), SpectrumChannels::Stereo, None, None),
+        Ok(false)
     );
     collection
         .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)

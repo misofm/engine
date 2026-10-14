@@ -2424,13 +2424,23 @@ impl AudioWorkletEngineHost {
             .map_err(spectrum_result)
     }
 
-    /// Select one exact prepared entry of the running stream, optionally with new smoothing.
-    /// Returns whether the stream restarted. A cadence refusal at the restart is a wrong state.
+    /// Select one exact prepared entry, with the stream's restarting selection while a stream
+    /// runs. Returns whether a running stream restarted (its metadata is then `Warming`).
+    /// `smoothing` changes a running stream's smoothing; without a running stream it is a
+    /// wrong state. `analysis` is the smoothing history of a caller that owns both halves.
+    ///
+    /// The collection performs all fallible admission before retiring its current capture, so a
+    /// refusal leaves the old stream, queued window and effective configuration intact. A select
+    /// that would replace the entry while the caller holds an armed window is refused as
+    /// backpressure (decision 17 D7).
+    ///
+    /// The worklet calls this on the browser's audio thread, so the target is borrowed and the
+    /// selection allocates nothing.
     ///
     /// # Errors
     ///
     /// The result word of the service's refusal.
-    pub fn select_spectrum_stream(
+    pub fn select_spectrum_target(
         &mut self,
         target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
@@ -2438,13 +2448,8 @@ impl AudioWorkletEngineHost {
         analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<bool, u32> {
         self.spectrum_service_mut()?
-            .select_stream(target, channels, smoothing, analysis)
-            .map_err(|error| match error {
-                SpectrumServiceError::CadenceRate | SpectrumServiceError::CadenceShape => {
-                    RESULT_WRONG_STATE
-                }
-                error => spectrum_result(error),
-            })
+            .select_target(target, channels, smoothing, analysis)
+            .map_err(spectrum_result)
     }
 
     /// Read the managed stream once and return the result word of its status. The stream metadata
@@ -2461,22 +2466,16 @@ impl AudioWorkletEngineHost {
         }
     }
 
-    /// Stop the managed stream and discard its queued native window.
-    pub fn stop_spectrum_stream(&mut self) -> u32 {
+    /// Stop the managed stream and discard its queued native window. With `analysis`, the
+    /// analysis of the stream ends at the same call.
+    pub fn stop_spectrum_stream(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         match self.spectrum_service_mut() {
             Ok(service) => {
-                service.stop_stream();
+                service.stop_stream(analysis);
                 RESULT_OK
             }
             Err(result) => result,
         }
-    }
-
-    /// Whether the managed stream runs.
-    #[must_use]
-    pub fn spectrum_stream_active(&self) -> bool {
-        self.spectrum_service()
-            .is_ok_and(SpectrumService::stream_active)
     }
 
     /// The stream metadata, or `None` without a spectrum observer.
@@ -2538,30 +2537,6 @@ impl AudioWorkletEngineHost {
             .and_then(|ready| ready.spectrum.as_ref())
             .and_then(SpectrumService::channels)
             .map_or(0, spectrum_channels_raw)
-    }
-
-    /// Atomically select one exact prepared spectrum target and channel mask.
-    ///
-    /// The collection performs all fallible admission before retiring its current capture. A
-    /// refusal therefore leaves the old stream, queued window and effective configuration intact.
-    /// A select that would replace the entry while the caller holds an armed window is refused as
-    /// backpressure (decision 17 D7).
-    ///
-    /// The worklet calls this on the browser's audio thread, so the target is borrowed and the
-    /// selection allocates nothing.
-    pub fn select_spectrum(
-        &mut self,
-        target: SpectrumTargetRef<'_>,
-        channels: SpectrumChannels,
-    ) -> u32 {
-        match self
-            .spectrum_service_mut()
-            .map(|service| service.select(target, channels))
-        {
-            Ok(Ok(_)) => RESULT_OK,
-            Ok(Err(error)) => spectrum_result(error),
-            Err(result) => result,
-        }
     }
 
     /// Return the collection selection identity, or zero for the singular compatibility path.

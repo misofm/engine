@@ -70,13 +70,12 @@ use crate::{
     SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
     SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_MAXIMUM_ID_BYTES,
     SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES,
-    SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED,
-    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_READY, WebBootOptions,
-    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebObservationResult, WebObservationSelection, WebResponseParameter, WebResponseRequest,
-    WebResponseResult, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
-    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow,
-    spectrum_result,
+    SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES,
+    STATE_READY, WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest,
+    WebLiveResponseResult, WebLiveResponseSection, WebObservationResult, WebObservationSelection,
+    WebResponseParameter, WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
+    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
+    WebSpectrumWindow, spectrum_result,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -93,10 +92,9 @@ use host_core::{
     ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput, ResponseSnapshotOwner,
     ResponseSnapshotQueryError, SpectrumAnalysis, SpectrumAnalysisHistory, SpectrumAnalysisResult,
     SpectrumChannels, SpectrumContinuousWindow, SpectrumHop, SpectrumPreparation,
-    SpectrumRequestError, SpectrumServiceError, SpectrumSmoothingConfig, SpectrumSnapshot,
-    SpectrumStreamMetadata, SpectrumStreamStatus, SpectrumTargetRef, SpectrumWindow,
-    prepare_response_query, query_response_snapshot_into, spectrum_channels_from_raw,
-    spectrum_smoothing,
+    SpectrumRequestError, SpectrumSmoothingConfig, SpectrumSnapshot, SpectrumStreamMetadata,
+    SpectrumStreamStatus, SpectrumTargetRef, SpectrumWindow, prepare_response_query,
+    query_response_snapshot_into, spectrum_channels_from_raw, spectrum_smoothing,
 };
 
 #[cfg(test)]
@@ -2788,14 +2786,6 @@ fn select_spectrum_with_smoothing(
             return RESULT_INTERNAL;
         };
         let staging = &mut *staging;
-        let stream_active = with_host(
-            handle,
-            false,
-            AudioWorkletEngineHost::spectrum_stream_active,
-        );
-        if smoothing.is_some() && !stream_active {
-            return RESULT_WRONG_STATE;
-        }
         let id_bytes = match usize::try_from(target_id_bytes) {
             Ok(value) if value > 0 && value <= staging.target_id.len() => value,
             _ => return RESULT_INVALID_ARGUMENT,
@@ -2812,20 +2802,17 @@ fn select_spectrum_with_smoothing(
             Ok(value) => value,
             Err(result) => return result,
         };
-        if !stream_active {
-            return with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-                host.select_spectrum(target, channels)
-            });
-        }
-        // The core commits the selection, the smoothing, the history reset and the metadata as
-        // one operation. A restart also drops the window staged for the old stream.
+        // The core decides between the entry selection and the stream's restarting selection,
+        // and commits the selection, the smoothing, the history reset and the metadata as one
+        // operation.
         let restarted = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.select_spectrum_stream(target, channels, smoothing, staging.analysis.as_mut())
+            host.select_spectrum_target(target, channels, smoothing, staging.analysis.as_mut())
         });
         match restarted {
             Err(result) => result,
             Ok(false) => RESULT_OK,
             Ok(true) => {
+                // A restart also drops the window staged for the old stream.
                 let metadata = with_host(handle, None, |host| {
                     host.spectrum_stream_metadata().copied()
                 });
@@ -3021,22 +3008,18 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis() -> u32 {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
-        if !staging
-            .analysis
-            .as_ref()
-            .is_some_and(SpectrumAnalysis::stream_active)
-        {
-            // An instance that owns both halves started the stream before its analysis existed
-            // (the audio thread keeps none). Its metadata record is the stream: adopt it, with
-            // the same checks as an import, once a ready window is staged.
-            if staging.stream_metadata.status != SPECTRUM_STREAM_STATUS_READY
-                || staging.stream_metadata.result != RESULT_OK
-            {
-                return RESULT_WRONG_STATE;
+        // An instance that owns both halves started the stream before its analysis existed (the
+        // audio thread keeps none). Its metadata record is the stream: the core says whether to
+        // adopt it, and the adoption has the same checks as an import.
+        let metadata = stream_metadata_of(&staging.stream_metadata);
+        match SpectrumAnalysis::adoption_needed(staging.analysis.as_ref(), &metadata) {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Err(result) = adopt_imported_stream(&mut staging) {
+                    return result;
+                }
             }
-            if let Err(result) = adopt_imported_stream(&mut staging) {
-                return result;
-            }
+            Err(error) => return spectrum_result(error),
         }
         run_spectrum_analysis(&mut staging, true)
     })
@@ -3068,14 +3051,12 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
         let Some(analysis) = staging.analysis.as_mut() else {
             return RESULT_WRONG_STATE;
         };
-        match analysis.reset_stream() {
-            Ok(()) => {}
-            Err(error @ SpectrumServiceError::StreamInactive) => return spectrum_result(error),
-            Err(_) => return RESULT_REFUSED_BUDGET,
+        if let Err(error) = analysis.reset_stream() {
+            return spectrum_result(error);
         }
         staging.result_len = 0;
         staging.stream_metadata.analysis_epoch = analysis.analysis_epoch();
-        staging.stream_metadata.history_start_sample = 0;
+        staging.stream_metadata.history_start_sample = analysis.history_start_sample();
         RESULT_OK
     })
 }
@@ -3091,19 +3072,20 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
             let Ok(mut staging) = slot.try_borrow_mut() else {
                 return RESULT_INTERNAL;
             };
-            let result = with_host_mut(
-                handle,
-                RESULT_INVALID_ARGUMENT,
-                AudioWorkletEngineHost::stop_spectrum_stream,
-            );
+            let staging = &mut *staging;
+            let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+                host.stop_spectrum_stream(staging.analysis.as_mut())
+            });
             if result == RESULT_OK {
-                if let Some(analysis) = staging.analysis.as_mut() {
-                    analysis.end_stream();
-                }
                 staging.capture_len = 0;
                 staging.result_len = 0;
+                let metadata = with_host(handle, None, |host| {
+                    host.spectrum_stream_metadata().copied()
+                });
+                if let Some(metadata) = metadata {
+                    write_stream_metadata(&mut staging.stream_metadata, &metadata);
+                }
                 staging.stream_metadata.result = RESULT_OK;
-                staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
             } else {
                 staging.stream_metadata.result = result;
             }
@@ -5143,6 +5125,7 @@ pub(crate) mod live_response_ffi_tests {
 mod spectrum_ffi_tests {
     use super::*;
     use crate::ffi::observation_alias_tests::no_live_host;
+    use crate::{SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED};
 
     #[test]
     fn cold_spectrum_capture_configuration_is_idempotent() {
@@ -6014,6 +5997,49 @@ mod spectrum_ffi_tests {
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
 
+    /// Batch 8 review, m4. Turns red if the analysis export answers a running stream that has no
+    /// ready window as a wrong state (the browser's bytes: invalid input), or a stopped or
+    /// never-started stream as anything but a wrong state.
+    #[test]
+    fn stream_analysis_answers_by_the_stream_state() {
+        stage_left_output_request();
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let handle = test_boot(
+            document.as_bytes(),
+            WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                ..WebBootOptions::explicit_defaults()
+            },
+        );
+        assert_ne!(handle, 0, "spectrum fixture must boot");
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis(),
+            RESULT_WRONG_STATE,
+            "no stream was started"
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+            RESULT_OK
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_read(handle),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis(),
+            RESULT_INVALID_ARGUMENT,
+            "the stream runs and no window is ready"
+        );
+        assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
+        assert_eq!(
+            miso_engine_web_v1_spectrum_stream_analysis(),
+            RESULT_WRONG_STATE,
+            "the stream was stopped"
+        );
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
     #[test]
     fn continuous_spectrum_ffi_reports_profile_and_analyzes_one_window() {
         stage_left_output_request();
@@ -6455,6 +6481,7 @@ mod spectrum_ffi_tests {
 mod observation_alias_tests {
     //! The ordinary observation aliases' live-host guard and the resident staging accounting.
     use super::*;
+    use crate::SPECTRUM_STREAM_STATUS_READY;
 
     pub(super) fn no_live_host() {
         assert!(LIVE_HOST.with(|slot| slot.borrow().is_none()));
