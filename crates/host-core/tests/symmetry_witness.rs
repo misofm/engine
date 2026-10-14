@@ -547,7 +547,11 @@ fn the_scalar_live_control_effect_arm_maintains_its_own_live_terms() {
     );
 
     // Lifting a prepare-time bypass through the scalar drain re-earns the term.
-    push(&mut console, "eq4", EffectControlRecord::Bypass(false));
+    push(
+        &mut console,
+        "eq4",
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+    );
     render(&mut console, 1);
     assert!(
         !declining_tracks(&console).contains("eq4"),
@@ -848,7 +852,11 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
     let [before, lanes] = census(&console);
     assert_eq!(before, lanes, "the mono fixture starts fully eligible");
 
-    push(&mut console, "eq5", EffectControlRecord::Bypass(true));
+    push(
+        &mut console,
+        "eq5",
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+    );
     render(&mut console, 1);
     assert_eq!(
         census(&console),
@@ -856,7 +864,11 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
         "a bypassed lane declines: its dry shunt copies both planes, so the cohort cannot collapse"
     );
 
-    push(&mut console, "eq5", EffectControlRecord::Bypass(false));
+    push(
+        &mut console,
+        "eq5",
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+    );
     render(&mut console, 1);
     assert_eq!(
         census(&console),
@@ -871,8 +883,16 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
         "eq5",
         parameter(ParameterChannel::Right, -3.0),
     );
-    push(&mut console, "eq5", EffectControlRecord::Bypass(true));
-    push(&mut console, "eq5", EffectControlRecord::Bypass(false));
+    push(
+        &mut console,
+        "eq5",
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+    );
+    push(
+        &mut console,
+        "eq5",
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+    );
     render(&mut console, 1);
     assert_eq!(
         census(&console),

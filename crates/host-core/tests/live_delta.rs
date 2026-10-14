@@ -2784,7 +2784,9 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
             vec![(
                 first.clone(),
                 LiveEffectAddress::insert(0),
-                vec![EffectControlRecord::Bypass(true)]
+                vec![EffectControlRecord::Bypass(
+                    effect_contract::BypassSwitch::step(true)
+                )]
             )]
         ))
     );
@@ -2798,7 +2800,9 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
         (
             second.as_str(),
             LiveEffectAddress::console(0),
-            &[EffectControlRecord::Bypass(false)][..]
+            &[EffectControlRecord::Bypass(
+                effect_contract::BypassSwitch::step(false)
+            )][..]
         )
     );
     assert_eq!(entry.targets, None);
@@ -2814,7 +2818,7 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
                 first,
                 LiveEffectAddress::insert(0),
                 vec![
-                    EffectControlRecord::Bypass(true),
+                    EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
                     record(0, Lane::Left, -30.0)
                 ]
             )]
@@ -2844,7 +2848,14 @@ fn a_bypass_flip_carries_the_sessions_mute_ramp_and_nothing_else() {
         });
         let delta = classify_live_delta(&current, &next, ramps, edit_ramps).expect("live");
         assert_eq!(delta.effects.len(), 1);
-        delta.effects[0].bypass_ramp_samples
+        delta.effects[0]
+            .records
+            .iter()
+            .find_map(|record| match record {
+                EffectControlRecord::Bypass(switch) => Some(switch.ramp_samples),
+                _ => None,
+            })
+            .unwrap_or(0)
     };
     assert_eq!(ramp_of(session_ramps, &EditRamps::new(), true), 300);
     assert_eq!(ramp_of(STEP, &EditRamps::new(), true), 0);
@@ -2889,7 +2900,7 @@ fn an_eq_bypass_beside_a_gain_change_rides_ahead_of_its_targets() {
     assert_eq!(
         records,
         vec![
-            EffectControlRecord::Bypass(true),
+            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
             record(3, Lane::Left, 5.0)
         ]
     );
@@ -2960,7 +2971,9 @@ fn a_submix_effect_bypass_is_live() {
             vec![(
                 "bus".to_owned(),
                 LiveEffectAddress::insert(0),
-                vec![EffectControlRecord::Bypass(true)]
+                vec![EffectControlRecord::Bypass(
+                    effect_contract::BypassSwitch::step(true)
+                )]
             )]
         ))
     );

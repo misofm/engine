@@ -7538,7 +7538,9 @@ mod tests {
             "a zero gain silences the wet path"
         );
 
-        producer.push(effect_contract::EffectControlRecord::Bypass(true));
+        producer.push(effect_contract::EffectControlRecord::Bypass(
+            effect_contract::BypassSwitch::step(true),
+        ));
         let bypassed = render_live_control_blocks(&mut plan, 2, 1);
         assert_eq!(
             &bypassed[..4],
@@ -7547,7 +7549,9 @@ mod tests {
         );
         assert_eq!(&bypassed[4..], &[-6.0, -7.0, -8.0, -9.0]);
 
-        producer.push(effect_contract::EffectControlRecord::Bypass(false));
+        producer.push(effect_contract::EffectControlRecord::Bypass(
+            effect_contract::BypassSwitch::step(false),
+        ));
         let restored = render_live_control_blocks(&mut plan, 3, 1);
         assert!(
             restored[..4].iter().all(|value| *value == 0.0),

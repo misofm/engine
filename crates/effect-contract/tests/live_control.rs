@@ -240,8 +240,10 @@ fn a_drained_cell_stages_nothing_on_the_next_block() {
 fn bypass_is_retained_state_and_produces_no_span() {
     let mut rig = Rig::new(shape(&[], &[], 0), 0);
     assert!(!rig.lane.bypassed());
-    rig.commit(&[EffectControlRecord::Bypass(true)])
-        .expect("a cell");
+    rig.commit(&[EffectControlRecord::Bypass(
+        effect_contract::BypassSwitch::step(true),
+    )])
+    .expect("a cell");
     assert_eq!(rig.stage().staged, 0, "bypass is not a span");
     assert!(rig.lane.bypassed());
     assert_eq!(rig.stage().staged, 0);
@@ -263,7 +265,7 @@ fn a_transaction_lands_in_one_block_under_the_blocks_snapshot() {
     {
         let stamp = rig.pin.stamp(revision).expect("a legal revision");
         for record in [
-            EffectControlRecord::Bypass(true),
+            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
             left(1, 0.5),
             right(1, 0.5),
             target(0, ParameterChannel::Both, 0x77),

@@ -131,19 +131,20 @@ pub enum EffectControlRecord {
         /// Render blocks per published window, or `0` for the plan's default.
         window_blocks: u32,
     },
-    /// Set this instance's live bypass as a **step**: the crossfade ramp is zero samples.
+    /// Set this instance's live bypass, with the crossfade ramp that carries it.
     ///
     /// Bypass is not a parameter and has no span: it is applied by the rack's latency-preserving
     /// shunt (see [`BypassShunt`]), never by the effect, because
     /// [`PreparedEffectMetadata::bypass`](crate::PreparedEffectMetadata) is baked into the
     /// program key and a bank's lanes must be able to disagree about it.
     ///
-    /// A host that crossfades the switch over the session's ramp writes a [`BypassSwitch`] with
-    /// [`EffectCellWriter::write_bypass`] instead; this record is the same write with
-    /// `ramp_samples == 0`. The control plane writes the pair, so a host that edits through the core
-    /// (the C ABI and the browser alike) always crossfades; a bare record is for a host that drives
-    /// the lane directly.
-    Bypass(bool),
+    /// The record is the whole bypass cell, two words: the bypass and its ramp
+    /// ([`BypassSwitch`]), written and drained as one unit. A host fills the ramp from the
+    /// session's mute ramp (`LiveRamps::mute_samples`); a bare step is
+    /// [`BypassSwitch::step`]. A ramp longer than [`INDEXED_RAMP_LENGTH_MAXIMUM`] is refused as
+    /// [`EffectWriteRefusal::Ramp`] by [`EffectCellWriter::check`] and
+    /// [`EffectCellWriter::write`], with nothing written.
+    Bypass(BypassSwitch),
 }
 
 /// A live bypass and the crossfade ramp that carries it: the two words of the bypass cell, written
@@ -468,7 +469,10 @@ impl EffectCellWriter {
                 };
                 Ok(Address::Targets(first, last, target.words))
             }
-            EffectControlRecord::Bypass(bypass) => Ok(Address::Bypass(BypassSwitch::step(bypass))),
+            EffectControlRecord::Bypass(switch) => {
+                switch.check()?;
+                Ok(Address::Bypass(switch))
+            }
             EffectControlRecord::Observe { .. } => Err(EffectWriteRefusal::Observe),
         }
     }
@@ -530,31 +534,6 @@ impl EffectCellWriter {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Write `switch` as the newest value of the bypass cell, stamped with the revision of the
-    /// transaction that commits it: the bypass and the ramp that carries it, as one unit.
-    ///
-    /// # Errors
-    ///
-    /// [`EffectWriteRefusal::Ramp`], with nothing written, when the ramp is longer than
-    /// [`INDEXED_RAMP_LENGTH_MAXIMUM`]. The caller has checked the switch ([`BypassSwitch::check`])
-    /// before the first write of its transaction.
-    pub fn write_bypass(
-        &mut self,
-        stamp: LiveStamp<'_>,
-        switch: BypassSwitch,
-    ) -> Result<(), EffectWriteRefusal> {
-        switch.check()?;
-        let cells = &*self.cells;
-        self.bypass.write(
-            &cells.bypass,
-            &cells.dirty[0],
-            0,
-            stamp,
-            [u32::from(switch.bypassed), switch.ramp_samples],
-        );
         Ok(())
     }
 
@@ -1053,7 +1032,8 @@ impl EffectControlLane {
             .saturating_add(frames)
             .min(self.mix.length);
         if self.mix_position >= self.mix.length && !self.bypass {
-            self.symmetry.admit(&EffectControlRecord::Bypass(false));
+            self.symmetry
+                .admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
         }
     }
 
@@ -1221,7 +1201,9 @@ impl EffectControlLane {
                 *mix_position = 0;
                 *bypass = value;
                 // A ramping lane counts as bypassed until it settles at wet (#1341 D6).
-                symmetry.admit(&EffectControlRecord::Bypass(value || mix.length != 0));
+                symmetry.admit(&EffectControlRecord::Bypass(BypassSwitch::step(
+                    value || mix.length != 0,
+                )));
             }
         }
         let mut staged = 0_usize;

@@ -4953,11 +4953,13 @@ fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
         }
         EffectValue::Bypass(switch) => {
             producer
-                .preflight_bypass(switch)
+                .preflight(EffectControlRecord::Bypass(switch))
                 .expect("a ramp the cell holds");
             let revision = gate.last_published() + 1;
             let stamp = gate.stamp(revision).expect("a legal revision");
-            producer.write_bypass(stamp, switch).expect("preflighted");
+            producer
+                .write(stamp, EffectControlRecord::Bypass(switch))
+                .expect("preflighted");
             gate.publish(revision);
         }
     }

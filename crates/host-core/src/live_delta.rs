@@ -39,8 +39,8 @@ use controls::{
 };
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{
-    AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
-    ParameterChannel, PreparedEffectTarget,
+    AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget,
 };
 use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
@@ -117,7 +117,11 @@ pub struct LiveEffectRecords<'a> {
     /// The instance's live address in its strip: a console slot by its slot index, an insert by
     /// its index. A producer is found by `(strip_id, address)`.
     pub address: LiveEffectAddress,
-    /// One [`EffectControlRecord::Bypass`] first when the instance's bypass changes (#1266 D1),
+    /// One [`EffectControlRecord::Bypass`] first when the instance's bypass changes (#1266 D1); it
+    /// carries the crossfade ramp, in samples: the session's `mute_ms` through
+    /// [`LiveRampRow::BypassCrossfade`] (#1341 D1, #1622 D1), the one live row with no per-edit
+    /// length, so `0` (a step) only when the session's `mute_ms` is 0. A host writes the record
+    /// as it is.
     /// then one [`EffectControlRecord::Parameter`] per `(parameter_index, channel)` whose resolved
     /// value changes, in descriptor order, `Left` before `Right`; never empty.
     ///
@@ -126,12 +130,6 @@ pub struct LiveEffectRecords<'a> {
     /// Its `Bypass` record, like every other instance's, is written as it is, ahead of the
     /// targets.
     pub records: Vec<EffectControlRecord>,
-    /// The crossfade ramp, in samples, that the [`EffectControlRecord::Bypass`] in `records`
-    /// carries: the session's `mute_ms` through [`LiveRampRow::BypassCrossfade`] (#1341 D1), the one
-    /// live row with no per-edit length, so `0` (a step) only when the session's `mute_ms` is 0.
-    /// `0` when `records` holds no bypass. A host writes the bypass with this ramp
-    /// (`EffectControlProducer::write_bypass`), never as a bare record.
-    pub bypass_ramp_samples: u32,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
     /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
@@ -1717,20 +1715,24 @@ fn effect_records<'a>(
             ctx.next.structure().sample_rate_hz,
         )?
     };
-    let mut bypass_ramp_samples = 0;
-    if let Some(bypass) = bypass {
+    if let Some(bypassed) = bypass {
         // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
-        bypass_ramp_samples = ctx.ramps.for_row(LiveRampRow::BypassCrossfade);
-        if bypass_ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+        let ramp_samples = ctx.ramps.for_row(LiveRampRow::BypassCrossfade);
+        if ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
             return Err(LiveRebuild::Domain);
         }
-        records.insert(0, EffectControlRecord::Bypass(bypass));
+        records.insert(
+            0,
+            EffectControlRecord::Bypass(BypassSwitch {
+                bypassed,
+                ramp_samples,
+            }),
+        );
     }
     Ok((!records.is_empty()).then(|| LiveEffectRecords {
         strip_id: target.after.id.as_str(),
         address,
         records,
-        bypass_ramp_samples,
         targets,
     }))
 }
