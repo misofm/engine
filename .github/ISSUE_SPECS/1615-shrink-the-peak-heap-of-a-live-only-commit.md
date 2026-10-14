@@ -244,3 +244,7 @@ about 97 kB, as this record measures natively.
 ## Ruling (root, 2026-10-14): the token size
 
 Root reversed "the token keeps its size" (batch 9 review): the token's layout reservation and the exact `size_of == 960` test are deleted. The C ABI prepared-protocol resource row computes `size_of::<PreparedStructuralCommand>()` itself, so it follows the smaller token with no re-pin; an exact byte count is kept only for wire, ABI or on-disk formats (AGENTS.md).
+
+## Fold (batch 9 CI): the heap gate measures with the audited allocator
+
+`hosts/host-web/tests/control_command_heap.rs` no longer registers its own `unsafe` counting allocator (the realtime policy allows `unsafe` only in audited files). It measures with `bench_support::alloc`: the thread-scoped counters for allocations and requested bytes, and a new per-thread live-heap window (`current_thread_peak_reset`, `current_thread_peak`: live bytes saturating at zero, and their peak). Same numbers: steady peak 71,204 bytes, requested 100,977, at 1, 64 and 256 tracks; first call 75,963 at one track.

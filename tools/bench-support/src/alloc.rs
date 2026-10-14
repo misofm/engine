@@ -39,6 +39,9 @@ static REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 static RELEASED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
+    /// The calling thread's live-heap window: bytes allocated minus bytes freed since
+    /// [`current_thread_peak_reset`] (never below zero), and the highest value it reached.
+    static PEAK_WINDOW: Cell<PeakWindow> = const { Cell::new(PeakWindow { live_bytes: 0, peak_bytes: 0 }) };
     static CURRENT_THREAD: Cell<Counters> = const {
         Cell::new(Counters {
             allocations: 0,
@@ -131,6 +134,42 @@ pub fn current_thread_delta_since(mark: Counters) -> Counters {
     current_thread_counters().since(mark)
 }
 
+/// The calling thread's live heap since its last [`current_thread_peak_reset`] (issue #1615).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PeakWindow {
+    /// Bytes allocated minus bytes freed on this thread since the reset, saturating at zero (a
+    /// free of memory allocated before the reset does not make it negative).
+    pub live_bytes: u64,
+    /// The highest `live_bytes` reached since the reset.
+    pub peak_bytes: u64,
+}
+
+/// Start a new live-heap window on the calling thread: both counts return to zero.
+pub fn current_thread_peak_reset() {
+    PEAK_WINDOW.with(|window| window.set(PeakWindow::default()));
+}
+
+/// The calling thread's live-heap window since its last [`current_thread_peak_reset`].
+#[must_use]
+pub fn current_thread_peak() -> PeakWindow {
+    PEAK_WINDOW.with(Cell::get)
+}
+
+#[inline]
+fn record_peak_window(grown: usize, released: usize) {
+    PEAK_WINDOW.with(|window| {
+        let current = window.get();
+        let live_bytes = current
+            .live_bytes
+            .saturating_add(grown as u64)
+            .saturating_sub(released as u64);
+        window.set(PeakWindow {
+            live_bytes,
+            peak_bytes: current.peak_bytes.max(live_bytes),
+        });
+    });
+}
+
 #[inline]
 fn record_current_thread_allocation(bytes: usize) {
     CURRENT_THREAD.with(|counters| {
@@ -139,6 +178,7 @@ fn record_current_thread_allocation(bytes: usize) {
         current.requested_bytes = current.requested_bytes.wrapping_add(bytes as u64);
         counters.set(current);
     });
+    record_peak_window(bytes, 0);
 }
 
 #[inline]
@@ -151,6 +191,11 @@ fn record_current_thread_reallocation(bytes: usize, released: usize) {
         current.released_bytes = current.released_bytes.wrapping_add(released as u64);
         counters.set(current);
     });
+    // A grown block adds its growth; a shrunk one frees the difference.
+    record_peak_window(
+        bytes.saturating_sub(released),
+        released.saturating_sub(bytes),
+    );
 }
 
 #[inline]
@@ -161,6 +206,7 @@ fn record_current_thread_deallocation(released: usize) {
         current.released_bytes = current.released_bytes.wrapping_add(released as u64);
         counters.set(current);
     });
+    record_peak_window(0, released);
 }
 
 /// The audited allocator. Installed as this process's `#[global_allocator]`.

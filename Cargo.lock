@@ -1540,6 +1540,7 @@ dependencies = [
  "effect-contract",
  "host-core",
  "host-web",
+ "protocol",
  "serde_json",
  "session",
  "sha2 0.11.0",
