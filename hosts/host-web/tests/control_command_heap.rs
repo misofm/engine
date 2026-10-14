@@ -1,0 +1,342 @@
+//! #1615: the peak heap of one live-only `control_command`, native.
+//!
+//! The browser runs the control plane in the AudioWorklet's message handler, so the peak of heap a
+//! live-only transaction needs at once is what can grow the wasm memory (`memory.grow`) there. The
+//! test is the qualification's nine-edit transaction (seven parametric-EQ edits on console slot
+//! `eq-simd1`, then the two input-filter cutoffs of the left lane) on `observation-session.json`,
+//! and the same nine edits on sessions of 64 and 256 tracks. It measures with a thread-scoped
+//! counting allocator, relative to the heap live at the call's entry.
+//!
+//! The ceilings are the numbers measured on this head with a few KB of slack. The steady call is
+//! the same at every track count: a live-only commit must not depend on the session's size. The
+//! numbers print with `--nocapture`.
+
+#![cfg(feature = "test-support")]
+#![allow(unsafe_code)]
+
+use core::alloc::Layout;
+use core::cell::Cell;
+use std::alloc::{GlobalAlloc, System};
+
+use controls::{ControlAddress, Owner, Section};
+use host_web::{EVENT_LANE_LOSSY, EVENT_LANE_RELIABLE, RESULT_OK, WebBootOptions, native_staging};
+use protocol::{
+    CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+    TypedCommandFrame,
+};
+use session::{
+    ParameterChannel, RouteSource, SendTap, StableId, canonical_session_json, parse_session_json,
+};
+
+thread_local! {
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+    static REQUESTED: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct PeakAllocator;
+
+#[global_allocator]
+static ALLOCATOR: PeakAllocator = PeakAllocator;
+
+fn allocated(bytes: usize) {
+    allocated_with(bytes, bytes);
+}
+
+/// `grown` is what the live heap gains; `requested` is what the caller asked of the allocator (a
+/// `realloc` asks for its whole new size).
+fn allocated_with(grown: usize, requested: usize) {
+    if !ARMED.try_with(Cell::get).unwrap_or(false) {
+        return;
+    }
+    ALLOCATIONS.with(|count| count.set(count.get() + 1));
+    REQUESTED.with(|total| total.set(total.get() + requested));
+    LIVE.with(|live| {
+        let next = live.get().saturating_add(grown);
+        live.set(next);
+        PEAK.with(|peak| peak.set(peak.get().max(next)));
+    });
+}
+
+fn deallocated(bytes: usize) {
+    if !ARMED.try_with(Cell::get).unwrap_or(false) {
+        return;
+    }
+    LIVE.with(|live| live.set(live.get().saturating_sub(bytes)));
+}
+
+// SAFETY: every allocator request is forwarded unchanged to `System`; the thread-local counters
+// observe successful operations but never alter their pointers, sizes, alignments or lifetimes.
+unsafe impl GlobalAlloc for PeakAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwards the allocator-provided layout unchanged.
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            allocated(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwards the allocator-provided layout unchanged.
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            allocated(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        deallocated(layout.size());
+        // SAFETY: forwards the original pointer and layout unchanged.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: forwards the original allocation arguments unchanged.
+        let replacement = unsafe { System.realloc(pointer, layout, new_size) };
+        if !replacement.is_null() {
+            if new_size >= layout.size() {
+                allocated_with(new_size - layout.size(), new_size);
+            } else {
+                deallocated(layout.size() - new_size);
+            }
+        }
+        replacement
+    }
+}
+
+/// What one measured call took: allocations, requested bytes, peak live bytes above the entry, and
+/// the live bytes left when it returned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Heap {
+    allocations: usize,
+    requested: usize,
+    peak: usize,
+    left: usize,
+}
+
+fn measured<T>(operation: impl FnOnce() -> T) -> (T, Heap) {
+    ARMED.with(|armed| armed.set(false));
+    LIVE.with(|live| live.set(0));
+    PEAK.with(|peak| peak.set(0));
+    REQUESTED.with(|requested| requested.set(0));
+    ALLOCATIONS.with(|count| count.set(0));
+    ARMED.with(|armed| armed.set(true));
+    let result = operation();
+    ARMED.with(|armed| armed.set(false));
+    let heap = Heap {
+        allocations: ALLOCATIONS.with(Cell::get),
+        requested: REQUESTED.with(Cell::get),
+        peak: PEAK.with(Cell::get),
+        left: LIVE.with(Cell::get),
+    };
+    (result, heap)
+}
+
+fn id(text: &str) -> StableId {
+    StableId::parse(text).expect("stable ID")
+}
+
+/// The console EQ's parameter IDs (`parametric-eq` contract: band 1 gain is 4, the high-pass is
+/// 65 to 67 and the low-pass 81 to 83) and the builtin filter cutoffs (`builtins`: 3 and 4).
+const EQ_PARAMETERS: [(u32, f32); 7] = [
+    (4, -3.0),
+    (66, 400.0),
+    (67, 0.8),
+    (65, 1.0),
+    (82, 6_000.0),
+    (83, 0.9),
+    (81, 1.0),
+];
+const HPF_HZ: u32 = 3;
+const LPF_HZ: u32 = 4;
+
+fn nine_edits(flip: bool) -> Vec<SessionEdit> {
+    let sign = if flip { 1.0 } else { 0.5 };
+    let strip = || Owner::Strip(id("track"));
+    let mut edits: Vec<SessionEdit> = EQ_PARAMETERS
+        .iter()
+        .map(|&(control, value)| SessionEdit::SetControl {
+            address: ControlAddress {
+                owner: strip(),
+                section: Section::Console(id("eq-simd1")),
+                control,
+                lane: ParameterChannel::Both,
+            },
+            value: if control == 65 || control == 81 {
+                if flip { 1.0 } else { 0.0 }
+            } else {
+                value * sign
+            },
+            ramp_samples: None,
+        })
+        .collect();
+    for (control, value) in [(HPF_HZ, 80.0_f32), (LPF_HZ, 12_000.0)] {
+        edits.push(SessionEdit::SetControl {
+            address: ControlAddress {
+                owner: strip(),
+                section: Section::Builtins,
+                control,
+                lane: ParameterChannel::Left,
+            },
+            value: value * sign,
+            ramp_samples: None,
+        });
+    }
+    edits
+}
+
+fn frame(request: u64, revision: u64, edits: &[SessionEdit]) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 8_192];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(edits),
+            },
+            &mut bytes,
+        )
+        .expect("a transaction frame");
+    bytes.truncate(length);
+    bytes
+}
+
+/// The qualification's session at `tracks` tracks: the first is `track`, the rest are copies of it
+/// with their own IDs and routes.
+fn document(tracks: usize) -> (String, u64) {
+    let mut model = parse_session_json(include_str!("../qualification/observation-session.json"))
+        .expect("the observation session parses");
+    let template = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    for index in 1..tracks {
+        let mut track = template.clone();
+        track.id = id(&format!("t{index:04}"));
+        // A small track, so 256 of them stay inside the staging ceiling for a document.
+        track.inserts.effects.clear();
+        for entry in &mut track.console {
+            entry.params.clear();
+        }
+        let mut route = route.clone();
+        route.id = id(&format!("t{index:04}-main"));
+        route.source = RouteSource::Track {
+            track_id: track.id.clone(),
+            tap: SendTap::PostPan,
+        };
+        model.tracks.push(track);
+        model.routes.push(route);
+    }
+    let revision = model.revision;
+    (canonical_session_json(&model).expect("canonical"), revision)
+}
+
+fn drain(handle: u32) {
+    for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+        loop {
+            let (result, event) = native_staging::control_event(handle, lane);
+            assert_eq!(result, RESULT_OK, "event lane {lane}");
+            if event.is_empty() {
+                break;
+            }
+        }
+    }
+}
+
+/// The first call and the steady state of the nine-edit transaction on a session of `tracks`.
+fn run(tracks: usize) -> (Heap, Heap) {
+    let (text, revision) = document(tracks);
+    let options = WebBootOptions {
+        source_ring_frames: 2_048,
+        live_control_observation_taps: 4,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let length = native_staging::boot(options, text.as_bytes()).expect("the session stages");
+    let handle = host_web::miso_engine_web_v1_boot(length);
+    assert_ne!(handle, 0, "the session boots");
+    // Boot reads the strip order through the control interface, which draws request IDs from the
+    // endpoint's own allocator; the first transaction's ID must sit above them.
+    let mut request = 1_000_u64;
+    let mut first = None;
+    let mut steady = Vec::new();
+    for call in 0..6_u64 {
+        request += 1;
+        let bytes = frame(request, revision + call, &nine_edits(call % 2 == 0));
+        let ((result, response), heap) =
+            measured(|| native_staging::control_command(handle, &bytes).expect("a live handle"));
+        assert_eq!(result, RESULT_OK, "call {call}");
+        assert!(!response.is_empty(), "call {call} answers");
+        drain(handle);
+        if call == 0 {
+            first = Some(heap);
+        } else if call >= 2 {
+            steady.push(heap);
+        }
+    }
+    assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    let steady_first = steady[0];
+    assert!(
+        steady.iter().all(|heap| *heap == steady_first),
+        "the steady calls differ: {steady:?}"
+    );
+    (first.expect("a first call"), steady_first)
+}
+
+/// Ceilings, measured on this head (decision record of #1615): bytes of heap live at the peak above
+/// the call's entry, and bytes requested over the call, with a few KB of slack. Debug and release
+/// builds give the same numbers (the debug stage check is off, above).
+///
+/// One track: the first call peaks at 76,011 bytes and every later call at 71,252, requesting
+/// 101,025 bytes in 753 allocations. Before #1615 they were 172,790 and 168,031, requesting 293,477
+/// in 786.
+///
+/// A transaction on a larger session is the same number once the first call has built what it
+/// keeps; the first call of 64 and 256 tracks still grows with the session and is recorded, not
+/// gated.
+const FIRST_PEAK_CEILING_ONE_TRACK: usize = 78_000;
+const STEADY_PEAK_CEILING: usize = 73_000;
+const STEADY_REQUESTED_CEILING: usize = 104_000;
+
+#[test]
+fn a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size() {
+    std::thread::spawn(|| {
+        // A debug build checks each values-only stage against a full catalog build; that check is
+        // what this test is not measuring.
+        host_core::verify_stages(false);
+        let mut peaks = Vec::new();
+        for tracks in [1_usize, 64, 256] {
+            let (first, steady) = run(tracks);
+            println!("tracks {tracks}: first {first:?}; steady {steady:?}");
+            // A steady call keeps only its 80-byte response; the first also seeds some state.
+            assert!(
+                steady.left <= 256 && first.left <= 4_096,
+                "a call leaves heap live"
+            );
+            if tracks == 1 {
+                assert!(
+                    first.peak <= FIRST_PEAK_CEILING_ONE_TRACK,
+                    "{tracks}: first {first:?}"
+                );
+            }
+            assert!(
+                steady.peak <= STEADY_PEAK_CEILING,
+                "{tracks}: steady {steady:?}"
+            );
+            assert!(
+                steady.requested <= STEADY_REQUESTED_CEILING,
+                "{tracks}: steady {steady:?}"
+            );
+            peaks.push(steady);
+        }
+        // A live-only commit does not depend on the session's size.
+        assert_eq!(
+            peaks[1].peak, peaks[2].peak,
+            "64 and 256 tracks differ: {peaks:?}"
+        );
+        assert_eq!(peaks[1].requested, peaks[2].requested, "{peaks:?}");
+    })
+    .join()
+    .expect("the run completes");
+}
