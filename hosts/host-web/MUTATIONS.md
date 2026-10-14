@@ -782,5 +782,5 @@ qualification of decision 15's heavy gates" (#1605) or the first CI run that app
 | `qualification/run.mjs` `sdk-observation-wait` (S1) | delete the `limit` timer in `next` (`sdk/src/browser/engine.ts`, `setTimeout(() => finish(false), timeoutMs)`; keep `limit` defined) | gate 1: `settled: false` at the 10 s guard |
 | same (S2), Chromium, Firefox, WebKit | `boundMs: 5_000` regardless of `requestDeadlineMs` | gate 1: late (`elapsedMs` above 4_000) |
 | same (S3), Chromium, Firefox, WebKit | in `#submit` (`sdk/src/core/observation-subscriptions.ts`), drop `if (!rendered)` so the typed refusal is thrown whatever `next` returns | gate 3: the render instance's close ends in `backpressure` (`resolved: false`, log `[ok, bp]`) |
-| same (S4) | `current.renderedQuanta >= started` in `next` | gate 1: early, and more than one close send in the log |
+| same (S4) | `current.renderedQuanta >= since` in `next` | gate 1: early, and more than one close send in the log |
 | same (S5) | the browser engine passes no `renderWait` | gates 1 and 3 |

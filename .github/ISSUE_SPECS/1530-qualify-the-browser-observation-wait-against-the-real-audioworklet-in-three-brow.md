@@ -309,3 +309,23 @@ Attempt 1 (lane W): per-browser `sdk-render-allocations` lines naming the two in
   already show. Gate 3's proof is `resolved === true` together with that log (the refused close was
   resent and admitted after a real render). The field is no longer read, and the result mutations
   are seven.
+
+## CI fold (batch 5, PR #1607, WebKit red)
+
+- **Failure.** WebKit, gate 3: `elapsedMs: 10002` (the request deadline), `renderedQuantaAfterRender:
+  "16"`, log `[[0,0],[6,8]]` (arm, one refused close, no resend). The render happened and the
+  resend never did. Chromium and Firefox passed.
+- **Cause: an SDK defect (a lost wakeup), not a WebKit limit.** `renderWait.next` read its baseline
+  `renderedQuanta` with a status round trip *after* the refusal had reached the owner. The gate
+  starts the offline render as soon as it sees the refusal, and an `OfflineAudioContext` renders its
+  16 quanta in one burst (D8). On WebKit the burst can end before that baseline read, so the baseline
+  was already 16, the count never moved past it, and the wait ran to the deadline. A real-time
+  context hides this only because the next block follows within milliseconds; a context that
+  renders a few blocks and stops hits it too.
+- **Fix (SDK, a deviation from this slice's "no SDK change", forced by the red).** The transport's
+  `renderWait` gains `mark()`; `#submit` requests it in the same synchronous turn, before the send
+  (the host answers status first), and passes it as `since` to `next(timeoutMs, since)`. A block
+  rendered after the mark and before the refusal returns now counts. One extra status read per
+  managed submission, pipelined with the send. The scripted-host evals are unchanged and cover the
+  contract (`sdk/test/observation-subscription-evals.mjs`, issue 1345 browser cases).
+- **Not run locally:** no browser. The WebKit leg of PR #1607's CI is the evidence.

@@ -1052,7 +1052,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         // typed refusal, so a context that does not render never holds the caller.
         renderWait: {
           boundMs: options.requestDeadlineMs ?? 5_000,
-          next: (timeoutMs) => new Promise<boolean>((resolve, reject) => {
+          mark: async () => (await host.status()).renderedQuanta,
+          next: (timeoutMs, since) => new Promise<boolean>((resolve, reject) => {
             let settled = false;
             let poll: ReturnType<typeof setTimeout> | undefined;
             const finish = (rendered: boolean, error?: unknown): void => {
@@ -1064,13 +1065,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             };
             const limit = setTimeout(() => finish(false), timeoutMs);
             void (async () => {
-              const started = (await host.status()).renderedQuanta;
               for (;;) {
                 await new Promise<void>((tick) => { poll = setTimeout(tick, 4); });
                 if (settled) return;
                 if (closed) return finish(false);
                 const current = await host.status();
-                if (current.renderedQuanta > started) return finish(true);
+                if (current.renderedQuanta > since) return finish(true);
               }
             })().catch((error: unknown) => finish(false, error));
           }),
