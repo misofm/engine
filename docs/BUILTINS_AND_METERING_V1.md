@@ -259,7 +259,7 @@ preparation bakes, into the records the members already take.
   (#1312, #1347) with no queue to fill. The
   decode staging grows by two entries per strip a VCA reaches, and the bridge's exact retained
   report charges the VCA state.
-- **Bounded per-command work** (amendment A1, a planner decision subject to owner review). A batch's
+- **Bounded per-command work** (amendment A1; since batch 7 review M1 the bound is the core's, `host.resource.count` and `host.resource.vca_reach_pairs` on every host, and the `web.vca.*` codes below are gone; a planner decision subject to owner review). A batch's
   VCA work grows with the (strip, reaching VCA) pairs, and it runs on the AudioWorklet thread, so a
   browser session may declare at most 256 VCAs and 16,384 pairs; past either it is refused at boot
   (`web.vca.maximum_vcas`, `web.vca.reach_pairs`, `RESULT_REFUSED_BUDGET`) before any VCA table is

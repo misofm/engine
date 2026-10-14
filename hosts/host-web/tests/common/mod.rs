@@ -10,9 +10,9 @@ use protocol::{
     SessionSnapshotRequest, StatusCode, TypedCommandFrame,
 };
 use session::{
-    DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit,
-    RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix, Vca,
-    canonical_session_json, parse_session_json,
+    ConsoleEntry, ConsoleSlot, DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan,
+    ParameterChannel, ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel,
+    StableId, Submix, Vca, canonical_session_json, parse_session_json,
 };
 
 pub(crate) const QUANTUM: u32 = 128;
@@ -115,6 +115,14 @@ pub(crate) const DELAY: Insert = Insert {
     native: "miso.delay",
     position: 2,
 };
+/// The two console slots of the session, one in each section (`pre_insert`, `post_insert`), and
+/// the effect each runs on every track. A slot's controls are addressed on a strip, in
+/// `Section::Console(slot)`.
+pub(crate) const PRE_SLOT: &str = "pre-comp";
+pub(crate) const PRE_SLOT_NATIVE: &str = "miso.compressor";
+pub(crate) const POST_SLOT: &str = "post-clip";
+pub(crate) const POST_SLOT_NATIVE: &str = "miso.soft-clip";
+
 pub(crate) const INSERTS: [Insert; 8] = [
     EQ, COMPRESSOR, GATE, CLIP, SHAPER, MULTIBAND, LIMITER, DELAY,
 ];
@@ -135,6 +143,17 @@ pub(crate) fn model_at(rate: u32) -> SessionModel {
     model.sources.clear();
     model.tracks.clear();
     model.routes.clear();
+    // One console slot before the inserts and one after, each a native effect every strip carries.
+    let slot = |id: &str, native: &str| ConsoleSlot {
+        slot: StableId::parse(id).expect("slot ID"),
+        identity: EffectIdentity::Native {
+            effect_id: StableId::parse(native).expect("native effect ID"),
+        },
+        quality: eq.quality,
+        link_mode: eq.link_mode,
+    };
+    model.console.pre_insert = vec![slot(PRE_SLOT, PRE_SLOT_NATIVE)];
+    model.console.post_insert = vec![slot(POST_SLOT, POST_SLOT_NATIVE)];
     for (index, strip) in [T1, T2, T3].into_iter().enumerate() {
         let mut source = source.clone();
         source.id = StableId::parse(&format!("src-{}", strip.id)).expect("source ID");
@@ -142,6 +161,14 @@ pub(crate) fn model_at(rate: u32) -> SessionModel {
         let mut track = track.clone();
         track.id = StableId::parse(strip.id).expect("track ID");
         track.source_id = source.id.clone();
+        track.console = [PRE_SLOT, POST_SLOT]
+            .into_iter()
+            .map(|slot| ConsoleEntry {
+                slot: StableId::parse(slot).expect("slot ID"),
+                bypass: false,
+                params: Vec::new(),
+            })
+            .collect();
         track.fader.left_db = -2.0 - index as f32;
         track.fader.right_db = -2.0 - index as f32;
         track.matrix_or_pan = match strip.id {

@@ -123,6 +123,18 @@ enum Edit {
         insert: Insert,
         bypassed: bool,
     },
+    /// A parameter of a console slot on `t1` (batch 7 review M6).
+    ConsoleParameter {
+        slot: &'static str,
+        parameter: u32,
+        lanes: Lanes,
+        value: f32,
+    },
+    /// A console slot's bypass on `t1`.
+    ConsoleBypass {
+        slot: &'static str,
+        bypassed: bool,
+    },
     SendGain {
         db: f32,
     },
@@ -422,6 +434,40 @@ fn script() -> Vec<Step> {
                 bypassed: true,
             },
         ),
+        // Console slots, one in each section: a block-rate parameter of each, then a bypass of
+        // each. Their cells are the inserts' (a console slot is an effect of its strip).
+        live(
+            33,
+            Edit::ConsoleParameter {
+                slot: PRE_SLOT,
+                parameter: 1,
+                lanes: Lanes::Left,
+                value: -30.0,
+            },
+        ),
+        live(
+            34,
+            Edit::ConsoleParameter {
+                slot: POST_SLOT,
+                parameter: 1,
+                lanes: Lanes::Both,
+                value: 12.0,
+            },
+        ),
+        live(
+            35,
+            Edit::ConsoleBypass {
+                slot: PRE_SLOT,
+                bypassed: true,
+            },
+        ),
+        live(
+            41,
+            Edit::ConsoleBypass {
+                slot: POST_SLOT,
+                bypassed: true,
+            },
+        ),
         // Routes: the send's gain, matrix and mute.
         live(36, Edit::SendGain { db: -6.0 }),
         live(
@@ -659,7 +705,7 @@ fn limits() -> CompileLimits {
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
         maximum_submixes: 100,
-        maximum_vcas: 100,
+        maximum_vcas: 256,
         reserved: [0; 2],
     }
 }
@@ -824,6 +870,29 @@ impl CAbi {
                 address(
                     Owner::Strip(id(insert.track.id)),
                     Section::Inserts(id(insert.id)),
+                    controls::BYPASS_CONTROL,
+                    ParameterChannel::Both,
+                ),
+                toggle(bypassed),
+            )],
+            Edit::ConsoleParameter {
+                slot,
+                parameter,
+                lanes,
+                value,
+            } => vec![set(
+                address(
+                    Owner::Strip(id(T1.id)),
+                    Section::Console(id(slot)),
+                    parameter,
+                    lanes.lane(),
+                ),
+                value,
+            )],
+            Edit::ConsoleBypass { slot, bypassed } => vec![set(
+                address(
+                    Owner::Strip(id(T1.id)),
+                    Section::Console(id(slot)),
                     controls::BYPASS_CONTROL,
                     ParameterChannel::Both,
                 ),
@@ -1320,4 +1389,156 @@ fn every_scripted_edit_is_heard() {
             full[omitted].block
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The VCA bounds (batch 7 review M1, ruling V-Q3)
+// ---------------------------------------------------------------------------------------------
+
+/// `tracks` tracks of one source under a chain of `vcas` VCAs: `v000` holds every track and each
+/// later VCA holds the one before, so every track is reached by every VCA (`tracks * vcas` pairs).
+fn bound_model(tracks: usize, vcas: usize) -> SessionModel {
+    let mut model = model_at(48_000);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.submixes.clear();
+    model.vcas.clear();
+    let source = model.sources[0].clone();
+    let template = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    model.sources = vec![source.clone()];
+    model.tracks.clear();
+    model.routes.clear();
+    for index in 0..tracks {
+        let mut track = template.clone();
+        track.id = id(&format!("x{index:03}"));
+        track.source_id = source.id.clone();
+        track.console.clear();
+        track.inserts.effects.clear();
+        let mut route = route.clone();
+        route.id = id(&format!("x{index:03}-main"));
+        route.source = session::RouteSource::Track {
+            track_id: track.id.clone(),
+            tap: session::SendTap::PostPan,
+        };
+        model.tracks.push(track);
+        model.routes.push(route);
+    }
+    for index in 0..vcas {
+        let members = if index == 0 {
+            model.tracks.iter().map(|track| track.id.clone()).collect()
+        } else {
+            vec![id(&format!("v{:03}", index - 1))]
+        };
+        model.vcas.push(Vca {
+            id: id(&format!("v{index:03}")),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members,
+        });
+    }
+    model
+}
+
+/// What the C ABI answers a compile of `model` with: its result code and its diagnostics. A
+/// session that compiles is destroyed again.
+fn c_abi_compile(model: &SessionModel) -> (u32, Vec<u8>) {
+    let document = canonical_session_json(model).expect("canonical session");
+    let config = EngineConfig {
+        struct_size: ENGINE_CONFIG_SIZE,
+        abi_version: C_ABI_VERSION,
+        reserved: [0; 4],
+    };
+    let (mut engine, mut session, mut plan) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+    let mut storage = [0_u8; 4_096];
+    let mut diagnostics = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: storage.as_mut_ptr(),
+        capacity_bytes: storage.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: Every descriptor and output location lives for the complete call; the handles a
+    // successful compile returns are destroyed once.
+    unsafe {
+        assert_eq!(
+            capi::miso_engine_v1_engine_create(&config, &mut engine),
+            C_RESULT_OK
+        );
+        let code = capi::miso_engine_v1_compile_session(
+            engine,
+            document.as_ptr(),
+            document.len() as u64,
+            &limits(),
+            &mut diagnostics,
+            &mut session,
+            &mut plan,
+        );
+        capi::miso_engine_v1_engine_destroy(engine);
+        if code == C_RESULT_OK {
+            capi::miso_engine_v1_session_destroy(session);
+            capi::miso_engine_v1_plan_destroy(plan);
+        }
+        (
+            code,
+            storage[..diagnostics.required_bytes as usize].to_vec(),
+        )
+    }
+}
+
+/// The browser's diagnostics for a boot of `model`: `None` when it boots.
+fn browser_boot_refusal(model: &SessionModel) -> Option<Vec<u8>> {
+    let document = canonical_session_json(model).expect("canonical session");
+    let options = host_web::WebBootOptions {
+        require_sample_rate_hz: model.sample_rate_hz,
+        require_quantum_frames: QUANTUM,
+        source_ring_frames: QUANTUM * 2,
+        ..host_web::WebBootOptions::explicit_defaults()
+    };
+    host_web::AudioWorkletEngineHost::boot(document.as_bytes(), options)
+        .err()
+        .map(|failure| failure.diagnostic().to_vec())
+}
+
+/// Both hosts take a session at the VCA bound (256 VCAs, 16,384 reach pairs) and refuse one past
+/// either bound with the same diagnostic: the core's limits, not a rule of one host.
+///
+/// Test value: red if one host enforces the bound and the other does not (the browser composes a
+/// VCA move on the worklet thread, the C ABI on the host's control thread; both run the same core),
+/// if the reach pairs go uncounted so that 65 tracks under 256 nested VCAs boot, or if either
+/// host's bound drifts from `host_core::MAXIMUM_VCA_REACH_PAIRS` and `MAXIMUM_VCAS_BOUNDED`.
+#[test]
+fn both_hosts_bound_the_vcas_alike() {
+    // 64 tracks x 256 VCAs is exactly 16,384 pairs and 256 VCAs: both boot.
+    let at_the_bound = bound_model(64, 256);
+    assert_eq!(
+        at_the_bound.vca_reach_pairs(u64::MAX),
+        host_core::MAXIMUM_VCA_REACH_PAIRS
+    );
+    assert_eq!(c_abi_compile(&at_the_bound).0, C_RESULT_OK);
+    assert_eq!(browser_boot_refusal(&at_the_bound), None);
+
+    // One track more is 16,640 pairs.
+    let too_many_pairs = bound_model(65, 256);
+    let (code, c_diagnostics) = c_abi_compile(&too_many_pairs);
+    assert_ne!(code, C_RESULT_OK);
+    let browser_diagnostics = browser_boot_refusal(&too_many_pairs).expect("the browser refuses");
+    assert_eq!(c_diagnostics, browser_diagnostics, "reach pairs");
+    assert_eq!(
+        c_diagnostics,
+        b"host.resource.vca_reach_pairs\t$\n".to_vec(),
+        "the core's own diagnostic"
+    );
+
+    // 257 VCAs (no members: no pairs) is one over the count.
+    let too_many_vcas = bound_model(2, 257);
+    let (code, c_diagnostics) = c_abi_compile(&too_many_vcas);
+    assert_ne!(code, C_RESULT_OK);
+    let browser_diagnostics = browser_boot_refusal(&too_many_vcas).expect("the browser refuses");
+    assert_eq!(c_diagnostics, browser_diagnostics, "VCA count");
+    assert_eq!(c_diagnostics, b"host.resource.count\t$\n".to_vec());
 }

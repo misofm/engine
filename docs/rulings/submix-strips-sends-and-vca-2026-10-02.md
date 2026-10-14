@@ -250,6 +250,18 @@ Ruling:
     its verdict). The numbers are the planner's: a higher bound trades worklet headroom for larger
     VCA trees. The C ABI caps VCAs at preparation through `maximum_vcas` (#1243) and has no live
     VCA state until #1247, which sizes its own bound.
+
+    **Amended (batch 7 review M1, decision 17).** The bound is no longer the browser's own rule:
+    `ControlLimits` and `HostPrepareCaps` carry `maximum_vcas` and `maximum_vca_reach_pairs`, and
+    preparation checks both on every host, at boot or compile and for a live edit that adds a
+    VCA or a member (`check_counts`). The browser sets 256 VCAs (`MAXIMUM_VCAS_BOUNDED`) and 16,384
+    pairs (`MAXIMUM_VCA_REACH_PAIRS`); the C ABI's compile limits carry no word for the pair
+    bound, so it takes the same constant, and its `maximum_vcas` stays the caller's. The refusals
+    are the core's, `host.resource.count` and `host.resource.vca_reach_pairs`, for both hosts (the
+    browser-only `web.vca.*` codes are gone). A VCA move at the bound through the core measured
+    1.5 ms median natively, in release, against a 2.67 ms quantum
+    (`hosts/host-web/tests/control_command_timing.rs`, nightly): slower than the 0.15 ms of the
+    deleted browser path, and well inside a quantum.
 - **Performance.** The bus-and-send benchmark rows and their baseline are three standalone
   successor issues, outside the umbrella: *Add a bus-and-send row to the native console benchmark*
   (#1227), *Add the bus-and-send session to the browser mixing benchmark* (#1228) and *Record the

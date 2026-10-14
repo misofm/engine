@@ -68,6 +68,15 @@ fn insert_row(strip: &str, effect: &str, control: u32, lane: Lane) -> ControlAdd
     )
 }
 
+fn console_row(strip: &str, slot: &str, control: u32, lane: Lane) -> ControlAddress {
+    address(
+        Owner::Strip(id(strip)),
+        Section::Console(id(slot)),
+        control,
+        lane,
+    )
+}
+
 fn route_row(control: u32) -> ControlAddress {
     address(
         Owner::Route(id("t1-b")),
@@ -158,7 +167,17 @@ fn fixed_row(label: &'static str, address: ControlAddress, value: f32) -> Row {
         label,
         setup: Vec::new(),
         edits: vec![set(address, value, None)],
-        stateful: matches!(label, "hpf" | "lpf" | "effect parameter" | "EQ band gain"),
+        stateful: matches!(
+            label,
+            "hpf"
+                | "lpf"
+                | "effect parameter"
+                | "EQ band gain"
+                | "pre-insert slot parameter"
+                | "post-insert slot parameter"
+                | "pre-insert slot bypass"
+                | "post-insert slot bypass"
+        ),
         from_block: 0,
     }
 }
@@ -223,6 +242,42 @@ fn live_rows() -> Vec<Row> {
             insert_row(
                 "t1",
                 "comp",
+                controls::BYPASS_CONTROL,
+                ParameterChannel::Both,
+            ),
+            1.0,
+        ),
+        // One console slot in each section (batch 7 review M6): a parameter and a bypass of each.
+        fixed_row(
+            "pre-insert slot parameter",
+            console_row("t1", PRE_SLOT, COMPRESSOR_THRESHOLD, ParameterChannel::Left),
+            -30.0,
+        ),
+        fixed_row(
+            "post-insert slot parameter",
+            console_row(
+                "t1",
+                POST_SLOT,
+                COMPRESSOR_THRESHOLD,
+                ParameterChannel::Both,
+            ),
+            12.0,
+        ),
+        fixed_row(
+            "pre-insert slot bypass",
+            console_row(
+                "t1",
+                PRE_SLOT,
+                controls::BYPASS_CONTROL,
+                ParameterChannel::Both,
+            ),
+            1.0,
+        ),
+        fixed_row(
+            "post-insert slot bypass",
+            console_row(
+                "t1",
+                POST_SLOT,
                 controls::BYPASS_CONTROL,
                 ParameterChannel::Both,
             ),
@@ -381,8 +436,10 @@ fn every_live_row_commits_to_the_model_and_renders_as_a_fresh_plan() {
             // The plan was running before the edit and smooths the coefficient through state, so
             // it approaches the fresh plan's output and is never bit-equal to it. Gate 8 holds
             // these rows bit-equal to the C ABI's, which is the same smoothing.
+            // A stateless smoother can land on the fresh plan's bits exactly: zero converges.
+            let settled = largest_difference(BLOCKS_RUN as usize - 2);
             assert!(
-                largest_difference(BLOCKS_RUN as usize - 2) < largest_difference(8) / 2.0,
+                settled == 0.0 || settled < largest_difference(8) / 2.0,
                 "{label}: the running plan does not converge on the fresh plan"
             );
         } else {
@@ -610,11 +667,18 @@ fn solo_is_the_monitor_overlay_and_a_later_live_edit_keeps_it() {
     );
 }
 
-/// The parity session with no insert, so no plan latency delays an edit's effect at the output.
+/// The parity session with no insert and no console slot, so no plan latency delays an edit's
+/// effect at the output and no effect state makes a running plan differ from a fresh one.
 fn without_inserts(rate: u32) -> SessionModel {
     let mut model = model_at(rate);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
     for track in &mut model.tracks {
         track.inserts.effects.clear();
+        track.console.clear();
+    }
+    for submix in &mut model.submixes {
+        submix.console.clear();
     }
     model
 }
