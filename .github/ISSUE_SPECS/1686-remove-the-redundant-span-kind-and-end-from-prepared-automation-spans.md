@@ -2,7 +2,7 @@
 
 Successor of #1636 (retire the span kinds and sample rate no producer uses). Code anchors verified
 on the batch 13b fold branch `codex/controls-b13b-fold`. Issue number: assigned at filing (written
-here as TBD33). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch
+here as #1686). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch
 review.
 
 ## Product outcome
@@ -66,7 +66,7 @@ no test has to check one.
 
 - **Retained bytes.** The struct shrinks, so a staging window's bytes shrink. Ceilings stay; a test
   that pins an exact byte count of a span window is re-pinned with the reason
-  "TBD33 removes the span kind and end".
+  "#1686 removes the span kind and end".
 
 ## Objective gates
 

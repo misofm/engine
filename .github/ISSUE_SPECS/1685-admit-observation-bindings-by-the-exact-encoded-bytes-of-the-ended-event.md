@@ -2,7 +2,7 @@
 
 Successor of #1676 (cap the observation bindings by what one ended event holds) and #1584 D6a
 (root ruling A: one `OBSERVATION_ENDED` per commit). Code anchors verified on the batch 13b fold
-branch `codex/controls-b13b-fold`. Issue number: assigned at filing (written here as TBD32).
+branch `codex/controls-b13b-fold`. Issue number: assigned at filing (written here as #1685).
 Batch 14, the first K (core) slice. Feature sprint mode (owner, 2026-10-13): one implementer,
 normal tests, a batch review.
 
