@@ -1,7 +1,7 @@
 # Boot an empty session on both hosts
 
 Owner answer (2026-10-15): an app opens an empty mixer and adds stems through structural edits.
-Decision 17 programme. Code anchors verified on `4be10cd67` (PR #1680). Issue number: assigned at filing (written here as TBD30). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Decision 17 programme. Code anchors verified on `4be10cd67` (PR #1680). Issue number: assigned at filing (written here as #1682). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 
@@ -60,7 +60,7 @@ What shipped:
   empty boot needed no other change, and no host adapter has a special path (D1). Every
   boot-time size that depends on the strip count was exercised at zero by the gates below and
   needed no fix (D2); the successor path grows from empty to one strip and shrinks back.
-- From TBD29: `HostPrepareCaps::maximum_source_channels` and its `host.source.channels` check are
+- From #1681: `HostPrepareCaps::maximum_source_channels` and its `host.source.channels` check are
   deleted (the validator rule is the one limit), with its test `source_channel_cap_is_optional`,
   its `MUTATIONS.md` row M-06 and the stale doc line; callers dropped the field.
 

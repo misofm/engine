@@ -2498,7 +2498,7 @@ export async function applyDelayThroughSdk(
 }
 
 /**
- * Send one structural command frame the protocol codec wrote (TBD30: the frame that adds the first
+ * Send one structural command frame the protocol codec wrote (#1682: the frame that adds the first
  * stem) through the SDK's endpoint for the host. The SDK has no encoder for a structural edit, and
  * the engine's replay cache refuses a request ID twice, so the frame takes the next ID of the
  * host's one allocator and the committed revision, the two header words that depend on the engine.

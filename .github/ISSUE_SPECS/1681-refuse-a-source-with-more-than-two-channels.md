@@ -1,6 +1,6 @@
 # Refuse a source with more than two channels
 
-Owner answer (2026-10-15): sources are mono or stereo only. Decision 17 programme. Code anchors verified on `4be10cd67` (PR #1680). Issue number: assigned at filing (written here as TBD29). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Owner answer (2026-10-15): sources are mono or stereo only. Decision 17 programme. Code anchors verified on `4be10cd67` (PR #1680). Issue number: assigned at filing (written here as #1681). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 

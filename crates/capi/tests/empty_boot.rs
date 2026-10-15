@@ -1,4 +1,4 @@
-//! TBD30: a session with no source and no track boots through the C ABI (owner answer of
+//! #1682: a session with no source and no track boots through the C ABI (owner answer of
 //! 2026-10-15), and a structural transaction then adds a stereo stem with its track.
 //!
 //! * **Boot.** The empty session (only the output and one declared console slot) compiles. Its

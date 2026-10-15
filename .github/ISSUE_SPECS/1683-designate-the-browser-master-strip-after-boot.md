@@ -1,7 +1,7 @@
 # Designate the browser master strip after boot
 
-Successor of TBD30 (an empty session boots), decision 17. Code anchors verified on the batch 13a
-branch `codex/controls-batch-13aw`. Issue number: assigned at filing (written here as TBD31).
+Successor of #1682 (an empty session boots), decision 17. Code anchors verified on the batch 13a
+branch `codex/controls-batch-13aw`. Issue number: assigned at filing (written here as #1683).
 Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
@@ -14,8 +14,8 @@ that must name a strip that exists at boot.
 
 - The browser boot option `liveControlMasterTrackPlusOne` (with observation taps) designates a
   master strip at boot; over an empty session the boot is refused `host.observation.master_track`,
-  because the strip does not exist yet (TBD30's decision record).
-- Since TBD30 an empty session boots on both hosts and grows by structural transactions.
+  because the strip does not exist yet (#1682's decision record).
+- Since #1682 an empty session boots on both hosts and grows by structural transactions.
 
 ## Decisions to take (the implementer proposes, the coordinator rules)
 
@@ -34,7 +34,7 @@ that must name a strip that exists at boot.
 
 ## Dependencies
 
-- TBD30.
+- #1682.
 
 ## Size
 
