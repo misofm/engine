@@ -886,9 +886,18 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             "{name}: typed decoded backing has exact element size"
         );
         assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
-        assert!(ready.effect_instances.is_empty(), "no effect additions");
-        assert!(ready.meter_pending.is_empty(), "no meter additions");
-        assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
+        assert!(
+            ready.shape.effect_instances.is_empty(),
+            "no effect additions"
+        );
+        assert!(ready.shape.meter_pending.is_empty(), "no meter additions");
+        assert!(
+            ready
+                .shape
+                .rack_effects
+                .iter()
+                .all(|counts| *counts == [0, 0, 0])
+        );
         assert_eq!(host.resources().observation_retained_bytes, 0);
 
         // The control plane's own retained row (its catalog, producers, protocol queues, replay
@@ -972,9 +981,9 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         let baseline =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
         let ready = baseline.ready.as_ref().expect("ready ownership");
-        let dense_effect_table_bytes = size_of_val(ready.effect_instances.as_ref()) as u64;
+        let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
         assert_eq!(
-            ready.effect_instances.len(),
+            ready.shape.effect_instances.len(),
             1,
             "one-track fixture has one effect"
         );
@@ -2087,6 +2096,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         host.ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2110,7 +2120,10 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             reserved: [0; 2],
         }
     );
-    assert_eq!(host.ready.as_ref().expect("ready").in_flight[..], [depth]);
+    assert_eq!(
+        host.ready.as_ref().expect("ready").shape.in_flight[..],
+        [depth]
+    );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
     reset_admission_counter_clear();
@@ -2121,6 +2134,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         host.ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2134,7 +2148,10 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         stage_observe_subscribe(&mut host, index);
     }
     assert_eq!(host.submit_commands(depth), RESULT_OK);
-    assert_eq!(host.ready.as_ref().expect("ready").in_flight[0], depth);
+    assert_eq!(
+        host.ready.as_ref().expect("ready").shape.in_flight[0],
+        depth
+    );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     stage_observe_subscribe(&mut host, 0);
     assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
@@ -2151,7 +2168,10 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             reserved: [0; 2],
         }
     );
-    assert_eq!(host.ready.as_ref().expect("ready").in_flight[..], [depth]);
+    assert_eq!(
+        host.ready.as_ref().expect("ready").shape.in_flight[..],
+        [depth]
+    );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
     reset_admission_counter_clear();
@@ -2162,6 +2182,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         host.ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2178,7 +2199,10 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         host.command_report().applied_at_sample,
         6 * u64::from(QUANTUM)
     );
-    assert_eq!(host.ready.as_ref().expect("ready").in_flight[..], [depth]);
+    assert_eq!(
+        host.ready.as_ref().expect("ready").shape.in_flight[..],
+        [depth]
+    );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     reset_admission_counter_clear();
     feed_and_render(&mut host, 1, 6, 0.25);
@@ -2188,6 +2212,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         host.ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2225,6 +2250,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2247,6 +2273,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .ready
             .as_ref()
             .expect("ready")
+            .shape
             .in_flight
             .iter()
             .all(|count| *count == 0)
@@ -2275,14 +2302,20 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .expect("ready")
             .has_in_flight_commands
     );
-    assert_eq!(refused.ready.as_ref().expect("ready").in_flight[0], 1);
+    assert_eq!(refused.ready.as_ref().expect("ready").shape.in_flight[0], 1);
 
     // A render failure is sticky: pending ownership and the untouched clear counters survive the
     // failed block and the subsequent WRONG_STATE re-entry.
     let mut failed = observed_effect_live_control_host(QUANTUM);
     stage_observe_subscribe(&mut failed, 0);
     assert_eq!(failed.submit_commands(1), RESULT_OK);
-    let before = failed.ready.as_ref().expect("ready").in_flight.to_vec();
+    let before = failed
+        .ready
+        .as_ref()
+        .expect("ready")
+        .shape
+        .in_flight
+        .to_vec();
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
     failed
         .buffers
@@ -2305,7 +2338,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
     assert_eq!(admission_counter_clear_stats(), (0, 0));
     assert_eq!(
-        &failed.ready.as_ref().expect("ready").in_flight[..],
+        &failed.ready.as_ref().expect("ready").shape.in_flight[..],
         &before[..]
     );
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
@@ -2314,7 +2347,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
     assert_eq!(admission_counter_clear_stats(), (0, 0));
     assert_eq!(
-        &failed.ready.as_ref().expect("ready").in_flight[..],
+        &failed.ready.as_ref().expect("ready").shape.in_flight[..],
         &before[..]
     );
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
@@ -2799,7 +2832,7 @@ fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
     for (meter, pending) in companions
         .meters
         .iter_mut()
-        .zip(ready.meter_pending.iter_mut())
+        .zip(ready.shape.meter_pending.iter_mut())
     {
         let mut snapshot = meter.consumer.try_pop().expect("queued snapshot");
         snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
@@ -3109,8 +3142,11 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
         feed_and_render_tracks(&mut host, block, 0.25);
     }
     let ready = host.ready.as_ref().expect("ready ownership");
-    assert_eq!(ready.tracks, [Box::from("t0"), Box::from("t1")]);
-    assert_eq!(ready.submixes, [Box::from("aaa-bus"), Box::from("zzz-bus")]);
+    assert_eq!(ready.shape.tracks, [Box::from("t0"), Box::from("t1")]);
+    assert_eq!(
+        ready.shape.submixes,
+        [Box::from("aaa-bus"), Box::from("zzz-bus")]
+    );
     assert_eq!(host.live_control_tracks().len(), 2, "the track prefix only");
     // Strip order, computed here: the tracks, then the submixes at `T + j`.
     let strips = ["t0", "t1", "aaa-bus", "zzz-bus"];
@@ -3151,10 +3187,13 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
             )
         });
         for (address, native) in console.into_iter().chain(chain) {
-            let slot =
-                dense_effect_slot(ready.effect_base[strip], ready.rack_effects[strip], address)
-                    .unwrap_or_else(|| panic!("{id} {address:?} has a dense slot"));
-            let producer = ready.effect_instances[slot]
+            let slot = dense_effect_slot(
+                ready.shape.effect_base[strip],
+                ready.shape.rack_effects[strip],
+                address,
+            )
+            .unwrap_or_else(|| panic!("{id} {address:?} has a dense slot"));
+            let producer = ready.shape.effect_instances[slot]
                 .as_ref()
                 .unwrap_or_else(|| panic!("{id} {address:?} has a filed producer"));
             assert_eq!(&*producer.track_id, *id, "slot {slot}'s producer owner");
@@ -3170,21 +3209,21 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
                     observed.is_none(),
                     "{id} {address:?}: an EQ declares no tap"
                 );
-                assert_eq!(ready.observation_tracks[slot], u32::MAX);
+                assert_eq!(ready.shape.observation_tracks[slot], u32::MAX);
             } else {
                 assert!(observed.is_some(), "{id} {address:?} has a filed observer");
-                assert_eq!(ready.observation_tracks[slot] as usize, strip);
+                assert_eq!(ready.shape.observation_tracks[slot] as usize, strip);
             }
             filed += 1;
         }
     }
     assert_eq!(filed, 13);
     assert_eq!(
-        ready.effect_instances.len(),
+        ready.shape.effect_instances.len(),
         13,
         "no producer slot beyond the strips'"
     );
-    assert_eq!(ready.observation_present.len(), strips.len());
+    assert_eq!(ready.shape.observation_present.len(), strips.len());
 }
 
 /// Issue #1209 gates 1 and 5: three effect-free tracks over the observation fixture's source,
@@ -3273,7 +3312,7 @@ fn meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows() {
         companions
             .meters
             .iter()
-            .zip(ready.meter_pending.iter())
+            .zip(ready.shape.meter_pending.iter())
             .map(|(meter, pending)| {
                 meter.consumer.available_at_entry() + usize::from(pending.is_some())
             })
@@ -4200,7 +4239,7 @@ fn a_submission_names_each_observation_tap_once() {
     assert_eq!(report.rejected_index, 1, "the second record of the tap");
     assert_eq!(report.admitted, 0);
     let ready = host.ready.as_ref().expect("ready");
-    assert!(ready.in_flight.iter().all(|count| *count == 0));
+    assert!(ready.shape.in_flight.iter().all(|count| *count == 0));
     assert_eq!(host.observation_armed_taps(), armed);
     feed_and_render_tracks(&mut host, 2, 0.5);
     feed_and_render_tracks(&mut clean, 2, 0.5);
@@ -5273,7 +5312,7 @@ fn tap_gain_reduction(host: &mut AudioWorkletEngineHost, effect_index: u32) -> f
         panic!("the tap has no published window: {:?}", rows[0].status);
     };
     let ready = host.ready.as_ref().expect("ready");
-    let tap = ready.effect_instances[effect_index as usize]
+    let tap = ready.shape.effect_instances[effect_index as usize]
         .as_ref()
         .filter(|instance| instance.reader.is_some())
         .expect("observation handle")
@@ -5820,5 +5859,940 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             successor.report.carried_source_total_bytes > 0,
             "{capture:?}: the successor prepares the unchanged source vacant"
         );
+    }
+}
+
+// Issue #1290a: the browser host applies a structural transaction while it plays. The control half
+// prepares the successor from the committed model, publishes it and returns; the render half
+// adopts it at a block boundary. The native gates run the one instance on one thread, the
+// message handler's place between render calls (decision 17, "single instance first"), through
+// the test-support switch that lets the rebuild arm run past `refuse_rebuild` (deleting that
+// refusal is #1562b's).
+//
+// The sessions here have no console slot and no insert: an effect's state carries across a swap
+// only with #1280a, and a session that holds one would not render the same bits after the swap.
+#[cfg(feature = "test-support")]
+mod structural_apply {
+    use super::*;
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+        StatusCode, TypedCommandFrame,
+    };
+    use session::{MatrixOrPan, RouteSource, SessionModel, StableId};
+
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+    const SOURCE: &[u8] = b"fixture-source";
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 14;
+    /// The block before which the structural transaction runs.
+    const APPLY_BEFORE: u64 = 6;
+    const ADDED: &str = "a-muted";
+
+    /// Nine stereo tracks over one source with both console sections empty and no insert, every
+    /// track's high-pass and low-pass enabled at its own cutoffs, and a non-centre pan.
+    fn gate_model() -> SessionModel {
+        let mut model = parse_session_json(FIXTURE).expect("the fixture parses");
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            track.console.clear();
+            track.inserts.effects.clear();
+            let step = index as f32;
+            for (side, channel) in [&mut track.builtins.left, &mut track.builtins.right]
+                .into_iter()
+                .enumerate()
+            {
+                channel.hpf_hz = 30.0 + 11.0 * step + 7.0 * side as f32;
+                channel.lpf_hz = 9_000.0 - 450.0 * step - 600.0 * side as f32;
+            }
+            track.matrix_or_pan = MatrixOrPan::Pan {
+                left: 0.9 - 0.05 * step,
+                right: 0.4 + 0.05 * step,
+                smoothing_samples: 16,
+            };
+        }
+        model
+    }
+
+    /// A muted copy of the first track, whose ID sorts first, and its route to the output.
+    fn muted_track(model: &SessionModel, id: &str) -> (session::Track, session::Route) {
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse(id).expect("track ID");
+        track.fader.left_mute = true;
+        track.fader.right_mute = true;
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse(&format!("{id}-main")).expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        (track, route)
+    }
+
+    fn add_muted_track(model: &SessionModel, id: &str) -> Vec<SessionEdit> {
+        let (track, route) = muted_track(model, id);
+        vec![
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ]
+    }
+
+    /// The committed model after [`add_muted_track`]: what a fresh boot is compared against.
+    fn with_muted_track(model: &SessionModel, id: &str) -> SessionModel {
+        let (track, route) = muted_track(model, id);
+        let mut next = model.clone();
+        next.tracks.insert(0, track);
+        next.routes.push(route);
+        next.revision += 1;
+        next
+    }
+
+    fn frame(edits: &[SessionEdit], request: u64, revision: u64) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                    payload: CommandPayload::SessionTransactionApply(edits),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// What one transaction's response frame says.
+    #[derive(Debug, Eq, PartialEq)]
+    enum Outcome {
+        Applied { path: EditPath, revision: u64 },
+        Refused(StatusCode, Vec<String>),
+    }
+
+    fn outcome(response: &[u8]) -> Outcome {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+            .expect("a transaction response")
+        {
+            DecodedTypedResponseFrame::Success { header, payload } => {
+                let DecodedSuccessResponsePayload::SessionTransactionApplied(applied) = payload
+                else {
+                    panic!("a transaction success")
+                };
+                Outcome::Applied {
+                    path: applied.edit_path,
+                    revision: header.revision.0,
+                }
+            }
+            DecodedTypedResponseFrame::NonOk { header, payload } => Outcome::Refused(
+                header.status,
+                payload
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.to_string())
+                    .collect(),
+            ),
+        }
+    }
+
+    fn options() -> WebBootOptions {
+        WebBootOptions {
+            live_control_meter_blocks: 2,
+            live_control_observation_taps: 4,
+            ..WebBootOptions::explicit_defaults()
+        }
+    }
+
+    /// One booted host, the blocks it rendered (as bits) and the next block to feed.
+    struct Rig {
+        host: AudioWorkletEngineHost,
+        block: u64,
+        bits: Vec<Vec<u32>>,
+    }
+
+    impl Rig {
+        fn boot(
+            model: &SessionModel,
+            options: WebBootOptions,
+            spectrum: Option<SpectrumPreparationRequest>,
+        ) -> Self {
+            let document = canonical_session_json(model).expect("canonical session");
+            let host =
+                AudioWorkletEngineHost::boot_with_spectrum(document.as_bytes(), options, spectrum)
+                    .expect("the session boots");
+            Self {
+                host,
+                block: 0,
+                bits: Vec::new(),
+            }
+        }
+
+        /// Feed the next block to the source, then render it.
+        fn step(&mut self) {
+            let quantum = u64::from(QUANTUM);
+            let lane = |lane: u64| {
+                (self.block * quantum..(self.block + 1) * quantum)
+                    .map(|frame| strip_sample(0, lane, frame))
+                    .collect::<Vec<f32>>()
+            };
+            let planes = [lane(0), lane(1)];
+            let views: [&[f32]; 2] = [&planes[0], &planes[1]];
+            assert_eq!(
+                self.host.submit_source(
+                    SOURCE,
+                    1,
+                    self.block * quantum,
+                    48_000,
+                    &views,
+                    QUANTUM,
+                    false
+                ),
+                RESULT_OK,
+                "block {}: the source feed",
+                self.block
+            );
+            assert_eq!(self.host.render_next(), RESULT_OK, "block {}", self.block);
+            self.bits.push(
+                self.host
+                    .output_pcm()
+                    .expect("output")
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect(),
+            );
+            self.block += 1;
+        }
+
+        /// Apply a structural transaction through the control half and decode its response.
+        fn apply(&mut self, edits: &[SessionEdit], request: u64) -> Outcome {
+            let revision = self.host.committed_revision();
+            let response = self
+                .host
+                .structural_command_for_test(&frame(edits, request, revision))
+                .expect("the control plane answers the frame");
+            outcome(&response)
+        }
+
+        fn epoch(&self) -> u64 {
+            self.host.active_plan_epoch_for_test().expect("a plan")
+        }
+
+        /// Whether a committed replacement waits for the block that adopts it.
+        fn pending(&self) -> bool {
+            self.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .newest_plan_epoch()
+                != self.epoch()
+        }
+
+        fn watermark(&mut self) -> WebPlanWatermark {
+            assert_eq!(self.host.read_watermark(), RESULT_OK);
+            *self.host.watermark()
+        }
+    }
+
+    fn first_difference(left: &[Vec<u32>], right: &[Vec<u32>]) -> Option<(usize, usize)> {
+        left.iter()
+            .zip(right)
+            .enumerate()
+            .find_map(|(block, (a, b))| {
+                a.iter()
+                    .zip(b)
+                    .position(|(x, y)| x != y)
+                    .map(|sample| (block, sample))
+            })
+    }
+
+    /// Gate 1, in its single-thread form: the structural transaction returns before the render
+    /// half adopts, and from the adoption block on every block equals a fresh boot of the committed
+    /// model fed the same PCM from frame zero.
+    fn gap_free_acceptance(spectrum: impl Fn() -> Option<SpectrumPreparationRequest>) {
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+
+        let mut fresh = Rig::boot(&committed, options(), spectrum());
+        for _ in 0..BLOCKS {
+            fresh.step();
+        }
+
+        let mut rig = Rig::boot(&model, options(), spectrum());
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let base = rig.host.committed_revision();
+        assert_eq!(rig.epoch(), 0);
+        let applied = rig.apply(&add_muted_track(&model, ADDED), 1);
+        assert_eq!(
+            applied,
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            },
+            "the response is the committed revision and the rebuild path"
+        );
+        // It returned before render adopted: the plan that renders is the boot plan, a successor
+        // waits, and the watermark is not early.
+        assert_eq!(rig.epoch(), 0, "apply never waits for render");
+        assert!(rig.pending());
+        assert_eq!(
+            rig.watermark().revision,
+            base,
+            "the watermark is never early"
+        );
+        assert_eq!(rig.host.blocking_rebuilds(), 1);
+
+        while rig.block < BLOCKS {
+            rig.step();
+        }
+        assert_eq!(rig.epoch(), 1);
+        assert!(!rig.pending(), "render adopted the plan");
+        assert_eq!(rig.host.service(), RESULT_OK);
+        assert!(!rig.pending());
+        assert_eq!(
+            rig.host.status().next_absolute_sample,
+            BLOCKS * u64::from(QUANTUM),
+            "the clock continues"
+        );
+        let watermark = rig.watermark();
+        assert_eq!(watermark.revision, base + 1);
+        assert_eq!(watermark.outcome_flags, 1, "exact");
+        assert_eq!(
+            watermark.first_sample,
+            APPLY_BEFORE * u64::from(QUANTUM),
+            "the adoption block's first sample"
+        );
+        assert_eq!(
+            first_difference(
+                &rig.bits[APPLY_BEFORE as usize..],
+                &fresh.bits[APPLY_BEFORE as usize..]
+            ),
+            None,
+            "from the adoption block on, every block equals a fresh boot of the committed model"
+        );
+        assert_eq!(
+            first_difference(
+                &rig.bits[..APPLY_BEFORE as usize],
+                &fresh.bits[..APPLY_BEFORE as usize]
+            ),
+            None,
+            "and the blocks before it, since the added track is muted"
+        );
+        assert!(
+            rig.bits[BLOCKS as usize - 1].iter().any(|bits| *bits != 0),
+            "the blocks are not silence"
+        );
+
+        // A response capture after the swap is stamped with the continued clock.
+        struct Sink;
+        impl ResponseSnapshotSink for Sink {
+            fn copy_owner(
+                &mut self,
+                _: engine::realtime::ResponseSnapshotOwnerInfo<'_>,
+                _: &[engine::realtime::ResponseSnapshotSection],
+                _: &[engine::realtime::ResponseSnapshotSection],
+            ) -> Result<(), ResponseSnapshotError> {
+                Ok(())
+            }
+        }
+        let capture = rig
+            .host
+            .copy_response_snapshot(model.tracks[0].id.as_str(), &mut Sink)
+            .expect("a response capture on the successor");
+        assert_eq!(
+            capture.captured_sample,
+            BLOCKS * u64::from(QUANTUM),
+            "the capture is stamped with the continued clock"
+        );
+    }
+
+    /// Gate 1. Test value: red if the apply reboots internally (fresh rings or state: the filters
+    /// and ramps restart and the bits differ), if the successor's clock restarts at zero, or if
+    /// `apply` blocks until adoption (the plan that renders would already be the successor).
+    #[test]
+    fn a_rebuild_swaps_without_a_gap() {
+        gap_free_acceptance(|| None);
+    }
+
+    fn single_capture() -> Option<SpectrumPreparationRequest> {
+        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+            target: SpectrumTarget::TrackPostMatrix(model_track_id().into()),
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: u64::MAX,
+        }))
+    }
+
+    fn capture_collection() -> Option<SpectrumPreparationRequest> {
+        Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![host_core::SpectrumCaptureCollectionEntry {
+                    target: SpectrumTarget::TrackPostMatrix(model_track_id().into()),
+                    channels: SpectrumChannels::Stereo,
+                }],
+                maximum_capture_bytes: u64::MAX,
+            },
+        ))
+    }
+
+    fn model_track_id() -> String {
+        gate_model().tracks[3].id.as_str().to_owned()
+    }
+
+    /// Gate 5. Test value: red if a successor of either spectrum branch is prepared without its
+    /// capture, or by a different path than the boot's (the swap would refuse or the bits move).
+    #[test]
+    fn a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured() {
+        gap_free_acceptance(single_capture);
+        gap_free_acceptance(capture_collection);
+    }
+
+    /// The ramp of the live fader edit, in samples: longer than the blocks between the edit and
+    /// the adoption block, so the ramp is in flight when the plan swaps.
+    const FADER_RAMP: u32 = 400;
+
+    /// A live fader edit of strip `id` through the production control entry, as the SDK sends it.
+    fn live_fader(rig: &mut Rig, id: &str, db: f32, request: u64) {
+        let edits = [SessionEdit::SetControl {
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(StableId::parse(id).expect("strip ID")),
+                section: controls::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Both,
+            },
+            value: db,
+            ramp_samples: Some(FADER_RAMP),
+        }];
+        let bytes = frame(&edits, request, rig.host.committed_revision());
+        let staging = rig
+            .host
+            .control_request_mut(bytes.len() as u32)
+            .expect("the control staging");
+        staging[..bytes.len()].copy_from_slice(&bytes);
+        assert_eq!(rig.host.control_command(bytes.len() as u32), RESULT_OK);
+        assert_eq!(
+            outcome(rig.host.control_response()),
+            Outcome::Applied {
+                path: EditPath::Live,
+                revision: rig.host.committed_revision()
+            }
+        );
+    }
+
+    /// Gate 2. Test value: red if the successor is prepared from the boot document instead of the
+    /// committed model, which would lose the live edit (the fader would snap back after the swap).
+    #[test]
+    fn a_live_edit_is_part_of_the_base_the_successor_is_prepared_from() {
+        // The edit starts at sample 640 and its ramp ends at 1040, in block 8: it crosses the
+        // adoption at block 6.
+        const EDIT_BEFORE: u64 = 5;
+        const SETTLED_FROM: usize = 9;
+        let model = gate_model();
+        let edited_id = model.tracks[3].id.as_str().to_owned();
+        let edited_db = -7.5;
+
+        // The committed model: the live edit, then the added track.
+        let mut committed = with_muted_track(&model, ADDED);
+        let edited = committed
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == edited_id)
+            .expect("the edited track");
+        edited.fader.left_db = edited_db;
+        edited.fader.right_db = edited_db;
+        let mut fresh = Rig::boot(&committed, options(), None);
+        for _ in 0..BLOCKS {
+            fresh.step();
+        }
+
+        // The same live edit and no structural edit: what the swap must not disturb.
+        let mut live_only = Rig::boot(&model, options(), None);
+        // The unedited session: the edit must be audible.
+        let mut unedited = Rig::boot(&model, options(), None);
+        let mut swapped = Rig::boot(&model, options(), None);
+        for block in 0..BLOCKS {
+            if block == EDIT_BEFORE {
+                live_fader(&mut live_only, &edited_id, edited_db, 1);
+                live_fader(&mut swapped, &edited_id, edited_db, 1);
+            }
+            if block == APPLY_BEFORE {
+                let base = swapped.host.committed_revision();
+                assert_eq!(
+                    swapped.apply(&add_muted_track(&model, ADDED), 2),
+                    Outcome::Applied {
+                        path: EditPath::Rebuild,
+                        revision: base + 1
+                    }
+                );
+            }
+            live_only.step();
+            unedited.step();
+            swapped.step();
+        }
+        assert_eq!(swapped.epoch(), 1);
+        assert_eq!(
+            first_difference(&swapped.bits, &live_only.bits),
+            None,
+            "the swap disturbs nothing, the ramp in flight included: every block equals the run \
+             with the live edit alone"
+        );
+        let last = BLOCKS as usize - 1;
+        assert_ne!(
+            swapped.bits[last], unedited.bits[last],
+            "the edit is audible after the swap"
+        );
+        assert_eq!(
+            first_difference(&swapped.bits[SETTLED_FROM..], &fresh.bits[SETTLED_FROM..]),
+            None,
+            "once the ramp ends the output equals a fresh boot of the committed model"
+        );
+    }
+
+    /// Everything a refusal must leave as it was.
+    #[derive(Debug, Eq, PartialEq)]
+    struct Untouched {
+        revision: u64,
+        epoch: u64,
+        pending: bool,
+        blocking_rebuilds: u32,
+    }
+
+    fn untouched(rig: &Rig) -> Untouched {
+        Untouched {
+            revision: rig.host.committed_revision(),
+            epoch: rig.epoch(),
+            pending: rig.pending(),
+            blocking_rebuilds: rig.host.blocking_rebuilds(),
+        }
+    }
+
+    /// Run the script with `refusal` called before block `APPLY_BEFORE`, and the same script
+    /// without it; assert the refusal changed nothing the host can see.
+    fn assert_refusal_changes_nothing(
+        options: WebBootOptions,
+        refusal: impl FnOnce(&mut Rig, &SessionModel) -> String,
+    ) -> String {
+        let model = gate_model();
+        let mut without = Rig::boot(&model, options, None);
+        for _ in 0..BLOCKS {
+            without.step();
+        }
+        let mut with = Rig::boot(&model, options, None);
+        for _ in 0..APPLY_BEFORE {
+            with.step();
+        }
+        let before = untouched(&with);
+        let refused = refusal(&mut with, &model);
+        assert_eq!(
+            untouched(&with),
+            before,
+            "a refusal leaves the revision, the plan and the counters as they were"
+        );
+        while with.block < BLOCKS {
+            with.step();
+        }
+        assert_eq!(with.epoch(), 0, "no candidate was published");
+        assert_eq!(with.host.status().state, STATE_READY);
+        assert_eq!(
+            first_difference(&with.bits, &without.bits),
+            None,
+            "the blocks after a refusal are bit-identical to a run without the call"
+        );
+        refused
+    }
+
+    /// Gate 3, case one. Test value: red if a malformed transaction reaches the preparer or leaves
+    /// a candidate, a revision bump or a counted rebuild behind.
+    #[test]
+    fn a_malformed_transaction_is_refused_and_changes_nothing() {
+        assert_refusal_changes_nothing(options(), |rig, model| {
+            let mut bytes = frame(
+                &add_muted_track(model, ADDED),
+                1,
+                rig.host.committed_revision(),
+            );
+            bytes.truncate(bytes.len() - 5);
+            let error = rig
+                .host
+                .structural_command_for_test(&bytes)
+                .expect_err("a truncated frame is refused");
+            format!("{error:?}")
+        });
+    }
+
+    /// Run one frame through the production control entry with the rebuild arm open, as the SDK's
+    /// `control` message will once #1562b deletes the refusal. Returns the entry's result word and
+    /// what it left to read.
+    fn entry_with_rebuild_open(
+        rig: &mut Rig,
+        edits: &[SessionEdit],
+        request: u64,
+    ) -> (u32, Vec<u8>) {
+        let bytes = frame(edits, request, rig.host.committed_revision());
+        let staging = rig
+            .host
+            .control_request_mut(bytes.len() as u32)
+            .expect("the control staging");
+        staging[..bytes.len()].copy_from_slice(&bytes);
+        let allow = Arc::clone(&rig.host.ready.as_ref().expect("ready").allow_rebuild);
+        allow.store(true, Ordering::Release);
+        let result = rig.host.control_command(bytes.len() as u32);
+        allow.store(false, Ordering::Release);
+        (result, rig.host.control_response().to_vec())
+    }
+
+    /// Gate 3, case two. Test value: red if a transaction that changes the rate or the quantum
+    /// reaches publication (the plan exchange answers it as retryable backpressure, a retry that
+    /// can never succeed), or if the entry reports it as anything but a required re-prepare.
+    #[test]
+    fn a_rate_or_quantum_change_is_refused_as_a_required_reprepare() {
+        for edit in [
+            SessionEdit::SetSampleRateHz {
+                sample_rate_hz: 44_100,
+            },
+            SessionEdit::SetQuantumFrames {
+                quantum_frames: 256,
+            },
+        ] {
+            assert_refusal_changes_nothing(options(), |rig, _| {
+                let (result, response) =
+                    entry_with_rebuild_open(rig, std::slice::from_ref(&edit), 1);
+                assert_eq!(result, RESULT_REPREPARE_REQUIRED, "{edit:?}");
+                let text = String::from_utf8(response).expect("diagnostic text");
+                assert!(
+                    text.starts_with("control.apply.reprepare_required"),
+                    "{text}"
+                );
+                text
+            });
+        }
+    }
+
+    /// Gate 3, case three. Test value: red if the projection charges the successor alone instead
+    /// of the running plan and the successor together (D3): a budget that fits one plan but not
+    /// two would then publish a replacement the page cannot hold.
+    #[test]
+    fn a_transaction_over_the_memory_budget_is_refused_and_changes_nothing() {
+        let model = gate_model();
+        let fits_one_plan =
+            exact_retained_report_total(Rig::boot(&model, options(), None).host.resources());
+        let tight = WebBootOptions {
+            maximum_memory_bytes: fits_one_plan,
+            ..options()
+        };
+        // The budget boots the session (the boot is inclusive of its own total) ...
+        Rig::boot(&model, tight, None);
+        // ... and refuses a second plan beside it.
+        let refused = assert_refusal_changes_nothing(tight, |rig, model| {
+            let error = rig
+                .host
+                .structural_command_for_test(&frame(
+                    &add_muted_track(model, ADDED),
+                    1,
+                    rig.host.committed_revision(),
+                ))
+                .expect_err("a replacement that does not fit beside the running plan is refused");
+            let control_plane::CommandError::CompileRejected(failure) = &error else {
+                panic!("a typed refusal, not {error:?}")
+            };
+            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+        });
+        assert!(
+            refused.contains("control.resource.replacement_peak"),
+            "{refused}"
+        );
+        // The same transaction fits a budget with room for a second plan.
+        let roomy = WebBootOptions {
+            maximum_memory_bytes: fits_one_plan * 2,
+            ..options()
+        };
+        let mut rig = Rig::boot(&model, roomy, None);
+        assert!(matches!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied { .. }
+        ));
+    }
+
+    /// Gate 6, in the form a host can drive without a browser: what is still bound to the boot
+    /// plan's indices describes the successor from the adoption block on. The observation catalog
+    /// (`observation_binding*`, the strip order) is the plan's tables, and the source table is the
+    /// committed model's.
+    ///
+    /// Test value: red if the tables stay the boot plan's after the swap (a track added in front
+    /// shifts every index: an observation armed at the catalog's index would arm another strip's
+    /// effect and read another reader), or if an observation record submitted between the commit
+    /// and the adoption block is refused (the C ABI admits it), is addressed by the rendering
+    /// plan's tables or queued on its producers (it would arm another strip's effect, or none, and
+    /// be lost with the retiring plan), or does not arm the successor's effect at its adoption.
+    #[test]
+    fn the_catalogs_describe_the_successor_from_the_adoption_block_on() {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-source").expect("source ID");
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("a-track").expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("a-track-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let mut rig = Rig::boot(&model, options(), None);
+        let ids = |host: &AudioWorkletEngineHost| {
+            host.live_control_tracks()
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let binding_tracks = |host: &AudioWorkletEngineHost| {
+            (0..host.observation_binding_count() as u32)
+                .map(|index| {
+                    host.observation_binding(index)
+                        .expect("a binding")
+                        .address
+                        .track_index
+                })
+                .collect::<Vec<_>>()
+        };
+        rig.step();
+        assert_eq!(ids(&rig.host), ["track"]);
+        assert_eq!(binding_tracks(&rig.host), [0]);
+        assert_eq!(rig.host.session_source_count(), 1);
+
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        // Committed, not adopted: the source table is the committed model's and the catalog is
+        // still the plan that renders.
+        assert_eq!(rig.host.session_source_count(), 2);
+        assert_eq!(rig.host.session_source_id(0), Some("a-source"));
+        assert_eq!(rig.host.session_source_id(1), Some("fixture-source"));
+        assert_eq!(ids(&rig.host), ["track"]);
+        assert_eq!(binding_tracks(&rig.host), [0]);
+        // An observation record is admitted against the successor, as a live value is: index 1
+        // exists only in the successor's tables (the old track's compressor, shifted by the added
+        // track), and nothing is armed on the plan that renders.
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK,
+            "an observation record between the commit and the adoption block is admitted"
+        );
+        assert_eq!(rig.host.command_report().admitted, 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            0,
+            "the plan that renders is not armed by a record addressed to its successor"
+        );
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_BACKPRESSURE,
+            "the record is queued on the successor: its one-slot queue is full until its block"
+        );
+
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(ids(&rig.host), ["a-track", "track"]);
+        assert_eq!(
+            binding_tracks(&rig.host),
+            [0, 1],
+            "both compressors are bound, the old one at its shifted index"
+        );
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            1,
+            "the record took effect on the successor: the old track's compressor is armed"
+        );
+        assert_eq!(rig.host.service(), RESULT_OK);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let binding = rig.host.observation_binding(1).expect("a binding");
+        let mut address = binding.address;
+        address.tap_id = 1;
+        assert!(
+            rig.host.read_observation_addresses(&[address]).is_ok(),
+            "the reader the catalog names is the successor's"
+        );
+        assert_eq!(rig.host.service(), RESULT_OK);
+    }
+
+    /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
+    fn poll_blocks(rig: &mut Rig, blocks: u64) -> u32 {
+        let mut windows = 0;
+        for _ in 0..blocks {
+            rig.step();
+            windows += rig.host.poll_meters();
+        }
+        windows
+    }
+
+    /// The meter delivery across a swap, until #1290d carries it: a swap that keeps the strip
+    /// count restarts delivery on the successor's meters (a new epoch the page can see), and a
+    /// swap that changes the count publishes nothing rather than a frame whose words name other
+    /// strips (the worklet's views over the frame keep the boot's size).
+    ///
+    /// Test value: red if the meter poll reads past the boot-sized frame or the successor's
+    /// meters after a swap that adds a strip, or if a swap that keeps the strip count leaves the
+    /// delivery on the retired plan's state (no window would ever fold again).
+    #[test]
+    fn meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame() {
+        let model = gate_model();
+
+        // A swap that keeps the strips: an unused source is added.
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-unused").expect("source ID");
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(poll_blocks(&mut rig, 6) > 0, "the boot plan's windows fold");
+        let generation = rig.host.meter_header().reserved[0];
+        let strips = rig.host.live_control_tracks().len();
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&[SessionEdit::UpsertSource { source }], 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        let windows = poll_blocks(&mut rig, 8);
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(rig.host.live_control_tracks().len(), strips);
+        assert!(windows > 0, "the successor's windows fold");
+        assert_eq!(
+            rig.host.meter_header().reserved[0],
+            generation + 1,
+            "the swap is a new delivery epoch"
+        );
+
+        // A swap that adds a strip.
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(poll_blocks(&mut rig, 6) > 0);
+        let frame = rig.host.meter_frame().to_vec();
+        let header = *rig.host.meter_header();
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        assert_eq!(poll_blocks(&mut rig, 8), 0, "no frame describes ten strips");
+        assert_eq!(rig.host.live_control_tracks().len(), 10);
+        assert_eq!(rig.host.meter_frame(), &frame[..], "the frame is untouched");
+        assert_eq!(rig.host.meter_header().sequence, header.sequence);
+    }
+
+    fn meter_loss(rig: &Rig) -> u64 {
+        rig.host.ready.as_ref().expect("ready").meter_loss_count
+    }
+
+    /// Telemetry is dropped only with a count. A swap that changes the strip count publishes no
+    /// frame, so every window it leaves unpublished is added to the loss count the next published
+    /// frame reports, and the swap does not zero what was counted before it.
+    ///
+    /// Test value: red if the unpublished windows of a strip-count change vanish without a count
+    /// (a page would see a silent gap), or if the restart at the swap zeroes the loss count.
+    #[test]
+    fn meter_windows_a_strip_count_change_leaves_unpublished_are_counted() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(poll_blocks(&mut rig, 6) > 0);
+        // Windows rendered and not polled when the swap comes, and a loss counted before it.
+        for _ in 0..4 {
+            rig.step();
+        }
+        let waiting = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        assert!(waiting > 0, "the render side closed windows nobody polled");
+        let ready = rig.host.ready.as_mut().expect("ready");
+        ready.meter_loss_count = 5;
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        let after_swap = meter_loss(&rig);
+        assert!(
+            after_swap >= 5 + waiting,
+            "the swap keeps the count ({after_swap}) and adds the {waiting} windows it discarded"
+        );
+
+        // Every window closed afterwards is polled, found unpublishable and counted.
+        let windows_before = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        let mut counted = after_swap;
+        for _ in 0..8 {
+            rig.step();
+            let closed = rig.host.ready.as_ref().expect("ready").master_count as u64;
+            assert_eq!(rig.host.poll_meters(), 0);
+            let ready = rig.host.ready.as_ref().expect("ready");
+            assert_eq!(
+                ready.master_count, 0,
+                "the poll drains what it cannot publish"
+            );
+            assert_eq!(meter_loss(&rig), counted + closed);
+            counted += closed;
+        }
+        assert!(
+            counted > after_swap + windows_before,
+            "windows were closed and counted"
+        );
+    }
+
+    /// Run the production control entry on a record the preparer cannot leave its tables in: the
+    /// rebuild is refused before the commit, so no revision, plan or counter moves and no
+    /// acknowledgement is dropped.
+    ///
+    /// Test value: red if a preparation that cannot hand its plan's tables to the host still
+    /// commits (the client would be told the command failed after the revision advanced, and the
+    /// host would swap plans without tables).
+    #[test]
+    fn a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit() {
+        let refused = assert_refusal_changes_nothing(options(), |rig, model| {
+            let record = Arc::clone(&rig.host.ready.as_ref().expect("ready").record);
+            let poisoner = std::thread::spawn(move || {
+                let _guard = record.lock().expect("the record is free");
+                panic!("poison the record");
+            });
+            assert!(poisoner.join().is_err());
+            let error = rig
+                .host
+                .structural_command_for_test(&frame(
+                    &add_muted_track(model, ADDED),
+                    1,
+                    rig.host.committed_revision(),
+                ))
+                .expect_err("the rebuild is refused");
+            let control_plane::CommandError::CompileRejected(failure) = &error else {
+                panic!("a typed refusal, not {error:?}")
+            };
+            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+        });
+        assert!(refused.contains("web.apply.shape_unavailable"), "{refused}");
     }
 }

@@ -491,3 +491,16 @@ insert row too, and the gate keeps no tolerance.
 the live blocks with the wrong control; new `sdk-live-bypass-step` (one quantum of start then the
 target), `-unsettled` (the last quantum back at the start) and `-lift` (the lift left bypassed). All
 five are proven red in each browser by `--self-test-mutations`.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **#1341b folds into #1280a.** D7 is a copy of `mix` (`crates/effect-contract/src/live.rs:773`)
+  and `mix_position` (`:776`) in `EffectControlLane::carry_from`, beside `bypass` and the symmetry
+  terms that #1280 D2 copies. A separate slice would add one field copy to code that #1280a
+  writes. #1280a runs gate 6, for a zero-latency effect and for the true-peak limiter (which also
+  needs #1280 D5's shunt copy, now in #1280a).
+- This issue closes when #1280a's evidence is upstream: a1, a2 and the Q2 SDK builder row are done
+  (batch 9 records above).
+- #1622 (open) folds the ramp into the bypass record; D7 does not change.

@@ -194,14 +194,15 @@ pub(crate) fn effect_control_resource(
 ) -> Option<GraphScalarOwnerResourceEstimate> {
     let bytes = |value: usize| u64::try_from(value).ok();
     let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
-    // Charge the five fields retained by `graph`'s `runtime::LiveControlEffect`.
+    // Charge the six fields retained by `graph`'s `runtime::LiveControlEffect`.
     // `bypass_resources`' allocator-observed estimate test sees the box if it
     // ever outgrows this sum.
     let live_control_effect_bytes = bytes(graph::EFFECT_RENDER_NODE_BYTES)?
         .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
         .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
         .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?
-        .checked_add(bytes(core::mem::size_of::<Option<Box<ObservationLane>>>())?)?;
+        .checked_add(bytes(core::mem::size_of::<Option<Box<ObservationLane>>>())?)?
+        .checked_add(bytes(core::mem::size_of::<rack::EffectLaneLayout>())?)?;
     let live_control_stage_bytes = bytes(core::mem::size_of::<rack::LiveControlEffectBankStage>())?;
     let live_control_stage_growth = live_control_stage_bytes
         .saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);

@@ -656,7 +656,9 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
                 if draw.chance(1, 5) {
                     records.push(Live::Effect(
                         index,
-                        EffectControlRecord::Bypass(draw.chance(1, 2)),
+                        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(
+                            draw.chance(1, 2),
+                        )),
                     ));
                     continue;
                 }

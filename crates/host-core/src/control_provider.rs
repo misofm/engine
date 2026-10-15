@@ -15,11 +15,10 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterChannel, ParameterHandle, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
-    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
-    TelemetryConfiguration, TelemetryCounters, TransportSetRequest, TransportSnapshot,
-    TransportState,
+    EnumChoice, ParameterChannel, ParameterProviderError, ParameterUnit as ProtocolUnit,
+    ResponseConfiguration, ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseProviderError,
+    ResponseResult, ResponseTarget, SampleTime, StatusCode, TelemetryConfiguration,
+    TelemetryCounters, TransportSetRequest, TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -30,12 +29,11 @@ use crate::response::{
 };
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
-/// counters, the canceled-automation count, `live_values_superseded` (#1312 D8) and
-/// `transition_reprepare_refusals` (D6). Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 5] = [
+/// counters, `live_values_superseded` (#1312 D8) and `transition_reprepare_refusals` (D6). Each
+/// reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 4] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
-    CounterId::CanceledAutomation,
     CounterId::LiveValuesSuperseded,
     CounterId::TransitionReprepareRefusals,
 ];
@@ -1072,28 +1070,6 @@ impl ControlProvider for SessionControlProvider {
         serve_response(self.maximum_reply_bytes, model, request)
     }
 
-    fn control_row(
-        &mut self,
-        handle: ParameterHandle,
-    ) -> Result<&ControlRow, ParameterProviderError> {
-        let record = usize::try_from(handle.0)
-            .ok()
-            .and_then(|handle| handle.checked_sub(1))
-            .and_then(|index| self.catalog.rows.get(index))
-            .ok_or(ParameterProviderError::NotFound)?;
-        // Until #1567 only an effect parameter is a target of `AUTOMATION_ENQUEUE`: no other
-        // row has a render record that a timed value could reach.
-        if record.kind == RowKind::Control
-            && record.control != controls::BYPASS_CONTROL
-            && record.control != controls::LINK_MODE_CONTROL
-            && let Some(row) = self.catalog.descriptors.get(record.descriptor as usize)
-            && row.family == ControlFamily::Effect
-        {
-            return Ok(row);
-        }
-        Err(ParameterProviderError::UnsupportedTarget)
-    }
-
     fn counters(
         &mut self,
         request: &CountersRequest,
@@ -1116,19 +1092,6 @@ impl ControlProvider for SessionControlProvider {
             observed_sample: self.current_sample(),
             values,
         })
-    }
-
-    fn record_canceled_automation(&mut self, records: u64) {
-        let current = self
-            .counter_snapshot
-            .iter()
-            .find(|value| value.id == CounterId::CanceledAutomation)
-            .map_or(0, |value| value.value);
-        set_counter(
-            &mut self.counter_snapshot,
-            CounterId::CanceledAutomation,
-            current.saturating_add(records),
-        );
     }
 
     fn diagnostics(
@@ -3217,60 +3180,6 @@ mod tests {
     }
 
     #[test]
-    fn only_an_effect_parameter_is_an_automation_target() {
-        let model = nine_track();
-        let (mut provider, _clock) = provider_of(&model);
-        let list = whole_list(&mut provider, 256);
-        let parameter = list
-            .iter()
-            .find(|entry| {
-                matches!(&entry.body, ControlBody::Control(row)
-                    if row.family == ControlFamily::Effect && row.automatable)
-                    && entry.address.control != Some(controls::BYPASS_CONTROL)
-            })
-            .expect("a live effect parameter");
-        let ControlBody::Control(listed) = &parameter.body else {
-            unreachable!("matched as a control row");
-        };
-        let mut descriptor = listed.clone();
-        descriptor.value = 0.0;
-        assert_eq!(
-            provider
-                .control_row(ParameterHandle(parameter.handle))
-                .expect("a parameter"),
-            &descriptor,
-            "the lent row is the stored descriptor, whose value is 0.0"
-        );
-        let others = [
-            // The bypass, the fader (a strip builtin), a header and a handle past the end.
-            list.iter().find(|entry| {
-                entry.address.control == Some(controls::BYPASS_CONTROL)
-                    && matches!(entry.body, ControlBody::Control(_))
-            }),
-            list.iter().find(|entry| {
-                matches!(&entry.body, ControlBody::Control(row)
-                    if row.family == ControlFamily::StripLevel)
-            }),
-            list.first(),
-        ];
-        for entry in others {
-            let entry = entry.expect("a row");
-            assert_eq!(
-                provider.control_row(ParameterHandle(entry.handle)).err(),
-                Some(ParameterProviderError::UnsupportedTarget),
-                "{:?}",
-                entry.address
-            );
-        }
-        for handle in [0, list.len() as u32 + 1] {
-            assert_eq!(
-                provider.control_row(ParameterHandle(handle)).err(),
-                Some(ParameterProviderError::NotFound)
-            );
-        }
-    }
-
-    #[test]
     fn clock_transport_counters_and_diagnostics_are_session_backed() {
         let (mut provider, clock) = provider_of(&nine_track());
         clock.0.store(256, Ordering::Release);
@@ -3288,7 +3197,6 @@ mod tests {
             telemetry_coalesced: 7,
             telemetry_dropped: 9,
         });
-        provider.record_canceled_automation(11);
         provider.set_live_values_superseded(13);
         let counters = provider
             .counters(&CountersRequest {
@@ -3299,14 +3207,14 @@ mod tests {
         assert_eq!(counters.observed_sample, SampleTime(256));
         assert_eq!(counters.values[0].value, 7);
         assert_eq!(counters.values[1].value, 9);
-        assert_eq!(counters.values[2].value, 11);
-        assert_eq!(counters.values[3].id, CounterId::LiveValuesSuperseded);
-        assert_eq!(counters.values[3].value, 13);
+        assert_eq!(counters.values[2].id, CounterId::LiveValuesSuperseded);
+        assert_eq!(counters.values[2].value, 13);
         assert_eq!(
-            counters.values[4].id,
+            counters.values[3].id,
             CounterId::TransitionReprepareRefusals
         );
-        assert_eq!(counters.values[4].value, 0);
+        assert_eq!(counters.values[3].value, 0);
+        assert_eq!(counters.values.len(), 4);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

@@ -535,7 +535,11 @@ fn run(backend: Backend) -> Run {
     // Before block 0, so both land at its first sample.
     for track in 0..TRACKS {
         let channel = console.compressors[track];
-        push(&mut console, channel, EffectControlRecord::Bypass(true));
+        push(
+            &mut console,
+            channel,
+            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+        );
         let channel = console.limiters[track];
         push(
             &mut console,

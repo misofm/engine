@@ -190,3 +190,68 @@ changed or added owners start fresh.
 
 Dependencies gain *Prepare every browser preparation branch concurrently, as a successor too, in
 host-core* (#1401), for D2's meter successor entry.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** `MeterObserver` is `crates/builtins-compiler/src/lib.rs:5943`,
+  `MeterConsumer` `:942`; `MeterAccumulator` is `crates/builtins/src/lib.rs:5130`;
+  `HostMeterRequest` is `crates/host-core/src/prepare.rs:436`, `HostLiveControlHandles::meters`
+  `:482` and `effect_observations` `:489`; `ObservationLane` is
+  `crates/effect-contract/src/live.rs:1321`; a bank's `observations` is
+  `crates/rack/src/lib.rs:1184`; `impl PreparedPlanExecutor for GraphExecutor` is
+  `crates/graph/src/lib.rs:3579`; `PreparedRenderPlan::carry_from` is
+  `crates/engine/src/realtime/plan.rs:1158`. The entries are
+  `prepare_host_runtime_with_selected_meters_between_render_calls` (`prepare.rs:1487`), its
+  successor form (`:1544`, #1401) and `prepare_host_runtime_with_live_controls_successor` (`:1295`).
+- **#1609's observer hook.** `GraphRuntimeObserver::block_end` exists now, and
+  `GraphNodeObserverBinding` reads `accepts_block_end` once at bind (`graph/src/lib.rs:2881-2890`).
+  D2 swaps the boxed observer between two bindings of the same kind and never swaps a binding, so
+  the cached flag stays right.
+- **D5's C ABI note is ahead of the code.** #1581, #1584 and #1587 are open: a C ABI plan has no
+  strip meter and no observation tap yet. The gates are host-core gates and do not change.
+- **#1584 D6 (open).** A successor is prepared with the committed taps armed, and a tap whose lane
+  carries takes the predecessor's state (D2). That is exact only when #1280b has applied the
+  predecessor's pending Observe records at the carry. So #1327b depends on #1280b.
+- **The browser's readers today.** Since #1381a the meter consumers and observation handles are in
+  `RenderCompanions`, the plan's attachment. The spectrum capture is not: it is in host-core's
+  `SpectrumService`, on the control side (see #1395's batch 10 amendment).
+- **Split (as plan v2).** #1327a: meters (D1's meter key, D2, D3 for meters, D6; gates 1, 2, 3 and
+  5). #1327b: observation taps (D1's tap key, D3 for observations; gate 4). #1327a needs no carry
+  chain slice (the observer table needs only the carry program, on `main`); #1327b needs #1280b,
+  #1281 and #1282, whose owners the taps follow. The filed dependency on #1284 is file order only.
+- **Engine edit (one-attempt rule).** D3's `ObserverCarry`, `ObserverKind`,
+  `PreparedPlanExecutor::observer_carries` and `PreparedRenderPlan::observer_carries` are an edit of
+  `crates/engine/src/realtime/plan.rs`. Recommendation: make it the chain's one `plan.rs` edit, in
+  #1327a: declare `ObserverKind::Spectrum` here too (so #1395 has no engine edit), and add #1381
+  D3's hook here, `HostAttachment::adopt_predecessor(&mut self, predecessor: &mut dyn
+  HostAttachment, carries: &[ObserverCarry])` with an empty default, called by
+  `PreparedRenderPlan::carry_from` after the executor hand-over when both plans have an attachment
+  (so #1381b has no engine edit). Gate 3 then pairs the meters from a host-core test attachment's
+  hook in the swap block (the pattern of `crates/host-core/tests/host_attachment_render.rs`), which
+  is how the browser calls it. If root rules against the fold, #1395 and #1381b each carry their own
+  `plan.rs` edit under its own one-attempt rule.
+- **If the hook folds in:** the call is a new indirect call in the browser's render closure, so
+  the pinned indirect-site table of `scripts/check-web-audioworklet-callgraph.py` (#1333 D4) gains
+  it in the same slice, with #1381 D3's reason; that script joins this slice's authorized paths for
+  that row only.
+
+## Ruling (root, 2026-10-14): one plan.rs edit
+
+#1327a makes the one combined edit to `crates/engine/src/realtime/plan.rs` the chain needs: the
+observer carries of #1327 (`ObserverCarry`, `ObserverKind`, `observer_carries`), the
+`ObserverKind::Spectrum` variant of #1395 and `HostAttachment::adopt_predecessor` with its call in
+`PreparedRenderPlan::carry_from` for #1381b, with the callgraph pin in
+`scripts/check-web-audioworklet-callgraph.py`. One attempt; if the permission system refuses it,
+the slice stops and root is told at once. #1395 and #1381b make no edit of their own in
+`crates/engine/src/realtime`.
+
+## Ruling (root, 2026-10-14): the acknowledged subscribe
+
+Since #1280b, a pending Observe record of a carried lane is applied at the carry to the
+predecessor's `ObservationLane`, but the tap it arms is not carried to the successor until this
+issue: an acknowledged subscribe can be dropped at a swap (an ack that precedes a drop). #1327b's
+gates include that case: a subscribe admitted and acknowledged before a swap is armed on the
+successor's tap after the swap, and the successor publishes the window the predecessor would have
+published, with zero allocations and frees on the swap block.

@@ -35,5 +35,5 @@ fi
 output="$("$binary" protocol)"
 printf '%s\n' "$output"
 grep -qF \
-  'protocol caller-buffer audit: ok (command, success, non-OK, event, reliable/meter/counter egress, 64 edits, 10,000 automation records in 40 batches; diagnostic egress is control-plane typed storage)' \
+  'protocol caller-buffer audit: ok (command, success, non-OK, event, reliable/meter/counter egress, 64 edits; diagnostic egress is control-plane typed storage)' \
   <<<"$output"

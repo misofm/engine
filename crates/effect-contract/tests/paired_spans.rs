@@ -269,7 +269,7 @@ fn targets_fold_from_the_final_cell_contents() {
 fn bypass_and_observe_records_fold_in_place_around_a_pair() {
     let mut rig = Rig::new(shape(0), 4);
     rig.commit_each(&[
-        EffectControlRecord::Bypass(true),
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
         left(0, -6.0),
         right(0, -6.0),
     ]);
@@ -288,7 +288,10 @@ fn bypass_and_observe_records_fold_in_place_around_a_pair() {
         !rig.lane.symmetry().holds(UNBYPASSED),
         "the bypass folded as ever"
     );
-    rig.commit_each(&[left(0, -9.0), EffectControlRecord::Bypass(false)]);
+    rig.commit_each(&[
+        left(0, -9.0),
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+    ]);
     rig.stage();
     assert!(rig.lane.symmetry().holds(UNBYPASSED));
     assert!(

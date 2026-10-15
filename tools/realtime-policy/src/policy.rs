@@ -57,14 +57,7 @@ pub struct ControlSideEntry {
 /// The day-one control-side allowlist (#1443 D7): path, function, sites, thread, reason. A reason
 /// says why the pop never runs inside a product render callback (the C ABI render call, the
 /// worklet's `process()` or a worklet message handler).
-const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
-    (
-        "crates/protocol/src/queue.rs",
-        "ProtocolQueues::try_dequeue_automation",
-        1,
-        "C ABI control thread",
-        "ProtocolController's control-side cancel of queued automation is the only consumer; no render-side drain exists (docs/CONTROL_PROTOCOL_SEMANTICS.md, \"Delivery status\"), and the protocol crate is not linked into the browser artifact",
-    ),
+const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 12] = [
     (
         "crates/protocol/src/queue.rs",
         "ProtocolQueues::try_dequeue_event",

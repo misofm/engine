@@ -18,8 +18,6 @@ use crate::{
 
 #[cfg(test)]
 const WIRE_U8: u8 = 1;
-#[cfg(test)]
-const WIRE_U32: u8 = 3;
 
 macro_rules! write_spec {
     ($writer:expr, $spec:expr, $bytes:expr $(,)?) => {{
@@ -57,15 +55,15 @@ impl CapabilityFlags {
     /// Canonical BTLV, caller-buffer, replay, revisioned-edit, and snapshot support.
     pub const B1B_BASE: Self = Self((1 << 5) - 1);
     /// Complete issue-005 typed provider, telemetry, and reliable-event registry.
-    pub const B4_BASE: Self = Self((1 << 15) - 1);
+    pub const B4_BASE: Self = Self(((1 << 15) - 1) & !(1 << 5));
     /// Reliable session-committed event support.
     pub const SESSION_EVENT_STREAM: Self = Self(1 << 12);
-    const KNOWN: u64 = (1 << 15) - 1;
+    const KNOWN: u64 = ((1 << 15) - 1) & !(1 << 5);
 }
 
-/// All 27 fields of a successful `CAPABILITIES_GET` response.
+/// All 23 fields of a successful `CAPABILITIES_GET` response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)] // The 27 frozen field names mirror the normative registry verbatim.
+#[allow(missing_docs)] // The 23 frozen field names mirror the normative registry verbatim.
 pub struct Capabilities<'a> {
     /// Lowest supported protocol version.
     pub minimum_version: crate::ProtocolVersion,
@@ -79,20 +77,15 @@ pub struct Capabilities<'a> {
     pub maximum_string_bytes: u64,
     /// Effective nested MESSAGE depth.
     pub maximum_nesting: u8,
-    /// Fixed v1 batch capacity, exactly 256.
-    pub maximum_automation_records: u16,
     /// Effective queue/replay/response bounds, in frozen field order.
     pub control_command_slots: u64,
     pub control_command_bytes: u64,
-    pub automation_batch_slots: u64,
     pub reliable_response_slots: u64,
     pub reliable_event_slots: u64,
     pub telemetry_slots: u64,
     pub replay_entries: u64,
     pub replay_bytes: u64,
     pub maximum_cached_response_bytes: u64,
-    pub per_block_automation_density: u64,
-    pub admission_quantum_frames: u64,
     pub maximum_control_page_items: u16,
     pub maximum_diagnostic_page_items: u16,
     pub maximum_telemetry_handles: u16,
@@ -111,7 +104,7 @@ pub struct Capabilities<'a> {
 /// consumers construct `Capabilities` with native `u16` slice literals, while decode must borrow
 /// allocation-free packed little-endian bytes from the input frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)] // Borrowed counterpart of the same frozen 27-field registry.
+#[allow(missing_docs)] // Borrowed counterpart of the same frozen 23-field registry.
 pub struct DecodedCapabilities<'a> {
     pub minimum_version: crate::ProtocolVersion,
     pub maximum_version: crate::ProtocolVersion,
@@ -119,18 +112,14 @@ pub struct DecodedCapabilities<'a> {
     pub maximum_tlvs: u32,
     pub maximum_string_bytes: u64,
     pub maximum_nesting: u8,
-    pub maximum_automation_records: u16,
     pub control_command_slots: u64,
     pub control_command_bytes: u64,
-    pub automation_batch_slots: u64,
     pub reliable_response_slots: u64,
     pub reliable_event_slots: u64,
     pub telemetry_slots: u64,
     pub replay_entries: u64,
     pub replay_bytes: u64,
     pub maximum_cached_response_bytes: u64,
-    pub per_block_automation_density: u64,
-    pub admission_quantum_frames: u64,
     pub maximum_control_page_items: u16,
     pub maximum_diagnostic_page_items: u16,
     pub maximum_telemetry_handles: u16,
@@ -851,70 +840,6 @@ pub struct ControlStatePage {
     pub records: Vec<ControlStateRecord>,
 }
 
-/// Typed `AUTOMATION_ENQUEUE` command records. The enclosing frame supplies identity/revision.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AutomationEnqueue<'a> {
-    /// Canonically ordered fixed records, one through 256 inclusive.
-    pub records: &'a [crate::AutomationRecord],
-}
-
-/// Borrowed strict decode view of one `AUTOMATION_ENQUEUE` record array.
-///
-/// The records remain borrowed from the caller frame. Converting them into the fixed queue slot
-/// is explicit so decoding itself cannot allocate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DecodedAutomationEnqueue<'a> {
-    /// Number of exact 32-byte records in `record_bytes`.
-    pub count: u16,
-    record_bytes: &'a [u8],
-}
-
-impl<'a> DecodedAutomationEnqueue<'a> {
-    /// Decode one already bounds-checked fixed record without allocation.
-    pub fn record(self, index: usize) -> Result<crate::AutomationRecord, DecodeError> {
-        let offset = index
-            .checked_mul(crate::AUTOMATION_RECORD_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let end = offset
-            .checked_add(crate::AUTOMATION_RECORD_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let bytes: &[u8; crate::AUTOMATION_RECORD_BYTES] = self
-            .record_bytes
-            .get(offset..end)
-            .ok_or(DecodeError::InvalidTlv)?
-            .try_into()
-            .map_err(|_| DecodeError::InvalidValueLength)?;
-        crate::AutomationRecord::decode_le(bytes).map_err(|_| DecodeError::InvalidTlv)
-    }
-
-    /// Copy this borrowed input into the prepared fixed queue-slot representation.
-    pub fn into_batch(
-        self,
-        revision: crate::SessionRevision,
-        request_id: crate::RequestId,
-    ) -> Result<crate::AutomationBatchSlot, DecodeError> {
-        let mut records = [crate::AutomationRecord::EMPTY; crate::AUTOMATION_BATCH_RECORDS];
-        for (index, record) in records[..usize::from(self.count)].iter_mut().enumerate() {
-            *record = self.record(index)?;
-        }
-        crate::AutomationBatchSlot::new(revision, request_id, &records[..usize::from(self.count)])
-            .map_err(|_| DecodeError::InvalidTlv)
-    }
-}
-
-/// Typed successful `AUTOMATION_ENQUEUE` admission report.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AutomationEnqueued {
-    /// Exact number of atomically accepted fixed records.
-    pub accepted_records: u16,
-    /// Automation queue occupancy after acceptance.
-    pub occupancy: u64,
-    /// Fixed automation queue capacity in batches.
-    pub capacity: u64,
-    /// Immutable queue generation.
-    pub generation: u64,
-}
-
 /// Frozen absolute transport-state registry. V1 has no pause, toggle, rate, or loop state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -959,39 +884,6 @@ pub struct TransportStateEvent {
     pub effective_sample: crate::SampleTime,
     /// Originating set request, when this state change came from a command.
     pub origin_request_id: Option<crate::RequestId>,
-}
-
-/// Frozen reason why an already accepted automation batch was canceled.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum AutomationCancellationReason {
-    /// A structural session revision invalidated revision-scoped handles.
-    RevisionChanged = 1,
-    /// An absolute transport locate invalidated pending automation.
-    TransportLocate = 2,
-    /// The endpoint is shutting down.
-    EndpointShutdown = 3,
-    /// The typed provider became unavailable.
-    ProviderUnavailable = 4,
-    /// An explicit endpoint reconfiguration invalidated pending automation.
-    ExplicitReconfiguration = 5,
-}
-
-/// Typed reliable `AUTOMATION_CANCELED` event payload.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AutomationCanceled {
-    /// Endpoint-monotonic reliable event sequence.
-    pub event_sequence: u64,
-    /// Original nonzero automation command request ID.
-    pub origin_request_id: crate::RequestId,
-    /// Number of records canceled from the accepted batch.
-    pub canceled_records: u16,
-    /// Explicit cancellation cause.
-    pub reason: AutomationCancellationReason,
-    /// Immutable automation queue generation.
-    pub queue_generation: u64,
-    /// Effective endpoint sample, when known.
-    pub effective_sample: Option<crate::SampleTime>,
 }
 
 /// Frozen meter component registry for one fixed telemetry record.
@@ -1060,13 +952,13 @@ pub struct DiagnosticEvent {
     pub diagnostic: Diagnostic,
 }
 
-/// Frozen registered non-resetting counter IDs.
+/// Frozen registered non-resetting counter IDs. IDs 2 and 11 to 14 are retired (#1629): refused,
+/// never reallocated.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
 #[allow(missing_docs)]
 pub enum CounterId {
     ControlCommandBackpressure = 1,
-    AutomationBackpressure = 2,
     ReliableResponseBackpressure = 3,
     ReliableEventBackpressure = 4,
     TelemetryCoalesced = 5,
@@ -1075,10 +967,6 @@ pub enum CounterId {
     ReplayHits = 8,
     RequestIdReuse = 9,
     ReplayExpired = 10,
-    LateAutomation = 11,
-    CanceledAutomation = 12,
-    AutomationTimePast = 13,
-    AutomationOrderReject = 14,
     ValidationFailures = 15,
     LiveValuesSuperseded = 16,
     TransitionReprepareRefusals = 17,
@@ -1203,14 +1091,13 @@ pub struct Diagnostic {
     pub provider_sequence: Option<u64>,
 }
 
-/// Exact queue-kind codes used by typed backpressure payloads.
+/// Exact queue-kind codes used by typed backpressure payloads. Code 2 is retired (#1629): refused,
+/// never reallocated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BackpressureQueueKind {
     /// Reliable copied control command queue.
     ControlCommand = 1,
-    /// Fixed automation batch queue.
-    Automation = 2,
     /// Reliable response queue.
     ReliableResponse = 3,
     /// Reliable event queue.
@@ -1225,7 +1112,6 @@ impl BackpressureQueueKind {
     fn decode(value: u8) -> Result<Self, DecodeError> {
         match value {
             1 => Ok(Self::ControlCommand),
-            2 => Ok(Self::Automation),
             3 => Ok(Self::ReliableResponse),
             4 => Ok(Self::ReliableEvent),
             5 => Ok(Self::Telemetry),
@@ -1324,7 +1210,7 @@ impl ProtocolCodec {
         decode_non_ok(self, Message::top_level(payload, tlv_count, self.limits())?)
     }
 
-    /// Exact payload length for the 27-field successful capabilities response.
+    /// Exact payload length for the 23-field successful capabilities response.
     pub fn encoded_capabilities_len(&self, value: &Capabilities<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_capabilities(&mut sink, value)?;
@@ -1346,7 +1232,7 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode the exact 27-field successful capabilities payload.
+    /// Strictly decode the exact 23-field successful capabilities payload.
     pub fn decode_capabilities<'a>(
         &self,
         payload: &'a [u8],
@@ -1637,83 +1523,6 @@ impl ProtocolCodec {
         decode_control_state_page(Message::top_level(payload, count, self.limits())?)
     }
 
-    /// Return the exact direct caller-buffer length for one typed automation command payload.
-    pub fn encoded_automation_enqueue_len(
-        &self,
-        value: AutomationEnqueue<'_>,
-    ) -> Result<usize, EncodeError> {
-        let mut sink = CountSink::new(self.limits());
-        write_automation_enqueue(&mut sink, value)?;
-        checked_sink_len(self, &mut sink)
-    }
-
-    /// Encode a fixed-record automation command directly into caller-owned output.
-    pub fn encode_automation_enqueue(
-        &self,
-        value: AutomationEnqueue<'_>,
-        output: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let required = self.encoded_automation_enqueue_len(value)?;
-        if output.len() < required {
-            return Err(EncodeError::OutputTooSmall { required });
-        }
-        let mut writer = SliceSink::new(output, self.limits());
-        write_automation_enqueue(&mut writer, value)?;
-        checked_writer_len(&writer, required)
-    }
-
-    /// Strictly decode a borrowed fixed-record automation command without allocation.
-    pub fn decode_automation_enqueue<'a>(
-        &self,
-        payload: &'a [u8],
-        count: u32,
-    ) -> Result<DecodedAutomationEnqueue<'a>, DecodeError> {
-        decode_automation_enqueue(self, payload, count)
-    }
-
-    /// Encode the exact four-field successful automation admission payload.
-    pub fn encode_automation_enqueued(
-        &self,
-        value: AutomationEnqueued,
-        output: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let mut sizing = CountSink::new(self.limits());
-        write_automation_enqueued(&mut sizing, value)?;
-        let required = checked_sink_len(self, &mut sizing)?;
-        if output.len() < required {
-            return Err(EncodeError::OutputTooSmall { required });
-        }
-        let mut writer = SliceSink::new(output, self.limits());
-        write_automation_enqueued(&mut writer, value)?;
-        checked_writer_len(&writer, required)
-    }
-
-    /// Strictly decode the exact four-field successful automation admission payload.
-    pub fn decode_automation_enqueued(
-        &self,
-        payload: &[u8],
-        count: u32,
-    ) -> Result<AutomationEnqueued, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::automation_enqueued::SPEC)?;
-        let result = AutomationEnqueued {
-            accepted_records: read_u16(one_spec!(
-                message,
-                schema::automation_enqueued::ACCEPTED_RECORDS
-            )?)?,
-            occupancy: read_u64(one_spec!(message, schema::automation_enqueued::OCCUPANCY)?)?,
-            capacity: read_u64(one_spec!(message, schema::automation_enqueued::CAPACITY)?)?,
-            generation: read_u64(one_spec!(message, schema::automation_enqueued::GENERATION)?)?,
-        };
-        if result.accepted_records == 0
-            || result.capacity == 0
-            || result.occupancy > result.capacity
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(result)
-    }
-
     /// Encode the canonical empty `TRANSPORT_GET` command payload.
     pub const fn encode_transport_get_request(
         &self,
@@ -1874,74 +1683,6 @@ impl ProtocolCodec {
                 None => None,
             },
         })
-    }
-
-    /// Return the exact direct caller-buffer size for a reliable automation cancellation event.
-    pub const fn encoded_automation_canceled_len(&self, value: AutomationCanceled) -> usize {
-        if value.effective_sample.is_some() {
-            96
-        } else {
-            80
-        }
-    }
-
-    /// Encode a reliable typed `AUTOMATION_CANCELED` payload without allocation.
-    pub fn encode_automation_canceled(
-        &self,
-        value: AutomationCanceled,
-        output: &mut [u8],
-    ) -> Result<usize, EncodeError> {
-        let required = self.encoded_automation_canceled_len(value);
-        if output.len() < required {
-            return Err(EncodeError::OutputTooSmall { required });
-        }
-        let mut writer = SliceSink::new(output, self.limits());
-        write_automation_canceled(&mut writer, value)?;
-        checked_writer_len(&writer, required)
-    }
-
-    /// Strictly decode a reliable typed `AUTOMATION_CANCELED` payload.
-    pub fn decode_automation_canceled(
-        &self,
-        payload: &[u8],
-        count: u32,
-    ) -> Result<AutomationCanceled, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::automation_canceled::SPEC)?;
-        let value = AutomationCanceled {
-            event_sequence: read_u64(one_spec!(
-                message,
-                schema::automation_canceled::EVENT_SEQUENCE
-            )?)?,
-            origin_request_id: crate::RequestId::new(read_u64(one_spec!(
-                message,
-                schema::automation_canceled::ORIGIN_REQUEST_ID
-            )?)?)
-            .ok_or(DecodeError::InvalidTlv)?,
-            canceled_records: read_u16(one_spec!(
-                message,
-                schema::automation_canceled::CANCELED_RECORDS
-            )?)?,
-            reason: parse_automation_cancellation_reason(read_u8(one_spec!(
-                message,
-                schema::automation_canceled::REASON
-            )?)?)?,
-            queue_generation: read_u64(one_spec!(
-                message,
-                schema::automation_canceled::QUEUE_GENERATION
-            )?)?,
-            effective_sample: optional_spec!(
-                message,
-                schema::automation_canceled::EFFECTIVE_SAMPLE
-            )?
-            .map(read_u64)
-            .transpose()?
-            .map(crate::SampleTime),
-        };
-        if value.canceled_records == 0 {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(value)
     }
 
     /// Return the exact caller-buffer bytes required for one fixed-record meter batch.
@@ -2362,19 +2103,6 @@ fn parse_transport_state(value: u8) -> Result<TransportState, DecodeError> {
     }
 }
 
-fn parse_automation_cancellation_reason(
-    value: u8,
-) -> Result<AutomationCancellationReason, DecodeError> {
-    match value {
-        1 => Ok(AutomationCancellationReason::RevisionChanged),
-        2 => Ok(AutomationCancellationReason::TransportLocate),
-        3 => Ok(AutomationCancellationReason::EndpointShutdown),
-        4 => Ok(AutomationCancellationReason::ProviderUnavailable),
-        5 => Ok(AutomationCancellationReason::ExplicitReconfiguration),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-
 fn parse_meter_component(value: u16) -> Result<MeterComponent, DecodeError> {
     match value {
         1 => Ok(MeterComponent::Left),
@@ -2436,7 +2164,6 @@ fn decode_meter_record(value: &[u8]) -> Result<MeterRecord, DecodeError> {
 fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
     match value {
         1 => Ok(CounterId::ControlCommandBackpressure),
-        2 => Ok(CounterId::AutomationBackpressure),
         3 => Ok(CounterId::ReliableResponseBackpressure),
         4 => Ok(CounterId::ReliableEventBackpressure),
         5 => Ok(CounterId::TelemetryCoalesced),
@@ -2445,14 +2172,10 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         8 => Ok(CounterId::ReplayHits),
         9 => Ok(CounterId::RequestIdReuse),
         10 => Ok(CounterId::ReplayExpired),
-        11 => Ok(CounterId::LateAutomation),
-        12 => Ok(CounterId::CanceledAutomation),
-        13 => Ok(CounterId::AutomationTimePast),
-        14 => Ok(CounterId::AutomationOrderReject),
         15 => Ok(CounterId::ValidationFailures),
         16 => Ok(CounterId::LiveValuesSuperseded),
         17 => Ok(CounterId::TransitionReprepareRefusals),
-        _ => Err(DecodeError::InvalidTlv),
+        _ => Err(DecodeError::InvalidField),
     }
 }
 
@@ -2585,100 +2308,6 @@ fn write_u32s(
     })
 }
 
-fn validate_automation_records(
-    records: &[crate::AutomationRecord],
-) -> Result<(), crate::AutomationBatchError> {
-    crate::AutomationBatchSlot::new(
-        crate::SessionRevision(0),
-        crate::RequestId::new(1).expect("constant nonzero request ID"),
-        records,
-    )
-    .map(|_| ())
-}
-
-fn write_automation_record_bytes(
-    sink: &mut dyn Sink,
-    records: &[crate::AutomationRecord],
-) -> Result<(), EncodeError> {
-    let length = records
-        .len()
-        .checked_mul(crate::AUTOMATION_RECORD_BYTES)
-        .ok_or(EncodeError::LimitExceeded)?;
-    sink.stream_field_spec(schema::automation_enqueue::RECORDS, length, &mut |sink| {
-        for record in records {
-            let mut bytes = [0_u8; crate::AUTOMATION_RECORD_BYTES];
-            record
-                .encode_le(&mut bytes)
-                .map_err(|_| EncodeError::LimitExceeded)?;
-            sink.raw(&bytes)?;
-        }
-        Ok(())
-    })
-}
-
-/// Automation uses the shared allocation-free reader while borrowing its fixed record array.
-fn decode_automation_enqueue<'a>(
-    codec: &ProtocolCodec,
-    payload: &'a [u8],
-    count: u32,
-) -> Result<DecodedAutomationEnqueue<'a>, DecodeError> {
-    if count > codec.limits().max_tlv_count || payload.len() > codec.limits().max_frame_bytes {
-        return Err(DecodeError::LimitExceeded);
-    }
-    let fields = Message::top_level(payload, count, codec.limits())?
-        .schema_spec(&schema::automation_enqueue::SPEC)?;
-    let count = read_u16(one_spec!(fields, schema::automation_enqueue::COUNT)?)?;
-    let stride = read_u16(one_spec!(fields, schema::automation_enqueue::RECORD_BYTES)?)?;
-    let records = one_spec!(fields, schema::automation_enqueue::RECORDS)?;
-    if count == 0
-        || usize::from(count) > crate::AUTOMATION_BATCH_RECORDS
-        || stride != crate::AUTOMATION_RECORD_BYTES as u16
-        || records.len()
-            != usize::from(count)
-                .checked_mul(crate::AUTOMATION_RECORD_BYTES)
-                .ok_or(DecodeError::LimitExceeded)?
-    {
-        return Err(DecodeError::InvalidTlv);
-    }
-    let result = DecodedAutomationEnqueue {
-        count,
-        record_bytes: records,
-    };
-    let mut previous = None;
-    for index in 0..usize::from(count) {
-        let record = result.record(index)?;
-        if previous.is_some_and(|prior: crate::AutomationRecord| {
-            (record.start, record.handle) < (prior.start, prior.handle)
-        }) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        previous = Some(record);
-    }
-    for left_index in 0..usize::from(count) {
-        let left = result.record(left_index)?;
-        let left_end = if left.kind == crate::AutomationKind::Point {
-            left.start
-        } else {
-            left.end
-        };
-        for right_index in left_index + 1..usize::from(count) {
-            let right = result.record(right_index)?;
-            if left.handle != right.handle {
-                continue;
-            }
-            let right_end = if right.kind == crate::AutomationKind::Point {
-                right.start
-            } else {
-                right.end
-            };
-            if left.start == right.start || (left.start < right_end && right.start < left_end) {
-                return Err(DecodeError::InvalidTlv);
-            }
-        }
-    }
-    Ok(result)
-}
-
 pub(crate) fn write_snapshot_request(
     sink: &mut dyn Sink,
     value: SessionSnapshotRequest,
@@ -2774,56 +2403,6 @@ pub(crate) fn write_session_committed(
     )
 }
 
-pub(crate) fn write_automation_enqueue(
-    sink: &mut dyn Sink,
-    value: AutomationEnqueue<'_>,
-) -> Result<(), EncodeError> {
-    validate_automation_records(value.records).map_err(|_| EncodeError::LimitExceeded)?;
-    sink.check_field_count(schema::automation_enqueue::SPEC.field_count(&[])?)?;
-    let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
-    write_spec!(
-        sink,
-        schema::automation_enqueue::COUNT,
-        &count.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_enqueue::RECORD_BYTES,
-        &(crate::AUTOMATION_RECORD_BYTES as u16).to_le_bytes()
-    )?;
-    write_automation_record_bytes(sink, value.records)
-}
-
-pub(crate) fn write_automation_enqueued(
-    sink: &mut dyn Sink,
-    value: AutomationEnqueued,
-) -> Result<(), EncodeError> {
-    if value.accepted_records == 0 || value.capacity == 0 || value.occupancy > value.capacity {
-        return Err(EncodeError::LimitExceeded);
-    }
-    sink.check_field_count(schema::automation_enqueued::SPEC.field_count(&[])?)?;
-    write_spec!(
-        sink,
-        schema::automation_enqueued::ACCEPTED_RECORDS,
-        &value.accepted_records.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_enqueued::OCCUPANCY,
-        &value.occupancy.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_enqueued::CAPACITY,
-        &value.capacity.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_enqueued::GENERATION,
-        &value.generation.to_le_bytes()
-    )
-}
-
 pub(crate) fn write_transport_set(
     sink: &mut dyn Sink,
     value: TransportSetRequest,
@@ -2898,52 +2477,6 @@ pub(crate) fn write_transport_state_event(
             sink,
             schema::transport_state_event::ORIGIN_REQUEST_ID,
             &origin.get().to_le_bytes()
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn write_automation_canceled(
-    sink: &mut dyn Sink,
-    value: AutomationCanceled,
-) -> Result<(), EncodeError> {
-    if value.canceled_records == 0 {
-        return Err(EncodeError::LimitExceeded);
-    }
-    sink.check_field_count(schema::automation_canceled::SPEC.field_count(&[(
-        schema::automation_canceled::EFFECTIVE_SAMPLE,
-        usize::from(value.effective_sample.is_some()),
-    )])?)?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::EVENT_SEQUENCE,
-        &value.event_sequence.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::ORIGIN_REQUEST_ID,
-        &value.origin_request_id.get().to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::CANCELED_RECORDS,
-        &value.canceled_records.to_le_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::REASON,
-        &[value.reason as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::automation_canceled::QUEUE_GENERATION,
-        &value.queue_generation.to_le_bytes()
-    )?;
-    if let Some(sample) = value.effective_sample {
-        write_spec!(
-            sink,
-            schema::automation_canceled::EFFECTIVE_SAMPLE,
-            &sample.0.to_le_bytes()
         )?;
     }
     Ok(())
@@ -4020,11 +3553,6 @@ pub(crate) fn write_capabilities(
         schema::capabilities::MAXIMUM_NESTING,
         &[value.maximum_nesting]
     )?;
-    write_spec!(
-        sink,
-        schema::capabilities::MAXIMUM_AUTOMATION_RECORDS,
-        &value.maximum_automation_records.to_le_bytes(),
-    )?;
     for (spec, field) in [
         (
             schema::capabilities::CONTROL_COMMAND_SLOTS,
@@ -4033,10 +3561,6 @@ pub(crate) fn write_capabilities(
         (
             schema::capabilities::CONTROL_COMMAND_BYTES,
             value.control_command_bytes,
-        ),
-        (
-            schema::capabilities::AUTOMATION_BATCH_SLOTS,
-            value.automation_batch_slots,
         ),
         (
             schema::capabilities::RELIABLE_RESPONSE_SLOTS,
@@ -4052,14 +3576,6 @@ pub(crate) fn write_capabilities(
         (
             schema::capabilities::MAXIMUM_CACHED_RESPONSE_BYTES,
             value.maximum_cached_response_bytes,
-        ),
-        (
-            schema::capabilities::PER_BLOCK_AUTOMATION_DENSITY,
-            value.per_block_automation_density,
-        ),
-        (
-            schema::capabilities::ADMISSION_QUANTUM_FRAMES,
-            value.admission_quantum_frames,
         ),
     ] {
         write_spec!(sink, spec, &field.to_le_bytes())?;
@@ -4123,7 +3639,10 @@ fn decode_capabilities<'a>(
     codec: &ProtocolCodec,
     message: Message<'a>,
 ) -> Result<DecodedCapabilities<'a>, DecodeError> {
-    let message = message.schema_spec(&schema::capabilities::SPEC)?;
+    // Fields 9, 12, 19 and 20 are retired with `AUTOMATION_ENQUEUE` (#1627): refused in either
+    // flag form, never skipped as unknown optional fields.
+    let message = message
+        .schema_spec_retiring(&schema::capabilities::SPEC, &schema::capabilities::RETIRED)?;
     let value = DecodedCapabilities {
         minimum_version: crate::ProtocolVersion {
             major: read_u16(one_spec!(
@@ -4155,10 +3674,6 @@ fn decode_capabilities<'a>(
             schema::capabilities::MAXIMUM_STRING_BYTES
         )?)?,
         maximum_nesting: read_u8(one_spec!(message, schema::capabilities::MAXIMUM_NESTING)?)?,
-        maximum_automation_records: read_u16(one_spec!(
-            message,
-            schema::capabilities::MAXIMUM_AUTOMATION_RECORDS
-        )?)?,
         control_command_slots: read_u64(one_spec!(
             message,
             schema::capabilities::CONTROL_COMMAND_SLOTS
@@ -4166,10 +3681,6 @@ fn decode_capabilities<'a>(
         control_command_bytes: read_u64(one_spec!(
             message,
             schema::capabilities::CONTROL_COMMAND_BYTES
-        )?)?,
-        automation_batch_slots: read_u64(one_spec!(
-            message,
-            schema::capabilities::AUTOMATION_BATCH_SLOTS
         )?)?,
         reliable_response_slots: read_u64(one_spec!(
             message,
@@ -4185,14 +3696,6 @@ fn decode_capabilities<'a>(
         maximum_cached_response_bytes: read_u64(one_spec!(
             message,
             schema::capabilities::MAXIMUM_CACHED_RESPONSE_BYTES
-        )?)?,
-        per_block_automation_density: read_u64(one_spec!(
-            message,
-            schema::capabilities::PER_BLOCK_AUTOMATION_DENSITY
-        )?)?,
-        admission_quantum_frames: read_u64(one_spec!(
-            message,
-            schema::capabilities::ADMISSION_QUANTUM_FRAMES
         )?)?,
         maximum_control_page_items: read_u16(one_spec!(
             message,
@@ -4287,7 +3790,6 @@ struct CapabilityInvariantView<'a> {
     maximum_frame_bytes: u64,
     maximum_tlvs: u32,
     maximum_nesting: u8,
-    maximum_automation_records: u16,
     maximum_control_page_items: u16,
     maximum_diagnostic_page_items: u16,
     maximum_transaction_edits: u32,
@@ -4304,7 +3806,6 @@ impl<'a> From<&Capabilities<'a>> for CapabilityInvariantView<'a> {
             maximum_frame_bytes: value.maximum_frame_bytes,
             maximum_tlvs: value.maximum_tlvs,
             maximum_nesting: value.maximum_nesting,
-            maximum_automation_records: value.maximum_automation_records,
             maximum_control_page_items: value.maximum_control_page_items,
             maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
             maximum_transaction_edits: value.maximum_transaction_edits,
@@ -4323,7 +3824,6 @@ impl<'a> From<&DecodedCapabilities<'a>> for CapabilityInvariantView<'a> {
             maximum_frame_bytes: value.maximum_frame_bytes,
             maximum_tlvs: value.maximum_tlvs,
             maximum_nesting: value.maximum_nesting,
-            maximum_automation_records: value.maximum_automation_records,
             maximum_control_page_items: value.maximum_control_page_items,
             maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
             maximum_transaction_edits: value.maximum_transaction_edits,
@@ -4337,14 +3837,13 @@ impl<'a> From<&DecodedCapabilities<'a>> for CapabilityInvariantView<'a> {
 fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(), DecodeError> {
     let has_command = |wanted| value.supported_commands.contains(wanted);
     let has_event = |wanted| value.supported_events.contains(wanted);
-    let session_family = has_command(0x0003) && has_event(0x8001) && has_event(0x8002);
+    let session_family = has_command(0x0003) && has_event(0x8001);
     if value.minimum_version.major != 1
         || value.maximum_version.major != 1
         || value.minimum_version.minor > value.maximum_version.minor
         || value.maximum_frame_bytes == 0
-        || value.maximum_tlvs < 27
+        || value.maximum_tlvs < 23
         || value.maximum_nesting == 0
-        || value.maximum_automation_records != 256
         || value.maximum_control_page_items > 256
         || value.maximum_diagnostic_page_items > 256
         || ((value.maximum_transaction_edits != 0) != session_family)
@@ -4353,7 +3852,6 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || !value.supported_events.is_strict_allocated(true)
         || ((value.flags.0 & (1 << 3) != 0) != session_family)
         || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
-        || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
         || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
         || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x000c) && has_command(0x000d)))
         || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
@@ -4364,7 +3862,6 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
         || (has_command(0x0003) != has_event(0x8001))
-        || (has_event(0x8001) != has_event(0x8002))
         || (has_command(0x000c) != has_command(0x000d))
         || (has_command(0x0008) != has_event(0x8010))
         || (has_command(0x000a) != has_event(0x8021))
@@ -4376,9 +3873,11 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
 }
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
-        matches!(id, 0x8001 | 0x8002 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
+        // `0x8002` is retired: never allocated again, never advertised (#1628).
+        matches!(id, 0x8001 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
+            && !crate::wire::is_retired_message_id(id)
     } else {
-        // `0x0004` and `0x0005` are retired: never allocated again, never advertised.
+        // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
         matches!(id, 1..=14) && !crate::wire::is_retired_message_id(id)
     }
 }

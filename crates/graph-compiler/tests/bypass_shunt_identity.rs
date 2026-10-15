@@ -715,7 +715,10 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                 let revision = pin.last_published() + 1;
                 let stamp = pin.stamp(revision).expect("a legal revision");
                 producer
-                    .write(stamp, EffectControlRecord::Bypass(value))
+                    .write(
+                        stamp,
+                        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(value)),
+                    )
                     .expect("a bypass cell");
                 pin.publish(&gate, revision);
                 live_bypassed = value;
@@ -951,12 +954,12 @@ fn render_per_node<L: lane::Lane>(
                     let revision = pin.last_published() + 1;
                     let stamp = pin.stamp(revision).expect("a legal revision");
                     writer
-                        .write_bypass(
+                        .write(
                             stamp,
-                            effect_contract::BypassSwitch {
+                            EffectControlRecord::Bypass(effect_contract::BypassSwitch {
                                 bypassed,
                                 ramp_samples,
-                            },
+                            }),
                         )
                         .expect("a bypass cell");
                     pin.publish(&gate, revision);
@@ -1354,7 +1357,7 @@ fn bank_equals_node(effect_id: &str, backend: Backend) {
             for writer in [bank_writers[lane].as_mut(), nodes[lane].writer.as_mut()] {
                 writer
                     .expect("a lane with records has a channel")
-                    .write_bypass(stamp, switch)
+                    .write(stamp, EffectControlRecord::Bypass(switch))
                     .expect("a bypass cell");
             }
             pin.publish(&gate, revision);

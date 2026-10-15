@@ -103,3 +103,9 @@ Batch Q. Direct dependencies:
 - Draft 24a *Build the stored-automation console benchmark row*, merged.
 
 Draft 20 *Render stored parametric EQ automation* and its predecessors arrive through draft 24a.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- No design change.

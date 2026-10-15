@@ -97,6 +97,7 @@ fn limits(source_ring_frames: u32) -> ControlLimits {
         maximum_submixes: 0,
         maximum_vcas: 0,
         maximum_vca_reach_pairs: u64::MAX,
+        maximum_replacement_peak_bytes: u64::MAX,
     }
 }
 

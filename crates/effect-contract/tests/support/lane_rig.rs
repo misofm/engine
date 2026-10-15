@@ -120,10 +120,11 @@ impl Rig {
 
     /// One bypass switch, with its crossfade ramp, as a transaction of its own.
     pub(crate) fn commit_bypass(&mut self, switch: BypassSwitch) -> Result<(), EffectWriteRefusal> {
-        switch.check()?;
+        let record = EffectControlRecord::Bypass(switch);
+        self.writer.check(&record)?;
         let revision = self.pin.last_published() + 1;
         let stamp = self.pin.stamp(revision).expect("a legal revision");
-        self.writer.write_bypass(stamp, switch)?;
+        self.writer.write(stamp, record)?;
         self.pin.publish(&self.gate, revision);
         Ok(())
     }

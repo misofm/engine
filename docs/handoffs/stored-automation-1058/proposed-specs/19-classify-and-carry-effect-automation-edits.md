@@ -210,3 +210,17 @@ the live record that would otherwise overflow it. Direct dependencies:
 
 Draft 18a, draft 10 (the mask per row, `LiveRebuild::Automation`, `automated_cell`), draft 07 (the cursor reposition) and *Report each transaction's edit path in
 its response* (#1313) arrive through draft 18b.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The classifier** lowers effect values by family (`parameter_records` in
+  `crates/host-core/src/live_delta.rs`); D1 and D2 use draft 10's `automation_row_renders` and
+  `automated_cell` in `controls`.
+- **Automation wins on effect parameters** (OQ1 = C): D2's rule stands.
+- **No channel-less lane** (C6): D6's second and third bullets go; every owner has its live lane in
+  both plans, so #1280's "attached in both plans or in neither" holds by construction.
+- **Carry.** #1279 has landed; #1280 is open and the carry chain is about to start. This slice
+  extends #1280's code after it lands, as written; #1280 needs no change for it.
+- **The browser** edits through `SET_CONTROL` (#1563); `COMMAND_EFFECT_PARAM` is deleted (#1565).

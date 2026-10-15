@@ -221,3 +221,15 @@ drafts 06a and 06b, and the first reader draft 09b. All are in batch R1.
 
 None of these specs is amended for the timeline: each lands before this slice, and this slice adds
 the timeline's line to the mechanism each one built.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Moved files.** The C ABI's commit-time `adopt_persisting` call is in `crates/control-plane/src/control.rs`
+  (#1309); `crates/capi/src/runtime/control.rs` is gone.
+- **The browser** runs the same `SessionState` (#1562a, single instance), so D1-D7 reach it by
+  construction; its successor (carry) path is refused `web.apply.rebuild_pending` until #1562b, so
+  the browser half of gate 2 waits for #1562b.
+- **Realtime policy** as in draft 04a's amendment (`./target/release/realtime_policy`).
+- **Dependencies.** #1285, #1316, #1320, #1323 and #1396 are still open.

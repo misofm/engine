@@ -1290,7 +1290,10 @@ mod tests {
                         && producer.address == LiveEffectAddress::insert(1)
                 })
                 .expect("dynamic slot-1 control producer")
-                .write(stamp, EffectControlRecord::Bypass(true))
+                .write(
+                    stamp,
+                    EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+                )
                 .expect("every lane has a bypass cell");
             // The decoy lane belongs to another node; it is written the value it already holds, so
             // a swap of the two lanes is visible and a correct handoff is not.
@@ -1301,7 +1304,10 @@ mod tests {
                         && producer.address == LiveEffectAddress::console(0)
                 })
                 .expect("simd1 slot-0 control producer")
-                .write(stamp, EffectControlRecord::Bypass(false))
+                .write(
+                    stamp,
+                    EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+                )
                 .expect("every lane has a bypass cell");
             gate.publish(revision);
         }
@@ -3247,7 +3253,8 @@ mod tests {
                     + size_of::<Box<EffectControlLane>>()
                     + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
                     + size_of::<effect_contract::BypassShunt>()
-                    + size_of::<Option<Box<effect_contract::ObservationLane>>>();
+                    + size_of::<Option<Box<effect_contract::ObservationLane>>>()
+                    + size_of::<rack::EffectLaneLayout>();
                 let window = capacity * span;
                 let shunt = 2 * (quantum + latency) * size_of::<f32>();
                 expected_total = expected_total

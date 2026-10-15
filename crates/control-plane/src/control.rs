@@ -249,8 +249,6 @@ pub struct TestTransactionSnapshot<Row> {
     pub reliable_event: protocol::QueueReport,
     /// The reliable response queue.
     pub reliable_response: protocol::QueueReport,
-    /// The automation queue.
-    pub automation: protocol::QueueReport,
     /// The telemetry queue.
     pub telemetry: protocol::QueueReport,
     /// The telemetry counters.
@@ -554,6 +552,12 @@ impl Drop for ObservedPreparedToken {
     }
 }
 
+/// The diagnostic code of a transaction that changes the session's sample rate or quantum (#1290a):
+/// the plan exchange admits a replacement plan only at the envelope of the plan it replaces, so
+/// the session must be re-prepared from its document instead. An adapter maps it to its own
+/// "re-prepare" result.
+pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
+
 /// Why a control command was refused.
 #[derive(Debug)]
 pub enum CommandError {
@@ -652,25 +656,16 @@ pub enum EventError {
     Internal,
 }
 
-/// Write one preflighted effect record. A bypass takes the transaction's crossfade ramp
-/// (#1341 D1), every other record is written as it is.
+/// Write one preflighted effect record as it is; a bypass record carries its own crossfade ramp
+/// (#1341 D1, #1622 D1).
 fn write_effect_record(
     producer: &mut host_core::EffectControlProducer,
     stamp: engine::realtime::LiveStamp<'_>,
     record: effect_contract::EffectControlRecord,
-    bypass_ramp_samples: u32,
 ) {
-    let written = match record {
-        effect_contract::EffectControlRecord::Bypass(bypassed) => producer.write_bypass(
-            stamp,
-            effect_contract::BypassSwitch {
-                bypassed,
-                ramp_samples: bypass_ramp_samples,
-            },
-        ),
-        record => producer.write(stamp, record),
-    };
-    written.unwrap_or_else(|_| unreachable!("every effect record passed its producer's preflight"));
+    producer
+        .write(stamp, record)
+        .unwrap_or_else(|_| unreachable!("every effect record passed its producer's preflight"));
 }
 
 pub(crate) fn map_encode_error(error: EncodeError) -> CommandError {
@@ -926,10 +921,6 @@ where
                 .controller
                 .queues()
                 .report(protocol::QueueKind::ReliableResponse),
-            automation: self
-                .controller
-                .queues()
-                .report(protocol::QueueKind::Automation),
             telemetry: self
                 .controller
                 .queues()
@@ -1271,6 +1262,26 @@ where
                     return Err(CommandError::CompileRejected(crate::error::diagnostic(
                         code,
                     )));
+                }
+                // #1290a: a plan's rate and quantum are fixed for its session: the plan exchange
+                // admits a replacement only at the same envelope, and would hand a different one
+                // back as retryable backpressure. A transaction that changes either is refused
+                // here, typed and permanent, before anything is prepared, stamped or queued.
+                {
+                    let prospective = prepared
+                        .get()
+                        .prospective_session()
+                        .compiled()
+                        .ok_or(CommandError::Internal)?;
+                    let committed = self.controller.session().compiled();
+                    if prospective.sample_rate() != committed.sample_rate()
+                        || prospective.quantum() != committed.quantum()
+                    {
+                        drop(prepared);
+                        return Err(CommandError::CompileRejected(crate::error::diagnostic(
+                            REPREPARE_REQUIRED,
+                        )));
+                    }
                 }
                 // Issue #1042: while the atomic lags the providers, a render call has swapped plans
                 // but not yet published the epoch. The retired plan's row stays for any-thread
@@ -1797,14 +1808,10 @@ where
             let producer = &owners.effects[index];
             for &record in &instance.records {
                 match record {
-                    // Written on every instance, the EQ's too, with the session's crossfade ramp
-                    // (#1341 D1).
-                    effect_contract::EffectControlRecord::Bypass(bypassed) => {
-                        let switch = effect_contract::BypassSwitch {
-                            bypassed,
-                            ramp_samples: instance.bypass_ramp_samples,
-                        };
-                        if producer.preflight_bypass(switch).is_err() {
+                    // Written on every instance, the EQ's too; the record carries the session's
+                    // crossfade ramp (#1341 D1).
+                    effect_contract::EffectControlRecord::Bypass(_) => {
+                        if producer.preflight(record).is_err() {
                             return LiveCommit::Done(Err(CommandError::Internal));
                         }
                     }
@@ -1892,23 +1899,13 @@ where
                 match &instance.targets {
                     None => {
                         for &record in &instance.records {
-                            write_effect_record(
-                                producer,
-                                stamp,
-                                record,
-                                instance.bypass_ramp_samples,
-                            );
+                            write_effect_record(producer, stamp, record);
                         }
                     }
                     Some(targets) => {
                         for &record in &instance.records {
                             if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
-                                write_effect_record(
-                                    producer,
-                                    stamp,
-                                    record,
-                                    instance.bypass_ramp_samples,
-                                );
+                                write_effect_record(producer, stamp, record);
                             }
                         }
                         let base_revision = producer
@@ -2182,6 +2179,23 @@ where
         self.pending_providers.last().unwrap_or(&self.providers)
     }
 
+    /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
+    /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
+    /// first plan is prepared, and the limits the session was built with are a plain value.
+    pub fn set_replacement_peak_limit(&mut self, bytes: u64) {
+        self.limits.maximum_replacement_peak_bytes = bytes;
+    }
+
+    /// The epoch of the newest plan (#1290a): the pending candidate's while one waits for its
+    /// swap, else the current plan's. It advances by a published rebuild, so a host that compares
+    /// it across a command knows whether the command published a replacement plan, and, against
+    /// the epoch of the plan it renders, whether a replacement is still waiting for its block. It
+    /// is the epoch of the plan whose producers [`Self::effect_producers`] lists.
+    #[must_use]
+    pub fn newest_plan_epoch(&self) -> u64 {
+        self.newest_providers().epoch
+    }
+
     fn newest_providers_mut(&mut self) -> &mut ProviderEpoch {
         self.pending_providers
             .last_mut()
@@ -2204,21 +2218,24 @@ where
         self.controller.provider().catalog_resources()
     }
 
-    /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
+    /// The newest plan's effect producers, in `HostLiveControlHandles::effect_controls` order
     /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
     /// observation queue. The adapter reaches an effect's observation queue for the browser's
     /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
     /// else of a producer, so it cannot write a live value or open an owner behind the commit.
     ///
-    /// These are the producers of the plan that renders, not a pending candidate's: a
-    /// subscription must reach the observer the active plan's readers belong to. The browser's
+    /// These are the producers of the newest committed plan (#1290a, batch 10 review): the
+    /// pending candidate's while one waits for its swap, else the current plan's. That is the plan
+    /// a live value, a source feed and a seek already reach, so an observation record is admitted
+    /// against the successor the way every other control call is. The adapter pairs them with the
+    /// addressing tables of the plan whose epoch is [`Self::newest_plan_epoch`]. The browser's
     /// feature phase deletes this accessor together with those kinds.
     #[must_use]
     pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
-        &self.providers.effects
+        &self.newest_providers().effects
     }
 
-    /// Queues one observation record on the effect producer at `position` of
+    /// Queues one observation record on the newest plan's effect producer at `position` of
     /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
     ///
     /// # Errors
@@ -2231,7 +2248,7 @@ where
         armed: bool,
         window_blocks: u32,
     ) -> Option<Result<(), effect_contract::ObservePushError>> {
-        self.providers
+        self.newest_providers_mut()
             .effects
             .get_mut(position)
             .map(|producer| producer.try_push_observe(tap_index, armed, window_blocks))

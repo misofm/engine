@@ -88,6 +88,53 @@ fn common_error_payload_is_canonical_and_caller_owned() {
     assert!(short.iter().all(|byte| *byte == 0xaa));
 }
 
+/// #1629 gate 1. Queue kind 2 (the automation queue) is retired: a backpressure payload that
+/// names it fails typed decode, while the allocated kinds decode. Never reallocated.
+///
+/// Test value: red if the retired queue code decodes again or is given to another queue.
+#[test]
+fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
+    let codec = codec();
+    let encode = |queue_kind: BackpressureQueueKind| {
+        let mut value = response();
+        value
+            .backpressure
+            .as_mut()
+            .expect("backpressure")
+            .queue_kind = queue_kind;
+        let mut output = vec![0_u8; codec.encoded_non_ok_payload_len(&value).expect("size")];
+        codec
+            .encode_non_ok_payload(&value, &mut output)
+            .expect("encode");
+        output
+    };
+    let reliable_response = encode(BackpressureQueueKind::ReliableResponse);
+    let control = encode(BackpressureQueueKind::ControlCommand);
+    let at = reliable_response
+        .iter()
+        .zip(&control)
+        .position(|(left, right)| left != right)
+        .expect("the queue kind is the one byte that differs");
+    assert_eq!((control[at], reliable_response[at]), (1, 3));
+    for allocated in [1_u8, 3, 4, 5] {
+        let mut bytes = reliable_response.clone();
+        bytes[at] = allocated;
+        assert!(
+            codec.decode_non_ok_payload(&bytes, 3).is_ok(),
+            "{allocated}"
+        );
+    }
+    for refused in [0_u8, 2, 7] {
+        let mut bytes = reliable_response.clone();
+        bytes[at] = refused;
+        assert_eq!(
+            codec.decode_non_ok_payload(&bytes, 3),
+            Err(DecodeError::InvalidTlv),
+            "queue kind {refused}"
+        );
+    }
+}
+
 #[test]
 fn unknown_optional_skips_but_required_and_wrong_variant_reject() {
     let codec = codec();
@@ -258,7 +305,6 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
             maximum_frame_bytes: 4096,
             maximum_tlvs: 64,
             maximum_nesting: 4,
-            maximum_automation_records: 256,
             maximum_control_page_items: 256,
             maximum_diagnostic_page_items: 256,
             maximum_transaction_edits: 64,
@@ -289,7 +335,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     }
 
     let commands = [1, 2, 3];
-    let events = [0x8001, 0x8002];
+    let events = [0x8001];
     let command_bytes = le(&commands);
     let event_bytes = le(&events);
     assert!(
@@ -307,11 +353,14 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     );
 
     assert_parity_rejects(&[1, 3, 2], &events);
-    // The pair rule, an unallocated ID and a retired ID are each refused.
+    // The pair rule, an unallocated ID and a retired ID are each refused: a record that adds the
+    // retired event `0x8002` back is refused whatever else it lists (#1628).
+    assert_parity_rejects(&commands, &[0x8001, 0x8002]);
     assert_parity_rejects(&[1, 2, 12], &events);
     assert_parity_rejects(&[1, 2, 14], &events);
     assert_parity_rejects(&[1, 2, 4], &events);
-    assert_parity_rejects(&commands, &[0x8001]);
+    assert_parity_rejects(&[1, 2, 6], &events);
+    assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
 }
 
@@ -319,7 +368,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
 fn b1b_success_schemas_round_trip_and_truncate() {
     let codec = codec();
     let commands = [1_u16, 2, 3];
-    let events = [0x8001_u16, 0x8002];
+    let events = [0x8001_u16];
     let capabilities = Capabilities {
         minimum_version: crate::ProtocolVersion::V1,
         maximum_version: crate::ProtocolVersion::V1,
@@ -327,18 +376,14 @@ fn b1b_success_schemas_round_trip_and_truncate() {
         maximum_tlvs: 64,
         maximum_string_bytes: 64,
         maximum_nesting: 4,
-        maximum_automation_records: 256,
         control_command_slots: 1,
         control_command_bytes: 64,
-        automation_batch_slots: 1,
         reliable_response_slots: 1,
         reliable_event_slots: 1,
         telemetry_slots: 1,
         replay_entries: 1,
         replay_bytes: 1024,
         maximum_cached_response_bytes: 512,
-        per_block_automation_density: 256,
-        admission_quantum_frames: 64,
         maximum_control_page_items: 256,
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
@@ -359,14 +404,14 @@ fn b1b_success_schemas_round_trip_and_truncate() {
         .encode_capabilities(&capabilities, &mut capability_bytes)
         .expect("encode");
     let decoded = codec
-        .decode_capabilities(&capability_bytes, 27)
+        .decode_capabilities(&capability_bytes, 23)
         .expect("decode");
     assert_eq!(decoded.maximum_frame_bytes, 4096);
     assert_eq!(decoded.supported_commands, &[1, 0, 2, 0, 3, 0]);
     for end in 0..capability_bytes.len() {
         assert!(
             codec
-                .decode_capabilities(&capability_bytes[..end], 27)
+                .decode_capabilities(&capability_bytes[..end], 23)
                 .is_err()
         );
     }
@@ -1722,11 +1767,11 @@ fn control_code_tables_are_exact() {
 /// Gate 2: a retired message ID decodes to `UNSUPPORTED_MESSAGE`, no message variant uses a
 /// retired code, and a capability registry that lists one is refused.
 ///
-/// Red if `0x0004` or `0x0005` is reallocated to a new message or still served, or a peer can
-/// advertise one.
+/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served, or a
+/// peer can advertise one.
 #[test]
 fn retired_message_ids_are_never_reused_or_advertised() {
-    assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005]);
+    assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005, 0x0006, 0x8002]);
     for raw in 0..=u16::MAX {
         match crate::MessageId::from_raw(raw) {
             Ok(message) => {
@@ -1743,211 +1788,125 @@ fn retired_message_ids_are_never_reused_or_advertised() {
             }
         }
     }
-    assert!(!allocated_id(0x0004, false) && !allocated_id(0x0005, false));
     assert!(
-        [1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        !allocated_id(0x0004, false)
+            && !allocated_id(0x0005, false)
+            && !allocated_id(0x0006, false)
+            && !allocated_id(0x8002, true)
+    );
+    assert!(
+        [0x8001, 0x8010, 0x8020, 0x8021, 0x8030]
+            .into_iter()
+            .all(|id| allocated_id(id, true))
+    );
+    assert!(
+        [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14]
             .into_iter()
             .all(|id| allocated_id(id, false))
     );
     assert!(!allocated_id(0, false) && !allocated_id(15, false));
 }
 
-fn automation_record(sample: u64, handle: u32, value: f32) -> crate::AutomationRecord {
-    crate::AutomationRecord {
-        kind: crate::AutomationKind::Point,
-        handle: crate::ParameterHandle(handle),
-        start: crate::SampleTime(sample),
-        end: crate::SampleTime(sample),
-        start_value: value,
-        end_value: value,
+fn session_capabilities<'a>(commands: &'a [u16], events: &'a [u16]) -> Capabilities<'a> {
+    Capabilities {
+        minimum_version: crate::ProtocolVersion::V1,
+        maximum_version: crate::ProtocolVersion::V1,
+        maximum_frame_bytes: 4096,
+        maximum_tlvs: 64,
+        maximum_string_bytes: 64,
+        maximum_nesting: 4,
+        control_command_slots: 1,
+        control_command_bytes: 64,
+        reliable_response_slots: 1,
+        reliable_event_slots: 1,
+        telemetry_slots: 1,
+        replay_entries: 1,
+        replay_bytes: 1024,
+        maximum_cached_response_bytes: 512,
+        maximum_control_page_items: 256,
+        maximum_diagnostic_page_items: 256,
+        maximum_telemetry_handles: 256,
+        maximum_transaction_edits: 64,
+        supported_commands: commands,
+        supported_events: events,
+        flags: CapabilityFlags(
+            CapabilityFlags::B1B_BASE.0 | CapabilityFlags::SESSION_EVENT_STREAM.0,
+        ),
     }
 }
 
+/// #1627: capability fields 9 (`maximum_automation_records`), 12 (`automation_batch_slots`), 19
+/// (`per_block_automation_density`) and 20 (`admission_quantum_frames`) are retired with
+/// `AUTOMATION_ENQUEUE`: a record that carries one is refused in either flag form, never skipped as
+/// an unknown optional field. The control splice is a never-allocated optional field (28), which
+/// decodes, so a broken splice cannot pass as a refusal.
+///
+/// Red if a retired field is skipped like an unknown optional field (the record decodes), is read
+/// again as a field, or the record has more than its 23 fields.
 #[test]
-fn b2b_automation_goldens_truncation_and_malformed_cases_are_functional() {
+fn retired_capability_fields_are_refused_in_either_flag_form() {
     let codec = codec();
-    let records = [automation_record(2, 1, 1.0)];
-    let request = AutomationEnqueue { records: &records };
-    let required = codec
-        .encoded_automation_enqueue_len(request)
-        .expect("request length");
-    assert_eq!(required, 72);
-    let mut bytes = [0_u8; 72];
-    assert_eq!(
-        codec.encode_automation_enqueue(request, &mut bytes),
-        Ok(required)
-    );
-    assert_eq!(
-        hex(&bytes),
-        concat!(
-            "01000201020000000100000000000000",
-            "02000201020000002000000000000000",
-            "03000a01200000000100000001000000",
-            "02000000000000000200000000000000",
-            "0000803f0000803f"
-        )
-    );
-    let decoded = codec
-        .decode_automation_enqueue(&bytes, 3)
-        .expect("strict decode");
-    assert_eq!(decoded.count, 1);
-    assert_eq!(decoded.record(0), Ok(records[0]));
-    assert_eq!(
-        decoded
-            .into_batch(
-                crate::SessionRevision(7),
-                crate::RequestId::new(9).expect("id")
-            )
-            .expect("slot")
-            .as_slice(),
-        &records
-    );
-    for end in 0..bytes.len() {
-        assert!(codec.decode_automation_enqueue(&bytes[..end], 3).is_err());
-    }
-    let success = AutomationEnqueued {
-        accepted_records: 1,
-        occupancy: 1,
-        capacity: 2,
-        generation: 2,
-    };
-    let mut success_bytes = [0_u8; 64];
-    codec
-        .encode_automation_enqueued(success, &mut success_bytes)
-        .expect("success encode");
-    assert_eq!(
-        hex(&success_bytes),
-        concat!(
-            "01000201020000000100000000000000",
-            "02000401080000000100000000000000",
-            "03000401080000000200000000000000",
-            "04000401080000000200000000000000"
-        )
-    );
-    assert_eq!(
-        codec.decode_automation_enqueued(&success_bytes, 4),
-        Ok(success)
-    );
-    for end in 0..success_bytes.len() {
-        assert!(
-            codec
-                .decode_automation_enqueued(&success_bytes[..end], 4)
-                .is_err()
-        );
-    }
-
-    let mut invalid = bytes;
-    invalid[8] = 0; // count zero
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    invalid = bytes;
-    invalid[24] = 31; // stride must be 32
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    invalid = bytes;
-    invalid[36] = 31; // exact count * stride byte length
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    invalid = bytes;
-    invalid[44..48].fill(0); // zero public handle
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    invalid = bytes;
-    invalid[35] = 0; // known field with optional flag
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    invalid = bytes;
-    invalid[34] = WIRE_U32; // known field wire type
-    assert!(codec.decode_automation_enqueue(&invalid, 3).is_err());
-    let mut extension = bytes.to_vec();
-    extension.extend_from_slice(&[4, 0, WIRE_U8, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0]);
-    assert!(codec.decode_automation_enqueue(&extension, 4).is_ok());
-    extension[72 + 3] = 1;
-    assert_eq!(
-        codec.decode_automation_enqueue(&extension, 4),
-        Err(DecodeError::UnknownRequiredField)
-    );
-    let ordered = [automation_record(3, 1, 1.0), automation_record(4, 2, 1.0)];
-    let mut ordered_bytes = [0_u8; 104];
-    codec
-        .encode_automation_enqueue(AutomationEnqueue { records: &ordered }, &mut ordered_bytes)
-        .expect("ordered encode");
-    ordered_bytes[80..88].copy_from_slice(&2_u64.to_le_bytes());
-    ordered_bytes[88..96].copy_from_slice(&2_u64.to_le_bytes());
-    assert!(codec.decode_automation_enqueue(&ordered_bytes, 3).is_err());
-    let adjacent = [
-        crate::AutomationRecord {
-            kind: crate::AutomationKind::Linear,
-            handle: crate::ParameterHandle(1),
-            start: crate::SampleTime(3),
-            end: crate::SampleTime(5),
-            start_value: 0.0,
-            end_value: 1.0,
-        },
-        crate::AutomationRecord {
-            kind: crate::AutomationKind::Linear,
-            handle: crate::ParameterHandle(1),
-            start: crate::SampleTime(5),
-            end: crate::SampleTime(7),
-            start_value: 1.0,
-            end_value: 0.0,
-        },
+    let commands = [1_u16, 2, 3];
+    let events = [0x8001_u16];
+    let capabilities = session_capabilities(&commands, &events);
+    let mut bytes = vec![
+        0;
+        codec
+            .encoded_capabilities_len(&capabilities)
+            .expect("length")
     ];
-    let mut adjacent_bytes = [0_u8; 104];
     codec
-        .encode_automation_enqueue(
-            AutomationEnqueue { records: &adjacent },
-            &mut adjacent_bytes,
-        )
-        .expect("adjacent encode");
-    adjacent_bytes[80..88].copy_from_slice(&4_u64.to_le_bytes());
-    assert!(codec.decode_automation_enqueue(&adjacent_bytes, 3).is_err());
-
-    let queue_config = crate::ProtocolQueueConfig {
-        control_command_slots: core::num::NonZeroUsize::new(1).expect("one"),
-        control_command_bytes: core::num::NonZeroUsize::new(1).expect("one"),
-        automation_batch_slots: core::num::NonZeroUsize::new(1).expect("one"),
-        reliable_response_slots: core::num::NonZeroUsize::new(1).expect("one"),
-        reliable_event_slots: core::num::NonZeroUsize::new(1).expect("one"),
-        telemetry_slots: core::num::NonZeroUsize::new(1).expect("one"),
-        per_block_automation_density: core::num::NonZeroUsize::new(256).expect("density"),
-        quantum_frames: core::num::NonZeroUsize::new(1).expect("quantum"),
-    };
-    let mut queues = crate::ProtocolQueues::prepare(queue_config).expect("prepared");
-    let mut output = vec![0_u8; 16 + 16 + 8 + crate::AUTOMATION_BATCH_RECORDS * 32];
-    let audit_codec = ProtocolCodec::new(ProtocolLimits {
-        max_frame_bytes: 16 * 1024,
-        ..codec.limits()
-    });
-    let mut next = 0_u64;
-    for batch_index in 0..40_u64 {
-        let count = if batch_index == 39 { 16 } else { 256 };
-        let mut batch = [crate::AutomationRecord::EMPTY; crate::AUTOMATION_BATCH_RECORDS];
-        for record in &mut batch[..count] {
-            *record = automation_record(next, 1, 1.0);
-            next += 1;
+        .encode_capabilities(&capabilities, &mut bytes)
+        .expect("encode");
+    assert_eq!(parse_tlvs(&bytes).len(), 23, "the record has 23 fields");
+    assert!(codec.decode_capabilities(&bytes, 23).is_ok());
+    let (control, count) = edited(&bytes, |fields| insert(fields, leaf(28, 1, &[0])));
+    assert!(codec.decode_capabilities(&control, count).is_ok());
+    for (id, wire, width) in [(9_u16, 2_u8, 2_usize), (12, 4, 8), (19, 4, 8), (20, 4, 8)] {
+        for mandatory in [0_u8, 1] {
+            let (patched, count) = edited(&bytes, |fields| {
+                let mut field = leaf(id, wire, &vec![1; width]);
+                field.mandatory = mandatory;
+                insert(fields, field);
+            });
+            assert_eq!(
+                codec.decode_capabilities(&patched, count).err(),
+                Some(if mandatory == 1 {
+                    DecodeError::UnknownRequiredField
+                } else {
+                    DecodeError::InvalidTlv
+                }),
+                "retired field {id}, mandatory {mandatory}"
+            );
         }
-        let value = AutomationEnqueue {
-            records: &batch[..count],
-        };
-        output.fill(0xa5);
-        let len = audit_codec
-            .encode_automation_enqueue(value, &mut output)
-            .expect("encode");
-        assert!(output[len..].iter().all(|byte| *byte == 0xa5));
-        let decoded = audit_codec
-            .decode_automation_enqueue(&output[..len], 3)
-            .expect("decode");
-        let slot = decoded
-            .into_batch(
-                crate::SessionRevision(7),
-                crate::RequestId::new(batch_index + 1).expect("id"),
-            )
-            .expect("slot");
-        queues
-            .try_enqueue_automation(crate::SampleTime(0), slot)
-            .expect("enqueue");
-        assert_eq!(
-            queues.try_dequeue_automation().expect("consume").len as usize,
-            count
-        );
     }
-    assert_eq!(next, 10_000);
+}
+
+/// #1627: flag bit 5 was `AUTOMATION_ENQUEUE`'s. It is no longer a known flag, so a record that
+/// sets it is refused whatever it lists; the 23-field record needs `maximum_tlvs` of at least 23.
+///
+/// Red if bit 5 is accepted again (a peer advertises the retired command through its flag), or the
+/// field-count floor stays at the old 27.
+#[test]
+fn capability_flag_bit_5_is_unknown_and_the_floor_is_the_field_count() {
+    let codec = codec();
+    let commands = [1_u16, 2, 3];
+    let events = [0x8001_u16];
+    let mut capabilities = session_capabilities(&commands, &events);
+    assert_eq!(capabilities.flags.0 & (1 << 5), 0);
+    assert!(codec.encoded_capabilities_len(&capabilities).is_ok());
+    capabilities.flags = CapabilityFlags(capabilities.flags.0 | (1 << 5));
+    assert!(codec.encoded_capabilities_len(&capabilities).is_err());
+    capabilities.flags = CapabilityFlags(capabilities.flags.0 & !(1 << 5));
+    capabilities.maximum_tlvs = 22;
+    assert!(codec.encoded_capabilities_len(&capabilities).is_err());
+    capabilities.maximum_tlvs = 23;
+    assert!(codec.encoded_capabilities_len(&capabilities).is_ok());
+    assert_eq!(
+        CapabilityFlags::B4_BASE.0 & (1 << 5),
+        0,
+        "the full provider set no longer sets bit 5"
+    );
 }
 
 #[test]
@@ -2082,7 +2041,8 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
 }
 
 /// Issue #1351 gate 4: every registered counter ID, the newest `TRANSITION_REPREPARE_REFUSALS`
-/// included, round-trips through the telemetry configuration, and the next ID is refused.
+/// included, round-trips through the telemetry configuration; the next ID and the retired IDs
+/// 2 and 11 to 14 (#1629) are refused.
 ///
 /// Test value: red if a counter joins the enum but not `parse_counter_id`, so that a host's
 /// configuration of it decodes as malformed.
@@ -2091,7 +2051,6 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let codec = codec();
     let all = [
         CounterId::ControlCommandBackpressure,
-        CounterId::AutomationBackpressure,
         CounterId::ReliableResponseBackpressure,
         CounterId::ReliableEventBackpressure,
         CounterId::TelemetryCoalesced,
@@ -2100,17 +2059,16 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::ReplayHits,
         CounterId::RequestIdReuse,
         CounterId::ReplayExpired,
-        CounterId::LateAutomation,
-        CounterId::CanceledAutomation,
-        CounterId::AutomationTimePast,
-        CounterId::AutomationOrderReject,
         CounterId::ValidationFailures,
         CounterId::LiveValuesSuperseded,
         CounterId::TransitionReprepareRefusals,
     ];
-    for (index, id) in all.iter().enumerate() {
-        assert_eq!(*id as usize, index + 1, "the registry has no gap or reuse");
-    }
+    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17];
+    assert_eq!(
+        all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
+        allocated,
+        "IDs 2 and 11 to 14 are retired, never reallocated"
+    );
     let configuration = TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
@@ -2125,21 +2083,33 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         .expect("configuration");
     assert_eq!(
         codec.decode_telemetry_configuration(&bytes[..len], 6),
-        Ok(configuration)
+        Ok(configuration.clone())
     );
-    let next = u32::try_from(all.len() + 1).expect("small");
-    let mut refused = bytes;
-    let id_bytes = (all.len() as u32).to_le_bytes();
-    let at = refused[..len]
+    // One ID per request, so a refusal cannot come from the sorted-unique rule.
+    let single = TelemetryConfiguration {
+        counter_ids: vec![CounterId::TransitionReprepareRefusals],
+        counter_period_blocks: 3,
+        ..configuration
+    };
+    let mut bytes = [0_u8; 192];
+    let len = codec
+        .encode_telemetry_configuration(&single, &mut bytes)
+        .expect("single");
+    let id_bytes = 17_u32.to_le_bytes();
+    let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
-        .expect("last counter ID");
-    refused[at..at + 4].copy_from_slice(&next.to_le_bytes());
-    assert!(
-        codec
-            .decode_telemetry_configuration(&refused[..len], 6)
-            .is_err()
-    );
+        .expect("counter ID");
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 18] {
+        let mut refused = bytes;
+        refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
+        assert!(
+            codec
+                .decode_telemetry_configuration(&refused[..len], 6)
+                .is_err(),
+            "counter ID {refused_id} must be refused"
+        );
+    }
 }
 
 #[test]
@@ -2438,47 +2408,6 @@ fn b3b2_diagnostics_pages_are_canonical_bounded_and_strict() {
 #[test]
 fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     let codec = codec();
-    let canceled = AutomationCanceled {
-        event_sequence: 1,
-        origin_request_id: crate::RequestId::new(2).expect("id"),
-        canceled_records: 3,
-        reason: AutomationCancellationReason::RevisionChanged,
-        queue_generation: 2,
-        effective_sample: Some(crate::SampleTime(9)),
-    };
-    let mut canceled_bytes = [0_u8; 96];
-    codec
-        .encode_automation_canceled(canceled, &mut canceled_bytes)
-        .expect("cancel");
-    assert_eq!(
-        hex(&canceled_bytes),
-        concat!(
-            "01000401080000000100000000000000",
-            "02000401080000000200000000000000",
-            "03000201020000000300000000000000",
-            "04000101010000000100000000000000",
-            "05000401080000000200000000000000",
-            "06000400080000000900000000000000"
-        )
-    );
-    assert_eq!(
-        codec.decode_automation_canceled(&canceled_bytes, 6),
-        Ok(canceled)
-    );
-    for end in 0..canceled_bytes.len() {
-        assert!(
-            codec
-                .decode_automation_canceled(&canceled_bytes[..end], 6)
-                .is_err()
-        );
-    }
-    let mut bad_canceled = canceled_bytes;
-    bad_canceled[40..42].fill(0);
-    assert!(codec.decode_automation_canceled(&bad_canceled, 6).is_err());
-    bad_canceled = canceled_bytes;
-    bad_canceled[56] = 9;
-    assert!(codec.decode_automation_canceled(&bad_canceled, 6).is_err());
-
     let records = [MeterRecord {
         handle: 1,
         component: MeterComponent::Right,
@@ -2621,18 +2550,6 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
                 );
             }
         };
-    assert_event_frame(
-        crate::MessageId::AutomationCanceled,
-        &canceled_bytes,
-        6,
-        concat!(
-            "4d49534f43544c00010000003000030002800000600000000000000000000000",
-            "07000000000000000600000000000000",
-            "0100040108000000010000000000000002000401080000000200000000000000",
-            "0300020102000000030000000000000004000101010000000100000000000000",
-            "0500040108000000020000000000000006000400080000000900000000000000"
-        ),
-    );
     assert_event_frame(
         crate::MessageId::MeterBatch,
         &meter_bytes,

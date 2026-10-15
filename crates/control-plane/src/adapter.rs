@@ -78,6 +78,13 @@ pub struct ControlLimits {
     /// (Strip, VCA) reach pairs of one session (ruling V-Q3): the bound on one VCA move's work.
     /// Every adapter sets [`host_core::MAXIMUM_VCA_REACH_PAIRS`].
     pub maximum_vca_reach_pairs: u64,
+    /// The most a replacement may hold at its peak, summed over the categories: the running plan's
+    /// and the replacement's graph, session and plan bytes, both compiled models, and the source
+    /// bytes of both plans, a carried ring counted once (#1290a D3). Each category also has its own
+    /// ceiling above; an adapter that owns one aggregate budget (the browser's) sets this to what
+    /// that budget leaves for them after its own fixed bytes, and one that has none sets
+    /// `u64::MAX`.
+    pub maximum_replacement_peak_bytes: u64,
 }
 
 /// One plan's frozen resource accounting (#1309 D4): every field of the C ABI's

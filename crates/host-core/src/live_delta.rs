@@ -24,7 +24,6 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::control_preparation::{
-    EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
     INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
 use crate::route_controls::{RouteControlError, RouteControlRecord, route_record};
@@ -35,14 +34,10 @@ use builtins::{
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
-    Owner, RebuildReason, Section,
+    Owner, Section,
 };
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
-use effect_contract::{
-    AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
-    ParameterChannel, PreparedEffectTarget,
-};
-use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
+use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
 use session::{
     EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks,
     Route, RouteDestination, SessionModel, StableId, StripRef, canonical_session_json,
@@ -64,8 +59,9 @@ pub fn take_fast_classification_count() -> usize {
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
-    EffectiveDiff, LevelRules, OutOfDomain, StripChange, StripEditRamps, effective_fader,
-    fader_records, lane_records, level_differs, matrix_record, route_source_strip, strip_at,
+    EffectiveDiff, LevelRules, OutOfDomain, StripChange, StripEditRamps, effect_instance_records,
+    effective_fader, fader_records, lane_records, level_differs, matrix_record, route_source_strip,
+    same_params, strip_at,
 };
 use crate::prepare::{LiveRampRow, LiveRamps, MonitorBase};
 
@@ -117,7 +113,11 @@ pub struct LiveEffectRecords<'a> {
     /// The instance's live address in its strip: a console slot by its slot index, an insert by
     /// its index. A producer is found by `(strip_id, address)`.
     pub address: LiveEffectAddress,
-    /// One [`EffectControlRecord::Bypass`] first when the instance's bypass changes (#1266 D1),
+    /// One [`EffectControlRecord::Bypass`] first when the instance's bypass changes (#1266 D1); it
+    /// carries the crossfade ramp, in samples: the session's `mute_ms` through
+    /// [`LiveRampRow::BypassCrossfade`] (#1341 D1, #1622 D1), the one live row with no per-edit
+    /// length, so `0` (a step) only when the session's `mute_ms` is 0. A host writes the record
+    /// as it is.
     /// then one [`EffectControlRecord::Parameter`] per `(parameter_index, channel)` whose resolved
     /// value changes, in descriptor order, `Left` before `Right`; never empty.
     ///
@@ -126,14 +126,8 @@ pub struct LiveEffectRecords<'a> {
     /// Its `Bypass` record, like every other instance's, is written as it is, ahead of the
     /// targets.
     pub records: Vec<EffectControlRecord>,
-    /// The crossfade ramp, in samples, that the [`EffectControlRecord::Bypass`] in `records`
-    /// carries: the session's `mute_ms` through [`LiveRampRow::BypassCrossfade`] (#1341 D1), the one
-    /// live row with no per-edit length, so `0` (a step) only when the session's `mute_ms` is 0.
-    /// `0` when `records` holds no bypass. A host writes the bypass with this ramp
-    /// (`EffectControlProducer::write_bypass`), never as a bare record.
-    pub bypass_ramp_samples: u32,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
-    /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
+    /// targets [`crate::EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
     /// (`EffectControlProducer::publish_candidate_targets`). `None` for every other effect, whose
     /// `records` are written as they are.
@@ -210,29 +204,7 @@ impl LiveDelta<'_> {
     }
 }
 
-/// Why a delta needs a plan rebuild.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LiveRebuild {
-    /// The models differ in something that is not a control value: the strip, route, slot or
-    /// insert set or order, an effect's identity, quality or sidechain, a profile's other fields,
-    /// or any other field no control row describes.
-    Structure,
-    /// A fader, pan/matrix or input value is outside the domain its render-side setter accepts, a
-    /// send's gain or matrix is outside the route domain or its ramp is too long, or an
-    /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
-    /// preparation diagnostic it always has.
-    Domain,
-    /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
-    /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
-    /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
-    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
-    RebuildOnly(RebuildReason),
-    /// The stored automation changes and one of `next`'s automations names a row that its rule
-    /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
-    /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
-    /// refusal has one author and no live commit can ack it first.
-    AutomationTarget,
-}
+pub use crate::prepare::LiveRebuild;
 
 /// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1, #1554).
 ///
@@ -1683,9 +1655,9 @@ fn locate(
 }
 
 /// The bypass and parameter records of one effect instance whose `bypass` or `params` differ
-/// (#1264 D2, #1266 D1). The structure comparison has already proved that the two strips'
-/// instances agree in everything but their `params` and `bypass`, and the rows have proved that
-/// each changed value is live.
+/// (#1264 D2, #1266 D1): [`effect_instance_records`] for the instance's lowered pair, with its
+/// live address. The rows have proved that each changed value is live; the function is the same
+/// one a successor's join asks (#1280 D1, D4), so the live path and a carry cannot disagree.
 fn effect_records<'a>(
     ctx: &Context<'_>,
     target: &Target<'_, '_, 'a>,
@@ -1701,148 +1673,18 @@ fn effect_records<'a>(
     }
     let effect_before = &racks_before.in_chain_order()[rack][index];
     let effect_after = &racks_after.in_chain_order()[rack][index];
-    // This lowering carries a bypass and parameters. Any other changed effect row (today the link
-    // mode, whose row is rebuild-only) has no record here, so a live classification of it would be
-    // acked and then dropped: it is a rebuild until its own lowering exists.
-    if effect_before.link_mode != effect_after.link_mode {
-        return Err(LiveRebuild::Structure);
-    }
-    let bypass = (effect_before.bypass != effect_after.bypass).then_some(effect_after.bypass);
-    let (mut records, targets) = if same_params(&effect_before.params, &effect_after.params) {
-        (Vec::new(), None)
-    } else {
-        parameter_records(
-            effect_before,
-            effect_after,
-            ctx.next.structure().sample_rate_hz,
-        )?
-    };
-    let mut bypass_ramp_samples = 0;
-    if let Some(bypass) = bypass {
-        // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
-        bypass_ramp_samples = ctx.ramps.for_row(LiveRampRow::BypassCrossfade);
-        if bypass_ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
-            return Err(LiveRebuild::Domain);
-        }
-        records.insert(0, EffectControlRecord::Bypass(bypass));
-    }
-    Ok((!records.is_empty()).then(|| LiveEffectRecords {
+    Ok(effect_instance_records(
+        effect_before,
+        effect_after,
+        ctx.next.structure().sample_rate_hz,
+        ctx.ramps,
+    )?
+    .map(|instance| LiveEffectRecords {
         strip_id: target.after.id.as_str(),
         address,
-        records,
-        bypass_ramp_samples,
-        targets,
+        records: instance.records,
+        targets: instance.targets,
     }))
-}
-
-/// The records of one instance, and the targets of a target-capable one.
-type InstanceRecords = (Vec<EffectControlRecord>, Option<Vec<PreparedEffectTarget>>);
-
-/// The parameter records that bring one instance from `before`'s resolved values to `after`'s,
-/// and, for a target-capable instance (the EQ), the targets that carry them (#1265 D1).
-fn parameter_records(
-    before: &Effect,
-    after: &Effect,
-    sample_rate_hz: u32,
-) -> Result<InstanceRecords, LiveRebuild> {
-    // A third-party or unknown identity never prepared; the rebuild reports it.
-    let EffectIdentity::Native { effect_id } = &after.identity else {
-        return Err(LiveRebuild::Structure);
-    };
-    let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
-    let factory = registry
-        .get_shared_ascii(effect_id.as_str())
-        .ok_or(LiveRebuild::Structure)?;
-    let descriptor = factory.descriptor();
-    let values_before =
-        resolve_initial_values(descriptor, &before.params).map_err(|_| LiveRebuild::Domain)?;
-    let values_after =
-        resolve_initial_values(descriptor, &after.params).map_err(|_| LiveRebuild::Domain)?;
-    let mut records = Vec::new();
-    for (value_before, value_after) in values_before.iter().zip(&values_after) {
-        if value_before.value.to_bits() == value_after.value.to_bits() {
-            continue;
-        }
-        let parameter = &descriptor.parameters[value_after.parameter_index as usize];
-        // A row is live only when the plan keeps a block-rate cell for it, and the control rows
-        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `Sample`-rate
-        // one is rebuild-only for correctness. This guard keeps the classifier from trusting a row
-        // that ever claimed more than the plan holds.
-        if parameter.automation_rate != AutomationRate::Block {
-            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
-        }
-        records.push(EffectControlRecord::Parameter {
-            parameter_index: value_after.parameter_index,
-            channel: value_after.channel,
-            value: value_after.value,
-        });
-    }
-    // The EQ's parameters ride its owner's prepared targets: its producer refuses a bare
-    // parameter record (`EffectControlProducer::preflight`), so the records become the owner's
-    // edits and the targets are designed here, on the control thread (#1265 D1).
-    if records.is_empty() || factory.target_preparation().is_none() {
-        return Ok((records, None));
-    }
-    let seeds: Vec<f32> = values_before.iter().map(|value| value.value).collect();
-    let targets = design_targets(factory, sample_rate_hz, &seeds, &records)?;
-    Ok((records, Some(targets)))
-}
-
-/// Designs a target-capable instance's targets with [`EqTargetPreparer`], from its pre-commit
-/// `seeds` (canonical row order) and its changed `records` (#1265 D1).
-fn design_targets(
-    factory: std::sync::Arc<dyn NativeEffectFactory>,
-    sample_rate_hz: u32,
-    seeds: &[f32],
-    records: &[EffectControlRecord],
-) -> Result<Vec<PreparedEffectTarget>, LiveRebuild> {
-    let descriptor = factory.descriptor();
-    // A capability other than the 60-row EQ's has no control-thread designer: rebuild.
-    let preparer = EqTargetPreparer::new(factory)
-        .map_err(|_| LiveRebuild::RebuildOnly(RebuildReason::Correctness))?;
-    if seeds.len() != EQ_VALUE_COUNT {
-        return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
-    }
-    let edits: Vec<EqTargetEdit> = records
-        .iter()
-        .map(|record| match *record {
-            EffectControlRecord::Parameter {
-                parameter_index,
-                channel,
-                value,
-            } => Ok(EqTargetEdit {
-                parameter_id: descriptor.parameters[parameter_index as usize].id.0,
-                channel,
-                value,
-            }),
-            _ => Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness)),
-        })
-        .collect::<Result<_, _>>()?;
-    let mut out = [PreparedEffectTarget {
-        slot: 0,
-        channel: ParameterChannel::Both,
-        words: [0; PREPARED_EFFECT_TARGET_WORDS],
-    }; EQ_TARGET_CAPACITY];
-    let (_, count) = preparer
-        .prepare(sample_rate_hz, seeds, &edits, &mut out)
-        .map_err(|error| match error {
-            EqTargetPreparerError::Unsupported => {
-                LiveRebuild::RebuildOnly(RebuildReason::Correctness)
-            }
-            _ => LiveRebuild::Domain,
-        })?;
-    Ok(out[..count].to_vec())
-}
-
-/// Whether two `params` lists are the same entries, value bits included.
-fn same_params(before: &[EffectParam], after: &[EffectParam]) -> bool {
-    before.len() == after.len()
-        && before.iter().zip(after).all(|(left, right)| {
-            left.parameter_id == right.parameter_id
-                && left.channel == right.channel
-                && left.unit == right.unit
-                && left.value.to_bits() == right.value.to_bits()
-        })
 }
 
 #[cfg(test)]

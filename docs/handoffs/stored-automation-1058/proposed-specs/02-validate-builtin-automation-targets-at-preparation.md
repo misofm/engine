@@ -20,7 +20,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
 - **The session crate cannot see descriptors.** It depends on `engine` and `json-syntax` only
   (`crates/session/Cargo.toml:15-17`; `scripts/check-session-policy.sh`), so its target check
   (`crates/session/src/validate.rs:854-888`) reads only the parameter ID and the channel form.
-  Draft 01 adds the lane, strip-kind and discontinuity rules there.
+  #1626 adds the lane, strip-kind and discontinuity rules there.
 - **The builtin descriptors.** `BUILTIN_PARAMETER_DESCRIPTORS` (`crates/builtins/src/lib.rs:453-673`);
   `builtin_parameter_unit` (`:254-269`) gives `db` for trim and fader, `hz` for the filters and
   `linear` for polarity, mute, matrix and pan. `BuiltinParameterDomain` (`:288-296`) and its
@@ -54,7 +54,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
   refuses. The anchors in this draft stay those of `6ee64f484`. Note A10 removes the mask one row at
   a time, from slice 10 to slice 20, so until slice 20 some automation edits still skip
   preparation.
-- **Checked-in builtin automation** (`fixtures/session/v1/builtins-automation.json`, after draft 01's
+- **Checked-in builtin automation** (`fixtures/session/v1/builtins-automation.json`, after #1626's
   migration): fader `both` linear `db` 0 to -3, matrix `both` linear `linear` 1 to 0.5 on a matrix
   strip, polarity `right` step 0 to 1, trim `left` linear `db` 0 to -6. Each fits D1. No checked-in
   document automates a filter.
@@ -83,7 +83,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
   - A second function, `input_filter_order_diagnostics(model: &SessionModel) ->
     Vec<BuiltinDiagnostic>`, runs per strip and lane (`left`, `right`) where at least one of HPF
     (3) and LPF (4) is automated. A `both` entry drives both lanes. Each side's curve is its entry
-    under the hold rule (draft 01 D4), or, when that side is not automated, the constant curve of
+    under the hold rule (#1626 D4), or, when that side is not automated, the constant curve of
     its static value. A lane with neither side automated is the static rule's.
   - **Split.** The time axis `[0, ∞)` is cut at every `start_sample` and `end_sample` of either
     curve. On each sub-interval `[a, b]` each side is one monotone piece: a hold (constant), a
@@ -114,7 +114,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
 - **D3. One call site.** `prepare_session_builtins_with_live_controls_and_policy` appends both
   functions' results before its check at `:3515`, after the per-strip preflight, so no host and no
   validator stage changes its own code. Both functions allocate only off render, at preparation.
-- **D4. Docs.** `docs/SESSION_SCHEMA_V1.md` (the automation section draft 01 writes) names the three
+- **D4. Docs.** `docs/SESSION_SCHEMA_V1.md` (the automation section #1626 writes) names the three
   `builtin.automation.*` codes with the rows they admit, and the curve form of the filter order
   rule. The `author-session` skill's automation refusal table gains the four rows at stage
   `prepare-builtins`.
@@ -152,7 +152,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
 
 ## Non-goals
 
-- Effect-target rules: draft 03a and #1335. Session-level rules: draft 01.
+- Effect-target rules: draft 03a and #1335. Session-level rules: #1626.
 - The SDK builder's mirror (draft 03b). The classifier route for static filter edits (slice 16b).
 - Rendering any automation.
 
@@ -234,10 +234,41 @@ that would cross a curve with the same code. Nothing renders the table yet.
 
 ## Dependencies
 
-- Draft 01 *Validate stored automation lanes in the session crate and state the hold rule* (the
+- #1626 *Validate stored automation lanes in the session crate and state the hold rule* (the
   hold rule, the migrated fixture, the strip-kind rule).
 - Draft 07 *Compile stored automation into per-cell events in node time*: `value_at`, the one
   evaluation law D2 calls.
 - *Refuse automation on effect parameters that are not block-rate* (#1335): D5 uses its
   `LiveRebuild::AutomationTarget` route, which is on `main` at `0c19119d0`.
 - Batch: R1.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Most of D1 is done by #1566.** `controls::automation_diagnostics` refuses a segment whose unit
+  is not the row's unit or whose value the row refuses (`control.domain`, through `controls::check`,
+  which applies the rate-keyed filter bound), for every row: builtin, effect, route and VCA. The
+  `builtin.automation.unit` and `.domain` codes are not added.
+- **What remains, in `controls`.** The shape rule (D1's third bullet) and the curve form of the
+  filter order rule (D2) move into `controls::automation_diagnostics`, the one row rule (#1566 D6),
+  not into `builtins-compiler`. The shape rule is one rule for every row, so it also takes draft
+  03a's: a `Toggle` or `Enumeration` row takes only `step`; `exponential` only on a continuous row
+  whose minimum is strictly positive and whose unit is not dB; on a row with a `disabled_value`
+  (HPF, LPF) a `linear` or `exponential` segment never touches it. New codes of the control set:
+  `control.automation.shape` and `control.automation.order` (at the LPF entry's segment, as D2
+  says). `controls` gains a normal dependency on draft 07's `automation` crate for `value_at`.
+- **D3 and D5 are done.** Preparation (`crates/host-core/src/prepare.rs:1890`), the classifier
+  (`crates/host-core/src/live_delta.rs:372-376`, `LiveRebuild::AutomationTarget`) and
+  `session-validator` (`tools/session-validator/src/lib.rs:396`) already call the row rule, so the
+  new checks reach every path with no new call site.
+- **Authorized paths** become `crates/controls/**`, `crates/host-core/tests/live_delta.rs`,
+  `crates/capi/src/runtime/live_tests.rs` (tests), `tools/session-validator/tests/validate.rs`, the
+  docs, `Cargo.lock`. Not `builtins-compiler` and not `scripts/check-builtins-policy.sh`.
+  `crates/builtins-compiler/tests/builtin_automation_targets.rs` is deleted (#1566); gates 1-2 go to
+  `crates/controls/tests/automation.rs`.
+- **Context anchors gone.** `validate_builtin_automation_target`, `BUILTIN_AUTOMATION_TARGETS`,
+  `effect_automation_diagnostics` and `crates/capi/src/runtime/control.rs` (now
+  `crates/control-plane/src/control.rs`).
+- **Dependencies.** #1626, 07, #1566 (in place of #1335's route). Draft 03a is obsolete; this draft
+  carries its shape rule. Batch R1.

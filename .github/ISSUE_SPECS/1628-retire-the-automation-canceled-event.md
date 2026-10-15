@@ -7,14 +7,14 @@ to file. Code anchors verified on `6ee64f484`. Batch P1.
 
 ## Product outcome
 
-After draft 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*, no
+After #1627 *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*, no
 batch can enter the automation queue, so nothing can be canceled. This slice removes the
 cancellation: the event `AUTOMATION_CANCELED` (`0x8002`) and its reason enum are retired, a
 revision change or a transport locate cancels nothing, and a transaction commit reserves only its
 `SESSION_COMMITTED` event. No endpoint advertises `0x8002`. The retired ID is refused and never
 reallocated.
 
-This is the second of three slices that retire the command, all in batch P1 (one push). Draft 21c
+This is the second of three slices that retire the command, all in batch P1 (one push). #1629
 *Delete the protocol automation queue, its records and counters* follows it.
 
 ## Context
@@ -52,7 +52,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
 - protocol: `controller/tests.rs`
   `transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch` (`:2433`)
   exists only for the cancellation; `c2b2_event_egress_emits_all_six_schema_closed_full_frames`
-  (`:3185`) touches it; the `typed_frame.rs` tests that 21a rewrote lose their event rows.
+  (`:3185`) touches it; the `typed_frame.rs` tests that #1627 rewrote lose their event rows.
 - C ABI (#1315 gate 4 names the first): `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`
   (`crates/capi/src/runtime/tests.rs:1857`, pinned `RESPONSES` at `:1858-1873`) and
   `a_live_edit_emits_the_commit_events_of_a_rebuild`
@@ -73,14 +73,14 @@ This is the second of three slices that retire the command, all in batch P1 (one
 - **D4. Tests.** A test that exists only for the cancellation is deleted. The C ABI event test
   becomes `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes` (no path raises
   `0x8002`); `a_live_edit_emits_the_commit_events_of_a_rebuild` expects `SESSION_COMMITTED` alone.
-- **D5. Re-pins**, each with the reason "draft 21b retires `AUTOMATION_CANCELED`":
+- **D5. Re-pins**, each with the reason "#1628 retires `AUTOMATION_CANCELED`":
   `COMPLETE_SCHEMA_HASH` and its history line (the corpus loses the event row), the wasm-parity
   self-test strings, the fuzz manifest, the conformance record, and the C ABI vectors.
   `retired_code_rows` gains a row for `0x8002`.
 - **D6. Docs.** The registry lists `0x8002` as retired with this slice as the reason; the
   semantics doc loses the cancellation paragraph (`:19`).
 - **D7. The acked-batch question: can an ack ever precede a drop?** No. No batch can be admitted
-  (draft 21a), so there is nothing to cancel, and draft 21c removes the queue.
+  (#1627), so there is nothing to cancel, and #1629 removes the queue.
 
 ## Deliverables
 
@@ -100,14 +100,14 @@ This is the second of three slices that retire the command, all in batch P1 (one
 
 ## Non-goals
 
-- The command (draft 21a). The queue, its records, config and counters (draft 21c). The transport
+- The command (#1627). The queue, its records, config and counters (#1629). The transport
   position (draft 25).
 
 ## Hazards
 
-- **Batch P1.** After this slice the queue has no producer and no consumer; draft 21c deletes it
+- **Batch P1.** After this slice the queue has no producer and no consumer; #1629 deletes it
   in the same push.
-- **Corpus re-pin order** as in draft 21a.
+- **Corpus re-pin order** as in #1627.
 
 ## Objective gates
 
@@ -126,7 +126,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
    `bash scripts/run-protocol-allocation-audit.sh target/release/audit` and
    `./target/release/audit capi` with zero allocations, locks and syscalls, and the same
    `pcm_digest` as base (PR evidence).
-6. **Commands:** as draft 21a's gate 6, which includes `bash scripts/check-cross-targets.sh`
+6. **Commands:** as #1627's gate 6, which includes `bash scripts/check-cross-targets.sh`
    (README F19, the iOS memset rule: no new `memset_pattern16` call; fix one in code, never by a
    ceiling).
 
@@ -142,6 +142,93 @@ This is the second of three slices that retire the command, all in batch P1 (one
 
 Batch P1. Direct dependency:
 
-- Draft 21a *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*.
+- #1627 *Retire the AUTOMATION_ENQUEUE command from the protocol wire and dispatch*.
 
-Draft 21c *Delete the protocol automation queue, its records and counters* depends on this draft.
+#1629 *Delete the protocol automation queue, its records and counters* depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The event test** is already `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`
+  (`crates/capi/src/runtime/tests.rs:2194`, renamed by #1315). D4's rename is done; its doc comment
+  (`:2187-2191`, "the sixth family returns with stored automation") is rewritten: the family is
+  retired (README F24).
+- **`a_live_edit_emits_the_commit_events_of_a_rebuild`** is `crates/capi/src/runtime/live_tests.rs:2324`;
+  it still decodes `AUTOMATION_CANCELED` (`:2308`).
+- **Anchors** in the inventory have moved; re-read at filing. Batch P1, ready.
+
+## Decision record: #1628 retire AUTOMATION_CANCELED (batch 10)
+
+**What shipped.** The event `AUTOMATION_CANCELED` (`0x8002`) and the whole cancellation path are
+gone from `protocol`, host-core and the conformance corpus; nothing else changed on the wire.
+
+- `MessageId::AutomationCanceled`, `AutomationCancellationReason`, `AutomationCanceled`, its schema,
+  codec (`encode`/`decode`/`write`, `parse_automation_cancellation_reason`), the `EventPayload` and
+  `DecodedEventPayload` arms, `ReliablePayload::AutomationCanceled`, `ReliableSlot::automation_canceled`
+  and the controller's event encoding are deleted. `0x8002` joins `RETIRED_MESSAGE_IDS`
+  (`[0x0004, 0x0005, 0x0006, 0x8002]`), so `from_raw` and `allocated_id` refuse it with no new code.
+- `cancel_pending_automation`, `cancel_queued_automation_reserved`,
+  `ProtocolQueues::reset_automation_ordering_after_cancellation` and the provider hook
+  `record_canceled_automation` (trait default, `MockProvider`, host-core) are deleted. A transaction
+  commit (planned, prepared and legacy paths) reserves only its `SESSION_COMMITTED` (`required_events`
+  is 0 for a monitor-only transaction, else 1); a `TRANSPORT_SET` reserves only its `TRANSPORT_STATE`.
+  `PreparedStructuralCommand` and `StructuralCommandPlan` lose `cancellation_batches`, and a token no
+  longer goes stale when the automation queue's occupancy changes.
+- `check_capabilities_invariants` drops `has_event(0x8002)` from the session family and the
+  `0x8001`/`0x8002` tie; `allocated_id` refuses `0x8002`; `capability_registry` lists five events.
+- Docs: registry (table, retired paragraph, event payload sentence), semantics (cancellation
+  paragraph), conformance manifest, `C_ABI_V1_QUALIFICATION.md` ("Same events").
+
+**Tests.** Deleted (existed only for the cancellation): `transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch`,
+the `cancel_pending_automation` assertion of `structural_token_cancel_owner_generation_and_serial_rules_are_affine`,
+the cancellation codec block of `b4_event_payloads_are_typed_canonical_and_truncation_safe`. New:
+`a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events` (gate 3: with a batch queued and
+a two-slot reliable event queue, a revision change emits `SESSION_COMMITTED` alone and a locate
+`TRANSPORT_STATE` alone) and `an_event_frame_under_the_retired_cancellation_id_is_refused` (gate 1,
+event side: a valid event frame with its ID patched to `0x8002` fails typed decode with
+`UnsupportedMessage`). Rewritten: `c2b2_event_egress_emits_all_five_schema_closed_full_frames`,
+`retired_message_ids_are_never_reused_or_advertised` (4 IDs; `0x8002` not an allocated event),
+`capability_id_views_reject_order_allocation_and_session_family_identically` (a record that adds
+`0x8002` back is refused: gate 2), the `[0x8001]` event lists of the capabilities tests,
+`retired_and_console_refused_codes_meet_their_conformance_rows` (`retired_code_rows` gains
+`retired.message_id_0x8002`, a command frame under the retired event ID: 16 + 4 + 7 + 13 + 1 + 4 + 1),
+C ABI `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes` (doc comment: the family is
+retired, README F24; the capabilities response vector now lists five events) and
+`a_live_edit_emits_the_commit_events_of_a_rebuild` (no `AUTOMATION_CANCELED` arm).
+
+**Re-pins** (reason: draft 21b retires `AUTOMATION_CANCELED`): `COMPLETE_SCHEMA_HASH`
+`0xcfa5_8ab7_b7bb_b7c4` to `0x4b21_d9e6_f520_afd9` (corpus 46 to 45 frames: the
+`event.automation_canceled` row is gone and the capabilities response lists no `8002`), the parity
+self-test strings (digest, and the length-assertion mutation 45 to 44), the fuzz manifest, the
+conformance manifest, `main.rs`/`conformance_corpus.rs`/`mutation_million.rs` frame counts, and C ABI
+vectors: the capabilities response (events TLV `0c` bytes to `0a`, five IDs, same padded length) in
+the dispatch test and in the five-family event test. No other C ABI vector moved.
+
+**Gates.** `cargo test --locked` for protocol (`--features test-support`), control-plane
+(`--features test-support`), host-core (`--all-features`), capi, conformance, host-web
+(`--features host-web/test-support`): all green. Wasm parity and `--self-test`, both vocabulary
+scripts, `check-protocol-control-policy.sh`, `run-protocol-allocation-audit.sh`, fuzz `cargo check`,
+clippy `--workspace --all-targets --all-features -D warnings`, `cargo fmt --check`,
+`check-sdk-generated.sh` and `check-cross-targets.sh` (no new `memset_pattern16`): pass. `audit capi`:
+0 allocations, locks and syscalls; `pcm_digest` `76525e7ef9e78cf4`, equal to base.
+
+**Departures.**
+
+- The counters `CANCELED_AUTOMATION` (12), `AUTOMATION_TIME_PAST` (13) and `AUTOMATION_ORDER_REJECT`
+  (14) stay in `CounterId`, `parse_counter_id` and host-core's served set: #1629's spec retires
+  counters 2 and 11-14 with a gate of its own. After this slice counter 12 always reads 0 (host-core's
+  test asserts that); #1629 removes it. #1627's record listed them under #1628, but this spec's
+  inventory and #1629's spec say otherwise, and a counter retirement needs the `retired_code_rows`
+  rows that #1629 owns.
+- `retired_code_rows()` rows are command frames, so the `0x8002` row is a command-header frame under
+  the retired event ID (refused `UnsupportedMessage`); the event-side refusal is the separate
+  `an_event_frame_under_the_retired_cancellation_id_is_refused` test.
+- Mechanical edits outside the authorized paths: `crates/conformance/src/main.rs` and
+  `tests/mutation_million.rs` (frame count), `docs/C_ABI_V1_QUALIFICATION.md` (one stale sentence),
+  `crates/protocol/src/typed_frame.rs` fixture rows.
+
+**Left for #1629.** `ProtocolQueues::try_dequeue_automation` now has no production caller (its doc
+says so); the gate-3 test enqueues a batch to prove nothing cancels it and loses that line when the
+queue goes; `tools/realtime-policy/src/policy.rs:63` still names `try_dequeue_automation`;
+`queue.rs:202` ("identity for cancellation") describes the batch slot.

@@ -112,3 +112,28 @@ adopts in move mode at its first ready block too, so it moves the instance the s
 ## Dependencies
 
 - *Carry an insert lane that moves between a bank and a per-node instance* (#1281).
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** `NodeKind::LiveControlEffect(Box<LiveControlEffect>)` is
+  `crates/graph/src/runtime.rs:1161`, struct `:1228` (fields `effect`, `control`, `spans`, `shunt`,
+  `observation`); `GraphPreparedEffect` is `crates/graph/src/lib.rs:909`; `NEVER_BANKED_EFFECTS` is
+  `crates/effect-compiler/src/prepare.rs:291` and `PREPARED_BYPASS_EFFECTS` `:307`. #1339 and #1340
+  are open, and the registry keeps the delay and multiband bypass rebuild-only
+  (`lowers_session_bypass`), so D1 stands.
+- **D3 for decision 17.** Both hosts attach effect lanes from `controls::live_lanes`, which depends
+  on the session's shape only, so a mixed pair arises only when a transaction adds the first or
+  removes the last effect with a live row. D3 stands.
+- **D2.** Swap `effect`'s processor box and the `shunt`; the `spans` window is not moved (each plan
+  sized its own from the same metadata; #1621, open, sizes it by live cells, which this move does
+  not read). The lane's control state goes through `EffectControlLane::carry_from` with its carried
+  slots (#1280a). The `observation` lane is #1327b's.
+- **Live retarget.** A live difference on a per-node owner retargets by #1280c's per-instance
+  function.
+- **Gate 2.** A live bypass now crossfades over `mute_ms` (#1341a1). The reference gets the same
+  record at the same block, so the gate stands.
+- **Edit order with #1621** (`runtime.rs`, the per-node window): whichever is scheduled first lands
+  first; the other rebases. They change different lines.
+- **Dependencies.** #1281, #1280c (for D1's retarget).

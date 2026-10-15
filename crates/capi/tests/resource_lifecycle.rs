@@ -1171,24 +1171,32 @@ impl Budget {
 /// 346,368 and 117,340.3 -> 117,376. The four-lane ceilings stand (AArch64 runs only in CI, which
 /// prints the four-lane values; the window only shrinks, so the old ceilings still bound them).
 /// `capi_retained_bytes` and the other rows did not move (197,521 before and after).
+///
+/// Batch 10 tightens the four-lane graph rows from CI's `aarch64-debug` print on PR #1634 (job
+/// 116221840527, the batch 10 head): 294,810, 294,738 and 109,733 bytes, so the ceilings are the
+/// print plus 10 %, rounded up to 64: 324,291.0 -> 324,352, 324,211.8 -> 324,224 and 120,706.3 ->
+/// 120,768 (a first derivation from batch 9's print plus the eight-lane carry delta was 144 bytes
+/// high per row). #1629 removed the protocol automation queue: `capi_retained_bytes` measured
+/// 165,166 at both widths (that print, and x86-64), so its ceiling is 165,166 plus 10 %, rounded
+/// up to 64: 181,682.6 -> 181,696 (was 216,832).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
         eight_lanes: 346_432,
-        four_lanes: 375_360,
+        four_lanes: 324_352,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
         eight_lanes: 346_368,
-        four_lanes: 375_360,
+        four_lanes: 324_224,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
         eight_lanes: 117_376,
-        four_lanes: 182_976,
+        four_lanes: 120_768,
     },
     Budget {
         row: "graph_delay_bytes",
@@ -1277,8 +1285,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 216_832,
-        four_lanes: 216_832,
+        eight_lanes: 181_696,
+        four_lanes: 181_696,
     },
     Budget {
         row: "largest_named_allocation_bytes",

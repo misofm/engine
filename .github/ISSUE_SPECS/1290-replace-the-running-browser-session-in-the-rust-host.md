@@ -283,3 +283,135 @@ handler in `single` mode (first), and the Worker after #1332. `blockingRebuilds`
   - **(b)** gate 4 (supersession). Dependencies: (a), #1310 (after stream B's #1344 and #1398).
   - (c), the spectrum refusal, is dropped (root Q4).
 - #1332 and #1387 are removed from the dependencies.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **(a) is reachable now.** `SessionState::command` runs the rebuild arm through
+  `WebRuntimePreparer` with a `SuccessorBase` (`hosts/host-web/src/lib.rs:4549-4660`, every boot
+  branch has its successor entry), and `refuse_rebuild` stops it unless `allow_rebuild` is set
+  (#1562a D9). (a)'s native gates drive the arm through the test-support switch
+  (`structural_command_for_test`, `:1870-1890`); deleting the refusal stays #1562b's.
+  `blockingRebuilds` (D6) does not exist yet; (a) adds it.
+- **D4 step 3 and gate 6 are stale.** `host_generation` and the prepared companions bound to it are
+  gone (#1565 deleted the prepared commands). Options: (1) delete D4 step 3 and gate 6; (2) restate
+  gate 6 on what is still bound to boot-time indices: after the adoption block, the observation
+  catalog exports (`miso_engine_web_v1_observation_*`, until #1590 deletes them) and the source
+  table (`miso_engine_web_v1_source_count`, `_source_id`) describe the successor. Recommendation:
+  (2), with its observation part void once #1590 lands.
+- **D7.** Meter consumers and observation handles are in the plan's attachment and pair in the swap
+  block (#1381b). Spectrum captures are in `SpectrumService` on the control side: (d) keeps the
+  successor's prepared captures beside the candidate and calls #1395's `SpectrumService` pairing
+  when the candidate is promoted (#1395's batch 10 amendment). Gate 7's spectrum part is (d)'s.
+- **Effects.** Gates 1 and 2 as written have no effect, so (a) does not wait for the carry chain. A
+  session with a console slot or an insert is bit-identical after the swap only with #1280a (and
+  #1281, #1282 for inserts that change representation or render per node).
+- **Dependencies.** (a): #1381a, #1562a (both landed). (d+e): (a), #1381b, #1327a, #1327b, #1395a,
+  #1395b.
+- **Anchors moved** in `hosts/host-web/src/lib.rs`: `AudioWorkletEngineHost` `:1598`,
+  `boot_with_spectrum_config` `:1655`, `render_next` `:2904`, `compile_ready` `:4982`. #1349 is
+  closed; the watermark is in the browser status (D5).
+
+## Ruling (root, 2026-10-14): gate 6
+
+Gate 6 is restated on what is still bound to boot-time indices: after adoption, the observation
+catalog exports (until #1590) and the source table describe the successor. D4 step 3's prepared
+commands no longer exist (#1565A) and leave the gate.
+
+## Decision record: (a) the rebuild apply (batch 10)
+
+**Shipped.** The browser host applies a structural transaction while it plays, through the existing
+`SessionState::command` rebuild arm and `WebRuntimePreparer`'s successor entries. It is reachable
+now only through the test-support switch `structural_command_for_test` (the refusal is #1562b's).
+
+- **Tables travel with the plan.** `PlanShape` (the strip order, the dense effect table, the
+  observation arm tables and the per-meter scratch) was ReadyOwnership's boot-time state. It is now
+  built by one function (`build_plan_shape`) in the preparer, for the boot plan and for every
+  successor. A command that publishes a rebuild keeps the successor's tables in a bounded
+  `pending_shapes` list (room checked before the command, so an ack never meets a full list). The
+  block that adopts the plan swaps them in place (`adopt_shape`, a pointer exchange, no indexing,
+  no allocation); the service step drops the retired tables. The tables live in the host, not in the
+  plan's attachment, because reaching an attachment is a `dyn Any` call and the render export pins
+  zero indirect sites in `render_next`.
+- **Gate 6 (restated).** After the adoption block the observation catalog and strip order describe
+  the successor; the source table is the committed model's from the commit. An observation record
+  (kinds 7 and 8) is `BACKPRESSURE` from the commit until the service step after the adoption block
+  (its tables and the control plane's producers are one plan's again then); nothing is queued.
+- **D3 (budget).** `ControlLimits.maximum_replacement_peak_bytes` (new; the C ABI sets `u64::MAX`)
+  bounds the sum of both plans' graph, both models and both plans' source bytes (a carried ring
+  once). The browser sets it after boot to its one budget less its exact bridge rows
+  (`SessionState::set_replacement_peak_limit`). A successor's tables are charged to its plan row.
+- **Rate or quantum change.** The plan exchange answered it as retryable `BACKPRESSURE`. The core
+  now refuses it before preparing (`control.apply.reprepare_required`, `REPREPARE_REQUIRED`); the
+  browser maps it to `RESULT_REPREPARE_REQUIRED`. This also fixes the C ABI's answer.
+- **D6.** `AudioWorkletEngineHost::blocking_rebuilds()` (saturating `u32`), counted when a command
+  publishes a replacement (`SessionState::newest_plan_epoch` advanced). No export and no status word
+  carry it yet: the worklet status field is #1293-#1297's, so no ABI mirror changed.
+- **Meters across a swap (until #1290d).** A swap restarts the meter delivery state (a new delivery
+  epoch, `meter_generation` + 1). The published frame keeps its boot size (the worklet binds fixed
+  views over it), so a swap that changes the strip count publishes nothing instead of a misshaped
+  frame. Observation arm bits are not carried (#1327).
+
+**Departures.**
+- Gates 1, 2, 3, 5, 6 and 8 run on one thread (apply between render calls). No test-support
+  control/render halves exist for two real threads; that form arrives with the Worker.
+- Gate 8 uses the module's own `RenderLockedAllocator` and the export counters, as the sibling
+  binaries do (the workspace has no `bench_support::alloc`; the spec's `assert_installed` form does
+  not apply).
+- D4 step 3 and the old gate 6 (prepared companions) are gone with #1565A.
+- Gate 7 (meters, spectrum), gate 9 (single-mode browser legs) and gate 4 (supersession) are not
+  in (a). Effects: the gate sessions have no console slot and no insert; an effect carries state
+  across a swap only with #1280a.
+
+**Gates -> tests** (`cargo test --locked -p host-web --features host-web/test-support`):
+- gate 1: `tests::structural_apply::a_rebuild_swaps_without_a_gap`
+- gate 2: `a_live_edit_is_part_of_the_base_the_successor_is_prepared_from` (the ramp is in flight
+  at the adoption block)
+- gate 3: `a_malformed_transaction_is_refused_and_changes_nothing`,
+  `a_rate_or_quantum_change_is_refused_as_a_required_reprepare`,
+  `a_transaction_over_the_memory_budget_is_refused_and_changes_nothing`
+- gate 5: `a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured`
+- gate 6: `the_catalogs_describe_the_successor_from_the_adoption_block_on`
+- meter interim: `meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
+- gate 8: `tests/structural_apply_realtime.rs` (two tests); render-locked allocations 0 across every
+  render call, the adoption block included; the retired plan and tables drop in the service step.
+
+## Fold (batch 10 review)
+
+Four findings of the batch 10 review, folded in `hosts/host-web` (plus two accessors of
+`crates/control-plane`).
+
+- **Observation records across a swap (MINOR-2).** Gate 6's `BACKPRESSURE` window is gone: the
+  browser admits an observation record (kinds 7 and 8) between a rebuild's commit and its adoption
+  block, as the control plane admits a live value, so no behaviour differs from the C ABI but the
+  sequenced rebuild refusal. `ReadyOwnership::replacement_pending` and the `submit_commands` check
+  are deleted. `admit_on_newest_plan` exchanges the waiting replacement's tables with the host's
+  (a pointer swap, back before it returns; nothing allocates), and the control plane's
+  `effect_producers` / `push_effect_observe` now address the newest plan's producers (the
+  successor's while one waits, else the current plan's; `current_plan_epoch` had no other reader
+  and is deleted). The record is queued on the successor's observation queue, drains at its
+  adoption block, and arms the successor's tap (the arm bits and arm samples live in its own
+  tables, so the plan that renders is untouched). `adopt_shape` marks the in-flight counts for the
+  clearing pass, since a block that did not adopt cleared only the rendering plan's tables. Arm
+  state is still not carried across a swap (#1327): a record admitted to the retiring plan before
+  the commit, or to a candidate a later rebuild supersedes, ends with that plan.
+- **Meter windows across a strip-count change (MINOR-3).** While the published frame cannot
+  describe the plan (the strip count differs), `poll_meters` drains the master intervals it cannot
+  publish and adds each to `meter_loss_count`; `adopt_shape` keeps the count across the restart and
+  adds the windows the restart discards (the master intervals waiting and a half-assembled track
+  group). The only counter that reports meter loss is the header's (`reserved[1]`), which a frame
+  publishes, so the count reaches the page with the first frame after #1290d grows the frame; no
+  status word was added.
+- **Rebuild without tables after a commit (MINOR-6).** The preparer leaves the plan's tables in the
+  record under a lock whose failure refuses the preparation (`web.apply.shape_unavailable`, before
+  the commit); `run_command` no longer has a refusal after a commit (a committed rebuild always has
+  its tables; the take is an `expect` of that invariant).
+- **NIT-3.** `blocking_rebuilds()` stays; its doc names #1293-#1297 (the status field, #1332 D1)
+  and #1295 (the first reader).
+
+Gates -> tests: `structural_apply::the_catalogs_describe_the_successor_from_the_adoption_block_on`
+(an observation submitted between the commit and the adoption block is admitted, queued on the
+successor's full one-slot queue, leaves the rendering plan unarmed and arms the successor's
+compressor at the adoption block); `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`;
+`a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit` (nothing committed).
