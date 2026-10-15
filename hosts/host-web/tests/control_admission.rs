@@ -5,13 +5,13 @@
 //!
 //! Every test drives `AudioWorkletEngineHost` through `control_request_mut` and `control_command`,
 //! the calls the exports make, with the frames the C ABI would receive and nothing decoded by the
-//! host. The rebuild path is #1562b's: until then a transaction the classifier sends there is
-//! refused `web.apply.rebuild_pending` before it is committed (D9, gate 11).
+//! host. A transaction the classifier sends to the rebuild arm is prepared and published like any
+//! other (#1562b).
 
 #![cfg(feature = "test-support")]
 
 use controls::{ControlAddress, Lane, MonitorOverlay, Owner, Section};
-use host_web::{RESULT_COMPILE_REJECTED, RESULT_INVALID_ARGUMENT, RESULT_OK};
+use host_web::RESULT_INVALID_ARGUMENT;
 use protocol::{
     CommandPayload, ControlListRequest, DecodeScratch, DecodedSuccessResponsePayload,
     DecodedTypedResponseFrame, EditPath, ExpectedRevision, ProtocolCodec, SessionEdit,
@@ -350,7 +350,7 @@ fn live_rows() -> Vec<Row> {
 /// Test value: red if a browser edit reaches the cells without reaching the committed model (the
 /// document would not hold the value, and the fresh plan would render the old one), if a family
 /// lowers differently in the browser than in the model, or if a row the core calls live is a
-/// rebuild in the browser (`web.apply.rebuild_pending`).
+/// rebuild in the browser.
 #[test]
 fn every_live_row_commits_to_the_model_and_renders_as_a_fresh_plan() {
     const BLOCKS_RUN: u64 = 40;
@@ -465,92 +465,137 @@ fn every_live_row_commits_to_the_model_and_renders_as_a_fresh_plan() {
     }
 }
 
-/// Gate 11 and D9: a `SET_CONTROL` on `delay_samples` needs a plan rebuild, which the browser
-/// cannot apply in place before #1562b. The frame is refused `web.apply.rebuild_pending` before
-/// anything is committed.
+/// Gate 1's `delay_samples` row (#1562b): a `SET_CONTROL` on `delay_samples` is a rebuild. The
+/// browser prepares the successor and publishes it, the reply is `rebuild` at the next revision
+/// with the plan still the boot plan, and from the block that adopts it every block is the bits of
+/// a plan prepared from the committed document and fed the same PCM from frame 0.
 ///
-/// Test value: red if a rebuild-path frame reaches `SessionState`'s rebuild arm (a revision would
-/// advance, a plan would be published, a commit event would queue), or if the refusal leaves the
-/// host unable to take the next live edit.
+/// Test value: red if the browser still refuses a rebuild-path frame, answers it live, acknowledges
+/// it without a plan that renders it (the document would hold the delay and the blocks would not
+/// have it), or adopts a plan that is not the committed model's.
 #[test]
-fn a_rebuild_frame_is_refused_before_commit_and_changes_nothing() {
-    const BLOCKS_RUN: u64 = 12;
+fn a_delay_samples_edit_is_a_rebuild_and_renders_as_a_fresh_plan() {
+    const BLOCKS_RUN: u64 = 24;
     let model = model_at(RATE);
     let mut rig = Rig::new(&model);
-    let before_document = document(&mut rig);
-    let before_revision = rig.host.committed_revision();
-    let epoch = rig.host.active_plan_epoch_for_test();
-    drain_events(&mut rig.host);
-
-    let edits = [set(
+    let before = rig.host.committed_revision();
+    let epoch = rig.host.active_plan_epoch_for_test().expect("a plan");
+    let verdict = rig.transaction(&[set(
         strip_row("t1", DELAY_SAMPLES, ParameterChannel::Both),
         64.0,
         None,
-    )];
-    let frame = rig.encode(
-        CommandPayload::SessionTransactionApply(&edits),
-        ExpectedRevision::Exact(protocol::SessionRevision(rig.revision)),
-    );
-    let (result, diagnostic) = rig.send_frame(&frame);
-    assert_eq!(result, RESULT_COMPILE_REJECTED, "the call's result");
-    assert_eq!(
-        String::from_utf8(diagnostic).expect("UTF-8"),
-        "web.apply.rebuild_pending\t$\n",
-        "the response is the typed refusal"
-    );
-    assert_eq!(
-        rig.host.committed_revision(),
-        before_revision,
-        "no revision"
-    );
-    assert_eq!(rig.host.active_plan_epoch_for_test(), epoch, "no plan");
-    assert_eq!(document(&mut rig), before_document, "no committed change");
-    assert_eq!(
-        drain_events(&mut rig.host),
-        0,
-        "nothing was acknowledged: no commit event is queued"
-    );
-    // The refusal consumed its request ID, as every refusal after the core has seen the frame
-    // does (the replay cache answers a resend `protocol.failure`); a retry takes a new ID and
-    // meets the same refusal.
-    let (resent, resent_bytes) = rig.send_frame(&frame);
-    assert_eq!(resent, RESULT_OK);
-    assert!(matches!(
-        decode_verdict(&resent_bytes),
-        Verdict::Refused { ref codes, .. } if codes == &["protocol.failure"]
-    ));
-    let retry = rig.encode(
-        CommandPayload::SessionTransactionApply(&edits),
-        ExpectedRevision::Exact(protocol::SessionRevision(rig.revision)),
-    );
-    let (again, _) = rig.send_frame(&retry);
-    assert_eq!(again, RESULT_COMPILE_REJECTED);
-
-    // The host is still ready, and the next live edit commits at the unchanged revision.
-    let verdict = rig.transaction(&[set(
-        strip_row("t1", FADER_DB, ParameterChannel::Both),
-        -6.0,
-        Some(0),
     )]);
     assert_eq!(
         verdict,
         Verdict::Applied {
-            path: EditPath::Live,
-            revision: before_revision + 1
-        }
+            path: EditPath::Rebuild,
+            revision: before + 1
+        },
+        "the reply is the rebuild path at the next revision"
     );
+    assert_eq!(
+        rig.host.active_plan_epoch_for_test(),
+        Some(epoch),
+        "the submit never waits for render: the boot plan still renders"
+    );
+    let committed = document(&mut rig);
+    let edited: Vec<Vec<u32>> = (0..BLOCKS_RUN).map(|block| rig.step(block)).collect();
+    assert_eq!(
+        rig.host.active_plan_epoch_for_test(),
+        Some(epoch + 1),
+        "render adopted the successor"
+    );
+    let parsed = parse_session_json(std::str::from_utf8(&committed).expect("UTF-8"))
+        .expect("the committed document parses");
+    let held = controls::get(
+        &parsed,
+        &MonitorOverlay::default(),
+        &strip_row("t1", DELAY_SAMPLES, ParameterChannel::Left),
+        RATE,
+    )
+    .expect("the delay row reads");
+    assert!((held - 64.0).abs() < 1.0e-6, "the document holds {held}");
+    let fresh = fresh_blocks(&committed, BLOCKS_RUN, |_| {});
+    assert_eq!(
+        first_difference(&edited, &fresh),
+        None,
+        "a block differs from the plan prepared from the committed model"
+    );
+    let untouched = fresh_blocks(&document_of(&model), BLOCKS_RUN, |_| {});
+    assert_ne!(
+        first_difference(&edited, &untouched),
+        None,
+        "the delay is heard"
+    );
+}
 
-    // The next blocks are the bits of a run that never saw the refused frame.
-    let mut with_refusal = Rig::new(&model);
-    let _ = with_refusal.send_frame(&frame);
+fn document_of(model: &SessionModel) -> Vec<u8> {
+    canonical_session_json(model)
+        .expect("canonical session")
+        .into_bytes()
+}
+
+/// Gate 3's structural part (#1562b): a structural transaction keeps the solo. Track `t3` is
+/// muted by the solo of `t2`, so its delay changes nothing the output carries; the rebuild's
+/// successor must still render under the overlay, or the soloed-out tracks would be heard.
+///
+/// Test value: red if a rebuild drops or recomputes the monitor overlay (the others would unmute
+/// from the swap block, which the bits against a run without the rebuild show), or if the solo
+/// moved the revision or the document.
+#[test]
+fn a_structural_transaction_keeps_the_solo() {
+    const BLOCKS_RUN: u64 = 24;
+    const REBUILD_BEFORE: u64 = 8;
+    let model = without_inserts(RATE);
+    let solo = set(strip_own_solo("t2"), 1.0, Some(0));
+
     let mut without = Rig::new(&model);
+    without.transaction(std::slice::from_ref(&solo));
+    let reference: Vec<Vec<u32>> = (0..BLOCKS_RUN).map(|block| without.step(block)).collect();
+
+    let mut rig = Rig::new(&model);
+    rig.transaction(std::slice::from_ref(&solo));
+    let mut blocks = Vec::new();
     for block in 0..BLOCKS_RUN {
-        assert_eq!(
-            with_refusal.step(block),
-            without.step(block),
-            "block {block} differs after a refused rebuild frame"
-        );
+        if block == REBUILD_BEFORE {
+            let before = rig.host.committed_revision();
+            let verdict = rig.transaction(&[set(
+                strip_row("t3", DELAY_SAMPLES, ParameterChannel::Both),
+                64.0,
+                None,
+            )]);
+            assert_eq!(
+                verdict,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    revision: before + 1
+                },
+                "the structural transaction rebuilds"
+            );
+        }
+        blocks.push(rig.step(block));
     }
+    assert_eq!(
+        rig.host.active_plan_epoch_for_test(),
+        Some(1),
+        "render adopted the successor"
+    );
+    assert_eq!(
+        first_difference(&blocks, &reference),
+        None,
+        "the successor renders under the solo: every block equals a run with no rebuild"
+    );
+    // The solo is still a monitor write after the swap.
+    let after = rig.host.committed_revision();
+    let verdict = rig.transaction(&[set(strip_own_solo("t2"), 0.0, Some(0))]);
+    assert_eq!(
+        verdict,
+        Verdict::Applied {
+            path: EditPath::Monitor,
+            revision: after
+        },
+        "clearing the solo after the swap is still a monitor write"
+    );
 }
 
 /// Gate 4 (the acked-batch rule): a transaction of a valid fader edit, a solo and an out-of-domain

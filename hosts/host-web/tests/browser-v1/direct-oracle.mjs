@@ -22,9 +22,9 @@ const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
 const COMMAND_OBSERVE_SUBSCRIBE = 7;
 const COMMAND_OBSERVE_UNSUBSCRIBE = 8;
 const BUFFER_METER_FRAME = 7;
-// 80 bytes: `submix_count` at 64 and `retired` at 68 (issue #1209 D2, #1290d1), then
-// `frame_pointer` at 72 and `successor_pointer` at 76 (issue #1290d1).
-const METER_HEADER_BYTES = 80;
+// Issue #1209 D2: 72 since `submix_count` and its pad were appended at 64 and 68; 80 with the frame
+// and successor pointers (#1290d1); 88 with `structure_epoch` appended at 80 (#1562b).
+const METER_HEADER_BYTES = 88;
 const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [
   "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "idStagingBytes",
@@ -405,6 +405,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   assert.equal(header.getUint32(68, true), 0, "the header is not retired");
   assert.equal(header.getUint32(72, true), framePointer, "the header names its frame");
   assert.equal(header.getUint32(76, true), 0, "no replacement plan waits");
+  assert.equal(header.getBigUint64(80, true), 1n, "the boot list is the first structure");
   assert.equal(header.getUint32(40, true), taps === 0n ? 0 : 1);
   const frame = new Float32Array(memoryBuffer, framePointer, 6);
   assert.equal(exports.miso_engine_web_v1_meter_lease(handle, 1), 0);

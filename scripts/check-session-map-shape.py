@@ -13,7 +13,7 @@ now written out in five places:
 * `scripts/check-web-audioworklet.sh` -- the shipped module's frozen export set. An export that
   exists in the crate and not in that list is an export nothing proves is shipped.
 * `hosts/host-web/web/miso-engine-v1-audio-worklet.js` -- the worklet, which calls the
-  exports once at construction and posts the map.
+  exports in `readSourceRows` (at construction and at each map request) and posts the map.
 * `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` -- the main-realm host,
   whose acknowledgement validator fails the WHOLE host on a field set it does not expect. This is
   the #151 failure shape exactly: a map that grew a field the validator did not know about would
@@ -181,22 +181,22 @@ def check_boot_export_signatures(text: str, shipped: set[str]) -> None:
 
 
 def worklet_called_exports(text: str) -> set[str]:
-    """Every source query the worklet's construction path calls.
+    """Every source query the worklet's `readSourceRows` calls.
 
     The PCM feed path lives in `receiveSource`/`receiveSeek`, not here, so a `source_` name found in
     this body is an introspection query by construction.
     """
-    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
+    body = block_after(text, "\n  readSourceRows() ", "{", "}")
     called = set(
         re.findall(r"this\.exports\.(miso_engine_web_v1_source_[a-z_]+)\(", body)
     )
-    require(called, "the worklet's construction path calls no source query at all")
+    require(called, "the worklet's readSourceRows calls no source query at all")
     return called
 
 
 def worklet_source_reads(text: str) -> dict[str, str]:
     """`field name -> export name`, as the worklet actually wires them together."""
-    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
+    body = block_after(text, "\n  readSourceRows() ", "{", "}")
     reads = {
         field: export
         for field, export in re.findall(
@@ -219,8 +219,8 @@ def worklet_source_reads(text: str) -> dict[str, str]:
 
 
 def worklet_pushed_fields(text: str) -> list[str]:
-    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
-    match = re.search(r"this\.sources\.push\(\{([^}]*)\}\);", body)
+    body = block_after(text, "\n  readSourceRows() ", "{", "}")
+    match = re.search(r"rows\.push\(\{([^}]*)\}\);", body)
     require(match, "the worklet does not push a per-source record with shorthand fields")
     fields = [part.strip() for part in match.group(1).split(",") if part.strip()]
     require(
@@ -413,8 +413,8 @@ def self_test() -> None:
             "the worklet records a field it does not post",
             mutate(
                 WORKLET_JS,
-                "this.sources.push({ id, channels, frames });",
-                "this.sources.push({ id, channels });",
+                "rows.push({ id, channels, frames });",
+                "rows.push({ id, channels });",
             ),
         ),
         (

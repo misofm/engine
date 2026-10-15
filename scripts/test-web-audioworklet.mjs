@@ -2091,7 +2091,7 @@ async function testMainRealm() {
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-        windows: 1, trackCount: 2,
+        windows: 1, trackCount: 2, structureEpoch: 1,
         peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
         trackGrDb: new Float32Array([6.5, 0]), masterGrDb: 6.5,
         firstSample: 512n, endSample: 768n,
@@ -2145,6 +2145,11 @@ async function testMainRealm() {
       { validity: 0x7, lossCount: 0 },
       { validity: 0x3, lossCount: 1 },
       { lossCount: 0x1_0000_0000 },
+      // Issue #1562b: the structure epoch is a positive safe integer.
+      { structureEpoch: MISSING },
+      { structureEpoch: 0 },
+      { structureEpoch: 1.5 },
+      { structureEpoch: 1n },
       { trackGrDb: new Float32Array(1) },
       { trackGrDb: [0, 0] },
       { trackGrDb: new Float32Array([-6.5, 0]) },
@@ -2182,7 +2187,7 @@ async function testMainRealm() {
       const rejected = rejecting.status();
       const data = {
         tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-        windows: 1, trackCount: 2,
+        windows: 1, trackCount: 2, structureEpoch: 1,
         peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 512n, endSample: 768n, submixCount: 1,
         submixPeaks: new Float32Array(2), submixGrDb: new Float32Array(1), ...broken,
@@ -2329,7 +2334,7 @@ async function testMainRealm() {
       node.port.onmessage({
         data: {
           tag: "miso.meter.v1", sequence: 10 + reason, generation: 1n, validity: 0xb,
-          lossCount: 0, windows: 1, trackCount: 2,
+          lossCount: 0, windows: 1, trackCount: 2, structureEpoch: 1,
           peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
           trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
           firstSample: 1024n, endSample: 1280n,
@@ -2387,7 +2392,7 @@ async function testMainRealm() {
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, generation: 1n, validity: 0x3, lossCount: 0,
-        windows: 1, trackCount: 2,
+        windows: 1, trackCount: 2, structureEpoch: 1,
         peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 768n, endSample: 1024n,
         submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
@@ -2402,7 +2407,7 @@ async function testMainRealm() {
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 3, generation: 1n, validity: 0x3, lossCount: 0,
-        windows: 1, trackCount: 2,
+        windows: 1, trackCount: 2, structureEpoch: 1,
         peaks: new Float32Array(4), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 0n, endSample: 0n,
         submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
@@ -2493,7 +2498,7 @@ async function testMainRealm() {
     FakeNode.latest.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-        windows: 1, trackCount: 2,
+        windows: 1, trackCount: 2, structureEpoch: 1,
         peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
         firstSample: 0n, endSample: 256n,
         submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
@@ -2606,21 +2611,23 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const submixCount = submixIds.length;
   const strips = trackIds.length + submixCount;
   const meterFrameFloats = strips * 3 + 3;
-  // Issue #1290d1: the header is 80 bytes and names its frame (offset 72); `retired` (68) and
-  // `successor` (76) are zero until a replacement plan is committed and adopted. The replacement
+  // Issue #1290d1: the header is 88 bytes (#1562b appended `structure_epoch` at 80) and names its
+  // frame (offset 72); `retired` (68) and `successor` (76) are zero until a replacement plan is
+  // committed and adopted. The replacement
   // plan's own header and frame, sized for one more track, sit beside it: `commitMeterSuccessor`
   // names it in the active header, as the host does when a command commits a rebuild, and
   // `adoptOnNextRender` makes the next render call model the swap block (the old header is marked
   // retired and names the new one, whose stream fields are the old header's).
   const successorHeaderPointer = 41300;
   const successorFramePointer = 44000;
-  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 80);
-  const successorHeader = new DataView(memory.buffer, successorHeaderPointer, 80);
-  for (const [header, tracks, framePointer] of [
-    [meterHeader, trackIds.length, meterFramePointer],
-    [successorHeader, trackIds.length + 1, successorFramePointer],
+  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 88);
+  const successorHeader = new DataView(memory.buffer, successorHeaderPointer, 88);
+  for (const [header, tracks, framePointer, epoch] of [
+    [meterHeader, trackIds.length, meterFramePointer, 1n],
+    [successorHeader, trackIds.length + 1, successorFramePointer, 2n],
   ]) {
-    header.setUint32(0, 80, true);
+    header.setUint32(0, 88, true);
+    header.setBigUint64(80, epoch, true);
     header.setUint32(64, submixCount, true);
     header.setUint32(4, 0x00010000, true);
     header.setUint32(8, tracks, true);
@@ -3739,7 +3746,7 @@ async function testProcessor() {
       // A refusal carries its result and diagnostic bytes, and leaves the worklet ready.
       fake.calls.controlResult = 10;
       fake.calls.controlResponse = Uint8Array.from(
-        "web.apply.rebuild_pending\t$\n", (character) => character.charCodeAt(0),
+        "web.apply.shape_unavailable\t$\n", (character) => character.charCodeAt(0),
       );
       processor.port.onmessage({
         data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([7]) },
@@ -3749,7 +3756,7 @@ async function testProcessor() {
       assert.equal(refused.result, 10);
       assert.equal(
         String.fromCharCode(...refused.response),
-        "web.apply.rebuild_pending\t$\n",
+        "web.apply.shape_unavailable\t$\n",
       );
       assert.equal(processor.ready, true, "a typed refusal is not sticky");
       // A frame the staging buffer refuses is a typed result with no response, not sticky.
@@ -4196,6 +4203,7 @@ async function testProcessor() {
       assert.deepEqual([...frame.submixGrDb], [2.25]);
       assert.equal(frame.firstSample, 512n);
       assert.equal(frame.endSample, 768n);
+      assert.equal(frame.structureEpoch, 1, "the plan's list epoch rides the frame");
 
       // A nonzero poll is still withheld unless both complete peak-validity bits are present.
       // This exercises the real worklet guard against a malformed/future Rust publication.
@@ -4213,6 +4221,11 @@ async function testProcessor() {
       assert.equal(lossyFrame.generation, 1n);
       assert.equal(lossyFrame.validity, 0xf);
       assert.equal(lossyFrame.lossCount, 2);
+      // The epoch is read as two words: one past 2^32 still arrives whole, with no BigInt.
+      fake.meterHeader.setBigUint64(80, (3n << 32n) | 7n, true);
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.at(-1).message.structureEpoch, 3 * 4294967296 + 7);
 
       // Releasing the lease stops the frames immediately.
       processor.receive({ tag: "miso.meters.v1", requestId: 2, enabled: false });
@@ -4291,6 +4304,7 @@ async function testProcessor() {
       assert.deepEqual([...frame.submixGrDb], [2.25]);
       assert.equal(frame.masterGrDb, 7.5);
       assert.equal(frame.sequence, 3, "the page's sequence continues across the swap");
+      assert.equal(frame.structureEpoch, 2, "the adopted plan names its own list");
 
       // A memory growth re-cuts both sets, so a later swap still reads live memory.
       fake.growMemory();
@@ -4393,7 +4407,7 @@ async function testProcessor() {
     }
 
     {
-      // The session map answers from the identities read once at construction. Two submixes
+      // The session map answers from the engine's rows. Two submixes
       // (#1210 MINOR-1, #1214 MINOR-2): the SDK indexes bus commands by this list's order, so red
       // if the worklet enumerates or posts the submix IDs in any other order.
       const { processor, fake } = makeProcessor(["aa-bus", "zz-bus"]);
@@ -4406,10 +4420,46 @@ async function testProcessor() {
       assert.equal(Object.hasOwn(map, "submixes"), false, "issue #1565: the strip order is the core's list");
       assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: no route list");
       assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: no VCA list");
-      // The identities were read once at construction and the reads are not repeated per request:
-      // a second map answers from the same numbers, and `process()` never sees any of this.
+      // A second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
       assert.deepEqual(processor.port.posts.at(-1).message.sources, fake.sourceRows);
+    }
+
+    {
+      // Issue #1562b: a rebuild can change the committed sources and, at its adoption block, the
+      // observation bindings, so both maps are read from the engine at each request. Red if the
+      // worklet answers from the boot's rows (a source added by a rebuild would never be listed),
+      // or if the observation map does not name the structure epoch of the plan that renders.
+      const { processor, fake } = makeProcessor();
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      fake.sourceRows.push({ id: "zz-added", channels: 1, frames: 480n });
+      processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
+      assert.deepEqual(
+        processor.port.posts.at(-1).message.sources.map((source) => source.id),
+        ["bass", "drums", "zz-added"],
+        "the session map lists a source a rebuild added",
+      );
+      processor.receive({ tag: "miso.observationmap.v1", requestId: 2 });
+      const before = processor.port.posts.at(-1).message;
+      assert.equal(before.tag, "miso.observationmap.v1");
+      assert.equal(before.structureEpoch, 1, "the boot plan's list");
+      assert.deepEqual([...before.bindings], []);
+
+      // A replacement plan waits: the rendering plan's epoch is still the boot's.
+      fake.commitMeterSuccessor();
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      processor.receive({ tag: "miso.observationmap.v1", requestId: 3 });
+      assert.equal(processor.port.posts.at(-1).message.structureEpoch, 1, "not adopted yet");
+      // The adopting block: the successor's header is the rendering plan's now.
+      fake.calls.adoptOnNextRender = true;
+      assert.equal(processor.process([], [[left, right]]), true);
+      processor.receive({ tag: "miso.observationmap.v1", requestId: 4 });
+      assert.equal(
+        processor.port.posts.at(-1).message.structureEpoch,
+        2,
+        "the adopted plan's list",
+      );
     }
 
     {

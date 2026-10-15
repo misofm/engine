@@ -2477,6 +2477,26 @@ export async function applyMatrixThroughSdk(
 }
 
 /**
+ * One `delay_samples` edit of a track as a `SET_CONTROL` transaction (#1562b): the plan needs a new
+ * latency, so the core classifies it as a rebuild, prepares a replacement plan and publishes it for
+ * the render to adopt at a block boundary. Returns the core's report, with the committed revision.
+ */
+export async function applyDelayThroughSdk(
+  host: MisoAudioWorkletHost,
+  trackId: string,
+  samples: number,
+): Promise<{ ok: boolean; path: string; appliedOperations: number; revision: string }> {
+  const controls = await createBrowserLiveControls(host);
+  const report = await controls.submit(controls.edit.track(trackId).delaySamples(samples));
+  return {
+    ok: report.ok,
+    path: report.path,
+    appliedOperations: report.appliedOperations,
+    revision: String(report.revision),
+  };
+}
+
+/**
  * The track IDs of the host's running session, in the core's own order (the owner headers of its
  * control list, #1564 D5). The worklet's session map no longer carries them (#1565B), and the
  * raw qualification rows read them here, through the SDK, so that they hold no reader of their own.

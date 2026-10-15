@@ -485,3 +485,165 @@ Checked against `ea336c039`.
     lanes compile at every merge.
 - **Frozen decisions.** D1-D6 and the batch 10 split hold.
 - **No edit under `crates/engine/src/realtime`.**
+
+## Decision record: #1562b-W (batch 12)
+
+Lane W. Checked against the batch 12 head `0c6f35a1d`.
+
+### What shipped
+
+- **D9 is gone in the browser.** `REBUILD_PENDING`, `WebRuntimePreparer`'s `refuse_rebuild`
+  override, the `allow_rebuild` switch and `structural_command_for_test` (with
+  `native_staging::structural_command`) are deleted. The browser prepares and publishes a
+  rebuild like the C ABI: a transaction's ack still comes only after the preparer left the plan's
+  tables (`run_command`). The core hook `RuntimePreparer::refuse_rebuild` and its call in
+  `SessionState::command` stay for lane K to delete. Gate 11 and its test are deleted.
+  The #1290a, #1381b and #1584 D6b tests, and the plan-exchange and structural-realtime integration
+  tests, drive the rebuild through `control_request_mut` and `control_command` (the unit module's
+  `Rig::entry`, `native_staging::control_command`).
+- **Structure epoch in the meter header.** `WebMeterHeader` grew at its end: `structure_epoch: u64`
+  at offset 80 (88 bytes). `run_command` stamps the newest committed plan's header (the pending
+  replacement's, else the rendering plan's) with `SessionState::structure_epoch()` (a new read-only
+  accessor next to `committed_session`; the only edit under `crates/control-plane`), and the boot
+  stamps the boot plan's. The worklet posts it as `structureEpoch` in every `miso.meter.v1` frame
+  (two 32-bit words, no BigInt) and in the `miso.observationmap.v1` reply (read from the rendering
+  plan's header). Mirrors: `abi_layout.rs`, `check-abi-layout-v1.py` and its fixture, the
+  regenerated `sdk/assets` and `sdk/src/generated/abi.ts`, both `.d.ts`, the host's frame validator.
+  Lane K reads `meterHeader.structureEpoch` in `pollMeters`.
+- **Maps follow the plan.** The worklet read `sources` and the observation bindings once at boot;
+  both are now read from the module at every `miso.sessionmap.v1` / `miso.observationmap.v1`
+  request (`readSourceRows`, `readObservationBindings`), so a rebuild that adds a source, a strip or
+  an effect is seen. The exports those reads call after construction are now `render_locked` and
+  listed (wrapped) in `render-thread-exports.json`; `check-session-map-shape.py` follows
+  `readSourceRows`.
+- **Browser SDK follows the strip order.** `createBrowserStripOrders` (sdk/src/browser/live-controls.ts)
+  keeps the last eight strip orders by structure epoch. A meter frame is named by the order of the
+  epoch it carries (`createMeasurementFeeds(host, orders, available)`, in-order delivery, a frame
+  whose list the page never held is dropped), and the observation map is paired with the order of
+  the epoch the reply names. No fixed boot strip IDs remain in `meterProjection`'s callers.
+- **Browser qualification.** A new page row, `structural-apply` (`runStructuralApplyQualification`):
+  a `delay_samples` edit through the SDK is the rebuild path, the applied revision is not early, the
+  output is the input delayed by exactly the edit (computed, not read back), the meter stream is the
+  successor's with one structure epoch, and the render-locked count is 0 (11 workloads now). Four
+  mutations: `structural-apply-path`, `-early`, `-output`, `-meter`.
+
+### Departures and notes
+
+- Gate 1's `delay_samples` row is its own test (`a_delay_samples_edit_is_a_rebuild_and_renders_as_a_fresh_plan`),
+  because a rebuild's reply and swap differ from the live rows' loop.
+- The rebuild rows of the batch 7 parity amendment are scripted: output route gain and mute,
+  `delay_samples`, the multiband and delay prepared bypass. **No launch effect declares an
+  audio-rate parameter** (`AutomationRate::Sample` has no user in a launch effect), so that row has no
+  edit.
+- `sdk/test` repairs that the browser change forces (the module accepts the rebuild in headless
+  and browser alike): `control-list-evals.mjs` (rebuild-only row commits as `rebuild`),
+  `console-evals.mjs` (the delay and multiband lift render the unbypassed session), and the fake
+  `observationMap` replies carry `structureEpoch`. `sdk/README.md` loses one sentence.
+- Not done by lane W: the SDK's named effect rows and `pollMeters`' re-read (lane K), the managed
+  observation subscription remap (lane K).
+
+### Gates
+
+`control_admission.rs`: `a_delay_samples_edit_is_a_rebuild_and_renders_as_a_fresh_plan` (gate 1 row),
+`a_structural_transaction_keeps_the_solo` (gate 3, structural part). `control_parity.rs`:
+`both_hosts_give_the_same_result_for_the_same_control_edits` (now with the six rebuild steps),
+`every_scripted_edit_is_heard`, and `the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports`
+(#1349 rebuild leg, four rates, equal to `miso_engine_v1_plan_watermark` after every block).
+`tests.rs`: `the_headers_structure_epoch_is_the_control_lists`, the epoch assertions of
+`a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block`, and the layout test.
+Worklet harness: the epoch in the frame (including past 2^32 and the adoption block), the frame
+validator, the re-read session and observation maps. SDK evals: `measurement-evals.mjs` (three new:
+frames named by their epoch, in order; an unnameable frame is dropped; the engine follows a rebuild).
+Browser: `npm run qualify` with `--sdk-root`, `--check-matrix`, `--self-test-mutations` passes in
+chromium 151.0.7922.34, firefox 153.0 and webkit 26.5 (the matrix rows are unchanged).
+
+## Decision record: #1562b-K (batch 12)
+
+Lane K. Checked against `2b79cec44` (batch 12a + #1562b-W).
+
+### What shipped
+
+- **The core hook is gone.** `RuntimePreparer::refuse_rebuild` (`crates/control-plane/src/compile.rs`)
+  and its call in `SessionState::command` are deleted. Both hosts take every rebuild: the host-web
+  rebuild tests (`control_admission`, `structural_apply_realtime`, the unit `structural_apply`) and
+  the capi tests pass without the hook.
+- **A meter frame names its own strips.** `WasmBoundary.pollMeters` reads the structure epoch in the
+  meter header (offset 80, #1562b-W) and names the frame by the control list of that epoch. The
+  boundary keeps the last eight orders by epoch; a frame whose list it never read and cannot read now
+  is dropped (the browser's `createMeasurementFeeds` does the same). `MeterFrame` gains
+  `structureEpoch`, `trackIds` and `submixIds` (additive), so a frame that a rebuild leaves with the
+  same strip count is still named right, and a window the old plan completed is named by the old list
+  even after the SDK read the new one.
+- **Named effect rows follow the core's section headers.** `ControlStripOrder` (the one cached read of
+  the list) now also holds the effect of each console slot and insert, from the list's section
+  headers (`stripEffectOf`). `LiveControlEdits` resolves a named effect row from it first, from the
+  booted session second. An edit that names an effect row remembers (effect, row name, strict or
+  not); `effectRowResolver`, installed as the transaction queue's new `prepare` hook on both engines,
+  checks it against the list just before the frame is encoded (a probe of the structure epoch, the
+  list only when it moved; edits with no effect row cost nothing). A named section follows its header;
+  a builder typed for an effect the insert no longer runs is refused with `MisoUsageError`, and
+  nothing is sent. The queue draws the transaction's request ID after `prepare`, because the core takes
+  IDs in ascending order and `prepare` reads the list with IDs of its own.
+- **Live controls follow the strips.** `EngineLiveControls.syncStructure()` and
+  `LiveControlTransport.stripOrder` re-read the order when the epoch moved; an observation record is
+  re-addressed to its strip's index in the current list just before it is sent, so a manual
+  `observe()` edit built before a rebuild is also right. The headless `liveControls()` and
+  `withSession()` drop the booted session from the layout once a rebuild moved the strips (the engine
+  is then no longer that session); the browser's memoized controls drop it in `update()`.
+- **Managed subscriptions follow a rebuild and end on `OBSERVATION_ENDED`.**
+  `ObservationSubscriptionOwner` takes the event through the new transport member
+  `observationEnded` (the headless engine and the browser engine decode the reliable lane with
+  `decodeObservationEnded`, `sdk/src/core/observation-ended.ts`). The event, one per commit with every
+  key, drops the bindings and tells each subscription once: `onEnd({ revision, ended, remaining })`;
+  `handle.ended` lists them; a subscription left with no selection is closed. An event that arrives
+  while an operation is in flight is applied when it ends. Arm and disarm records take their strip
+  index and effect index from the newest control list and observation map (`syncStructure()`, and
+  `#remap()` of every held binding), not from the address they were subscribed with.
+
+### Departures and notes
+
+- **Files outside `sdk/src/core` and the core hook** (mechanical or forced by the above):
+  `sdk/src/headless/engine.ts` and `sdk/src/browser/{engine,live-controls}.ts` (the transport wiring),
+  the three index barrels (`ObservationSubscriptionEnd`), `sdk/README.md`, and the test fakes that
+  must carry `onControlEvent` (hosts) and `syncStructure` (live controls). The browser's
+  `createBrowserStripOrders` is now one reader for each host, shared by the queue's check, the live
+  controls and the feeds.
+- **A structural fixture.** The SDK has no builder for a structural edit, so
+  `hosts/host-web/tests/structural_frames_fixture.rs` writes five frames with the protocol codec
+  (`fixtures/structural-frames.json`: add a first strip, replace the last strip, swap an insert for
+  another effect, remove an insert, remove the insert before it), and `structure-evals.mjs` sends
+  them to a real core. It is a wire format, so the byte comparison is the gate.
+- **The queue does not learn a foreign commit's revision.** A structural frame sent past the queue
+  (as the evals do) leaves the queue one revision behind and the next transaction is refused. The
+  evals call `queue.reset(controlRevision())`. A transaction API for structural edits (#1296) goes
+  through the queue and has no such gap.
+- The existing `set checks only encodability` eval now asserts that a named insert row resolves from a
+  document-text boot (it was a refusal before) and that an unknown insert is still refused.
+
+### Gates
+
+`sdk/test/structure-evals.mjs`: `a rebuild that adds a strip: frames before name the old strips,
+frames after the new`; `a window the old plan completed is named by the old list even after the new
+list was read` (red when the frame is named by the newest cached order); `a rebuild that keeps the
+strip count and changes the strips is named by the new list`; `headless` and `browser: a row named
+before an insert changed effect lands on the new effect's row` (the compressor's `mix` is control 7,
+the soft clip's 3; the typed builder and a name the new effect lacks are refused and send nothing);
+`the end of a tap is reported once, with the rest of the subscription kept (headless)`; `one commit
+that ends every tap of a subscription closes it and says so once`; `removing the insert ends its tap
+the same way`; `a tap that survives a rebuild keeps publishing and is disarmed at the strip's new
+index`; `an effect that moved to another index is disarmed where it is now` (red without `#remap`);
+`through the browser transport, whose live controls were made before the rebuild` (red without
+`syncStructure`/the record re-addressing). `check-sdk-headless.sh` 543 pass; `check-sdk-types.sh`,
+`check-sdk-generated.sh`, `sdk-package.sh check` pass on `target/ci/b12k-artifacts`; chromium
+151.0.7922.34 qualification with `--sdk-root`, `--check-matrix`, `--self-test-mutations` passes (all
+render-allocation rows 0). Rust: control-plane (`test-support`), capi and host-web
+(`host-web/test-support`) tests, clippy `-D warnings` (host-core with no features, default and all
+features, control-plane, capi, host-web), fmt, `realtime-policy` (141 regions) and
+`check-bench-policy.sh` pass.
+
+### Open
+
+- Between a rebuild's commit and the block that adopts it, `observationMap()` describes the plan that
+  renders, and a kind 7/8 record is queued on the newest plan. The evals render a block before they
+  subscribe. Which plan's index space the record addresses in that window is the core's to rule
+  (successor, with #1589).

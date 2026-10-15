@@ -569,3 +569,55 @@ follows the apply (#1296's); the engine side is complete.
 - **Doc fixes.** `miso_engine_web_v1_meter_header_ptr` no longer says "stable" (the address changes
   at each swap, each plan carrying its own header); the browser oracle's header size comment says
   80 bytes.
+
+## Decision record: (d2) spectrum (batch 12, lane W)
+
+**Shipped.** A browser rebuild keeps a running spectrum stream, an armed one-shot and a collection's
+selection. At a plan's promotion the host calls `SpectrumService::adopt_successor(captures, pairing,
+carried)` with the plan's own pairing list and the engine's real carry outcome.
+
+- **Where the successor's captures wait (departure from the text).** The spec said to take them out of
+  the adopted plan's attachment. The attachment is the render half's once the plan is published, and
+  two adoptions before one service step would leave the first plan's captures unreachable. The
+  preparer now leaves a plan's captures and `inventory.spectrum_pairing()` in the `BootRecord`, beside
+  the plan's tables (`SpectrumHandover`); boot moves them into the service, and a command that
+  publishes a replacement keeps them in the plan's `PendingShape`. `RenderCompanions` lost its
+  `spectrum_capture` field (and `has_spectrum_capture`, `take_spectrum_capture`). The pairing is
+  charged to the plan's rows with its tables.
+- **Carry outcome.** The adoption block reads `RealtimePlanOwner::carried_count()` and compares it with
+  the count at the previous adoption (`carried_swaps_seen`): a swap carried exactly when it advanced.
+  One `u64` load and compare in the swap block; `PendingShape::adoption` records `Some(carried)`.
+  The block that adopted the plan marks it; a candidate a later one superseded keeps `None` and its
+  captures drop with the entry.
+- **Promotion.** `ReadyOwnership::promote_spectrum`, run first in `reclaim_shapes` (the service step
+  and the start of every command), installs each adopted plan's captures in commit order and drops
+  the displaced captures there, on the control side. Spectrum exports run in render-locked windows,
+  so promotion is deliberately not called from them.
+- **Lane K.** #1618 adds a fourth argument, `analysis: Option<&mut SpectrumAnalysis>`, to
+  `adopt_successor`. The browser holds no analysis state (the worklet passes `None`; the caller of
+  `start_spectrum_stream` owns it), so the call in `promote_spectrum` passes `None` at the merge.
+
+**Gates -> tests** (`hosts/host-web/src/tests.rs`, `structural_apply`):
+- gate 7, stream: `a_running_spectrum_stream_continues_across_a_rebuild` (an added track sorts first
+  and shifts every index; the stream is read after every block and equals a fresh boot of the
+  committed model window for window; one capture epoch, no `Failed`/`Gap`; service step right after
+  the adoption block, and 18 blocks later)
+- gate 7, collection: `a_collection_selection_and_its_stream_continue_across_a_rebuild` (second entry
+  selected and streamed)
+- armed one-shot: `an_armed_one_shot_completes_across_a_rebuild` (window spans the swap, equal to the
+  committed model's)
+- `web_runtime_preparer_attaches_the_companions_on_every_branch` now reads the capture kind from the
+  record.
+- Red check: forcing `swap_carried = false` turns the stream, collection and one-shot tests red.
+
+**Limits found.**
+1. With the carried arm, promotion is not observable: the service keeps the same reader whether it
+   holds the predecessor's capture or the paired successor's shell. Only a swap that did not carry
+   distinguishes them, and the browser cannot make one yet: the only natural refusal is the
+   identity mismatch of a successor of a candidate that never rendered (supersession, #1310), and
+   a second command while a candidate waits is `Backpressure` today. No test covers the not-carried
+   arm on the browser; `a_refused_hand_over_installs_the_fresh_capture` (host-core) covers
+   `adopt_successor`'s side. Revisit when #1310 lands: add the two-rebuilds-before-one-block case.
+2. A removed spectrum-observed strip: not tested here (#1593 keeps the taps).
+3. Gate 8 (render-locked allocations) is unchanged; the adoption block adds one load and compare
+   (`realtime-policy` ok).

@@ -63,6 +63,16 @@ export interface ControlQueueOptions {
    * reply, because the core may have committed the transaction whose reply was lost.
    */
   readonly readRevision?: (() => bigint | PromiseLike<bigint>) | undefined;
+  /**
+   * Called with the edits of each transaction, coalesced, just before the frame is encoded. It
+   * returns the edits to send: the same count, in the same order, each standing for the edit at its
+   * position (an edit that names an effect's row by name is resolved against the core's current
+   * control list here, #1562b-K). A rejection fails the submits of that transaction as an encoding
+   * fault does: when it carried several, each is sent alone and only the one at fault is rejected.
+   */
+  readonly prepare?: ((
+    edits: readonly ControlFrameEdit[],
+  ) => readonly ControlFrameEdit[] | PromiseLike<readonly ControlFrameEdit[]>) | undefined;
 }
 
 /** What the queue counted since it was made. */
@@ -226,6 +236,7 @@ export class ControlTransactionQueue {
   readonly #ids: ControlRequestIds;
   readonly #limits: ControlLimits | undefined;
   readonly #readRevision: (() => bigint | PromiseLike<bigint>) | undefined;
+  readonly #prepare: ControlQueueOptions["prepare"];
   #revision: bigint;
   /** The batch being staged, which the next transaction sends. */
   #next: Batch | undefined;
@@ -251,6 +262,7 @@ export class ControlTransactionQueue {
     this.#revision = revision;
     this.#limits = options.limits;
     this.#readRevision = options.readRevision;
+    this.#prepare = options.prepare;
   }
 
   /**
@@ -473,13 +485,27 @@ export class ControlTransactionQueue {
         const group = this.#takeGroup(remaining, alone > 0 ? 1 : Number.POSITIVE_INFINITY);
         if (alone > 0) alone -= 1;
         const { edits, owners } = coalesce(group);
-        const requestId = this.#ids.next();
+        let requestId = 0n;
         let reply: ControlReply;
+        // The edits as sent: `edits` unless `prepare` stood other edits in for some of them.
+        let sent: readonly ControlFrameEdit[] = edits;
         try {
+          if (this.#prepare !== undefined) {
+            sent = await this.#prepare(edits);
+            if (sent.length !== edits.length) {
+              throw new MisoEngineError("the queue's prepare hook changed the number of edits", {
+                phase: "lifecycle",
+                code: "internal",
+              });
+            }
+          }
+          // The ID is drawn after `prepare`, which reads the core's list with IDs of its own: the
+          // core takes IDs in ascending order.
+          requestId = this.#ids.next();
           const frame = encodeControlTransaction({
             requestId,
             expectedRevision: this.#revision,
-            edits,
+            edits: sent,
           });
           this.#transactions += 1;
           reply = decodeControlReply(await this.#send(frame));
@@ -524,9 +550,11 @@ export class ControlTransactionQueue {
         // The named edit, in its own submit's coordinates; `undefined` when it names none of them.
         let own: number | undefined;
         if (culprit !== undefined) {
-          const key = controlEditKey(edits[index!]!);
+          // The core names the edit as it was sent; the submit holds the edit as it was staged.
+          const key = controlEditKey(sent[index!]!);
           culprit.edits.forEach((edit, at) => {
-            if (controlEditKey(edit) === key) own = at;
+            const stood = edits.indexOf(edit);
+            if (controlEditKey(stood < 0 ? edit : sent[stood]!) === key) own = at;
           });
         }
         if (culprit === undefined || !sameSession) {

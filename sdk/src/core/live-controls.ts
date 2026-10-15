@@ -17,6 +17,8 @@ import type {
   TapName,
 } from "../generated/catalog.ts";
 import type { CommandReport, SessionMap } from "./boundary.ts";
+import { stripEffectOf } from "./control-list.ts";
+import type { ControlStripOrder } from "./control-list.ts";
 import { validateControlEdit } from "./control-frame.ts";
 import type { ControlFrameEdit, ControlWireAddress } from "./control-frame.ts";
 import type { ControlAppliedReport, ControlTransactionQueue } from "./control-queue.ts";
@@ -67,6 +69,97 @@ export interface LiveControlTransport {
   readonly queue: ControlTransactionQueue;
   /** Observation records (kinds 7 and 8) stay 48-byte commands until the browser-feature phase. */
   readonly observe: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
+  /**
+   * The strips and effects of the core's control list as they are now (#1562b-K): a probe of the
+   * structure epoch, and a read of the list only when it moved. Absent for a scripted transport
+   * that has no list; live controls then keep the order they were made with.
+   */
+  readonly stripOrder?: StripOrderSource;
+  /** The order the transport read when it made these live controls. */
+  readonly order?: ControlStripOrder;
+}
+
+/** Reads the core's strip order and effects; the caller caches by structure epoch. */
+export type StripOrderSource = () => ControlStripOrder | Promise<ControlStripOrder>;
+
+/** What a built edit remembers of the effect row it names, to name it again after a rebuild. */
+interface RowProvenance {
+  readonly stripId: string;
+  readonly section:
+    | { readonly kind: "console"; readonly slot: string }
+    | { readonly kind: "inserts"; readonly effect: string };
+  /** The row's machine name in its effect's control table. */
+  readonly name: string;
+  /** The effect the numeric `control` was resolved for. */
+  readonly effectId: string;
+  /**
+   * `true` when the caller typed the effect (`insert("c", "miso.compressor")`): the edit is refused
+   * if the core's section header now names another. `false` for an address named by the section
+   * alone, which follows the header.
+   */
+  readonly strict: boolean;
+}
+
+const PROVENANCE = new WeakMap<object, RowProvenance>();
+/** The strip an observation edit names by index, to name it again after a rebuild. */
+const OBSERVED_STRIP = new WeakMap<object, string>();
+
+function noteRow(set: ControlEditSet, row: RowProvenance): ControlEditSet {
+  for (const edit of set.edits) PROVENANCE.set(edit, row);
+  return set;
+}
+
+/**
+ * The hook that resolves the effect rows of a transaction against the core's control list
+ * (#1562b-K). A rebuild can change the effect an insert or console slot runs, and the numeric row
+ * of an effect's control depends on the effect, so an edit built before the rebuild could land on
+ * another effect's row with the same number. Before each transaction is encoded, an edit that names
+ * an effect row is checked against the section header the core lists now (a probe of the structure
+ * epoch, and the list again only when it moved): an address named by its section follows the header,
+ * and one built for a typed effect that is no longer there is refused. Edits that name no effect row
+ * cost nothing.
+ */
+export function effectRowResolver(
+  source: StripOrderSource,
+): (edits: readonly ControlFrameEdit[]) => readonly ControlFrameEdit[] | Promise<readonly ControlFrameEdit[]> {
+  return (edits) => {
+    if (!edits.some((edit) => PROVENANCE.has(edit))) return edits;
+    return (async () => {
+      const order = await source();
+      return edits.map((edit) => {
+        const row = PROVENANCE.get(edit);
+        if (row === undefined) return edit;
+        const actual = stripEffectOf(order, row.stripId, row.section);
+        // No such section in the list: the core refuses the address with its own code.
+        if (actual === undefined || actual === row.effectId) return edit;
+        const where = `${row.section.kind === "console" ? "console slot" : "insert"} `
+          + `'${row.section.kind === "console" ? row.section.slot : row.section.effect}' of strip '${row.stripId}'`;
+        if (row.strict) {
+          throw new MisoUsageError(
+            `${where} runs ${actual} now, and this edit was built for ${row.effectId}`,
+          );
+        }
+        const control = effectControlIdIfRow(actual, row.name);
+        if (control === undefined) {
+          throw new MisoUsageError(`${where} runs ${actual} now, which has no control '${row.name}'`);
+        }
+        const resolved = Object.freeze({
+          ...edit,
+          address: Object.freeze({ ...edit.address, control }),
+        });
+        PROVENANCE.set(resolved, { ...row, effectId: actual });
+        return resolved;
+      });
+    })();
+  };
+}
+
+function effectControlIdIfRow(effectId: string, name: string): number | undefined {
+  try {
+    return effectControlId(effectId, name);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -142,6 +235,13 @@ function sameIds(declared: Iterable<string>, compiled: readonly string[]): boole
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+/** Whether the strips of `session` are the strips `map` names (false once a rebuild moved them). */
+export function sessionDescribesStrips(session: SessionLike, map: SessionMap): boolean {
+  const model = modelOf(session);
+  return sameIds(model.tracks.map((track) => String(track.id)), map.tracks)
+    && sameIds((model.submixes ?? []).map((submix) => String(submix.id)), map.submixes);
+}
+
 function layoutOf(session: SessionLike, map: SessionMap): LiveControlLayout {
   const model = modelOf(session);
   const consoleRecord = model.console as Readonly<Record<string, readonly unknown[]>>;
@@ -212,6 +312,7 @@ function controlEdit(
 
 function observationEdit(
   kind: LaneEdit["kind"],
+  stripId: string,
   stripIndex: number,
   options: {
     readonly rack: number;
@@ -220,7 +321,7 @@ function observationEdit(
     readonly smoothingSamples: number;
   },
 ): LaneEdit {
-  return Object.freeze({
+  const edit: LaneEdit = Object.freeze({
     kind,
     trackIndex: stripIndex,
     rack: options.rack,
@@ -230,6 +331,8 @@ function observationEdit(
     smoothingSamples: options.smoothingSamples,
     values: Object.freeze([0, 0, 0, 0]) as unknown as readonly [number, number, number, number],
   });
+  OBSERVED_STRIP.set(edit, stripId);
+  return edit;
 }
 
 /**
@@ -246,17 +349,20 @@ function observationEdit(
  * index (`effect()`) to its stable ID.
  */
 export class LiveControlEdits {
-  readonly #tracks: ReadonlyMap<string, number>;
-  readonly #submixes: ReadonlyMap<string, number>;
-  readonly #layout: LiveControlLayout | undefined;
+  #tracks: ReadonlyMap<string, number>;
+  #submixes: ReadonlyMap<string, number>;
+  #layout: LiveControlLayout | undefined;
+  /** The core's strips and effects as last read; supplies the effect of a named section. */
+  #order: ControlStripOrder | undefined;
   /** What a strip reaches `set` and its effect builders through. */
   readonly #context: StripContext;
 
-  constructor(map: SessionMap, session?: SessionLike) {
+  constructor(map: SessionMap, session?: SessionLike, order?: ControlStripOrder) {
     this.#tracks = new Map(map.tracks.map((trackId, index) => [trackId, index] as const));
     const trackCount = map.tracks.length;
     this.#submixes = new Map(map.submixes.map((submixId, index) => [submixId, trackCount + index] as const));
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
+    this.#order = order;
     this.#context = {
       set: (address, value, options) => this.set(address, value, options),
       effect: <E extends EffectId>(instance: EffectInstance<E>) => new EffectEdits(
@@ -264,6 +370,26 @@ export class LiveControlEdits {
         (address, value, options) => this.set(address, value, options),
       ),
     };
+  }
+
+  /**
+   * Follow the core's control list (#1562b-K): the strip indices that observation records name, and
+   * the effect each named section runs, are the list's after a rebuild. Builders made before this
+   * call keep what they were made with. A session the SDK built that no longer describes the strips
+   * is dropped from the layout, since the engine is no longer that session.
+   */
+  update(order: ControlStripOrder): void {
+    if (order === this.#order) return;
+    this.#order = order;
+    this.#tracks = new Map(order.tracks.map((trackId, index) => [trackId, index] as const));
+    this.#submixes = new Map(
+      order.submixes.map((submixId, index) => [submixId, order.tracks.length + index] as const),
+    );
+    const layout = this.#layout;
+    if (layout !== undefined
+      && !(sameIds(layout.tracks.keys(), order.tracks) && sameIds(layout.submixes.keys(), order.submixes))) {
+      this.#layout = undefined;
+    }
   }
 
   /**
@@ -293,16 +419,34 @@ export class LiveControlEdits {
     const rampSamples = options.rampSamples === undefined
       ? undefined
       : requireU32(options.rampSamples, "rampSamples");
+    const named = typeof address.control !== "number";
     const edit = controlEdit(
       address.owner,
       address.section,
-      typeof address.control === "number" ? address.control : this.#rowId(address),
+      named ? this.#rowId(address as ControlAddress) : address.control as number,
       value,
       address.lane,
       rampSamples,
     );
     validateControlEdit(edit);
-    return editSet(edit);
+    const set = editSet(edit);
+    const { owner, section } = address;
+    if (named && owner.kind === "strip" && (section.kind === "console" || section.kind === "inserts")) {
+      // A row named by its section follows the core's header for that section at send time.
+      const effectId = this.#effectOf(owner, section);
+      if (effectId !== undefined) {
+        noteRow(set, {
+          stripId: owner.id,
+          section: section.kind === "console"
+            ? { kind: "console", slot: section.slot }
+            : { kind: "inserts", effect: section.effect },
+          name: address.control as string,
+          effectId,
+          strict: false,
+        });
+      }
+    }
+    return set;
   }
 
   /** The numeric ID of the row a named address names. */
@@ -339,18 +483,27 @@ export class LiveControlEdits {
   }
 
   #effectRowId(owner: ControlOwner, section: ControlSection, name: string): number {
-    const instance = owner.kind === "strip" && this.#layout !== undefined
-      ? this.#instanceOf(this.#layout, owner.id, section)
-      : undefined;
-    if (instance === undefined) {
+    const effectId = this.#effectOf(owner, section);
+    if (effectId === undefined) {
       throw new MisoUsageError(
         `the control '${name}' of ${section.kind === "console" ? `console slot '${section.slot}'` : section.kind === "inserts" ? `insert '${section.effect}'` : section.kind}`
-          + " is named, and its numeric ID depends on the effect it runs, which is known only for a "
-          + "session the SDK built (liveControls().withSession(session)); address it by its numeric "
+          + " is named, and its numeric ID depends on the effect it runs, which the engine's control "
+          + "list does not name for this section (is the ID right?); address it by its numeric "
           + "row ID instead (the `address` of its row in engine.controls())",
       );
     }
-    return effectControlId(instance.effectId, name);
+    return effectControlId(effectId, name);
+  }
+
+  /**
+   * The effect a strip's console slot or insert runs: the core's section header when the list is
+   * known (it follows a rebuild), else the session the SDK built for this engine.
+   */
+  #effectOf(owner: ControlOwner, section: ControlSection): string | undefined {
+    if (owner.kind !== "strip" || (section.kind !== "console" && section.kind !== "inserts")) return undefined;
+    const listed = this.#order === undefined ? undefined : stripEffectOf(this.#order, owner.id, section);
+    if (listed !== undefined) return listed;
+    return this.#layout === undefined ? undefined : this.#instanceOf(this.#layout, owner.id, section)?.effectId;
   }
 
   #instanceOf(
@@ -363,6 +516,7 @@ export class LiveControlEdits {
     if (section.kind === "inserts") return instances?.inserts.find((row) => row.id === section.effect);
     return undefined;
   }
+
   /**
    * A track strip's live edits. The ID is not checked here: an unknown strip is refused by the core
    * with `control.address.unknown`.
@@ -478,16 +632,29 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
     options?: SetControlOptions,
   ): ControlEditSet {
     // The row is one of this effect's, by the machine name the generated table gives it; the
-    // instance knows its effect, so the address carries the row's number.
-    return this.#set(
+    // instance knows its effect, so the address carries the row's number. The edit also keeps the
+    // effect it was typed for, so a send after a rebuild checks it against the core's header.
+    const section = this.#section();
+    return noteRow(
+      this.#set(
+        {
+          owner: { kind: "strip", id: this.#stripId },
+          section,
+          control: effectControlId(this.effectId, control),
+          lane,
+        },
+        value,
+        options,
+      ),
       {
-        owner: { kind: "strip", id: this.#stripId },
-        section: this.#section(),
-        control: effectControlId(this.effectId, control),
-        lane,
+        stripId: this.#stripId,
+        section: section.kind === "console"
+          ? { kind: "console", slot: section.slot }
+          : { kind: "inserts", effect: (section as { readonly effect: string }).effect },
+        name: control,
+        effectId: this.effectId,
+        strict: true,
       },
-      value,
-      options,
     );
   }
 
@@ -503,7 +670,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
           + "address it with liveControls().withSession(session) or effect(rack, index, effectId)",
       );
     }
-    return observationEdit(armed ? "observeSubscribe" : "observeUnsubscribe", this.#stripIndex, {
+    return observationEdit(armed ? "observeSubscribe" : "observeUnsubscribe", this.#stripId, this.#stripIndex, {
       rack: RACKS[this.#rack],
       effectIndex: this.#effectIndex,
       parameterId: observation.id,
@@ -538,7 +705,7 @@ export class EngineLiveControls {
     session?: SessionLike,
     booted?: Uint8Array,
   ) {
-    this.edit = new LiveControlEdits(map, session);
+    this.edit = new LiveControlEdits(map, session, transport.order);
     this.#map = map;
     this.#transport = transport;
     this.#beforeSubmit = beforeSubmit;
@@ -563,7 +730,27 @@ export class EngineLiveControls {
       );
     }
     assertBootedSession(session, this.#booted);
-    return new EngineLiveControls(this.#map, this.#transport, this.#beforeSubmit, session, this.#booted);
+    // After a rebuild moved the strips the engine is no longer the booted session: the names then
+    // resolve from the core's control list alone.
+    const describes = sessionDescribesStrips(session, this.#map);
+    return new EngineLiveControls(
+      this.#map,
+      this.#transport,
+      this.#beforeSubmit,
+      describes ? session : undefined,
+      this.#booted,
+    );
+  }
+
+  /**
+   * Follow the core's control list: read the structure epoch, and when a rebuild moved it, take the
+   * list's strips and effects (#1562b-K). Builders made afterwards address the new order. A
+   * transport without a list keeps the order these controls were made with.
+   */
+  async syncStructure(): Promise<void> {
+    const source = this.#transport.stripOrder;
+    if (source === undefined) return;
+    this.edit.update(await source());
   }
 
   /** The engine's one transaction queue, which every value edit goes through. */
@@ -617,7 +804,24 @@ export class EngineLiveControls {
     }
     const beforeSubmit = this.#beforeSubmit?.(edits, managed);
     if (beforeSubmit !== undefined) await beforeSubmit;
-    const report = await this.#transport.observe(edits);
+    // A record names its strip by index, and a rebuild can move the strips: name each again from the
+    // core's list as it is now.
+    const source = this.#transport.stripOrder;
+    let sent = edits;
+    if (source !== undefined) {
+      const order = await source();
+      this.edit.update(order);
+      const strips = [...order.tracks, ...order.submixes];
+      sent = edits.map((edit) => {
+        const stripId = OBSERVED_STRIP.get(edit);
+        const index = stripId === undefined ? -1 : strips.indexOf(stripId);
+        if (stripId === undefined || index < 0 || index === edit.trackIndex) return edit;
+        const moved: LaneEdit = Object.freeze({ ...edit, trackIndex: index });
+        OBSERVED_STRIP.set(moved, stripId);
+        return moved;
+      });
+    }
+    const report = await this.#transport.observe(sent);
     const resultConsistent = report.ok === (report.result === 0);
     const wholeBatch = report.ok
       ? report.admitted === edits.length

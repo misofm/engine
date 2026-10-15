@@ -399,6 +399,113 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   };
 }
 
+/// The delay the structural row applies, in samples (#1562b).
+const STRUCTURAL_DELAY_SAMPLES = 64;
+
+/// #1562b: a structural apply in a real browser. The live-control session's track gets a
+/// `delay_samples` edit, which the core classifies as a rebuild: it prepares a replacement plan and
+/// publishes it while the first plan has rendered nothing, so the very first quantum is the swap
+/// block (the offline context cannot be suspended in every engine). The row holds what the swap
+/// must keep: the reply is the rebuild path, the applied revision is not early, the output is the
+/// submitted PCM delayed by exactly the edit (computed here, not read back), the meter stream is the
+/// successor's from its first frame (the retired header's views were switched in the swap block,
+/// and the frame carries the structure epoch of the list), and no allocator call ran on the
+/// render thread.
+async function runStructuralApplyQualification(createHost, sessionDocument) {
+  const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    document: sessionDocument,
+    options: bootOptions(
+      LIVE_CONTROL_FRAMES,
+      LIVE_CONTROL_METER_BLOCKS,
+    ),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+
+  const meterFrames = [];
+  const expected = [new Float32Array(LIVE_CONTROL_FRAMES), new Float32Array(LIVE_CONTROL_FRAMES)];
+  const input = [new Float32Array(LIVE_CONTROL_FRAMES), new Float32Array(LIVE_CONTROL_FRAMES)];
+  for (let block = 0; block < LIVE_CONTROL_BLOCKS; block += 1) {
+    const planes = sourcePlanes(block);
+    for (let channel = 0; channel < 2; channel += 1) {
+      input[channel].set(planes[channel], block * QUANTUM_FRAMES);
+    }
+    const acknowledgement = await host.submitSource({
+      sourceId: "live-control-source",
+      generation: 1n,
+      startFrame: BigInt(block * QUANTUM_FRAMES),
+      sampleRateHz: SAMPLE_RATE,
+      planes,
+      frames: QUANTUM_FRAMES,
+      endOfRegion: block === LIVE_CONTROL_BLOCKS - 1,
+    });
+    if (acknowledgement.result !== 0) throw new Error("structural-apply prefill rejected");
+  }
+  for (let channel = 0; channel < 2; channel += 1) {
+    for (let frame = STRUCTURAL_DELAY_SAMPLES; frame < LIVE_CONTROL_FRAMES; frame += 1) {
+      expected[channel][frame] = input[channel][frame - STRUCTURAL_DELAY_SAMPLES];
+    }
+  }
+  const meterLease = await host.meters({
+    enabled: true,
+    onFrame: (frame) => meterFrames.push({
+      sequence: frame.sequence,
+      trackCount: frame.trackCount,
+      structureEpoch: frame.structureEpoch,
+      peaks: frame.peaks.length,
+      firstSample: frame.firstSample,
+      endSample: frame.endSample,
+    }),
+  });
+  const before = await host.status();
+  const { applyDelayThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const command = await applyDelayThroughSdk(host, "track", STRUCTURAL_DELAY_SAMPLES);
+  const pending = await host.status();
+
+  const rendered = await context.startRendering();
+  for (let spin = 0; spin < 8 && meterFrames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  const after = await host.status();
+  const renderAllocations = await renderAllocationCount(host);
+  await host.dispose();
+  const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
+
+  let exact = true;
+  for (let channel = 0; channel < 2; channel += 1) {
+    for (let frame = 0; frame < LIVE_CONTROL_FRAMES; frame += 1) {
+      if (!Object.is(actual[channel][frame], expected[channel][frame])) exact = false;
+    }
+  }
+  let increasing = true;
+  for (let index = 1; index < meterFrames.length; index += 1) {
+    if (meterFrames[index].sequence <= meterFrames[index - 1].sequence) increasing = false;
+  }
+  return {
+    commandOk: command.ok,
+    commandPath: command.path,
+    commandApplied: command.appliedOperations,
+    committedRevision: command.revision,
+    meterLeaseResult: meterLease.result,
+    initialRevision: before.appliedRevision.toString(),
+    pendingRevision: pending.appliedRevision.toString(),
+    finalRevision: after.appliedRevision.toString(),
+    finalSample: after.appliedSample.toString(),
+    meterFrames: meterFrames.length,
+    meterFrameWidth: meterFrames.length === 0 ? 0 : meterFrames[0].peaks,
+    meterTrackCount: meterFrames.length === 0 ? 0 : meterFrames[0].trackCount,
+    structureEpochs: [...new Set(meterFrames.map((frame) => frame.structureEpoch))],
+    sequenceIncreasing: increasing,
+    exactDelayedOutput: exact,
+    expectedDigest: await pcmDigest(expected, LIVE_CONTROL_FRAMES),
+    renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+    renderAllocations,
+  };
+}
+
 /// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
@@ -779,6 +886,7 @@ export async function runQualification() {
       boot: { ready: false, backend: null },
       corpus: null,
       liveControls: null,
+      structuralApply: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -818,6 +926,18 @@ export async function runQualification() {
   } catch (error) {
     const diagnostic = await diagnoseReady(liveControlDocument);
     throw new Error(`live-control qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
+  let structural;
+  try {
+    structural = await runStructuralApplyQualification(
+      createMisoAudioWorkletHost,
+      liveControlDocument,
+    );
+  } catch (error) {
+    const diagnostic = await diagnoseReady(liveControlDocument);
+    throw new Error(`structural-apply qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
@@ -866,6 +986,7 @@ export async function runQualification() {
       freshContextIdentity: digests[0] === digests[1],
     },
     liveControls: live,
+    structuralApply: structural,
     observation,
     stall,
     stagingReads,
@@ -876,6 +997,7 @@ export async function runQualification() {
         workload: `corpus-${index}-${segment}`, count,
       }))),
       { workload: "live-control", count: live.renderAllocations },
+      { workload: "structural-apply", count: structural.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
@@ -905,6 +1027,7 @@ export const qualificationBootContract = Object.freeze({
   renderCorpusSegment,
   typedUnsupportedAttestation,
   runLiveControlQualification,
+  runStructuralApplyQualification,
   runObservationRun,
   runStallQualification,
   runStagingReadRun,

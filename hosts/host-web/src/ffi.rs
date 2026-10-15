@@ -3321,7 +3321,7 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 /// and a refused transaction is still an ok call with a non-ok frame); [`RESULT_INVALID_ARGUMENT`]
 /// for a wrong handle, a bad length or a frame the core cannot correlate;
 /// [`RESULT_WRONG_STATE`]; [`RESULT_BUFFER_TOO_SMALL`]; [`RESULT_BACKPRESSURE`];
-/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.rebuild_pending`);
+/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.shape_unavailable`);
 /// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
@@ -3485,8 +3485,10 @@ pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
 /// Return the number of prepared resident observation effects in the current owner map.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.observation_binding_count()).unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            u32::try_from(host.observation_binding_count()).unwrap_or(0)
+        })
     })
 }
 
@@ -3535,21 +3537,23 @@ fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
 /// Copy one bound observation effect's stable local slot ID into the observation-ID staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_effect_slot_id(handle: u32, index: u32) -> u32 {
-    copy_observation_id(handle, index, false)
+    render_locked(|| copy_observation_id(handle, index, false))
 }
 
 /// Copy one bound observation effect's native contract ID into the observation-ID staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, index: u32) -> u32 {
-    copy_observation_id(handle, index, true)
+    render_locked(|| copy_observation_id(handle, index, true))
 }
 
 /// One bound observation effect's strip index (tracks, then submixes), or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| binding.address.track_index)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| binding.address.track_index)
+        })
     })
 }
 
@@ -3557,9 +3561,11 @@ pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index:
 /// range. Zero is the retired `simd1` code, so it names no rack (issue #1096).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| observation_rack_raw(binding.address.rack))
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| observation_rack_raw(binding.address.rack))
+        })
     })
 }
 
@@ -3567,19 +3573,23 @@ pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -
 /// console slot's index in the session's slot order, or an insert's index.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_effect_index(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| binding.address.effect_index)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| binding.address.effect_index)
+        })
     })
 }
 
 /// Return one bound observation effect's declared tap count, or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_tap_count(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
-            .unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
+                .unwrap_or(0)
+        })
     })
 }
 
@@ -3590,10 +3600,12 @@ pub extern "C" fn miso_engine_web_v1_observation_tap_id(
     index: u32,
     tap_index: u32,
 ) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .and_then(|binding| binding.descriptors.get(tap_index as usize))
-            .map_or(0, |tap| tap.id.0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .and_then(|binding| binding.descriptors.get(tap_index as usize))
+                .map_or(0, |tap| tap.id.0)
+        })
     })
 }
 
@@ -3787,8 +3799,10 @@ pub extern "C" fn miso_engine_web_v1_observation_result_bytes() -> u32 {
 /// lower bound: an export that appears or disappears fails that gate.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.session_source_count()).unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            u32::try_from(host.session_source_count()).unwrap_or(0)
+        })
     })
 }
 
@@ -3798,24 +3812,28 @@ pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
 /// in the compiled session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_session_source_id(index))
+    render_locked(|| with_host_mut(handle, 0, |host| host.copy_session_source_id(index)))
 }
 
 /// Return one source's declared channel count, or zero for an out-of-range index.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_channels(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.channel_count)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.session_source_shape(index)
+                .map_or(0, |shape| shape.channel_count)
+        })
     })
 }
 
 /// Return one source's exact length in source sample frames, or zero out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u64 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.frames)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.session_source_shape(index)
+                .map_or(0, |shape| shape.frames)
+        })
     })
 }
 
@@ -3984,19 +4002,6 @@ pub mod native_staging {
     pub fn source_pcm(handle: u32, value: f32) -> bool {
         super::with_host_mut(handle, false, |host| {
             host.source_pcm_mut().map(|pcm| pcm.fill(value)).is_some()
-        })
-    }
-
-    /// Run one structural command frame through the control plane of the host `handle` names
-    /// (#1381a gates 2 and 4), which publishes the successor plan. The result is the control
-    /// plane's refusal rendered as its debug text, or `None` for an unknown handle.
-    #[cfg(feature = "test-support")]
-    pub fn structural_command(handle: u32, request: &[u8]) -> Option<Result<Vec<u8>, String>> {
-        super::with_host_mut(handle, None, |host| {
-            Some(
-                host.structural_command_for_test(request)
-                    .map_err(|error| format!("{error:?}")),
-            )
         })
     }
 
