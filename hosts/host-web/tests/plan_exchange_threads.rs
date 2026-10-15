@@ -23,8 +23,8 @@ use std::alloc::System;
 use std::sync::Mutex;
 
 use host_web::{
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RenderLockedAllocator, WATERMARK_BYTES, WebBootOptions,
-    companion_drops_on_this_thread, native_staging,
+    AudioWorkletEngineHost, RESULT_INVALID_ARGUMENT, RESULT_OK, RenderLockedAllocator,
+    WATERMARK_BYTES, WebBootOptions, companion_drops_on_this_thread, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
@@ -95,9 +95,13 @@ fn add_muted_track(model: &SessionModel, id: &str) -> [SessionEdit; 2] {
 }
 
 fn transaction_bytes(edits: &[SessionEdit], revision: u64) -> Vec<u8> {
+    transaction_bytes_with_id(edits, revision, 1)
+}
+
+fn transaction_bytes_with_id(edits: &[SessionEdit], revision: u64, request_id: u64) -> Vec<u8> {
     let codec = ProtocolCodec::default();
     let frame = TypedCommandFrame {
-        request_id: RequestId::new(1).expect("nonzero request"),
+        request_id: RequestId::new(request_id).expect("nonzero request"),
         expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
         payload: CommandPayload::SessionTransactionApply(edits),
     };
@@ -482,6 +486,72 @@ fn a_rebuild_adds_the_longest_id_and_feeds_the_new_source() {
             .any(|sample| *sample != 0.0);
         assert!(heard, "the new source is heard");
         assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    })
+    .join()
+    .expect("the run completes");
+}
+
+/// #1398 gate 1b, the browser twin of the C ABI's
+/// `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`: a structural edit
+/// made after render has adopted the previous one's plan, but before the epoch atomic names it, is
+/// admitted against the running plan. Boot, commit a structural edit (a muted track), and render
+/// the block that adopts it as a mistimed block, which swaps plans and is refused before the
+/// atomic is published. The second structural edit, through the browser's control path, returns
+/// OK, and the next block adopts its plan.
+///
+/// Test value: red if the lag refusal is kept on the browser path (the base returns
+/// `BACKPRESSURE`), or if the browser's budget does not charge #1398 D1's tables and so refuses
+/// the second plan; the C ABI's gate 1 tests do not boot the browser.
+#[test]
+fn a_structural_edit_inside_the_swap_window_is_admitted_on_the_browser_path() {
+    let _turn = TURN.lock().expect("the turn");
+    std::thread::spawn(|| {
+        let mut host = AudioWorkletEngineHost::boot(document().as_bytes(), options())
+            .unwrap_or_else(|_| panic!("the fixture boots"));
+        let model = parse_session_json(&document()).expect("the fixture parses");
+        let command = |host: &mut AudioWorkletEngineHost, request: &[u8]| {
+            let length = u32::try_from(request.len()).expect("a small frame");
+            host.control_request_mut(length)
+                .expect("a control frame fits the staging")[..request.len()]
+                .copy_from_slice(request);
+            let result = host.control_command(length, None);
+            (result, host.control_response().to_vec())
+        };
+
+        let first = transaction_bytes(&add_muted_track(&model, "a-muted"), model.revision);
+        let (result, response) = command(&mut host, &first);
+        assert_eq!(result, RESULT_OK, "the first structural edit publishes");
+        assert_rebuild_applied(&response, model.revision + 1);
+        assert_eq!(host.active_plan_epoch_for_test(), Some(0));
+
+        // The block that adopts it, mistimed: the owner swaps, then refuses the block, so the
+        // epoch atomic still names the boot plan.
+        assert!(
+            !host.render_plan_at_for_test(1),
+            "a mistimed block is refused"
+        );
+        assert_eq!(
+            host.active_plan_epoch_for_test(),
+            Some(1),
+            "the owner adopted the first plan"
+        );
+
+        // Inside the window: the second structural edit is admitted against the running plan.
+        let second =
+            transaction_bytes_with_id(&add_muted_track(&model, "b-muted"), model.revision + 1, 2);
+        let (result, response) = command(&mut host, &second);
+        assert_eq!(result, RESULT_OK, "the window's structural edit publishes");
+        assert_rebuild_applied(&response, model.revision + 2);
+
+        // The next block adopts its plan.
+        assert_eq!(host.render_next(), RESULT_OK);
+        assert_eq!(
+            host.active_plan_epoch_for_test(),
+            Some(2),
+            "the window's plan renders"
+        );
+        assert_eq!(host.service(None), RESULT_OK);
+        assert_eq!(host.dispose(), RESULT_OK);
     })
     .join()
     .expect("the run completes");

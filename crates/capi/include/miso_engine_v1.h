@@ -286,6 +286,14 @@ typedef struct miso_engine_v1_compile_limits {
     uint64_t maximum_sources;
     uint64_t maximum_routes;
     uint64_t maximum_effects;
+    /* Sizing rule for the resource caps from here to maximum_capi_retained_bytes (#1398). A
+       structural transaction is admitted against every plan the session still holds plus its
+       own: the running plan, and at most a withdrawn candidate and its successor, so up to three
+       plans live at once. Set each of these caps to at least three times one plan's row (the
+       matching field of miso_engine_v1_plan_resource_report, for the largest session the host
+       will compile), and maximum_graph_session_plus_plan_bytes to that plus three compiled
+       models. A cap below that refuses a transaction with a resource diagnostic before it
+       commits; it is never backpressure, and nothing is acknowledged. */
     uint64_t maximum_graph_session_plus_plan_bytes;
     uint64_t maximum_source_total_bytes;
     uint64_t maximum_source_overhead_bytes;

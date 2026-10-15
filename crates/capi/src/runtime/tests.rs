@@ -1705,6 +1705,11 @@ fn control_outcome<T, E: core::fmt::Debug>(result: &Result<T, E>) -> String {
 /// report row, skipped because it matched the lagging atomic, kept the table full, so every later
 /// structural command returned `Backpressure`.
 ///
+/// #1398 gate 1: the structural command inside the window is admitted against the running plan
+/// and commits there, while the report table holds three rows (the lagging atomic's, the running
+/// plan's and the new candidate's); the next round's swapping block adopts its plan. Red if the
+/// lag refusal is kept or the report table is a row short (`Backpressure` in the window).
+///
 /// Issue #1273 gate 4: the trigger adds and removes a muted track (`UpsertTrack`), so every swap
 /// carries the source's ring, and the source is fed twice a round: after the commit, while the
 /// candidate is pending, and inside the window. Both submits must land in the carried ring. Test
@@ -1827,6 +1832,14 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
                 .find_map(|(epoch, report)| (*epoch == old_epoch).then_some(*report)),
             Some(window_query)
         );
+        assert_eq!(
+            window_rows
+                .iter()
+                .map(|(epoch, _)| *epoch)
+                .collect::<Vec<_>>(),
+            vec![old_epoch, new_epoch, new_epoch + 1],
+            "round {round}: the lagging row, the running plan's and the window's candidate"
+        );
 
         // Second half of `PlanState::render`: publish the epoch that rendered the block.
         children
@@ -1855,10 +1868,10 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             (
                 "ok".to_owned(),
                 "ok".to_owned(),
-                // The window's structural command waits for the lagging row (transient
-                // backpressure), acks nothing, and commits nothing.
-                "Backpressure".to_owned(),
-                revision,
+                // #1398: the window's structural command is admitted against the running plan
+                // and commits; the same request after the window is its replay.
+                "ok".to_owned(),
+                revision + 1,
                 "ok".to_owned(),
                 new_epoch,
                 Vec::new(),
@@ -1867,22 +1880,39 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             ),
             "round {round}: a control call inside the swapping render call"
         );
+        assert_eq!(
+            children.session.test_controller().session().revision().0,
+            revision + 1,
+            "round {round}: the replay commits nothing more"
+        );
         revision += 1;
     }
+    // The last window's candidate is adopted at the next block.
+    let last = children.session.test_pending_providers()[0].test_epoch();
+    feed(&mut children, "last candidate");
+    children
+        .plan
+        .render(
+            5 * 128,
+            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+        )
+        .expect("adopting block");
+    assert_eq!(children.plan.owner().active_epoch().0, last);
 }
 
-/// Issue #1042, attempt 2: a valid structural edit inside the swap window is backpressured, never
-/// reported as a compile rejection.
+/// Issue #1042, attempt 2, and #1398 gate 1: a valid structural edit inside the swap window is
+/// admitted against the running plan, never refused.
 ///
-/// The peak check pairs a candidate with the resource row of the epoch the atomic names. Inside
-/// the window that is the retired plan, not the one rendering. The limit here admits exactly the
-/// pairs that really coexist (nine EQs with eight, either way round) and refuses nine with nine.
-/// The test removes one EQ and puts it back twice: while the eight-EQ plan is still pending, and
-/// inside the window after the swap. Before the fix, both calls paired nine EQs with nine and
-/// returned `CompileRejected(effect.resource.limit)`; the same request was admitted once the
-/// render call published its epoch.
+/// The limit here admits exactly the pairs that really coexist (nine EQs with eight, either way
+/// round) and refuses nine with nine. The test removes one EQ and puts it back twice: while the
+/// eight-EQ plan is still pending, and inside the window after the swap. While the eight-EQ plan
+/// is pending the edit waits for it (one candidate at a time until #1310), as backpressure, not a
+/// compile rejection. Inside the window the nine-EQ plan is reclaimed, so the edit sits beside the
+/// eight-EQ plan alone and is admitted; its plan is adopted at the next block, and the report table
+/// holds three rows meanwhile. Red if the lag refusal is kept (`Backpressure`), or if the
+/// admission pairs the candidate with the atomic's retired row (`effect.resource.limit`).
 #[test]
-fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
+fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
     // The fixture's EQ is a console slot on all nine tracks, which a track cannot drop (decision
     // 12), so the edited EQ is a tenth instance: an insert on the first track. Console session
     // edits are #1094's.
@@ -1962,36 +1992,50 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
         )
         .expect("swapping block");
     assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
-    let compiled_before = test_lifecycle_counters().candidate_plan_constructed;
     let window = children.session.command(&request, 4_096);
-    // Refused before compiling: the report table is full while the atomic lags.
-    let window_compiles = test_lifecycle_counters().candidate_plan_constructed - compiled_before;
     let window_revision = children.session.test_controller().session().revision().0;
+    let window_rows = children
+        .session
+        .test_transaction_snapshot()
+        .resource_rows
+        .iter()
+        .map(|(epoch, _)| *epoch)
+        .collect::<Vec<_>>();
     // Second half: publish the epoch that rendered the block.
     children
         .plan
         .test_active_epoch()
         .store(report.active_epoch.0, Ordering::Release);
+    // The same request again is the window's replay.
     let after = children.session.command(&request, 4_096);
     assert_eq!(
         (
             control_outcome(&pending),
             control_outcome(&window),
-            window_compiles,
             window_revision,
+            window_rows,
             control_outcome(&after),
             children.session.test_controller().session().revision().0,
         ),
         (
             "Backpressure".to_owned(),
-            "Backpressure".to_owned(),
-            0,
-            43,
+            "ok".to_owned(),
+            44,
+            vec![0, 1, 2],
             "ok".to_owned(),
             44
         ),
         "the eight-EQ plan rendering beside nine EQs fits; only a retired row says it does not"
     );
+    // The window's plan is adopted at the next block.
+    children
+        .plan
+        .render(
+            256,
+            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+        )
+        .expect("adopting block");
+    assert_eq!(children.plan.owner().active_epoch().0, 2);
 }
 
 /// Issue #1042 on one thread: a *rejected* render call can open the window too.
@@ -2026,8 +2070,16 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
             protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
         )
     };
-    let mut request = structural(1, 42);
-    assert_eq!(command_c(c_session, &request).0, crate::RESULT_OK);
+    // #1398 gate 1: each round publishes a candidate, a rejected render call swaps to it, and a
+    // structural command inside that window is admitted against the running plan and commits; the
+    // next good block adopts its plan. The retry of the same request is its replay.
+    let mut request_id = 1;
+    let mut revision = 42;
+    assert_eq!(
+        command_c(c_session, &structural(request_id, revision)).0,
+        crate::RESULT_OK
+    );
+    revision += 1;
 
     for round in 1..=4_u64 {
         let next_sample = round * 128;
@@ -2037,11 +2089,24 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
         assert_eq!(pending_before, 1, "round {round}: a candidate is published");
         let rejected = crate::ffi::test_render(c_plan, next_sample + 1, &output);
         let (lossy, _) = event_c(c_session, crate::EVENT_LANE_LOSSY);
-        request = structural(round + 1, 42 + round);
+        request_id += 1;
+        let request = structural(request_id, revision);
         let (window, canary) = command_c(c_session, &request);
-        let (revision, _, provider, pending) = crate::ffi::test_session_state_summary(c_session);
+        let (window_revision, _, provider, pending) =
+            crate::ffi::test_session_state_summary(c_session);
+        let window_rows = crate::ffi::test_transaction_snapshot(c_session)
+            .resource_rows
+            .len();
         let good = crate::ffi::test_render(c_plan, next_sample, &output);
         let (after, _) = command_c(c_session, &request);
+        let (after_revision, _, after_provider, after_pending) =
+            crate::ffi::test_session_state_summary(c_session);
+        // Drain the window's `SESSION_COMMITTED`, then publish the next round's candidate.
+        let (window_event, _) = event_c(c_session, crate::EVENT_LANE_RELIABLE);
+        revision += 1;
+        request_id += 1;
+        let (next, _) = command_c(c_session, &structural(request_id, revision));
+        revision += 1;
         assert_eq!(
             (
                 reliable,
@@ -2049,25 +2114,44 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
                 lossy,
                 window,
                 canary == vec![0xa5; 4_096],
-                revision,
+                window_revision,
                 provider,
                 pending,
-                good,
-                after,
+                window_rows,
             ),
             (
                 crate::RESULT_OK,
                 crate::RESULT_RENDER_REJECTED,
                 crate::RESULT_OK,
-                crate::RESULT_BACKPRESSURE,
-                true,
-                revision_before,
+                crate::RESULT_OK,
+                false,
+                revision_before + 1,
                 provider_before + 1,
+                1,
+                3,
+            ),
+            "round {round}: control after a rejected, swapping render call"
+        );
+        assert_eq!(
+            (
+                good,
+                after,
+                after_revision,
+                after_provider,
+                after_pending,
+                window_event,
+                next,
+            ),
+            (
+                crate::RESULT_OK,
+                crate::RESULT_OK,
+                revision_before + 1,
+                provider_before + 2,
                 0,
                 crate::RESULT_OK,
                 crate::RESULT_OK,
             ),
-            "round {round}: control after a rejected, swapping render call"
+            "round {round}: the window's plan is adopted at the next block"
         );
     }
     crate::ffi::test_plan_destroy(c_plan);

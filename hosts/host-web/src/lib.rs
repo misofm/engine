@@ -2337,6 +2337,22 @@ impl AudioWorkletEngineHost {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
     }
 
+    /// Render one block through the plan owner at `absolute_sample` rather than the host's clock,
+    /// and nothing else (#1398 gate 1b); `false` when the owner refused it or the host is not
+    /// ready. A mistimed block adopts a published successor before the owner checks its time, and
+    /// is refused without publishing the epoch atomic: the window in which render has swapped
+    /// plans and the control plane has not seen the epoch. The host's own records (clock, shape,
+    /// status) do not move.
+    #[cfg(feature = "test-support")]
+    pub fn render_plan_at_for_test(&mut self, absolute_sample: u64) -> bool {
+        let quantum = self.status.quantum_frames as usize;
+        let (Some(plan), Some(buffers)) = (self.plan.as_mut(), self.buffers.as_mut()) else {
+            return false;
+        };
+        PlanarBufferMut::try_new(&mut buffers.output_pcm, 2, quantum, quantum)
+            .is_ok_and(|output| plan.render(absolute_sample, output).is_ok())
+    }
+
     /// The staging buffer for one control command frame of `len` bytes (issue #1562a D1), or
     /// `None` when `len` is zero or exceeds the boot's `maximum_control_frame_bytes`
     /// (16 KiB) or the host is not ready. The page writes the frame here and

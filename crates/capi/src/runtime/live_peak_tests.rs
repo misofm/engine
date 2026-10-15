@@ -46,9 +46,10 @@ fn verdict(
     models: CompiledModelAdmission,
     limits: CompileLimits,
 ) -> Result<(), String> {
+    let held = [Some(current), pending];
+    let held = held.iter().flatten().copied().collect::<Vec<_>>();
     validate_live_peak(
-        current,
-        pending,
+        &held,
         models,
         LiveCatalogAdmission::default(),
         limits.into(),

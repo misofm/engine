@@ -248,3 +248,66 @@ expects. Each fact in Context still holds; only the lines moved.
 
 **Realtime-path edits.** None under `crates/engine/src/realtime`. The capacities are control-side
 configuration (`PlanExchangeConfig`), read at boot.
+
+## Decision record: #1398 (batch 15a)
+
+**Shipped.**
+- D1 in `crates/control-plane/src/compile.rs`: `REPORT_ROWS = 4`, `PENDING_PROVIDERS = 2`,
+  `RETIRED_PROVIDERS = 2`, `RETIREMENT_CAPACITY = 3` (exchange and its resource report alike). The
+  capi fixed rows charge the pending and retired lists as two rows (they are two allocations) and
+  the report table at 4.
+- D2: the lag refusal is deleted (`control.rs`), not mapped to another error.
+- D3: `PublicationFull` and `RetirementFull` at reservation, and a full report table or pending
+  list at commit, return `CommandError::Internal` with a `debug_assert!`; `Incompatible`,
+  `EpochExhausted` and `plan_alive == false` stay `BACKPRESSURE`.
+- D4: `validate_replacement_peak` and `validate_live_peak` take every held plan
+  (`SessionState::held_epochs`: the running plan, then every pending candidate, from the report
+  table's provider rows, never the atomic's; a fixed array, no allocation) and every compiled model
+  (`compiled_model_admission_over`). The replacement admission sums every D4 term including
+  `maximum_replacement_peak_bytes`; the capi term is the newest held row plus every older held
+  epoch's `epoch_retained` plus the candidate's epoch and prepared-protocol rows (the live
+  admission's rule). `AdmissionPeak::{Single, WithReprepare}` is added; the command path passes
+  `Single`. `WithReprepare` checks a second peak of the running plan beside the candidate twice
+  (each copy charged the candidate's allocated source bytes and its epoch plus prepared-protocol
+  capi rows: an upper bound). The largest-allocation check folds every held row.
+- D5: the header's sizing paragraph sits on `maximum_graph_session_plus_plan_bytes`;
+  `docs/C_ABI_V1_QUALIFICATION.md` has a #1398 section. No reference limit was raised: the
+  nine-track EQ session's rows are graph 316,350, source total 12,198, capi 161,258 bytes against
+  caps of 100,000,000 / 10,000,000 / 10,000,000.
+- Gate 1b's accessor is `AudioWorkletEngineHost::render_plan_at_for_test` (`hosts/host-web/src/lib.rs`).
+
+**Departures.**
+- The one-candidate refusal (`if !self.pending_providers.is_empty()`, #1310's) moved from after the
+  admission to just before it. With D4 summing the pending plan, an edit made while a candidate
+  waits would otherwise be compile-rejected (permanent) where it was backpressure (retryable), and
+  `a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan` pins that pending
+  case as `Backpressure`. #1310 replaces that line.
+- Gate 1b holds the window with a mistimed render call (the owner adopts the successor, then
+  refuses the block, so the atomic is not published), through one test-support accessor that uses
+  only `PlanState::render`. `PlanState::test_owner_mut`/`test_active_epoch` are behind
+  `control-plane/test-support`, which host-web's `test-support` feature does not enable; enabling
+  it would turn on the control plane's fault hooks and lifecycle observers in every host-web test
+  and needs a `Cargo.toml` edit outside the authorized paths.
+- `crates/capi/src/runtime/live_peak_tests.rs`: mechanical caller update for the slice signature.
+- Gate 1's third test now publishes a fresh candidate after each round (the window's plan is
+  adopted by the good block, so the next round needs one); its canary assertion is now `false`,
+  because an admitted command writes its response.
+
+**Gates.**
+- Gate 1: `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`,
+  `a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan` (renamed),
+  `a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live` (`crates/capi/src/runtime/tests.rs`):
+  pass; all three red with the lag refusal restored.
+- Gate 1b: `a_structural_edit_inside_the_swap_window_is_admitted_on_the_browser_path`
+  (`hosts/host-web/tests/plan_exchange_threads.rs`): pass; red (`BACKPRESSURE`) with the lag
+  refusal restored.
+- Gate 2: `compile::admission_tests::the_replacement_admission_sums_every_held_plan_and_model`.
+- Gate 3: `compile::admission_tests::a_warm_candidate_is_admitted_against_its_reprepare_peak`.
+- Gate 4/5: `cargo test --locked -p capi` (incl. `resource_lifecycle`, `plan_swap_race`),
+  `-p control-plane --all-features`, `-p host-web --all-features`; `audit capi` (pcm_digest
+  `bf7dcedd1d92621f`, 0 violations; `tools/audit/src/capi.rs` unchanged); `check-capi-abi.sh` and
+  `--self-test`; `check-workspace-policy.sh`; `realtime_policy`; fmt; clippy on the three crates:
+  all pass.
+
+**Measured.** Nine-track EQ reference session `capi_retained_bytes` 159,354 -> 161,258 (+1,904,
+#1398 D1's tables). No test pinned that row; no browser pin moved.

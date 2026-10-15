@@ -372,6 +372,19 @@ pub fn test_lifecycle_counters() -> TestOwnerCounters {
     TEST_OWNER_STATE.with(core::cell::Cell::get)
 }
 
+/// Every plan the control plane holds unreclaimed, the running plan first (#1398 D4), without an
+/// allocation.
+pub(crate) struct HeldEpochs {
+    rows: [LiveEpochResources; 1 + PENDING_PROVIDERS],
+    len: usize,
+}
+
+impl HeldEpochs {
+    pub(crate) fn as_slice(&self) -> &[LiveEpochResources] {
+        &self.rows[..self.len]
+    }
+}
+
 /// One session's control plane: the control-protocol controller, the provider epochs, the plan
 /// exchange's control ends and the shared plan projection, generic over the adapter (#1309 D4).
 pub struct SessionState<A: ControlAdapter> {
@@ -1387,25 +1400,40 @@ where
             .values
     }
 
-    /// The resource row a structural candidate must fit beside (issue #1042).
+    /// Every plan the control plane holds unreclaimed, as the admissions read them (#1398 D4): the
+    /// running plan first, then every pending or withdrawn candidate, the newest last.
     ///
-    /// That is the newest plan, the one still live when the candidate would be published: the
-    /// pending candidate's while it waits for its swap, else the current provider's. With nothing
-    /// pending and the atomic caught up, this is the rendering plan's row, as before. Pairing a
-    /// candidate with an older row would report a valid edit as a compile rejection whenever the
-    /// two plans could never coexist.
-    pub(crate) fn replacement_base_report(&self) -> Result<PlanResources, CommandError> {
-        let newest = self
-            .pending_providers
-            .last()
-            .map_or(self.providers.epoch, |provider| provider.epoch);
-        self.shared
+    /// Each row is the provider's own epoch's, read from the report table, never the atomic's: a
+    /// plan render has displaced is reclaimed before any admission runs (`service`), so a row the
+    /// atomic still names while it lags is not a plan the control plane holds (#1042).
+    pub(crate) fn held_epochs(&self) -> Result<HeldEpochs, CommandError> {
+        let reports = self
+            .shared
             .reports
             .lock()
-            .map_err(|_| CommandError::Internal)?
-            .iter()
-            .find_map(|(epoch, report)| (*epoch == newest).then_some(PlanResources::from(*report)))
-            .ok_or(CommandError::Internal)
+            .map_err(|_| CommandError::Internal)?;
+        let row = |provider: &ProviderEpoch| {
+            reports
+                .iter()
+                .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
+                .map(|report| LiveEpochResources {
+                    report: PlanResources::from(report),
+                    capi: provider.capi,
+                })
+                .ok_or(CommandError::Internal)
+        };
+        if self.pending_providers.len() > PENDING_PROVIDERS {
+            return Err(CommandError::Internal);
+        }
+        // No allocation: the live arm's admission runs it too.
+        let mut rows = [row(&self.providers)?; 1 + PENDING_PROVIDERS];
+        for (slot, provider) in rows[1..].iter_mut().zip(&self.pending_providers) {
+            *slot = row(provider)?;
+        }
+        Ok(HeldEpochs {
+            rows,
+            len: 1 + self.pending_providers.len(),
+        })
     }
 
     /// Brings the provider epochs and the resource-report table up to the render thread.
@@ -1595,14 +1623,6 @@ where
                         )));
                     }
                 }
-                // Issue #1042: while the atomic lags the providers, a render call has swapped plans
-                // but not yet published the epoch. The retired plan's row stays for any-thread
-                // readers, so the report table is full and no candidate could be admitted: refuse
-                // before compiling, with retryable backpressure rather than a wasted compile. The
-                // live arm above adds no row, so it skips this (#1053 D7).
-                if self.shared.active_epoch.load(Ordering::Acquire) < self.providers.epoch {
-                    return Err(CommandError::Backpressure);
-                }
                 #[cfg(feature = "test-support")]
                 if self.take_test_fault(TestStructuralFaultPhase::BeforeRuntimePrepare) {
                     drop(prepared);
@@ -1735,11 +1755,22 @@ where
                         return Err(CommandError::Backpressure);
                     }
                 }
+                // One candidate at a time until #1310 supersedes: checked before the admission,
+                // which sums every held plan (#1398 D4), so an edit made while a candidate waits
+                // is retryable backpressure and never a compile rejection that the candidate's
+                // adoption would undo.
+                if !self.pending_providers.is_empty() {
+                    return Err(CommandError::Backpressure);
+                }
+                // #1398 D4: the candidate beside every plan the control plane holds unreclaimed,
+                // and every model it holds, checked before anything is reserved or committed.
                 validate_replacement_peak(
-                    self.replacement_base_report()?,
-                    resources,
-                    carried,
-                    prospective_capi,
+                    self.held_epochs()?.as_slice(),
+                    ProspectivePlan {
+                        resources,
+                        carried,
+                        capi: prospective_capi,
+                    },
                     compiled_model_admission(
                         self.controller.session().compiled(),
                         prepared
@@ -1749,6 +1780,7 @@ where
                             .ok_or(CommandError::Internal)?,
                     )
                     .map_err(CommandError::CompileRejected)?,
+                    AdmissionPeak::Single,
                     self.limits,
                 )
                 .map_err(CommandError::CompileRejected)?;
@@ -1757,9 +1789,6 @@ where
                     drop(candidate_plan);
                     drop(candidate_provider);
                     drop(prepared);
-                    return Err(CommandError::Backpressure);
-                }
-                if !self.pending_providers.is_empty() {
                     return Err(CommandError::Backpressure);
                 }
                 #[cfg(feature = "test-support")]
@@ -1774,14 +1803,26 @@ where
                 {
                     Ok(reservation) => reservation,
                     Err(error) => {
-                        let returned = match error {
+                        // #1398 D3: the exchange's publication cells and its retirement credits
+                        // (#1398 D1) hold every plan a candidate can find there, so a full one is
+                        // an accounting fault, not backpressure. An incompatible envelope and an
+                        // exhausted epoch stay as they were.
+                        let (returned, refusal) = match error {
                             PlanReplacementReservationError::PublicationFull(plan)
-                            | PlanReplacementReservationError::RetirementFull(plan)
-                            | PlanReplacementReservationError::Incompatible(plan)
-                            | PlanReplacementReservationError::EpochExhausted(plan) => plan,
+                            | PlanReplacementReservationError::RetirementFull(plan) => {
+                                debug_assert!(
+                                    false,
+                                    "#1398 D1 sizes the exchange for every candidate"
+                                );
+                                (plan, CommandError::Internal)
+                            }
+                            PlanReplacementReservationError::Incompatible(plan)
+                            | PlanReplacementReservationError::EpochExhausted(plan) => {
+                                (plan, CommandError::Backpressure)
+                            }
                         };
                         drop(ObservedCandidatePlan::returned(returned));
-                        return Err(CommandError::Backpressure);
+                        return Err(refusal);
                     }
                 };
                 let reservation = ObservedReservation::new(reservation);
@@ -1801,10 +1842,16 @@ where
                     .reports
                     .lock()
                     .map_err(|_| CommandError::Internal)?;
+                // #1398 D3: the report table and the pending list hold every row a candidate can
+                // meet (#1398 D1), so a full one is an accounting fault.
                 if reports.len() == reports.capacity()
                     || self.pending_providers.len() == self.pending_providers.capacity()
                 {
-                    return Err(CommandError::Backpressure);
+                    debug_assert!(
+                        false,
+                        "#1398 D1 sizes the report table and the pending list"
+                    );
+                    return Err(CommandError::Internal);
                 }
 
                 #[cfg(feature = "test-support")]
@@ -2454,28 +2501,13 @@ where
                 host_core::StagedCatalog::Full(full) => full.resources(),
             },
         );
-        let (current, pending) = {
-            let reports = self
-                .shared
-                .reports
-                .lock()
-                .map_err(|_| CommandError::Internal)?;
-            let row = |provider: &ProviderEpoch| {
-                reports
-                    .iter()
-                    .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
-                    .map(|report| LiveEpochResources {
-                        report: PlanResources::from(report),
-                        capi: provider.capi,
-                    })
-                    .ok_or(CommandError::Internal)
-            };
-            let current = row(&self.providers)?;
-            let pending = self.pending_providers.last().map(row).transpose()?;
-            (current, pending)
-        };
-        validate_live_peak(current, pending, models, catalog_admission, self.limits)
-            .map_err(CommandError::CompileRejected)?;
+        validate_live_peak(
+            self.held_epochs()?.as_slice(),
+            models,
+            catalog_admission,
+            self.limits,
+        )
+        .map_err(CommandError::CompileRejected)?;
         Ok(catalog)
     }
 
