@@ -3830,9 +3830,13 @@ struct InsertOwnerJoin<'a> {
 }
 
 impl ChainJoin<'_> {
-    /// Whether any console slot of the strip could carry.
+    /// Whether any console slot or surviving insert of the strip could carry.
     fn may_carry(&self) -> bool {
         self.owners.iter().any(|owner| !owner.state.is_prepared())
+            || self
+                .surviving_inserts
+                .iter()
+                .any(|insert| !insert.state.is_prepared())
     }
 }
 
@@ -4469,6 +4473,30 @@ mod tests {
             }],
             sidechain: session::SidechainDeclaration::None,
         }
+    }
+
+    /// The carry program is built only when some owner may carry, and the effect carry refuses a
+    /// plan without one (`NoEffectCarryProgram`). A strip whose only non-prepared owner is a
+    /// surviving insert must therefore say it may carry; a join that looked at the console slots
+    /// alone would refuse a valid transaction with `host.carry.install`. (No swap reaches this
+    /// today: a strip present in both models also joins its fader, which is never prepared when
+    /// live controls attach, so the program is built anyway. The check defends the invariant at the
+    /// join that owns it.)
+    #[test]
+    fn a_surviving_insert_alone_makes_a_chain_join_carry() {
+        let insert = |state| super::InsertOwnerJoin {
+            id: "lim",
+            address: super::LiveEffectAddress::insert(0),
+            state,
+        };
+        let chain = |state| super::ChainJoin {
+            id: "eq0",
+            chain_changed: false,
+            owners: Vec::new(),
+            surviving_inserts: vec![insert(state)],
+        };
+        assert!(chain(super::FamilyJoin::Same).may_carry());
+        assert!(!chain(super::FamilyJoin::Prepared).may_carry());
     }
 
     /// #1280 D1: the one per-instance function says which difference is live. A compressor's

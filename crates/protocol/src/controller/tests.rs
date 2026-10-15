@@ -3224,6 +3224,52 @@ fn session_commit_reserves_reliable_event_before_replacing_store() {
     assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
 }
 
+/// An executed `BACKPRESSURE` outcome is cached like any other: a retry under the same request ID
+/// replays the identical response and executes nothing, even after the queue that refused the
+/// first attempt has room. Red if the cache stops storing `BACKPRESSURE` outcomes: the retry then
+/// executes, commits revision 8 and enqueues an event.
+#[test]
+fn a_backpressure_outcome_is_cached_and_its_retry_executes_nothing() {
+    let mut controller = controller(4);
+    let before_snapshot = controller.session().canonical_snapshot().to_owned();
+    controller
+        .queues_mut()
+        .try_enqueue_event(ReliableSlot::session_committed(
+            SessionRevision(7),
+            99,
+            id(99),
+            SessionRevision(6),
+            1,
+        ))
+        .expect("fill the reliable event queue");
+    let edits = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("retried-commit").expect("ID"),
+    }];
+    let request = || ControllerRequest {
+        request_id: id(1),
+        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+        canonical_bytes: b"backpressure-then-retry",
+        command: ControlCommand::SessionTransactionApply { edits: &edits },
+    };
+    let refused = controller.process(request());
+    assert_eq!(refused.status, StatusCode::Backpressure);
+    assert_eq!(controller.session().revision(), SessionRevision(7));
+
+    // Free the queue: an execution of the retry would now succeed.
+    let _ = controller
+        .queues_mut()
+        .try_dequeue_event()
+        .expect("the filler event");
+    let replayed = controller.process(request());
+    assert_eq!(replayed, refused, "the identical response, replayed");
+    assert_eq!(controller.session().revision(), SessionRevision(7));
+    assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
+    assert!(
+        controller.queues_mut().try_dequeue_event().is_err(),
+        "the replay enqueued no event"
+    );
+}
+
 #[test]
 fn committed_transaction_emits_typed_zero_header_id_event() {
     let mut controller = controller(4);

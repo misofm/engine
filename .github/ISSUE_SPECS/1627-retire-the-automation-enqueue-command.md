@@ -357,3 +357,7 @@ AutomationTimePast, AutomationOrderReject}`, `ReliablePayload::AutomationCancele
 per_block_automation_density, quantum_frames}`, and the sizing guide's automation queue and
 10,000-record paragraphs and the semantics guide's "Queues and telemetry" automation sentences.
 `crates/capi/tests/resource_lifecycle.rs:1119` keeps a historical comment naming the command.
+
+## Fold (batch 10 review)
+
+The deletion of `backpressure_is_cached_without_second_enqueue` took a general claim with it: an executed `BACKPRESSURE` outcome is cached, and a retry under the same request ID replays the identical frame without executing. Re-homed on `SESSION_TRANSACTION_APPLY` as `a_backpressure_outcome_is_cached_and_its_retry_executes_nothing` (`crates/protocol/src/controller/tests.rs`): a full reliable-event queue refuses the apply with `BACKPRESSURE`; the queue is freed; the same request ID retried returns the identical response, the revision and the canonical snapshot are unchanged, and no event is enqueued. Red when `process` stops caching a `BACKPRESSURE` outcome (the retry's frame differs), run once and reverted.

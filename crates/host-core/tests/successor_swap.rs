@@ -6064,10 +6064,7 @@ impl Insert {
 
 /// The lanes of one bank at `backend`.
 fn bank_width(backend: Backend) -> usize {
-    match backend {
-        Backend::Simd8 => 8,
-        _ => 4,
-    }
+    backend.width()
 }
 
 /// Whether each insert of `session` is a per-node instance (`true`) or a lane of a bank (`false`),

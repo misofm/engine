@@ -415,15 +415,19 @@ to the new committed value.
 
 The four-lane case is `ignore`d on this AVX2 host (#1017), as the #1280a cases are.
 
-**Found, not fixed.** `ChainJoin::may_carry` ignores surviving inserts, so a strip that could carry
-only inserts builds no `carry_program` for sources; the insert carry installs its own table and
-works, so nothing is wrong today, but the name says more than it checks.
+**Found, then fixed in the batch 10 review fold.** `ChainJoin::may_carry` ignored surviving
+inserts. The carry program is built only when some owner may carry, and `install_effect_carry`
+refuses a plan without one (`NoEffectCarryProgram`, surfaced as `host.carry.install`), so the
+earlier line here that nothing was wrong was wrong: a transaction whose only carryable owners were
+inserts would have been refused. See "Fold (batch 10 review)" below.
 
 ### `audit capi` digest (batch 10)
 
 The C ABI render audit commits one structural transaction after its first call (it adds a muted track, `tools/audit/src/capi.rs`). Before #1280a that swap restarted every strip with a console EQ slot; now the slots carry their state across it. So `audit capi`'s `pcm_digest` moves from `76525e7ef9e78cf4` (every batch through 9) to `9bc5ec3d8a4c223c`, measured at `f0e387307` and its parent `869ffb78b`; allocations, frees and render errors stay 0. CI checks the digest's format only.
 
 ## Decision record: #1280b (batch 10)
+
+*Superseded in part: the `apply_pending_observations` / `settle_observations` description below is replaced by the "Fold (root ruling B, batch 10)" section, and the stage's `next_block_sample` by the "Fold (batch 10 review)" section.*
 
 **Shipped.** D3 (pending Observe records) and gate 8. (D5 shipped in #1280a.)
 
@@ -477,3 +481,9 @@ Root ruled that the `settle_observations` wrappers of #1280b put the pop two cal
 - New, non-popping accessors that hand the carry the parts: `rack::ObserveTarget { queue, tap, first_sample, unbound }`, `LiveControlEffectBankStage::observe_target_mut(lane)`, `EffectControlLane::observe_queue_mut()` (effect-contract), and in graph `observe_target_at` over `EffectStageMut::into_observe_target` and `LiveControlEffect::observe_target_mut`. A record with no tap still counts in `unbound_observations` of a bank stage.
 - Departure: no new "pending lanes" table. The carry program `moves` is the plan-sized table, it does not change between the two loops, and the second loop reads the queue's count and the sample from the instance itself. So there is no new storage and the resource estimate does not move. One behavior difference: the old code settled only a move whose successor resolved; the new loop settles every move whose predecessor resolves (the predecessor never renders again either way). `can_carry_effect_lanes` already refuses a program whose successor does not resolve, so no reachable case differs.
 - Policy note: the loop iterates `moves.iter()`, not `moves`. The slice-parameter form requires that nothing names the parameter earlier in the function body, and the first loop does. `<fields>.iter()` is the same finite collection form. With `available -= 1;` removed the tool refuses the loop at `runtime.rs` (`marked realtime unbounded try_pop drain`), so the pop is judged here.
+
+## Fold (batch 10 review)
+
+- `ChainJoin::may_carry` (`crates/host-core/src/prepare.rs`) now also counts a surviving insert that is not prepared, so a strip whose only carryable owner is an insert builds the carry program that `install_effect_carry` requires. Unit test `a_surviving_insert_alone_makes_a_chain_join_carry`. Not reproducible through a swap today: a strip present in both models also joins its fader and matrix, which are `Same` or `Live` (never prepared) whenever live controls attach, and that alone builds the program. So the join, not a swap, owns the check, and the earlier "nothing is wrong today" line is corrected above.
+- One clock for the carry's Observe drain. `LiveControlEffectBankStage::next_block_sample` (a per-block store that duplicated `GraphExecutor::next_block_sample`) is deleted, and so is `rack::ObserveTarget::first_sample`. `Runtime::carry_effect_lanes` applies every retired queue's records at `predecessor_next_sample`, for a bank lane and a per-node instance alike. A stage that skipped a block's drain can no longer hold a stale clock. The #1280b window-sample assertions stay green.
+- The per-node instance keeps `unbound: None` in its `ObserveTarget`: the control plane refuses a subscription the plan cannot hold before it reaches a queue, so nothing is unbound there, and a counter nothing reads would be dead state. (A first attempt at this fold added one and was reverted.)

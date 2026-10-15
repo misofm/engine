@@ -135,7 +135,7 @@ Checked against `12d4a4f9d`.
   the authorized paths for that helper only).
 - **Dependencies.** #1280a and #1280c (gate 3's second case). Not #1280b.
 
-## Decision record: #1281 (batch 8)
+## Decision record: #1281 (batch 10)
 
 **Shipped.** An insert instance that changes representation at a swap (a per-node live-controlled
 effect to a lane of a `LiveControlEffectBankStage`, and back) carries its exact state, its control

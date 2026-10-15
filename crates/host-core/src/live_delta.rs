@@ -127,7 +127,7 @@ pub struct LiveEffectRecords<'a> {
     /// targets.
     pub records: Vec<EffectControlRecord>,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
-    /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
+    /// targets [`crate::EqTargetPreparer`] designed on the control thread from the instance's pre-commit
     /// values and `records`, in the order its owner publishes them
     /// (`EffectControlProducer::publish_candidate_targets`). `None` for every other effect, whose
     /// `records` are written as they are.

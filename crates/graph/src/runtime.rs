@@ -1275,13 +1275,14 @@ impl LiveControlEffect {
     }
 
     /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
-    /// queue, its tap, and `sample`, the first sample of the block it would have rendered next.
-    /// Pops nothing; the carry pops in a loop of its own. `None` when the instance holds no queue.
-    fn observe_target_mut(&mut self, sample: u64) -> Option<rack::ObserveTarget<'_>> {
+    /// queue and its tap. Pops nothing; the carry pops in a loop of its own. `None` when the
+    /// instance holds no queue.
+    fn observe_target_mut(&mut self) -> Option<rack::ObserveTarget<'_>> {
         Some(rack::ObserveTarget {
             queue: self.control.observe_queue_mut()?,
             tap: self.observation.as_deref_mut(),
-            first_sample: sample,
+            // The control plane refuses a subscription the plan cannot hold (no observation
+            // capacity, or an undeclared tap) before it reaches a queue, so nothing is unbound here.
             unbound: None,
         })
     }
@@ -4438,22 +4439,19 @@ impl<'a> EffectStageMut<'a> {
     }
 }
 
-/// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and the first
-/// sample of the block it would have rendered next (`node_sample` for a per-node instance, the
-/// bank stage's own for a lane). Pops nothing (#1280 D3).
+/// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and unbound
+/// counter, if the owner keeps one. Pops nothing (#1280 D3). The first sample of the block it would have rendered next is
+/// the predecessor executor's, one clock for a lane and a per-node instance alike.
 fn observe_target_at(
     units: &mut [crate::runtime::RuntimeUnit],
     site: crate::GraphEffectSite,
-    node_sample: u64,
 ) -> Option<rack::ObserveTarget<'_>> {
     match site {
         crate::GraphEffectSite::Lane(at) => {
             let (chain, slot, lane) = effect_lane_mut(units, at)?;
             effect_stage_mut(chain, slot)?.into_observe_target(lane)
         }
-        crate::GraphEffectSite::Node(unit) => {
-            effect_node_mut(units, unit)?.observe_target_mut(node_sample)
-        }
+        crate::GraphEffectSite::Node(unit) => effect_node_mut(units, unit)?.observe_target_mut(),
     }
 }
 
@@ -5046,17 +5044,12 @@ impl crate::runtime::Runtime {
         // over the same program, so each pop is bounded where it stands: the queue's count at
         // entry, one pass per move.
         for step in moves.iter() {
-            let Some(target) = observe_target_at(
-                &mut predecessor.units,
-                step.predecessor,
-                predecessor_next_sample,
-            ) else {
+            let Some(target) = observe_target_at(&mut predecessor.units, step.predecessor) else {
                 continue;
             };
             let rack::ObserveTarget {
                 queue,
                 mut tap,
-                first_sample,
                 unbound,
             } = target;
             let mut available = queue.available_at_entry();
@@ -5068,7 +5061,11 @@ impl crate::runtime::Runtime {
                     // the drain bounded if a malformed test double violates that invariant.
                     break;
                 };
-                if !effect_contract::apply_observe(record, first_sample, tap.as_deref_mut()) {
+                if !effect_contract::apply_observe(
+                    record,
+                    predecessor_next_sample,
+                    tap.as_deref_mut(),
+                ) {
                     unapplied = unapplied.saturating_add(1);
                 }
             }

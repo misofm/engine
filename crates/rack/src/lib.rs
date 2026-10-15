@@ -1248,8 +1248,6 @@ pub struct ObserveTarget<'a> {
     pub queue: &'a mut Consumer<EffectControlRecord>,
     /// The lane's observation tap, if its plan declares observation capacity.
     pub tap: Option<&'a mut ObservationLane>,
-    /// The first sample of the block the lane would have rendered next.
-    pub first_sample: u64,
     /// Where a record the lane has no tap for is counted, when the owner keeps such a count.
     pub unbound: Option<&'a mut u64>,
 }
@@ -1340,10 +1338,6 @@ pub struct LiveControlEffectBankStage {
     staged_spans: usize,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
     unbound: u64,
-    /// The first sample of the block after the last one this stage drained: where the stage's next
-    /// block would apply a record still queued, and so where a plan swap's carry applies it
-    /// (#1280 D3). `None` until the stage has drained a block.
-    next_block_sample: Option<u64>,
     /// One bit per lane, set when the lane's last restored payload had left and right sections that
     /// differ (clear for a lane never restored): the `RESTORED` term of the witness, held as
     /// [`EffectBankStage`] holds it and set by a plan swap's carry. A bank has at most eight
@@ -1478,7 +1472,6 @@ impl LiveControlEffectBankStage {
             samples,
             staged_spans: 0,
             unbound: 0,
-            next_block_sample: None,
             unrestored: 0,
             layout,
             carry_refused: 0,
@@ -1967,7 +1960,6 @@ impl LiveControlEffectBankStage {
             self.offsets[lane + 1] = packed as u32;
         }
         self.staged_spans = packed;
-        self.next_block_sample = Some(first_sample.saturating_add(u64::from(self.quantum)));
         let mut observations = self.observations.as_deref_mut();
         let mut unbound = 0_u64;
         for (index, queue) in self.observe_queues.iter_mut() {
@@ -1993,8 +1985,9 @@ impl LiveControlEffectBankStage {
     }
 
     /// The parts of lane `lane`'s pending-`Observe` drain a plan swap's carry needs (#1280 D3):
-    /// the lane's queue, its observation tap, the sample its next block would have started at,
-    /// and this stage's unbound counter. `None` when the lane has no queue.
+    /// the lane's queue, its observation tap and this stage's unbound counter. The sample its next
+    /// block would have started at is the executor's, which the carry already holds. `None` when
+    /// the lane has no queue.
     ///
     /// The predecessor never renders again, so an acknowledged subscribe admitted after its last
     /// block would be lost with the retired queue unless the carry applies it. The carry pops the
@@ -2012,7 +2005,6 @@ impl LiveControlEffectBankStage {
                 .as_deref_mut()
                 .and_then(|lanes| lanes.get_mut(lane))
                 .and_then(Option::as_mut),
-            first_sample: self.next_block_sample.unwrap_or(0),
             unbound: Some(&mut self.unbound),
         })
     }
