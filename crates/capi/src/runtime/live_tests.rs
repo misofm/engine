@@ -4630,6 +4630,98 @@ fn a_builtin_automation_the_rows_refuse_is_refused_before_any_ack() {
     }
 }
 
+/// #1645 fold. On a playing engine whose `eq0` stores an HPF ride from 100 to 900 Hz under a static
+/// 1 kHz LPF, a `SET_CONTROL` that moves the static LPF to 500 Hz (the automation table unchanged)
+/// is refused with the compile rejection preparation gives (`control.automation.order`): the
+/// revision, the committed model and the reliable lane do not move, no candidate is prepared, and
+/// the next blocks are bit-identical to an engine that never received it. A move to 2 kHz commits
+/// live.
+///
+/// Red if the classifier (its fast path included) re-checks the order rule only when the
+/// automation table changes: the edit commits live, acked, and its next rebuild refuses it.
+#[test]
+fn a_static_lpf_edit_that_crosses_an_automated_hpf_is_refused_before_any_ack() {
+    let ride = builtin_automation_edit(
+        3,
+        session::AutomationShape::Linear,
+        session::ParameterUnit::Hz,
+        (100.0, 900.0),
+    );
+    let document = with_model(&eq_session(48_000), |model| {
+        let builtins = &mut model.tracks[0].builtins;
+        for lane in [&mut builtins.left, &mut builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 1_000.0;
+        }
+        protocol::apply_session_edit(model, &ride).expect("the ride applies");
+    });
+    let mut rig = Rig::new(&document);
+    let mut untouched = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&untouched.step()), "warm-up");
+    }
+    let lpf = |value: f32| SessionEdit::SetControl {
+        expected_effect: None,
+        address: session::ControlAddress {
+            owner: session::Owner::Strip(StableId::parse("eq0").expect("strip")),
+            section: session::Section::Builtins,
+            control: 4,
+            lane: session::ParameterChannel::Both,
+        },
+        value,
+        ramp_samples: None,
+    };
+
+    let refused = lpf(500.0);
+    let before = (refusal_state(&rig), rig.summary());
+    assert_eq!(
+        rig.apply(core::slice::from_ref(&refused)),
+        crate::RESULT_COMPILE_REJECTED
+    );
+    let mut rejected = parse_session_json(&document).expect("model");
+    protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
+    let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
+    let Err(failure) = compile_children(&rejected, limits()) else {
+        panic!("a static LPF under the HPF ride does not prepare")
+    };
+    assert_eq!(
+        rig.last_error(),
+        failure.diagnostics,
+        "the refusal is preparation's diagnostic"
+    );
+    assert!(
+        String::from_utf8_lossy(&failure.diagnostics).contains("control.automation.order"),
+        "{}",
+        String::from_utf8_lossy(&failure.diagnostics)
+    );
+    assert_eq!(
+        (refusal_state(&rig), rig.summary()),
+        before,
+        "no revision, no candidate, no event"
+    );
+    for _ in 0..3 {
+        let block = rig.block;
+        let expected = untouched.step();
+        assert!(
+            expected.iter().any(|sample| *sample != 0.0),
+            "block {block}"
+        );
+        assert_eq!(bits(&rig.step()), bits(&expected), "block {block}");
+    }
+
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(
+        rig.apply(core::slice::from_ref(&lpf(2_000.0))),
+        crate::RESULT_OK
+    );
+    let (after, _, after_epoch, pending) = rig.summary();
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 1, epoch, 0),
+        "an ordered static LPF commits live: one revision, no candidate"
+    );
+}
+
 // Issue #1552: the control list on the C ABI.
 
 /// Two tracks (each with an insert and the session's console slots), a submix that a send feeds, a

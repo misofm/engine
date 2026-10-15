@@ -264,9 +264,11 @@ pub use crate::prepare::LiveRebuild;
 ///    canonical JSON error is structural too.
 /// 2. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` or a row's
 ///    activity changed ([`controls::activity_changed`]: a strip's `matrix_mode` switch flips which
-///    of its pan and matrix rows are active, #1631) and [`controls::automation_diagnostics`]
-///    refuses one of `next`'s automations (decision 15 E1, #1335 D4, #1566 D6). An unchanged
-///    automation table over unchanged activity is never re-checked: it was prepared. An accepted
+///    of its pan and matrix rows are active, #1631) or a static HPF or LPF moved on a strip that
+///    automates either filter ([`controls::filter_statics_changed_under_automation`]: the order
+///    rule reads the static side, #1645) and [`controls::automation_diagnostics`] refuses one of
+///    `next`'s automations (decision 15 E1, #1335 D4, #1566 D6). An unchanged automation table
+///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared. An accepted
 ///    change stays live with no records, as #1260 D2 made it.
 /// 3. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
@@ -389,7 +391,9 @@ pub fn classify_live_delta_with_monitor<'a>(
     drop(masked);
 
     // Step 2.
-    if (current.automation != next.automation || controls::activity_changed(current, next))
+    if (current.automation != next.automation
+        || controls::activity_changed(current, next)
+        || controls::filter_statics_changed_under_automation(current, next))
         && !controls::automation_diagnostics(next, next.sample_rate_hz).is_empty()
     {
         return Err(LiveRebuild::AutomationTarget);
@@ -478,6 +482,8 @@ pub fn classify_live_delta_with_monitor<'a>(
 /// - `rows` is `None` (a structural edit, or any other edit);
 /// - a named row moves more than itself (`controls::changed_rows`: the session's rows, a strip's
 ///   `matrix_mode`), does not resolve in both models, or is not live;
+/// - a named row is a strip's HPF or LPF and the strip automates either filter: the order rule
+///   reads the static value (#1645), and the full classifier's step 2 judges it;
 /// - the effective values of the strips and sends the rows reach cannot be built locally;
 /// - a step of the lowering refuses: the full classifier then decides which refusal wins.
 ///
@@ -565,6 +571,15 @@ fn classify_rows<'a>(
     if current.tracks.len() != next.tracks.len()
         || current.submixes.len() != next.submixes.len()
         || current.routes.len() != next.routes.len()
+    {
+        return None;
+    }
+
+    // A static filter under filter automation can break the order rule (#1645): step 2 of the full
+    // classifier judges it. The edits leave the automation table as committed.
+    if rows
+        .iter()
+        .any(|address| controls::filter_under_automation(current, address))
     {
         return None;
     }

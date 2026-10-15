@@ -315,6 +315,19 @@ Checked against `12d4a4f9d`.
     evidence.
 - **Docs.** `docs/SESSION_SCHEMA_V1.md` names both codes, the shape rule and the curve order rule;
   the `author-session` skill's automation refusal table gains three rows at `prepare-effects`.
-- **Not done here (successor, #1660):** a static HPF/LPF edit that crosses an automated curve
-  without changing the automation still classifies live, because the classifier's step 2 runs the
-  row rule only when the automation or activity changes.
+- **Fold (batch 14a).** The gap the first pass found is closed here: a static HPF or LPF edit that
+  crosses an automated curve with the automation table unchanged classified live, so the committed
+  model could break the order rule. `controls` gains `filter_statics_changed_under_automation`
+  (a strip's static HPF or LPF bits differ and `next` automates either filter of that strip) and
+  `filter_under_automation` (an address is such a strip's HPF or LPF). The classifier's step 2
+  (`crates/host-core/src/live_delta.rs`) also runs `automation_diagnostics` on `next` when the
+  first holds, and refuses with `LiveRebuild::AutomationTarget`, as the #1631 activity path does;
+  the fast path (`classify_rows`, used by the C ABI and the browser through `control-plane`)
+  answers `None` for a row the second names, so the full classifier judges it. Tests:
+  `a_static_filter_edit_that_crosses_an_automated_curve_needs_a_rebuild` (host-core `live_delta`;
+  red without the step-2 change: `Ok([("eq0", [], None)])` against `Err(AutomationTarget)`) and
+  `a_static_lpf_edit_that_crosses_an_automated_hpf_is_refused_before_any_ack` (capi; a
+  `SET_CONTROL` of the LPF to 500 Hz under an HPF ride to 900 Hz: red without the fix, and red
+  again with the step-2 change but without the fast-path fallback, both times `RESULT_OK` (0)
+  against `RESULT_COMPILE_REJECTED` (5); a move to 2 kHz commits live). #1660 keeps only the
+  classification of input-filter edits on an automated strip, not this refusal.

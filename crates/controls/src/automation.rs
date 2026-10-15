@@ -5,7 +5,7 @@ use automation::{Segment, Shape, value_at};
 use effect_contract::ParameterUnit;
 use session::{
     Automation, AutomationSegment, AutomationShape, ControlAddress, Owner, Section, SessionModel,
-    StripRef,
+    StableId, StripRef,
 };
 
 use crate::ControlKind;
@@ -158,6 +158,49 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
         }
     }
     diagnostics
+}
+
+/// Whether `address` is a strip's static HPF or LPF and `model` stores automation on either filter
+/// of that strip: a write to it can break the input filter order rule with the automation table
+/// unchanged (#1645 fold), so a classifier judges it with [`automation_diagnostics`].
+#[must_use]
+pub fn filter_under_automation(model: &SessionModel, address: &ControlAddress) -> bool {
+    address.section == Section::Builtins
+        && (address.control == HPF_HZ || address.control == LPF_HZ)
+        && matches!(&address.owner, Owner::Strip(strip) if has_filter_automation(model, strip))
+}
+
+/// Whether `model` stores automation on the HPF or the LPF of strip `strip` (either lane).
+fn has_filter_automation(model: &SessionModel, strip: &StableId) -> bool {
+    model.automation.iter().any(|automation| {
+        let target = &automation.target;
+        matches!(&target.owner, Owner::Strip(owner) if owner == strip)
+            && target.section == Section::Builtins
+            && (target.control == HPF_HZ || target.control == LPF_HZ)
+    })
+}
+
+/// Whether a static HPF or LPF value differs between `current` and `next` on a strip that `next`
+/// automates either filter of (#1645 fold). The order rule reads a non-automated side's static
+/// value, so such an edit can break it with the automation table unchanged: a classifier re-runs
+/// [`automation_diagnostics`] on `next` when this holds. Strips are compared in order; a model
+/// whose strips differ is a structural change, which the caller refuses first.
+#[must_use]
+pub fn filter_statics_changed_under_automation(
+    current: &SessionModel,
+    next: &SessionModel,
+) -> bool {
+    current.strips().zip(next.strips()).any(|(before, after)| {
+        let moved = [
+            (before.builtins.left.hpf_hz, after.builtins.left.hpf_hz),
+            (before.builtins.left.lpf_hz, after.builtins.left.lpf_hz),
+            (before.builtins.right.hpf_hz, after.builtins.right.hpf_hz),
+            (before.builtins.right.lpf_hz, after.builtins.right.lpf_hz),
+        ]
+        .into_iter()
+        .any(|(old, new)| old.to_bits() != new.to_bits());
+        moved && has_filter_automation(next, after.id)
+    })
 }
 
 /// Whether the row takes the segment's shape (#1645 D1, the shape rule; the values are already in

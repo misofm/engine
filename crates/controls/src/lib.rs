@@ -44,7 +44,10 @@ mod tables;
 mod vca;
 mod view;
 
-pub use automation::{ControlDiagnostic, automation_diagnostics};
+pub use automation::{
+    ControlDiagnostic, automation_diagnostics, filter_statics_changed_under_automation,
+    filter_under_automation,
+};
 pub use descriptor::{
     AutomationRule, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check,
 };
