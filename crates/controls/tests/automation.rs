@@ -575,8 +575,8 @@ fn input_filter_curves_keep_the_hpf_below_the_lpf() {
         ),
         Vec::new()
     );
-    // The same LPF ride under an HPF that stays on is refused in the gap's hold: the LPF entry's
-    // segment 0 defines its value there.
+    // The same LPF ride under an HPF that stays on is refused on the LPF ride's sub-interval
+    // [480, 960): the LPF entry's segment 0 defines its value there.
     assert_eq!(
         judged_with(
             with_static_lpf(1_000.0),
@@ -591,4 +591,80 @@ fn input_filter_curves_keep_the_hpf_below_the_lpf() {
     let ride = || vec![hpf("h", vec![ramp(Linear, Hz, span, (100.0, 900.0))])];
     assert_eq!(judged_with(with_static_lpf(1_000.0), ride()), Vec::new());
     assert_eq!(judged_with(with_static_lpf(500.0), ride()), order("h", 0));
+
+    // Two constants that tie are refused: the static rule is strict. Red if `<` becomes `<=`.
+    assert_eq!(
+        judged_with(
+            with_static_lpf(1_000.0),
+            vec![hpf("h", vec![ramp(Step, Hz, span, (1_000.0, 1_000.0))])]
+        ),
+        order("h", 0)
+    );
+    // A ride that ends one `f32` step under a static LPF is ordered in `f32` and refused within
+    // the margin, which render's rounding could close. Red if the margin is removed.
+    let under = f32::from_bits(1_000.0_f32.to_bits() - 1);
+    assert_eq!(
+        judged_with(
+            with_static_lpf(1_000.0),
+            vec![hpf("h", vec![ramp(Linear, Hz, span, (100.0, under))])]
+        ),
+        order("h", 0)
+    );
+    // Two parallel `exponential` rides, the LPF an octave above, are accepted, as two `linear`
+    // ones are. Red if an exponential pair falls through to the mixed rule (its extremes overlap).
+    assert_eq!(
+        judged_with(
+            with_static_lpf(1_000.0),
+            vec![
+                hpf("h", vec![ramp(Exponential, Hz, span, (100.0, 800.0))]),
+                lpf("l", vec![ramp(Exponential, Hz, span, (200.0, 1_600.0))]),
+            ]
+        ),
+        Vec::new()
+    );
+}
+
+/// Root's ruling (a) on #1645 (review fold): render can lead a stored filter value by 64 samples
+/// (#1637's grid lookahead) and lag it by 64 (the filter's jump ramp), so a rendered pair can read
+/// stored values up to 128 samples apart, and the rule holds the HPF at each sample below the LPF
+/// at every sample within 128 samples of it. An HPF that holds 900 Hz on `[0, 1000)` and then
+/// steps to 100 Hz, under an LPF that falls linearly from 1,000 Hz to 300 Hz on `[1000, 1010)`, is
+/// ordered at every single sample but crosses in render: the LPF reaches 300 Hz before the HPF's
+/// jump ramp has left 900 Hz.
+///
+/// Red if the rule compares the two curves at the same sample only (the counterexample is then
+/// accepted), if the reach is 64 rather than 128 (the same fall a hundred samples later, still
+/// within one lead plus one lag of the HPF's 900 Hz, is then accepted), or if the reach is
+/// unbounded (the fall two hundred samples later is then refused).
+#[test]
+fn input_filter_curves_keep_their_order_within_renders_reach() {
+    use AutomationShape::{Linear, Step};
+    use ParameterUnit::Hz;
+    let pair = |fall: u64| {
+        vec![
+            hpf("h", vec![ramp(Step, Hz, (0, 1_000), (900.0, 100.0))]),
+            lpf(
+                "l",
+                vec![ramp(Linear, Hz, (fall, fall + 10), (1_000.0, 300.0))],
+            ),
+        ]
+    };
+    assert_eq!(
+        judged_with(with_static_lpf(1_000.0), pair(1_000)),
+        [(
+            "control.automation.order",
+            "$.automation[id=l].segments[0]".to_owned()
+        )]
+    );
+    assert_eq!(
+        judged_with(with_static_lpf(1_000.0), pair(1_100)),
+        [(
+            "control.automation.order",
+            "$.automation[id=l].segments[0]".to_owned()
+        )]
+    );
+    assert_eq!(
+        judged_with(with_static_lpf(1_000.0), pair(1_200)),
+        Vec::new()
+    );
 }

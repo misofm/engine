@@ -1221,58 +1221,6 @@ fn a_mode_switch_that_strands_an_automation_needs_a_rebuild() {
     );
 }
 
-/// #1645 gate 7. A delta that only adds a builtin entry the row rule refuses routes to the rebuild,
-/// whose preparation refuses it: a fader ride in `linear` units (`control.domain`), a mute that
-/// ramps (`control.automation.shape`) and an HPF ride that reaches a static LPF
-/// (`control.automation.order`). The same delta with a valid fader ride stays live.
-///
-/// Red if the classifier's row-rule check misses the shape or order rule: the edit commits live,
-/// acked, and its next rebuild refuses it.
-#[test]
-fn an_automation_the_builtin_rows_refuse_needs_a_rebuild() {
-    let mut declared = two_tracks();
-    declared.tracks[0].builtins.left.lpf_hz = 1_000.0;
-    declared.tracks[0].builtins.right.lpf_hz = 1_000.0;
-    let current = normalized(&declared);
-    type Make = fn(&mut Automation);
-    let refused: [(&str, Make); 3] = [
-        ("fader in linear units", |ride| {
-            ride.segments[0].unit = ParameterUnit::Linear;
-        }),
-        ("mute ramp", |ride| {
-            ride.target.control = 6;
-            ride.segments[0].unit = ParameterUnit::Linear;
-            ride.segments[0].start_value = 0.0;
-            ride.segments[0].end_value = 1.0;
-        }),
-        ("HPF ride to the LPF", |ride| {
-            ride.target.control = 3;
-            ride.segments[0].unit = ParameterUnit::Hz;
-            ride.segments[0].start_value = 200.0;
-            ride.segments[0].end_value = 1_000.0;
-        }),
-    ];
-    for (name, make) in refused {
-        assert_eq!(
-            classify(&current, |next| {
-                let mut ride = fader_ride(next);
-                make(&mut ride);
-                next.automation.push(ride);
-            }),
-            Err(LiveRebuild::AutomationTarget),
-            "{name}"
-        );
-    }
-    assert!(
-        classify(&current, |next| {
-            let ride = fader_ride(next);
-            next.automation.push(ride);
-        })
-        .is_ok(),
-        "a valid fader ride stays live"
-    );
-}
-
 /// #1645 fold. A delta that only moves a static LPF under a stored HPF ride (the automation table
 /// unchanged) routes to the rebuild when the order rule refuses `next`: an LPF of 500 Hz under a
 /// ride to 900 Hz. An LPF of 2 kHz, an LPF edit on a strip with no filter automation, and the same

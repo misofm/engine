@@ -254,7 +254,8 @@ export const enum MisoCommandReason {
   /// The subscription would leave more taps armed than the engine can end honestly in one
   /// `OBSERVATION_ENDED` event in one control frame (issue 1685: the event's exact encoded bytes
   /// against the browser's 16 KiB frame). `rejectedIndex` names the subscription that crossed it,
-  /// after every unsubscribe of the same submission is counted; nothing was admitted. The result is `RESULT_UNSUPPORTED`.
+  /// after every unsubscribe of the same submission is counted; nothing was admitted. The result
+  /// is `RESULT_UNSUPPORTED`.
   ///
   /// A render does not make room, so retrying the same submission will not help, which is why this
   /// is its own reason and not `Backpressure`: unsubscribe another tap first.
@@ -714,7 +715,10 @@ export interface MisoWebBootOptions {
   /// Plus one because zero has to keep meaning "unset". Requires
   /// `liveControlObservationTaps !== 0n`. This word designates the first plan only (issue
   /// 1683): after boot the app sets or moves the master with the strip's `master` monitor row
-  /// (`SET_CONTROL`), the core holds it by strip ID, and every later plan follows it.
+  /// (`SET_CONTROL`), the core holds it by strip ID, and every later plan follows it. The row has
+  /// no tap requirement: it is valid on every host (the C ABI has no taps), and with no tap on the
+  /// strip `masterGrDb` is `null`. Only this boot word keeps the stricter rule, until its
+  /// successor retires it.
   liveControlMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;

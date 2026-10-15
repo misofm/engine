@@ -1844,6 +1844,50 @@ mod tests {
         );
     }
 
+    /// #1683 review fold: a solo and a master write of one strip in one transaction are two monitor
+    /// writes, on the in-place path and on the full path alike. The rule that a later write
+    /// replaces an earlier one holds per strip and row, never per strip.
+    ///
+    /// Red if either path keys the replacement by strip alone: the master write would then drop
+    /// the solo, which the response would still acknowledge.
+    #[test]
+    fn a_solo_and_a_master_of_one_strip_are_two_monitor_writes_on_both_paths() {
+        let store = store();
+        let track = store.compiled().normalized_model().tracks[0].id.clone();
+        let monitor = |control: u32| {
+            SessionEdit::set_control(
+                controls::ControlAddress {
+                    owner: Owner::Strip(track.clone()),
+                    section: Section::Own,
+                    control,
+                    lane: Lane::Both,
+                },
+                1.0,
+                None,
+            )
+        };
+        let edits = [monitor(2), monitor(4)];
+        let expected = [controls::MonitorRow::Solo, controls::MonitorRow::Master].map(|row| {
+            controls::MonitorWrite {
+                strip: track.clone(),
+                row,
+                on: true,
+                ramp: None,
+            }
+        });
+        let revision = ExpectedRevision::Exact(store.revision());
+        let in_place = store
+            .prepare_transaction_in_place(revision, &edits)
+            .expect("prepares in place");
+        assert!(in_place.is_in_place() && in_place.is_monitor_only());
+        assert_eq!(in_place.monitor_edits(), expected, "in place");
+        let full = store
+            .prepare_transaction_with_monitor(revision, &edits)
+            .expect("prepares");
+        assert!(!full.is_in_place());
+        assert_eq!(full.monitor_edits(), expected, "full");
+    }
+
     /// #1612 D2. `set_control_rows` names the rows a transaction of `SetControl`s wrote, in
     /// transaction order, and is `None` as soon as one edit is another kind. A write to a monitor
     /// row is not a model write, so it is not in the list, and a transaction of such writes alone

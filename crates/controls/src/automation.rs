@@ -225,6 +225,17 @@ fn shape_fits(descriptor: &ControlDescriptor, segment: &AutomationSegment) -> bo
 /// after render rounds each ramped value once to `f32` no rendered pair ties or crosses.
 const ORDER_MARGIN: f64 = 1.0 + 1.0 / 4_194_304.0;
 
+/// How far apart in time two stored filter values can be when render compares them, in node-time
+/// samples: the order rule holds the HPF at each sample below the LPF at every sample this close on
+/// either side (#1645 review fold, root's ruling (a)). #1637 gives an automated builtin filter cell
+/// two reaches of 64 samples each, and neither is an exported constant: a grid ramp started at `τ`
+/// aims at the curve's value 64 samples ahead (`automation::events` `target_at`), so render can
+/// lead the stored curve by 64, and a discontinuity ramps over 64 samples, so render can lag it by
+/// 64. The rendered value at `τ` therefore lies among the stored values of `[τ - 64, τ + 64]` on
+/// each filter, and a rendered pair can read stored values up to 128 samples apart. A change to
+/// either reach changes this constant with it.
+const ORDER_REACH: u64 = 128;
+
 /// One side of a lane's filter pair: its automation entry (with its segments in the evaluator's
 /// type) or its static value.
 enum Curve<'a> {
@@ -235,21 +246,36 @@ enum Curve<'a> {
     },
 }
 
-/// What one side does on a sub-interval `[a, b)` of the cut time axis.
+/// What one side does on a closed sub-interval `[a, b]` of the cut time axis (at `b` the left
+/// limit).
 #[derive(Clone, Copy)]
 enum Piece {
     /// A hold, a `step` or a static value.
     Constant(f32),
-    /// A `linear` or `exponential` piece, with its values at `a` and (the left limit) at `b`.
-    Ramp { shape: Shape, at_a: f32, at_b: f32 },
+    /// A `linear` or `exponential` piece: the one segment that defines the sub-interval.
+    Ramp(Segment),
 }
 
 impl Piece {
-    fn ends(self) -> (f64, f64) {
+    /// The value at `t`, a sample of the piece's closed sub-interval: the segment alone, so at its
+    /// end the value is its own `end_value`, never the start of a segment that begins there.
+    fn at(self, t: u64) -> f64 {
         match self {
-            Self::Constant(value) => (f64::from(value), f64::from(value)),
-            Self::Ramp { at_a, at_b, .. } => (f64::from(at_a), f64::from(at_b)),
+            Self::Constant(value) => f64::from(value),
+            Self::Ramp(segment) => {
+                f64::from(value_at(core::slice::from_ref(&segment), node_time(t)))
+            }
         }
+    }
+
+    /// Whether the piece is affine in time (a constant or a `linear` ramp).
+    fn linear(self) -> bool {
+        !matches!(self, Self::Ramp(segment) if segment.shape != Shape::Linear)
+    }
+
+    /// Whether the piece's logarithm is affine in time (a constant or an `exponential` ramp).
+    fn exponential(self) -> bool {
+        !matches!(self, Self::Ramp(segment) if segment.shape != Shape::Exponential)
     }
 }
 
@@ -291,48 +317,75 @@ impl<'a> Curve<'a> {
             .saturating_sub(1)
     }
 
-    /// The piece on `[a, b)`, where no cut of this curve lies strictly inside; `b` is `None` on the
+    /// The piece on `[a, b]`, where no cut of this curve lies strictly inside; `b` is `None` on the
     /// last sub-interval, a hold.
     fn piece(&self, a: u64, b: Option<u64>) -> Piece {
         let segments = match self {
             Self::Static(value) => return Piece::Constant(*value),
             Self::Automated { segments, .. } => segments,
         };
-        let at_a = value_at(segments, node_time(a));
-        let segment = segments.get(Self::defining(segments, a));
-        match (segment, b) {
-            (Some(segment), Some(b))
+        match (segments.get(Self::defining(segments, a)), b) {
+            (Some(segment), Some(_))
                 if segment.start <= a && a < segment.end && segment.shape != Shape::Step =>
             {
-                Piece::Ramp {
-                    shape: segment.shape,
-                    at_a,
-                    // The segment alone: at its end the value is its own `end_value`, never the
-                    // start of a segment that begins there.
-                    at_b: value_at(core::slice::from_ref(segment), node_time(b)),
-                }
+                Piece::Ramp(*segment)
             }
-            _ => Piece::Constant(at_a),
+            _ => Piece::Constant(value_at(segments, node_time(a))),
         }
     }
 }
 
-/// Whether the HPF piece stays below the LPF piece on the sub-interval (#1645 D2).
-fn ordered(hpf: Piece, lpf: Piece) -> bool {
+/// Whether the HPF piece on `[a, b]` stays below the LPF piece on `[c, d]` at every pair of
+/// samples `(t, s)`, `t` in the first and `s` in the second, at most [`ORDER_REACH`] apart (#1645
+/// D2, widened by the review fold's ruling (a)). The pairs form a convex polygon in `(t, s)`.
+fn ordered(hpf: Piece, (a, b): (u64, u64), lpf: Piece, (c, d): (u64, u64)) -> bool {
+    // No sample of one is within reach of the other.
+    if c > b.saturating_add(ORDER_REACH) || a > d.saturating_add(ORDER_REACH) {
+        return true;
+    }
     match (hpf, lpf) {
-        // "Off" on either side leaves the sub-interval unchecked.
+        // "Off" on either side leaves the pair unchecked.
         (Piece::Constant(off), _) | (_, Piece::Constant(off)) if off == 0.0 => true,
         // Render does not round a constant: the static rule.
         (Piece::Constant(h), Piece::Constant(l)) => h < l,
-        (Piece::Ramp { shape: hs, .. }, Piece::Ramp { shape: ls, .. }) if hs == ls => {
-            let (h_a, h_b) = hpf.ends();
-            let (l_a, l_b) = lpf.ends();
-            l_a > h_a * ORDER_MARGIN && l_b > h_b * ORDER_MARGIN
+        // `L(s) - H(t)·m` is affine in `(t, s)` (both pieces linear), or `ln L(s) - ln H(t)` is
+        // (both exponential), so its least value over the polygon is at a vertex. Every vertex
+        // is where two of its edges meet (`t` at `a` or `b`, `s` at `c` or `d`, `s - t` at `±R`);
+        // the candidates that leave the polygon are skipped, and any extra one inside it is only
+        // one more sample the rule must hold at.
+        _ if (hpf.linear() && lpf.linear()) || (hpf.exponential() && lpf.exponential()) => {
+            let r = ORDER_REACH;
+            [
+                (a, c),
+                (a, d),
+                (b, c),
+                (b, d),
+                (a, a.saturating_sub(r)),
+                (a, a.saturating_add(r)),
+                (b, b.saturating_sub(r)),
+                (b, b.saturating_add(r)),
+                (c.saturating_sub(r), c),
+                (c.saturating_add(r), c),
+                (d.saturating_sub(r), d),
+                (d.saturating_add(r), d),
+            ]
+            .into_iter()
+            .filter(|&(t, s)| (a..=b).contains(&t) && (c..=d).contains(&s) && t.abs_diff(s) <= r)
+            .all(|(t, s)| lpf.at(s) > hpf.at(t) * ORDER_MARGIN)
         }
+        // Mixed pieces: the least LPF value over the samples within reach of the HPF piece above
+        // the greatest HPF value over the samples within reach of the LPF piece. Sufficient and
+        // not necessary, by design; each piece is monotone, so its extremes are at its ends.
         _ => {
-            let (h_a, h_b) = hpf.ends();
-            let (l_a, l_b) = lpf.ends();
-            l_a.min(l_b) > h_a.max(h_b) * ORDER_MARGIN
+            let (t_from, t_to) = (
+                a.max(c.saturating_sub(ORDER_REACH)),
+                b.min(d.saturating_add(ORDER_REACH)),
+            );
+            let (s_from, s_to) = (
+                c.max(a.saturating_sub(ORDER_REACH)),
+                d.min(b.saturating_add(ORDER_REACH)),
+            );
+            lpf.at(s_from).min(lpf.at(s_to)) > hpf.at(t_from).max(hpf.at(t_to)) * ORDER_MARGIN
         }
     }
 }
@@ -341,13 +394,23 @@ fn ordered(hpf: Piece, lpf: Piece) -> bool {
 ///
 /// Each side's curve is its automation entry under the hold rule, or the constant of its static
 /// value when it is not automated; a lane with neither side automated is the static rule's. The
-/// time axis is cut at every `start_sample` and `end_sample` of either curve; on each
-/// sub-interval each side is one monotone piece, so its extremes lie at the ends:
+/// time axis is cut at every `start_sample` and `end_sample` of either curve; on each closed
+/// sub-interval each side is one monotone piece.
+///
+/// Render moves a stored value by up to [`ORDER_REACH`] samples (a grid ramp aims ahead, a jump
+/// ramps), so the rule holds the HPF at every sample `t` below the LPF at every sample `s` with
+/// `|t - s| <= ORDER_REACH` (#1645 review fold, root's ruling (a)): stored automation is never
+/// accepted now and crossed in render. Each HPF piece is judged against every LPF piece whose
+/// sub-interval comes within reach of its own, over the pairs of samples within reach:
 ///
 /// - both constant: `H < L`, in `f32`;
-/// - both `linear` or both `exponential`: `L > H·(1 + 2^-22)` at both ends (a linear difference
-///   or a monotone ratio keeps the order inside);
-/// - otherwise: `min(L) > max(H)·(1 + 2^-22)`, sufficient and not necessary, by design.
+/// - both affine in time (a constant or `linear`), or both with an affine logarithm (a constant
+///   or `exponential`): `L > H·(1 + 2^-22)` at every vertex of the polygon of pairs, which bounds
+///   it everywhere inside;
+/// - otherwise: `min(L) > max(H)·(1 + 2^-22)` over the samples of each piece within reach of the
+///   other, sufficient and not necessary, by design.
+///
+/// A constant "off" (`0`) on either side leaves its pairs unchecked.
 ///
 /// It reads only `model`, so a classifier can run it on a candidate model. Entries with their own
 /// fault (`faulted`) are not read: their curves may touch "off" inside a ramp.
@@ -361,7 +424,7 @@ fn input_filter_order(
     let entry = |control: u32| {
         model.automation.iter().enumerate().find(|(_, automation)| {
             let target = &automation.target;
-            target.owner == Owner::Strip(strip.id.clone())
+            matches!(&target.owner, Owner::Strip(owner) if owner == strip.id)
                 && target.section == Section::Builtins
                 && target.control == control
                 && (target.lane == *lane || target.lane == Lane::Both)
@@ -393,28 +456,52 @@ fn input_filter_order(
     }
     cuts.sort_unstable();
     cuts.dedup();
-    for (position, &a) in cuts.iter().enumerate() {
-        let b = cuts.get(position + 1).copied();
-        if ordered(hpf.piece(a, b), lpf.piece(a, b)) {
-            continue;
+    // Sub-interval `k` is `[cuts[k], cuts[k + 1]]`; the last one runs on, a hold on both sides.
+    let span = |k: usize| {
+        let end = cuts.get(k + 1).copied();
+        (cuts[k], end, end.unwrap_or(u64::MAX))
+    };
+    let pieces = |curve: &Curve<'_>| -> Vec<Piece> {
+        (0..cuts.len())
+            .map(|k| {
+                let (a, b, _) = span(k);
+                curve.piece(a, b)
+            })
+            .collect()
+    };
+    let (hpf_pieces, lpf_pieces) = (pieces(&hpf), pieces(&lpf));
+    for (i, &h) in hpf_pieces.iter().enumerate() {
+        let (a, _, b) = span(i);
+        // The LPF sub-intervals within reach: from the first that ends at or after
+        // `a - ORDER_REACH` to the last that starts at or before `b + ORDER_REACH`.
+        let first = cuts
+            .partition_point(|&cut| cut.saturating_add(ORDER_REACH) < a)
+            .saturating_sub(1);
+        let last = cuts.partition_point(|&cut| cut <= b.saturating_add(ORDER_REACH));
+        for (j, &l) in lpf_pieces.iter().enumerate().take(last).skip(first) {
+            let (c, _, d) = span(j);
+            if ordered(h, (a, b), l, (c, d)) {
+                continue;
+            }
+            // The LPF entry when the LPF is automated (at the LPF's sub-interval), else the HPF
+            // entry (at the HPF's).
+            let (reported, at) = if matches!(lpf, Curve::Automated { .. }) {
+                (&lpf, c)
+            } else {
+                (&hpf, a)
+            };
+            let Curve::Automated { entry, segments } = reported else {
+                unreachable!("one side is automated")
+            };
+            return Some(ControlDiagnostic {
+                code: ControlError::AutomationOrder.code(),
+                path: format!(
+                    "$.automation[id={}].segments[{}]",
+                    entry.id.as_str(),
+                    Curve::defining(segments, at)
+                ),
+            });
         }
-        // The LPF entry when the LPF is automated, else the HPF entry.
-        let reported = if matches!(lpf, Curve::Automated { .. }) {
-            &lpf
-        } else {
-            &hpf
-        };
-        let Curve::Automated { entry, segments } = reported else {
-            unreachable!("one side is automated")
-        };
-        return Some(ControlDiagnostic {
-            code: ControlError::AutomationOrder.code(),
-            path: format!(
-                "$.automation[id={}].segments[{}]",
-                entry.id.as_str(),
-                Curve::defining(segments, a)
-            ),
-        });
     }
     None
 }

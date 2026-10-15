@@ -234,7 +234,7 @@ fn every_faulty_mock_is_detected() {
 fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
     for seed in 0..10_000_u32 {
         let mut descriptor: EffectDescriptor = DUAL_ACCUMULATOR_DELAY_DESCRIPTOR;
-        match seed % 4 {
+        match seed % 5 {
             0 => descriptor.contract_major = 2,
             1 => descriptor.state_layout_version = 0,
             2 => descriptor.display_name = "",

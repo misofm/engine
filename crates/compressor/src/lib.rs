@@ -418,9 +418,9 @@ fn initial_defaults(
 /// Applies one lane's automation spans to its ramps.
 ///
 /// Validation is unchanged from V1 and deliberately strict: a span must be inside the prepared
-/// automation capacity, a span at exactly `first_sample`, inside the parameter's domain, addressed to a single channel, in strictly
-/// increasing `(parameter, channel)` order, and not a duplicate. Anything else is counted in
-/// `invalid_spans` and ignored — never applied partially.
+/// automation capacity, a span at exactly `first_sample`, inside the parameter's domain, addressed
+/// to a single channel, in strictly increasing `(parameter, channel)` order, and not a duplicate.
+/// Anything else is counted in `invalid_spans` and ignored — never applied partially.
 fn apply_automation<L: Lane>(
     spans: &[PreparedAutomationSpan],
     first_sample: u64,

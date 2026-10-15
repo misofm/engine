@@ -1546,6 +1546,48 @@ fn dump(
     (rows, snapshot)
 }
 
+/// The owners of the control list's `master` rows that are on (#1683), read by the rows' typed
+/// fields.
+fn listed_masters(
+    mut send: impl FnMut(CommandPayload<'_>, ExpectedRevision) -> Vec<u8>,
+) -> Vec<String> {
+    let mut masters = Vec::new();
+    let (mut epoch, mut after) = (0, 0);
+    loop {
+        let request = ControlListRequest {
+            structure_epoch: epoch,
+            after_handle: after,
+            limit: 256,
+            owner: None,
+        };
+        let bytes = send(
+            CommandPayload::ControlListGet(&request),
+            ExpectedRevision::Any,
+        );
+        let mut fields = [0_u16; 4096];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ControlListPage(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&bytes, &mut DecodeScratch::new(&mut fields))
+            .expect("a control page")
+        else {
+            panic!("expected a control list page")
+        };
+        masters.extend(page.entries.iter().filter_map(|entry| match &entry.body {
+            protocol::ControlBody::Control(row) if row.name == "master" && row.value == 1.0 => {
+                entry.address.owner_id.clone()
+            }
+            _ => None,
+        }));
+        if page.eof {
+            return masters;
+        }
+        epoch = page.structure_epoch;
+        after = page.last_handle;
+    }
+}
+
 /// One run of `steps` on both legs. Returns the browser's blocks and the final superseded count
 /// (equal on both legs, asserted here).
 fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
@@ -2836,17 +2878,22 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
         let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
         assert_eq!(b_rows, c_rows, "step {step}: the control pages agree");
         assert_eq!(b_snapshot, c_snapshot, "step {step}: the snapshots agree");
-        // The listed masters: the owner of each `master` row whose value is on.
-        let designated: Vec<&str> = b_rows
-            .iter()
-            .filter(|row| row.contains("name: \"master\"") && row.contains("value: 1.0 }"))
-            .filter_map(|row| row.split("owner_id: Some(\"").nth(1)?.split('"').next())
-            .collect();
+        // The listed masters: the owner of each `master` row whose value is on, by the rows'
+        // typed fields, on each host.
         let expected: &[&str] = match step {
             1 => &["t1"],
             2..=4 => &["bus"],
             _ => &[],
         };
-        assert_eq!(designated, expected, "step {step}: the listed master");
+        assert_eq!(
+            listed_masters(|payload, expected| browser.command(payload, expected)),
+            expected,
+            "step {step}: the browser's listed master"
+        );
+        assert_eq!(
+            listed_masters(|payload, expected| c_abi.send(payload, expected)),
+            expected,
+            "step {step}: the C ABI's listed master"
+        );
     }
 }

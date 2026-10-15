@@ -343,5 +343,11 @@ Checked against `12d4a4f9d`.
   its value at 1014, 300 Hz, below the HPF's 900 Hz. `docs/SESSION_SCHEMA_V1.md` states the rule
   with the reach.
 - **#1660 must keep its reach at or below 64 samples**, or widen this rule in the same change.
+- **The reach is 128 samples (coordinator, within the ruling).** Widening each curve by its
+  64-sample reach means a rendered pair can read stored values up to 128 samples apart: render
+  leads a curve by up to 64 (grid lookahead) and lags it by up to 64 (jump ramp), on either filter.
+  `ORDER_REACH` is 128; with 64 the test `input_filter_curves_keep_their_order_within_renders_reach`
+  is red (an LPF fall 100 samples after the HPF's step is accepted). #1660 must keep each of its two
+  reaches at or below 64 samples, or widen this rule in the same change.
 - **Path.** The fold edits `crates/host-core/src/live_delta.rs`. That file is outside the original
   authorized paths. The coordinator approved the edit.

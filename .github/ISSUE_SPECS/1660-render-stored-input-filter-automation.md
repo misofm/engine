@@ -228,5 +228,7 @@ Checked against `12d4a4f9d`.
   and `input_filter_order_diagnostics`, are superseded by those.
 - **#1660 keeps only the classification of input-filter edits on an automated strip** (the
   automation edits that are carried rebuilds, and the record rules of #1648).
-- **The reach.** Root ruled on 2026-10-15 that #1645's order rule is checked widened by 64 samples.
-  #1660's render reach must stay at or below 64 samples, or the rule must widen in the same change.
+- **The reach.** Root ruled on 2026-10-15 that #1645's order rule is checked widened by each
+  curve's 64-sample reach, which compares stored values up to 128 samples apart (`ORDER_REACH`).
+  #1660's grid lookahead and filter jump ramp must each stay at or below 64 samples, or the rule
+  must widen in the same change.

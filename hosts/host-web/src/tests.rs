@@ -8216,6 +8216,193 @@ mod structural_apply {
         assert!(word > 0.0);
         assert_eq!(master, None, "no designation reads absent");
     }
+
+    impl Rig {
+        /// The strips whose `master` monitor row is on in the control list, read through the
+        /// production control entry by the rows' typed fields.
+        fn listed_masters(&mut self, request: u64) -> Vec<String> {
+            let codec = ProtocolCodec::default();
+            let mut masters = Vec::new();
+            let (mut epoch, mut after, mut request) = (0, 0, request);
+            loop {
+                let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                let length = codec
+                    .encode_command_frame_into(
+                        &TypedCommandFrame {
+                            request_id: RequestId::new(request).expect("nonzero request"),
+                            expected_revision: ExpectedRevision::Any,
+                            payload: CommandPayload::ControlListGet(
+                                &protocol::ControlListRequest {
+                                    structure_epoch: epoch,
+                                    after_handle: after,
+                                    limit: 256,
+                                    owner: None,
+                                },
+                            ),
+                        },
+                        &mut bytes,
+                    )
+                    .expect("a control list frame");
+                bytes.truncate(length);
+                request += 1;
+                let (result, response) = self.entry(&bytes);
+                assert_eq!(result, RESULT_OK, "the control plane answers the list");
+                let mut fields = [0_u16; 8192];
+                let DecodedTypedResponseFrame::Success {
+                    payload: DecodedSuccessResponsePayload::ControlListPage(page),
+                    ..
+                } = codec
+                    .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                    .expect("a control list page")
+                else {
+                    panic!("expected a control list page")
+                };
+                masters.extend(page.entries.iter().filter_map(|entry| match &entry.body {
+                    protocol::ControlBody::Control(row)
+                        if row.name == "master" && row.value == 1.0 =>
+                    {
+                        entry.address.owner_id.clone()
+                    }
+                    _ => None,
+                }));
+                if page.eof {
+                    return masters;
+                }
+                epoch = page.structure_epoch;
+                after = page.last_handle;
+            }
+        }
+    }
+
+    /// The observation fixture's three tracks (`t0`, `t1`, `t2`), booted with the boot word
+    /// designating track `master` (#1683).
+    fn boot_designated(master: u64) -> (SessionModel, Rig) {
+        let model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: 2,
+            live_control_observation_taps: 4,
+            live_control_master_track_plus_one: master + 1,
+            ..boot_options(QUANTUM)
+        };
+        let rig = Rig::boot(&model, options, None);
+        (model, rig)
+    }
+
+    /// #1683 review fold: a master the boot word designates is the core's `master` row of that
+    /// strip, held by ID from boot on. A live `SET_CONTROL` of another row and then a rebuild that
+    /// adds a track whose ID sorts first leave the row on `t1` and move the header's index with it.
+    ///
+    /// Test value: red if the boot word seeds the overlay by index only (a live write or the
+    /// rebuild would then leave the reading on strip 1, now `t0`), or if a live write re-seeds it.
+    #[test]
+    fn a_boot_designated_master_follows_its_strip_through_a_live_write_and_a_rebuild() {
+        let (model, mut rig) = boot_designated(1);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert_eq!(rig.listed_masters(1), ["t1"]);
+
+        let fader = SessionEdit::SetControl {
+            expected_effect: None,
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(StableId::parse("t2").expect("strip ID")),
+                section: controls::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Both,
+            },
+            value: -6.0,
+            ramp_samples: None,
+        };
+        let live = rig.apply(&[fader], 1_000);
+        assert!(
+            matches!(
+                live,
+                Outcome::Applied {
+                    path: EditPath::Live,
+                    ..
+                }
+            ),
+            "{live:?}"
+        );
+        assert_eq!(rig.host.render_next(), RESULT_OK);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert_eq!(rig.listed_masters(1_001), ["t1"]);
+
+        let mut track = model.tracks[0].clone();
+        let mut route = model.routes[0].clone();
+        track.id = StableId::parse("a0").expect("a track ID");
+        route.id = StableId::parse("a0-main").expect("a route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the fixture routes a track")
+        };
+        *track_id = track.id.clone();
+        assert!(matches!(
+            rig.apply(
+                &[
+                    SessionEdit::UpsertTrack { track },
+                    SessionEdit::UpsertRoute { route },
+                ],
+                2_000
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            3,
+            "t1 is strip 2 now, and still the master"
+        );
+        assert_eq!(rig.listed_masters(2_001), ["t1"]);
+    }
+
+    /// #1683 review fold: a rebuild that removes the master strip ends the designation in the
+    /// committed model and the replacement's tables at once, but the plan still rendering keeps its
+    /// master until the block that adopts the replacement.
+    ///
+    /// Test value: red if the commit rewrites the rendering plan's header (its reading would vanish
+    /// before render has moved to the plan without the strip), or if the adopted plan keeps a
+    /// master the session no longer has.
+    #[test]
+    fn a_rebuild_that_removes_the_master_keeps_the_rendering_plans_master_until_adoption() {
+        let (_, mut rig) = boot_designated(0);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 1);
+        assert!(matches!(
+            rig.apply(
+                &[
+                    SessionEdit::RemoveRoute {
+                        route_id: StableId::parse("t0-main").expect("a route ID"),
+                    },
+                    SessionEdit::RemoveTrack {
+                        track_id: StableId::parse("t0").expect("a track ID"),
+                    },
+                ],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert!(rig.pending(), "the replacement waits for its adoption");
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            1,
+            "the rendering plan keeps its master until adoption"
+        );
+        assert_eq!(rig.listed_masters(2), Vec::<String>::new());
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+        assert!(!rig.pending());
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            0,
+            "the adopted plan has no master"
+        );
+    }
 }
 
 /// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the insert taps keyed by

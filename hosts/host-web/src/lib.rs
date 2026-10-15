@@ -1101,6 +1101,12 @@ pub struct WebBootOptions {
     ///
     /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
+    ///
+    /// Two rules stand side by side until a successor retires this word (#1683). The word is
+    /// refused at boot (`web.options.live_controls`) unless `live_control_observation_taps` is
+    /// nonzero. The core's `master` monitor row, written by `SET_CONTROL`, is a designation valid
+    /// on every host with or without observation taps (the C ABI has none); without a tap on the
+    /// strip, `masterGrDb` is `null`. The word seeds that row at boot by the strip's ID.
     pub live_control_master_track_plus_one: u64,
 }
 
@@ -1648,15 +1654,21 @@ impl ReadyOwnership {
         result
     }
 
-    /// Point every plan's tables the host holds at the master strip the core designates now
-    /// (#1683): the rendering plan's and each replacement's that waits for its adoption, each by
+    /// Point the newest plan's tables at the master strip the core designates now (#1683): each
+    /// replacement's that waits for its adoption, else the rendering plan's, each by
     /// the strip's ID in that plan's own strip order, so a strip added or removed before the
     /// master never moves the reading to another strip. A plan that does not hold the strip has no
     /// master. The designation moves no render value; the next poll folds the master reading from
     /// it. Control side only, as [`Self::stamp_structure_epoch`].
     fn sync_master(&mut self) {
         let master = self.control.master_strip();
-        let shapes = core::iter::once(&mut *self.shape).chain(
+        // While a replacement waits for its adoption, the designation rides it: the rendering
+        // plan keeps its own until the block that adopts the replacement swaps the tables (#1683
+        // review fold), so a rebuild that removes the master never clears the reading of the
+        // plan still rendering.
+        let waiting = self.pending_shapes.iter().any(|entry| !entry.adopted);
+        let rendering = (!waiting).then_some(&mut *self.shape);
+        let shapes = rendering.into_iter().chain(
             self.pending_shapes
                 .iter_mut()
                 .filter(|entry| !entry.adopted)

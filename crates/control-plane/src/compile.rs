@@ -692,6 +692,20 @@ pub fn observation_reserve_bytes(
     ))
 }
 
+/// The binding table's charge alone ([`observation_binding_rows`]) for a control frame of
+/// `frame_bytes` and `slots` observation slots, so a test can hold a measured table to it.
+///
+/// # Errors
+///
+/// The arithmetic overflowed.
+#[cfg(feature = "test-support")]
+pub fn observation_binding_table_bytes(
+    frame_bytes: u64,
+    slots: usize,
+) -> Result<u64, CompileFailure> {
+    Ok(observation_reserve(frame_bytes, slots)?.bindings_table)
+}
+
 /// The heap one `OBSERVATION_ENDED` event can own when it ends at most `keys` taps (#1584 D6a,
 /// #1685 D4): its key list, one `protocol::ObservationTapKey` each, and the text of the two IDs
 /// every key owns, at most [`admitted_text`]. `keys` is what the session can hold, the smaller of
@@ -706,24 +720,36 @@ fn ended_event_ceiling(wire: ObservationWire, keys: usize) -> Result<u64, Compil
 }
 
 /// What the binding table and a rebuild's transient copies of it hold for at most `keys` admitted
-/// bindings, as `(table, transient)` bytes (#1584 D6a, #1685 D4). The table's `Vec` grows by
-/// insertion, so its capacity is at most twice its length (and at least four entries). The
-/// transient is what `ObservationBindings::after` builds from the table: each binding goes to the
-/// kept table or the ended list, so at most `keys` of them together, and the protocol keys the
+/// bindings, as `(table, transient)` bytes (#1584 D6a, #1685 D4).
+///
+/// The table is two peaks added, not one peak of their sum (#1685 review fold): its `Vec` keeps
+/// its high-water capacity (`ObservationBindings::clear` removes and never shrinks), while the ID
+/// text belongs to whatever set is armed now, so a table that once held many short IDs can later
+/// hold few long ones in the same capacity. The `Vec` grows only by `insert`, one entry at a time,
+/// from empty or from `ObservationBindings::after`'s exact reservation: std's amortized growth
+/// doubles the capacity, or takes four for an entry of at most 1 KiB, so the capacity is at most
+/// `2 * max(keys, 4)` entries. The text is at most the peak of [`admitted_text`].
+///
+/// The transient is what `ObservationBindings::after` builds from the table: each binding goes to
+/// the kept table or the ended list, so at most `keys` of them together, and the protocol keys the
 /// ended ones are copied into. The bindings' ID text and the keys' copy of it are each at most
 /// [`admitted_text`].
 fn observation_binding_rows(
     wire: ObservationWire,
     keys: usize,
 ) -> Result<(u64, u64), CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
     let binding = size_of::<controls::ObservationBinding>();
     let key = size_of::<protocol::ObservationTapKey>();
-    let table = peak_over_keys(wire, keys, |count| {
-        if count == 0 { 0 } else { count.max(4) }
-            .checked_mul(2)?
-            .checked_mul(binding)?
-            .checked_add(admitted_text(wire, count)?)
-    })?;
+    let capacity = if keys == 0 { 0 } else { keys.max(4) }
+        .checked_mul(2)
+        .and_then(|entries| entries.checked_mul(binding))
+        .ok_or_else(arithmetic)?;
+    let text = peak_over_keys(wire, keys, |count| admitted_text(wire, count))?;
+    let table = u64::try_from(capacity)
+        .map_err(|_| failure(ResourceFault::Platform))?
+        .checked_add(text)
+        .ok_or_else(arithmetic)?;
     let transient = peak_over_keys(wire, keys, |count| {
         count
             .checked_mul(binding.checked_add(key)?)?

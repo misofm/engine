@@ -1403,3 +1403,56 @@ fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
         .expect("each tap named once");
     assert_eq!(rig.session.observation_armed(), cap);
 }
+
+/// The binding table's charge covers its high-water capacity and the text of a later armed set
+/// together (#1685 review fold): `ObservationBindings::clear` never shrinks the `Vec`, so a table
+/// that grew for many short IDs keeps that capacity while it later holds fewer, longer IDs. At a
+/// 16 KiB frame, 129 short-ID taps grow the capacity to 256 entries; after they are disarmed, 51
+/// taps with two IDs of the grammar's longest fill the frame's text.
+///
+/// Red if the table is charged one peak of capacity plus text over the key count (that charges
+/// 258 entries and the little text 129 keys leave, or 102 entries and 51 keys' text, and the
+/// measured table holds 256 entries and 51 keys' text).
+#[test]
+fn the_binding_table_charge_covers_its_kept_capacity_and_a_later_sets_text() {
+    const HIGH_WATER: usize = 129;
+    let frame = 16_384;
+    let charge = control_plane::observation_binding_table_bytes(frame, HIGH_WATER).expect("charge");
+    let short = |tap: usize| TapKey {
+        strip: StableId::parse("s").expect("strip"),
+        section: TapSection::Inserts(StableId::parse("e").expect("effect")),
+        tap_id: u32::try_from(tap).expect("tap"),
+    };
+    let longest = |tap: usize| TapKey {
+        strip: StableId::parse(&"s".repeat(session::STABLE_ID_MAXIMUM_BYTES)).expect("strip"),
+        section: TapSection::Inserts(
+            StableId::parse(&"e".repeat(session::STABLE_ID_MAXIMUM_BYTES)).expect("effect"),
+        ),
+        tap_id: u32::try_from(tap).expect("tap"),
+    };
+    let mut table = controls::ObservationBindings::new();
+    bench_support::alloc::current_thread_peak_reset();
+    let mut highest = 0;
+    // After each change, every key the test built is owned by the table or freed, so the thread's
+    // live heap since the reset is the table's: its capacity and its bindings' ID text.
+    let mut measure = || {
+        highest = highest.max(bench_support::alloc::current_thread_peak().live_bytes);
+    };
+    for tap in 0..HIGH_WATER {
+        table.set(short(tap), WINDOW_BLOCKS);
+        measure();
+    }
+    for tap in 0..HIGH_WATER {
+        assert!(table.clear(&short(tap)));
+        measure();
+    }
+    for tap in 0..51 {
+        table.set(longest(tap), WINDOW_BLOCKS);
+        measure();
+    }
+    assert_eq!(table.len(), 51);
+    assert!(
+        highest <= charge,
+        "the table held {highest} bytes over a charge of {charge}"
+    );
+}

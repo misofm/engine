@@ -73,7 +73,7 @@ pub use plan::{PlanQueries, PlanState};
 #[cfg(feature = "test-support")]
 pub use compile::{
     CapiResources, CompiledModelAdmission, LiveCatalogAdmission, LiveEpochResources,
-    observation_reserve_bytes, prepare_caps, validate_live_peak,
+    observation_binding_table_bytes, observation_reserve_bytes, prepare_caps, validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{

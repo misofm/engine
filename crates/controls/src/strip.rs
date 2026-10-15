@@ -142,6 +142,12 @@ pub(crate) static ROWS: [StripRow; 6] = [
     // a submix too: a bus whose strip carries a limiter can be the master (issue #1208 D3). At
     // most one strip is the master; designating one ends the other's designation. It moves no
     // render value, so it has no ramp and no family that render reads.
+    //
+    // The row is a core designation, valid on every host and with no observation tap: the C ABI
+    // has no taps, and a browser booted with no observation taps takes the write too. Without a
+    // tap on the strip the master's reading (`masterGrDb`) is absent, never zero. The browser's
+    // boot word (`WebBootOptions::live_control_master_track_plus_one`) keeps its stricter boot
+    // rule, refused unless observation taps are configured, until its successor retires it.
     StripRow {
         id: MASTER,
         on_submix: true,
