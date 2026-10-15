@@ -19,8 +19,8 @@ use super::*;
 use dsp_reference::class_a;
 use dsp_reference::randomized::{Draw, Profile, run_seeds};
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, EffectQuality, LinkMode, PrepareEffectLimits,
-    PreparedPorts, PreparedSidechainPort,
+    EffectProcessBlock, EffectQuality, LinkMode, PrepareEffectLimits, PreparedPorts,
+    PreparedSidechainPort,
 };
 
 const QUANTUM: u32 = 128;
@@ -185,13 +185,10 @@ fn draw_spans(draw: &mut Draw, mono: bool) -> Vec<PreparedAutomationSpan> {
         let spec = &COMPRESSOR_PARAMETERS[parameter];
         let value = draw.in_domain(spec.minimum.unwrap(), spec.maximum.unwrap());
         let span = |channel| PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel,
             parameter_index: parameter as u32,
-            start_sample: 0,
-            end_sample: 0,
-            start_value: value,
-            end_value: value,
+            sample: 0,
+            value,
         };
         if draw.chance(1, 12) {
             spans.push(span(ParameterChannel::Both));
@@ -287,8 +284,7 @@ fn at(spans: &[PreparedAutomationSpan], first_sample: u64) -> Vec<PreparedAutoma
     spans
         .iter()
         .map(|span| PreparedAutomationSpan {
-            start_sample: first_sample,
-            end_sample: first_sample,
+            sample: first_sample,
             ..*span
         })
         .collect()

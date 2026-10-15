@@ -75,6 +75,14 @@ export abstract class StripEdits extends StripAddressing {
     );
   }
 
+  /** `master`: Master. */
+  master(enabled: boolean): ControlEditSet {
+    return this.setControl(
+      { owner: this.controlOwner(), section: { kind: "own" }, control: "master", lane: "both" },
+      flag(enabled),
+    );
+  }
+
   /** `pan` of each lane: `left` on the left lane and `right` on the right. */
   pan(left: number, right: number, options: SmoothingOptions = {}): ControlEditSet {
     const ramp = rampOptions(options);
@@ -1026,6 +1034,17 @@ export const CONTROL_BUILDERS: readonly ControlBuilderEntry[] =
       "options": "none",
       "rows": [
         "pan_window_samples"
+      ]
+    },
+    {
+      "owner": "strip",
+      "section": "own",
+      "method": "master",
+      "shape": "row",
+      "valueKind": "boolean",
+      "options": "none",
+      "rows": [
+        "master"
       ]
     },
     {

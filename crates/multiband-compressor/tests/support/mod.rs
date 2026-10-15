@@ -10,8 +10,8 @@ pub mod oracle;
 use lane::Backend;
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
+    BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffect,
     PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes,
@@ -149,13 +149,10 @@ pub fn point(
     value: f32,
 ) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: first_sample,
-        end_sample: first_sample,
-        start_value: value,
-        end_value: value,
+        sample: first_sample,
+        value,
     }
 }
 

@@ -12,8 +12,7 @@
 mod support;
 
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, LinkMode, ParameterChannel, PreparedAutomationSpan,
-    PreparedSidechainPort,
+    EffectProcessBlock, LinkMode, ParameterChannel, PreparedAutomationSpan, PreparedSidechainPort,
 };
 
 use support::{
@@ -34,13 +33,10 @@ fn every_parameter() -> Vec<(u64, PreparedAutomationSpan)> {
             spans.push((
                 0_u64,
                 PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: parameter as u32,
-                    start_sample: 0,
-                    end_sample: 0,
-                    start_value: value,
-                    end_value: value,
+                    sample: 0,
+                    value,
                 },
             ));
         }
@@ -137,13 +133,10 @@ fn bank_block_partitions_are_invariant() {
                 0_u64,
                 track,
                 PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: 0,
-                    start_sample: 0,
-                    end_sample: 0,
-                    start_value: -30.0 - track as f32,
-                    end_value: -30.0 - track as f32,
+                    sample: 0,
+                    value: -30.0 - track as f32,
                 },
             )
         })

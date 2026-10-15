@@ -8,10 +8,10 @@
 #![allow(dead_code, unreachable_pub)]
 
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, EffectQuality as Quality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
-    PreparedEffectTarget, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
+    EffectProcessBlock, EffectQuality as Quality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectTarget,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
@@ -244,13 +244,10 @@ pub fn point(
     value: f32,
 ) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: sample,
-        end_sample: sample,
-        start_value: value,
-        end_value: value,
+        sample,
+        value,
     }
 }
 

@@ -228,11 +228,8 @@ pub fn point(
     PreparedAutomationSpan {
         parameter_index: parameter,
         channel,
-        kind: effect_contract::AutomationSpanKind::Point,
-        start_sample: first_sample,
-        end_sample: first_sample,
-        start_value: value,
-        end_value: value,
+        sample: first_sample,
+        value,
     }
 }
 

@@ -186,6 +186,41 @@ export const CONTROLS = deepFreeze(
       "automatable": false
     },
     {
+      "control": 4,
+      "name": "master",
+      "displayName": "Master",
+      "displayUnit": "",
+      "unit": "linear",
+      "kind": "toggle",
+      "minimum": 0,
+      "maximum": 1,
+      "disabledValue": null,
+      "default": 0,
+      "taper": "stepped",
+      "step": {
+        "unit": "index",
+        "size": "1",
+        "precision": 0,
+        "ladder": {
+          "xs": 1,
+          "sm": 3,
+          "md": 5,
+          "lg": 10,
+          "xl": 30
+        }
+      },
+      "choices": [],
+      "ramp": "fixed",
+      "scope": "monitor",
+      "family": "setting",
+      "lanes": "shared",
+      "class": "live",
+      "reason": null,
+      "reasonIssue": null,
+      "reopen": null,
+      "automatable": false
+    },
+    {
       "control": 64,
       "name": "effective_fader_db",
       "displayName": "Effective Fader",

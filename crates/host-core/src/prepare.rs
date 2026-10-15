@@ -393,6 +393,11 @@ pub struct HostLiveControlRequest {
     /// a bus whose strip carries a limiter can now be designated. The field, its refusal code
     /// `host.observation.master_track` and the browser and SDK spellings keep their track-era
     /// names (DESIGN P17).
+    ///
+    /// It designates a first plan's master only (#1683): the designation is the strip's `master`
+    /// monitor row, which the boot seeds from this field and the app sets or changes after boot,
+    /// and a successor takes it from [`SuccessorBase::monitor`]. A successor's request that names
+    /// one refuses with `host.observation.master_track`.
     pub master_track: Option<u32>,
 }
 
@@ -1927,6 +1932,39 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     caps.validate_shape(compiled)?;
+    // Issue #143 D6, widened to strips by issue #1208 D3 and made a monitor row by #1683: a
+    // designated master must name a strip this session actually has, or the frame would report a
+    // master reading nobody can address. A first plan takes it from the request (the browser's
+    // boot word), by strip index; a successor takes it from the overlay it renders under, by strip
+    // ID, so a strip added or removed before the master never moves the designation. A successor
+    // request that names one is refused: the overlay is the one designation.
+    let strip_total = model.tracks.len() + model.submixes.len();
+    let master_track = match (successor, live_controls.master_track) {
+        (None, Some(index)) if (index as usize) < strip_total => Some(index),
+        (None, None) => None,
+        (None | Some(_), Some(_)) => return Err(shape("host.observation.master_track")),
+        (Some(base), None) => match base.monitor.next.master() {
+            Some(id) => Some(
+                controls::strip_index(model, id)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or_else(|| shape("host.observation.master_track"))?,
+            ),
+            None => None,
+        },
+    };
+    // The overlay the plan renders and lists under (#1559 D9): a successor's own; a first plan's
+    // solos nothing and holds the request's master (#1683), so the boot catalog lists it.
+    let boot_overlay = match (successor, master_track) {
+        (None, Some(index)) => {
+            let mut overlay = controls::MonitorOverlay::new();
+            if let Some(strip) = model.strips().nth(index as usize) {
+                overlay.set_master(strip.id, true);
+            }
+            overlay
+        }
+        _ => controls::MonitorOverlay::new(),
+    };
+    let overlay = successor.map_or(&boot_overlay, |base| base.monitor.next);
 
     let source_id_bytes = model.sources.iter().try_fold(0_usize, |total, source| {
         total
@@ -2239,7 +2277,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     #[cfg(feature = "control-provider")]
     let control_catalog = crate::ControlCatalog::build(
         compiled.normalized_model(),
-        successor.map_or(&NO_OVERLAY, |base| base.monitor.next),
+        overlay,
         compiled.sample_rate().0,
     )
     .map_err(|_| resource("host.control_provider.allocation"))?;
@@ -2406,7 +2444,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // Decision 17, C7: every effective value is computed once per preparation, here, under the
     // overlay the successor renders with (#1559 D9); a first plan has no solo.
-    let overlay = successor.map_or(&NO_OVERLAY, |base| base.monitor.next);
     let effective = controls::effective(compiled.normalized_model(), overlay);
     let builtins = if selected_meters.is_some() {
         // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
@@ -2716,14 +2753,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         meters.sort_by_key(|value| canonical_index[&*value.track_id]);
     }
-
-    // Issue #143 D6, widened to strips by issue #1208 D3: a designated master must name a strip
-    // this session actually has, or the frame would report a master reading nobody can address.
-    let master_track = match live_controls.master_track {
-        Some(index) if (index as usize) < live_control_strips.len() => Some(index),
-        Some(_) => return Err(shape("host.observation.master_track")),
-        None => None,
-    };
 
     // Issue #143 R7: walked over the built runtime, not derived from the request. A plan that
     // bound nothing reports zero because it *holds* nothing.

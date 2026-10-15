@@ -224,13 +224,10 @@ impl Draw {
                 }
                 let value = self.value(parameter);
                 spans.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: index as u32,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: value,
-                    end_value: value,
+                    sample: first_sample,
+                    value,
                 });
             }
         }
@@ -374,13 +371,10 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
                 spans.extend(
                     [ParameterChannel::Both, ParameterChannel::Left].map(|channel| {
                         PreparedAutomationSpan {
-                            kind: AutomationSpanKind::Point,
                             channel,
                             parameter_index: 0,
-                            start_sample: first_sample,
-                            end_sample: first_sample,
-                            start_value: -30.0,
-                            end_value: -30.0,
+                            sample: first_sample,
+                            value: -30.0,
                         }
                     }),
                 );

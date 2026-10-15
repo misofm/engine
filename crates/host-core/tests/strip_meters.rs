@@ -675,6 +675,81 @@ fn the_last_submix_can_be_designated_master_and_one_past_it_is_refused() {
     assert_eq!(codes, ["host.observation.master_track"], "{text}");
 }
 
+/// #1683: a successor's master is the strip its monitor overlay designates, by ID, resolved in the
+/// successor's own strip order: a track added before the bus moves the bus's index and the
+/// designation with it. The boot request's index designates the first plan only; a successor's
+/// request that names one is refused.
+///
+/// Red if a successor reuses the boot index (it would name `aux`, or refuse), ignores the overlay,
+/// or quietly takes a successor request's index over the overlay's designation.
+#[test]
+fn a_successor_takes_its_master_from_the_overlay_by_strip_id() {
+    let document = two_bus_session();
+    let request = |master: Option<u32>| HostLiveControlRequest {
+        meter_period_frames: NonZeroU32::new(QUANTUM as u32),
+        meter_queue_depth: NonZeroUsize::new(4).expect("meter depth"),
+        meter_tap: MeterTap::PostMatrix,
+        observation_taps: 1,
+        master_track: master,
+    };
+    let (compiled, prepared, handles) =
+        prepare_host_session_with_live_controls(&document, &caps(), &request(Some(4)))
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+    assert_eq!(&*handles.strips[4], "bus");
+    assert_eq!(handles.master_track, Some(4));
+
+    // One more track, whose ID sorts first: every submix moves one index on.
+    let mut grown = compiled.normalized_model().clone();
+    let mut added = grown.tracks[0].clone();
+    added.id = sid("a-first");
+    grown.tracks.insert(0, added);
+    let grown_document = canonical_session_json(&grown).expect("grown session canonicalizes");
+    let grown_compiled = compile_host_session(&grown_document, &caps()).expect("grown compiles");
+    let mut overlay = controls::MonitorOverlay::new();
+    overlay.set_master(&sid("bus"), true);
+    let successor = |live: &HostLiveControlRequest, overlay: &controls::MonitorOverlay| {
+        host_core::prepare_host_runtime_with_live_controls_successor(
+            &grown_compiled,
+            &caps(),
+            live,
+            host_core::SuccessorBase {
+                inventory: &prepared.inventory,
+                committed: compiled.normalized_model(),
+                revision: 2,
+                edit_ramps: &session::EditRamps::new(),
+                monitor: host_core::MonitorBase {
+                    committed: overlay,
+                    next: overlay,
+                    ramp: None,
+                },
+                observation: &host_core::NO_OBSERVATION,
+            },
+        )
+    };
+    let (_, grown_handles) = successor(&request(None), &overlay).unwrap_or_else(|failure| {
+        panic!("successor: {}", String::from_utf8_lossy(failure.as_bytes()))
+    });
+    assert_eq!(&*grown_handles.strips[5], "bus");
+    assert_eq!(grown_handles.master_track, Some(5), "the bus, by ID");
+
+    let (_, undesignated) = successor(&request(None), &controls::MonitorOverlay::new())
+        .unwrap_or_else(|failure| {
+            panic!("successor: {}", String::from_utf8_lossy(failure.as_bytes()))
+        });
+    assert_eq!(undesignated.master_track, None);
+
+    let Err(failure) = successor(&request(Some(4)), &overlay) else {
+        panic!("a successor request that names a master must be refused");
+    };
+    let text = String::from_utf8_lossy(failure.as_bytes()).into_owned();
+    assert!(
+        text.starts_with("host.observation.master_track\t"),
+        "{text}"
+    );
+}
+
 /// Gate 4: with a meter at each of `bus`'s seven boundaries, every render after block 0 allocates
 /// and frees nothing: the render audit and `bench_support::alloc`'s thread-scoped counters both
 /// read exact zero around each call.

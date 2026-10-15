@@ -9,12 +9,12 @@
 use std::sync::{Arc, Mutex};
 
 use effect_contract::{
-    AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectCellWriter,
-    EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, LatencySamples, LinkMode, ParameterChannel,
-    ParameterChannelPolicy, PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, effect_control_lane,
+    BankProcessReport, BankWidth, EffectBankProcessBlock, EffectCellWriter, EffectControlLane,
+    EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec, EffectProgramKey,
+    EffectQuality, LatencySamples, LinkMode, ParameterChannel, ParameterChannelPolicy,
+    PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank, PreparedPorts,
+    PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, effect_control_lane,
 };
 use engine::realtime::{GatePin, LiveSnapshot, LiveValuesSuperseded, RenderError, RevisionGate};
 use rack::{
@@ -95,10 +95,9 @@ impl PreparedNativeEffectBank for MockGainBank {
             let end = block.automation_offsets[lane + 1] as usize;
             self.seen[lane] = end - start;
             for span in &block.automation[start..end] {
-                assert_eq!(span.kind, AutomationSpanKind::Point);
-                assert_eq!(span.start_sample, block.first_sample);
+                assert_eq!(span.sample, block.first_sample);
                 if span.parameter_index == 0 {
-                    self.gain[lane] = span.start_value;
+                    self.gain[lane] = span.value;
                 }
             }
         }

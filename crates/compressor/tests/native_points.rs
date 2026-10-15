@@ -3,9 +3,9 @@
 mod support;
 
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, ObservationSample, ParameterAccessError,
-    ParameterChannel, PreparedAutomationSpan, PreparedNativeEffect, PreparedParameterState,
-    ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    EffectProcessBlock, ObservationSample, ParameterAccessError, ParameterChannel,
+    PreparedAutomationSpan, PreparedNativeEffect, PreparedParameterState, ProcessReport, ResetKind,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 
 use support::{initial_values, noise, prepare, render_scalar, request, snapshot};
@@ -21,13 +21,10 @@ fn point_at(
     value: f32,
 ) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index: parameter,
-        start_sample: sample,
-        end_sample: sample,
-        start_value: value,
-        end_value: value,
+        sample,
+        value,
     }
 }
 

@@ -25,6 +25,9 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
+    /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
+    /// plan's seeds the session's monitor overlay; a successor's is its overlay's own.
+    pub(crate) master_track: Option<u32>,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -1029,6 +1032,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         effect_controls,
         route_controls,
         jump_lengths,
+        master_track,
         ..
     } = handles;
     // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
@@ -1130,6 +1134,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
+        master_track,
     })
 }
 
@@ -1173,6 +1178,18 @@ where
         &live_values_superseded,
         0,
     )?;
+    // #1683: the boot plan's designated master (the browser's boot word) seeds the overlay, so the
+    // control list, a later write of the row and every successor start from the same designation.
+    let mut monitor = controls::MonitorOverlay::new();
+    if let Some(strip) = runtime.master_track.and_then(|index| {
+        store
+            .compiled()
+            .normalized_model()
+            .strips()
+            .nth(index as usize)
+    }) {
+        monitor.set_master(strip.id, true);
+    }
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -1208,6 +1225,7 @@ where
         inventory,
         control_catalog,
         capi,
+        master_track: _,
     } = runtime;
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
@@ -1296,7 +1314,7 @@ where
         render_diagnostic_head: 0,
         render_diagnostic_len: 0,
         protocol_reliable_pending: false,
-        monitor: controls::MonitorOverlay::new(),
+        monitor,
         observation: controls::ObservationBindings::new(),
         observation_pending: Box::default(),
         observation_offsets: Box::default(),

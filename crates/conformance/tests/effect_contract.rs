@@ -18,13 +18,13 @@ use conformance::{
     admit, run_effect_conformance,
 };
 use effect_contract::{
-    AutomationSpanKind, BankWidth, DescriptorDiagnosticCode, DescriptorError, EffectDescriptor,
-    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
-    ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts,
-    PreparedSidechainPort, QualityDescriptor, RegisteredTailBound, SmoothingRule,
-    expected_prepared_metadata, inverse_map_normalized, inverse_map_stepped_normalized,
-    map_normalized, map_stepped_normalized, validate_automation_block, validate_descriptor,
+    BankWidth, DescriptorDiagnosticCode, DescriptorError, EffectDescriptor, EffectQuality,
+    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel, ParameterId,
+    ParameterMapping, ParameterSmoother, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
+    QualityDescriptor, RegisteredTailBound, SmoothingRule, expected_prepared_metadata,
+    inverse_map_normalized, inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
+    validate_automation_block, validate_descriptor,
 };
 
 /// The mock's 48 kHz `Normal` entry, read from a registry that admitted it (issue #1462).
@@ -234,7 +234,7 @@ fn every_faulty_mock_is_detected() {
 fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
     for seed in 0..10_000_u32 {
         let mut descriptor: EffectDescriptor = DUAL_ACCUMULATOR_DELAY_DESCRIPTOR;
-        match seed % 5 {
+        match seed % 4 {
             0 => descriptor.contract_major = 2,
             1 => descriptor.state_layout_version = 0,
             2 => descriptor.display_name = "",
@@ -292,20 +292,16 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
     .unwrap();
     for seed in 0..10_000_u32 {
         let mut span = PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: ParameterChannel::Left,
             parameter_index: 0,
-            start_sample: 0,
-            end_sample: 0,
-            start_value: 1.0,
-            end_value: 1.0,
+            sample: 0,
+            value: 1.0,
         };
-        match seed % 5 {
+        match seed % 4 {
             0 => span.parameter_index = u32::MAX,
             1 => span.channel = ParameterChannel::Both,
-            2 => span.start_sample = 128,
-            3 => span.end_value = f32::NAN,
-            _ => span.end_sample = 1,
+            2 => span.sample = 128,
+            _ => span.value = f32::NAN,
         }
         let result =
             std::panic::catch_unwind(|| validate_automation_block(&[span], metadata, 0, 128));

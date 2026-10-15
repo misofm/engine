@@ -24,9 +24,9 @@
 //! input, so every sample is finite; the test module checks that rather than assuming it.
 
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectRegistry, ParameterChannel, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
+    EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
+    NativeEffectRegistry, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
 };
 
 use crate::{DELAY_DESCRIPTOR, DELAY_PARAMETERS, DelayFactory};
@@ -127,13 +127,10 @@ fn event(first_sample: u64) -> [PreparedAutomationSpan; 5] {
     let mix = [1.0_f32, 0.0, 0.25, 0.6];
     let cross = [0.5_f32, 1.0, 0.0, 0.75];
     let point = |parameter_index: u32, channel, value| PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: first_sample,
-        end_sample: first_sample,
-        start_value: value,
-        end_value: value,
+        sample: first_sample,
+        value,
     };
     [
         point(0, ParameterChannel::Left, delay[step]),

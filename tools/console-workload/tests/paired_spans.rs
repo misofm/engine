@@ -35,17 +35,17 @@ use bench_support::digest::Sha256Sink;
 use console_workload::{ObservationArm, PlanConfig, SessionRuntime, Workload};
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, ChannelSymmetryWitness,
-    EffectBankProcessBlock, EffectCellWriter, EffectControlLane, EffectControlRecord,
-    EffectDescriptor, EffectLaneShape, EffectLaneSpec, EffectProcessBlock, EffectProgramKey,
-    EffectQuality, EffectTargetError, EffectTargetRequest, InitialParameterValue, LinkMode,
-    NativeEffectFactory, ObservationSample, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectBank,
-    PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
-    ProcessBlockError, ResetKind, ResponseAnalysisError, ResponseSnapshotRequest,
-    ResponseSnapshotSummary, SeamSide, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, default_initial_values, effect_control_lane,
+    AutomationRate, BankProcessReport, BankWidth, ChannelSymmetryWitness, EffectBankProcessBlock,
+    EffectCellWriter, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectLaneShape,
+    EffectLaneSpec, EffectProcessBlock, EffectProgramKey, EffectQuality, EffectTargetError,
+    EffectTargetRequest, InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedEffect, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, ProcessBlockError, ResetKind, ResponseAnalysisError,
+    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, default_initial_values,
+    effect_control_lane,
 };
 use engine::realtime::{GatePin, LiveValuesSuperseded, RenderError, RevisionGate};
 use lane::Backend;
@@ -1871,13 +1871,10 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
             let (gate, mut pin) = RevisionGate::pair(0);
             let mut staging = vec![
                 PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Both,
                     parameter_index: 0,
-                    start_sample: 0,
-                    end_sample: 0,
-                    start_value: 0.0,
-                    end_value: 0.0,
+                    sample: 0,
+                    value: 0.0,
                 };
                 control.parameter_cells().max(2)
             ];
@@ -1979,13 +1976,10 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
     let window = |spans: usize| {
         vec![
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Both,
                 parameter_index: 0,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 0.0,
-                end_value: 0.0,
+                sample: 0,
+                value: 0.0,
             };
             spans
         ]

@@ -294,20 +294,15 @@ fn automation_rejects_everything_but_canonical_ordered_points() {
     let mut effect = prepare(&values);
     let mut left = vec![0.0_f32; 8];
     let mut right = vec![0.0_f32; 8];
-    let mut both = support::point(0, ParameterChannel::Both, 6.0, 0);
-    let mut ranged = support::point(1, ParameterChannel::Left, 6.0, 0);
-    ranged.end_sample = 4;
-    let mut out_of_domain = support::point(1, ParameterChannel::Right, 96.0, 0);
-    out_of_domain.end_value = 96.0;
+    let both = support::point(0, ParameterChannel::Both, 6.0, 0);
+    let out_of_domain = support::point(1, ParameterChannel::Right, 96.0, 0);
     let disordered = [
         support::point(2, ParameterChannel::Left, 0.5, 0),
         support::point(0, ParameterChannel::Left, 6.0, 0),
     ];
-    both.end_value = 6.0;
-    ranged.end_value = 6.0;
-    let spans = [both, ranged, out_of_domain, disordered[0], disordered[1]];
+    let spans = [both, out_of_domain, disordered[0], disordered[1]];
     let report = process(effect.as_mut(), &mut left, &mut right, 0, &spans);
-    assert_eq!(report.invalid_spans, 4);
+    assert_eq!(report.invalid_spans, 3);
     assert_eq!(report.sanitized_main_samples, 0);
 }
 
