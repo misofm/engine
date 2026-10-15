@@ -180,3 +180,69 @@ Checked against `12d4a4f9d`.
   (amended) says. D1's row-to-word list is replaced by that function.
 - **Context.** #1054 and #1365 have landed; `LiveRamps` moved from host-core to `controls`.
 - **The browser** is the same `SessionState` (#1562a); D5 holds by construction.
+
+## Decision record: #1639 (batch 13b)
+
+**Shipped.** `crates/graph`: `GraphJumpLengths { fader_samples, mute_samples, pan_samples }` (the
+three `LiveRamps` key values), one `LatestCell<3>` per plan with its dirty word in one `Arc`, the
+boxed one reader in the executor (`JumpLengthReader`, not `Clone`, built only by
+`graph::attach_jump_lengths`), the writer `GraphJumpLengthProducer::write(stamp, lengths)`, and
+`jump_length_retained_bytes` / `jump_length_largest_allocation_bytes`. `render` reads the cell once
+per block right after it takes the block's live snapshot, beside the source set's `begin_block`
+(`read_counted`, so a replaced write joins `live_values_superseded`), and holds the three values for
+the block. The test-support reader is `graph::test_only_block_jump_lengths()` (a thread-local the
+block entry sets). `crates/host-core`: `session_jump_lengths(model)` (from
+`LiveRamps::for_session`), preparation attaches and seeds the cell on every plan after bind and
+charges it in the graph row, `HostLiveControlHandles::jump_lengths`; the classifier's
+`LiveDelta::jump_lengths: Option<GraphJumpLengths>` (read by `is_empty`) and
+`automation_jump_row(target)`. `crates/control-plane`: the epoch's `StripLanes` holds the writer;
+`commit_live_once` checks it is present before the stamp and writes the value with the records,
+under the stamp, before the revision's publication. D7's sentence is in `docs/SESSION_SCHEMA_V1.md`.
+
+**Departures and choices (code truth).**
+
+1. **Attach after bind, not in `PreparedGraphPlan`.** The cell is attached to the bound plan by
+   `graph::attach_jump_lengths(&mut PreparedRenderPlan, ...)` (a downcast, as the carry installers
+   do), so no builtins-compiler pass-through and no change to `bind` were needed. The seed is the
+   reader's initial held value, not a cell write: a fresh plan holds the prepared lengths at its
+   first block with no stamp at preparation.
+2. **D3's row set** is `automation_jump_row`: a builtin, strip-own, route or VCA row whose live
+   motion is `Motion::Ramp(row)` (`controls::row_motion`), plus an effect's bypass row
+   (`BYPASS_CONTROL` -> `LiveRampRow::BypassCrossfade`, the `mute_ms` crossfade; its descriptor's
+   motion is `Fixed` because it takes no per-edit length). No hard-coded row-number list. Filters,
+   the delay, effect parameters and the (rebuild-only) link mode read no length.
+3. **The count is charged on every plan that made its own.** The cell's reader holds a clone of
+   `live_values_superseded` in every plan, so the graph row now charges the preparation's own count
+   whenever the host passed none (before: only with strip controls).
+4. **The fast classifier** (`classify_rows`) never sees a `control_smoothing` change
+   (`changed_rows` refuses session rows, so the full classifier runs); it leaves `jump_lengths`
+   `None`, with a comment.
+5. **Known gap, by the spec's design:** a `control_smoothing` change committed while the session has
+   no reading entry is not written; an entry added later (model-only until #1648 classifies
+   automation edits) reads the cell's older lengths. The hazard section's rebuild rule (#1648 D1)
+   closes it for rendered rows.
+
+**Re-pinned rows** (each "the jump-length cell, #1639 D1"; measured: the cell's two allocations are
+168 bytes, a count 24 bytes, the revision gate 72 bytes):
+
+| Test | Row | Before | After |
+|---|---|---|---|
+| `host-core` `tests/prepare.rs` `the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds` | plain preparation (no strip controls), graph row less incremental | 72 (gate) | 264 (gate + cell + its own count) |
+| same | strip controls, the preparation's own count | 96 | 264 |
+| same | strip controls, the session's count | 72 | 240 |
+| `host-core` `tests/live_routes.rs` `live_send_lanes_are_charged_against_the_graph_cap` | live total less idle total | route lanes + 24 (count) | route lanes (both plans hold the cell and their count); the test pins no total; live total 118304 at head (read from a failing run), 168 bytes (one cell) above the base it derives from |
+| `host-web` `tests/retained_ceilings.rs` `the_graph_row_charges_the_plans_gate_and_not_the_sessions_superseded_count` | browser graph row less incremental | 72 | 240 |
+
+`capi` `model_only_edits_commit_without_a_plan_rebuild`: the `control_smoothing` edit now comes
+before the automation upsert (on a session with a fader entry it is `live` by D3); not a byte row.
+
+**Gates.**
+
+| Gate | Test | Result |
+|---|---|---|
+| 1 Block-entry read | `graph` `tests/jump_lengths.rs` `the_block_entry_holds_the_newest_published_lengths` (prepared lengths at block 0; an unpublished write not held; held from the first block after publication; two writes give the last and count one superseded; a second attach refused) | pass |
+| 2 Classifier | `host-core` `tests/live_delta.rs` `a_control_smoothing_change_writes_the_jump_lengths_only_for_automation_that_reads_them` (fader, mute, pan entries live; none, EQ parameter entry and 10.0 -> 10.001 ms empty; effect bypass entry live), `the_rows_that_read_a_jump_length_are_the_ramped_rows` | pass |
+| 3 C ABI | `capi` `runtime::live_tests::a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live` (SET_CONTROL of the three smoothing rows: `live`, same epoch, no candidate, next block holds 96/48/144; without automation `model_only`, prepared 960/480/960 held). Red with the commit's write removed. | pass |
+| 4 Realtime | gates 1 and 3 count 0 allocations and 0 frees in the block that applies the write; `audit capi`: every violation count 0 | pass |
+| 5 Commands | `graph --features test-support`, `host-core` (all features), `capi`, `control-plane`, `host-web` suites; the `test-debug-a` workspace leg (2228 passed, 0 failed); `realtime_policy` (149 regions in 32 files; floor 147 -> 149 for this issue's two regions), graph, host-core and workspace policy scripts; `check-cross-targets.sh` (PASS, iOS memset only the known #1018 builtins/lane calls); workspace clippy `-D warnings`; `fmt --check` | pass |
+| 6 No bit moves | `audit capi` `pcm_digest` `bf7dcedd1d92621f` at base and head. Browser legs: run by the coordinator | native pass |

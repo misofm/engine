@@ -4222,3 +4222,193 @@ fn a_vca_reach_change_beside_a_solo_takes_the_models_ramp() {
         Some(vec![mute(BuiltinLaneSelector::Both, true, 40)])
     );
 }
+
+// Issue #1639: the jump lengths of stored automation, in the plan's cell.
+
+/// The classification of `current` to `edit(current)` under the post-commit lengths, as a host
+/// classifies a transaction.
+fn classify_jump(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> (Option<host_core::GraphJumpLengths>, bool, usize) {
+    let next = edited(current, edit);
+    let delta = classify_live_delta(
+        current,
+        &next,
+        LiveRamps::for_session(&next),
+        &EditRamps::new(),
+    )
+    .expect("live");
+    assert!(
+        delta.strips.is_empty() && delta.effects.is_empty() && delta.routes.is_empty(),
+        "no record beside the jump lengths"
+    );
+    (
+        delta.jump_lengths,
+        delta.is_empty(),
+        usize::from(delta.settings_changed),
+    )
+}
+
+/// `model` with one stored automation, `ride`.
+fn automated(model: &SessionModel, ride: impl FnOnce(&SessionModel) -> Automation) -> SessionModel {
+    let mut model = model.clone();
+    let ride = ride(&model);
+    model.automation.push(ride);
+    model
+}
+
+/// A mute ride on the first track's builtin strip (builtin 6, left lane).
+fn mute_ride(model: &SessionModel) -> Automation {
+    let mut ride = fader_ride(model);
+    ride.id = id("mute-ride");
+    ride.target.control = 6;
+    ride.target.lane = ParameterChannel::Left;
+    ride.segments[0].shape = AutomationShape::Step;
+    ride.segments[0].unit = ParameterUnit::Linear;
+    ride.segments[0].start_value = 0.0;
+    ride.segments[0].end_value = 1.0;
+    ride
+}
+
+/// #1639 gate 2. A `control_smoothing` change on a session with a fader or a mute entry is a live
+/// delta that carries the post-commit lengths and no record; without stored automation, or with
+/// only an effect parameter entry, it is empty (`model_only`). A change in milliseconds that rounds
+/// to the same sample counts is empty too. An effect's bypass entry reads the `mute_ms` length
+/// (its crossfade), so it carries the lengths.
+///
+/// Test value: red if the edit is `live` with no entry that reads a length (a needless write),
+/// `model_only` with one (the new lengths never reach render), or if equal sample counts still
+/// write.
+#[test]
+fn a_control_smoothing_change_writes_the_jump_lengths_only_for_automation_that_reads_them() {
+    let fast = ControlSmoothing {
+        mute_ms: 1.0,
+        fader_ms: 2.0,
+        pan_ms: 3.0,
+    };
+    let base = two_tracks();
+    let expected = host_core::GraphJumpLengths {
+        fader_samples: 96,
+        mute_samples: 48,
+        pan_samples: 144,
+    };
+    for (name, current) in [
+        ("fader entry", automated(&base, fader_ride)),
+        ("mute entry", automated(&base, mute_ride)),
+        (
+            "pan entry",
+            automated(&base, |model| pan_ride(model, false)),
+        ),
+    ] {
+        assert!(
+            controls::automation_diagnostics(&current, current.sample_rate_hz).is_empty(),
+            "{name}: a valid entry"
+        );
+        assert_eq!(
+            classify_jump(&current, |next| next.control_smoothing = Some(fast)),
+            (Some(expected), false, 1),
+            "{name}: live with the new lengths"
+        );
+    }
+
+    // No stored automation: model-only.
+    assert_eq!(
+        classify_jump(&base, |next| next.control_smoothing = Some(fast)),
+        (None, true, 1),
+        "no automation"
+    );
+
+    // Only an effect parameter entry: its ramp is the effect's own, so model-only.
+    let mut effects = with_effects();
+    effects.tracks[0].inserts.effects[2].params = Vec::new();
+    let effects = normalized(&effects);
+    let gain = automated(&effects, |model| eq_automation(model, 4, ParameterUnit::Db));
+    assert!(controls::automation_diagnostics(&gain, gain.sample_rate_hz).is_empty());
+    assert_eq!(
+        classify_jump(&gain, |next| next.control_smoothing = Some(fast)),
+        (None, true, 1),
+        "an effect parameter entry"
+    );
+
+    // An effect's bypass entry: its crossfade is the `mute_ms` length.
+    let bypass = automated(&effects, |model| {
+        let mut ride = eq_automation(model, controls::BYPASS_CONTROL, ParameterUnit::Linear);
+        ride.target.section = Section::Inserts(id("comp"));
+        ride.target.lane = ParameterChannel::Both;
+        ride.segments[0].start_value = 0.0;
+        ride
+    });
+    assert!(controls::automation_diagnostics(&bypass, bypass.sample_rate_hz).is_empty());
+    assert_eq!(
+        classify_jump(&bypass, |next| next.control_smoothing = Some(fast)),
+        (Some(expected), false, 1),
+        "an effect bypass entry"
+    );
+
+    // 10.0 ms and 10.001 ms are both 480 samples at 48 kHz: no write.
+    let ten = ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 10.0,
+        pan_ms: 10.0,
+    };
+    let current = with_smoothing(&automated(&base, fader_ride), Some(ten));
+    assert_eq!(current.sample_rate_hz, 48_000);
+    assert_eq!(
+        classify_jump(&current, |next| {
+            next.control_smoothing = Some(ControlSmoothing {
+                fader_ms: 10.001,
+                ..ten
+            });
+        }),
+        (None, true, 1),
+        "equal sample counts"
+    );
+}
+
+/// #1639 D3: the rows whose jumps read a length are the rows `LiveRamps::for_row` gives a length:
+/// a builtin fader, trim, mute, polarity, pan or matrix row, a strip's own and a VCA's ramped rows,
+/// and an effect's bypass; never a filter, the delay or an effect parameter.
+///
+/// Test value: red if the row set is a hand-written list that drifts from the descriptors' ramp
+/// rows, or if an effect's parameter is taken for its bypass.
+#[test]
+fn the_rows_that_read_a_jump_length_are_the_ramped_rows() {
+    let strip = |section: Section, control: u32| ControlAddress {
+        owner: Owner::Strip(id("track")),
+        section,
+        control,
+        lane: ParameterChannel::Left,
+    };
+    let builtin = |control| host_core::automation_jump_row(&strip(Section::Builtins, control));
+    assert_eq!(builtin(1), Some(LiveRampRow::PolarityInvert));
+    assert_eq!(builtin(2), Some(LiveRampRow::InputTrim));
+    assert_eq!(builtin(3), None, "the HPF keeps its fixed ramp");
+    assert_eq!(builtin(4), None, "the LPF keeps its fixed ramp");
+    assert_eq!(builtin(5), Some(LiveRampRow::Fader));
+    assert_eq!(builtin(6), Some(LiveRampRow::Mute));
+    for matrix in 7..=10 {
+        assert_eq!(builtin(matrix), Some(LiveRampRow::Matrix));
+    }
+    assert_eq!(builtin(11), None, "the delay is not live");
+    assert_eq!(builtin(12), Some(LiveRampRow::Pan));
+    let effect =
+        |control| host_core::automation_jump_row(&strip(Section::Inserts(id("eq")), control));
+    assert_eq!(
+        effect(controls::BYPASS_CONTROL),
+        Some(LiveRampRow::BypassCrossfade)
+    );
+    assert_eq!(effect(4), None, "an effect parameter");
+    // A VCA's own rows: its offset reads `fader_ms`, its mute `mute_ms`.
+    let vca: Vec<LiveRampRow> = (0..64)
+        .filter_map(|control| {
+            host_core::automation_jump_row(&ControlAddress {
+                owner: Owner::Vca(id("vca")),
+                section: Section::Own,
+                control,
+                lane: ParameterChannel::Both,
+            })
+        })
+        .collect();
+    assert_eq!(vca, [LiveRampRow::VcaOffset, LiveRampRow::VcaMute]);
+}

@@ -19,6 +19,9 @@ pub(crate) struct StripLanes {
     /// One producer per route into a submix, in canonical route-ID order; empty when the plan
     /// carries no route lane.
     pub(crate) routes: Box<[host_core::RouteControlProducer]>,
+    /// The writer of the plan's jump-length cell (#1639 D1), held inline; every prepared plan has
+    /// one.
+    pub(crate) jump_lengths: Option<host_core::GraphJumpLengthProducer>,
 }
 
 /// One epoch's worth of host-owned source producers, strip live-control producers and effect
@@ -1888,6 +1891,12 @@ where
             };
             resolved_routes.push(index);
         }
+        // 2a'. A delta with new jump lengths has the newest plan's cell to write them to (#1639
+        // D3), found before the first write.
+        let jump_lane = &mut strips.jump_lengths;
+        if delta.jump_lengths.is_some() && jump_lane.is_none() {
+            return LiveCommit::Done(Err(CommandError::Internal));
+        }
 
         // 2b. A strip with input records has an input writer, and every filter target passes the
         // contract the writer assumes (#1556 D5). Both are checked before the first write: the
@@ -2041,6 +2050,10 @@ where
             }
             for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
                 route_lanes[index].write(stamp, route.record);
+            }
+            // #1639 D3: the new jump lengths, in the same block as the records.
+            if let (Some(lengths), Some(producer)) = (delta.jump_lengths, jump_lane.as_mut()) {
+                producer.write(stamp, lengths);
             }
             for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
                 let producer = &mut owners.effects[index];

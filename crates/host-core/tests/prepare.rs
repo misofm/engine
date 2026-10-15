@@ -764,11 +764,11 @@ fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
 }
 
 /// The graph row counts the allocations the plan makes for itself, for every host: its revision gate
-/// (#1502 D1) always, and its `live_values_superseded` count only where the count is both the
-/// preparation's own and held by the plan (#1312 D2). A host that passes the session's count
-/// charges it once itself (the C ABI), and a preparation with no strip controls has no cell reader
-/// holding a count, so the plan retains none. The browser's per-plan count has readers and copies
-/// this row unchanged into its exact retained total.
+/// (#1502 D1) and its jump-length cell (#1639 D1) always, and its `live_values_superseded` count
+/// where the count is the preparation's own (#1312 D2): the jump-length cell's reader holds it in
+/// every plan, with or without strip controls. A host that passes the session's count charges it
+/// once itself (the C ABI). The browser's per-plan count copies this row unchanged into its exact
+/// retained total.
 ///
 /// The graph compiler's row is `session_bytes + incremental_plan_bytes`, and the facade passes it
 /// no session bytes, so the report's incremental row is the independent term the plan's own
@@ -777,7 +777,9 @@ fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
 fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let with_lanes = HostLiveControlRequest::default();
-    let gate = engine::realtime::plan_revision_gate_retained_bytes();
+    // The jump-length cell, #1639 D1: every plan holds it.
+    let gate =
+        engine::realtime::plan_revision_gate_retained_bytes() + graph::jump_length_retained_bytes();
     let row = |report: &HostPrepareReport| {
         report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes
     };
@@ -787,9 +789,9 @@ fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
         .report;
     assert_eq!(
         row(&lane_free),
-        gate,
-        "no strip controls: no cell reader holds the preparation's count, so the row charges the \
-         gate and not the count"
+        gate + LiveValuesSuperseded::retained_bytes(),
+        "no strip controls: the jump-length cell's reader holds the preparation's count, so the row \
+         charges the gate, the cell and the count"
     );
     let own = prepare_host_runtime_with_live_controls(&compiled, &caps(), &with_lanes)
         .unwrap_or_else(|_| panic!("prepare with the preparation's own count"))

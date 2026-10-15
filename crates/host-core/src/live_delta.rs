@@ -63,7 +63,7 @@ use crate::prepare::{
     effect_instance_records, effective_fader, fader_records, lane_records, level_differs,
     matrix_record, route_record_between, route_source_strip, same_params, strip_at,
 };
-use crate::prepare::{LiveRampRow, LiveRamps, MonitorBase};
+use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -178,6 +178,12 @@ pub struct LiveDelta<'a> {
     /// control catalog then stages the derived rows of these owners and of `changed_owners` and no
     /// others. `None` when the classification compared the whole models: every derived row is read.
     pub derived_owners: Option<Vec<usize>>,
+    /// The new value of the plan's jump-length cell (#1639 D3): `Some` when the session's
+    /// `control_smoothing` lengths in samples differ between the two models and the post-commit
+    /// model holds at least one stored automation whose jumps ramp over one of them
+    /// ([`automation_jump_row`]); `None` otherwise, equal sample counts included. The host writes
+    /// it to the newest plan's cell after every fallible check, with the transaction's records.
+    pub jump_lengths: Option<GraphJumpLengths>,
 }
 
 impl LiveDelta<'_> {
@@ -199,9 +205,46 @@ impl LiveDelta<'_> {
             changed_owners: _,
             settings_changed: _,
             derived_owners: _,
+            jump_lengths,
         } = self;
-        strips.is_empty() && effects.is_empty() && routes.is_empty()
+        strips.is_empty() && effects.is_empty() && routes.is_empty() && jump_lengths.is_none()
     }
+}
+
+/// The live ramp row whose session length the jumps of a stored automation on `target` ramp over
+/// (#1639 D3, #1637 D2 as amended): the row of a control whose live motion is a
+/// `control_smoothing` ramp (`controls::row_motion`), and an effect's bypass, whose crossfade is
+/// [`LiveRampRow::BypassCrossfade`]. A stage resolves the row's length with
+/// [`LiveRamps::for_row`]. `None` for every other row: an effect parameter, the input filters and
+/// the EQ keep their fixed ramps, and a link-mode row is not automatable.
+#[must_use]
+pub fn automation_jump_row(target: &ControlAddress) -> Option<LiveRampRow> {
+    match &target.section {
+        Section::Console(_) | Section::Inserts(_) => {
+            (target.control == controls::BYPASS_CONTROL).then_some(LiveRampRow::BypassCrossfade)
+        }
+        Section::Own | Section::Builtins => {
+            match controls::row_motion(target.owner.kind(), target.section.kind(), target.control) {
+                Some(controls::Motion::Ramp(row)) => Some(row),
+                Some(controls::Motion::Fixed) | None => None,
+            }
+        }
+    }
+}
+
+/// D3 of #1639: the new jump lengths when `current` and `next` differ in them, in samples, and
+/// `next` holds an automation whose jumps read one of them. The rule reads the session only, not
+/// which rows render yet: every plan has the cell, so the write always lands, and a row whose
+/// rendering slice is still to come reads the new value from its first jump.
+fn jump_length_change(current: &SessionModel, next: &SessionModel) -> Option<GraphJumpLengths> {
+    let after = session_jump_lengths(next);
+    if session_jump_lengths(current) == after {
+        return None;
+    }
+    next.automation
+        .iter()
+        .any(|automation| automation_jump_row(&automation.target).is_some())
+        .then_some(after)
 }
 
 pub use crate::prepare::LiveRebuild;
@@ -247,8 +290,11 @@ pub use crate::prepare::LiveRebuild;
 ///
 /// The session ID, the two profile IDs, the stored automation and `control_smoothing` are
 /// model-only: no prepared plan reads them (#1260, #1365), so a delta that changes only them is
-/// live with no records, once step 3 has accepted the automation's targets. `control_smoothing`'s
-/// only reader is [`LiveRamps::for_session`], which the caller evaluates on `next`: the records
+/// live with no records, once step 3 has accepted the automation's targets. The one exception is
+/// the plan's jump-length cell (#1639 D3): when the lengths in samples differ and `next` holds a
+/// stored automation whose jumps ramp over one of them ([`automation_jump_row`]), the delta
+/// carries [`LiveDelta::jump_lengths`] and is not empty. `control_smoothing`'s
+/// record reader is [`LiveRamps::for_session`], which the caller evaluates on `next`: the records
 /// of the same transaction use the new lengths, and a ramp already in flight keeps its own. A
 /// preparation that bakes a ramp length into a plan (a transition decided at preparation) reads
 /// the key at that preparation only, so a later edit still governs only later transitions. The
@@ -389,6 +435,7 @@ pub fn classify_live_delta_with_monitor<'a>(
     let mut delta = LiveDelta {
         changed_owners: core::mem::take(&mut accumulated.changed_owners),
         settings_changed: accumulated.settings_changed,
+        jump_lengths: jump_length_change(current, next),
         ..LiveDelta::default()
     };
     let diff = diff.as_ref().map(|diff| diff as &dyn LevelDiff);
@@ -624,6 +671,8 @@ fn classify_rows<'a>(
                 .or_insert_with(|| Work::new(view.strip(index).id.clone()));
         }
     }
+    // No jump-length write here (#1639 D3): the session's `control_smoothing` rows are never judged
+    // on this path (`controls::changed_rows` refuses them), so the lengths are the committed ones.
     let mut delta = LiveDelta {
         changed_owners: core::mem::take(&mut accumulated.changed_owners),
         settings_changed: accumulated.settings_changed,

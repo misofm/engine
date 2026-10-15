@@ -1231,6 +1231,202 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         largest_allocation_bytes: largest,
     }
 }
+/// Words of the plan's jump-length cell (#1639 D1): the session's `fader_ms`, `mute_ms` and
+/// `pan_ms` lengths in samples, in that order.
+const JUMP_LENGTH_WORDS: usize = 3;
+
+/// The session's three live ramp lengths, in samples, that the plan's jump-length cell holds
+/// (#1639 D1): the values of `controls::LiveRamps` for the `fader_ms`, `mute_ms` and `pan_ms` keys
+/// (`SessionModel::control_smoothing_samples`). A stage resolves one row's length from them with
+/// `LiveRamps::for_row`, which owns every row rule (the polarity doubling among them); the graph
+/// holds the three values and knows no row.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphJumpLengths {
+    /// The `fader_ms` key, in samples.
+    pub fader_samples: u32,
+    /// The `mute_ms` key, in samples.
+    pub mute_samples: u32,
+    /// The `pan_ms` key, in samples.
+    pub pan_samples: u32,
+}
+
+impl GraphJumpLengths {
+    const fn to_words(self) -> [u32; JUMP_LENGTH_WORDS] {
+        [self.fader_samples, self.mute_samples, self.pan_samples]
+    }
+
+    // REALTIME_POLICY_BEGIN
+    const fn from_words(words: [u32; JUMP_LENGTH_WORDS]) -> Self {
+        let [fader_samples, mute_samples, pan_samples] = words;
+        Self {
+            fader_samples,
+            mute_samples,
+            pan_samples,
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// What the plan's jump-length cell shares between its writer (control) and its reader (render):
+/// one #1312 latest-target cell and its dirty word (#1639 D1).
+struct JumpLengthLane {
+    cell: engine::realtime::LatestCell<JUMP_LENGTH_WORDS>,
+    dirty: engine::realtime::DirtyWord,
+}
+
+/// The render half of the plan's jump-length cell (#1639 D2): the one reader. It is not `Clone`
+/// and only [`attach_jump_lengths`] builds it, straight into the executor, so a second reader of
+/// the cell cannot be written.
+struct JumpLengthReader {
+    lane: std::sync::Arc<JumpLengthLane>,
+    reader: engine::realtime::CellReader,
+    dirty: engine::realtime::DirtyReader,
+    superseded: engine::realtime::LiveValuesSuperseded,
+    /// The lengths this block holds: the prepared ones until a write is applied.
+    held: GraphJumpLengths,
+}
+
+// REALTIME_POLICY_BEGIN
+impl JumpLengthReader {
+    /// Render, once per block at block entry, after the block's live snapshot: apply the newest
+    /// write at or below `snapshot`, if it was not applied before (#1639 D2). An idle cell costs
+    /// one `Relaxed` load. A write a later one replaced before this read joins the session's
+    /// `live_values_superseded` count (D15-2).
+    fn begin_block(&mut self, snapshot: LiveSnapshot) {
+        if self.dirty.pending(&self.lane.dirty) == 0 {
+            return;
+        }
+        if let engine::realtime::CellRead::Applied { words, .. } = self.reader.read_counted(
+            &self.lane.cell,
+            snapshot,
+            &mut self.dirty,
+            0,
+            &self.superseded,
+        ) {
+            self.held = GraphJumpLengths::from_words(words);
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+/// The control half of a plan's jump-length cell (#1639 D1, D3): the cell's one writer.
+pub struct GraphJumpLengthProducer {
+    lane: std::sync::Arc<JumpLengthLane>,
+    writer: engine::realtime::CellWriter<JUMP_LENGTH_WORDS>,
+}
+
+impl GraphJumpLengthProducer {
+    /// Write `lengths` as the plan's newest jump lengths, stamped with the revision of the
+    /// transaction that commits them. It cannot fail and never waits; the caller publishes the
+    /// stamp's revision on the plan's gate after every write of the transaction, and render holds
+    /// the lengths from the first block whose snapshot covers it (#1312 D7).
+    pub fn write(&mut self, stamp: engine::realtime::LiveStamp<'_>, lengths: GraphJumpLengths) {
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            lengths.to_words(),
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl GraphJumpLengthProducer {
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight, which a
+    /// quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        engine::realtime::CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
+    }
+}
+
+/// Why [`attach_jump_lengths`] refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphJumpLengthError {
+    /// The plan is not a graph plan.
+    NotAGraphPlan,
+    /// The plan has its jump-length cell already.
+    AlreadyAttached,
+}
+
+/// The bytes one plan's jump-length cell retains (#1639 D1): the shared allocation of the cell
+/// and its dirty word (`SharedAllocation<JumpLengthLane>`) and the boxed render-side reader. The
+/// same for every session. The producer is held inline by its owner.
+#[must_use]
+pub fn jump_length_retained_bytes() -> u64 {
+    let shared = core::mem::size_of::<engine::realtime::SharedAllocation<JumpLengthLane>>();
+    let reader = core::mem::size_of::<JumpLengthReader>();
+    u64::try_from(shared.saturating_add(reader)).unwrap_or(u64::MAX)
+}
+
+/// The largest single allocation of [`jump_length_retained_bytes`].
+#[must_use]
+pub fn jump_length_largest_allocation_bytes() -> u64 {
+    let shared = core::mem::size_of::<engine::realtime::SharedAllocation<JumpLengthLane>>();
+    let reader = core::mem::size_of::<JumpLengthReader>();
+    u64::try_from(shared.max(reader)).unwrap_or(u64::MAX)
+}
+
+/// Give a bound graph plan its jump-length cell (#1639 D1), holding `lengths` from its first
+/// block, and return the cell's one writer. Every write a later one replaces before render reads
+/// it is added to `superseded`, the session's count. Off the render thread, before publication.
+///
+/// The graph reads the cell once per block at block entry, beside the source set's
+/// `begin_block`, and holds the three values for that block (D2). No stage reads the cell itself.
+///
+/// # Errors
+///
+/// [`GraphJumpLengthError::NotAGraphPlan`] for a plan another executor renders, and
+/// [`GraphJumpLengthError::AlreadyAttached`] for a second call on one plan.
+pub fn attach_jump_lengths(
+    plan: &mut PreparedRenderPlan,
+    lengths: GraphJumpLengths,
+    superseded: &engine::realtime::LiveValuesSuperseded,
+) -> Result<GraphJumpLengthProducer, GraphJumpLengthError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphJumpLengthError::NotAGraphPlan)?;
+    if executor.jump_lengths.is_some() {
+        return Err(GraphJumpLengthError::AlreadyAttached);
+    }
+    let lane = std::sync::Arc::new(JumpLengthLane {
+        cell: engine::realtime::LatestCell::new(),
+        dirty: engine::realtime::DirtyWord::new(),
+    });
+    executor.jump_lengths = Some(Box::new(JumpLengthReader {
+        lane: std::sync::Arc::clone(&lane),
+        reader: engine::realtime::CellReader::new(),
+        dirty: engine::realtime::DirtyReader::new(),
+        superseded: superseded.clone(),
+        held: lengths,
+    }));
+    Ok(GraphJumpLengthProducer {
+        lane,
+        writer: engine::realtime::CellWriter::new(),
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// #1639 gate 1: the jump lengths the graph plan rendered last on this thread held for its
+    /// block, or `None` for a block of a plan with no jump-length cell.
+    static BLOCK_JUMP_LENGTHS: Cell<Option<GraphJumpLengths>> = const { Cell::new(None) };
+}
+
+/// The jump lengths the last graph block rendered on this thread held (#1639 gate 1): the values
+/// read at that block's entry, or `None` when its plan has no jump-length cell.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_block_jump_lengths() -> Option<GraphJumpLengths> {
+    BLOCK_JUMP_LENGTHS.with(Cell::get)
+}
+
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
     /// The member on each active lane, in lane order: lanes `0..members.len()`.
@@ -3054,6 +3250,9 @@ struct GraphExecutor {
     /// [`PreparedPlanExecutor::begin_live_block`] and taken by `render`, so a block that renders
     /// without its own snapshot is refused and never reads the previous block's.
     live_snapshot: Option<LiveSnapshot>,
+    /// The plan's jump-length cell reader (#1639 D2), attached after bind by
+    /// [`attach_jump_lengths`]; `None` for a plan with no cell.
+    jump_lengths: Option<Box<JumpLengthReader>>,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -4257,6 +4456,7 @@ struct GraphExecutorWithoutSplitPairTable {
     carry_routes: Box<[GraphRouteMove]>,
     bind_identities: runtime::BindIdentities,
     live_snapshot: Option<LiveSnapshot>,
+    jump_lengths: Option<Box<JumpLengthReader>>,
 }
 
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
@@ -4380,6 +4580,7 @@ impl GraphExecutor {
             carry_routes: Box::default(),
             bind_identities,
             live_snapshot: None,
+            jump_lengths: None,
         }
     }
 }
@@ -4613,11 +4814,18 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry_routes: _,
             bind_identities: _,
             live_snapshot,
+            jump_lengths,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.
         let Some(live) = live_snapshot.take() else {
             return Err(RenderError::InvalidEnvelope);
         };
+        // #1639 D2: the plan's jump lengths, read once at block entry and held for the block.
+        if let Some(jump_lengths) = jump_lengths.as_deref_mut() {
+            jump_lengths.begin_block(live);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        BLOCK_JUMP_LENGTHS.with(|held| held.set(jump_lengths.as_deref().map(|reader| reader.held)));
         *next_block_sample = time
             .absolute_sample
             .saturating_add(runtime.arena.frames() as u64);
