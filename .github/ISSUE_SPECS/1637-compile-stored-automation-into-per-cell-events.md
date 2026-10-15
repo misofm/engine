@@ -305,7 +305,11 @@ mark `value_at` (`evaluate.rs`) and the event generator (`events.rs`).
 
 **Observation for successors.** A seek `Set` in `Exact` mode clears the in-flight ramp in the
 state, so the stage must treat `Set` as an immediate assignment. `CellState::hold_until` takes the completion node time in the cell's own `Completion`
-convention.
+convention; on a `no_restart` cell it must not be earlier than the ramp in flight (the caller
+does not restart a busy lane), or a deferred jump lands late (attempt-3 review, MINOR).
+A seek landing in `Ramp` mode restarts a busy `no_restart` lane, as D4's `Set` rule says, with no
+`no_restart` exception. #1646 and #1647 use `no_restart = false`. The first issue that automates
+a `no_restart` target (delay time) decides whether a seek landing waits for the lane.
 
 **Gates and tests.**
 

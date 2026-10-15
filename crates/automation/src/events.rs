@@ -136,6 +136,10 @@ impl CellState {
 
     /// Reports a ramp the caller started on this lane (a mute ramp, a live record's ramp) that
     /// completes at node time `completion`, so the grid holds inside it.
+    ///
+    /// On a `no_restart` cell the caller must not restart a busy lane, so `completion` is never
+    /// earlier than the ramp in flight: a deferred jump keeps the absolute time it was deferred
+    /// to, and a shorter report would land it late (at the next grid point instead).
     pub const fn hold_until(&mut self, completion: i64) {
         self.ramp_done = completion;
     }
