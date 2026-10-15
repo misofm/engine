@@ -196,3 +196,7 @@ host-web/test-support` green; clippy `-D warnings` on `host-core` (no features, 
 all features) and `host-core graph effect-contract rack capi --all-targets --all-features`;
 `realtime-policy`, `check-bench-policy.sh`, `check-builtins-fixtures.sh`, `check-cross-targets.sh`,
 `check-web-audioworklet.sh`, `trace-graph-audit.sh` (1,000,000 blocks) and rustdoc `-D warnings` pass.
+
+### `audit capi` digest (batch 11)
+
+The C ABI render audit commits one structural transaction after its first call (it adds a muted track). Its session also holds a per-node live effect instance (the audit editor reaches a non-EQ effect lane). Before this slice that instance restarted at the swap; now it moves by pointer and keeps its state. So `audit capi`'s `pcm_digest` moves from `9bc5ec3d8a4c223c` to `bf7dcedd1d92621f`, measured by building the audit at `405221f8d` (#1633, the parent: `9bc5ec3d8a4c223c`) and at `067d145ec` (this slice: `bf7dcedd1d92621f`); the later batch 11 slices leave it at `bf7dcedd1d92621f`. Allocations, frees and render errors stay 0.
