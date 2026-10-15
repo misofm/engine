@@ -101,7 +101,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
 ## Non-goals
 
 - The command (#1627). The queue, its records, config and counters (#1629). The transport
-  position (draft 25).
+  position (#1635).
 
 ## Hazards
 
@@ -197,7 +197,7 @@ C ABI `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes` (doc com
 retired, README F24; the capabilities response vector now lists five events) and
 `a_live_edit_emits_the_commit_events_of_a_rebuild` (no `AUTOMATION_CANCELED` arm).
 
-**Re-pins** (reason: draft 21b retires `AUTOMATION_CANCELED`): `COMPLETE_SCHEMA_HASH`
+**Re-pins** (reason: #1628 retires `AUTOMATION_CANCELED`): `COMPLETE_SCHEMA_HASH`
 `0xcfa5_8ab7_b7bb_b7c4` to `0x4b21_d9e6_f520_afd9` (corpus 46 to 45 frames: the
 `event.automation_canceled` row is gone and the capabilities response lists no `8002`), the parity
 self-test strings (digest, and the length-assertion mutation 45 to 44), the fuzz manifest, the

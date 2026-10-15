@@ -1,6 +1,6 @@
 # Validate effect automation units, domains and shapes at preparation
 
-> **Obsolete (controls coordinator, 2026-10-14):** its unit and domain rules are #1566's row rule and its shape rule moves into draft 02. Kept as a record; do not file. See the amendment at the end.
+> **Obsolete (controls coordinator, 2026-10-14):** its unit and domain rules are #1566's row rule and its shape rule moves into #1645. Kept as a record; do not file. See the amendment at the end.
 
 Proposed by *Research: render stored session automation in the engine, identically on every
 platform* (#1058), answer A3, under decision 15 D15-16
@@ -39,7 +39,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
   `ratio` (minimum 0.1 or 1).
 - **Frozen effect codes.** `docs/EFFECT_CONTRACT_V1.md:206-229` ("Stable diagnostics"); #1335 D6
   adds `effect.automation.rate`.
-- **Session and builtin rules** are #1626 and draft 02: one entry per lane, pan or matrix by strip
+- **Session and builtin rules** are #1626 and #1645: one entry per lane, pan or matrix by strip
   kind, discontinuity spacing, and builtin unit, domain, shape and filter order.
 - **Checked-in documents.** `fixtures/session/v1/canonical.json` automates an insert of the
   unregistered identity `parametric-eq` (#1335's skip applies); the skill's
@@ -84,9 +84,9 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 
 ## Non-goals
 
-- The rate rule (#1335). Session-level and builtin rules (#1626, draft 02).
+- The rate rule (#1335). Session-level and builtin rules (#1626, #1645).
 - The SDK mirror (draft 03b) and submix authoring (draft 03c).
-- Rendering effect automation (slices 17a to 20).
+- Rendering effect automation (#1661 to #1667).
 
 ## Hazards
 
@@ -139,7 +139,7 @@ ABI automation-only transaction (through #1335's classifier route) and `session-
 
 - #1626 *Validate stored automation lanes in the session crate and state the hold rule* (the
   skill's automation refusal table).
-- Draft 02 *Validate builtin automation targets against their rows at preparation* (the builtin
+- #1645 *Validate builtin automation targets against their rows at preparation* (the builtin
   rules these effect rules complete, the shared path form and the classifier call beside which
   #1335's function runs).
 - *Refuse automation on effect parameters that are not block-rate* (#1335): D1 extends its
@@ -153,5 +153,5 @@ Checked against `12d4a4f9d`.
 - **Status: obsolete (decision 17, #1566).** Its unit and domain rules are #1566's row rule
   (`controls::automation_diagnostics`, `control.domain`), which covers effect rows through their
   descriptors (`DomainRule::Contract`); `effect_automation_diagnostics`, the function it extends, is
-  deleted (#1566 D7). Its one remaining rule, the shape rule, moves into amended draft 02 as one
+  deleted (#1566 D7). Its one remaining rule, the shape rule, moves into amended #1645 as one
   rule for every row. Do not file this draft.

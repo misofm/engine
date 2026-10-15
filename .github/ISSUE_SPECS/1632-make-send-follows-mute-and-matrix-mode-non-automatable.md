@@ -28,7 +28,7 @@ and a mode, not performance values.
   valid control row. `docs/CONTROL_PROTOCOL_REGISTRY.md:54` states the rule.
 - No checked-in fixture automates either row (`fixtures/session/v1/builtins-automation.json` holds
   builtins rows of `vocal`, `route-ride` on route control 1 and `vca-ride`).
-- The stored-automation drafts assume this ruling: draft 13d (amended) renders no `follows_mute`
+- The stored-automation drafts assume this ruling: #1654 (amended) renders no `follows_mute`
   entry, and a `matrix_mode` entry would make rows active and inactive over time, which no draft
   covers.
 
@@ -70,7 +70,7 @@ and a mode, not performance values.
 
 ## Dependencies
 
-- None. Draft 13d of the stored-automation program (README) assumes it (ordering only).
+- None. #1654 of the stored-automation program (README) assumes it (ordering only).
 
 ## Size
 

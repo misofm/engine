@@ -70,7 +70,7 @@ refusal is permanent) and D6.
 | Fuzz | `fuzz/corpus/complete-schema-manifest.md:3-10` (frame counts and the hash); no seed file carries the command |
 
 **Never retired here:** `ParameterHandle`, the type `ParameterAutomationRate`
-(`message_wire.rs:239-247`; draft 26 retires its value 1), `ControlProvider::current_sample`,
+(`message_wire.rs:239-247`; #1636 retires its value 1), `ControlProvider::current_sample`,
 `reserve_reliable_events`, the stored automation edits `0x0600`-`0x0603`.
 
 **Tests that send or pin the command today:**
@@ -156,15 +156,15 @@ the manifest `fuzz/corpus/complete-schema-manifest.md:10`, the record
 
 - The event `0x8002`, the cancellation path and `record_canceled_automation` (#1628).
 - The queue, its records, config, report, queue kind 2 and the counters (#1629).
-- The C limit `maximum_automation_spans_per_block` (draft 22). The browser bypass lift (#1315 D4).
-- The stored automation edits `0x0600`-`0x0603`. The transport position (draft 25). The span kinds
-  and the sample rate value (draft 26).
+- The C limit `maximum_automation_spans_per_block` (#1668). The browser bypass lift (#1315 D4).
+- The stored automation edits `0x0600`-`0x0603`. The transport position (#1635). The span kinds
+  and the sample rate value (#1636).
 
 ## Hazards
 
 - **Batch P1.** After this slice the cancellation path and the queue have no producer; #1628
   and #1629 remove them in the same push, so `main` never holds them.
-- **Corpus re-pin order.** #1313, #1365, #1369 and #1394, #1628, and drafts 25 and 26 also re-pin
+- **Corpus re-pin order.** #1313, #1365, #1369 and #1394, #1628, and #1635 and #1636 also re-pin
   `COMPLETE_SCHEMA_HASH`. Whichever merges later recomputes from the earlier value and adds its own
   history line; never merge two hashes by hand.
 - **#1315's C ABI half** must not land before this slice: its feature switch would be code this
@@ -339,7 +339,7 @@ stored `SetAutomationSegments` edit, not the command) and
   (the self-test's search text matched nothing and would have failed `--self-test`). Both now carry
   the new pin.
 
-**Re-pins** (reason: draft 21a retires `AUTOMATION_ENQUEUE`, statuses 15 and 16 and capability
+**Re-pins** (reason: #1627 retires `AUTOMATION_ENQUEUE`, statuses 15 and 16 and capability
 fields 9, 12, 19 and 20): `COMPLETE_SCHEMA_HASH` `0x4f6a_80fb_52c1_2aed` to `0xcfa5_8ab7_b7bb_b7c4`
 (corpus 50 to 46 frames: the command row, its success row and the two status rows are gone, and the
 capabilities response has 23 fields and lists no `0006`), the parity self-test strings, the fuzz

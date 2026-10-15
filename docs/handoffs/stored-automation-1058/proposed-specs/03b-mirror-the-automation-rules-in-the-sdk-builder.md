@@ -31,7 +31,7 @@ accepts.
   rows), and each effect row its `domainName`, `minimum`, `maximum` and `unitName`.
 - **The engine rules mirrored here.** #1626 D1-D3: `automation.duplicate_lane`, pan or matrix by
   strip kind (`reference.missing_entity` at the parameter), `automation.discontinuity_spacing`.
-  Draft 02 D1-D2: `builtin.automation.{unit,domain,shape}` and `builtin.filter.order` over curves.
+  #1645 D1-D2: `builtin.automation.{unit,domain,shape}` and `builtin.filter.order` over curves.
   Draft 03a D1: `effect.automation.{unit,domain,shape}`.
 - **SDK precedent tests.** `sdk/test/builder-evals.mjs:691-728` (builtin target rows) and the
   engine-parity helper `engineFirstCode` (`:568-574`, `:645-651`), which boots a hand-edited model
@@ -50,9 +50,9 @@ accepts.
     `.segments[<k>].startSample` or `.endSample`;
   - pan on a matrix strip, matrix on a pan strip (#1626 D2): `reference.missing_entity` at
     `.target.parameter`;
-  - builtin domain and shape (draft 02 D1): `builtin.automation.domain` through the same tests as
+  - builtin domain and shape (#1645 D1): `builtin.automation.domain` through the same tests as
     `builtinNumber` and `builtinFilter` at the session rate, and `builtin.automation.shape`;
-  - filter order (draft 02 D2): the same split, margin and code `builtin.filter.order`;
+  - filter order (#1645 D2): the same split, margin and code `builtin.filter.order`;
   - effect shape (draft 03a D1): `effect.automation.shape`; effect domain stays
     `automationScalar`'s check, which now carries `effect.automation.domain`.
 - **D2. Units need no SDK rule:** the builder writes the row's unit.
@@ -116,7 +116,7 @@ accepts.
 ## Dependencies
 
 - #1626 *Validate stored automation lanes in the session crate and state the hold rule*,
-  draft 02 *Validate builtin automation targets against their rows at preparation* and draft 03a
+  #1645 *Validate builtin automation targets against their rows at preparation* and draft 03a
   *Validate effect automation units, domains and shapes at preparation*: D1 mirrors their rules,
   so each must be on `main` first.
 - Batch: R3.

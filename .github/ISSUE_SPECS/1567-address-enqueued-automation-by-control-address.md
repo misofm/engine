@@ -158,4 +158,4 @@ Checked against `main` at `7feb27800`.
 
 ## Parked (root, 2026-10-14)
 
-Parked 2026-10-14: #1058 A9 retires AUTOMATION_ENQUEUE; close as superseded when #1058 slice 21a is filed and lands.
+Parked 2026-10-14: #1058 A9 retires AUTOMATION_ENQUEUE; close as superseded when #1627 lands.
