@@ -305,6 +305,12 @@ export interface MeterFrame {
    * plan that still renders keeps the previous list.
    */
   readonly structureEpoch: bigint;
+  /**
+   * Meter windows this instance dropped before this frame because no list of their structure epoch
+   * was held or could be read (the frame could not be named), counted over the instance's life. It
+   * only grows; a gap in `sequence` that this count explains is not a host loss.
+   */
+  readonly unnamedWindows: bigint;
   /** The tracks of the frame, in the order of its arrays: the strip order of `structureEpoch`. */
   readonly trackIds: readonly string[];
   /** The submix strips of the frame, in the order of its submix arrays. */
@@ -342,6 +348,8 @@ export class WasmBoundary {
    * frame is named by the order of the epoch it carries (#1562b).
    */
   readonly #stripOrders = new Map<bigint, ControlStripOrder>();
+  /** Meter windows dropped because no list named their structure epoch. */
+  #unnamedMeterWindows = 0n;
   #trackResponse: TrackResponseModule | undefined;
   #spectrum: SpectrumModule | undefined;
   #spectrumQuery: SpectrumQuery | undefined;
@@ -620,10 +628,42 @@ export class WasmBoundary {
   }
 
   /**
-   * Read the current prepared owner's stable resident-observation bindings. A caller that already
-   * holds the strip order of this call passes it in, so the structure epoch is probed once.
+   * The strip order of the plan that renders (#1562b): the list of the structure epoch in that
+   * plan's meter header, which is the newest list's except between a rebuild's commit and the block
+   * that adopts its replacement. The observation bindings and reads address the rendering plan, so
+   * they name their strips by this order and never by the newest list.
    */
-  observationMap(knownOrder?: ControlStripOrder): ObservationMap {
+  #renderingStripOrder(): ControlStripOrder {
+    const newest = this.stripOrder();
+    const header = new StructView(
+      this.#exports.memory,
+      "meterHeader",
+      Number(this.#exports.miso_engine_web_v1_meter_header_ptr(this.#live())),
+    );
+    const epoch = header.u64("structureEpoch");
+    if (epoch === 0n || epoch === newest.structureEpoch) return newest;
+    const held = this.#stripOrders.get(epoch);
+    if (held === undefined) {
+      // The plan that renders was prepared from a list this instance never read, and a newer one
+      // replaced it: the strips of its bindings cannot be named. A render adopts the newer plan.
+      throw new MisoEngineError("the rendering plan belongs to a control list that is gone", {
+        phase: "lifecycle",
+        code: "control.list.stale",
+        diagnostics: [{ code: "control.list.stale", path: "structureEpoch" }],
+      });
+    }
+    return held;
+  }
+
+  /**
+   * Read the current prepared owner's stable resident-observation bindings: the plan that renders,
+   * named by the strip order of its own structure epoch.
+   */
+  observationMap(): ObservationMap {
+    return this.#observationMapOf(this.#renderingStripOrder());
+  }
+
+  #observationMapOf(order: ControlStripOrder): ObservationMap {
     const handle = this.#live();
     const count = Number(this.#exports.miso_engine_web_v1_observation_count(handle));
     if (!Number.isSafeInteger(count) || count < 0 || count > 0xffff_ffff) {
@@ -645,7 +685,6 @@ export class WasmBoundary {
       });
     }
     // Issue #1210 D5: a binding's index is a strip index, the tracks then the submixes.
-    const order = knownOrder ?? this.stripOrder();
     const strips = [...order.tracks, ...order.submixes];
     const raw: RawObservationBinding[] = [];
     const readId = (length: number, path: string): string => {
@@ -703,7 +742,7 @@ export class WasmBoundary {
         tapIds,
       });
     }
-    return enrichObservationMap(strips, raw);
+    return enrichObservationMap(strips, raw, order.structureEpoch);
   }
 
   /** Internal managed-subscription view of the optional prepared spectrum query. */
@@ -722,8 +761,8 @@ export class WasmBoundary {
     const handle = this.#live();
     // Issue #1210 D5: selections resolve against the strips, the tracks then the submixes. The
     // order is read once and shared with the map: each read probes the structure epoch.
-    const order = this.stripOrder();
-    const map = this.observationMap(order);
+    const order = this.#renderingStripOrder();
+    const map = this.#observationMapOf(order);
     const strips = [...order.tracks, ...order.submixes];
     const addresses = resolveObservationAddressesWithTracks(map, strips, selections);
     const selectionPointer = Number(this.#exports.miso_engine_web_v1_observation_selection_ptr());
@@ -1173,8 +1212,12 @@ export class WasmBoundary {
     }
     // The list of that epoch was never read and is gone: the frame cannot be named, and a frame
     // named by another list would key readings by the wrong strips. The browser drops it the same
-    // way (`createMeasurementFeeds`).
-    if (order === undefined) return undefined;
+    // way (`createMeasurementFeeds`). The windows are counted, never lost without a trace: the next
+    // frame reports the count.
+    if (order === undefined) {
+      this.#unnamedMeterWindows += BigInt(windows);
+      return undefined;
+    }
     const trackCount = order.tracks.length;
     const reportedWindows = header.u32("windows");
     const masterGrPresent = header.u32("masterGrPresent");
@@ -1221,6 +1264,7 @@ export class WasmBoundary {
       windows,
       trackCount,
       structureEpoch,
+      unnamedWindows: this.#unnamedMeterWindows,
       trackIds: order.tracks,
       submixIds: order.submixes,
       peaks,

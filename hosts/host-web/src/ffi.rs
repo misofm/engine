@@ -3288,6 +3288,43 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
     })
 }
 
+/// Run a host operation that can promote an adopted plan's spectrum captures (`service`, and the
+/// reclaim every `control_command` starts with), with the staging's analysis for the promotion to
+/// end (#1618). A promotion that does not keep the stream ends the analysis with it; the staging's
+/// stream record and staged window then describe a stream that no longer exists, so the record is
+/// written from the service and the window is dropped, as `spectrum_stream_stop` does. Without
+/// that, `spectrum_stream_analysis` would adopt the stale record again and re-report the window.
+/// A staging that is borrowed has no analysis running: the operation gets `None`.
+fn with_promotion_analysis<R>(
+    host: &mut AudioWorkletEngineHost,
+    operation: impl FnOnce(&mut AudioWorkletEngineHost, Option<&mut SpectrumAnalysis>) -> R,
+) -> R {
+    with_spectrum_staging(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return operation(host, None);
+        };
+        let staging = &mut *staging;
+        let was_running = staging
+            .analysis
+            .as_ref()
+            .is_some_and(SpectrumAnalysis::stream_active);
+        let result = operation(host, staging.analysis.as_mut());
+        let running = staging
+            .analysis
+            .as_ref()
+            .is_some_and(SpectrumAnalysis::stream_active);
+        if was_running && !running {
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            if let Some(metadata) = host.spectrum_stream_metadata().copied() {
+                write_stream_metadata(&mut staging.stream_metadata, &metadata);
+            }
+            staging.stream_metadata.result = RESULT_OK;
+        }
+        result
+    })
+}
+
 /// Run the control plane's service step once (issue #1381a D5, #1348 D1): reclaim every plan and
 /// attachment render has displaced, in the caller's thread and never in render. Control side
 /// only: the control Worker, or in `single` mode the worklet's message handler, never `process()`.
@@ -3297,7 +3334,9 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
 /// that is not ready; an epoch failure as [`RESULT_INTERNAL`] with the session's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        with_promotion_analysis(host, AudioWorkletEngineHost::service)
+    })
 }
 
 /// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
@@ -3326,7 +3365,7 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.control_command(len)
+        with_promotion_analysis(host, |host, analysis| host.control_command(len, analysis))
     })
 }
 
@@ -5694,6 +5733,176 @@ mod spectrum_ffi_tests {
             SPECTRUM_STREAM_STATUS_STOPPED
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    /// The nine-track fixture with a muted copy of its first track (whose ID sorts first) and the
+    /// copy's route to the output, as one rebuild transaction at `revision` (#1618, m7).
+    fn adding_a_strip_frame(request: u64, revision: u64) -> Vec<u8> {
+        use protocol::{
+            CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
+            SessionRevision, TypedCommandFrame,
+        };
+        let model = session::parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("the fixture parses");
+        let mut track = model.tracks[0].clone();
+        track.id = session::StableId::parse("a-muted").expect("track ID");
+        track.fader.left_mute = true;
+        track.fader.right_mute = true;
+        let mut route = model.routes[0].clone();
+        route.id = session::StableId::parse("a-muted-main").expect("route ID");
+        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                    payload: CommandPayload::SessionTransactionApply(&edits),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// A rebuild whose promotion does not keep the spectrum stream ends the instance's analysis
+    /// with it (#1618, m1 and m7 of the batch 12b review), whichever control export runs the
+    /// promotion: the service step, or the reclaim a control command starts with. The swap carries
+    /// (the engine reports it so) but its pairing does not name the capture, so the successor's
+    /// fresh capture is installed and the service's stream ends.
+    ///
+    /// Test value: red if `miso_engine_web_v1_service` or `miso_engine_web_v1_control_command`
+    /// promotes without the staging's analysis: the stream ends but the analysis stays active, so
+    /// `spectrum_stream_reset` answers ok instead of a wrong state and `spectrum_stream_analysis`
+    /// re-analyzes the last window of a stream that no longer exists.
+    #[test]
+    fn a_promotion_that_drops_the_stream_ends_the_analysis() {
+        for by_service in [true, false] {
+            stage_left_output_request();
+            let document =
+                include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+            let handle = test_boot(
+                document.as_bytes(),
+                WebBootOptions {
+                    require_sample_rate_hz: 48_000,
+                    require_quantum_frames: 128,
+                    live_control_meter_blocks: 2,
+                    live_control_observation_taps: 4,
+                    ..WebBootOptions::explicit_defaults()
+                },
+            );
+            assert_ne!(handle, 0, "spectrum fixture must boot");
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+                RESULT_OK
+            );
+            assert_eq!(
+                test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+                RESULT_OK
+            );
+            assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+            let mut block = 0_u64;
+            let mut render = |count: u64| {
+                for _ in 0..count {
+                    assert_eq!(
+                        miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                        RESULT_OK,
+                        "source block {block}"
+                    );
+                    assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+                    block += 1;
+                }
+            };
+            render(16);
+            assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+            assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+            assert!(with_spectrum_staging(|slot| {
+                slot.borrow()
+                    .analysis
+                    .as_ref()
+                    .is_some_and(SpectrumAnalysis::stream_active)
+            }));
+
+            // A rebuild commits, and the block after it adopts the successor plan.
+            let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
+            let (result, _) =
+                native_staging::control_command(handle, &adding_a_strip_frame(1, revision))
+                    .expect("the control staging");
+            assert_eq!(result, RESULT_OK);
+            render(2);
+            // The pairing names nothing: the swap carried, but not this capture.
+            with_host_mut(handle, (), |host| {
+                let ready = host.ready.as_mut().expect("ready");
+                let waiting = ready
+                    .pending_shapes
+                    .iter_mut()
+                    .filter(|entry| entry.adoption == Some(true))
+                    .filter_map(|entry| entry.spectrum.as_mut())
+                    .map(|handover| handover.pairing = Box::default())
+                    .count();
+                assert_eq!(waiting, 1, "the adopted plan waits for its promotion");
+            });
+            if by_service {
+                assert_eq!(miso_engine_web_v1_service(handle), RESULT_OK);
+            } else {
+                // Any control command reclaims first; a revision probe is the lightest.
+                let probe = {
+                    use protocol::{
+                        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId,
+                        TypedCommandFrame,
+                    };
+                    let codec = ProtocolCodec::default();
+                    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                    let length = codec
+                        .encode_command_frame_into(
+                            &TypedCommandFrame {
+                                request_id: RequestId::new(2).expect("nonzero request"),
+                                expected_revision: ExpectedRevision::Any,
+                                payload: CommandPayload::CapabilitiesGet,
+                            },
+                            &mut bytes,
+                        )
+                        .expect("a capabilities frame");
+                    bytes.truncate(length);
+                    bytes
+                };
+                let (result, _) =
+                    native_staging::control_command(handle, &probe).expect("the control staging");
+                assert_eq!(result, RESULT_OK);
+            }
+
+            assert!(
+                with_spectrum_staging(|slot| {
+                    slot.borrow()
+                        .analysis
+                        .as_ref()
+                        .is_some_and(|analysis| !analysis.stream_active())
+                }),
+                "the analysis ended with the stream (by_service = {by_service})"
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_reset(),
+                RESULT_WRONG_STATE,
+                "there is no stream to reset (by_service = {by_service})"
+            );
+            assert_ne!(
+                miso_engine_web_v1_spectrum_stream_analysis(),
+                RESULT_OK,
+                "the analysis does not re-report the last window (by_service = {by_service})"
+            );
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        }
     }
 
     /// Issue #1592 D4. Turns red if a stream start on a collection discards a caller's arm (the

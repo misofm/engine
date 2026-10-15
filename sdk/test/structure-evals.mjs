@@ -428,3 +428,177 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
     }
   });
 });
+
+// Batch 12b review, M1. A rebuild's commit moves the control list at once, and the plan that renders
+// keeps its own indices until the block that adopts the replacement. An observation record names a
+// strip by the newest list and an effect by an index of the map, and the core admits it against the
+// newest plan, so a record built in that window can arm another effect's tap and be acked for it.
+// `swap_t3_multi_and_limiter` puts two effects with the same tap (`Gain Reduction`, ID 1) at each
+// other's index: the record for `multi` built from the rendering plan's map names index 0, which is
+// `limiter` in the newest plan.
+describe("batch 12b review M1 -- an observation record waits for the map of its epoch", () => {
+  const armed = (engine, effectSlotId) => engine.readObservations([tap("t3", "inserts", effectSlotId)])[0].status;
+  const behind = (error) => error.code === "backpressure" && error.diagnosticCode === "sdk.observation.structure_behind";
+
+  /** An engine whose rebuild is committed and not yet adopted. */
+  async function committedNotAdopted() {
+    const engine = await boot();
+    run(engine, 0, 4);
+    rebuild(engine, "swap_t3_multi_and_limiter");
+    return engine;
+  }
+
+  test("a subscribe in the window is refused, arms nothing, and arms the right tap once a render adopted the plan", async () => {
+    const engine = await committedNotAdopted();
+    try {
+      await assert.rejects(
+        () => engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }),
+        behind,
+        "the headless engine renders only when its caller does: the refusal is typed and retryable",
+      );
+      assert.equal(armed(engine, "multi"), "unarmed");
+      assert.equal(armed(engine, "limiter"), "unarmed", "the other effect's tap is not armed in its place");
+      run(engine, 4, 2);
+      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
+      run(engine, 6, 4);
+      await handle.pump();
+      assert.equal(handle.readLatest()[0].status, "ready");
+      assert.notEqual(armed(engine, "multi"), "unarmed", "multi's own tap is armed");
+      assert.equal(armed(engine, "limiter"), "unarmed", "limiter's tap is not");
+      await handle.close();
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a close in the window is refused and disarms the right tap after the adoption", async () => {
+    const engine = await boot();
+    try {
+      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
+      run(engine, 0, 4);
+      rebuild(engine, "swap_t3_multi_and_limiter");
+      await assert.rejects(() => handle.close(), behind);
+      assert.notEqual(armed(engine, "multi"), "unarmed", "the refused close left the subscription as it was");
+      run(engine, 4, 2);
+      await handle.close();
+      run(engine, 6, 2);
+      assert.equal(armed(engine, "multi"), "unarmed", "multi is disarmed where it is now");
+      assert.equal(armed(engine, "limiter"), "unarmed");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("an update in the window is refused and arms the right tap after the adoption", async () => {
+    const engine = await boot();
+    try {
+      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "limiter")], windowBlocks: 2 });
+      run(engine, 0, 4);
+      rebuild(engine, "swap_t3_multi_and_limiter");
+      await assert.rejects(() => handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }), behind);
+      run(engine, 4, 2);
+      await handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
+      run(engine, 6, 4);
+      await handle.pump();
+      assert.equal(handle.readLatest()[0].status, "ready");
+      assert.notEqual(armed(engine, "multi"), "unarmed");
+      assert.equal(armed(engine, "limiter"), "unarmed", "limiter was released where it is now");
+      await handle.close();
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  /** An owner over the engine whose renders run on a clock of their own: a wait renders one block. */
+  function ownerRenderingOnWait(engine, { rendered = true } = {}) {
+    let block = 20;
+    const waits = [];
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => engine.observationMap(),
+      readObservations: (selections) => engine.readObservations(selections),
+      liveControls: () => engine.liveControls(),
+      renderWait: {
+        boundMs: 1_000,
+        mark: async () => engine.status().renderedQuanta,
+        next: async () => {
+          waits.push(block);
+          if (rendered) run(engine, block, 1);
+          block += 1;
+          return rendered;
+        },
+      },
+    });
+    return { owner, waits };
+  }
+
+  test("an engine that renders on its own clock waits for a render and sends the record of the adopted plan", async () => {
+    const engine = await committedNotAdopted();
+    const { owner, waits } = ownerRenderingOnWait(engine);
+    try {
+      const { handle } = await owner.subscribe({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
+      assert.ok(waits.length >= 1, "it waited for a render");
+      assert.notEqual(armed(engine, "multi"), "unarmed", "the tap of multi is armed");
+      assert.equal(armed(engine, "limiter"), "unarmed", "the tap of limiter is not");
+      await handle.close();
+      run(engine, 30, 2);
+      assert.equal(armed(engine, "multi"), "unarmed");
+    } finally {
+      owner.invalidate(true);
+      engine.dispose();
+    }
+  });
+
+  test("a map that does not catch up within the wait is refused, and nothing was sent", async () => {
+    const engine = await committedNotAdopted();
+    const { owner, waits } = ownerRenderingOnWait(engine, { rendered: false });
+    try {
+      await assert.rejects(() => owner.subscribe({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }), behind);
+      assert.equal(waits.length, 1);
+      run(engine, 20, 4);
+      assert.equal(armed(engine, "multi"), "unarmed");
+      assert.equal(armed(engine, "limiter"), "unarmed");
+    } finally {
+      owner.invalidate(true);
+      engine.dispose();
+    }
+  });
+});
+
+// Batch 12b review, m3. A deferred `OBSERVATION_ENDED` event of an earlier commit names a tap by its
+// stable key only. The tap may have been armed again since (removed at R1, added back, subscribed):
+// the event ended the earlier arm, and the new subscription is the core's.
+describe("batch 12b review m3 -- an ended event older than the arm is ignored", () => {
+  test("an event of a commit at or before the arm does not close the subscription; a later one does", async () => {
+    const engine = await boot();
+    let deliver;
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => engine.observationMap(),
+      readObservations: (selections) => engine.readObservations(selections),
+      liveControls: () => engine.liveControls(),
+      observationEnded: (listener) => { deliver = listener; return () => {}; },
+    });
+    try {
+      run(engine, 0, 2);
+      const ends = [];
+      const { handle } = await owner.subscribe({
+        selections: [tap("t1", "inserts", "comp")],
+        windowBlocks: 2,
+        onEnd: (end) => ends.push(end),
+      });
+      const armedAt = engine.controlRevision();
+      const key = { stripId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1 };
+      deliver({ sequence: 1n, revision: armedAt - 1n, keys: [key] });
+      deliver({ sequence: 2n, revision: armedAt, keys: [key] });
+      assert.equal(ends.length, 0, "the events belong to earlier arms of the tap");
+      run(engine, 2, 4);
+      await handle.pump();
+      assert.equal(handle.readLatest()[0].status, "ready", "the tap is still the subscription's");
+      deliver({ sequence: 3n, revision: armedAt + 1n, keys: [key] });
+      assert.equal(ends.length, 1, "a commit after the arm ended it");
+      assert.deepEqual(ends[0].ended.map((selection) => selection.effectSlotId), ["comp"]);
+    } finally {
+      owner.invalidate(true);
+      engine.dispose();
+    }
+  });
+});

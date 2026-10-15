@@ -331,7 +331,7 @@ Checked against `ea336c039`.
   host-core and control-plane tests above, and `docs/CONTROL_PROTOCOL_{REGISTRY,SEMANTICS}.md`.
 - **D6b (lane W, after D6a).** `build_plan_shape` (`hosts/host-web/src/lib.rs:5437`) sets
   `observation_armed` for the bindings of `MonitorBase.next`, with arm sample 0 and the commanded bit
-  clear: a fresh tap has no stale window. Gates through `structural_command_for_test`:
+  clear: a fresh tap has no stale window. Gates through `control_command`, the host's production control entry:
   - After a restart of a subscribed compressor, the meter frame's gain-reduction word and the
     observation read return windows from the adoption block on.
   - After an insert removal, there is no slot for the removed insert, and the browser's event drain
@@ -553,7 +553,7 @@ What shipped, in `hosts/host-web/src/lib.rs`:
   holds `SESSION_COMMITTED` and `OBSERVATION_ENDED`, within the drain's 16-call bound). The SDK reaction
   stays with #1562b-K.
 
-Gates (`structural_apply` in `hosts/host-web/src/tests.rs`, through `structural_command_for_test`):
+Gates (`structural_apply` in `hosts/host-web/src/tests.rs`, through `control_command`, the production control entry):
 
 1. `a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser`: the subscribed compressor's
    link mode changes (rebuild, no carry); the successor has `observation_armed_taps() == 1`, its first
@@ -572,3 +572,15 @@ Runs: `cargo test -p host-web --features host-web/test-support` (all), `cargo te
 `check-sdk-types.sh`, `check-sdk-headless.sh`, the chromium qualification (151.0.7922.34, all
 render-allocation rows 0), `realtime-policy` (141 regions) and `check-bench-policy.sh` all pass. The
 shipped module sha256 is `179a933a...c3c1ae`; no export, layout or JS file changed.
+
+## Fold (batch 12b review)
+
+- **n1.** The D6b gates run through `control_command`, the host's production control entry. The text
+  above said `structural_command_for_test`, which D9 of #1562 deleted.
+- **m1/m7 (shared with #1290).** `miso_engine_web_v1_service` and `miso_engine_web_v1_control_command`
+  now lend the ffi staging's `SpectrumAnalysis` to the promotion their reclaim performs, so a swap
+  that does not keep the stream ends the instance's analysis in the same call (see the #1290 fold).
+- **m3 (shared with #1562).** The SDK keeps the revision the core had committed when each managed
+  arm was sent and ignores an `OBSERVATION_ENDED` event of a commit at or before it: that event ended
+  an earlier arm of the same tap. `ControlTransactionQueue.readCommittedRevision()` reads it from the
+  core.

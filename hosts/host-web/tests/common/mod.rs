@@ -409,7 +409,7 @@ impl Rig {
             .control_request_mut(length)
             .expect("the control request staging");
         staging[..frame.len()].copy_from_slice(frame);
-        let result = self.host.control_command(length);
+        let result = self.host.control_command(length, None);
         (result, self.host.control_response().to_vec())
     }
 

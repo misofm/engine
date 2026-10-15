@@ -621,3 +621,25 @@ carried)` with the plan's own pairing list and the engine's real carry outcome.
 2. A removed spectrum-observed strip: not tested here (#1593 keeps the taps).
 3. Gate 8 (render-locked allocations) is unchanged; the adoption block adds one load and compare
    (`realtime-policy` ok).
+
+## Fold (batch 12b review)
+
+- **m1/m7.** The batch 12 note above says the browser passes `None` to `adopt_successor` in
+  `promote_spectrum`. That left the analysis of an instance that owns both halves (the ffi staging's
+  `SpectrumAnalysis`) active after a promotion that does not keep the stream: `spectrum_stream_reset`
+  answered ok, and `spectrum_stream_analysis` adopted the stale metadata record again and re-reported
+  the last window. `service`, `control_command`, `run_command`, `reclaim_shapes` and
+  `promote_spectrum` now take `Option<&mut SpectrumAnalysis>`. The two exports lend the staging's
+  analysis through `with_promotion_analysis` (`try_borrow_mut`; `None` when the staging is borrowed,
+  so the audio thread's own instance, which keeps none, is unchanged). When the promotion ended the
+  analysis, the export also writes the stream record from the service and drops the staged window, as
+  `spectrum_stream_stop` does; without that the record still says `Ready`.
+- **Gate:** `ffi::spectrum_ffi_tests::a_promotion_that_drops_the_stream_ends_the_analysis`, run for
+  both exports. The swap carries, and its pairing is emptied so it does not name the capture (the
+  host cannot make a refused hand-over yet; limit 1 above stands for that arm). After the promotion
+  the analysis is not `stream_active`, `spectrum_stream_reset` answers a wrong state, and
+  `spectrum_stream_analysis` does not answer ok. Red with the exports passing `None`.
+- **m6.** `the_headers_structure_epoch_is_the_control_lists` now reads the epoch from a real
+  `CONTROL_LIST_GET` page through the control entry, after a rebuild and after a live commit that
+  moves the epoch (a VCA added). It is red when `stamp_structure_epoch` runs for rebuilds only (the
+  live stamp removed): the header keeps 2 while the page reads 3.

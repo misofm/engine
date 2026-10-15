@@ -235,7 +235,9 @@ export class OfflineEngine {
    * An effect's observation queue holds one subscription per tap until a block drains it. A
    * subscribe, update or close that finds the slot taken by an earlier one is refused at once with
    * the typed, retryable `backpressure` error. It never waits: this engine renders only when the
-   * caller does, so the caller calls `render()` and submits again.
+   * caller does, so the caller calls `render()` and submits again. The same refusal meets a request
+   * made between a rebuild's commit and the render that adopts its plan: the records would name
+   * effects of the plan that renders, and the core admits them against the newest plan.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);

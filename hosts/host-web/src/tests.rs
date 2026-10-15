@@ -1800,7 +1800,7 @@ fn native_set_control_timeline_digest_pins_the_wasm_parity() {
         host.control_request_mut(length)
             .expect("the control request staging")[..frame.len()]
             .copy_from_slice(frame);
-        assert_eq!(host.control_command(length), RESULT_OK);
+        assert_eq!(host.control_command(length, None), RESULT_OK);
         // A commit queues its reliable events; drain them the way the worklet does.
         for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
             loop {
@@ -6091,7 +6091,7 @@ mod structural_apply {
                 .control_request_mut(bytes.len() as u32)
                 .expect("the control staging");
             staging[..bytes.len()].copy_from_slice(bytes);
-            let result = self.host.control_command(bytes.len() as u32);
+            let result = self.host.control_command(bytes.len() as u32, None);
             (result, self.host.control_response().to_vec())
         }
 
@@ -6101,6 +6101,45 @@ mod structural_apply {
             let (result, response) = self.entry(&frame(edits, request, revision));
             assert_eq!(result, RESULT_OK, "the control plane answers the frame");
             outcome(&response)
+        }
+
+        /// The structure epoch a `CONTROL_LIST_GET` page carries now: the control list's own,
+        /// read through the production control entry as a client reads it.
+        fn list_epoch(&mut self, request: u64) -> u64 {
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(request).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Any,
+                        payload: CommandPayload::ControlListGet(&protocol::ControlListRequest {
+                            structure_epoch: 0,
+                            after_handle: 0,
+                            limit: 1,
+                            owner: None,
+                        }),
+                    },
+                    &mut bytes,
+                )
+                .expect("a control list frame");
+            bytes.truncate(length);
+            let (result, response) = self.entry(&bytes);
+            assert_eq!(
+                result, RESULT_OK,
+                "the control plane answers the list frame"
+            );
+            let mut fields = [0_u16; 64];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::ControlListPage(page),
+                ..
+            } = codec
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("a control list page")
+            else {
+                panic!("expected a control list page")
+            };
+            page.structure_epoch
         }
 
         fn epoch(&self) -> u64 {
@@ -6179,7 +6218,7 @@ mod structural_apply {
         }
         assert_eq!(rig.epoch(), 1);
         assert!(!rig.pending(), "render adopted the plan");
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         assert!(!rig.pending());
         assert_eq!(
             rig.host.status().next_absolute_sample,
@@ -6402,7 +6441,7 @@ mod structural_apply {
             }
             rig.step();
             if rebuild == Some(block) {
-                assert_eq!(rig.host.service(), RESULT_OK);
+                assert_eq!(rig.host.service(None), RESULT_OK);
             }
             reads.push(rig.read_stream());
         }
@@ -6457,7 +6496,7 @@ mod structural_apply {
             0,
             "promoted at the service step"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         assert_eq!(
             rig.host.ready.as_ref().expect("ready").carried_swaps_seen,
             1,
@@ -6517,7 +6556,7 @@ mod structural_apply {
                 }
                 rig.step();
                 if rebuild && block == SPECTRUM_APPLY_BEFORE {
-                    assert_eq!(rig.host.service(), RESULT_OK);
+                    assert_eq!(rig.host.service(None), RESULT_OK);
                 }
                 if found.is_none() && block >= ARM_BEFORE {
                     found = rig
@@ -6571,7 +6610,10 @@ mod structural_apply {
             .control_request_mut(bytes.len() as u32)
             .expect("the control staging");
         staging[..bytes.len()].copy_from_slice(&bytes);
-        assert_eq!(rig.host.control_command(bytes.len() as u32), RESULT_OK);
+        assert_eq!(
+            rig.host.control_command(bytes.len() as u32, None),
+            RESULT_OK
+        );
         assert_eq!(
             outcome(rig.host.control_response()),
             Outcome::Applied {
@@ -6890,7 +6932,7 @@ mod structural_apply {
             1,
             "the record took effect on the successor: the old track's compressor is armed"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
@@ -6901,7 +6943,7 @@ mod structural_apply {
             rig.host.read_observation_addresses(&[address]).is_ok(),
             "the reader the catalog names is the successor's"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
     }
 
     /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
@@ -6994,11 +7036,15 @@ mod structural_apply {
 
     /// The meter header's structure epoch is the control list's (#1562b): a rebuild that leaves
     /// every address and descriptor alone (a strip's `delay_samples` value) keeps it, and the
-    /// header of the plan that renders reads the number `CONTROL_LIST_GET` pages carry.
+    /// header of the plan that renders reads the number `CONTROL_LIST_GET` pages carry, read here
+    /// through the control entry after a rebuild and after a live commit that moves the epoch (a
+    /// VCA added).
     ///
     /// Test value: red if the header's epoch advances with the revision or the plan epoch rather
-    /// than with the list (a client would read the list again at every commit), or stays the boot's
-    /// when the list moved (the strip order of a frame would be named by a stale list).
+    /// than with the list (a client would read the list again at every commit), stays the boot's
+    /// when the list moved (the strip order of a frame would be named by a stale list), or is not
+    /// stamped by a live commit (`stamp_structure_epoch`): the header then keeps the epoch of the
+    /// last rebuild while the page's moved on.
     #[test]
     fn the_headers_structure_epoch_is_the_control_lists() {
         let model = gate_model();
@@ -7048,6 +7094,58 @@ mod structural_apply {
         rig.step();
         assert_eq!(rig.epoch(), 2);
         assert_eq!(rig.host.meter_header().structure_epoch, boot + 1);
+        let page = rig.list_epoch(3);
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            page,
+            "after a rebuild the header is the page's"
+        );
+
+        // A commit that rides the live lanes can move the list's epoch too (a VCA added: a new
+        // owner and new addresses), and stamps the plan that renders, which has no successor
+        // waiting. The header then reads what a `CONTROL_LIST_GET` page carries.
+        let vca = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: StableId::parse("late-vca").expect("VCA ID"),
+                fader: session::DualMonoFader {
+                    left_db: -3.0,
+                    right_db: -3.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![model.tracks[0].id.clone()],
+            },
+        };
+        // The two rebuilds above queued their events; a client drains them as it goes.
+        for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+            while rig.host.control_event(lane) == RESULT_OK
+                && !rig.host.control_response().is_empty()
+            {}
+        }
+        let before_vca = rig.list_epoch(4);
+        let revision = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(std::slice::from_ref(&vca), 5),
+            Outcome::Applied {
+                path: EditPath::Live,
+                revision: revision + 1
+            },
+            "a VCA added is a live commit"
+        );
+        assert!(
+            !rig.pending(),
+            "no replacement waits: the live commit rode the rendering plan"
+        );
+        let after_vca = rig.list_epoch(6);
+        assert!(
+            after_vca > before_vca,
+            "a VCA added moves the list's structure epoch"
+        );
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            after_vca,
+            "the rendering plan's header is stamped with the live commit's epoch"
+        );
     }
 
     /// A swap that adds a strip publishes the successor's frame (#1290d1): the frame travels with
@@ -7364,7 +7462,7 @@ mod structural_apply {
             1,
             "the subscription the plan had acknowledged is armed on the successor"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }

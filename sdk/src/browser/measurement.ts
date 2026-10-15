@@ -26,6 +26,12 @@ export interface MeterUpdate {
   readonly sequence: bigint;
   readonly generation: bigint;
   readonly validity: number;
+  /**
+   * Meter windows dropped before this one, saturating: the host's own count plus the windows the
+   * SDK could not name and dropped (the frame carried a structure epoch whose strip list the page no
+   * longer held, #1562b). The first update after such a drop also sets the loss bit (`4`) in
+   * `validity`.
+   */
   readonly lossCount: number;
   readonly windows: number;
   /** This half-open span timestamps the peak window only. */
@@ -337,25 +343,52 @@ export interface BrowserMeasurementFeeds {
   readonly close: () => void;
 }
 
+/** The shipped header's validity bit for "one or more windows were dropped before this one". */
+const METER_VALIDITY_LOSS = 4;
+const MAXIMUM_LOSS_COUNT = 0xffff_ffff;
+
 export function createMeasurementFeeds(
   host: Pick<MisoAudioWorkletHost, "meters" | "telemetry">,
   orders: MeterStripOrders,
   available: boolean,
 ): BrowserMeasurementFeeds {
+  // The windows the page could not name (no list of their epoch is held), counted so the loss is
+  // reported and never silent: every update after a drop carries the total in `lossCount` (it
+  // saturates like the host's own count), and the first one sets the loss bit in `validity`.
+  let unnamedWindows = 0;
+  let unnamedReported = true;
+  const reportingUnnamed = (update: MeterUpdate): MeterUpdate => {
+    if (unnamedWindows === 0) return update;
+    const flagged = !unnamedReported;
+    unnamedReported = true;
+    return Object.freeze({
+      ...update,
+      lossCount: Math.min(update.lossCount + unnamedWindows, MAXIMUM_LOSS_COUNT),
+      validity: flagged ? update.validity | METER_VALIDITY_LOSS : update.validity,
+    });
+  };
   const meters = createHostFeed<MisoMeterFrame, MeterUpdate>({
     name: "meters",
     available,
     lease: (onFrame) => host.meters({ enabled: onFrame !== null, onFrame }),
     // A frame names its strips by the list of the structure epoch it carries (#1562b): a rebuild
     // that adds, removes or reorders a strip changes the epoch in the frame of the block that
-    // adopted the plan, and the order is read once for the new epoch. Frames of an epoch whose list
-    // the page cannot name are dropped, as every telemetry frame the page cannot use is.
+    // adopted the plan, and the order is read once for the new epoch. A frame of an epoch whose
+    // list the page cannot name is dropped and counted (a frame named by another list would key its
+    // readings by the wrong strips); the count reaches the listener with the next update.
     project: (frame) => {
       const held = orders.held(frame.structureEpoch);
-      if (held !== undefined) return meterProjection(frame, held.tracks, held.submixes);
-      return orders.of(frame.structureEpoch).then((named) => (
-        named === undefined ? undefined : meterProjection(frame, named.tracks, named.submixes)
-      ));
+      if (held !== undefined) {
+        return reportingUnnamed(meterProjection(frame, held.tracks, held.submixes));
+      }
+      return orders.of(frame.structureEpoch).then((named) => {
+        if (named === undefined) {
+          unnamedWindows = Math.min(unnamedWindows + Math.max(1, frame.windows), MAXIMUM_LOSS_COUNT);
+          unnamedReported = false;
+          return undefined;
+        }
+        return reportingUnnamed(meterProjection(frame, named.tracks, named.submixes));
+      });
     },
   });
   const telemetry = createHostFeed<MisoTelemetryFrame, TelemetryUpdate>({

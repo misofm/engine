@@ -647,3 +647,30 @@ features, control-plane, capi, host-web), fmt, `realtime-policy` (141 regions) a
   renders, and a kind 7/8 record is queued on the newest plan. The evals render a block before they
   subscribe. Which plan's index space the record addresses in that window is the core's to rule
   (successor, with #1589).
+
+## Fold (batch 12b review)
+
+- **M1.** The "Open" item above (which plan's index space a record addresses between a rebuild's
+  commit and its adoption) is closed on the SDK side. The core admits against the newest plan
+  (`admit_on_newest_plan`), the strip index comes from the newest list, and the effect index came
+  from `observationMap()`, which describes the plan that renders. `ObservationMap` now carries the
+  `structureEpoch` of that plan (the browser reply's own; the headless engine reads the meter header
+  of the rendering plan and names the strips by the list of that epoch). Subscribe, update and close
+  compare it with the epoch of the list used to address the record (`syncStructure()` returns it). On
+  a mismatch an engine with a render wait waits for a render and reads again (at most 8 renders and
+  the engine's request deadline); the headless engine, and a wait that ends, refuse with the typed
+  retryable `backpressure` error (`sdk.observation.structure_behind`). `submitManagedAt(epoch, ...)`
+  checks the list epoch again at the send, so a commit between the check and the send is refused, not
+  misaddressed. No record is sent in the window.
+- **Gates** (`sdk/test/structure-evals.mjs`, fixture frame `swap_t3_multi_and_limiter` from
+  `structural_frames_fixture.rs`: two effects with the same tap change indices): subscribe, close and
+  update in the window are refused and arm or disarm the right tap after a render; an owner with a
+  render wait sends the record of the adopted plan; a wait that gives up sends nothing. The browser
+  engine: `measurement-evals.mjs`, the map's epoch 1 against list epoch 2. All red on the previous SDK.
+- **m2.** Meter frames the SDK cannot name by epoch are counted. The browser feed adds their windows to
+  `lossCount` of the next update (saturating) and sets the loss bit once; the headless `MeterFrame`
+  carries `unnamedWindows`. Eval: `a meter frame whose list the page cannot name is dropped, counted,
+  and the stream goes on`.
+- **m3.** `BindingState.armRevision` is the committed revision read just before the arm was sent; an
+  `OBSERVATION_ENDED` event with a revision at or before it is ignored (it ended an earlier arm).
+  Eval: `an ended event older than the arm is ignored`.

@@ -316,16 +316,24 @@ test("a meter frame of a new structure epoch is named by the list of that epoch,
   feeds.close();
 });
 
-test("a meter frame whose list the page cannot name is dropped and the stream goes on", async () => {
+test("a meter frame whose list the page cannot name is dropped, counted, and the stream goes on", async () => {
   const host = fakeHost();
   const orders = epochOrders({ 2: { tracks: ["kick", "snare"], submixes: [] } });
   const feeds = createMeasurementFeeds(host, orders, true);
   const seen = [];
-  await feeds.meters((update) => seen.push(update.sequence));
-  host.emitMeter({ ...frameOf(1, 2), sequence: 1 });
-  host.emitMeter({ ...frameOf(2, 2), sequence: 2 });
+  await feeds.meters((update) => seen.push(update));
+  host.emitMeter({ ...frameOf(2, 2), sequence: 1, lossCount: 3 });
+  host.emitMeter({ ...frameOf(1, 2), sequence: 2, windows: 1 });
+  host.emitMeter({ ...frameOf(1, 2), sequence: 3, windows: 2 });
+  host.emitMeter({ ...frameOf(2, 2), sequence: 4, lossCount: 3 });
+  host.emitMeter({ ...frameOf(2, 2), sequence: 5, lossCount: 3 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(seen, [2n], "epoch 1 has no list: its frame is not named by another's");
+  assert.deepEqual(seen.map((update) => update.sequence), [1n, 4n, 5n],
+    "epoch 1 has no list: its frames are not named by another's");
+  // A gap in the sequence is never silent: the three windows the page dropped join the host's own
+  // three, and the first update after the drop carries the loss bit once.
+  assert.deepEqual(seen.map((update) => update.lossCount), [3, 6, 6]);
+  assert.deepEqual(seen.map((update) => (update.validity & 4) !== 0), [false, true, false]);
   feeds.close();
 });
 
@@ -537,6 +545,62 @@ test("browser live controls retain the managed observation conflict hook", async
   }
 });
 
+
+test("the browser engine sends an observation record only for the map of the list's epoch (batch 12b M1)", async () => {
+  // A rebuild is committed: the control list is already epoch 2 (comp moved from effect 1 to 0),
+  // and the plan that renders still reports epoch 1 and comp at effect 1 until a block adopts the
+  // replacement. A record built from that map would name effect 1 of the newest plan.
+  const host = fakeHost();
+  const strips = { tracks: ["t"], submixes: [], structureEpoch: 1n };
+  let rendered = 0n;
+  const commands = [];
+  Object.assign(host, {
+    control: scriptedControl({ strips }),
+    async sessionMap() {
+      return { tag: "miso.sessionmap.v1", result: 0, sources: [], metersAttached: true };
+    },
+    async status() { rendered += 1n; return { renderedQuanta: rendered }; },
+    async command(request) {
+      commands.push(request.commands);
+      return {
+        tag: "miso.ack.v1", result: 0, reason: 0, rejectedIndex: 0,
+        admitted: request.commands.length, appliedAtSample: 0n,
+      };
+    },
+    onControlEvent() { return () => {}; },
+    async observationMap() {
+      const adopted = rendered >= 3n;
+      return {
+        tag: "miso.observationmap.v1", result: 0, structureEpoch: adopted ? 2 : 1,
+        bindings: [{ trackIndex: 0, rack: 1, effectIndex: adopted ? 0 : 1, effectSlotId: "comp",
+          nativeEffectId: "miso.compressor", tapIds: [1] }],
+      };
+    },
+    async readObservations(request) {
+      return {
+        tag: "miso.observation.v1", result: 0,
+        rows: request.selections.map((selection) => ({ ...selection, status: 2,
+          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
+          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
+      };
+    },
+  });
+  const engine = await openBrowser(host, { liveControls: { meterBlocks: 1, observationTaps: 1 } });
+  try {
+    await engine.liveControls();
+    strips.structureEpoch = 2n;
+    const managed = await engine.subscribeObservations({
+      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
+      windowBlocks: 1,
+    });
+    assert.ok(rendered >= 3n, "the subscribe waited for the plan of the newest list to render");
+    assert.equal(commands.length, 1, "one record batch, sent after the wait");
+    assert.equal(commands[0][0].effectIndex, 0, "the record names the effect of the newest plan");
+    await managed.close();
+  } finally {
+    await engine.close();
+  }
+});
 
 test("telemetry shares one lease until its last subscription and isolates throwing callbacks", async () => {
   const host = fakeHost();

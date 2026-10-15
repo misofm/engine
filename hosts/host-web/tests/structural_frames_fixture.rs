@@ -85,6 +85,22 @@ fn t1_without_eq(model: &SessionModel) -> SessionEdit {
     SessionEdit::UpsertTrack { track }
 }
 
+/// `t3` with its first two inserts, `multi` and `limiter`, swapped. Both declare the same tap
+/// (`Gain Reduction`, ID 1), so a record for one effect's index arms the other's tap when the
+/// indices belong to another plan than the one the core admits it against (#1562b, batch 12b).
+fn t3_with_multi_and_limiter_swapped(model: &SessionModel) -> SessionEdit {
+    let mut track = model
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == "t3")
+        .expect("the parity session has t3")
+        .clone();
+    assert_eq!(track.inserts.effects[0].id.as_str(), "multi");
+    assert_eq!(track.inserts.effects[1].id.as_str(), "limiter");
+    track.inserts.effects.swap(0, 1);
+    SessionEdit::UpsertTrack { track }
+}
+
 fn frames() -> Vec<(&'static str, Vec<u8>)> {
     let model = booted();
     let revision = model.revision;
@@ -174,6 +190,11 @@ fn frames() -> Vec<(&'static str, Vec<u8>)> {
         ),
         // The compressor stays and moves from the second insert to the first.
         ("remove_eq", frame(&[t1_without_eq(&model)], revision)),
+        // `multi` and `limiter` change places: each moves to the other's index.
+        (
+            "swap_t3_multi_and_limiter",
+            frame(&[t3_with_multi_and_limiter_swapped(&model)], revision),
+        ),
     ]
 }
 

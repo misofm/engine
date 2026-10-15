@@ -278,6 +278,16 @@ export class ControlTransactionQueue {
     return this.#revision;
   }
 
+  /**
+   * The revision the core has committed now, read from the core, or `undefined` when the queue was
+   * given no way to read it. Unlike {@link revision} it sees commits made by other senders (a
+   * structural edit). It does not change the queue's own revision.
+   */
+  async readCommittedRevision(): Promise<bigint | undefined> {
+    const revision = await this.#readRevision?.();
+    return typeof revision === "bigint" ? revision : undefined;
+  }
+
   /** The host's frame ceiling in bytes, or `undefined` when the queue was given none. */
   get maximumFrameBytes(): number | undefined {
     return this.#limits?.maximumFrameBytes;

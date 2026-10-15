@@ -696,7 +696,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       const stripIds = Object.freeze([...order.tracks, ...order.submixes]);
       return Object.freeze({
-        map: enrichObservationMap(stripIds, reply.bindings as readonly RawObservationBinding[]),
+        map: enrichObservationMap(
+          stripIds,
+          reply.bindings as readonly RawObservationBinding[],
+          BigInt(reply.structureEpoch),
+        ),
         stripIds,
       });
     };

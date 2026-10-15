@@ -22,7 +22,8 @@ import type { ControlStripOrder } from "./control-list.ts";
 import { validateControlEdit } from "./control-frame.ts";
 import type { ControlFrameEdit, ControlWireAddress } from "./control-frame.ts";
 import type { ControlAppliedReport, ControlTransactionQueue } from "./control-queue.ts";
-import { MisoUsageError } from "./errors.ts";
+import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { constantValue } from "./abi.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
 import { requireU32 } from "../internal/ramp.ts";
@@ -62,6 +63,25 @@ export type {
 export { EffectControlBuilders, RouteEdits, SessionEdits, StripEdits, SubmixEdits, TrackEdits, VcaEdits }
   from "../generated/control-builders.ts";
 export type { InputFilterValues, MatrixValues } from "../generated/control-builders.ts";
+
+/**
+ * A managed observation record cannot be addressed yet: the plan that renders is older than the
+ * newest committed one, so the effect indices it reports belong to another plan than the one the
+ * core admits the record against. It is `backpressure`, the typed retryable refusal: a render adopts
+ * the newer plan, and the caller sends the request again (a browser engine waits for that render
+ * itself, within its request deadline).
+ */
+export function structureBehindError(detail: string): MisoEngineError {
+  return new MisoEngineError(
+    `the plan that renders is older than the newest committed plan; render and try again: ${detail}`,
+    {
+      phase: "lifecycle",
+      code: "backpressure",
+      result: constantValue("resultCodes", "backpressure"),
+      diagnostics: [{ code: "sdk.observation.structure_behind", path: "" }],
+    },
+  );
+}
 
 /** What live controls send through: the engine's one transaction queue, and the observation records. */
 export interface LiveControlTransport {
@@ -745,12 +765,15 @@ export class EngineLiveControls {
   /**
    * Follow the core's control list: read the structure epoch, and when a rebuild moved it, take the
    * list's strips and effects (#1562b-K). Builders made afterwards address the new order. A
-   * transport without a list keeps the order these controls were made with.
+   * transport without a list keeps the order these controls were made with. Resolves the structure
+   * epoch of the list it followed, or `undefined` for a transport without one.
    */
-  async syncStructure(): Promise<void> {
+  async syncStructure(): Promise<bigint | undefined> {
     const source = this.#transport.stripOrder;
-    if (source === undefined) return;
-    this.edit.update(await source());
+    if (source === undefined) return undefined;
+    const order = await source();
+    this.edit.update(order);
+    return order.structureEpoch;
   }
 
   /** The engine's one transaction queue, which every value edit goes through. */
@@ -793,7 +816,22 @@ export class EngineLiveControls {
     return this.#submitObservation(edits, true);
   }
 
-  async #submitObservation(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
+  /**
+   * @internal Managed submission whose effect indices come from the plan that renders at
+   * `structureEpoch`. A record names its strip by the newest list and its effect by an index, and
+   * the core admits it against the newest plan; so when the newest list is not of that epoch, the
+   * indices belong to another plan and the record is refused with the retryable
+   * {@link structureBehindError} before it is sent.
+   */
+  async submitManagedAt(structureEpoch: bigint | undefined, edits: readonly LaneEdit[]): Promise<CommandReport> {
+    return this.#submitObservation(edits, true, structureEpoch);
+  }
+
+  async #submitObservation(
+    edits: readonly LaneEdit[],
+    managed: boolean,
+    structureEpoch?: bigint,
+  ): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
         `an observation submit must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
@@ -810,6 +848,11 @@ export class EngineLiveControls {
     let sent = edits;
     if (source !== undefined) {
       const order = await source();
+      if (structureEpoch !== undefined && order.structureEpoch !== structureEpoch) {
+        throw structureBehindError(
+          `the records were addressed at structure epoch ${structureEpoch}, and the control list is at ${order.structureEpoch}`,
+        );
+      }
       this.edit.update(order);
       const strips = [...order.tracks, ...order.submixes];
       sent = edits.map((edit) => {

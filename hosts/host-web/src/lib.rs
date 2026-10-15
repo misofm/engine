@@ -1579,8 +1579,9 @@ impl ReadyOwnership {
         &mut self,
         request: &[u8],
         output_capacity: u64,
+        analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<usize, control_plane::CommandError> {
-        self.reclaim_shapes();
+        self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(control_plane::CommandError::Backpressure);
         }
@@ -1639,8 +1640,8 @@ impl ReadyOwnership {
 
     /// Drop the tables of plans render has adopted past (#1290a): the host's own, retired by the
     /// adoption block, and those of a candidate that a later one superseded. Control side only.
-    fn reclaim_shapes(&mut self) {
-        self.promote_spectrum();
+    fn reclaim_shapes(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
+        self.promote_spectrum(analysis);
         self.pending_shapes.retain(|entry| !entry.adopted);
     }
 
@@ -1651,7 +1652,12 @@ impl ReadyOwnership {
     /// adoptions before one service step promote one after the other, each against the captures
     /// the one before left. A plan that was superseded before it rendered was never adopted
     /// (`adoption` is `None`) and its captures drop with its entry. Control side only: it frees.
-    fn promote_spectrum(&mut self) {
+    ///
+    /// `analysis` is the smoothing history of the instance that owns both halves (the ffi staging's
+    /// analysis, #1618): a promotion that does not keep the stream ends the stream's analysis in
+    /// the same call, so the analysis never reports facts of a stream that ended. The browser's
+    /// audio thread, which keeps none, passes `None`.
+    fn promote_spectrum(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
         for entry in &mut self.pending_shapes {
             let (Some(carried), Some(handover)) = (entry.adoption, entry.spectrum.take()) else {
                 continue;
@@ -1659,7 +1665,12 @@ impl ReadyOwnership {
             let Some(service) = self.spectrum.as_mut() else {
                 continue;
             };
-            drop(service.adopt_successor(handover.captures, &handover.pairing, carried, None));
+            drop(service.adopt_successor(
+                handover.captures,
+                &handover.pairing,
+                carried,
+                analysis.as_deref_mut(),
+            ));
         }
     }
 
@@ -2311,7 +2322,11 @@ impl AudioWorkletEngineHost {
     /// again are answered [`RESULT_OK`] with a non-ok response frame whose code is
     /// `protocol.failure` (the replay cache), and a retry must take a new request ID to meet the
     /// refusal again.
-    pub fn control_command(&mut self, len: u32) -> u32 {
+    ///
+    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
+    /// stream (see [`Self::service`]); a plan this command's reclaim promotes ends it when the
+    /// stream is not kept.
+    pub fn control_command(&mut self, len: u32, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -2323,7 +2338,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES) {
+        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -2460,7 +2475,11 @@ impl AudioWorkletEngineHost {
     /// so a periodic tick never overwrites a refusal the host has yet to read.
     ///
     /// An epoch failure is sticky: the host fails with the session's diagnostic.
-    pub fn service(&mut self) -> u32 {
+    ///
+    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
+    /// stream, which a promotion this step performs ends when it does not keep the stream (#1618);
+    /// the browser's audio thread passes `None`.
+    pub fn service(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -2469,7 +2488,7 @@ impl AudioWorkletEngineHost {
         };
         match ready.control.service() {
             Ok(()) => {
-                ready.reclaim_shapes();
+                ready.reclaim_shapes(analysis);
                 RESULT_OK
             }
             Err(error) => {
