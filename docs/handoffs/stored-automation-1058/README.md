@@ -73,7 +73,7 @@ What changes in the design:
   into a submix on draft 13b's route lane. *Amended by root's rulings (2026-10-14):* a hand send gain
   move on an automated send writes the send's stored dB offset, a hand send mute ORs (13d D5
   confirmed), and a hand matrix edit commits `model_only` (automation wins). `follows_mute` (row 7)
-  becomes not automatable (TBD22, root's ruling on finding F20).
+  becomes not automatable (#1632, root's ruling on finding F20).
 - **AUTOMATION_ENQUEUE.** #1315 has landed with a feature switch (`ProviderFeatures::automation`,
   false in `crates/control-plane/src/compile.rs:938-943`), not a retirement. #1627-#1629 delete
   the switch with the command (amended #1627; section "Batch P1 readiness").
@@ -100,10 +100,10 @@ Recorded by the controls coordinator. Root ruled on the points this note left to
     automation* (batch R3, after 19: it drives #1341's `BypassSwitch` crossfade at events).
   - A send's `follows_mute` and a strip's `matrix_mode` are not automatable: a routing setting and a
     mode, not performance values. No draft; a placeholder issue spec,
-    `.github/ISSUE_SPECS/TBD22-make-send-follows-mute-and-matrix-mode-non-automatable.md`, makes the
+    `.github/ISSUE_SPECS/1632-make-send-follows-mute-and-matrix-mode-non-automatable.md`, makes the
     row rule refuse them. Root reports it to the owner as revisitable.
 - **F21.** A placeholder defect spec,
-  `.github/ISSUE_SPECS/TBD21-run-the-automation-row-rule-when-a-rows-activity-changes.md`. TBD22
+  `.github/ISSUE_SPECS/1631-run-the-automation-row-rule-when-a-rows-activity-changes.md`. #1632
   narrows the fault class but does not remove it: a pan entry on a strip switched to matrix still
   dangles.
 - **F23.** #1306 is amended to its D3 only (its window term is done by #1611 and #1621), in a section
@@ -868,8 +868,8 @@ can follow P1 directly; the R3 must-land group is 18a, 18b and 19.
 #1626-#1629 (with 25 and 26 still drafts); R2 gains 13e after 13c; R3 gains 19b after 19; #1306 is
 D3 only. Neither 13e nor 19b is in a must-land group: each is a complete outcome once its
 dependencies have landed, and before it lands its rows stay masked and inert, as every row no
-slice renders (A10). TBD21 (defect) and TBD22 (row rule) are placeholder issue specs outside the
-staged plan; neither depends on a slice. Draft 13d (amended) assumes TBD22: it renders no
+slice renders (A10). #1631 (defect) and #1632 (row rule) are placeholder issue specs outside the
+staged plan; neither depends on a slice. Draft 13d (amended) assumes #1632: it renders no
 `follows_mute` entry because the row rule refuses one.
 
 **No placeholder and no cycle.**
@@ -1371,7 +1371,7 @@ New findings:
   inactive over time, which A3's "one authority per strip" does not cover.
   **Root's ruling (2026-10-14):** VCA `offset_db` and `mute` render (draft 13e); effect `bypass`
   renders (draft 19b); a send's `follows_mute` and a strip's `matrix_mode` are not automatable
-  (placeholder TBD22; root reports it to the owner as revisitable).
+  (placeholder #1632; root reports it to the owner as revisitable).
 - **F21. A live `matrix_mode` switch can commit a model its own preparation refuses.** The switch is
   live (C12) and flips which rows are active, but the classifier runs the row rule only when the
   automation table changes (`live_delta.rs:372-376`). A strip with pan automation that switches to
@@ -1379,7 +1379,7 @@ New findings:
   not reproduced. Not a stored-automation slice: root files a small defect issue (run the row rule
   when a row's `active` changes, or refuse the switch while an entry on the strip's pan or matrix
   rows exists). **Root's ruling (2026-10-14):** placeholder
-  `.github/ISSUE_SPECS/TBD21-run-the-automation-row-rule-when-a-rows-activity-changes.md`. TBD22
+  `.github/ISSUE_SPECS/1631-run-the-automation-row-rule-when-a-rows-activity-changes.md`. #1632
   (no `matrix_mode` automation) narrows the fault class but does not remove it, because a live or
   document switch still flips which rows are active under a pan or matrix entry.
 - **F22. F12's amendment to #1054 D10 never landed.** #1054 is closed, and `set_fader_gain` still

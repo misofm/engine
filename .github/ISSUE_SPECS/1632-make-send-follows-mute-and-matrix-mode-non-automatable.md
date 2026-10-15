@@ -2,7 +2,7 @@
 
 Root's ruling on finding F20 of the stored-automation check (#1058 README, "Root's rulings
 (2026-10-14)"), decision 17 (`docs/rulings/one-control-abstraction-2026-10-13.md`, C3). Code anchors
-verified on `2e6343a99`. Issue number: assigned at filing (written here as TBD22). Feature sprint
+verified on `2e6343a99`. Issue number: assigned at filing (written here as #1632). Feature sprint
 mode (owner, 2026-10-13): one implementer, normal tests, a batch review. Root reports the ruling to
 the owner as revisitable.
 
@@ -47,7 +47,7 @@ and a mode, not performance values.
 - **D4. Fixtures, corpus and SDK follow.** The SDK's generated control tables are regenerated
   (`automatable` of the two rows); every pinned digest that moves (a control-list corpus row in
   `crates/conformance/src/protocol_corpus.rs`, the qualification artifacts) is re-pinned with the
-  reason "TBD22 makes follows_mute and matrix_mode non-automatable".
+  reason "#1632 makes follows_mute and matrix_mode non-automatable".
 
 ## Objective gates
 

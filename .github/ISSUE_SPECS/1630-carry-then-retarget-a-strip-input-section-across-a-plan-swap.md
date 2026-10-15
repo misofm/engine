@@ -2,7 +2,7 @@
 
 Successor found by the batch-10 carry-chain check, decision 17
 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `12d4a4f9d`.
-Issue number: assigned at filing (written here as TBD20). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1630). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review.
 
 ## Product outcome

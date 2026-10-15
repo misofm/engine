@@ -160,7 +160,7 @@ Commands: `cargo test --locked -p host-core --features test-support`, `cargo tes
 
 Root's rulings (README "Root's rulings (2026-10-14)"): a send gain is a level control and takes a
 hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation wins;
-`follows_mute` is not automatable (TBD22).
+`follows_mute` is not automatable (#1632).
 
 - **D1, gain cell.** For an automated `gain_db`, the seven-word cell's `gain` word holds the hand
   offset in dB (`f32` bits; draft 11b's offset field, amended for the send gain), not the static
@@ -179,7 +179,7 @@ hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation 
 - **D5 is confirmed** by root: a hand send mute ORs with the automated send mute. D5's "a
   reading for root to confirm" and its alternative are void.
 - **D7 is replaced.** `follows_mute` is not automatable (placeholder
-  `.github/ISSUE_SPECS/TBD22-make-send-follows-mute-and-matrix-mode-non-automatable.md`): the row
+  `.github/ISSUE_SPECS/1632-make-send-follows-mute-and-matrix-mode-non-automatable.md`): the row
   rule refuses an entry on route row 7 with `control.automation.target`, so this slice renders none
   and its flags word gains no automated `follows_mute` bit.
 - **Gate 3** becomes: a send automation edit gives path `rebuild` and completes `exact`; a
@@ -191,5 +191,5 @@ hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation 
 - **Test value** gains: gate 3 turns red if a hand send gain move writes the fallback (automation
   wins) instead of the offset, or if the offset reaches the matrix.
 - **Non-goals.** "VCA automation (README F20)" is draft 13e.
-- **Dependencies** gain draft 11b's amended field and rule (batch R1) and TBD22 (ordering only: its
+- **Dependencies** gain draft 11b's amended field and rule (batch R1) and #1632 (ordering only: its
   row rule refuses the `follows_mute` entry this slice no longer renders).

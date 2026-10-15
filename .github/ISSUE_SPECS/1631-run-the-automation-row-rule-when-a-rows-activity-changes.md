@@ -2,7 +2,7 @@
 
 Defect found by the stored-automation check (#1058 README, finding F21), decision 17
 (`docs/rulings/one-control-abstraction-2026-10-13.md`, C1 and C12). Code anchors verified on
-`2e6343a99`. Issue number: assigned at filing (written here as TBD21). Feature sprint mode (owner,
+`2e6343a99`. Issue number: assigned at filing (written here as #1631). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
@@ -25,7 +25,7 @@ transaction also retargets or removes the entry. Found by reading, not reproduce
   reverse). The next rebuild's preparation calls the row rule (`crates/host-core/src/prepare.rs`)
   and refuses that model with `control.inactive`. A document replacement that changes only the
   mode reaches the same path.
-- *Make a send's follows_mute and a strip's matrix_mode non-automatable* (TBD22) removes the
+- *Make a send's follows_mute and a strip's matrix_mode non-automatable* (#1632) removes the
   automated switch. That narrows the fault class but does not remove it: a live `SET_CONTROL` or a
   document replacement still flips the rows' activity under a pan or matrix entry.
 
@@ -65,7 +65,7 @@ transaction also retargets or removes the entry. Found by reading, not reproduce
 
 ## Dependencies
 
-- None. Independent of the stored-automation slices and of TBD22.
+- None. Independent of the stored-automation slices and of #1632.
 
 ## Size
 
