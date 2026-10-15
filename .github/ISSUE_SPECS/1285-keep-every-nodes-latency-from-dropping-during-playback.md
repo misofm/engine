@@ -173,10 +173,11 @@ Checked against `228fca26c`.
 
 **Dependencies.**
 - #1284 is closed. #1283, #1279 and #1277 are closed.
-- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
-  The rest of batch 15 follows, so #1324 is ordered before this slice. #1324's batch-15
-  amendment asks root to move it out of 15a (it needs #1288, #1325, #1363 and #1391). Until
-  #1324 lands, the fallback below applies.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325. The rest of batch 15 follows. #1324 is not ordered before this slice. This
+  slice keeps its no-duck fallback until #1324 lands: a restarted strip starts at rest with no
+  duck.
 - #1324 is open and not in batch 15/16. D3's duck-swap needs it. Until it lands, a restarted
   strip starts at rest with no duck.
 - #1287 is open. D2 names it as later work only. #1323 is in the batch.

@@ -159,8 +159,9 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
 
 Checked against `e2f6cfb24`.
 
-**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, #1324, in
-that order. The rest of batch 15 follows.
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
+that order. #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288,
+#1391, #1363 and #1325, in that order. The rest of batch 15 follows.
 
 **Moved anchors.** #1309 has landed; the files are in `crates/control-plane/src/` as the spec
 expects. Each fact in Context still holds; only the lines moved.
@@ -199,7 +200,8 @@ expects. Each fact in Context still holds; only the lines moved.
   control plane (`adapter.rs:59`); the C ABI maps one to the other (`runtime/mod.rs:199`).
 
 **Decisions.** D1-D4 and D6 hold against the code and decision 17. D5 does not hold as written.
-- **NEEDS ROOT RULING: the browser now runs this control plane.** D5 says "The browser's caps
+- **ROOT RULING (2026-10-15): this slice covers both hosts.** The finding follows; the ruled
+  text is after it. The browser now runs this control plane. D5 says "The browser's caps
   follow the same rule when it adopts the control plane (#1332)", and the non-goals leave the
   browser's caps to #1332. Since #1381a the browser runs `control_plane::SessionState` in its one
   instance (`hosts/host-web/src/lib.rs:6-16`). So D1's capacities and D4's sums reach the browser
@@ -211,6 +213,30 @@ expects. Each fact in Context still holds; only the lines moved.
   for moved pins only, with the measured reason: `hosts/host-web/src/tests.rs`,
   `hosts/host-web/tests/` and `hosts/host-web/tests/browser-v1/expected.json`. Gate 4 adds
   `cargo test --locked -p host-web --features host-web/test-support`.
+  The ruled text, which supersedes D5's browser sentence and the non-goal "The browser's caps
+  (#1332)":
+  - **D5, browser sentence (restated).** The browser's caps are its one memory budget
+    (`control_limits`, `hosts/host-web/src/lib.rs:5053-5083`). D1's larger tables are charged
+    in that budget, through the same control-plane code as the C ABI. Its replacement-peak term
+    (`set_replacement_peak_limit`, `:6347`) must cover the three-plan peak when #1403 admits a
+    warm candidate. This slice adds no browser cap and no browser default.
+  - **Host-web test (gate 1b).** A new test in `hosts/host-web/tests/plan_exchange_threads.rs`
+    is the browser twin of gate 1's first test. Boot, commit a structural edit (add a muted
+    track), and render the block that adopts it. Before the epoch atomic is published, submit a
+    second structural edit through the browser's control path. It returns OK (the base returns
+    `BACKPRESSURE`), its plan is adopted at the next block, and the active epoch then equals the
+    second plan's epoch. To hold the window, drive the render's two halves through
+    `control_plane::PlanState::test_owner_mut` and `test_active_epoch` (`crates/control-plane/src/plan.rs:219-229`).
+    If host-web cannot reach them, add one `#[cfg(feature = "test-support")]` accessor beside
+    `active_plan_epoch_for_test` (`hosts/host-web/src/lib.rs:2297`). Test value: the lag refusal
+    kept on the browser path, or a browser budget that does not charge D1's tables and so refuses
+    the second plan, turns it red; gate 1's C ABI tests do not boot the browser.
+  - **Authorized paths (added).** `hosts/host-web/tests/plan_exchange_threads.rs` (the new test);
+    `hosts/host-web/src/lib.rs` (the test-support accessor only); and, for moved pins only, each
+    with its measured reason in the PR: `hosts/host-web/src/tests.rs`, `hosts/host-web/tests/`
+    and `hosts/host-web/tests/browser-v1/expected.json`.
+  - **Gate 4 (added command).** `cargo test --locked -p host-web --features host-web/test-support`
+    passes, gate 1b included.
 
 **Dependencies on GitHub.**
 - #1309 is closed. #1343 and #1311 are closed.

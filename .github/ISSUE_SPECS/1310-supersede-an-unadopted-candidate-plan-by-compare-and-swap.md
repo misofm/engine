@@ -243,9 +243,10 @@ a revision word. The decisions above keep their meaning, read through the follow
 
 Checked against `e2f6cfb24`.
 
-**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, #1324, in
-that order. The rest of batch 15 follows. #1319 and #1323 need this slice (root rulings R4 and R5
-of 2026-10-15).
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
+that order. #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288,
+#1391, #1363 and #1325, in that order. The rest of batch 15 follows. #1319 and #1323 need this
+slice (root rulings R4 and R5 of 2026-10-15).
 
 **Moved anchors.** Each fact in Context still holds; only the lines moved.
 - The one-candidate refusal is `crates/control-plane/src/control.rs:1742-1744`. The #1042 lag
@@ -284,7 +285,10 @@ of 2026-10-15).
   (`crates/engine/src/realtime/plan.rs:663`) reads it. No new field is needed.
 
 **Decisions.** D1, D4-D7 hold against the code and decision 17. Two do not hold as written.
-- **NEEDS ROOT RULING: the rest of B's base (D2, D3).** D2 writes `SuccessorBase { inventory,
+- **ROOT RULING (2026-10-15): B's base keeps P0's monitor overlay with P0's model, and the edit
+  ramps committed after `r_P0`, merged with B's own (B wins on a shared row).** This is the
+  proposal below; D2 and D3 read with it. The finding follows. The rest of B's base (D2, D3).
+  D2 writes `SuccessorBase { inventory,
   committed }`. `SuccessorBase` now also has `monitor` (#1559), `edit_ramps` (#1394) and
   `observation` (#1584). `monitor.committed` is "the overlay the predecessor's cells hold"; today
   the control plane passes its one `self.monitor` (`control.rs:1677-1681`). While A waits, a solo
@@ -296,7 +300,11 @@ of 2026-10-15).
   keeps the edit ramps of every edit committed after `r_P0` and drops them with the epoch; B's
   `edit_ramps` are those merged with B's own, B's ramp winning on a row both set. `observation`
   is the host's bindings as now.
-- **NEEDS ROOT RULING: records queued on A (D8).** Each epoch's effect producers own the
+- **ROOT RULING (2026-10-15): B arms its taps from the host's bindings (#1584 D6a). A record kind
+  the bindings cannot express moves to B before publication, with room checked in D4. A kind that
+  fits neither stops the implementer, who reports to root.** D8 reads with this. Where the
+  proposal below says "before step 4", the ruling's "before publication" governs. The finding
+  follows. Records queued on A (D8). Each epoch's effect producers own the
   instance's observation queue (`EffectControlProducer`, `crates/effect-compiler/src/prepare.rs:619`).
   A record admitted between A's commit and its adoption waits in A's queue: see
   `hosts/host-web/src/tests.rs:7020-7032` ("the record is queued on the successor"). D5 step 6

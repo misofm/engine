@@ -178,7 +178,9 @@ Checked against `228fca26c`.
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310) is open and is not in the
   batch-15/16 list. #1310 depends on *Prepare a successor across a withdrawn candidate plan*
   (#1344), also open and not in the list. D2, D3 and the withdrawal counters need both.
-- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325.
   The rest of batch 15 follows, so #1310 and #1344 land before this slice.
 
 **Decisions.**

@@ -276,7 +276,9 @@ authorized paths, for the construction sites only: `crates/host-core/tests/brows
   engine's `withdraw` exists (`crates/engine/src/realtime/plan_exchange.rs:552`, #1343), but #1310's
   compare-and-swap and its D2, D5 and D6 do not. #1310 also waits on #1344 and #1398, both open.
 - #1403 (open) adds `PrimedCandidate` later. It is not a dependency.
-- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325.
   The rest of batch 15 follows. This slice is in the rest (R5).
 
 **ROOT RULING (2026-10-15): order #1310, #1344 and #1398 before #1323. No placeholder

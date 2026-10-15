@@ -173,8 +173,9 @@ it needs; on its own it changes no host behaviour.
 
 Checked against `e2f6cfb24`.
 
-**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, #1324, in
-that order. The rest of batch 15 follows. This slice is first.
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
+that order. #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288,
+#1391, #1363 and #1325, in that order. The rest of batch 15 follows. This slice is first.
 
 **Moved anchors.** Each fact in Context still holds, except as noted.
 - `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`. It now has six fields:
