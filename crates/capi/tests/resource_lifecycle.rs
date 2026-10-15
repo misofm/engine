@@ -1172,43 +1172,39 @@ impl Budget {
 /// prints the four-lane values; the window only shrinks, so the old ceilings still bound them).
 /// `capi_retained_bytes` and the other rows did not move (197,521 before and after).
 ///
-/// Batch 10 tightens the four-lane graph rows. CI's `aarch64-debug` job on PR #1625 (job
-/// 116156576326, the batch 9 head) printed 287,994, 287,922 and 102,917. The batch 10 carry
-/// (#1280a-#1280c, #1281: the effect lane inventory with its kinds and sites) adds the same
-/// 6,960 bytes to each row at eight lanes on x86-64 (314,918 -> 321,878, 314,846 -> 321,806,
-/// 106,673 -> 113,633); the ceilings are the AArch64 print plus that delta plus 10 %, rounded up
-/// to 64: 324,449.4 -> 324,480, 324,370.2 -> 324,416 and 120,864.7 -> 120,896. The next
-/// `aarch64-debug` print on this branch confirms them. The eight-lane ceilings hold as they are.
-/// #1629 lowered `capi_retained_bytes` to 165,166 at eight lanes; its ceiling is tightened from the
-/// next four-lane print.
+/// Batch 10 tightens the four-lane graph rows from CI's `aarch64-debug` print on PR #1634 (job
+/// 116221840527, the batch 10 head): 294,810, 294,738 and 109,733 bytes, so the ceilings are the
+/// print plus 10 %, rounded up to 64: 324,291.0 -> 324,352, 324,211.8 -> 324,224 and 120,706.3 ->
+/// 120,768 (a first derivation from batch 9's print plus the eight-lane carry delta was 144 bytes
+/// high per row). #1629 removed the protocol automation queue: `capi_retained_bytes` measured
+/// 165,166 at both widths (that print, and x86-64), so its ceiling is 165,166 plus 10 %, rounded
+/// up to 64: 181,682.6 -> 181,696 (was 216,832).
 ///
 /// #1633 (batch 11) moved the effect lanes' carried slots out of the build: a lane holds them only
 /// when a successor carries into it. The first-compile reference session carries nothing, so the
 /// three graph rows fall by the slots the batch 10 carry added at eight lanes (`graph_session_plus_plan_bytes`
 /// 321,846 -> 315,798, `graph_incremental_plan_bytes` 321,774 -> 315,726, `graph_metadata_bytes`
 /// 113,601 -> 107,553: 6,048 each, x86-64). `capi_retained_bytes` charges capi's own allocations
-/// and stays 165,166, so its eight-lane ceiling is that plus 10 %, rounded up to 64: 181,682.6 ->
-/// 181,696. The four-lane `capi_retained_bytes` ceiling and the three four-lane graph ceilings
-/// stand until the next `aarch64-debug` print (AArch64 runs only in CI); the window only shrinks, so
-/// they still bound the four-lane rows.
+/// and stays 165,166. The graph ceilings stand until the next `aarch64-debug` print tightens them
+/// (AArch64 runs only in CI); the rows only shrank, so they still bound them.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
         eight_lanes: 346_432,
-        four_lanes: 324_480,
+        four_lanes: 324_352,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
         eight_lanes: 346_368,
-        four_lanes: 324_416,
+        four_lanes: 324_224,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
         eight_lanes: 117_376,
-        four_lanes: 120_896,
+        four_lanes: 120_768,
     },
     Budget {
         row: "graph_delay_bytes",
@@ -1298,7 +1294,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
         eight_lanes: 181_696,
-        four_lanes: 216_832,
+        four_lanes: 181_696,
     },
     Budget {
         row: "largest_named_allocation_bytes",
