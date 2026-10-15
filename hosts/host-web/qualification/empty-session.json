@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "session_id": "web-browser-live-controls",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
+  "tracks": [],
+  "submixes": [],
+  "vcas": [],
+  "control_smoothing": {
+    "kind": "default"
+  },
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [],
+  "automation": []
+}

@@ -177,6 +177,9 @@ pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
     route_producer_position, route_record,
 };
+/// The most channels one source can declare at launch (mono or stereo): the one limit the session
+/// validator, the C ABI's source submission and the browser's staging all read.
+pub use session::SOURCE_CHANNELS_LAUNCH_MAXIMUM;
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,

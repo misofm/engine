@@ -31,3 +31,9 @@ match, so one function decides which tap a binding arms.
 ## Size
 
 A few hours.
+
+## Decision record: expose the armed tap mask (batch 13a)
+
+- `EffectObservationHandle` is defined in `crates/effect-compiler/src/prepare.rs` (host-core re-exports it), so the field `armed_taps: u32` (bit `i` = `descriptor.observations[i]`) was added there. `attach_effect_observation` sets a bit exactly when `ObservationLane::arm_prepared` armed that tap, so the mask is the lane's own arming, not a second match.
+- host-web's `build_plan_shape` copies `handle.armed_taps` into `observation_armed`; the duplicate binding match and its `bindings` parameter (and the caller's lookup) are deleted. An arm for a tap past bit 31 has no bit, as before.
+- Gate: `tests::structural_apply::the_browsers_armed_bits_are_the_mask_host_core_prepared` (a console slot `comp` and insert `comp` on two tracks, one insert and one console tap armed, restart rebuild; every slot's word equals the handle's mask; 4 observed, 2 armed). It goes red when the copy is replaced by 0. The #1584 D6b browser tests pass unchanged.

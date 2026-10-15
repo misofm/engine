@@ -114,7 +114,10 @@ The stored automation target `{entity_id, rack, effect_id, parameter_id, channel
 - `scope`: `model` (in the session document) or `monitor` (solo: host-local, never saved, never
   advances the revision; #1057 item 8);
 - `automatable`: **computed, not declared**: `class == live && scope == model && family != setting`
-  (decision 14 rule 4 with D15's "automatable iff live");
+  (decision 14 rule 4 with D15's "automatable iff live"), less one declared exclusion: a row may
+  carry `AutomationRule::Excluded { reason, reopen }`. Root's ruling of 2026-10-14 (#1632,
+  revisitable by the owner) excludes a send's `follows_mute` ("a routing setting") and a strip's
+  `matrix_mode` ("a mode"); both stay live controls;
 - `family`: the render family of C6;
 - `active`: false for a row that the owner's present shape does not use (the matrix rows of a strip
   in pan mode, and the reverse). The row set of a session changes only with its structure.

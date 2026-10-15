@@ -11,6 +11,8 @@ const FADER_DB: u32 = 5;
 const DELAY_SAMPLES: u32 = 11;
 const MATRIX_LL: u32 = 7;
 const SOLO: u32 = 2;
+const MATRIX_MODE: u32 = 1;
+const FOLLOWS_MUTE: u32 = 7;
 const PAN_WINDOW_SAMPLES: u32 = 3;
 const EFFECTIVE_FADER_DB: u32 = 64;
 const GAIN_DB: u32 = 1;
@@ -62,11 +64,12 @@ fn eq_param(strip: &str, control: u32, lane: Lane) -> ControlAddress {
 }
 
 /// Gate 1: the row decides. A rebuild-only row, a derived row, the monitor row and a setting row
-/// are refused at their target with `control.automation.target`; a send's gain, a VCA's offset, a
+/// are refused at their target with `control.automation.target`, and so are a send's
+/// `follows_mute` and a strip's `matrix_mode` (live, but ruled out of automation, #1632); a send's gain, a VCA's offset, a
 /// builtin fader and a block-rate effect parameter are accepted.
 ///
-/// Red if automation can target a value that is not live, or cannot target a live send or VCA
-/// value.
+/// Red if automation can target a value that is not live or a ruled exclusion, or cannot target a
+/// live send or VCA value.
 #[test]
 fn the_row_decides_what_can_be_automated() {
     let refused = [
@@ -93,6 +96,17 @@ fn the_row_decides_what_can_be_automated() {
         (
             "prepared",
             eq_param("vocal", BAND_ENABLED, Lane::Left),
+            ParameterUnit::Linear,
+        ),
+        // Live rows that a ruling keeps out of automation (#1632): a routing setting and a mode.
+        (
+            "follows-mute",
+            route_own("send", FOLLOWS_MUTE),
+            ParameterUnit::Linear,
+        ),
+        (
+            "matrix-mode",
+            strip_own("vocal", MATRIX_MODE, Lane::Both),
             ParameterUnit::Linear,
         ),
     ];

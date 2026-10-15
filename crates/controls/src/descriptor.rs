@@ -73,6 +73,29 @@ pub enum DomainRule {
     Contract(&'static ParameterDescriptor),
 }
 
+/// Whether a row's automatability is the computed rule alone or a ruled exclusion from it.
+///
+/// "Automatable iff live" is computed ([`ControlDescriptor::automatable`]); a row that is live but
+/// that a ruling keeps out of automation declares the exclusion here, with its reason and the
+/// condition that reopens it, so no second rule hides in a table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutomationRule {
+    /// Automatable exactly when the row is a live model value that render reads.
+    Computed,
+    /// Never automatable, though live: a ruled exclusion. A reference keeps the descriptor, which a
+    /// listing copies once per row, one word wider.
+    Excluded(&'static AutomationExclusion),
+}
+
+/// The reason a live row is kept out of automation, and what reopens the ruling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutomationExclusion {
+    /// Why the row is not a performance value a person automates.
+    pub reason: &'static str,
+    /// What reopens the ruling.
+    pub reopen: &'static str,
+}
+
 /// What one control is: everything a frontend or an agent needs to draw it, and everything the
 /// validator needs to check a write. The same type describes every control.
 ///
@@ -119,14 +142,18 @@ pub struct ControlDescriptor {
     pub active: bool,
     /// Which function decides the domain (see [`DomainRule`]).
     pub domain: DomainRule,
+    /// Whether the computed automation rule stands or the row is a ruled exclusion from it.
+    pub automation: AutomationRule,
 }
 
 impl ControlDescriptor {
-    /// Whether an agent may automate this control. Computed, never declared: a live model value
-    /// that render reads (decision 14 rule 4 with decision 15, "automatable iff live").
+    /// Whether an agent may automate this control. Computed: a live model value that render reads
+    /// (decision 14 rule 4 with decision 15, "automatable iff live"), unless the row declares a
+    /// ruled exclusion ([`AutomationRule::Excluded`], decision 17 C3).
     #[must_use]
     pub fn automatable(&self) -> bool {
-        self.class == ControlClass::Live
+        self.automation == AutomationRule::Computed
+            && self.class == ControlClass::Live
             && self.scope == ControlScope::Model
             && self.family != Family::Setting
     }
@@ -233,4 +260,5 @@ pub(crate) const BASE: ControlDescriptor = ControlDescriptor {
     family: Family::Setting,
     active: true,
     domain: DomainRule::Range,
+    automation: AutomationRule::Computed,
 };

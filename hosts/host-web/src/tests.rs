@@ -72,11 +72,11 @@ fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlo
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
         buffers.source_pcm.len(),
-        session::SOURCE_CHANNELS_MAXIMUM as usize * 128
+        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize * 128
     );
     assert_eq!(
         buffers.plane_references.len(),
-        session::SOURCE_CHANNELS_MAXIMUM as usize
+        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize
     );
     let longest = [b'x'; session::STABLE_ID_MAXIMUM_BYTES];
     assert_eq!(
@@ -503,7 +503,7 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
         // Source PCM staging holds the most channels a source can declare, not the boot session's.
         assert_eq!(
             host.source_pcm_mut().expect("PCM").len(),
-            session::SOURCE_CHANNELS_MAXIMUM as usize * quantum as usize
+            session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize * quantum as usize
         );
         assert_eq!(
             host.output_pcm().expect("output").len(),
@@ -4668,8 +4668,8 @@ fn observation_unit_conversion_is_declared_and_clamped() {
 ///
 /// `zeta` is declared first and `alpha` last, so a query that reported *declaration* order rather
 /// than the normalized order would be visible here rather than hidden by an already-sorted
-/// fixture. The shapes are all distinct -- different channel counts and lengths -- so a query that
-/// read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
+/// fixture. The shapes are all distinct -- a source is mono or stereo, so the lengths differ -- so a
+/// query that read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
 /// the last of the three by either ordering.
 fn three_source_session(quantum: u32) -> String {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
@@ -4686,7 +4686,7 @@ fn three_source_session(quantum: u32) -> String {
     model.sources = vec![
         source("zeta", 1, u64::from(quantum) * 3),
         source("mid", 2, u64::from(quantum) * 5),
-        source("alpha", 4, u64::from(quantum) * 2),
+        source("alpha", 1, u64::from(quantum) * 2),
     ];
     model.tracks[0].source_id = session::StableId::parse("mid").expect("stable id");
     canonical_session_json(&model).expect("canonical three-source session")
@@ -4721,7 +4721,7 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     assert_eq!(
         host.session_source_shape(0).expect("alpha"),
         SessionSourceShape {
-            channel_count: 4,
+            channel_count: 1,
             frames: u64::from(QUANTUM) * 2,
         }
     );
@@ -4789,7 +4789,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
             miso_engine_web_v1_source_channels(handle, 1),
             miso_engine_web_v1_source_channels(handle, 2),
         ],
-        [4, 2, 1]
+        [1, 2, 1]
     );
     assert_eq!(
         [
@@ -7784,6 +7784,106 @@ mod structural_apply {
             gain_reduction(&rig.host).0[0] > 0.0,
             "the meter frame's gain-reduction word follows the restarted tap"
         );
+    }
+
+    /// #1584 D6b via #1679: the successor's `observation_armed` word of every observed effect is
+    /// the `armed_taps` host-core prepared the handle with. The session has one compressor `comp`
+    /// as a console slot and as an insert on each of two tracks (an ID reused for another effect
+    /// in the other rack and on another strip); the host armed the first track's insert and the
+    /// second track's console slot, and a restart rebuilds both.
+    ///
+    /// Test value: red if the browser matches bindings to taps by its own rule again and that rule
+    /// differs from host-core's (an ID match that ignores the rack or the strip would arm the
+    /// console slot of the first track, or the insert of the second, in the page's tables only).
+    #[test]
+    fn the_browsers_armed_bits_are_the_mask_host_core_prepared() {
+        let mut model = observed_model();
+        model.console.pre_insert = vec![session::ConsoleSlot {
+            slot: StableId::parse("comp").expect("slot ID"),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("effect ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            link_mode: session::LinkMode::DualMono,
+        }];
+        model.tracks[0].console = model
+            .console
+            .slots()
+            .map(|slot| session::ConsoleEntry {
+                slot: slot.slot.clone(),
+                bypass: false,
+                params: Vec::new(),
+            })
+            .collect();
+        let (mut second, route) = muted_track(&model, "zz");
+        second.fader.left_mute = false;
+        second.fader.right_mute = false;
+        model.tracks.push(second);
+        model.routes.push(route);
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_CONSOLE, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.host.observation_armed_taps(), 2);
+
+        let mut restarted = model.tracks[0].inserts.effects[0].clone();
+        restarted.link_mode = session::LinkMode::Maximum;
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::PutTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 0,
+                    effect: restarted,
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        let slots = rig
+            .host
+            .ready
+            .as_ref()
+            .expect("ready")
+            .shape
+            .observation_armed
+            .len();
+        let (mut observed, mut armed) = (0, 0);
+        for slot in 0..slots {
+            let Some(mask) = rig.host.test_observation_handle(slot).map(|h| h.armed_taps) else {
+                continue;
+            };
+            let word = rig
+                .host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .shape
+                .observation_armed[slot];
+            assert_eq!(word, mask, "slot {slot}: the page copies host-core's mask");
+            observed += 1;
+            armed += mask.count_ones();
+        }
+        assert_eq!(
+            observed, 4,
+            "two inserts and two console slots are observed"
+        );
+        assert_eq!(armed, 2, "only the two acknowledged taps are armed");
     }
 
     /// #1584 D6b, removal: the removed insert has no slot on the successor, the browser's read

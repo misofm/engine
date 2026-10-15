@@ -1749,6 +1749,11 @@ pub struct EffectObservationHandle {
     pub descriptor: &'static EffectDescriptor,
     /// One reader per declared tap, in declaration order.
     pub readers: Box<[ObservationReader]>,
+    /// The taps this instance was prepared with armed (#1584 D6a), one bit per declared tap: bit
+    /// `i` is `descriptor.observations[i]`, the effect-local tap index `push_observe` sets. This is
+    /// the one place a binding is matched to a tap, so a host reads the arming from here and does
+    /// not repeat the match. A tap past bit 31 has no bit.
+    pub armed_taps: u32,
 }
 
 /// One observation tap a successor plan is prepared with armed (#1584 D6a): the host acknowledged
@@ -1856,6 +1861,7 @@ pub fn attach_effect_observation(
         // first window at its first rendered block. An arm for a tap the effect does not declare
         // is ignored: the host drops such a binding before it reaches here.
         let console = !matches!(entry.rack, EffectRack::Dynamic);
+        let mut armed_taps = 0_u32;
         if let Some(taps) = armed.get(&(entry.track_id.as_str(), console, entry.effect_id.as_str()))
         {
             for &(tap_id, window) in taps {
@@ -1863,8 +1869,11 @@ pub fn attach_effect_observation(
                     .observations
                     .iter()
                     .position(|tap| tap.id.0 == tap_id)
+                    && let Ok(index) = u32::try_from(index)
+                    && lane.arm_prepared(index, window)
+                    && let Some(bit) = 1_u32.checked_shl(index)
                 {
-                    lane.arm_prepared(index as u32, window);
+                    armed_taps |= bit;
                 }
             }
         }
@@ -1874,6 +1883,7 @@ pub fn attach_effect_observation(
             effect_id: entry.effect_id.as_str().into(),
             descriptor,
             readers: readers.into_boxed_slice(),
+            armed_taps,
         });
         entry.observation = Some(Box::new(lane));
     }

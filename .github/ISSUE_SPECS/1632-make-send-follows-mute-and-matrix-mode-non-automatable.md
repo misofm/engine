@@ -75,3 +75,29 @@ and a mode, not performance values.
 ## Size
 
 Half a day.
+
+## Decision record: #1632 (batch 13a)
+
+Shipped as written (D1 to D4). `ControlDescriptor` gains `automation: AutomationRule` (`BASE` and every
+other table: `Computed`); `automatable()` is the computed rule and `automation == Computed`.
+`matrix_mode` ("a mode, not a performance value") and `follows_mute` ("a routing setting, not a
+performance value") declare `AutomationRule::Excluded(&AutomationExclusion { reason, reopen: "an
+owner request" })`. The row rule (`controls::automation_diagnostics`), preparation, the classifier
+and `session-validator` need no new code: all four already refuse `!automatable()` as
+`control.automation.target`. The wire check (an implication) is unchanged.
+
+Departure from the text: the exclusion is held by reference (`Excluded(&'static AutomationExclusion)`),
+not inline. A listing copies one descriptor per row, and an inline pair of strings measurably grew
+the live-only `control_command` heap (#1615 gate: first peak 81,451 against a ceiling of 78,000);
+the reference costs one word per row (first peak 77,347, steady 72,588; ceilings 78,000 and 73,000
+hold).
+
+Gates and tests: `crates/controls/tests/automation.rs`
+`the_row_decides_what_can_be_automated` (both rows refused at `.target`),
+`crates/controls/tests/list.rs` `automatable_is_exactly_the_live_model_value_rows` (previous list
+less the two names) and `follows_mute_and_matrix_mode_are_live_and_not_automatable`. Re-pins: the
+host-web `tests/fixtures/control-list.json` (`automatable` of the five listed rows; reason
+"#1632 makes follows_mute and matrix_mode non-automatable"), `sdk/assets/miso-engine-v1-parameter-metadata.json`
+and `sdk/src/generated/controls.ts` (regenerated). No conformance corpus digest moved. No checked-in
+automation fixture used either row. #1631 interplay: it still covers a pan entry on a strip
+switched to matrix; a `matrix_mode` entry is now refused at the target before activity is judged.

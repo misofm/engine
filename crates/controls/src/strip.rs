@@ -8,7 +8,9 @@ use session::{
 };
 
 use crate::builtin_rows;
-use crate::descriptor::{BASE, Choice, ControlDescriptor, Lanes, Motion};
+use crate::descriptor::{
+    AutomationExclusion, AutomationRule, BASE, Choice, ControlDescriptor, Lanes, Motion,
+};
 use crate::effect_rows::{self, Instance};
 use crate::effective::EffectiveStrip;
 use crate::error::ControlError;
@@ -87,6 +89,10 @@ pub(crate) static ROWS: [StripRow; 5] = [
             choices: &MODE_CHOICES,
             motion: Motion::Ramp(LiveRampRow::Pan),
             family: Family::StripMatrix,
+            automation: AutomationRule::Excluded(&AutomationExclusion {
+                reason: "a mode, not a performance value",
+                reopen: "an owner request",
+            }),
             ..BASE
         },
         value: StripValue::Stored {

@@ -506,6 +506,138 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   };
 }
 
+/// #1682: an empty session in a real browser. The live-control session with no source, no track and
+/// no route boots and renders silence, and one structural transaction adds the source, the track
+/// and the route back, after which the fed PCM comes out of the output unchanged.
+///
+/// Two renders of the same session. The first only boots it and renders: the output is exact zero,
+/// the session map and the control list name no source and no strip, the meter stream (the lease is
+/// taken on the empty plan) is the master's two peaks with no track, and no allocator call ran on
+/// the render thread. The second applies the transaction (the frame is the protocol codec's, the
+/// fixture beside the session), feeds the added source before the first quantum, and renders: the
+/// first quantum is the swap block, so the output is the submitted PCM, exactly, computed here and
+/// not read back; the meter frame grows to the strip, and no render-thread allocator call ran.
+async function runEmptyBootQualification(createHost, emptyDocument, frameFixture) {
+  const boot = async () => {
+    const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
+    const host = await createHost({
+      context,
+      document: emptyDocument,
+      options: bootOptions(LIVE_CONTROL_FRAMES, LIVE_CONTROL_METER_BLOCKS),
+      simd128ModuleUrl: ARTIFACT_URL,
+      workletModuleUrl: WORKLET_URL,
+    });
+    host.node.connect(context.destination);
+    return { context, host };
+  };
+  const summarise = (frame) => ({
+    sequence: frame.sequence,
+    trackCount: frame.trackCount,
+    structureEpoch: frame.structureEpoch,
+    peaks: frame.peaks.length,
+  });
+  const nonzero = (pcm) => pcm.some((channel) => channel.some((sample) => !Object.is(sample, 0)));
+
+  // The empty boot alone.
+  const quiet = await boot();
+  const quietFrames = [];
+  const quietMap = await quiet.host.sessionMap();
+  const quietTracks = await readTracks(quiet.host);
+  const quietLease = await quiet.host.meters({
+    enabled: true,
+    onFrame: (frame) => quietFrames.push(summarise(frame)),
+  });
+  const quietRendered = await quiet.context.startRendering();
+  for (let spin = 0; spin < 8 && quietFrames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  const quietStatus = await quiet.host.status();
+  const quietAllocations = await renderAllocationCount(quiet.host);
+  await quiet.host.dispose();
+  const quietPcm = [quietRendered.getChannelData(0), quietRendered.getChannelData(1)];
+
+  // The first stem by one structural transaction.
+  const grown = await boot();
+  const grownFrames = [];
+  const input = [new Float32Array(LIVE_CONTROL_FRAMES), new Float32Array(LIVE_CONTROL_FRAMES)];
+  const grownLease = await grown.host.meters({
+    enabled: true,
+    onFrame: (frame) => grownFrames.push(summarise(frame)),
+  });
+  const { sendStructuralFrameThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const reply = await sendStructuralFrameThroughSdk(grown.host, frameFixture.hex, frameFixture.revision);
+  const afterMap = await grown.host.sessionMap();
+  const afterTracks = await readTracks(grown.host);
+  for (let block = 0; block < LIVE_CONTROL_BLOCKS; block += 1) {
+    const planes = sourcePlanes(block);
+    for (let channel = 0; channel < 2; channel += 1) {
+      input[channel].set(planes[channel], block * QUANTUM_FRAMES);
+    }
+    const acknowledgement = await grown.host.submitSource({
+      sourceId: "live-control-source",
+      generation: 1n,
+      startFrame: BigInt(block * QUANTUM_FRAMES),
+      sampleRateHz: SAMPLE_RATE,
+      planes,
+      frames: QUANTUM_FRAMES,
+      endOfRegion: block === LIVE_CONTROL_BLOCKS - 1,
+    });
+    if (acknowledgement.result !== 0) throw new Error("empty-boot prefill rejected");
+  }
+  const pending = await grown.host.status();
+  const grownRendered = await grown.context.startRendering();
+  for (let spin = 0; spin < 8 && grownFrames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  const grownStatus = await grown.host.status();
+  const grownAllocations = await renderAllocationCount(grown.host);
+  await grown.host.dispose();
+  const actual = [grownRendered.getChannelData(0), grownRendered.getChannelData(1)];
+  let exact = true;
+  for (let channel = 0; channel < 2; channel += 1) {
+    for (let at = 0; at < LIVE_CONTROL_FRAMES; at += 1) {
+      if (!Object.is(actual[channel][at], input[channel][at])) exact = false;
+    }
+  }
+  return {
+    boot: {
+      sources: quietMap.sources.length,
+      tracks: quietTracks.length,
+      metersAttached: quietMap.metersAttached,
+      meterLeaseResult: quietLease.result,
+      silent: !nonzero(quietPcm),
+      renderedQuanta: quietStatus.renderedQuanta.toString(),
+      expectedQuanta: LIVE_CONTROL_BLOCKS,
+      meterFrames: quietFrames.length,
+      meterTrackCounts: [...new Set(quietFrames.map((entry) => entry.trackCount))],
+      meterWidths: [...new Set(quietFrames.map((entry) => entry.peaks))],
+      renderAllocations: quietAllocations,
+    },
+    firstStem: {
+      replyStatus: reply.status,
+      commandPath: reply.path,
+      replyBytes: reply.replyBytes,
+      sourcesAfter: afterMap.sources.length,
+      tracksAfter: afterTracks,
+      meterLeaseResult: grownLease.result,
+      initialRevision: frameFixture.revision,
+      pendingRevision: pending.appliedRevision.toString(),
+      committedRevision: reply.revision,
+      finalRevision: grownStatus.appliedRevision.toString(),
+      finalSample: grownStatus.appliedSample.toString(),
+      exactInputOutput: exact,
+      heard: nonzero(actual),
+      expectedDigest: await pcmDigest(input, LIVE_CONTROL_FRAMES),
+      renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+      meterFrames: grownFrames.length,
+      meterTrackCounts: [...new Set(grownFrames.map((entry) => entry.trackCount))],
+      meterWidths: [...new Set(grownFrames.map((entry) => entry.peaks))],
+      structureEpochs: [...new Set(grownFrames.map((entry) => entry.structureEpoch))],
+      renderAllocations: grownAllocations,
+    },
+  };
+}
+
 /// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
@@ -841,7 +973,7 @@ export async function runQualification() {
   const resumeRecord = countResumes();
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
-    liveControlResponse, observationResponse,
+    liveControlResponse, observationResponse, emptyResponse, emptyFrameResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -851,9 +983,12 @@ export async function runQualification() {
       fetch("/qualification/stall-session.json"),
       fetch("/qualification/live-control-session.json"),
       fetch("/qualification/observation-session.json"),
+      fetch("/qualification/empty-session.json"),
+      fetch("/qualification/empty-boot-frame.json"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
-      || !liveControlResponse.ok || !observationResponse.ok) {
+      || !liveControlResponse.ok || !observationResponse.ok || !emptyResponse.ok
+      || !emptyFrameResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -866,6 +1001,9 @@ export async function runQualification() {
   // Issue #143 E12: the live-control session plus one compressor, so an armed tap has a real
   // reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
+  // #1682: the live-control session with no source, track or route, and the frame that adds them.
+  const emptyDocument = new TextEncoder().encode(await emptyResponse.text());
+  const emptyFrame = await emptyFrameResponse.json();
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
     ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
@@ -887,6 +1025,7 @@ export async function runQualification() {
       corpus: null,
       liveControls: null,
       structuralApply: null,
+      emptyBoot: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -941,6 +1080,15 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
+  let emptyBoot;
+  try {
+    emptyBoot = await runEmptyBootQualification(createMisoAudioWorkletHost, emptyDocument, emptyFrame);
+  } catch (error) {
+    const diagnostic = await diagnoseReady(emptyDocument);
+    throw new Error(`empty-boot qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -987,6 +1135,7 @@ export async function runQualification() {
     },
     liveControls: live,
     structuralApply: structural,
+    emptyBoot,
     observation,
     stall,
     stagingReads,
@@ -998,6 +1147,8 @@ export async function runQualification() {
       }))),
       { workload: "live-control", count: live.renderAllocations },
       { workload: "structural-apply", count: structural.renderAllocations },
+      { workload: "empty-boot", count: emptyBoot.boot.renderAllocations },
+      { workload: "empty-boot-first-stem", count: emptyBoot.firstStem.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
@@ -1028,6 +1179,7 @@ export const qualificationBootContract = Object.freeze({
   typedUnsupportedAttestation,
   runLiveControlQualification,
   runStructuralApplyQualification,
+  runEmptyBootQualification,
   runObservationRun,
   runStallQualification,
   runStagingReadRun,

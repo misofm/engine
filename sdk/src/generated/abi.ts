@@ -1789,6 +1789,7 @@ export const ABI_LAYOUT = deepFreeze(
     ],
     "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
+    "maximumSourceChannels": 2,
     "diagnosticBytes": 16384,
     "defaultMeterBlocks": 12,
     "maximumObservationTaps": 16,

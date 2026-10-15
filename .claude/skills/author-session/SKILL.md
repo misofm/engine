@@ -63,8 +63,9 @@ target it.
 ## Core shapes and vocabularies
 
 - A source has exactly `id`, `content`, `channels`, `bit_depth`, and `frames`. `content` is
-  `blake3:` plus 64 lowercase hex digits; `frames` is a nonzero decimal string; `bit_depth` is
-  `16`, `24`, or `"32f"`.
+  `blake3:` plus 64 lowercase hex digits; `channels` is `1` or `2` (a source is mono or stereo; any
+  other count is refused with `source.channels.unsupported`); `frames` is a nonzero decimal string;
+  `bit_depth` is `16`, `24`, or `"32f"`.
 - An output is `{"id":"main-out"}`.
 - A track is `id`, `source_id`, `left_source_channel`, `right_source_channel`, `builtins`,
   `console`, `inserts`, `fader`, then either `pan` with `left`, `right`, `smoothing_samples`, or
@@ -118,7 +119,7 @@ left/right/both, while matrix IDs 7-10 accept `both` only, and only on a strip i
 `console` and `inserts`, `control` is the effect's parameter ID (`0` is its bypass). The session
 validator checks only that the owner, slot or insert exists; whether the row is automatable (not
 rebuild-only like `delay_samples` 11 or an EQ band's `enabled`, not derived, not a monitor or
-setting row), takes the lane, unit and values is `control.address.unknown`,
+setting row, and not a send's `follows_mute` (route row 7) or a strip's `matrix_mode` (own row 1): live controls that a ruling keeps out of automation, #1632), takes the lane, unit and values is `control.address.unknown`,
 `control.automation.target`, `control.inactive`, `control.lane` or `control.domain` at prepare-effects. A
 parameter does not have to be declared on the strip. Stored automation is inert today: it authors
 and round-trips, and renders nothing.

@@ -7855,6 +7855,83 @@ mod set_control {
             assert_eq!(bits(pcm), bits(&prepared[block]), "rebuild, block {block}");
         }
     }
+
+    /// #1631. A `matrix_mode` switch under a stored pan entry is refused with the row rule's
+    /// `control.inactive` at the entry's path, before any commit: the revision, the committed
+    /// document, the replay log and the reliable lane do not move and no candidate is prepared. The
+    /// switch together with the entry's retarget to the matrix row commits, and a switch on a strip
+    /// with no pan or matrix entry stays live.
+    ///
+    /// Red mutation: run the classifier's row rule only when the automation table changes -> the
+    /// switch commits live and the model holds an entry that its own next rebuild refuses.
+    #[test]
+    fn a_mode_switch_under_a_stored_pan_entry_is_refused_before_any_commit() {
+        let document = effect_session(10, 48_000);
+        let mut rig = Rig::new(&document);
+        rig.step();
+        let ride = SessionEdit::UpsertAutomation {
+            automation: session::Automation {
+                id: id("pan-ride"),
+                target: builtin("eq0", PAN, Lane::Left),
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Linear,
+                    start_sample: 0,
+                    end_sample: 960,
+                    start_value: 0.0,
+                    end_value: 0.5,
+                    unit: session::ParameterUnit::Linear,
+                }],
+            },
+        };
+        assert_eq!(
+            rig.apply(&[ride]),
+            crate::RESULT_OK,
+            "a pan entry on a pan strip"
+        );
+
+        let switch = set(own("eq0", MATRIX_MODE, Lane::Both), 1.0, None);
+        let before = (refusal_state(&rig), rig.summary());
+        assert_eq!(
+            rig.apply(core::slice::from_ref(&switch)),
+            crate::RESULT_COMPILE_REJECTED
+        );
+        let diagnostics = String::from_utf8_lossy(&rig.last_error()).into_owned();
+        assert!(
+            diagnostics.contains("control.inactive")
+                && diagnostics.contains("$.automation[id=pan-ride].target"),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            (refusal_state(&rig), rig.summary()),
+            before,
+            "nothing committed, nothing prepared"
+        );
+
+        let retarget = SessionEdit::SetAutomationTarget {
+            automation_id: id("pan-ride"),
+            target: builtin("eq0", MATRIX_LL, Lane::Both),
+        };
+        let revision = rig.summary().0;
+        assert_eq!(
+            rig.apply(&[switch, retarget]),
+            crate::RESULT_OK,
+            "the switch with the entry retargeted"
+        );
+        let after = rig.summary();
+        assert_eq!(
+            (after.0, after.3),
+            (revision + 1, 0),
+            "one revision, live, no candidate"
+        );
+
+        let other = set(own("eq1", MATRIX_MODE, Lane::Both), 1.0, None);
+        assert_eq!(
+            rig.apply(&[other]),
+            crate::RESULT_OK,
+            "no entry, no refusal"
+        );
+        assert_eq!(rig.summary().3, 0, "still live");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

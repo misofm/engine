@@ -24,7 +24,6 @@ fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
         maximum_submixes: 100,
@@ -650,27 +649,6 @@ fn default_ring_derivation_covers_the_stall_and_two_in_flight_quanta() {
         }
     }
     assert_eq!(default_source_ring_frames(96_000, 127), 9_906);
-}
-
-/// A per-source channel cap is a host policy, not a session rule: the C ABI host does not set one
-/// and the browser host does.
-#[test]
-fn source_channel_cap_is_optional() {
-    let capped = HostPrepareCaps {
-        maximum_source_channels: Some(1),
-        ..caps()
-    };
-    let failure = prepare_host_session(SESSION, &capped)
-        .map(|_| ())
-        .expect_err("stereo source over the cap");
-    assert_eq!(failure.kind(), PrepareRejection::Shape);
-    assert_eq!(failure.as_bytes(), b"host.source.channels\t$\n");
-
-    let permitted = HostPrepareCaps {
-        maximum_source_channels: Some(2),
-        ..caps()
-    };
-    prepare_host_session(SESSION, &permitted).expect("stereo source within the cap");
 }
 
 /// The `Send + !Sync` half of the crate-level `# Host callback contract (V1)`.
