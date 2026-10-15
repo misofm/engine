@@ -1509,9 +1509,11 @@ impl ReadyOwnership {
             .and_then(|mut record| record.shape.take());
         let epoch = self.control.newest_plan_epoch();
         if result.is_ok() && epoch != before {
-            let Some(shape) = prepared else {
-                return Err(control_plane::CommandError::Internal);
-            };
+            // A rebuild commits only after the preparer returned `Ok`, and the preparer returns
+            // `Ok` only once it has left the plan's tables in the record (it refuses the
+            // preparation, before anything is committed, when it cannot). So a committed rebuild
+            // always has its tables, and no refusal can follow a commit.
+            let shape = prepared.expect("a committed rebuild's preparer left the plan's tables");
             self.pending_shapes.push(PendingShape {
                 epoch,
                 shape: Box::new(shape),
@@ -1534,6 +1536,14 @@ impl ReadyOwnership {
     /// and frees nothing, and indexes nothing, so it adds no trap to the render export.
     fn adopt_shape(&mut self, epoch: u64) {
         self.shape_epoch = epoch;
+        // The windows a swap discards unpublished (the master intervals waiting for a poll and
+        // the group of track snapshots a poll had begun to assemble) are lost telemetry, counted
+        // with the others (#1290a, batch 10 review).
+        let discarded = u64::try_from(self.master_count)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::from(
+                self.shape.meter_pending.iter().any(Option::is_some),
+            ));
         let mut taken = false;
         for entry in self.pending_shapes.iter_mut() {
             if entry.adopted {
@@ -1550,19 +1560,45 @@ impl ReadyOwnership {
         if taken {
             // A swap restarts the meter delivery state, as a producer reset does (#1290d carries
             // it).
+            let lost = self.meter_loss_count.saturating_add(discarded);
             self.reset_meter_delivery(false);
+            self.meter_loss_count = lost;
             self.meter_generation = self.meter_generation.saturating_add(1);
+            // The tables hold the admissions made against the plan before it rendered; the block
+            // that adopted it drained its observation queues at its top, so the pass that follows
+            // the swap clears the counts (a block that did not adopt cleared only the tables of
+            // the plan it rendered).
+            self.has_in_flight_commands = true;
         }
     }
 
-    /// Whether a replacement plan is committed but its tables and the control plane's producers
-    /// do not describe one plan (#1290a): the replacement waits for its block, or render adopted it
-    /// and the next service step has yet to promote its producers. An observation record
-    /// addresses an effect by this host's tables and reaches it through the producers, so it is
-    /// admitted only when both are the same plan's.
-    fn replacement_pending(&self) -> bool {
-        self.control.newest_plan_epoch() != self.shape_epoch
-            || self.control.current_plan_epoch() != self.shape_epoch
+    /// Run `admit` with the tables of the newest committed plan in place of the rendering plan's
+    /// (#1290a, batch 10 review): the rendering plan's while no replacement is waiting for its
+    /// block, else the waiting replacement's, the plan whose producers the control plane lists
+    /// (`effect_producers`). An observation record addresses an
+    /// effect by the tables and reaches it through the producers, so both must be one plan's: the
+    /// newest, as a live value is, so a submission between a rebuild's commit and its adoption is
+    /// admitted against the successor and takes effect on it, and the browser answers nothing the
+    /// C ABI would not.
+    ///
+    /// The tables are exchanged by pointer and exchanged back before this returns, so nothing
+    /// allocates and the rendering plan's tables are the host's again for the next render call.
+    /// `Err` only when the control plane's newest epoch has no waiting tables, which a commit
+    /// never leaves (the command keeps the tables of every plan it publishes).
+    fn admit_on_newest_plan<T>(&mut self, admit: impl FnOnce(&mut Self) -> T) -> Result<T, ()> {
+        let newest = self.control.newest_plan_epoch();
+        if newest == self.shape_epoch {
+            return Ok(admit(self));
+        }
+        let index = self
+            .pending_shapes
+            .iter()
+            .position(|entry| !entry.adopted && entry.epoch == newest)
+            .ok_or(())?;
+        core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
+        let admitted = admit(self);
+        core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
+        Ok(admitted)
     }
 
     /// Clear host-owned pending delivery state. Producer-side accumulators continue rendering;
@@ -2194,6 +2230,11 @@ impl AudioWorkletEngineHost {
     /// the worklet's message handler, outside `process()`, so each published replacement plan is
     /// a blocking rebuild that decision 15 accepts only when it is counted and reported. A
     /// refused command, a live command and a command that fails after preparation count nothing.
+    ///
+    /// Nothing in production reads it yet: no export and no status word carry it until the
+    /// rewritten browser slices #1293-#1297 wire the host status's `blockingRebuilds` field
+    /// (#1332 D1) to it, and #1295 is the first to read that field (its real-browser gate expects
+    /// exactly one on the non-isolated leg and none on the isolated one).
     #[must_use]
     pub fn blocking_rebuilds(&self) -> u32 {
         self.ready
@@ -3229,18 +3270,18 @@ impl AudioWorkletEngineHost {
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.live_controls\t$\n");
         };
-        // #1290a: an observation record addresses an effect by the tables of the plan that
-        // renders and reaches it through the control plane's producers. From a rebuild's commit
-        // until the service step after its adoption block the two are not one plan's (and a
-        // record queued on the retiring plan would be lost with it), so the submission waits
-        // (typed, retryable backpressure, nothing queued) rather than arm another plan's effect.
-        if ready.replacement_pending() {
-            return self.finish_commands(RESULT_BACKPRESSURE, COMMAND_REASON_BACKPRESSURE, 0, 0);
-        }
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
-        match admit_commands(ready, bytes, count as usize, applied_at_sample) {
+        // #1290a: against the newest committed plan, the successor between a rebuild's commit and
+        // its adoption block (see `admit_on_newest_plan`).
+        let admitted = ready.admit_on_newest_plan(|newest| {
+            admit_commands(newest, bytes, count as usize, applied_at_sample)
+        });
+        let Ok(admitted) = admitted else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.pending_shape\t$\n");
+        };
+        match admitted {
             Ok(()) => {
                 self.command_report.applied_at_sample = applied_at_sample;
                 self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
@@ -3303,6 +3344,11 @@ impl AudioWorkletEngineHost {
             .saturating_mul(3)
             .saturating_add(3);
         if ready.meter_frame.len() != frame_words {
+            // Each interval the render side closes in this state is a window that is not
+            // published: dropped with a count, which the next frame that is published reports.
+            while ready.pop_master_window().is_some() {
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+            }
             return 0;
         }
         // The render path is the sole producer of this fixed-capacity ring and increments the
@@ -5041,6 +5087,10 @@ impl HostAttachment for RenderCompanions {
     }
 }
 
+/// The diagnostic code of a preparation that could not leave the plan's tables for the host (a
+/// record another thread poisoned): refused before the transaction is committed (#1290a).
+const SHAPE_UNAVAILABLE: &str = "web.apply.shape_unavailable";
+
 /// The diagnostic code of a command frame whose transaction needs a plan rebuild, which the
 /// browser cannot apply in place yet (issue #1562a D9; #1562b removes the refusal).
 pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
@@ -5176,9 +5226,13 @@ impl WebRuntimePreparer {
         }
         charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
-        if let Some(record) = &self.record
-            && let Ok(mut record) = record.lock()
-        {
+        if let Some(record) = &self.record {
+            // The hand-off is checked here, before anything is committed: a preparation that
+            // cannot leave the plan's tables for the host is refused, so a committed rebuild
+            // always has its tables (`ReadyOwnership::run_command` relies on it).
+            let mut record = record.lock().map_err(|_| {
+                PrepareDiagnostics::fixed(PrepareRejection::Platform, SHAPE_UNAVAILABLE)
+            })?;
             if boot {
                 record.report = Some(host.report);
                 record.master_track = handles.master_track;

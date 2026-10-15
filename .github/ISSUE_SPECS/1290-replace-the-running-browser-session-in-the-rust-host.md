@@ -376,3 +376,42 @@ now only through the test-support switch `structural_command_for_test` (the refu
 - meter interim: `meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
 - gate 8: `tests/structural_apply_realtime.rs` (two tests); render-locked allocations 0 across every
   render call, the adoption block included; the retired plan and tables drop in the service step.
+
+## Fold (batch 10 review)
+
+Four findings of the batch 10 review, folded in `hosts/host-web` (plus two accessors of
+`crates/control-plane`).
+
+- **Observation records across a swap (MINOR-2).** Gate 6's `BACKPRESSURE` window is gone: the
+  browser admits an observation record (kinds 7 and 8) between a rebuild's commit and its adoption
+  block, as the control plane admits a live value, so no behaviour differs from the C ABI but the
+  sequenced rebuild refusal. `ReadyOwnership::replacement_pending` and the `submit_commands` check
+  are deleted. `admit_on_newest_plan` exchanges the waiting replacement's tables with the host's
+  (a pointer swap, back before it returns; nothing allocates), and the control plane's
+  `effect_producers` / `push_effect_observe` now address the newest plan's producers (the
+  successor's while one waits, else the current plan's; `current_plan_epoch` had no other reader
+  and is deleted). The record is queued on the successor's observation queue, drains at its
+  adoption block, and arms the successor's tap (the arm bits and arm samples live in its own
+  tables, so the plan that renders is untouched). `adopt_shape` marks the in-flight counts for the
+  clearing pass, since a block that did not adopt cleared only the rendering plan's tables. Arm
+  state is still not carried across a swap (#1327): a record admitted to the retiring plan before
+  the commit, or to a candidate a later rebuild supersedes, ends with that plan.
+- **Meter windows across a strip-count change (MINOR-3).** While the published frame cannot
+  describe the plan (the strip count differs), `poll_meters` drains the master intervals it cannot
+  publish and adds each to `meter_loss_count`; `adopt_shape` keeps the count across the restart and
+  adds the windows the restart discards (the master intervals waiting and a half-assembled track
+  group). The only counter that reports meter loss is the header's (`reserved[1]`), which a frame
+  publishes, so the count reaches the page with the first frame after #1290d grows the frame; no
+  status word was added.
+- **Rebuild without tables after a commit (MINOR-6).** The preparer leaves the plan's tables in the
+  record under a lock whose failure refuses the preparation (`web.apply.shape_unavailable`, before
+  the commit); `run_command` no longer has a refusal after a commit (a committed rebuild always has
+  its tables; the take is an `expect` of that invariant).
+- **NIT-3.** `blocking_rebuilds()` stays; its doc names #1293-#1297 (the status field, #1332 D1)
+  and #1295 (the first reader).
+
+Gates -> tests: `structural_apply::the_catalogs_describe_the_successor_from_the_adoption_block_on`
+(an observation submitted between the commit and the adoption block is admitted, queued on the
+successor's full one-slot queue, leaves the rendering plan unarmed and arms the successor's
+compressor at the adoption block); `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`;
+`a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit` (nothing committed).
