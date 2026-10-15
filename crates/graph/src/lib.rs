@@ -2633,6 +2633,39 @@ pub trait GraphPreparedSourceSetDriver: Send {
     ) -> bool {
         false
     }
+    /// This driver as shared `Any`, so [`Self::can_swap_sources`] can downcast the other driver.
+    /// `None` (the default) offers nothing.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
+    /// Whether source `source_index`'s consumer has begun a block (#1344 D5), or `None` when the
+    /// index is out of range, the entry is vacant, or the driver cannot tell (the default). Read
+    /// off the render thread.
+    fn source_has_begun_block(&self, _source_index: usize) -> Option<bool> {
+        None
+    }
+    /// Whether [`Self::swap_sources`] can exchange every `(this index, other index)` pair (#1344
+    /// D4): both entries occupied and of equal channel count, both drivers of one quantum. The
+    /// occupied-to-occupied twin of [`Self::adopt_sources`]'s check. Read-only, off the render
+    /// thread. `false` (the default) swaps nothing.
+    fn can_swap_sources(
+        &self,
+        _other: &dyn GraphPreparedSourceSetDriver,
+        _pairs: &[(u32, u32)],
+    ) -> bool {
+        false
+    }
+    /// Exchange each checked pair's two entries whole (#1344 D4): ring, queued blocks, generation,
+    /// read position and held seek. All or nothing: it re-checks the pairs and on `false` moves
+    /// nothing. Control-thread code, on two plans neither of which render owns; it allocates and
+    /// frees nothing.
+    fn swap_sources(
+        &mut self,
+        _other: &mut dyn GraphPreparedSourceSetDriver,
+        _pairs: &[(u32, u32)],
+    ) -> bool {
+        false
+    }
 }
 
 /// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
@@ -4363,6 +4396,185 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
         })
 }
 
+/// Every predecessor key the hand-over installed in a successor graph plan reads (#1344 D1), one
+/// list per executor carry section, each in its section's order. What the successor carried is
+/// derived from this, never recorded family by family.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphCarryReads {
+    /// [`GraphCarryProgram::predecessor`]: the plan every key below belongs to.
+    pub predecessor: u64,
+    /// Source indices the program moves consumers from.
+    pub sources: Vec<u32>,
+    /// Lanes the builtin-input section copies from.
+    pub input_lanes: Vec<GraphLaneLocation>,
+    /// `(owner, lane)` pairs the strip section copies from.
+    pub strip_lanes: Vec<(BuiltinStripOwner, GraphLaneLocation)>,
+    /// Effect instances the effect section moves from.
+    pub effect_sites: Vec<GraphEffectSite>,
+    /// `(kind, observer)` pairs the observer section takes: meters and spectrum captures.
+    pub observers: Vec<(ObserverKind, GraphObserverLocation)>,
+    /// Effect instances whose observation taps the observer section takes.
+    pub observation_sites: Vec<GraphEffectSite>,
+    /// Compensation lines the delay section continues.
+    pub delay_lines: Vec<u32>,
+    /// Strip delay lines the strip-delay section continues.
+    pub strip_delay_lines: Vec<u32>,
+    /// Live route units the live-send section takes.
+    pub live_routes: Vec<u32>,
+}
+
+/// The predecessor keys the hand-over installed in this graph plan reads (#1344 D1); `None` for any
+/// other plan and for a graph plan with no [`GraphCarryProgram`] (no section installs without one).
+///
+/// Read off the render thread, before publication. It names every executor carry section without a
+/// rest pattern, so a carry section added to the executor does not compile until this reports its
+/// predecessor keys: the installer of a new family owns its row here.
+#[must_use]
+pub fn installed_carry_reads(plan: &PreparedRenderPlan) -> Option<GraphCarryReads> {
+    let executor = plan.executor_any()?.downcast_ref::<GraphExecutor>()?;
+    let GraphExecutor {
+        runtime: _,
+        sample_rate_hz: _,
+        source_set: _,
+        source_input_buffers: _,
+        active_units: _,
+        identity: _,
+        carry,
+        carry_inputs,
+        carry_strips,
+        carry_effects,
+        // The payload scratch reads no predecessor key.
+        carry_scratch: _,
+        next_block_sample: _,
+        node_carry_refused: _,
+        observer_carry,
+        carry_delays,
+        compensation_lines: _,
+        carry_strip_delays,
+        carry_routes,
+        bind_identities: _,
+        live_snapshot: _,
+        jump_lengths: _,
+    } = executor;
+    let program = carry.as_ref()?;
+    let (observers, observation_sites) = observer_carry.as_deref().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |section| {
+            let ObserverCarryProgram {
+                moves,
+                // A join names two successor observers: it reads no predecessor key.
+                joins: _,
+                taps,
+                record: _,
+                carried: _,
+            } = section;
+            (
+                moves
+                    .iter()
+                    .map(|step| (step.kind, step.predecessor))
+                    .collect(),
+                taps.iter().map(|tap| tap.step.predecessor).collect(),
+            )
+        },
+    );
+    Some(GraphCarryReads {
+        predecessor: program.predecessor,
+        sources: program
+            .sources
+            .iter()
+            .map(|&(_, predecessor)| predecessor)
+            .collect(),
+        input_lanes: carry_inputs.iter().map(|step| step.predecessor).collect(),
+        strip_lanes: carry_strips
+            .iter()
+            .map(|step| (step.owner, step.predecessor))
+            .collect(),
+        effect_sites: carry_effects.iter().map(|step| step.predecessor).collect(),
+        observers,
+        observation_sites,
+        delay_lines: carry_delays.iter().map(|step| step.predecessor).collect(),
+        strip_delay_lines: carry_strip_delays
+            .iter()
+            .map(|step| step.predecessor)
+            .collect(),
+        live_routes: carry_routes.iter().map(|step| step.predecessor).collect(),
+    })
+}
+
+/// Why a source donation between two graph plans is refused (#1344 D4, D5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphDonationRefusal {
+    /// A plan is not a graph plan, or has no source set.
+    NotAGraphPlan,
+    /// A donor consumer has begun a block: it has played PCM the host was acked for.
+    Consumed,
+    /// A pair is out of range, names a vacant entry or repeats an index, or the two entries differ
+    /// in channel count or quantum.
+    Mismatch,
+}
+
+fn graph_source_driver(plan: &PreparedRenderPlan) -> Option<&dyn GraphPreparedSourceSetDriver> {
+    let executor = plan.executor_any()?.downcast_ref::<GraphExecutor>()?;
+    Some(executor.source_set.as_ref()?.driver.as_ref())
+}
+
+fn graph_source_driver_mut(
+    plan: &mut PreparedRenderPlan,
+) -> Option<&mut dyn GraphPreparedSourceSetDriver> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.source_set.as_mut()?.driver.as_mut())
+}
+
+/// Check a donation of source consumers from `donor` to `successor` (#1344 D4, D5): for each
+/// `(successor index, donor index)` pair, both entries occupied, of equal channel count and
+/// quantum, no index repeated, and the donor's consumer has never begun a block. Read-only; both
+/// plans are control-owned and neither is published.
+pub fn can_donate_sources(
+    successor: &PreparedRenderPlan,
+    donor: &PreparedRenderPlan,
+    pairs: &[(u32, u32)],
+) -> Result<(), GraphDonationRefusal> {
+    let (Some(into), Some(from)) = (graph_source_driver(successor), graph_source_driver(donor))
+    else {
+        return Err(GraphDonationRefusal::NotAGraphPlan);
+    };
+    for (index, &(successor_index, donor_index)) in pairs.iter().enumerate() {
+        if pairs[..index]
+            .iter()
+            .any(|&(s, d)| s == successor_index || d == donor_index)
+        {
+            return Err(GraphDonationRefusal::Mismatch);
+        }
+        if from.source_has_begun_block(donor_index as usize) == Some(true) {
+            return Err(GraphDonationRefusal::Consumed);
+        }
+    }
+    if into.can_swap_sources(from, pairs) {
+        Ok(())
+    } else {
+        Err(GraphDonationRefusal::Mismatch)
+    }
+}
+
+/// Swap the source consumers [`can_donate_sources`] checked (#1344 D4): each `(successor index,
+/// donor index)` pair exchanges its two entries' whole contents (ring, queued blocks, generation,
+/// read position and held seek), so the donor ends with the successor's fresh rings. On the
+/// control thread, on two plans neither of which render owns. Returns whether the pairs moved;
+/// unchecked pairs that fail the driver's own check move nothing.
+pub fn donate_sources(
+    successor: &mut PreparedRenderPlan,
+    donor: &mut PreparedRenderPlan,
+    pairs: &[(u32, u32)],
+) -> bool {
+    let (Some(into), Some(from)) = (
+        graph_source_driver_mut(successor),
+        graph_source_driver_mut(donor),
+    ) else {
+        return false;
+    };
+    into.swap_sources(from, pairs)
+}
+
 /// Bytes of one entry of each executor table sized at bind (issue #936): `(active_units,
 /// source_input_buffers)`.
 fn executor_table_entry_bytes() -> (u64, u64) {
@@ -4587,6 +4799,10 @@ impl GraphExecutor {
 
 impl PreparedPlanExecutor for GraphExecutor {
     fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        Some(self)
+    }
+
+    fn as_any(&self) -> Option<&dyn Any> {
         Some(self)
     }
 

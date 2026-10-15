@@ -185,8 +185,9 @@ pub use route_controls::{
 pub use session::SOURCE_CHANNELS_LAUNCH_MAXIMUM;
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use source::{
-    SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
-    source_id_arena_bytes,
+    ConsumerDonation, DonationError, DonationPlan, DonationSide, DonationSideMut, ProducerDonation,
+    SourceControlError, SourceControlSet, SourceSubmission, apply_donation, check_donation,
+    control_table_bytes, donate_consumers, donate_producers, source_id_arena_bytes,
 };
 pub use spectrum::{
     SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,

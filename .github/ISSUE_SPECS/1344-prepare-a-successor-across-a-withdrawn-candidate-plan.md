@@ -248,3 +248,70 @@ host-core internals, with no host surface.
 **Realtime-path edits.** None under `crates/engine/src/realtime`. D5 adds one `bool` store to the
 source consumer's block entry (`crates/source/src/lib.rs`, render-side). D4's swap runs on the
 control thread.
+
+## Decision record: #1344 (batch 15a)
+
+**Shipped.**
+- D1: `graph::installed_carry_reads(&PreparedRenderPlan) -> Option<GraphCarryReads>` names every
+  executor field without `..` and reports a predecessor key for all nine carry sections (sources,
+  input lanes, `(owner, lane)` strip stages, effect sites, `(kind, location)` observers for meters
+  and spectrum, observation tap sites, delay lines, strip delay lines, live routes; joins and the
+  scratch read none). `PreparedHost::carried_base` is the base inventory restricted by
+  `PlanStateInventory::restricted_to` (destructures without `..`), keeping P0's identity, rate,
+  quantum and capture kind, with `spectrum_pairing` and `restarted` empty. New report row
+  `carried_base_retained_bytes`; new accessor `PlanStateInventory::spectrum_count`.
+- D2: doc on `SuccessorBase`; no new entry point.
+- D3: `check_donation(DonationSide, DonationSide) -> Result<DonationPlan, DonationError>`
+  (read-only), `donate_producers`, `donate_consumers`, `apply_donation(DonationSideMut,
+  DonationSideMut, DonationPlan) -> usize` in `host-core/src/source.rs`. `DonationPlan { producers,
+  consumers }` holds the two halves; it borrows neither side.
+- D4: `GraphPreparedSourceSetDriver::{can_swap_sources, swap_sources}` (source crate implements
+  them, whole-entry swap, all or nothing); `graph::{can_donate_sources, donate_sources}`.
+- D5: `PcmSourceConsumer::has_begun_block`, one `bool` store in `begin_block_with`.
+
+**Departures.**
+- The amendment's "check_donation needs only `plan()`" and "no edit under
+  `crates/engine/src/realtime`" cannot both hold: no shared executor downcast existed. Added
+  `PreparedPlanExecutor::as_any(&self)` (default `None`) and `PreparedRenderPlan::executor_any(&self)`
+  in `crates/engine/src/realtime/plan.rs` (control-side, no render code; one attempt, accepted).
+- The driver trait also gained `as_any(&self)` and `source_has_begun_block`, needed to downcast the
+  donor through a shared reference and to type `DonationError::Consumed`.
+- `installed_carry_reads` takes `&PreparedRenderPlan`, not `&mut`.
+- Spectrum rows are kept by the observer section's installed `Spectrum` moves (D1's rule), with a
+  debug assertion that they equal the predecessor entries of A's `spectrum_pairing` (the
+  amendment's wording).
+- A successor with no section installed gets `Some` (P0's identity, no rows), not `None`: its
+  replacement still needs a base, and nothing carries.
+- Gate 5's "declaration or ring-config mismatch is refused": D3 selects only sources with equal
+  declaration and ring, so a mismatched `c` is not selected; the check returns an empty plan and
+  nothing moves. A typed refusal would block every other donation and refuse a legitimate
+  transaction that redeclares a source; the redeclared source's old PCM is not owed, exactly as in
+  the existing carry rule (#1272 gate 3). `DonationError` is `Consumed` and `Unswappable`.
+- Gate 1's "insert quality" edit does not prepare (no launch effect declares a second quality:
+  `effect.quality.unsupported`); the tests replace the insert's effect (compressor to
+  gate-expander) under the same insert ID. Gate 1/3/4/5 sessions have no console slot, because on
+  an AVX2 target a console slot at `Backend::Simd4` fails `console.slot.unbanked` even for the
+  unmodified fixture (see successor work).
+
+**Gates** (`crates/host-core/tests/withdrawn_successor.rs`, all pass):
+1. `a_successor_prepared_across_a_withdrawn_plan_renders_as_its_twin` (Simd8 and Simd4): 16
+   blocks bit-identical to the twin, `a` carried (B's reads name P0's index), `b` absent,
+   `restarted_strips() == [t1, t2]`; a fresh B differs.
+2. `the_carried_base_holds_exactly_the_rows_the_hand_over_reads`: all ten inventory families
+   non-empty in A's reads, base count equals read count per family, P0 identity, source rows equal
+   P0's, effect lanes and observations strictly fewer than P0's; a first plan has `None`.
+3. `a_source_absent_from_the_running_plan_is_never_carried_from_the_withdrawn_one`.
+4. `a_donated_ring_plays_its_acked_pcm_and_held_seek` (Simd8 and Simd4): one pair, apply returns 1,
+   bit-identical to the twin; without the donation it differs; every rendered block makes zero
+   allocator calls (`bench_support::alloc` thread counters).
+5. `a_refused_or_mismatched_donation_moves_nothing`.
+6. `cargo test --locked -p host-core --all-features` (41 targets ok), `-p graph --features
+   test-support`, `-p source`, `-p host-web --all-features`: pass. `-p capi`: passes with the
+   mechanical one-line fix below applied (not left in the tree). `audit capi`: `pcm_digest
+   bf7dcedd1d92621f`, 0 violations. `realtime-policy`: ok, 150 regions (none added).
+   `check-graph-policy.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`, fmt, clippy
+   on `engine`, `graph`, `source`, `host-core` (`--all-targets --all-features -D warnings`): pass.
+
+**Open, outside this slice's paths.** `crates/capi/tests/resource_lifecycle.rs:810` destructures
+`PreparedHost` exhaustively and needs `carried_base,` plus `assert!(carried_base.is_none())`; it
+was not edited here (batch 15a rule for `crates/capi`).
