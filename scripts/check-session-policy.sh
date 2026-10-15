@@ -41,7 +41,7 @@ anchor() {
     printf '%s' "$line"
 }
 estimate_line=$(anchor estimate 'let estimate = estimate_session\(session\)')
-caps_line=$(anchor caps 'check_caps\(session, estimate, caps\)')
+caps_line=$(anchor caps 'check_caps\(estimate, caps\)')
 validate_line=$(anchor validate 'validate_session\(session\)')
 canonical_line=$(anchor canonical 'let canonical_json = write_canonical\(session\)')
 clone_line=$(anchor clone 'let mut normalized = session\.clone\(\)')
