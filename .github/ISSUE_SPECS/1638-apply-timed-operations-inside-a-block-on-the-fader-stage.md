@@ -274,3 +274,11 @@ inside the hold's last 64 samples; stopping the cell exactly at the ramp end). T
 this slice's code correct; every failure was in the successor's mechanism. The mechanism is
 therefore #1647's design: #1647's amendment now states the requirement, the measured constraints and
 gate 8, and #1648's amendment the carry. This slice's obligation is that record.
+
+**Gates 6 and 7 on the integrated tree (batch 13b, cddff37d9).** Gate 6: `audit capi` gives
+`pcm_digest` `bf7dcedd1d92621f`, as on main; the browser fixtures' digests and exact rows are
+unchanged (`check-browser-expected-resources`), and chromium 151, firefox 153 and webkit 26.5
+qualification pass with 0 render allocations. No fixture moves a fader on a muted lane, so the F22
+live rule moves no pinned digest; its behaviour is held by gate 2. Gate 7: the batch gate set
+(workspace tests, clippy, `check-cross-targets.sh`, the policies) passes. The AArch64 legs
+(`aarch64-debug`, Simd4 on NEON) run only in CI: this host has no AArch64 toolchain.
