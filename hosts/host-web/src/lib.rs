@@ -5518,11 +5518,6 @@ impl WebRuntimePreparer {
             effects: lanes.effects || live_controls.observation_taps != 0,
             ..lanes
         };
-        // #1584 D6b: the taps the host had armed, which host-core arms the successor's lanes from;
-        // the plan's tables must say the same.
-        let bindings: &[controls::ObservationBinding] = successor
-            .map(|base| base.observation.bindings())
-            .unwrap_or_default();
         let (mut host, mut handles, spectrum_captures) = prepare_web_host(
             compiled,
             caps,
@@ -5542,7 +5537,6 @@ impl WebRuntimePreparer {
             &handles.effect_observations,
             handles.meters.len(),
             handles.master_track,
-            bindings,
         )
         .map_err(|code| {
             let rejection = if code.starts_with("web.resource.") {
@@ -5634,10 +5628,9 @@ impl WebRuntimePreparer {
 /// model's, the order host-core's addressing authority uses and the control plane's producers
 /// follow.
 ///
-/// `bindings` are the taps the host had armed when this plan was prepared (#1584 D6b): the same
-/// table host-core armed the plan's lanes from, so a bound tap's `observation_armed` bit is set
-/// here with arm sample 0 and its commanded bit clear (a fresh tap has no stale window). A binding
-/// whose effect or tap the plan lacks sets nothing, as host-core arms nothing for it.
+/// A tap the host had armed when this plan was prepared (#1584 D6b) has its `observation_armed`
+/// bit set here, copied from the observation handle's `armed_taps` (host-core's own match), with
+/// arm sample 0 and its commanded bit clear (a fresh tap has no stale window).
 ///
 /// Errors are the diagnostic code of the refusal.
 fn build_plan_shape(
@@ -5646,7 +5639,6 @@ fn build_plan_shape(
     observations: &[EffectObservationHandle],
     meter_count: usize,
     master_track: Option<u32>,
-    bindings: &[controls::ObservationBinding],
 ) -> Result<PlanShape, &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
@@ -5799,28 +5791,11 @@ fn build_plan_shape(
             .map_err(|_| "web.resource.allocation")?;
         arm_samples.resize(tap_count, 0);
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
-        // #1584 D6b: the bits of the taps the host had armed, in the descriptor's tap order (the
-        // bit is the effect-local tap index, as `push_observe` sets it).
-        let console = handle.address.rack == LiveEffectRack::Console;
-        for binding in bindings {
-            if binding.key.section.is_console() != console
-                || binding.key.section.id().as_str() != &*handle.effect_id
-                || binding.key.strip.as_str() != &*handle.track_id
-            {
-                continue;
-            }
-            if let Some(index) = handle
-                .descriptor
-                .observations
-                .iter()
-                .position(|tap| tap.id.0 == binding.key.tap_id)
-                && let Some(bit) = u32::try_from(index)
-                    .ok()
-                    .and_then(|index| 1_u32.checked_shl(index))
-                && let Some(word) = observation_armed.get_mut(slot)
-            {
-                *word |= bit;
-            }
+        // #1584 D6b: the taps the host had armed are the ones host-core armed in this plan's
+        // lanes, in the descriptor's tap order (the bit is the effect-local tap index, as
+        // `push_observe` sets it); host-core made the match, so it is copied, not repeated.
+        if let Some(word) = observation_armed.get_mut(slot) {
+            *word = handle.armed_taps;
         }
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
         reader_slots.push(u32::try_from(slot).map_err(|_| "web.live_controls.observation")?);

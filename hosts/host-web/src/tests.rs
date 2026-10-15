@@ -7786,6 +7786,106 @@ mod structural_apply {
         );
     }
 
+    /// #1584 D6b via #1679: the successor's `observation_armed` word of every observed effect is
+    /// the `armed_taps` host-core prepared the handle with. The session has one compressor `comp`
+    /// as a console slot and as an insert on each of two tracks (an ID reused for another effect
+    /// in the other rack and on another strip); the host armed the first track's insert and the
+    /// second track's console slot, and a restart rebuilds both.
+    ///
+    /// Test value: red if the browser matches bindings to taps by its own rule again and that rule
+    /// differs from host-core's (an ID match that ignores the rack or the strip would arm the
+    /// console slot of the first track, or the insert of the second, in the page's tables only).
+    #[test]
+    fn the_browsers_armed_bits_are_the_mask_host_core_prepared() {
+        let mut model = observed_model();
+        model.console.pre_insert = vec![session::ConsoleSlot {
+            slot: StableId::parse("comp").expect("slot ID"),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("effect ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            link_mode: session::LinkMode::DualMono,
+        }];
+        model.tracks[0].console = model
+            .console
+            .slots()
+            .map(|slot| session::ConsoleEntry {
+                slot: slot.slot.clone(),
+                bypass: false,
+                params: Vec::new(),
+            })
+            .collect();
+        let (mut second, route) = muted_track(&model, "zz");
+        second.fader.left_mute = false;
+        second.fader.right_mute = false;
+        model.tracks.push(second);
+        model.routes.push(route);
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_CONSOLE, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.host.observation_armed_taps(), 2);
+
+        let mut restarted = model.tracks[0].inserts.effects[0].clone();
+        restarted.link_mode = session::LinkMode::Maximum;
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::PutTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 0,
+                    effect: restarted,
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        let slots = rig
+            .host
+            .ready
+            .as_ref()
+            .expect("ready")
+            .shape
+            .observation_armed
+            .len();
+        let (mut observed, mut armed) = (0, 0);
+        for slot in 0..slots {
+            let Some(mask) = rig.host.test_observation_handle(slot).map(|h| h.armed_taps) else {
+                continue;
+            };
+            let word = rig
+                .host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .shape
+                .observation_armed[slot];
+            assert_eq!(word, mask, "slot {slot}: the page copies host-core's mask");
+            observed += 1;
+            armed += mask.count_ones();
+        }
+        assert_eq!(
+            observed, 4,
+            "two inserts and two console slots are observed"
+        );
+        assert_eq!(armed, 2, "only the two acknowledged taps are armed");
+    }
+
     /// #1584 D6b, removal: the removed insert has no slot on the successor, the browser's read
     /// finds no tap there, and the event drain returns the commit and one `OBSERVATION_ENDED`
     /// that names the tap.
