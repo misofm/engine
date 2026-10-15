@@ -218,11 +218,12 @@ impl Policy {
             // service's arm, read, cancel and select; #1591 fold) and #1609's one (`spectrum.rs`:
             // the one-shot render functions and the held-window publication) and #1637's three
             // (`crates/automation`: `value_at`, the event generator in `events.rs`, and the render
-            // reads of `CellProgram` and `Program::cell` in `program.rs`). The
-            // floors had fallen behind the tree before #1637; they are set to its counts again.
-            // A change that adds a marker raises them in the same change.
+            // reads of `CellProgram` and `Program::cell` in `program.rs`) and #1638's three
+            // (`crates/builtins`: the fader operation sink, and the bank's and the scalar track's
+            // `process_with`). The floors had fallen behind the tree before #1637; they are set
+            // to its counts again. A change that adds a marker raises them in the same change.
             marked_files_floor: 32,
-            marked_regions_floor: 144,
+            marked_regions_floor: 147,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

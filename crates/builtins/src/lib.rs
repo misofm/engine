@@ -2865,7 +2865,8 @@ struct InputSectionState {
 ///
 /// Plain data, fixed size, no heap: per channel the gain in use, the ramp's target and per-sample
 /// step, the authoritative countdown, the gain the fader holds independent of mute, and the mute
-/// flag. In-memory state handed across a plan replacement, never persisted (AGENTS.md, R6b).
+/// flag, and whether a mute ramp holds the gain (#1638 D2). In-memory state handed across a plan
+/// replacement, never persisted (AGENTS.md, R6b).
 #[derive(Clone, Copy, Debug)]
 pub struct FaderLaneState {
     channels: [FaderChannelState; 2],
@@ -2885,6 +2886,8 @@ struct FaderChannelState {
     fader_gain: f32,
     /// Whether the lane is muted.
     muted: bool,
+    /// Whether a mute or unmute ramp is in flight (issue #1638 D2).
+    mute_ramp: bool,
 }
 
 /// One matrix bank lane's whole state: what a plan swap hands from the predecessor's lane to the
@@ -2987,6 +2990,12 @@ pub(crate) struct FaderRampStage<L: Lane> {
     muted: [[bool; MAX_BANK_LANES]; 2],
     /// Frames left in each lane's ramp, `[channel][lane]`.
     remaining: [[u32; MAX_BANK_LANES]; 2],
+    /// Whether a mute or unmute ramp is in flight on each lane, `[channel][lane]` (issue #1638
+    /// D2). Set by a mute change with a nonzero window; cleared in the bookkeeping step that ends
+    /// the lane's countdown, by a zero-window mute change, by a live gain retarget and by
+    /// [`Self::reset`]. While it is set, or while the lane is muted, the lane's gain is *held*: a
+    /// timed gain operation only remembers the gain.
+    mute_ramp: [[bool; MAX_BANK_LANES]; 2],
 }
 
 /// Largest ramp countdown that is exact in `f32`.
@@ -3032,6 +3041,7 @@ impl<L: Lane> FaderRampStage<L> {
             fader_gain,
             muted,
             remaining: [[0; MAX_BANK_LANES]; 2],
+            mute_ramp: [[false; MAX_BANK_LANES]; 2],
         }
     }
 
@@ -3076,10 +3086,12 @@ impl<L: Lane> FaderRampStage<L> {
         }
     }
 
-    /// Retargets one lane's fader gain on the channels `channels` covers.
+    /// The live path's fader move on the channels `channels` covers (issue #1638, README F22).
     ///
-    /// A muted lane keeps its `0.0` target: the new gain is remembered and takes effect when the
-    /// lane is unmuted, exactly as a physical console's fader does.
+    /// The gain is always remembered. While the lane is muted -- settled, or ramping toward `0.0`
+    /// -- that is all a live move does: the lane keeps its mute ramp and its `0.0` target, and the
+    /// gain takes effect when the lane is unmuted, as a physical console's fader does. On an
+    /// unmuted lane, including one in an unmute ramp, the move retargets and ends any mute ramp.
     fn set_fader_gain(
         &mut self,
         lane: usize,
@@ -3088,13 +3100,20 @@ impl<L: Lane> FaderRampStage<L> {
         smoothing_samples: u32,
     ) {
         for channel in 0..2 {
-            if !channels.covers(channel) {
-                continue;
+            if channels.covers(channel) {
+                self.live_gain(lane, channel, gain, smoothing_samples);
             }
-            self.fader_gain[channel][lane] = gain;
-            let target = if self.muted[channel][lane] { 0.0 } else { gain };
-            self.retarget(lane, channel, target, smoothing_samples);
         }
+    }
+
+    /// One channel of [`Self::set_fader_gain`].
+    fn live_gain(&mut self, lane: usize, channel: usize, gain: f32, smoothing_samples: u32) {
+        self.fader_gain[channel][lane] = gain;
+        if self.muted[channel][lane] {
+            return;
+        }
+        self.retarget(lane, channel, gain, smoothing_samples);
+        self.mute_ramp[channel][lane] = false;
     }
 
     /// Sets or clears one lane's mute on the channels `channels` covers, as a retarget.
@@ -3106,17 +3125,54 @@ impl<L: Lane> FaderRampStage<L> {
         smoothing_samples: u32,
     ) {
         for channel in 0..2 {
-            if !channels.covers(channel) {
-                continue;
+            if channels.covers(channel) {
+                self.mute_channel(lane, channel, muted, smoothing_samples);
             }
-            self.muted[channel][lane] = muted;
-            let target = if muted {
-                0.0
-            } else {
-                self.fader_gain[channel][lane]
-            };
-            self.retarget(lane, channel, target, smoothing_samples);
-            self.sync_mute(channel);
+        }
+    }
+
+    /// One channel of [`Self::set_mute`]. A nonzero window starts a mute ramp (D2).
+    fn mute_channel(&mut self, lane: usize, channel: usize, muted: bool, smoothing_samples: u32) {
+        self.muted[channel][lane] = muted;
+        let target = if muted {
+            0.0
+        } else {
+            self.fader_gain[channel][lane]
+        };
+        self.retarget(lane, channel, target, smoothing_samples);
+        self.mute_ramp[channel][lane] = smoothing_samples != 0;
+        self.sync_mute(channel);
+    }
+
+    /// Whether one lane's gain is held: muted, or in a mute or unmute ramp (issue #1638 D2).
+    const fn gain_held(&self, lane: usize, channel: usize) -> bool {
+        self.muted[channel][lane] || self.mute_ramp[channel][lane]
+    }
+
+    /// Frames left in one lane's ramp: `0` when the lane is settled.
+    const fn ramp_remaining(&self, lane: usize, channel: usize) -> u32 {
+        self.remaining[channel][lane]
+    }
+
+    /// Applies one timed operation to one lane and channel (issue #1638 D1 and D2).
+    fn apply_operation(&mut self, lane: usize, channel: usize, operation: FaderOperation) {
+        match operation {
+            FaderOperation::RetargetGain { gain, samples } => {
+                self.timed_gain(lane, channel, gain, samples);
+            }
+            FaderOperation::SetGain { gain } => self.timed_gain(lane, channel, gain, 0),
+            FaderOperation::SetMute { muted, samples } => {
+                self.mute_channel(lane, channel, muted, samples);
+            }
+            FaderOperation::RememberGain { gain } => self.fader_gain[channel][lane] = gain,
+        }
+    }
+
+    /// A timed gain move: a retarget while the lane's gain is free, a remember while it is held.
+    fn timed_gain(&mut self, lane: usize, channel: usize, gain: f32, samples: u32) {
+        self.fader_gain[channel][lane] = gain;
+        if !self.gain_held(lane, channel) {
+            self.retarget(lane, channel, gain, samples);
         }
     }
 
@@ -3175,6 +3231,8 @@ impl<L: Lane> FaderRampStage<L> {
             if self.remaining[channel][lane] == 0 {
                 current[lane] = target[lane];
                 steps[lane] = 0.0;
+                // D2: a mute ramp ends in the same step that assigns its target.
+                self.mute_ramp[channel][lane] = false;
             }
         }
         self.ramp[channel].current = lane_words::<L>(&current);
@@ -3188,6 +3246,58 @@ impl<L: Lane> FaderRampStage<L> {
                 self.ramp[channel].current,
                 self.ramp[channel].mute,
             );
+        }
+    }
+
+    /// Renders frames `[start, end)` of both channels as one block (issue #1638 D3).
+    fn process_range(&mut self, left: &mut [f32], right: &mut [f32], start: usize, end: usize) {
+        let (from, to) = (start * L::WIDTH, end * L::WIDTH);
+        self.process_plane(0, &mut left[from..to], end - start);
+        self.process_plane(1, &mut right[from..to], end - start);
+    }
+
+    /// Renders one block with timed operations inside it (issue #1638 D3).
+    ///
+    /// The block is cut at each offset the source gives. Each piece runs [`Self::process_plane`]
+    /// exactly as a block of its length would, recomputing the countdown words from the `u32`
+    /// countdowns, and the operations at the next offset are then applied in D4's order. So the
+    /// block renders the bits of the same blocks split at the offsets, and a source with no
+    /// operation in the block gives one piece: [`Self::process`].
+    ///
+    /// An offset at or past `frames` is not pulled: it stays with the source for a later block.
+    /// Offsets must rise strictly; a source that repeats or lowers one breaks its contract and the
+    /// stage stops pulling for this block (the operation stays with the source), which bounds the
+    /// loop at `frames` pieces.
+    fn process_with<S: FaderOperationSource + ?Sized>(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        lanes: usize,
+        operations: &mut S,
+    ) {
+        let mut position = 0_usize;
+        let mut applied: Option<u32> = None;
+        while let Some(offset) = operations.next_offset() {
+            if applied.is_some_and(|last| offset <= last) {
+                debug_assert!(false, "fader operation offsets must rise strictly");
+                break;
+            }
+            let at = offset as usize;
+            if at >= frames {
+                break;
+            }
+            if at > position {
+                self.process_range(left, right, position, at);
+                position = at;
+            }
+            let mut sink = FaderOperationSink::new(lanes.min(L::WIDTH));
+            operations.apply(offset, &mut sink);
+            sink.apply_to(self);
+            applied = Some(offset);
+        }
+        if position < frames {
+            self.process_range(left, right, position, frames);
         }
     }
     // REALTIME_POLICY_END
@@ -3204,6 +3314,7 @@ impl<L: Lane> FaderRampStage<L> {
                 remaining: self.remaining[channel][lane],
                 fader_gain: self.fader_gain[channel][lane],
                 muted: self.muted[channel][lane],
+                mute_ramp: self.mute_ramp[channel][lane],
             }),
         }
     }
@@ -3225,6 +3336,7 @@ impl<L: Lane> FaderRampStage<L> {
             self.remaining[channel][lane] = carried.remaining;
             self.fader_gain[channel][lane] = carried.fader_gain;
             self.muted[channel][lane] = carried.muted;
+            self.mute_ramp[channel][lane] = carried.mute_ramp;
             self.sync_mute(channel);
         }
     }
@@ -3238,6 +3350,7 @@ impl<L: Lane> FaderRampStage<L> {
             self.ramp[channel].remaining = L::zero();
         }
         self.remaining = [[0; MAX_BANK_LANES]; 2];
+        self.mute_ramp = [[false; MAX_BANK_LANES]; 2];
     }
 }
 
@@ -4429,6 +4542,98 @@ impl BuiltinFaderBank {
         BuiltinProcessReport::default()
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// Renders one AoSoA block with timed operations inside it (issue #1638 D3).
+    ///
+    /// Bit for bit what [`Self::process`] renders over the same block split at each operation's
+    /// offset, with the operations applied by [`Self::apply_fader_operation`] at each split. A
+    /// source with no operation in the block renders exactly what [`Self::process`] does.
+    pub fn process_with<S: FaderOperationSource + ?Sized>(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        operations: &mut S,
+    ) -> BuiltinProcessReport {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
+        let lanes = self.members;
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.process_with(left, right, frames, lanes, operations);
+        });
+        BuiltinProcessReport::default()
+    }
+    // REALTIME_POLICY_END
+
+    /// Applies one timed operation now, at the block boundary (issue #1638 D1 and D2).
+    ///
+    /// # Errors
+    ///
+    /// [`FaderOperationError::Lane`] when `lane` is not a populated member, and
+    /// [`FaderOperationError::Gain`] when the gain is not finite or is negative.
+    pub fn apply_fader_operation(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        operation: FaderOperation,
+    ) -> Result<(), FaderOperationError> {
+        if lane >= self.members {
+            return Err(FaderOperationError::Lane);
+        }
+        let operation = checked_operation(operation)?;
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            for channel in 0..2 {
+                if channels.covers(channel) {
+                    stage.apply_operation(lane, channel, operation);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Whether a member lane's gain is held on `channel` (`0` left, `1` right): muted, or in a
+    /// mute or unmute ramp (issue #1638 D2). `None` for a padding lane or a channel above `1`.
+    #[must_use]
+    pub fn gain_held(&self, lane: usize, channel: usize) -> Option<bool> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.gain_held(lane, channel)))
+    }
+
+    /// Frames left in a member lane's ramp on `channel`; `0` when settled. `None` for a padding
+    /// lane or a channel above `1`.
+    #[must_use]
+    pub fn ramp_remaining(&self, lane: usize, channel: usize) -> Option<u32> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(
+            per_width!(FaderStageKernel(stage) in &self.stage => stage.ramp_remaining(lane, channel)),
+        )
+    }
+
+    /// [`Self::try_process_settled_with_matrix`] for a block that may carry timed operations
+    /// (issue #1638 D5): declines, touching nothing, when the source has an operation inside the
+    /// block, so the caller renders it with [`Self::process_with`].
+    pub fn try_process_settled_with_matrix_and_operations<S: FaderOperationSource + ?Sized>(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        operations: &mut S,
+    ) -> bool {
+        if operations
+            .next_offset()
+            .is_some_and(|offset| offset < frames)
+        {
+            return false;
+        }
+        self.try_process_settled_with_matrix(matrix, left, right, frames)
+    }
+
     /// Runs the settled fader and matrix stages in one traversal when their shapes and ramps
     /// agree. Returns false without touching either stage when a ramp is still active.
     pub fn try_process_settled_with_matrix(
@@ -4696,6 +4901,149 @@ impl BuiltinLaneSelector {
     }
 }
 
+/// One timed fader or mute operation on one lane (issue #1638 D1).
+///
+/// Gains are linear coefficients: the caller converts decibels with [`checked_fader_gain`].
+/// Windows are in sample updates; a window of `0` is an exact set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FaderOperation {
+    /// Move the fader toward `gain` over `samples`. While the lane's gain is held (muted, or in
+    /// a mute or unmute ramp) this only remembers the gain, as [`Self::RememberGain`] does.
+    RetargetGain { gain: f32, samples: u32 },
+    /// [`Self::RetargetGain`] with a window of `0`: an exact set, or a remember while held.
+    SetGain { gain: f32 },
+    /// Mute or unmute over `samples`, as the live mute does. A nonzero window holds the lane's
+    /// gain until the ramp ends.
+    SetMute { muted: bool, samples: u32 },
+    /// Update the remembered fader gain only, with no retarget.
+    RememberGain { gain: f32 },
+}
+
+impl FaderOperation {
+    /// Whether this is a gain operation (applied before a mute operation at one offset, D4).
+    const fn is_gain(self) -> bool {
+        !matches!(self, Self::SetMute { .. })
+    }
+
+    /// The gain this operation carries, if any.
+    const fn gain(self) -> Option<f32> {
+        match self {
+            Self::RetargetGain { gain, .. }
+            | Self::SetGain { gain }
+            | Self::RememberGain { gain } => Some(gain),
+            Self::SetMute { .. } => None,
+        }
+    }
+}
+
+/// Why a timed fader operation was refused. A refused operation changes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FaderOperationError {
+    /// The lane is a padding lane or past the bank.
+    Lane,
+    /// The gain is not finite or is negative.
+    Gain,
+    /// The lane and channel already carry an operation of the same kind at this offset.
+    Duplicate,
+}
+
+/// Checks one operation's gain: a finite, nonnegative linear coefficient.
+fn checked_operation(operation: FaderOperation) -> Result<FaderOperation, FaderOperationError> {
+    match operation.gain() {
+        Some(gain) if !(gain.is_finite() && gain >= 0.0) => Err(FaderOperationError::Gain),
+        _ => Ok(operation),
+    }
+}
+
+/// The operations a source applies at one offset (issue #1638 D3 and D4).
+///
+/// Fixed size, on the render stack, never allocated. Each lane and channel takes at most one gain
+/// operation and one mute operation per offset; whatever order they are pushed in, the stage
+/// applies every gain operation before every mute operation, left before right, as the live drain
+/// does. So an unmute and a fader move at one offset unmute toward the new gain, and a mute and a
+/// fader move at one offset end muted.
+#[derive(Debug)]
+pub struct FaderOperationSink {
+    lanes: usize,
+    gain: [[Option<FaderOperation>; MAX_BANK_LANES]; 2],
+    mute: [[Option<FaderOperation>; MAX_BANK_LANES]; 2],
+}
+
+impl FaderOperationSink {
+    // REALTIME_POLICY_BEGIN
+    const fn new(lanes: usize) -> Self {
+        Self {
+            lanes,
+            gain: [[None; MAX_BANK_LANES]; 2],
+            mute: [[None; MAX_BANK_LANES]; 2],
+        }
+    }
+
+    /// Queues one operation on `lane` for the channels `channels` covers.
+    ///
+    /// # Errors
+    ///
+    /// [`FaderOperationError::Lane`] for a padding lane or one past the bank,
+    /// [`FaderOperationError::Gain`] for a gain that is not finite or is negative, and
+    /// [`FaderOperationError::Duplicate`] when a covered channel already has an operation of the
+    /// same kind at this offset. A refusal queues nothing, on either channel.
+    pub fn push(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        operation: FaderOperation,
+    ) -> Result<(), FaderOperationError> {
+        if lane >= self.lanes {
+            return Err(FaderOperationError::Lane);
+        }
+        let operation = checked_operation(operation)?;
+        let slots = if operation.is_gain() {
+            &mut self.gain
+        } else {
+            &mut self.mute
+        };
+        for (channel, slot) in slots.iter().enumerate() {
+            if channels.covers(channel) && slot[lane].is_some() {
+                return Err(FaderOperationError::Duplicate);
+            }
+        }
+        for (channel, slot) in slots.iter_mut().enumerate() {
+            if channels.covers(channel) {
+                slot[lane] = Some(operation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the queued operations in D4's order: gains, then mutes, each left before right.
+    fn apply_to<L: Lane>(&self, stage: &mut FaderRampStage<L>) {
+        for slots in [&self.gain, &self.mute] {
+            for (channel, slot) in slots.iter().enumerate() {
+                for (lane, operation) in slot.iter().enumerate().take(self.lanes) {
+                    if let Some(operation) = *operation {
+                        stage.apply_operation(lane, channel, operation);
+                    }
+                }
+            }
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// A pull source of timed fader operations for one block (issue #1638 D3).
+///
+/// Offsets are frames from the block's first frame. The stage calls [`Self::next_offset`] to
+/// learn where the next operations sit, renders up to that frame, then calls [`Self::apply`] with
+/// that offset. Offsets must rise strictly within a block. An offset at or past the block's length
+/// is never applied by that block: the stage stops pulling and leaves it with the source.
+pub trait FaderOperationSource {
+    /// The offset of the next operations, without consuming them; `None` when there are none.
+    fn next_offset(&mut self) -> Option<u32>;
+
+    /// Pushes every operation at `offset` into `sink` and consumes them.
+    fn apply(&mut self, offset: u32, sink: &mut FaderOperationSink);
+}
+
 /// The live-control fader and mute section of one track (issue #140 B).
 ///
 /// # The ramped-fader decision, and why it is a separate type
@@ -4750,8 +5098,9 @@ impl FaderMuteRampBuiltins {
 
     /// Retarget one or both lanes' fader gain in decibels over an explicit ramp window.
     ///
-    /// A muted lane keeps its `0.0` target: the new gain is remembered and takes effect when the
-    /// lane is unmuted, exactly as a physical console's fader does.
+    /// While a lane is muted (settled, or ramping toward `0.0`) the new gain is only remembered:
+    /// the mute ramp runs on, and the gain takes effect when the lane is unmuted, exactly as a
+    /// physical console's fader does (issue #1638, README F22).
     ///
     /// # Errors
     ///
@@ -4790,6 +5139,54 @@ impl FaderMuteRampBuiltins {
         let frames = block.left.len();
         self.stage.process(block.left, block.right, frames);
         BuiltinProcessReport::default()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Renders one already-validated block with timed operations inside it (issue #1638 D3).
+    ///
+    /// The only lane is `0`. Bit for bit what [`Self::process`] renders over the block split at
+    /// each operation's offset, with the operations applied by [`Self::apply_fader_operation`].
+    pub fn process_with<S: FaderOperationSource + ?Sized>(
+        &mut self,
+        block: DualMonoBlock<'_>,
+        operations: &mut S,
+    ) -> BuiltinProcessReport {
+        let frames = block.left.len();
+        self.stage
+            .process_with(block.left, block.right, frames, 1, operations);
+        BuiltinProcessReport::default()
+    }
+    // REALTIME_POLICY_END
+
+    /// Applies one timed operation now, at the block boundary (issue #1638 D1 and D2).
+    ///
+    /// # Errors
+    ///
+    /// [`FaderOperationError::Gain`] when the gain is not finite or is negative.
+    pub fn apply_fader_operation(
+        &mut self,
+        lanes: BuiltinLaneSelector,
+        operation: FaderOperation,
+    ) -> Result<(), FaderOperationError> {
+        let operation = checked_operation(operation)?;
+        for channel in 0..2 {
+            if lanes.covers(channel) {
+                self.stage.apply_operation(0, channel, operation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether one lane's gain is held: muted, or in a mute or unmute ramp (issue #1638 D2).
+    #[must_use]
+    pub const fn gain_held(&self, lane: usize) -> bool {
+        self.stage.gain_held(0, lane % 2)
+    }
+
+    /// Frames left in one lane's ramp; `0` when settled.
+    #[must_use]
+    pub const fn ramp_remaining(&self, lane: usize) -> u32 {
+        self.stage.ramp_remaining(0, lane % 2)
     }
 
     /// Completes a settled fader over a graph block whose shape was validated by preparation.

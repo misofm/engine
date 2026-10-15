@@ -173,3 +173,57 @@ Checked against `12d4a4f9d`.
 - **Anchors moved.** `FaderRampStage`'s setters are now near `crates/builtins/src/lib.rs:3083-3140`,
   `BuiltinFaderBank` `:4314`, `FaderMuteRampBuiltins` `:4732`; re-read at filing. #1408 has landed.
 - **Realtime policy** as in #1637's amendment.
+
+## Decision record: #1638 (batch 13b)
+
+**Shipped** (`crates/builtins/src/lib.rs`). `FaderOperation` (D1), `FaderOperationError`
+(`Lane`, `Gain`, `Duplicate`), `FaderOperationSink` (fixed size, on the render stack; one gain and
+one mute slot per lane and channel; `push` refuses a padding lane, a gain that is not finite or is
+negative, and a second operation of one kind at one offset, and a refusal queues nothing on either
+channel), and the pull trait `FaderOperationSource { next_offset, apply }`. `FaderRampStage` gains
+one flag per lane and channel, `mute_ramp` (D2): set by a mute change with a nonzero window, cleared
+by a zero-window mute change, in the bookkeeping step that ends the countdown, by a live gain
+retarget, and by `reset`; it is carried by `export_lane`/`import_lane` (a new private field of
+`FaderChannelState`), so a plan swap during a mute ramp keeps the hold. `process_with` cuts the
+block at each offset and runs `process_plane` over each piece, so a split moves no bit (D6); the
+sink applies gains before mutes, left before right, whatever the push order (D4). Exposure (D5):
+`BuiltinFaderBank::{process_with, apply_fader_operation, gain_held, ramp_remaining,
+try_process_settled_with_matrix_and_operations}` and `FaderMuteRampBuiltins::{process_with,
+apply_fader_operation, gain_held, ramp_remaining}`. No production path calls `process_with`.
+
+**Live rule (amendment, README F22).** `set_fader_gain` on a muted lane (settled or ramping toward
+`0`) now only remembers the gain; on an unmuted lane, including one in an unmute ramp, it retargets
+and clears `mute_ramp`. Timed `RetargetGain`/`SetGain` remember only while the gain is held (muted
+or `mute_ramp`), so they also remember during an unmute ramp, as D2 says.
+
+**Departures.**
+- Offsets: an offset at or past the block is not pulled and stays with the source; offsets must
+  rise strictly, and a repeated or lower offset stops pulling for the block (debug assertion),
+  which bounds the loop at `frames` pieces.
+- D5's decline is a new method, `try_process_settled_with_matrix_and_operations`, which declines
+  when the source has an operation inside the block and otherwise forwards; the existing method and
+  its callers are unchanged.
+- Gate 4 "every existing test passes unchanged" cannot hold with the amended live rule: in
+  `crates/builtins-compiler/src/lib.rs`,
+  `the_drain_applies_the_fader_before_the_mute_whatever_the_write_order` relied on a fader move
+  after a *mute* being observable; under F22 both orders are now alike. The test now starts the lane
+  muted and writes an *unmute*, where the order is still observable (fader-then-unmute ramps to the
+  new gain; unmute-then-fader cuts the unmute ramp short). Test-only edit; no wiring.
+- `tools/realtime-policy/src/policy.rs`: `marked_regions_floor` 144 -> 147 (the sink, the bank's and
+  the scalar track's `process_with`); files stay 32.
+
+**Gates.**
+1. `an_operation_inside_a_block_renders_the_split_blocks_bits` (Simd4, Simd8, scalar; q 128 at
+   o in {1, 63, 64, 127} and q 100 at o in {1, 50, 99}; six operations; settled, ramping, ramp
+   ending before o, muted, mute ramp, unmute ramp; one lane and two lanes at different offsets;
+   the next block compared too), `an_operation_at_offset_zero_is_block_entry_and_one_past_the_block_waits`.
+2. `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it` (timed `RetargetGain`,
+   `RememberGain` and the live setter, every 64 samples in a 480-sample mute ramp).
+3. `at_one_offset_the_gain_applies_before_the_mute`.
+4. Existing `fader_ramp.rs` tests unchanged and green; builtins-compiler as above.
+5. `process_with_operations_never_allocates` (1,000 blocks per subject, thread counters: 0 and 0).
+- D2 flag: `the_held_flag_follows_the_mute_ramp`; sink refusals:
+  `the_fader_operation_sink_refuses_without_queuing` (in-crate).
+- Red on revert (copied aside, not stashed): live muted retarget restored -> gate 2 red; timed held
+  retarget -> gate 2 red; mutes applied before gains -> gate 3 red; operations one sample late ->
+  gate 1 red; flag not cleared at the countdown end -> gate 2 and the flag test red.

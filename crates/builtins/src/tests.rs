@@ -1193,3 +1193,43 @@ fn fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane() 
         "per-track instant identity"
     );
 }
+
+/// Issue #1638 D3: the sink refuses a padding lane, a bad gain and a second operation of one
+/// kind on one lane and channel, and a refusal queues nothing on either channel.
+#[test]
+fn the_fader_operation_sink_refuses_without_queuing() {
+    use super::{FaderOperation, FaderOperationError, FaderOperationSink};
+    let mut sink = FaderOperationSink::new(2);
+    let gain = FaderOperation::SetGain { gain: 0.5 };
+    assert_eq!(
+        sink.push(2, BuiltinLaneSelector::Both, gain),
+        Err(FaderOperationError::Lane)
+    );
+    for bad in [f32::NAN, f32::INFINITY, -0.25] {
+        assert_eq!(
+            sink.push(
+                0,
+                BuiltinLaneSelector::Both,
+                FaderOperation::RememberGain { gain: bad }
+            ),
+            Err(FaderOperationError::Gain)
+        );
+    }
+    assert_eq!(sink.push(0, BuiltinLaneSelector::Right, gain), Ok(()));
+    assert_eq!(
+        sink.push(0, BuiltinLaneSelector::Both, gain),
+        Err(FaderOperationError::Duplicate)
+    );
+    assert!(
+        sink.gain[0][0].is_none(),
+        "a refused Both queued nothing on the left"
+    );
+    let mute = FaderOperation::SetMute {
+        muted: true,
+        samples: 0,
+    };
+    assert_eq!(sink.push(0, BuiltinLaneSelector::Both, mute), Ok(()));
+    assert_eq!(sink.push(0, BuiltinLaneSelector::Left, gain), Ok(()));
+    assert_eq!(sink.gain[1][0], Some(gain));
+    assert_eq!(sink.mute[0][0], Some(mute));
+}
