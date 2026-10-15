@@ -2,7 +2,7 @@
 
 Successor found by the batch-12 spec check, decision 17
 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `ea336c039`.
-Issue number: assigned at filing (written here as TBD24). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1674). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review.
 
 ## Product outcome
