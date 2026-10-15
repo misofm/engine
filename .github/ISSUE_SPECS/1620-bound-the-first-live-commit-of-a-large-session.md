@@ -52,3 +52,39 @@ AudioWorklet's message handler on a 64- or 256-track session.
 ## Size
 
 Half a day, one sonnet-high implementer.
+
+## Decision record: #1620 (batch 14b) -- measurement, stopped before coding
+
+Anchor correction: the heap gate lives at `tools/parameter-metadata/tests/control_command_heap.rs`
+(the batch 9 CI fold moved it to use `bench_support::alloc`), not under `hosts/host-web/tests/`.
+
+Measured on `8b3ae13ec` (debug, `verify_stages(false)`), the nine-edit transaction of that test:
+
+| tracks | first call: allocations / requested / peak / left | steady call peak | first-call excess | session canonical text |
+|---|---|---|---|---|
+| 1 | 834 / 129,249 / 77,347 / 1,078 | 72,588 | 4,759 | 5,474 |
+| 64 | 1,848 / 549,392 / 197,929 / 1,078 | 72,588 | 125,341 | 96,887 |
+| 256 | 4,922 / 1,866,704 / 663,179 / 1,078 | 72,588 | 590,591 | 375,479 |
+
+**What the excess is.** Not lazily built state that later calls reuse. Traced with a temporary
+backtrace hook on every allocation of 4 KiB or more (reverted): the first call leaves the in-place
+path (#1613) and takes the full preparation. `SessionStore::prepare_in_place`
+(`crates/protocol/src/model.rs`) returns `None` because `session::owners_counts_equal` is false: the
+fixture's track holds a sparse `eq-simd1` parameter list (IDs 1 to 6, ID 4 per lane), and the edits
+write IDs 65, 66, 67, 81, 82, 83 and ID 4 on `both`, which adds parameter entries. A count change is
+not a change of values to the in-place path, so the store clones the whole model, runs
+`compile_session` (a second model clone, the validation maps, the stable sorts) and writes the
+whole canonical text. At 256 tracks the peak is that text's `String` doubling to 524,288 bytes
+(final 376,405) plus about 66 KB of model clones and sort buffers; at 64 tracks the text reaches
+131,072. The 1,078 bytes left are the committed model's added parameter entries. From the second
+call on, the entries exist, the counts are equal and every call is in place (72,588 at every size).
+
+**Why neither option fits.** Option A (build the reused state at boot) and Option B (lazy, one exact
+allocation) both assume reusable state; there is none. The cost is the full compile path, taken by
+any live edit that first writes a parameter the sparse model does not hold, on any revision, not
+only the first. The candidate fixes are outside this spec's authorized paths and need a ruling:
+(C1) let the in-place path accept a `SetControl` that adds a parameter entry (adjust
+`owners_counts_equal` and the in-place resource estimate in `protocol`/`session` so an added entry
+is charged exactly); or (C2) densify every effect's parameter list at preparation (changes the
+committed model and its canonical snapshot, a contract change). Per the coordinator's ruling the
+work stopped here; no code changed.
