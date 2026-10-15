@@ -189,3 +189,26 @@ Checked against `12d4a4f9d`.
 - **Automated VCA mutes** (root's F20 ruling) compose with this slice's `curve || terms` in
   #1655: the stage mute of a member lane gains `|| vca_curve(τ)` for each reaching VCA whose mute is
   automated. This slice's `terms` word keeps the static VCA mutes.
+
+## Amendment (controls coordinator, batch 13b, root ruling)
+
+- **A `SetMute` that changes nothing does nothing** (constraint). Today #1638's `SetMute { muted,
+  samples }` reaches `mute_channel` (`crates/builtins/src/lib.rs`, through `apply_operation`; the
+  live `set_mute` calls the same function), which always writes `muted`, retargets the lane to `0.0`
+  (muted) or to the remembered `fader_gain` (unmuted) over `samples`, and sets `mute_ramp` when
+  `samples` is not 0, whether or not the lane's mute state changed. So a `SetMute` that repeats the
+  lane's state restarts a fader ramp in flight over the mute length (its shape changes), and its
+  `mute_ramp` makes `gain_held` true for that window, so the fader events inside it are only
+  remembered. The rule: a `SetMute` whose `muted` equals the lane's and channel's current mute state
+  leaves the stage as it was (no retarget, `mute_ramp` and the ramp's remaining frames unchanged).
+  D1's "only a change emits" still holds; this rule makes the stage itself safe against a repeated
+  `SetMute`, whatever composed it. The change
+  is in `crates/builtins/src/lib.rs`, which this slice's authorized paths already allow; its test
+  goes in `crates/builtins/tests/fader_ramp.rs` (authorized).
+- **Gate 2, new case.** On the stage driven directly with #1638's operations: (a) an unmuted lane
+  with a fader `RetargetGain` in flight takes `SetMute { muted: false, samples: 240 }` at an offset
+  inside the ramp, then a `RetargetGain` 10 samples later; (b) a lane in a mute ramp toward `0.0`
+  takes `SetMute { muted: true, samples: 240 }` inside it. Each block is bit-identical to a twin
+  that never received the repeated `SetMute`, and in (a) `gain_held` stays false. Red if a repeated
+  `SetMute` retargets the lane or starts a mute ramp. Gate 7 holds that the change moves no bit of a
+  session with no stored automation.

@@ -293,8 +293,10 @@ mark `value_at` (`evaluate.rs`) and the event generator (`events.rs`).
    boundary" field has no user and is not stored.
 6. **`NodeSpan::new` is fallible** (`StepOutsideBlock` when the step offset is not below `frames`),
    so a seek cannot be silently dropped in render. A fresh `CellState` has no target, so its first
-   retarget always emits; `reposition(&program, t)` places the cursor only (target kept, in-flight
-   ramp and deferral dropped).
+   retarget always emits; `reposition(&program, t)` places the cursor at the first discontinuity at
+   or after `t`, keeps the target, and drops the in-flight ramp, any deferred jump and an outstanding
+   held event (batch 13b review: the earlier "cursor only" wording left out the held event), so a
+   retarget to the value the cell already targets then emits nothing.
 7. **Builder limits** beyond D5: `start < end`, every time below `2^53` (the evaluator's exactness
    bound), finite values, at least one segment per cell. `value_at` on an empty table returns `0.0`
    and never panics.

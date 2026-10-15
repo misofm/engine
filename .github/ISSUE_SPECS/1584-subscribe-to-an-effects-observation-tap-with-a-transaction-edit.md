@@ -584,3 +584,13 @@ shipped module sha256 is `179a933a...c3c1ae`; no export, layout or JS file chang
   arm was sent and ignores an `OBSERVATION_ENDED` event of a commit at or before it: that event ended
   an earlier arm of the same tap. `ControlTransactionQueue.readCommittedRevision()` reads it from the
   core.
+
+## Amendment (controls coordinator, batch 13b)
+
+- **The C ABI observe edit uses the core's two calls.** The edit of D1-D5 resolves its tap with
+  `SessionState::resolve_observation_key` (#1677: the stable key on the newest committed plan, never
+  a plan position) and admits and queues its changes with
+  `SessionState::admit_and_push_observation_batch` (#1676: one naming per tap, the key-count cap,
+  then the room, whole or nothing), both in `crates/control-plane/src/control.rs`. The browser's
+  record calls the same two, so the cap and the stable key hold alike on both hosts. The edit adds
+  no admission or key lookup of its own.

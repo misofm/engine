@@ -165,6 +165,10 @@ admission path remains that could write a live record onto an automated lane.
 - `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (one new test, and the two
   oracles of D6 at `:13358-13371` and `:13697-13715`)
 - `crates/host-core/tests/vca.rs` (`reference_db`, `:268-279`, only)
+- `crates/automation/src/events.rs` (one method that seeds a `CellState`'s target, and its test,
+  only if D2's event state needs a target at preparation: `CellState::new` leaves it empty and no
+  setter exists; #1648's batch 13b amendment authorizes the same method, and whichever lands first
+  adds it)
 - `crates/engine/src/realtime/latest_cell.rs` (a three-word cell form and its loom case, only if
   #1312's module has none)
 - `crates/session/src/vca.rs` (D6), `crates/session/src/lib.rs` (the `pub use` at `:31` only),
@@ -272,8 +276,9 @@ admission path remains that could write a live record onto an automated lane.
 - #1645 *Validate builtin automation targets against their rows at preparation*.
 - #1637 *Compile stored automation into per-cell events in node time*.
 - #1638 *Apply timed operations inside a block on the strip fader stage*.
-- #1639 *Hold the automation jump lengths in a plan cell*: the `fader` word the jump-length key
-  reads.
+- #1639 *Hold the automation jump lengths in a plan cell*: the lengths from which a caller resolves
+  the fader row's jump length with `LiveRamps::for_row` (#1637 as shipped, departure 1 of its
+  decision record; no program holds a jump-length key).
 - *Session controlSmoothing: configurable ramp lengths for live mute, fader and pan changes*
   (#1054): the fader jump length.
 - *Keep every node's latency from dropping during playback* (#1285): `a(n)`.

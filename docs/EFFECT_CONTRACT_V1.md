@@ -352,7 +352,8 @@ A declared ceiling may be tightened toward measured use, but that moves canonica
 and is an effect-identity change, never a contract cleanup. Per-lane audio, delay, filter,
 envelope, smoother, and dual-mono detector state stays in the corresponding lane section. Only
 shared configuration and an explicitly linked detector may be common. Full reset restores
-prepared defaults; discontinuity reset keeps targets but clears histories and active spans.
+prepared defaults; discontinuity reset keeps targets, clears histories and snaps every parameter
+ramp in flight to its target (runtime automation is `Point` spans only, so no span stays active).
 
 ## Stable diagnostics
 

@@ -263,8 +263,9 @@ records the obligation and its gate.
 written was not quantum-invariant: refreshing `hold_until` at every block entry inside a held ramp
 overwrote a cell `Jump`'s own ramp end. #1647's amendment now says when D1.2 reports the hold (once,
 at the block entry that starts or restarts the ramp, and after an adoption that carries it), holds
-the grid for the reissue's own ramp, composes the reissued gain as D1.4, and adds a moving-curve
-case to gate 8. No code change. The counter `fader_operations_stopped` is to be summed by #1647
+the grid for the reissue's own ramp, composes the reissued gain as D1.4, and adds the moving-curve
+cases to gate 8 (cases (c) and (e), whose samples `[E, E + J - 1]` equal one direct `RetargetGain`
+at `E` over `J`). No code change. The counter `fader_operations_stopped` is to be summed by #1647
 when it wires `process_with` into production.
 
 **Attempt 3 review and rescope (coordinator).** The attempt-3 review confirmed the hold rule is

@@ -25,9 +25,11 @@ exactly as before. The fader row leaves the classifier's mask in #1648, in the s
   executor calls the source set at block entry (`crates/graph/src/lib.rs:3254-3256`), where #1641
   advances the timeline.
 - **What #1646 leaves.** Each automated lane has a cell program (#1637) with its `a(n)`, its
-  grid and its jump-length key (the `fader` word of #1639's plan cell), an offsets cell (the lane's
-  VCA offset sum `S`, `+0.0` when no VCA reaches it; #1646 D1), and its event state in the fader bank stage. It starts at its prepared value, the
-  curve at node time `-a(n)`, which is the entry's first `start_value`.
+  grid and no jump length (#1637 as shipped, departure 1 of its decision record: a caller resolves
+  the fader row's length with `LiveRamps::for_row` from the three lengths #1639's plan cell holds),
+  an offsets cell (the lane's VCA offset sum `S`, `+0.0` when no VCA reaches it; #1646 D1), and
+  its event state in the fader bank stage. It starts at its prepared value, the curve at node time
+  `-a(n)`, which is the entry's first `start_value`.
 - **What #1639 leaves.** The graph reads the plan's jump-length cell once at block entry and holds
   its three words for the block; no stage reads them yet.
 - **The documents.** `docs/SESSION_SCHEMA_V1.md:220-225` says the table renders nothing; the
@@ -227,13 +229,25 @@ three #1638 reviews measured; the mechanism is this slice's design, reviewed wit
   5. D3's "exactly, with no ramp" does not hold for a seek `Set` inside a held ramp: the stage only
      remembers it, and it lands by the move at `E`.
   6. The stage's `fader_operations_stopped` counter (#1638) is summed into this slice's report.
+  7. `E` is the first sample at which the stage reports `gain_held` false for the lane. The move at
+     `E` replaces any gain operation the cell gives at `E`: #1638's sink takes one gain operation per
+     lane, channel and offset and refuses a second (`FaderOperationError::Duplicate`).
 - **Gate 8 (new).** At quantum 128, 100, 64 and 37, the same bits, and the lane never settles at the
-  pre-unmute gain: (a) a `Jump`, and (b) a seek `Set`, inside an unmute ramp on a curve flat after
-  it; (c) a `Jump` whose own ramp ends after `E`, with a block entry between the `Jump` and `E` at
-  one quantum only; (d) a curve that goes flat inside the last 64 samples of the unmute ramp (no
-  `Jump` or `Set`, only grid events); (e) grid events that are not held lying between `E` and the
-  next block entry at one quantum only (a `Jump` whose ramp ends before `E`, or a seek `Set` on a
-  moving curve). Test value: red if a remembered event is never moved to at `E`, if the move follows
-  a block entry instead of `E`, if D1.2 refreshes `hold_until` inside the hold, or if the move does
-  not hold the grid for its own ramp.
+  pre-unmute gain, in these cases, with `J` the fader row's jump length:
+  - (a) a `Jump`, and (b) a seek `Set`, inside an unmute ramp on a curve flat after it: from
+    `E + J - 1` (from `E` when `control_smoothing` is explicit 0) the lane equals the gain composed
+    from the cell's `target()` exactly, so it settles at that value one fader jump length after `E`;
+  - (c) a `Jump` whose own ramp ends after `E`, with a block entry between the `Jump` and `E` at one
+    quantum only: samples `[E, E + J - 1]` equal the stage driven directly with one `RetargetGain`
+    at `E` over `J` (no grid event cuts the move's ramp);
+  - (d) a curve that goes flat inside the last 64 samples of the unmute ramp (no `Jump` or `Set`,
+    only grid events);
+  - (e) grid events that are not held lying between `E` and the next block entry at one quantum only
+    (a `Jump` whose ramp ends before `E`, or a seek `Set` on a moving curve): samples
+    `[E, E + J - 1]` equal the stage driven directly with one `RetargetGain` at `E` over `J`.
+
+  Test value: red if a remembered event is never moved to at `E`, if the move follows a block entry
+  instead of `E`, if the lane does not equal the composed `target()` from `E + J - 1` (or from `E`
+  with `control_smoothing` 0), if D1.2 refreshes `hold_until` inside the hold, or if a grid event
+  cuts the move's ramp in `[E, E + J - 1]`.
 - **#1648** carries the obligation across a swap (see its amendment).

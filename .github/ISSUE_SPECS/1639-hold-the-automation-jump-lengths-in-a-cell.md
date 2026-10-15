@@ -223,6 +223,10 @@ before the revision's publication. D7's sentence is in `docs/SESSION_SCHEMA_V1.m
    no reading entry is not written; an entry added later (model-only until #1648 classifies
    automation edits) reads the cell's older lengths. The hazard section's rebuild rule (#1648 D1)
    closes it for rendered rows.
+6. **D3's field type.** D3 names `jump_lengths: Option<[u32; 3]>`; the shipped field is
+   `LiveDelta::jump_lengths: Option<GraphJumpLengths>`, the same three lengths with a name for each
+   key (`fader_samples`, `mute_samples`, `pan_samples`), so no caller depends on the word order.
+   The cell still holds three `u32` words (`GraphJumpLengths::to_words`).
 
 **Re-pinned rows** (each "the jump-length cell, #1639 D1"; measured: the cell's two allocations are
 168 bytes, a count 24 bytes, the revision gate 72 bytes; since the review fold gate 1 measures the

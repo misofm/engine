@@ -172,6 +172,8 @@ vectors, `TRANSPORT_20`/`TRANSPORT_21`, the `RESPONSES` snapshot, and the three 
 re-derived mechanically by deleting the position field and fixing the payload length and field count.
 The corpus frame count stays 46.
 
+Integrated in batch 13b: one re-pin from `0xcc9a_7bcc_502c_4936` to `0x0c71_96f8_6abe_6d57` for #1635 and #1678 together.
+
 **Departures.**
 
 - D3 says `retired_code_rows` gains one row per retired field. A `RetiredCodeRow` is a command frame

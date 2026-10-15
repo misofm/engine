@@ -253,17 +253,19 @@ model's field registry keeps every ID: track field 7 is now `inserts` (was `dyna
 field 15 and track field 11, with registries of its own for the slot declaration (`slot` 1,
 `identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3).
 
-An automation target is a control address (#1566, decision 17 C2): the address `SET_CONTROL` and the
-control list use, as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;
+An automation target is a control address (#1566, decision 17 C2): the plain address the control
+list uses (fields 1 to 6), as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;
 `session` is not a token, because no session row is automatable), `owner_id` (the strip, route or VCA
 ID), `section` (`own`, `builtins`, `console` or `inserts`), `slot_id` (the console slot or the insert),
 `control` (a `u32`, the row ID inside the section) and `lane` (`left`, `right` or `both`). `slot_id`
 is required in a `console` or `inserts` section and refused (`schema.unknown_field`) in `own` and
 `builtins`; every other key is required. The old keys (`entity_id`, `rack`, `effect_id`,
-`parameter_id`, `channel`) are unknown keys. The wire message is the `SET_CONTROL` address message
-(fields `owner` 1, `owner_id` 2, `section` 3, `slot_id` 4, `control` 5 and `lane` 6; owner kind
-strip 2, route 3, VCA 4 and section inserts 2, builtins 4, console 5, own 6, the retired rack codes
-1 and 3 never allocated), and the session wire refuses owner kind session.
+`parameter_id`, `channel`) are unknown keys. The wire message is the control list's address
+message, `ControlAddress` (fields `owner` 1, `owner_id` 2, `section` 3, `slot_id` 4, `control` 5 and
+`lane` 6; owner kind strip 2, route 3, VCA 4 and section inserts 2, builtins 4, console 5, own 6, the
+retired rack codes 1 and 3 never allocated), and the session wire refuses owner kind session. A
+target carries no expected effect: field 7 belongs to `SET_CONTROL`'s own address message,
+`SetControlAddress` (#1678), and a stored target is refused with it.
 
 Session validation checks the structure of a target, and nothing about its row: the `strip` owner is
 a declared track or submix (`reference.missing_entity` at `target.owner_id` otherwise; a VCA ID is

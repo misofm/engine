@@ -77,7 +77,8 @@ Half a day.
   the taps it leaves armed (arms of unarmed taps add, disarms of armed taps remove, a window change
   adds nothing) and returns `ObservationLimit { index, cap }` for the first arm that crosses. It
   moves nothing, so a refusal is whole and precedes every ack.
-- **Browser mapping.** `admit_commands` calls it after pass one and before the room pass; a
+- **Browser mapping** (attempt 1; superseded by attempt 2 below: reason 15 `observationLimit`,
+  `RESULT_UNSUPPORTED`). `admit_commands` calls it after pass one and before the room pass; a
   refusal is `RESULT_BACKPRESSURE` / `COMMAND_REASON_BACKPRESSURE` at the record that crossed it
   (doc comments on the Rust constant and both `.d.ts` copies say so). Nothing else in the adapter.
 - **D2, the reserve.** The ended-event heap per cell is now `min(slots, cap)` keys times
@@ -93,7 +94,8 @@ Half a day.
 
 **Departures.**
 
-1. **Refusal code.** The browser's `COMMAND_REASON_*` vocabulary is gate-pinned as contiguous from
+1. **Refusal code** (attempt 1; superseded by attempt 2 below: reason 15 `observationLimit`,
+   `RESULT_UNSUPPORTED`). The browser's `COMMAND_REASON_*` vocabulary is gate-pinned as contiguous from
    0 across six files, and 12-14 are retired and never reused; a new reason would need a vocabulary
    decision. The typed refusal is `ObservationLimit` in the core; the browser maps it to the
    existing backpressure reason (unsubscribe a tap, then retry succeeds). No `crates/protocol`
@@ -102,8 +104,10 @@ Half a day.
    `observation_taps` stays 0 there), so there is no C ABI path to put in
    `hosts/host-web/tests/control_parity.rs`. Both hosts share the one core cap, the one reserve
    and the one slot state; the C ABI edit must call `admit_observation_changes` (or its own edit
-   check against `observation_cap()`).
-3. `push_effect_observe` does not itself refuse past the cap: a batch can push its arms before its
+   check against `observation_cap()`). (Since attempt 2 that function is private; the C ABI edit
+   calls `admit_and_push_observation_batch`, as #1584's batch 13b amendment says.)
+3. (Attempt 1; superseded by attempt 2 below, which removes the uncapped public push.)
+   `push_effect_observe` does not itself refuse past the cap: a batch can push its arms before its
    disarms, so the cap is judged on the batch, by `admit_observation_changes`, which every caller
    must call first. The over-frame refusal in the commit stays as a defence; its existing test now
    says it pushes past the cap on purpose.
@@ -128,7 +132,7 @@ Half a day.
   features.
 
 **Successor candidates.** A dedicated browser command reason for the cap (needs a vocabulary
-decision). The C ABI `Observe` edit must admit against `observation_cap()`. 51 simultaneous taps at
+decision; attempt 1, superseded: attempt 2 adds reason 15 `observationLimit`). The C ABI `Observe` edit must admit against `observation_cap()`. 51 simultaneous taps at
 the browser frame is the product limit; a larger frame raises it linearly.
 
 ### Attempt 2 (batch 13b)
