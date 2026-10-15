@@ -55,7 +55,6 @@ use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
 };
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
-use crate::live_delta::LiveRebuild;
 use crate::route_controls::{RouteControlProducer, RouteControlResources};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
@@ -3236,7 +3235,8 @@ impl<'a> EffectiveDiff<'a> {
 }
 
 /// The index in [`SessionModel::strips`] of the strip `route` takes its source from, or `None` if
-/// the model has no such strip.
+/// the model has no such strip. Only the live paths (`control-provider`) resolve route sources.
+#[cfg(feature = "control-provider")]
 pub(crate) fn route_source_strip(model: &SessionModel, route: &session::Route) -> Option<usize> {
     let id = match &route.source {
         session::RouteSource::Track { track_id, .. } => track_id,
@@ -3318,6 +3318,31 @@ pub(crate) struct EffectInstanceRecords {
     pub(crate) records: Vec<EffectControlRecord>,
     /// The targets [`EqTargetPreparer`] designed from the pre-commit values and the records.
     pub(crate) targets: Option<Vec<PreparedEffectTarget>>,
+}
+
+/// Why a delta needs a plan rebuild. It lives here, beside `effect_instance_records`, because the
+/// successor join uses it in every build; `live_delta` (feature `control-provider`) re-exports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveRebuild {
+    /// The models differ in something that is not a control value: the strip, route, slot or
+    /// insert set or order, an effect's identity, quality or sidechain, a profile's other fields,
+    /// or any other field no control row describes.
+    Structure,
+    /// A fader, pan/matrix or input value is outside the domain its render-side setter accepts, a
+    /// send's gain or matrix is outside the route domain or its ramp is too long, or an
+    /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
+    /// preparation diagnostic it always has.
+    Domain,
+    /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
+    /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
+    /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
+    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
+    RebuildOnly(RebuildReason),
+    /// The stored automation changes and one of `next`'s automations names a row that its rule
+    /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
+    /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
+    /// refusal has one author and no live commit can ack it first.
+    AutomationTarget,
 }
 
 /// The one per-instance function that decides whether a difference between two lowered instances
