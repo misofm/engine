@@ -1780,7 +1780,6 @@ where
                             .ok_or(CommandError::Internal)?,
                     )
                     .map_err(CommandError::CompileRejected)?,
-                    AdmissionPeak::Single,
                     self.limits,
                 )
                 .map_err(CommandError::CompileRejected)?;

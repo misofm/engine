@@ -71,22 +71,9 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
   (`effect.resource.limit`); `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes`
   (`capi.resource.limit`). The largest-allocation check folds every held row. Before #1310 the
   held set is at most two plans, so no current admission changes.
-  - **Re-preparation peak.** A candidate that the control thread may later prepare again without
-    a submit, from the same committed model, is admitted with `AdmissionPeak::WithReprepare`. That
-    is a warm successor published `Primed`: when it is not ready by its deadline, the control plane
-    withdraws it and prepares the transition instead, keeping the withdrawn candidate as the donor
-    of its rings (*Fall back to the transition when a warm successor is not ready by its
-    deadline*, #1358; *Duck-swap the strips a latency growth restarts, and fall back to the
-    transition when a warm successor cannot adopt*, #1397). Admission then also checks a second
-    peak: the running plan plus the prospective row twice (the warm candidate and the transition's
-    re-preparation, which #1397 keeps no larger than the warm candidate in any D4 term), with the
-    same model terms. Every other held candidate is dropped before a re-preparation can run, so it
-    is not in that peak. Both peaks must fit, or the submit is refused before commit with the
-    cap's diagnostic. `service` then runs no cross-plan admission. The default,
-    `AdmissionPeak::Single`, is today's check; *Classify a latency-growth edit and publish its
-    warm successor from the control plane* (#1403) D2 passes `WithReprepare` when it admits a
-    warm candidate. Releasing the withdrawn plan's row before re-preparing is not an option: the
-    withdrawn plan is the donor of the rings it holds.
+  - **Re-preparation peak: dropped.** A second peak for a warm candidate's re-preparation
+    (`AdmissionPeak::WithReprepare`) is not in this slice; see the root ruling in the decision
+    record. #1403 adds it with its first caller.
 - **D5. Sizing rule and reference limits.** The header states it: each cap above must be at least
   three times one plan's row, and the graph cap also covers three compiled models. The repository's
   reference limits must admit three plans of their sessions: `audit_limits`
@@ -126,10 +113,7 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
 2. **Admission sums every held row (new control-plane unit test).** Three held rows and three
    models, with each cap in D4 one byte below the sum in turn, refuse with that cap's diagnostic;
    at the sum they pass. With one held row the result equals today's for the same inputs.
-3. **Re-preparation peak (new control-plane unit test).** One running row `R` and a prospective
-   row `C` admitted with `WithReprepare`: with each D4 cap set to `R + 2C - 1` the submit is
-   refused with that cap's diagnostic, at `R + 2C` it passes; with `Single`, `R + C` passes. With a
-   withdrawn candidate also held, both peaks are checked and the larger one decides.
+3. **Dropped** (root ruling 2026-10-15, decision record): the re-preparation peak moves to #1403.
 4. **Reference limits.** `./target/release/audit capi` and the two capi integration tests pass
    with their limits (raised only if needed, D5).
 5. Commands:
@@ -240,8 +224,8 @@ expects. Each fact in Context still holds; only the lines moved.
 
 **Dependencies on GitHub.**
 - #1309 is closed. #1343 and #1311 are closed.
-- Downstream: #1310 (batch 15a). #1403, #1358 and #1397 are open and not in batch 15; they are the
-  users of `AdmissionPeak::WithReprepare`, which this slice adds unused.
+- Downstream: #1310 (batch 15a). #1403, #1358 and #1397 are open and not in batch 15; #1403 adds the
+  re-preparation peak with its first caller (root ruling 2026-10-15, decision record).
 
 **Gates and commands.** Every named command, package, feature and script exists. Gate 4's
 `./target/release/audit capi` is built by gate 5's `cargo build` line.
@@ -266,10 +250,8 @@ configuration (`PlanExchangeConfig`), read at boot.
   (`compiled_model_admission_over`). The replacement admission sums every D4 term including
   `maximum_replacement_peak_bytes`; the capi term is the newest held row plus every older held
   epoch's `epoch_retained` plus the candidate's epoch and prepared-protocol rows (the live
-  admission's rule). `AdmissionPeak::{Single, WithReprepare}` is added; the command path passes
-  `Single`. `WithReprepare` checks a second peak of the running plan beside the candidate twice
-  (each copy charged the candidate's allocated source bytes and its epoch plus prepared-protocol
-  capi rows: an upper bound). The largest-allocation check folds every held row.
+  admission's rule). The largest-allocation check folds every held row. (The attempt also added
+  `AdmissionPeak::{Single, WithReprepare}`; the root ruling below removes it.)
 - D5: the header's sizing paragraph sits on `maximum_graph_session_plus_plan_bytes`;
   `docs/C_ABI_V1_QUALIFICATION.md` has a #1398 section. No reference limit was raised: the
   nine-track EQ session's rows are graph 316,350, source total 12,198, capi 161,258 bytes against
@@ -302,7 +284,7 @@ configuration (`PlanExchangeConfig`), read at boot.
   (`hosts/host-web/tests/plan_exchange_threads.rs`): pass; red (`BACKPRESSURE`) with the lag
   refusal restored.
 - Gate 2: `compile::admission_tests::the_replacement_admission_sums_every_held_plan_and_model`.
-- Gate 3: `compile::admission_tests::a_warm_candidate_is_admitted_against_its_reprepare_peak`.
+- Gate 3: dropped (root ruling below).
 - Gate 4/5: `cargo test --locked -p capi` (incl. `resource_lifecycle`, `plan_swap_race`),
   `-p control-plane --all-features`, `-p host-web --all-features`; `audit capi` (pcm_digest
   `bf7dcedd1d92621f`, 0 violations; `tools/audit/src/capi.rs` unchanged); `check-capi-abi.sh` and
@@ -311,3 +293,5 @@ configuration (`PlanExchangeConfig`), read at boot.
 
 **Measured.** Nine-track EQ reference session `capi_retained_bytes` 159,354 -> 161,258 (+1,904,
 #1398 D1's tables). No test pinned that row; no browser pin moved.
+
+Root ruling (2026-10-15): gate 3 and `AdmissionPeak::WithReprepare` are dropped from this slice: code with no production caller is a placeholder. #1403 adds the reprepare peak together with its first caller.

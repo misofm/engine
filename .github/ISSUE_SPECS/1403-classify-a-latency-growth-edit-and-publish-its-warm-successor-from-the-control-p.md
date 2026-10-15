@@ -246,3 +246,11 @@ no swap and the same host commands, timed on the source-read clock.
 - *Duck-swap a strip whose state cannot continue across a plan swap* (#1324): D4's duck set.
 - *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325): gate 2's path.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+
+## Amendment (controls coordinator, batch 15a, root ruling 2026-10-15)
+
+#1403 adds the reprepare admission peak together with its first caller, and carries #1398's former gate 3 (a warm candidate is admitted against its reprepare peak). #1398 no longer ships `AdmissionPeak::WithReprepare`: every reference to it above, and to "#1398 gate 3", now means work this issue does.
+
+- The peak is the replacement admission counting each copy of a warm candidate's allocated source bytes plus its epoch and prepared-protocol capi rows, as #1398's attempt measured: a second check of the running plan (`held[0]`) beside the candidate twice, with the same model terms, passed alongside the held-plan check; both must fit.
+- Code anchors verified in `crates/control-plane/src/compile.rs`: `validate_replacement_peak` (the replacement admission; its parameters are now `held`, `prospective`, `compiled_models`, `limits`, with no `AdmissionPeak`), whose one caller is `control.rs` (the structural command path, at the `#1398 D4` comment); `validate_live_peak` (the live arm, unchanged); `ProspectivePlan`, `CarriedSourceBytes`, `CapiResources` (the candidate's rows, including `capi.epoch_retained` and `capi.prepared_protocol_retained`); `compiled_model_admission` and `compiled_model_admission_over` (the model terms). The unit-test module is `compile::admission_tests` (helpers `epoch`, `candidate`, `peaks`, `assert_each_cap`, `CAPS`).
+- Gate 1's "`WithReprepare`" bullet and the Dependencies line on `AdmissionPeak::WithReprepare` read as this amendment: the issue adds the parameter or equivalent shape for the peak, passes it at its first caller, and adds the gate 3 test (`R + 2C - 1` refuses with each cap's diagnostic, `R + 2C` passes, `R + C` passes without the peak; with a withdrawn candidate also held, both peaks are checked and the larger decides).

@@ -813,20 +813,6 @@ pub(crate) fn controller_retained_capacity(
     })
 }
 
-/// Which peaks a structural candidate's admission checks (#1398 D4).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AdmissionPeak {
-    /// Every plan the control plane holds unreclaimed, and the candidate: today's check.
-    Single,
-    /// That peak, and the running plan beside the candidate twice: the warm candidate a deadline
-    /// fallback withdraws, kept as the donor of its rings, and the transition the control plane
-    /// then prepares again from the same committed model without a submit (#1358, #1397), which
-    /// is never larger than the warm candidate in any term. Every other held candidate is dropped
-    /// before that re-preparation runs, so it is not in the second peak. #1403 D2 passes it when it
-    /// admits a warm candidate published `Primed`.
-    WithReprepare,
-}
-
 /// The candidate a structural command prepared, as the replacement admission reads it.
 #[derive(Clone, Copy)]
 pub(crate) struct ProspectivePlan {
@@ -851,67 +837,26 @@ pub(crate) struct ProspectivePlan {
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
 /// prepared-protocol rows). The largest-allocation check folds every held row.
 ///
-/// With [`AdmissionPeak::WithReprepare`] it also checks the running plan, `held[0]`, beside the
-/// candidate twice, with the same model terms. Both peaks must fit; nothing is committed on a
-/// refusal.
+/// Nothing is committed on a refusal.
 pub(crate) fn validate_replacement_peak(
     held: &[LiveEpochResources],
-    prospective: ProspectivePlan,
-    compiled_models: CompiledModelAdmission,
-    peak: AdmissionPeak,
-    limits: ControlLimits,
-) -> Result<(), CompileFailure> {
-    let running = held
-        .first()
-        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
-    check_replacement_peak(held, 1, prospective, compiled_models, limits)?;
-    if peak == AdmissionPeak::WithReprepare {
-        check_replacement_peak(
-            core::slice::from_ref(running),
-            2,
-            prospective,
-            compiled_models,
-            limits,
-        )?;
-    }
-    let largest = held
-        .iter()
-        .map(|epoch| epoch.report.largest_named_allocation_bytes)
-        .fold(0, u64::max);
-    if largest
-        .max(prospective.resources.largest_named_allocation_bytes)
-        .max(prospective.capi.largest)
-        .max(compiled_models.largest_allocation_bytes)
-        > limits.maximum_named_allocation_bytes
-    {
-        return Err(failure(ResourceFault::Limit));
-    }
-    Ok(())
-}
-
-/// One peak of [`validate_replacement_peak`]: the plans of `held` (never empty) beside `copies`
-/// of the prospective plan, each term against its cap.
-fn check_replacement_peak(
-    held: &[LiveEpochResources],
-    copies: u64,
     prospective: ProspectivePlan,
     compiled_models: CompiledModelAdmission,
     limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     let newest = held.last().ok_or_else(arithmetic)?;
-    // Each held row's `field`, summed, plus `copies` of the candidate's `candidate`.
+    // Each held row's `field`, summed, plus the candidate's `candidate`.
     let peak = |field: fn(&PlanResources) -> u64, candidate: u64| {
         held.iter()
             .try_fold(0_u64, |total, epoch| {
                 total.checked_add(field(&epoch.report))
             })
-            .and_then(|total| total.checked_add(candidate.checked_mul(copies)?))
+            .and_then(|total| total.checked_add(candidate))
             .ok_or_else(arithmetic)
     };
     // Issue #1273 D5: a carried ring is the newest held plan's until the swap, so the peak counts
-    // it once, there. A re-preparation carries at least those rings from its donor, so each copy
-    // allocating no more than the first is an upper bound.
+    // it once, there.
     let allocated = |row: u64, carried: u64| row.checked_sub(carried).ok_or_else(arithmetic);
     let candidate = prospective.resources;
     let graph_peak = peak(
@@ -965,8 +910,7 @@ fn check_replacement_peak(
         return Err(failure(ResourceFault::Limit));
     }
     // The newest held row holds the session's fixed rows once and its own epoch's; every older
-    // held epoch adds its own rows, and each copy of the candidate its epoch and prepared-protocol
-    // rows.
+    // held epoch adds its own rows, and the candidate its epoch and prepared-protocol rows.
     let older_epochs = held[..held.len() - 1]
         .iter()
         .try_fold(0_u64, |total, epoch| {
@@ -977,11 +921,22 @@ fn check_replacement_peak(
         .capi
         .epoch_retained
         .checked_add(prospective.capi.prepared_protocol_retained)
-        .and_then(|candidate| candidate.checked_mul(copies))
         .and_then(|candidate| candidate.checked_add(newest.report.control_retained_bytes))
         .and_then(|value| value.checked_add(older_epochs))
         .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
+        return Err(failure(ResourceFault::Limit));
+    }
+    let largest = held
+        .iter()
+        .map(|epoch| epoch.report.largest_named_allocation_bytes)
+        .fold(0, u64::max);
+    if largest
+        .max(prospective.resources.largest_named_allocation_bytes)
+        .max(prospective.capi.largest)
+        .max(compiled_models.largest_allocation_bytes)
+        > limits.maximum_named_allocation_bytes
+    {
         return Err(failure(ResourceFault::Limit));
     }
     Ok(())
@@ -1502,8 +1457,7 @@ where
 
 #[cfg(test)]
 mod admission_tests {
-    //! #1398 gates 2 and 3: the replacement admission sums every held plan and model, and a warm
-    //! candidate's re-preparation peak.
+    //! #1398 gate 2: the replacement admission sums every held plan and model.
 
     use super::*;
 
@@ -1645,25 +1599,22 @@ mod admission_tests {
         held: &[LiveEpochResources],
         prospective: ProspectivePlan,
         models: CompiledModelAdmission,
-        peak: AdmissionPeak,
         limits: ControlLimits,
     ) -> Result<(), String> {
-        validate_replacement_peak(held, prospective, models, peak, limits)
+        validate_replacement_peak(held, prospective, models, limits)
             .map_err(|failure| String::from_utf8(failure.diagnostic().into_owned()).expect("UTF-8"))
     }
 
-    /// The peak of each cap in [`CAPS`] for `held` (in base units, running plan first) beside
-    /// `copies` of a candidate of base `candidate`, with `models` retained model bytes, spelled
-    /// out term by term.
-    fn peaks(held: &[u64], candidate: u64, copies: u64, models: u64) -> [u64; 9] {
-        let sum = |factor: u64| {
-            held.iter().map(|base| factor * base).sum::<u64>() + copies * factor * candidate
-        };
+    /// The peak of each cap in [`CAPS`] for `held` (in base units, running plan first) beside a
+    /// candidate of base `candidate`, with `models` retained model bytes, spelled out term by
+    /// term.
+    fn peaks(held: &[u64], candidate: u64, models: u64) -> [u64; 9] {
+        let sum =
+            |factor: u64| held.iter().map(|base| factor * base).sum::<u64>() + factor * candidate;
         let graph = sum(1) + models;
         let (older, newest) = (&held[..held.len() - 1], held[held.len() - 1]);
-        let control = 7 * newest
-            + older.iter().map(|base| 8 * base).sum::<u64>()
-            + copies * (8 + 9) * candidate;
+        let control =
+            7 * newest + older.iter().map(|base| 8 * base).sum::<u64>() + (8 + 9) * candidate;
         [
             graph,
             sum(3),
@@ -1682,18 +1633,11 @@ mod admission_tests {
         held: &[LiveEpochResources],
         prospective: ProspectivePlan,
         models: CompiledModelAdmission,
-        peak: AdmissionPeak,
         expected: [u64; 9],
     ) {
         for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
             assert_eq!(
-                verdict(
-                    held,
-                    prospective,
-                    models,
-                    peak,
-                    with_cap(index, expected[index])
-                ),
+                verdict(held, prospective, models, with_cap(index, expected[index])),
                 Ok(()),
                 "{label}, {cap}: accepted at the peak {}",
                 expected[index]
@@ -1703,7 +1647,6 @@ mod admission_tests {
                     held,
                     prospective,
                     models,
-                    peak,
                     with_cap(index, expected[index] - 1)
                 ),
                 Err((*code).to_owned()),
@@ -1733,8 +1676,7 @@ mod admission_tests {
             &held,
             prospective,
             models,
-            AdmissionPeak::Single,
-            peaks(&[1, 10, 100], 1_000, 1, models.retained_bytes),
+            peaks(&[1, 10, 100], 1_000, models.retained_bytes),
         );
         // Today's check, for the same candidate beside the running plan alone.
         let today =
@@ -1744,8 +1686,7 @@ mod admission_tests {
             &held[..1],
             prospective,
             today,
-            AdmissionPeak::Single,
-            peaks(&[1], 1_000, 1, today.retained_bytes),
+            peaks(&[1], 1_000, today.retained_bytes),
         );
         // The largest allocation: a middle held plan's is the strict maximum.
         let mut middle = epoch(10);
@@ -1753,69 +1694,8 @@ mod admission_tests {
         let held = [epoch(1), middle, epoch(100)];
         for (cap, expected) in [(50_000, Ok(())), (49_999, Err(CAPS[8].1.to_owned()))] {
             assert_eq!(
-                verdict(
-                    &held,
-                    prospective,
-                    models,
-                    AdmissionPeak::Single,
-                    with_cap(8, cap)
-                ),
+                verdict(&held, prospective, models, with_cap(8, cap)),
                 expected
-            );
-        }
-    }
-
-    /// Gate 3. A running plan `R` and a candidate `C` admitted `WithReprepare`: each cap at
-    /// `R + 2C - 1` refuses with its diagnostic and at `R + 2C` passes, while `Single` passes at
-    /// `R + C`. With a withdrawn candidate `W` also held, both peaks are checked and the larger
-    /// decides. Test value: an admission that checks a warm candidate only against the plans
-    /// held at submit admits one whose deadline fallback (three plans) exceeds the caps.
-    #[test]
-    fn a_warm_candidate_is_admitted_against_its_reprepare_peak() {
-        let models =
-            compiled_model_admission_between(model(1 << 20, 3), model(1 << 22, 7)).expect("models");
-        let running = [epoch(1)];
-        let prospective = candidate(1_000);
-        assert_each_cap(
-            "reprepare",
-            &running,
-            prospective,
-            models,
-            AdmissionPeak::WithReprepare,
-            peaks(&[1], 1_000, 2, models.retained_bytes),
-        );
-        let single = peaks(&[1], 1_000, 1, models.retained_bytes);
-        for (index, cap) in CAPS.iter().enumerate().take(8) {
-            assert_eq!(
-                verdict(
-                    &running,
-                    prospective,
-                    models,
-                    AdmissionPeak::Single,
-                    with_cap(index, single[index])
-                ),
-                Ok(()),
-                "single, {}: R + C passes",
-                cap.0
-            );
-        }
-        // A withdrawn candidate larger than the warm one: the held peak decides; smaller: the
-        // re-preparation peak does.
-        for withdrawn in [100_000, 10] {
-            let held = [epoch(1), epoch(withdrawn)];
-            let both = peaks(&[1, withdrawn], 1_000, 1, models.retained_bytes);
-            let again = peaks(&[1], 1_000, 2, models.retained_bytes);
-            let mut larger = [0; 9];
-            for index in 0..9 {
-                larger[index] = both[index].max(again[index]);
-            }
-            assert_each_cap(
-                &format!("withdrawn {withdrawn}"),
-                &held,
-                prospective,
-                models,
-                AdmissionPeak::WithReprepare,
-                larger,
             );
         }
     }
