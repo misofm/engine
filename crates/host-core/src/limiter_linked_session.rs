@@ -35,8 +35,9 @@
 //! bank there is refused rather than rendered per node (#1098; see `folded`). Two edits, each made
 //! for a measured reason:
 //!
-//! * **One stereo stream per track.** The fixture's one source is widened to 128 channels and
-//!   track `k` reads channels `2k` and `2k + 1`. With the fixture's one stereo source every lane
+//! * **One stereo stream per track.** The fixture's one source becomes sixty-four stereo sources
+//!   (a source is mono or stereo, so the streams cannot share one wide source) and track `k` reads
+//!   source `k`'s two channels, fed noise streams `2k` and `2k + 1`. With the fixture's one source every lane
 //!   of a bank hears the same noise, so an unlink is one trial rather than eight. On that shape,
 //!   with the compressors bypassed and three unlinks, M1 stayed green.
 //! * **Every compressor bypassed** from block 0, through its live control channel (the rack's
@@ -166,12 +167,15 @@ use crate::{
 
 const FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
-const SOURCE: &[u8] = b"fixture-source";
 const LIMITER: &str = "miso.true-peak-limiter";
 const COMPRESSOR: &str = "miso.compressor";
 const TRACKS: usize = 64;
-/// Source channels: one independent stereo stream per track.
+/// The noise streams: one independent stereo pair per track, each fed to that track's own source.
 const CHANNELS: usize = 2 * TRACKS;
+/// The ID of the source track `track` reads.
+fn source_id(track: usize) -> String {
+    format!("stream-{track:02}")
+}
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 96;
 /// Frames per noise segment. Divides neither the quantum nor the limiter's 241-frame window.
@@ -254,13 +258,12 @@ fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 256,
         maximum_submixes: 256,
         maximum_vcas: 256,
         maximum_vca_reach_pairs: u64::MAX,
-        maximum_sources: 16,
+        maximum_sources: 64,
         maximum_routes: 256,
         maximum_effects: 256,
         maximum_graph_session_plus_plan_bytes: 1_000_000_000,
@@ -312,10 +315,18 @@ fn strip_address(backend: Backend, index: u32) -> LiveEffectAddress {
 fn session(backend: Backend) -> String {
     let mut model = parse_session_json(FIXTURE).expect("the fixture parses");
     assert_eq!(model.sources.len(), 1, "the fixture has one source");
-    model.sources[0].channels = u8::try_from(CHANNELS).expect("channel count");
+    let template = model.sources[0].clone();
+    model.sources = (0..TRACKS)
+        .map(|index| {
+            let mut source = template.clone();
+            source.id = session::StableId::parse(&source_id(index)).expect("source ID");
+            source
+        })
+        .collect();
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        track.left_source_channel = u8::try_from(2 * index).expect("left channel");
-        track.right_source_channel = u8::try_from(2 * index + 1).expect("right channel");
+        track.source_id = session::StableId::parse(&source_id(index)).expect("source ID");
+        track.left_source_channel = 0;
+        track.right_source_channel = 1;
     }
     if folded(backend) {
         let chains: Vec<Vec<session::Effect>> = model
@@ -575,22 +586,24 @@ fn run(backend: Backend) -> Run {
                 *sample = source_sample(channel as u64, first + frame as u64);
             }
         }
-        let views: Vec<&[f32]> = planes.iter().map(|plane| &plane[..]).collect();
-        console
-            .prepared
-            .sources
-            .submit(
-                SOURCE,
-                SourceSubmission {
-                    generation: 1,
-                    start_frame: first,
-                    sample_rate_hz: 48_000,
-                    planes: &views,
-                    frames: QUANTUM as u32,
-                    end_of_region: false,
-                },
-            )
-            .expect("source block");
+        for track in 0..TRACKS {
+            let pair = [&planes[2 * track][..], &planes[2 * track + 1][..]];
+            console
+                .prepared
+                .sources
+                .submit(
+                    source_id(track).as_bytes(),
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: first,
+                        sample_rate_hz: 48_000,
+                        planes: &pair,
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
         let mut samples = [0.0_f32; QUANTUM * 2];
         let output =
             PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");

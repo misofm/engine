@@ -231,7 +231,6 @@ fn automatable_is_exactly_the_live_model_value_rows() {
         "hpf_hz",
         "lpf_hz",
         "gain_db",
-        "follows_mute",
         "offset_db",
         "fader_db",
         "mute",
@@ -240,11 +239,42 @@ fn automatable_is_exactly_the_live_model_value_rows() {
         "matrix_lr",
         "matrix_rl",
         "matrix_rr",
-        "matrix_mode",
     ]
     .into_iter()
     .collect();
     assert_eq!(names, expected);
+}
+
+/// #1632. Red if `follows_mute` or `matrix_mode` is automatable, or stops being a live model row:
+/// each is a live control that a ruling keeps out of automation ("a routing setting" and "a mode").
+#[test]
+fn follows_mute_and_matrix_mode_are_live_and_not_automatable() {
+    let model = fixture();
+    let mut seen = BTreeSet::new();
+    for row in list(&model, &controls::MonitorOverlay::default(), RATE) {
+        let d = &row.descriptor;
+        if d.name != "follows_mute" && d.name != "matrix_mode" {
+            continue;
+        }
+        seen.insert(d.name);
+        assert!(!d.automatable(), "{}", d.name);
+        // A route into the output folds `follows_mute` away (#1218); the send into the submix is
+        // the live row.
+        if matches!(&row.address.owner, Owner::Route(id) if id.as_str() != "send") {
+            continue;
+        }
+        assert_eq!(d.class, ControlClass::Live, "{}", d.name);
+        assert_eq!(d.scope, controls::ControlScope::Model, "{}", d.name);
+        assert!(
+            matches!(
+                d.automation,
+                controls::AutomationRule::Excluded(exclusion) if exclusion.reopen == "an owner request"
+            ),
+            "{}",
+            d.name
+        );
+    }
+    assert_eq!(seen, BTreeSet::from(["follows_mute", "matrix_mode"]));
 }
 
 /// Gate 3. Red if a row lacks a name, a reason's reopening condition, its choices, or a default

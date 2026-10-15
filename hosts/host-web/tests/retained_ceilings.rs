@@ -107,6 +107,14 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// to 255 channels of the quantum, the plane references and the ID staging); the metadata row rose
 /// by the plane references alone (1,594,186 to 1,598,234) and stays under its ceiling. The new
 /// beyond-capture figure is 716,302; plus 10 % is 787,932.2, rounded up to 64: 787,968.
+///
+/// **Re-pinned: `bridge_retained_bytes` (source channels, batch 13).** A source is mono or stereo
+/// (owner answer of 2026-10-15), so the browser sizes the same staging by
+/// `SOURCE_CHANNELS_LAUNCH_MAXIMUM` (two), not 255: the PCM staging is back to 2 channels of the
+/// quantum and the plane references to two. The ID staging keeps its 127 bytes. For this fixture
+/// the retained row fell from 1,764,878 to 1,631,294 bytes (x86-64; -133,584 and 113 for the ID
+/// staging, so +113 over the row before B1), and the metadata row to 1,594,186. The new
+/// beyond-capture figure is 582,718; plus 10 % is 640,989.8, rounded up to 64: 641,024.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
@@ -117,8 +125,8 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_retained_bytes",
         value: |report| report.bridge_retained_bytes,
-        eight_lanes: CAPTURE + 787_968,
-        four_lanes: CAPTURE + 787_968,
+        eight_lanes: CAPTURE + 641_024,
+        four_lanes: CAPTURE + 641_024,
     },
     Budget {
         row: "source_total_bytes",

@@ -203,6 +203,12 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   C calls themselves (engine create and destroy, compile, command submit, session and plan
   destroy), each with the handle and storage contract stated beside it; it installs no allocator
   and calls no render entry.
+- `crates/capi/tests/empty_boot.rs` (TBD30): the exported-C evidence that a session with no source
+  and no track boots, renders silence and grows by a structural transaction, with zero allocator
+  calls in the render entry. Its unsafe is the C calls themselves (engine create and destroy,
+  compile, command submit, service, event dequeue, source seek and submit, plan resource and
+  watermark queries, render, session and plan destroy), each with the handle and storage contract
+  stated beside it; the allocator it runs under is `bench_support::alloc`'s.
 - `crates/capi/tests/resource_lifecycle.rs` (issue 119): the exported-C retained-allocation and
   disposal evidence. It calls the C entries, including the render entry, and owns
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged
@@ -377,7 +383,7 @@ Approved unsafe code that runs on a render thread, per entry:
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
-  `input_design_bounds.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
+  `input_design_bounds.rs`, `empty_boot.rs`, `control_parity.rs` and `tools/audit/src/capi.rs` call the C
   render entry from threads of their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
   which runs on the same test thread as its render calls.

@@ -169,7 +169,10 @@ canonical serialization never turn such a model into an engine session. It is th
 rate in a document; V1 has no per-source rate and no implicit sample-rate conversion.
 
 Each source is exactly `{ id, content, channels, bit_depth, frames }`. `content` must match
-`blake3:[0-9a-f]{64}` exactly. `channels` and `frames` are nonzero; `frames` is the full canonical
+`blake3:[0-9a-f]{64}` exactly. `channels` is 1 or 2: a source is mono or stereo (owner answer of
+2026-10-15), and any other value, zero or more than `SOURCE_CHANNELS_LAUNCH_MAXIMUM`, rejects with
+`source.channels.unsupported` at `$.sources[i].channels` at load and in a structural edit's
+validation, on every host. `frames` is nonzero; `frames` is the full canonical
 content length beginning at frame zero. `bit_depth` is integer `16`, integer `24`, or the string
 `"32f"`; the canonical writer preserves those spellings. Locator, mapping, region, and per-source
 rate are not part of the schema. Host resolver policy maps the content identity to bytes, then
@@ -268,7 +271,7 @@ owner uses the `own` section (`schema.invalid_enum` at `target.section` otherwis
 lane and takes the segment's unit and values is the control core's rule
 (`controls::automation_diagnostics`), reported by host preparation and `session-validator` stage 5
 beside the effect diagnostics: `control.address.unknown` (no row), `control.automation.target`
-(the row is rebuild-only, derived, a monitor row or a setting), `control.inactive` (the owner's shape
+(the row is rebuild-only, derived, a monitor row, a setting, or one of the two live rows that a ruling keeps out of automation: a send's `follows_mute`, a routing setting, and a strip's `matrix_mode`, a mode; #1632), `control.inactive` (the owner's shape
 does not use the row), `control.lane` (`left` or `right` on a shared row) and `control.domain` (a
 segment whose unit is not the row's, or a value the row refuses). A console target on a submix
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter

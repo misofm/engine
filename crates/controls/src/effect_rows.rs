@@ -22,7 +22,8 @@ use session::{
 };
 
 use crate::descriptor::{
-    BASE, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, ruled_live_not_built,
+    AutomationRule, BASE, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion,
+    ruled_live_not_built,
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
@@ -204,6 +205,7 @@ pub(crate) fn parameter_descriptor(parameter: &'static ParameterDescriptor) -> C
         family: Family::Effect,
         active: true,
         domain: DomainRule::Contract(parameter),
+        automation: AutomationRule::Computed,
     }
 }
 
