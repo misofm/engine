@@ -12,7 +12,7 @@ make_base() {
   cat >"$d/crates/session/src/compile.rs" <<'EOF'
 fn compile(session: (), caps: ()) {
  let estimate = estimate_session(session);
- check_caps(session, estimate, caps);
+ check_caps(estimate, caps);
  validate_session(session);
  let canonical_json = write_canonical(session);
  let mut normalized = session.clone();
@@ -32,11 +32,11 @@ for kind in engine session toml serde publication estimate; do d="$tmp/$kind"; c
   estimate) printf 'String::with_capacity(1);\n' >>"$d/crates/session/src/estimate.rs";;
  esac; red "$kind" "$d"; done
 for f in crates/engine/Cargo.toml crates/session/Cargo.toml crates/session/src/estimate.rs crates/session/src/compile.rs; do d="$tmp/missing-${f//\//-}"; cp -a "$base" "$d"; rm "$d/$f"; red "missing $f" "$d"; done
-for f in 'let estimate = estimate_session(session);' 'check_caps(session, estimate, caps);' 'validate_session(session);' 'let canonical_json = write_canonical(session);' 'let mut normalized = session.clone();'; do d="$tmp/anchor-$RANDOM"; cp -a "$base" "$d"; sed -i "s|$f||" "$d/crates/session/src/compile.rs"; red anchor "$d"; done
-d="$tmp/order"; cp -a "$base" "$d"; sed -i '0,/check_caps(session, estimate, caps);/{s//let canonical_json = write_canonical(session);\n check_caps(session, estimate, caps);/}' "$d/crates/session/src/compile.rs"; red order "$d"
+for f in 'let estimate = estimate_session(session);' 'check_caps(estimate, caps);' 'validate_session(session);' 'let canonical_json = write_canonical(session);' 'let mut normalized = session.clone();'; do d="$tmp/anchor-$RANDOM"; cp -a "$base" "$d"; sed -i "s|$f||" "$d/crates/session/src/compile.rs"; red anchor "$d"; done
+d="$tmp/order"; cp -a "$base" "$d"; sed -i '0,/check_caps(estimate, caps);/{s//let canonical_json = write_canonical(session);\n check_caps(estimate, caps);/}' "$d/crates/session/src/compile.rs"; red order "$d"
 d="$tmp/duplicate"; cp -a "$base" "$d"; cat >>"$d/crates/session/src/compile.rs" <<'EOF'
  let estimate = estimate_session(session);
- check_caps(session, estimate, caps);
+ check_caps(estimate, caps);
  validate_session(session);
  let canonical_json = write_canonical(session);
  let mut normalized = session.clone();
@@ -65,7 +65,7 @@ descs=('engine reverse dependency' 'session engine workspace dependency' 'sessio
 outs=('1:session.workspace = true' '4:engine.workspace = true' '5:json-syntax = { version = "=0.12.5", default-features = false }' '4:toml = "1"' '1:use engine::PlanPublisher;' '1:String::with_capacity(1);')
 for i in "${!tokens[@]}"; do d="$tmp/direct-$i"; cp -a "$base" "$d"; rgshim "$d" "${tokens[i]}" "${outs[i]}"; red direct "$d" "${descs[i]} scan errored (rg exit 9)" env PATH="$d/bin:$PATH"; done
 # Plausible correct first rows, malformed/zero rows, and early clone distinguish first-match order.
-an=(estimate caps validate canonical clone); pats=('estimate_session' 'check_caps' 'validate_session' 'write_canonical' 'session\.clone'); rows=('2: let estimate = estimate_session(session);' '3: check_caps(session, estimate, caps);' '4: validate_session(session);' '5: let canonical_json = write_canonical(session);' '6: let mut normalized = session.clone();')
+an=(estimate caps validate canonical clone); pats=('estimate_session' 'check_caps' 'validate_session' 'write_canonical' 'session\.clone'); rows=('2: let estimate = estimate_session(session);' '3: check_caps(estimate, caps);' '4: validate_session(session);' '5: let canonical_json = write_canonical(session);' '6: let mut normalized = session.clone();')
 for i in "${!an[@]}"; do d="$tmp/ae-$i"; cp -a "$base" "$d"; rgshim "$d" "${pats[i]}" "${rows[i]}"; red anchor "$d" "${an[i]} scan errored (rg exit 9)" env PATH="$d/bin:$PATH"; done
 for row in 'x: let estimate = estimate_session(session);' '0: let estimate = estimate_session(session);'; do d="$tmp/al-$RANDOM"; cp -a "$base" "$d"; rgshim "$d" 'estimate_session' "$row" 0; red line "$d" 'estimate anchor line is not a positive decimal' env PATH="$d/bin:$PATH"; done
 d="$tmp/early-clone"; cp -a "$base" "$d"; sed -i '2i let mut normalized = session.clone();' "$d/crates/session/src/compile.rs"; red early-clone "$d" 'resource preflight/cap ordering changed'

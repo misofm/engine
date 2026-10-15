@@ -50,6 +50,10 @@ pub struct ResourceEstimate {
     pub estimated_bytes: u64,
 }
 
+/// The canonical-writer bound's allowance for one structural item (an entity, a route, a VCA
+/// member, an effect, a parameter entry, an automation or a segment).
+const CANONICAL_BYTES_PER_ITEM: u64 = 1_024;
+
 /// Estimate issue-004-owned model/runtime resources without cloning or canonicalizing the model.
 pub fn estimate_session_resources(
     session: &SessionModel,
@@ -218,7 +222,12 @@ pub fn estimate_session_resources(
         4_096,
         checked_add(
             checked_mul(retained_string_bytes, 10, "$.canonical", &mut errors),
-            checked_mul(structural_items, 1_024, "$.canonical", &mut errors),
+            checked_mul(
+                structural_items,
+                CANONICAL_BYTES_PER_ITEM,
+                "$.canonical",
+                &mut errors,
+            ),
             "$.canonical",
             &mut errors,
         ),
@@ -299,6 +308,65 @@ pub fn estimate_session_resources(
 }
 
 pub(crate) use estimate_session_resources as estimate_session;
+
+impl ResourceEstimate {
+    /// The estimate of a committed session after an in-place commit of values (#1613) that added
+    /// `growth`'s parameter entries (#1620), with the canonical text now `canonical_bytes` long:
+    /// exactly what [`crate::compile_session`] of the edited model gives, or `None` where it would
+    /// refuse (a cap, the canonical bound, an overflow) or where this cannot be exact.
+    ///
+    /// `self` is the committed session's estimate and `growth` comes from
+    /// [`crate::owners_growth`] over the edited owners, so every other count is the committed one.
+    /// An added parameter entry adds one entry to its effect's list, one structural item to the
+    /// canonical bound and nothing else; the largest single allocation is the largest of the
+    /// committed one, the new canonical bound and the grown lists, since no item shrank.
+    #[must_use]
+    pub fn after_owners_edit(
+        &self,
+        growth: crate::OwnersGrowth,
+        canonical_bytes: u64,
+        caps: crate::CompileCaps,
+    ) -> Option<Self> {
+        let parameters = u64::try_from(growth.parameters()).ok()?;
+        let entry = size::<crate::EffectParam>();
+        let canonical_upper_bound_bytes = self
+            .canonical_upper_bound_bytes
+            .checked_add(parameters.checked_mul(CANONICAL_BYTES_PER_ITEM)?)?;
+        // The compile's bound before the canonical text is written: the committed one, which
+        // counted the committed canonical bound in place of the text, plus the added entries and
+        // their structural items.
+        let compiled_model_upper_bound = self
+            .compiled_model_bytes
+            .checked_sub(self.canonical_bytes)?
+            .checked_add(canonical_upper_bound_bytes)?
+            .checked_add(parameters.checked_mul(entry)?)?;
+        let largest_grown_list = u64::try_from(growth.largest_grown_list())
+            .ok()?
+            .checked_mul(entry)?;
+        let single_allocation_bytes = self
+            .single_allocation_bytes
+            .max(canonical_upper_bound_bytes)
+            .max(largest_grown_list);
+        let platform = u64::try_from(isize::MAX).unwrap_or(u64::MAX);
+        for bytes in [compiled_model_upper_bound, single_allocation_bytes] {
+            if usize::try_from(bytes).is_err() || bytes > platform {
+                return None;
+            }
+        }
+        let preflight = Self {
+            parameter_count: self.parameter_count.checked_add(parameters)?,
+            canonical_upper_bound_bytes,
+            canonical_bytes: 0,
+            compiled_model_bytes: compiled_model_upper_bound,
+            single_allocation_bytes,
+            estimated_bytes: compiled_model_upper_bound
+                .checked_add(self.requested_runtime_bytes)?,
+            ..*self
+        };
+        crate::compile::check_caps(preflight, caps).ok()?;
+        with_canonical_bytes(preflight, usize::try_from(canonical_bytes).ok()?).ok()
+    }
+}
 
 pub(crate) fn with_canonical_bytes(
     mut estimate: ResourceEstimate,

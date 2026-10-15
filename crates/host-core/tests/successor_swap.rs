@@ -894,6 +894,17 @@ fn filtered_session(mono: bool) -> SessionModel {
     model
 }
 
+/// `model` without track `id` and the routes it sources: as a committed base, B's strip of that ID
+/// is new to the join, so its input section restarts at the swap. A live value difference no
+/// longer restarts one (#1630 D1).
+fn without_track(mut model: SessionModel, id: &str) -> SessionModel {
+    model.tracks.retain(|track| track.id.as_str() != id);
+    model.routes.retain(
+        |route| !matches!(&route.source, RouteSource::Track { track_id, .. } if track_id.as_str() == id),
+    );
+    model
+}
+
 /// `model` plus [`MUTED_TRACK`], a muted copy of `eq0` that sorts first.
 fn with_muted_track(mut model: SessionModel) -> SessionModel {
     add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
@@ -1022,17 +1033,20 @@ impl LivePlan {
             predecessor,
             committed,
             &host_core::NO_OBSERVATION,
+            &EditRamps::new(),
             backend,
         )
     }
 
-    /// A successor prepared with the taps the host armed (#1584 D6a).
+    /// A successor prepared with the taps the host armed (#1584 D6a) and the ramp lengths the
+    /// transaction's edits gave their rows (#1394 D6).
     fn successor_observed(
         session: &Session,
         request: &host_core::HostLiveControlRequest,
         predecessor: &host_core::PlanStateInventory,
         committed: &SessionModel,
         observation: &controls::ObservationBindings,
+        edit_ramps: &EditRamps,
         backend: Backend,
     ) -> Self {
         let (prepared, handles) =
@@ -1044,7 +1058,7 @@ impl LivePlan {
                     inventory: predecessor,
                     committed,
                     revision: successor::SUCCESSOR_REVISION,
-                    edit_ramps: &EditRamps::new(),
+                    edit_ramps,
                     monitor: host_core::MonitorBase::NONE,
                     observation,
                 },
@@ -1130,6 +1144,13 @@ struct DirectRun {
     transitions: [u64; 3],
     /// The predecessor's `live_values_superseded` count after the hand-over (#1312 D2).
     carry_superseded: u64,
+    /// The successor's own `live_values_superseded` count after its first block: the carried
+    /// values its adopting block replaced (#1630 f). The test seam gives each plan its own count;
+    /// a host passes both plans the session's.
+    successor_superseded: u64,
+    /// The last plan's own count after the final block: the successor's, when `b` is given. A
+    /// carried value counted again by a later drain shows here and not in `successor_superseded`.
+    final_superseded: u64,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks of `quantum` frames, then -- when `b` is given -- prepare
@@ -1145,6 +1166,30 @@ fn direct_run(
     backend: Backend,
     successor_dual: bool,
 ) -> DirectRun {
+    direct_run_ramped(
+        a,
+        b,
+        &EditRamps::new(),
+        feed,
+        quantum,
+        writes,
+        backend,
+        successor_dual,
+    )
+}
+
+/// [`direct_run`] whose successor is prepared with the transaction's `edit_ramps` (#1394 D6).
+#[allow(clippy::too_many_arguments)]
+fn direct_run_ramped(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    edit_ramps: &EditRamps,
+    feed: &Feed,
+    quantum: usize,
+    writes: &[LiveWrite],
+    backend: Backend,
+    successor_dual: bool,
+) -> DirectRun {
     use bench_support::alloc as bench_alloc;
     let mut plan = LivePlan::fresh(a, backend);
     let mut blocks = Vec::with_capacity(BLOCKS);
@@ -1152,6 +1197,7 @@ fn direct_run(
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut collapses = [[0; 2]; 2];
     let mut carry_superseded = 0;
+    let mut successor_superseded = 0;
     plan.submit(feed, quantum, 0);
     for block in 0..BLOCKS {
         for write in writes.iter().filter(|write| write.block == block) {
@@ -1160,8 +1206,15 @@ fn direct_run(
         let swap = block == SWAP_BLOCK && b.is_some();
         if let (true, Some((session, committed))) = (swap, b) {
             collapses[0] = plan.prepared.plan.bank_collapse_counters();
-            let mut successor =
-                LivePlan::successor(session, &plan.prepared.inventory, committed, backend);
+            let mut successor = LivePlan::successor_observed(
+                session,
+                &LivePlan::request(),
+                &plan.prepared.inventory,
+                committed,
+                &host_core::NO_OBSERVATION,
+                edit_ramps,
+                backend,
+            );
             successor
                 .prepared
                 .plan
@@ -1191,6 +1244,7 @@ fn direct_run(
                 (audit.allocations, audit.deallocations),
             );
             carry_superseded = plan.handles.live_values_superseded.get();
+            successor_superseded = successor.handles.live_values_superseded.get();
             blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
@@ -1208,6 +1262,8 @@ fn direct_run(
         collapses,
         transitions: plan.prepared.plan.bank_collapse_transitions(),
         carry_superseded,
+        successor_superseded,
+        final_superseded: plan.handles.live_values_superseded.get(),
     }
 }
 
@@ -1229,10 +1285,10 @@ fn first_direct_difference(left: &DirectRun, right: &DirectRun) -> Option<usize>
 /// B is prepared from, is pending in A's queue at the swap. The carry drains it into the lane
 /// before copying, so B's first block starts the trim ramp exactly where A would have. `strip` is
 /// the written strip: the first bank's `eq2`, or a strip in a later predecessor bank.
-/// `restarting` names a strip whose trim the committed model changes without B following it, so
-/// its input section restarts at the swap (#1276 D1); it sits in the first bank at the lane of the
-/// written strip in its own bank, and it is muted in every session so that its restart leaves the
-/// output bits where the unrestarted reference puts them.
+/// `restarting` names a strip the committed model lacks ([`without_track`]), so B's strip of that
+/// ID is new to the join and its input section restarts at the swap; it sits in the first bank at
+/// the lane of the written strip in its own bank, and it is muted in every session so that its
+/// restart leaves the output bits where the unrestarted reference puts them.
 fn a_pending_trim_record_survives_the_swap(
     backend: Backend,
     strip: &'static str,
@@ -1273,15 +1329,9 @@ fn a_pending_trim_record_survives_the_swap(
     track.builtins.right.trim_db = NEW_TRIM_DB;
     let b = Session::compile(with_muted_track(committed.clone()));
     if let Some(restarting) = restarting {
-        // Committed moves the restarting strip's trim; B keeps the old one, so that input section
-        // restarts instead of carrying.
-        let track = committed
-            .tracks
-            .iter_mut()
-            .find(|track| track.id.as_str() == restarting)
-            .expect("the restarting strip");
-        track.builtins.left.trim_db += 3.0;
-        track.builtins.right.trim_db += 3.0;
+        // A live value difference carries and retargets (#1630 D1); a strip the committed model
+        // lacks has nothing to carry, so that input section restarts.
+        committed = without_track(committed, restarting);
     }
     let reference_session = Session::compile(with_muted_track(session()));
     let feed = Feed::new(SOURCE, 5);
@@ -1328,23 +1378,16 @@ fn a_pending_trim_record_survives_the_swap(
 
 /// #1312 D2 on the input cells: `live_values_superseded` counts the writes the carry drain
 /// replaces on input lanes that carry, and none on an input lane the swap restarts, whichever
-/// lanes share their bank. The committed model differs from B's in the first strip's trim, so
-/// that strip's input section restarts (#1276 D1) while the strip beside it, in the same
-/// predecessor bank at four and at eight lanes, carries. Three trim writes sit unread in each
-/// strip's cells at the hand-over.
+/// lanes share their bank. The committed model lacks the first strip ([`without_track`]), so that
+/// strip's input section restarts while the strip beside it, in the same predecessor bank at four
+/// and at eight lanes, carries. Three trim writes sit unread in each strip's cells at the
+/// hand-over.
 fn a_restarting_input_lane_does_not_count_its_replaced_writes(backend: Backend) {
     const RESTARTING: &str = "eq0";
     const CARRYING: &str = "eq1";
     let a = Session::compile(filtered_session(false));
     let b = Session::compile(with_muted_track(filtered_session(false)));
-    let mut committed = filtered_session(false);
-    let strip = committed
-        .tracks
-        .iter_mut()
-        .find(|track| track.id.as_str() == RESTARTING)
-        .expect("the restarting strip");
-    strip.builtins.left.trim_db = 3.0;
-    strip.builtins.right.trim_db = 3.0;
+    let committed = without_track(filtered_session(false), RESTARTING);
     let feed = Feed::new(SOURCE, 5);
     let run = |strips: &[&'static str]| {
         let writes: Vec<LiveWrite> = strips
@@ -1581,7 +1624,9 @@ fn collapsed_strips_keep_collapsing_across_a_swap_at_four_lanes() {
 
 /// Gate 4 of #1276, one edit. B applies `edit` to `eq0`'s input section in the same transaction
 /// that adds a muted track, so `eq0`'s section does not carry (Q1's default): from the swap block
-/// on it renders exactly what a fresh plan of B renders from rest on the same PCM.
+/// on it renders exactly what a fresh plan of B renders from rest on the same PCM. These plans
+/// attach no input cells, so they cannot retarget a carried section; on plans that do, the section
+/// carries and retargets (#1630, [`an_input_difference_carries_and_retargets`]).
 fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoBuiltins)) {
     let one_track = |model: SessionModel| {
         let mut model = model;
@@ -1791,6 +1836,300 @@ fn the_input_carry_allocates_and_frees_nothing() {
             ((0, 0, 0), (0, 0)),
             "{backend:?}: allocator calls and audited allocations at the swap block"
         );
+    }
+}
+
+/// #1630 gates 1-3, one edit. B applies `edit` to [`RETARGETED`]'s input section in the same
+/// transaction that adds a muted track, on plans with live input cells. Run 1 prepares B from A's
+/// committed model: the section carries and the successor's cells retarget it (D1, D2). Run 2
+/// writes the classifier's records for the same edit to A's cells just before the swap and
+/// prepares B from a base that holds them: a plan that made the edit live. The runs are
+/// bit-identical in every block, and the swap block allocates and frees nothing (D3).
+#[cfg(feature = "control-provider")]
+fn an_input_difference_carries_and_retargets(name: &str, edit: fn(&mut session::DualMonoBuiltins)) {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    const RETARGETED: &str = "eq2";
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(filtered_session(false));
+    let mut moved = filtered_session(false);
+    edit(
+        &mut moved
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == RETARGETED)
+            .expect("the retargeted strip")
+            .builtins,
+    );
+    let moved = Session::compile(moved).model;
+    let b = Session::compile(with_muted_track(moved.clone()));
+    // The records the live path gives the same edit (#1556), with the session's ramps.
+    let delta = host_core::live_delta::classify_live_delta(
+        &a.model,
+        &moved,
+        LiveRamps::for_session(&moved),
+        &EditRamps::new(),
+    )
+    .unwrap_or_else(|reason| panic!("{name}: the edit is live: {reason:?}"));
+    assert_eq!(delta.strips.len(), 1, "{name}");
+    assert!(!delta.strips[0].input.is_empty(), "{name}: an input record");
+    let writes: Vec<LiveWrite> = delta.strips[0]
+        .input
+        .iter()
+        .map(|&record| LiveWrite {
+            block: SWAP_BLOCK,
+            strip: RETARGETED,
+            record,
+        })
+        .collect();
+    let feed = Feed::new(SOURCE, 17);
+    for backend in backends() {
+        let run = |committed: &SessionModel, writes: &[LiveWrite]| {
+            let run = direct_run(
+                &a,
+                Some((&b, committed)),
+                &feed,
+                QUANTUM,
+                writes,
+                backend,
+                false,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried, "{name}, {backend:?}");
+            run
+        };
+        let retargeted = run(&a.model, &[]);
+        let written = run(&moved, &writes);
+        assert_eq!(
+            retargeted.swap_allocator,
+            ((0, 0, 0), (0, 0)),
+            "{name}, {backend:?}: allocator calls and audited allocations at the swap block"
+        );
+        assert_eq!(
+            first_direct_difference(&retargeted, &written),
+            None,
+            "{name}, {backend:?}: carry then retarget sounds like live edit then structural edit"
+        );
+        // Not vacuous: a section that restarts at the new values is audible at the swap block,
+        // and so is one that carries without the retarget (B without the edit).
+        let restarted = run(&without_track(a.model.clone(), RETARGETED), &[]);
+        assert_eq!(
+            first_direct_difference(&retargeted, &restarted),
+            Some(SWAP_BLOCK),
+            "{name}, {backend:?}: a restart is a transient the carry avoids"
+        );
+        let unmoved = direct_run(
+            &a,
+            Some((
+                &Session::compile(with_muted_track(a.model.clone())),
+                &a.model,
+            )),
+            &feed,
+            QUANTUM,
+            &[],
+            backend,
+            false,
+        );
+        assert_eq!(
+            first_direct_difference(&retargeted, &unmoved),
+            Some(SWAP_BLOCK),
+            "{name}, {backend:?}: the retarget moves the output from the swap block on"
+        );
+        // #1394 D6 through the successor path (#1630 g): the transaction gave the strip's
+        // `(Strip, Input)` row a 37-sample ramp. The retarget is the record of that edit, so the
+        // run equals the one that writes the classifier's records for it. Red if the join reads
+        // another strip's lengths, or none.
+        let mut edit_ramps = EditRamps::new();
+        edit_ramps.set(
+            &session::EditRampTarget::Strip(id(RETARGETED)),
+            session::EditRampRow::Input,
+            Some(37),
+        );
+        let ramped_delta = host_core::live_delta::classify_live_delta(
+            &a.model,
+            &moved,
+            LiveRamps::for_session(&moved),
+            &edit_ramps,
+        )
+        .unwrap_or_else(|reason| panic!("{name}: the ramped edit is live: {reason:?}"));
+        let ramped_writes: Vec<LiveWrite> = ramped_delta.strips[0]
+            .input
+            .iter()
+            .map(|&record| LiveWrite {
+                block: SWAP_BLOCK,
+                strip: RETARGETED,
+                record,
+            })
+            .collect();
+        let ramped = direct_run_ramped(
+            &a,
+            Some((&b, &a.model)),
+            &edit_ramps,
+            &feed,
+            QUANTUM,
+            &[],
+            backend,
+            false,
+        );
+        assert_eq!(ramped.carry, CarryOutcome::Carried, "{name}, {backend:?}");
+        let ramped_written = run(&moved, &ramped_writes);
+        assert_eq!(
+            first_direct_difference(&ramped, &ramped_written),
+            None,
+            "{name}, {backend:?}: the retarget ramps over the edit's `(Strip, Input)` length"
+        );
+        // Not vacuous where the row ramps (trim and polarity; a filter target does not take it):
+        // the edit's length is audible against the session's.
+        if ramped_delta.strips[0].input != delta.strips[0].input {
+            assert_eq!(
+                first_direct_difference(&ramped, &retargeted),
+                Some(SWAP_BLOCK),
+                "{name}, {backend:?}: the edit's length is audible"
+            );
+        }
+    }
+}
+
+/// #1630 gate 1: a trim change. Red if the join still restarts a section whose trim differs (the
+/// restart transient), or if the carried section keeps the old trim (no retarget).
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_trim_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("trim_db", |builtins| {
+        builtins.left.trim_db += 1.5;
+        builtins.right.trim_db += 0.75;
+    });
+}
+
+/// #1630 gate 2: input filter cutoffs, one-sided and on both sides. Red if a filter retarget is
+/// dropped or designed from other seeds than the live path's.
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_filter_cutoff_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("hpf_hz", |builtins| {
+        builtins.left.hpf_hz = 160.0;
+        builtins.right.hpf_hz = 170.0;
+    });
+    an_input_difference_carries_and_retargets("lpf_hz", |builtins| {
+        builtins.right.lpf_hz = 3_500.0;
+    });
+}
+
+/// #1630 gate 2: a polarity change.
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_polarity_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("polarity_invert", |builtins| {
+        builtins.right.polarity_invert = true;
+    });
+}
+
+/// #1630 f, D15-2 on the input cells: a carried live value that the successor's retarget replaces
+/// in the adopting block is counted once. A left-only trim write sits unread in A's cells at the
+/// hand-over and is committed in the base; B moves that trim again. The carry drain applies the
+/// written value, and the successor's retarget replaces it before any sample renders: one value,
+/// one cell, superseded. The run is bit-identical to one whose base never held the write, and with
+/// no retarget (B leaves the trim at the written value) nothing is counted. Red without the
+/// adopting block's count (0, not 1).
+fn a_carried_input_value_the_retarget_replaces_is_counted(backend: Backend) {
+    const STRIP: &str = "eq2";
+    const WRITTEN_DB: f32 = 1.75;
+    const MOVED_DB: f32 = -3.5;
+    let with_left_trim = |db: f32| {
+        let mut model = filtered_session(false);
+        model
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == STRIP)
+            .expect("the strip")
+            .builtins
+            .left
+            .trim_db = db;
+        model
+    };
+    let a = Session::compile(filtered_session(false));
+    let written = with_left_trim(WRITTEN_DB);
+    let b = Session::compile(with_muted_track(with_left_trim(MOVED_DB)));
+    // The second write: a second value to the same cell, two blocks after the adopting block,
+    // through the successor's normal write path. The carry marks are spent by then, so it is a plain
+    // write, never a second carried value.
+    let writes = [
+        LiveWrite {
+            block: SWAP_BLOCK,
+            strip: STRIP,
+            record: builtins_compiler::TrackInputRecord::TrimDb {
+                lanes: builtins::BuiltinLaneSelector::Left,
+                db: WRITTEN_DB,
+                smoothing_samples: 64,
+            },
+        },
+        LiveWrite {
+            block: SWAP_BLOCK + 2,
+            strip: STRIP,
+            record: builtins_compiler::TrackInputRecord::TrimDb {
+                lanes: builtins::BuiltinLaneSelector::Left,
+                db: 0.5,
+                smoothing_samples: 64,
+            },
+        },
+    ];
+    let feed = Feed::new(SOURCE, 19);
+    let run = |b: &Session, committed: &SessionModel, writes: &[LiveWrite]| {
+        let run = direct_run(
+            &a,
+            Some((b, committed)),
+            &feed,
+            QUANTUM,
+            writes,
+            backend,
+            false,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+        run
+    };
+    let replaced = run(&b, &written, &writes);
+    assert_eq!(
+        (replaced.carry_superseded, replaced.successor_superseded),
+        (0, 1),
+        "{backend:?}: the carried value the retarget replaced is counted once"
+    );
+    assert_eq!(
+        replaced.final_superseded, 1,
+        "{backend:?}: a later write to the cell is not a second carried value"
+    );
+    let unwritten = run(&b, &a.model, &writes[1..]);
+    assert_eq!(unwritten.successor_superseded, 0, "{backend:?}");
+    assert_eq!(unwritten.final_superseded, 0, "{backend:?}");
+    assert_eq!(
+        first_direct_difference(&replaced, &unwritten),
+        None,
+        "{backend:?}: the replaced carried value moves no bit"
+    );
+    // A carried value with no retarget is heard, not superseded.
+    let kept = run(
+        &Session::compile(with_muted_track(written.clone())),
+        &written,
+        &writes,
+    );
+    assert_eq!(
+        (kept.carry_superseded, kept.successor_superseded),
+        (0, 0),
+        "{backend:?}: a carried value nothing replaces is not counted"
+    );
+    assert_eq!(kept.final_superseded, 0, "{backend:?}");
+}
+
+#[test]
+fn a_carried_input_value_the_retarget_replaces_is_counted_on_every_width() {
+    for backend in backends() {
+        a_carried_input_value_the_retarget_replaces_is_counted(backend);
     }
 }
 
@@ -2742,6 +3081,10 @@ struct CellRun {
     /// cells held unread that the carry drain replaced (#1312 D2). Zero for a run without a swap
     /// that rendered no block after its writes.
     carry_superseded: u64,
+    /// The successor's own count after its first block, as [`DirectRun::successor_superseded`].
+    successor_superseded: u64,
+    /// The last plan's count after the final block, as [`DirectRun::final_superseded`].
+    final_superseded: u64,
 }
 
 /// Render `a` and write `writes` to the plan that renders their block next; with a `swap`, prepare
@@ -2763,6 +3106,7 @@ fn cell_run(
     let mut restarted = Vec::new();
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut carry_superseded = 0;
+    let mut successor_superseded = 0;
     plan.live.submit(feed, QUANTUM, 0);
     for block in 0..BLOCKS {
         plan.write_block(writes, block);
@@ -2804,6 +3148,7 @@ fn cell_run(
                 (audit.allocations, audit.deallocations),
             );
             carry_superseded = plan.live.handles.live_values_superseded.get();
+            successor_superseded = successor.live.handles.live_values_superseded.get();
             blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
@@ -2819,6 +3164,8 @@ fn cell_run(
         restarted,
         swap_allocator,
         carry_superseded,
+        successor_superseded,
+        final_superseded: plan.live.handles.live_values_superseded.get(),
     }
 }
 
@@ -3361,6 +3708,114 @@ fn a_carried_lane_counts_its_replaced_writes_at_four_lanes() {
 fn a_carried_lane_counts_its_replaced_writes_at_eight_lanes() {
     for form in forms() {
         a_carried_lane_counts_its_replaced_writes(Backend::Simd8, form);
+    }
+}
+
+/// #1630 f, D15-2 on the strip cells (the #1277 carry): a carried live value that the successor's
+/// retarget replaces in the adopting block is counted once. A left-only fader write sits unread in
+/// [`MOVED`]'s cells at the hand-over and is committed in the base; B moves that fader again. The
+/// carry drain applies the written value, and the successor's retarget replaces it before any
+/// sample renders: one value, one cell, superseded. The run is bit-identical to one whose base
+/// never held the write, and with no retarget nothing is counted. Red without the adopting block's
+/// count (0, not 1).
+fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form: Form) {
+    const WRITTEN_DB: f32 = -7.5;
+    const MOVED_DB: f32 = -2.25;
+    let base = strip_state_session();
+    let right = base
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == MOVED)
+        .expect("the moved strip")
+        .fader
+        .right_db;
+    let a = Session::compile(base.clone());
+    let written = with_fader(base.clone(), MOVED, [WRITTEN_DB, right]);
+    let b = Session::compile(with_muted_track(with_fader(
+        base.clone(),
+        MOVED,
+        [MOVED_DB, right],
+    )));
+    let feed = feed_for_strips();
+    // The second write: a second value to the same cell, two blocks after the adopting block,
+    // through the successor's normal write path. The carry marks are spent by then, so it is a plain
+    // write, never a second carried value.
+    let writes = [
+        CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: CellRecord::Fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: WRITTEN_DB,
+                smoothing_samples: 64,
+            }),
+        },
+        CellWrite {
+            block: SWAP_BLOCK + 2,
+            strip: MOVED,
+            record: CellRecord::Fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -4.0,
+                smoothing_samples: 64,
+            }),
+        },
+    ];
+    let run = |to: &Session, committed: &SessionModel, writes: &[CellWrite]| {
+        let run = cell_run(
+            &a,
+            form,
+            Some(Swap {
+                to,
+                committed,
+                form,
+                successor_writes: &[],
+                edit_ramps: &EditRamps::new(),
+            }),
+            &feed,
+            writes,
+            backend,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?} {form:?}");
+        assert!(run.restarted.is_empty(), "{backend:?} {form:?}");
+        run
+    };
+    let replaced = run(&b, &written, &writes);
+    assert_eq!(
+        (replaced.carry_superseded, replaced.successor_superseded),
+        (0, 1),
+        "{backend:?} {form:?}: the carried value the retarget replaced is counted once"
+    );
+    assert_eq!(
+        replaced.final_superseded, 1,
+        "{backend:?} {form:?}: a later write to the cell is not a second carried value"
+    );
+    let unwritten = run(&b, &base, &writes[1..]);
+    assert_eq!(unwritten.successor_superseded, 0, "{backend:?} {form:?}");
+    assert_eq!(unwritten.final_superseded, 0, "{backend:?} {form:?}");
+    assert_eq!(
+        first_cell_difference(&replaced, &unwritten),
+        None,
+        "{backend:?} {form:?}: the replaced carried value moves no bit"
+    );
+    let kept = run(
+        &Session::compile(with_muted_track(written.clone())),
+        &written,
+        &writes,
+    );
+    assert_eq!(
+        (kept.carry_superseded, kept.successor_superseded),
+        (0, 0),
+        "{backend:?} {form:?}: a carried value nothing replaces is not counted"
+    );
+    assert_eq!(kept.final_superseded, 0, "{backend:?} {form:?}");
+}
+
+#[test]
+fn a_carried_strip_value_the_retarget_replaces_is_counted_on_every_width_and_form() {
+    for backend in backends() {
+        for form in forms() {
+            a_carried_strip_value_the_retarget_replaces_is_counted(backend, form);
+        }
     }
 }
 
@@ -7738,6 +8193,7 @@ mod observation_carry {
             &plan.prepared.inventory,
             &a.model,
             swap.bindings.unwrap_or(&host_core::NO_OBSERVATION),
+            &EditRamps::new(),
             backend,
         );
         subscribe(&mut successor, swap.successor_records);

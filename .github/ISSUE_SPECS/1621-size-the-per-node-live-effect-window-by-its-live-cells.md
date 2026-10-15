@@ -42,3 +42,62 @@ banked effect does since #1611, so an unbanked EQ (no parameter cells) holds no 
 ## Size
 
 Half a day.
+
+## Decision record: #1621 (batch 14b)
+
+**Shipped.** `LiveControlEffect::new` (`crates/graph/src/runtime.rs`) sizes its staging window by
+`control.parameter_cells()`: an unbanked EQ (prepared-target owner, no parameter cell) and a
+channel-less lane hold no span storage; a compressor-shaped lane holds exactly its cells. The estimate
+(`effect_control_resource`, `crates/graph-compiler/src/estimate.rs`) charges the same
+`parameter_cells * size_of::<PreparedAutomationSpan>()`. Per-lane arithmetic is untouched.
+
+**Departure (one, mechanical).** The bind-time check `EffectProcessBlock::check_automation_window`
+demanded `window == automation_capacity`, which the cell-sized window cannot meet. The banked stage
+already replaced that equality with "the lanes' cells never exceed the capacity" (#1611 D3). The same
+rule now holds per node: `check_automation_window` (in `crates/effect-contract/src/lib.rs`) accepts a
+window `<= automation_capacity`; the other half of the contract, that the window holds every cell the
+lane reads (no drop, #1345 D4), stays `EffectControlLane::check_window` and still runs at bind. The
+pairing-rule argument is unchanged: the hazard (#1012) was a window larger than the capacity, which
+could stage a twin pair across the effect's `span_index < automation_capacity` cut-off; a window no
+longer than the capacity cannot. Doc comments in `effect-contract/src/lib.rs` and `live.rs` say so.
+Ack-before-drop: no. A cell-sized window holds one span per cell, `check_window` refuses a shorter
+one at bind, and preparation raises `automation_capacity` to at least the descriptor's cells.
+
+**Gates and tests.**
+- Gate 1: `graph` `tests::a_per_node_window_is_its_lanes_cells_not_the_capacity` (EQ-shaped lane: 0;
+  compressor-shaped lane: 4 = its cells; gain fixture lane: 2; channel-less lane: 0; capacity 4,096).
+  `graph-compiler` `bypass_resources::a_per_node_live_window_does_not_grow_with_the_automation_capacity`
+  (real EQ, compressor and limiter inserts; allocator-measured retained bytes and the estimate are equal
+  at 128 and 4,096 spans). Both are red when the window returns to the capacity (checked by mutation).
+- Gate 2: `graph-compiler` `effect_control_resource_uses_independent_queue_and_owner_arithmetic` follows
+  the new window formula (scalar-target window 0). Its `expected.largest > plain` assertion for the
+  scalar case was removed: it held only because the capacity-sized window was the largest owner
+  allocation; no per-node owner allocation outgrows the plain plan's largest any more, and the
+  exact-cap accept/refuse legs and the `largest` equality stay. The charge-equals-freed test
+  `a_bypass_or_live_controls_are_charged_at_least_what_they_retain`, `bypass_shunt_identity` and
+  `bypass_cohorts` stay green.
+- Gate 3: `cargo test --locked` for graph, graph-compiler, rack, effect-contract, effect-compiler,
+  control-plane, controls, host-core (all features), host-web (all features), capi (all, incl.
+  `resource_lifecycle`) green; clippy `-D warnings` and fmt clean; `realtime-policy` ok;
+  `audit capi` `pcm_digest` `bf7dcedd1d92621f`; `check-browser-expected-resources.py` green.
+
+**Measured numbers.** No pinned row or ceiling moved, so none was re-pinned. Before/after on the same
+tree: `resource_lifecycle` nine-track EQ, soft-clip and browser-identity rows identical (EQ plan 218,401
+observed, ceilings unchanged); the browser fixture's eight budget rows identical (for example
+`graphIncrementalPlanBytes` 30,154). The one printed row that moved is the unpinned "routed submix"
+plan row printed by `capi_retained_bytes_charge_every_byte_the_compile_retains`: observed 104,589 ->
+98,781 and its estimate 196,180 -> 190,372 (-5,808 each, slack 91,591 unchanged; the per-node EQ/
+compressor windows of that session, 128-span capacity).
+
+**Review fold (batch 14b).** B1: `console-workload` `paired_spans`
+`every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity` still refused a window of
+`capacity - 1`, which this issue made legal; it is now
+`every_launch_effect_refuses_a_staging_window_longer_than_its_capacity`: it raises the direct
+factory request to the live cells as preparation does (D4), accepts a window of the capacity and of
+`EffectLaneShape::live_parameter_cells`, and refuses `capacity + 1`. The lower bound is the lane's
+(`effect-contract` `live_window` `a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs`).
+Red when `check_window` returns `Ok(())` unconditionally (checked by mutation). Stale prose fixed in
+`effect-contract/src/lib.rs` (`check_window` is the per-node bound, not "shared by both block types")
+and `effect-compiler/tests/native_session.rs` (the window is the lane's cells, which the capacity
+equals there). Gate 3 adds `cargo test --locked --release -p console-workload` (green; `paired_spans`
+13 pass).

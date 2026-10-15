@@ -80,6 +80,7 @@ macro_rules! append {
 }
 
 pub mod abi_layout;
+pub mod response_frame;
 pub mod session_keys;
 
 use std::io::Write as _;
@@ -135,7 +136,7 @@ pub const PLANE_OBSERVATION: &str = "observation";
 fn usage() -> ! {
     eprintln!(
         "usage: parameter_metadata --write DIRECTORY | --check DIRECTORY \
-| --print | --print-abi-layout | --print-session-keys"
+| --print | --print-abi-layout | --print-session-keys | --print-response-frame"
     );
     std::process::exit(2)
 }
@@ -1106,8 +1107,8 @@ const fn smoothing_name(rule: SmoothingRule) -> &'static str {
     }
 }
 
-/// Command-line entry point: `--write DIR`, `--check DIR`, `--print`, `--print-abi-layout` or
-/// `--print-session-keys`.
+/// Command-line entry point: `--write DIR`, `--check DIR`, `--print`, `--print-abi-layout`,
+/// `--print-session-keys` or `--print-response-frame`.
 ///
 /// `--write`/`--check` cover **both** emitted documents. They are one tool because they are one
 /// transcription discipline over one engine: splitting them into two binaries would let an
@@ -1117,7 +1118,8 @@ const fn smoothing_name(rule: SmoothingRule) -> &'static str {
 ///
 /// `--print-session-keys` is the SDK's session key tables (issue #1569). It is an SDK source asset,
 /// not a member of the release artifact set, so `--write`/`--check` leave it out and
-/// `sdk/codegen/assets.mjs` renders it itself.
+/// `sdk/codegen/assets.mjs` renders it itself. `--print-response-frame` is the same kind of asset:
+/// the `RESPONSE_GET` frame table of the protocol crate (issue #1623).
 pub fn run() {
     let mut arguments = std::env::args().skip(1);
     let mode = arguments.next().unwrap_or_else(|| usage());
@@ -1139,6 +1141,12 @@ pub fn run() {
                 usage();
             }
             print!("{}", session_keys::render());
+        }
+        "--print-response-frame" => {
+            if arguments.next().is_some() {
+                usage();
+            }
+            print!("{}", response_frame::render());
         }
         "--write" | "--check" => {
             let directory = PathBuf::from(arguments.next().unwrap_or_else(|| usage()));

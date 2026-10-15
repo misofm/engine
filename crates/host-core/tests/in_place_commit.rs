@@ -1,7 +1,7 @@
 //! #1613: a live-only transaction committed without cloning and compiling the model.
 //!
-//! The protocol prepares a transaction of `SetControl`s on existing values **in place**
-//! (`SessionStore::prepare_transaction_in_place`): the owners the edits name, edited, and nothing
+//! The protocol prepares a transaction of `SetControl`s, on existing values or adding parameter
+//! entries (#1620), **in place** (`SessionStore::prepare_transaction_in_place`): the owners the edits name, edited, and nothing
 //! of the model. The classifier reads the committed model and those owners as one view
 //! (`classify_live_staged`), the catalog stage reads them through the same view, and the commit
 //! swaps the owners in. This file holds the differential gate: the in-place chain must equal the
@@ -453,5 +453,155 @@ fn what_the_in_place_preparation_cannot_prove_is_prepared_by_the_full_path() {
             full.err(),
             "the in-place entry refuses {edits:?} alike"
         );
+    }
+}
+
+/// #1620, gate 1. Transactions whose `SetControl`s add parameter entries to sparse lists: on the
+/// console EQ that holds IDs 1 to 6 (above them, one lane and both), on an insert EQ that holds
+/// none (then below and between the entries it gained), splitting a `both` entry into two lanes,
+/// and across several effects of tracks and a submix, console and inserts, in one transaction.
+/// Each is prepared in place, classified from its rows and committed; the stores (model, canonical
+/// snapshot, estimate, revision) equal the full path's after each.
+///
+/// Red if an added entry is charged differently from a compile (estimate), lands where the full
+/// path's sort does not put it (model, snapshot), or sends the transaction to the full path.
+#[test]
+fn edits_that_add_parameter_entries_commit_in_place_as_the_full_path_does() {
+    let mut pair = Pair::new(rich_session(10));
+    let mut tally = Tally::default();
+    let row = |strip: &str, section: Section, control: u32, lane: Lane, value: f32| {
+        set(
+            address(Owner::Strip(id(strip)), section, control, lane),
+            value,
+        )
+    };
+    let console = |strip: &str, slot: &str, control: u32, lane: Lane, value: f32| {
+        row(strip, Section::Console(id(slot)), control, lane, value)
+    };
+    let insert = |strip: &str, effect: &str, control: u32, lane: Lane, value: f32| {
+        row(strip, Section::Inserts(id(effect)), control, lane, value)
+    };
+    let script: Vec<(Vec<SessionEdit>, bool)> = vec![
+        // Above the console EQ's IDs 1 to 6: a `both` entry and a one-lane entry.
+        (
+            vec![
+                console("t0000", "eq", 66, Lane::Both, 400.0),
+                console("t0000", "eq", 82, Lane::Left, 6_000.0),
+            ],
+            true,
+        ),
+        // An empty insert list gains an entry, then one below and one between.
+        (vec![insert("t0000", "eq", 82, Lane::Both, 6_000.0)], true),
+        (
+            vec![
+                insert("t0000", "eq", 4, Lane::Right, -3.0),
+                insert("t0000", "eq", 66, Lane::Left, 300.0),
+            ],
+            true,
+        ),
+        // A one-lane write on a `both` entry splits it.
+        (vec![insert("t0000", "eq", 82, Lane::Left, 5_000.0)], true),
+        // Abandoned: the store stays as it was.
+        (vec![insert("t0000", "eq", 3, Lane::Left, 200.0)], false),
+        // Several effects at once: tracks and the submix, console and inserts, both lanes.
+        (
+            vec![
+                insert("t0001", "comp", 1, Lane::Left, -30.0),
+                insert("t0002", "gate", 1, Lane::Both, 0.0),
+                console("t0003", "post-clip", 1, Lane::Both, 12.0),
+                console("bus", "eq", 4, Lane::Right, -2.0),
+                insert("t0004", "multi", 3, Lane::Both, -40.0),
+                console("t0009", "eq", 82, Lane::Both, 7_000.0),
+                set(strip_row("t0005", FADER_DB, Lane::Both), -4.0),
+            ],
+            true,
+        ),
+        // The other lane of an entry that exists on one lane only.
+        (vec![insert("t0001", "comp", 1, Lane::Right, -20.0)], true),
+    ];
+    let mut committed = 0;
+    for (edits, commit) in &script {
+        let before = pair.full.compiled().resource_estimate().parameter_count;
+        let prepared = prepare_in_place(&pair.fast, edits).expect("prepares");
+        assert!(prepared.is_in_place(), "{edits:?} is prepared in place");
+        assert!(
+            prepared
+                .in_place_estimate()
+                .expect("in place")
+                .parameter_count
+                > before,
+            "{edits:?} adds parameter entries"
+        );
+        drop(prepared);
+        pair.step(edits, &["added"], *commit, &mut tally);
+        committed += usize::from(*commit);
+    }
+    assert_eq!(
+        tally.in_place,
+        script.len(),
+        "every transaction was prepared and classified in place"
+    );
+    assert_eq!(
+        (tally.full_at_preparation, tally.full_at_classification),
+        (0, 0)
+    );
+    assert_eq!(tally.abandoned, script.len() - committed);
+    pair.assert_equal("after the script");
+}
+
+/// #1620: an added entry is charged against the store's caps before anything is committed. With a
+/// cap at the committed session's figure, a change of values still commits in place, and an edit
+/// that adds an entry is refused, by both entries alike, with the store unchanged.
+///
+/// Red if the in-place path commits an added entry that a compile's caps refuse (an ack the full
+/// path would not give).
+#[test]
+fn an_added_entry_over_the_caps_is_refused_before_any_commit() {
+    let model = rich_session(10);
+    let estimate = store(model.clone()).compiled().resource_estimate();
+    // The compile's figures before the canonical text is written, which its caps bound.
+    let upper_bound = estimate.compiled_model_bytes - estimate.canonical_bytes
+        + estimate.canonical_upper_bound_bytes;
+    let tight = [
+        session::CompileCaps {
+            max_compiled_model_bytes: upper_bound,
+            ..caps()
+        },
+        session::CompileCaps {
+            max_single_allocation_bytes: estimate.single_allocation_bytes,
+            ..caps()
+        },
+    ];
+    let fader = set(strip_row("t0005", FADER_DB, Lane::Both), -4.0);
+    let added = set(
+        address(
+            Owner::Strip(id("t0000")),
+            Section::Console(id("eq")),
+            66,
+            Lane::Both,
+        ),
+        400.0,
+    );
+    for caps in tight {
+        let mut store = SessionStore::new(model.clone(), caps).expect("compiles at its caps");
+        let current = store.revision();
+        let revision = ExpectedRevision::Exact(current);
+        assert!(
+            prepare_in_place(&store, std::slice::from_ref(&fader))
+                .expect("a fader moves")
+                .is_in_place()
+        );
+        let edits = [fader.clone(), added.clone()];
+        let full = store.prepare_transaction_with_monitor(revision, &edits);
+        assert!(
+            matches!(full, Err(protocol::SessionStoreError::Validation { .. })),
+            "the compile refuses the added entry: {:?}",
+            full.as_ref().err()
+        );
+        assert_eq!(prepare_in_place(&store, &edits).err(), full.err());
+        let before = store.canonical_snapshot().to_owned();
+        assert!(store.apply_transaction_in_place(revision, &edits).is_err());
+        assert_eq!(store.revision(), current);
+        assert_eq!(store.canonical_snapshot(), before);
     }
 }

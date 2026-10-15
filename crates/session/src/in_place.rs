@@ -1,10 +1,10 @@
 //! The pieces of a value-only commit that the session owns (#1613): which owners an edit
-//! touched, whether their values are valid, whether their counts are those of the owners they
-//! replace, and how many bytes they take in the canonical text.
+//! touched, whether their values are valid, what they add to the counts of the owners they replace
+//! (parameter entries only, #1620), and how many bytes they take in the canonical text.
 //!
 //! A host that changes the value of a control writes it into a **clone of the owner** (a track, a
 //! submix, a route or a VCA), checks the clone with [`owners_values_valid`] and
-//! [`owners_counts_equal`], measures the change of the canonical text with
+//! [`owners_growth`], measures the change of the canonical text with
 //! [`canonical_owner_bytes`], and installs the clones with [`CompiledSession::swap_owners`]. The
 //! rest of the compiled session is the same value, so nothing else is cloned, validated or written.
 
@@ -117,39 +117,87 @@ pub fn owners_values_valid<'a>(owners: impl IntoIterator<Item = OwnerRef<'a>>) -
     owners.into_iter().all(crate::validate::owner_values_valid)
 }
 
-/// Whether the owners of `old` and `new`, pairwise, hold the same number of everything the resource
-/// estimate counts: console entries, inserts, parameter entries per effect, VCA members. An edit that
-/// adds or removes one is not a change of values.
+/// What an edit of values adds to the counts of the resource estimate (#1620): parameter entries,
+/// and nothing else. A `SetControl` of a parameter that an effect's sparse list does not hold yet
+/// adds its entry (a one-lane write on a `both` entry splits it into two).
+///
+/// Only [`owners_growth`] builds one: its fields are private, so no caller can hand
+/// [`ResourceEstimate::after_owners_edit`] a growth smaller than the owners' real one and have the
+/// estimate under-charge.
+///
+/// [`ResourceEstimate::after_owners_edit`]: crate::ResourceEstimate::after_owners_edit
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnersGrowth {
+    /// Parameter entries added across the edited owners.
+    parameters: usize,
+    /// The length of the longest parameter list that grew, or zero.
+    largest_grown_list: usize,
+}
+
+impl OwnersGrowth {
+    const NONE: Self = Self {
+        parameters: 0,
+        largest_grown_list: 0,
+    };
+
+    /// Parameter entries added across the edited owners.
+    #[must_use]
+    pub const fn parameters(&self) -> usize {
+        self.parameters
+    }
+
+    /// The length of the longest parameter list that grew, or zero.
+    #[must_use]
+    pub const fn largest_grown_list(&self) -> usize {
+        self.largest_grown_list
+    }
+}
+
+/// What the owners of `new` add to those of `old`, pairwise, to the counts the resource estimate
+/// keeps: `Some` when they hold the same number of console entries, inserts and VCA members and no
+/// effect's parameter list is shorter, with the parameter entries added; `None` for any other change
+/// of a count, which is not an edit of values. [`ResourceEstimate::after_owners_edit`] charges the
+/// growth.
+///
+/// [`ResourceEstimate::after_owners_edit`]: crate::ResourceEstimate::after_owners_edit
 #[must_use]
-pub fn owners_counts_equal<'a>(
+pub fn owners_growth<'a>(
     old: impl IntoIterator<Item = OwnerRef<'a>>,
     new: impl IntoIterator<Item = OwnerRef<'a>>,
-) -> bool {
+) -> Option<OwnersGrowth> {
     let (mut old, mut new) = (old.into_iter(), new.into_iter());
+    let mut growth = OwnersGrowth::NONE;
     loop {
         match (old.next(), new.next()) {
-            (None, None) => return true,
-            (Some(old), Some(new)) if counts_equal(old, new) => {}
-            _ => return false,
+            (None, None) => return Some(growth),
+            (Some(old), Some(new)) => grow(&mut growth, old, new)?,
+            _ => return None,
         }
     }
 }
 
-fn counts_equal(old: OwnerRef<'_>, new: OwnerRef<'_>) -> bool {
-    let strip = |old: crate::StripRef<'_>, new: crate::StripRef<'_>| {
-        old.console.len() == new.console.len()
-            && old
-                .console
-                .iter()
-                .zip(new.console)
-                .all(|(old, new)| old.params.len() == new.params.len())
-            && old.inserts.effects.len() == new.inserts.effects.len()
-            && old
-                .inserts
-                .effects
-                .iter()
-                .zip(&new.inserts.effects)
-                .all(|(old, new)| old.params.len() == new.params.len())
+fn grow(growth: &mut OwnersGrowth, old: OwnerRef<'_>, new: OwnerRef<'_>) -> Option<()> {
+    let mut list = |old: &[crate::EffectParam], new: &[crate::EffectParam]| {
+        let added = new.len().checked_sub(old.len())?;
+        if added != 0 {
+            growth.parameters = growth.parameters.checked_add(added)?;
+            growth.largest_grown_list = growth.largest_grown_list.max(new.len());
+        }
+        Some(())
+    };
+    let mut strip = |old: crate::StripRef<'_>, new: crate::StripRef<'_>| {
+        if old.console.len() != new.console.len()
+            || old.inserts.effects.len() != new.inserts.effects.len()
+        {
+            return None;
+        }
+        for (old, new) in old.console.iter().zip(new.console) {
+            list(&old.params, &new.params)?;
+        }
+        for (old, new) in old.inserts.effects.iter().zip(&new.inserts.effects) {
+            list(&old.params, &new.params)?;
+        }
+        Some(())
     };
     match (old, new) {
         (OwnerRef::Track(old), OwnerRef::Track(new)) => {
@@ -158,9 +206,11 @@ fn counts_equal(old: OwnerRef<'_>, new: OwnerRef<'_>) -> bool {
         (OwnerRef::Submix(old), OwnerRef::Submix(new)) => {
             strip(crate::StripRef::submix(old), crate::StripRef::submix(new))
         }
-        (OwnerRef::Vca(old), OwnerRef::Vca(new)) => old.members.len() == new.members.len(),
-        (OwnerRef::Route(_), OwnerRef::Route(_)) => true,
-        _ => false,
+        (OwnerRef::Vca(old), OwnerRef::Vca(new)) => {
+            (old.members.len() == new.members.len()).then_some(())
+        }
+        (OwnerRef::Route(_), OwnerRef::Route(_)) => Some(()),
+        _ => None,
     }
 }
 

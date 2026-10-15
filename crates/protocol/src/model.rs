@@ -939,8 +939,8 @@ enum TransactionForm {
     /// The complete prospective compilation: the clone of the model with the edits applied,
     /// validated, normalized and written as canonical text.
     Compiled(CompiledSession),
-    /// A transaction of `SetControl`s on existing values (#1613): the owners the edits changed and
-    /// nothing else of the model. The committed compilation is not cloned, compiled or serialized;
+    /// A transaction of `SetControl`s that change values or add parameter entries (#1613, #1620):
+    /// the owners the edits changed and nothing else of the model. The committed compilation is not cloned, compiled or serialized;
     /// the commit installs the owners in it.
     InPlace(InPlaceEdit),
     /// A transaction of solo writes only: the model, the revision and the compilation stay as
@@ -958,7 +958,8 @@ struct InPlaceEdit {
     /// The revision the commit gives the model.
     revision: u64,
     /// The resource estimate of the model after the commit: the committed one with the canonical
-    /// text's length moved by the change of the edited owners and of the revision's digits.
+    /// text's length moved by the change of the edited owners and of the revision's digits, and the
+    /// parameter entries the edits added charged (#1620).
     estimate: session::ResourceEstimate,
     /// The transaction's edits, for [`PreparedSessionTransaction::materialize`].
     edits: Vec<SessionEdit>,
@@ -1201,7 +1202,8 @@ impl SessionStore {
     /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
     /// without a compilation (#1613).
     ///
-    /// A transaction whose edits are all `SetControl`s on values that exist is prepared **in
+    /// A transaction whose edits are all `SetControl`s, on values that exist or adding parameter
+    /// entries (#1620, charged exactly by `ResourceEstimate::after_owners_edit`), is prepared **in
     /// place**: the owners the edits name are cloned and edited with the very `controls::set` the
     /// full path uses, checked with the session's own value validators, and held with the exact
     /// resource estimate and the revision the commit gives. The committed model is not cloned,
@@ -1216,9 +1218,11 @@ impl SessionStore {
     /// - every edit is a `SetControl`, on a model row of a strip, a route or a VCA, or on a solo row;
     /// - `controls::set` accepts each edit in order, and the edited owners pass the validators of
     ///   `compile_session` (`session::owners_values_valid`);
-    /// - the edited owners hold as many console entries, inserts, parameter entries and members as
-    ///   the committed ones, so the resource estimate counts the same and the canonical text keeps
-    ///   its structure (a parameter entry that does not exist yet is the full path);
+    /// - the edited owners hold as many console entries, inserts and members as the committed ones,
+    ///   and no fewer parameter entries in any effect; an entry a `SetControl` adds to a sparse list
+    ///   is charged exactly in the estimate (`session::owners_growth`,
+    ///   `ResourceEstimate::after_owners_edit`, #1620), which must meet the store's caps as a
+    ///   compile's would;
     /// - no ramp is longer than a second, and the canonical text stays within its preflight bound.
     ///
     /// # Errors
@@ -1475,14 +1479,13 @@ impl SessionStore {
             });
         }
         let (owners, slots) = owners.finish();
-        if !session::owners_values_valid(slots.in_owners(&owners))
-            || !session::owners_counts_equal(
-                slots.in_committed(committed),
-                slots.in_owners(&owners),
-            )
-        {
+        if !session::owners_values_valid(slots.in_owners(&owners)) {
             return None;
         }
+        // Added parameter entries are charged exactly (#1620); any other change of a count is the
+        // full path's.
+        let growth =
+            session::owners_growth(slots.in_committed(committed), slots.in_owners(&owners))?;
         let estimate = self.compiled.resource_estimate();
         let before = session::canonical_owner_bytes(slots.in_committed(committed));
         let after = session::canonical_owner_bytes(slots.in_owners(&owners));
@@ -1494,20 +1497,9 @@ impl SessionStore {
             .checked_add(u64::try_from(after).ok()?)?
             .checked_sub(digits(current.0))?
             .checked_add(digits(revision))?;
-        // The full path refuses a canonical text over its preflight bound.
-        if canonical_bytes > estimate.canonical_upper_bound_bytes {
-            return None;
-        }
-        let compiled_model_bytes = estimate
-            .compiled_model_bytes
-            .checked_sub(estimate.canonical_bytes)?
-            .checked_add(canonical_bytes)?;
-        let estimate = session::ResourceEstimate {
-            canonical_bytes,
-            compiled_model_bytes,
-            estimated_bytes: compiled_model_bytes.checked_add(estimate.requested_runtime_bytes)?,
-            ..estimate
-        };
+        // `None` where the full path refuses: a cap, the canonical text over its preflight bound,
+        // an overflow. The full path then gives the refusal, before anything is committed.
+        let estimate = estimate.after_owners_edit(growth, canonical_bytes, self.caps)?;
         Some(PreparedSessionTransaction {
             base_revision: current,
             form: TransactionForm::InPlace(InPlaceEdit {

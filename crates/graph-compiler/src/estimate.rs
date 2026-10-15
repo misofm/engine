@@ -176,8 +176,9 @@ pub(crate) fn resource_estimate(
 /// allocates beyond the live-control-free path, in both of its forms:
 ///
 /// * **Per node**, `graph`'s `runtime::LiveControlEffect`: the boxed owner, which the
-///   live-control-free `NodeKind::Effect` does not allocate at all; the staging window of
-///   `automation_capacity` spans, for a live channel only; and the shunt, always.
+///   live-control-free `NodeKind::Effect` does not allocate at all; the staging window of the
+///   lane's live parameter cells (#1621 D1; none for a channel-less lane or a prepared-target
+///   owner such as the parametric EQ); and the shunt, always.
 /// * **Banked**, `rack::LiveControlEffectBankStage`: its growth over the `rack::EffectBankStage` it
 ///   replaces; the one-lane staging window and the packed window of the widest lane's live
 ///   parameter cells (#1611 D3; at most `automation_capacity`) spans
@@ -237,12 +238,11 @@ pub(crate) fn effect_control_resource(
             total = total.checked_add(lane)?;
             largest = largest.max(lane);
             // The per-node live-control owner: `runtime::LiveControlEffect::new` at the render
-            // quantum.
-            let window = if control.has_channel() {
-                u64::from(entry.metadata.automation_capacity).checked_mul(span_bytes)?
-            } else {
-                0
-            };
+            // quantum. Its staging window holds the lane's live parameter cells (#1621 D1), the
+            // banked window's rule: none for a channel-less lane or a prepared-target owner.
+            let window = u64::try_from(control.parameter_cells())
+                .ok()?
+                .checked_mul(span_bytes)?;
             let frames = usize::try_from(entry.metadata.quantum).ok()?;
             let latency = usize::try_from(entry.metadata.latency.0).ok()?;
             let shunt = bytes(BypassShunt::allocated_bytes(frames, latency)?)?;

@@ -1659,18 +1659,17 @@ pub enum ProcessBlockError {
     ZeroFrames,
     Shape,
     Automation,
-    /// A live-control staging window whose span count is not the effect's
-    /// `automation_capacity`; refused at preparation by
-    /// [`EffectProcessBlock::check_automation_window`] (the per-node window). A banked live slot
-    /// sizes its window by its lanes' parameter cells instead and reports its own rack error.
+    /// A live-control staging window with more spans than the effect's `automation_capacity`;
+    /// refused at preparation by [`EffectProcessBlock::check_automation_window`]. A banked live
+    /// slot checks the same bound and reports its own rack error.
     AutomationWindow,
 }
 
-/// The one statement of the staging-window bound, shared by both block types.
+/// The one statement of the per-node staging-window bound: the window may not exceed the capacity.
 ///
-/// See [`EffectProcessBlock::check_automation_window`] for why the bound is equality.
+/// See [`EffectProcessBlock::check_automation_window`] for why the window may not exceed the capacity.
 const fn check_window(window: usize, automation_capacity: u32) -> Result<(), ProcessBlockError> {
-    if window as u64 == automation_capacity as u64 {
+    if window as u64 <= automation_capacity as u64 {
         Ok(())
     } else {
         Err(ProcessBlockError::AutomationWindow)
@@ -1714,14 +1713,15 @@ impl<'a> EffectProcessBlock<'a> {
         self.left.len()
     }
 
-    /// Refuse, at preparation, a live-control staging window that is not exactly this instance's
-    /// `automation_capacity` spans (issue #1004 finding 1, issue #1012).
+    /// Refuse, at preparation, a live-control staging window longer than this instance's
+    /// `automation_capacity` spans (issue #1004 finding 1, issue #1012, #1621).
     ///
     /// Every caller that owns the window it hands [`EffectControlLane::stage`] for a prepared
     /// instance -- `graph`'s per-node live-control effect today -- calls this once, off the render
-    /// thread, where it allocates the window. The blocks this type builds afterwards carry only the
-    /// staged prefix of that window, per block, on the render thread, and never see the window or
-    /// the capacity, so this is where the bound can be checked at all.
+    /// thread, where it allocates the window. The window is the lane's live parameter cells
+    /// (#1621 D1), which preparation keeps within the capacity. The blocks this type builds
+    /// afterwards carry only the staged prefix of that window, per block, on the render thread, and
+    /// never see the window or the capacity, so this is where the bound can be checked at all.
     ///
     /// # Why the bound is a precondition of the pairing rule
     ///
@@ -1731,12 +1731,13 @@ impl<'a> EffectProcessBlock<'a> {
     /// one span at a time, so a window larger than the capacity could stage a twin across that
     /// cut-off: the effect would apply `Left p v` and refuse `Right p v`, the witness would still
     /// hold, and the mono collapse would render the left channel's state for the right one. A
-    /// window equal to the capacity cannot stage a span the effect refuses on capacity. A smaller
-    /// one would be sound for the pair but is refused too: it would drop a cell the lane read.
+    /// window no longer than the capacity cannot stage a span the effect refuses on capacity. A
+    /// shorter one is sound for the pair; that it holds every cell the lane reads is
+    /// [`EffectControlLane::check_window`]'s bound, so no cell is dropped.
     ///
     /// # Errors
     ///
-    /// [`ProcessBlockError::AutomationWindow`] when `window.len()` differs from
+    /// [`ProcessBlockError::AutomationWindow`] when `window.len()` exceeds
     /// `metadata.automation_capacity`.
     pub const fn check_automation_window(
         window: &[PreparedAutomationSpan],

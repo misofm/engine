@@ -978,8 +978,8 @@ impl LiveValuesSuperseded {
     /// caller is [`CellReader::read_counted`], which render's drains call: only a cell read writes
     /// the count. `read_counted` is public, so a reader built over a stamped cell could call it
     /// elsewhere; the rule rests on who holds the readers, not on a type barrier (#1347 attempt 2,
-    /// n1). [`LiveValuesSuperseded::add_carried`] is the second render path that writes the count
-    /// (#1280 D2).
+    /// n1). [`LiveValuesSuperseded::add_carried`] is the second render path that writes the count,
+    /// from a plan swap and from a successor's first block drain (#1280 D2).
     fn add(&self, count: u64) {
         if count != 0 {
             let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
@@ -990,9 +990,12 @@ impl LiveValuesSuperseded {
         }
     }
 
-    /// Render, at a plan swap: add `count` writes the retiring plan's cell held and its successor
-    /// takes over (#1280 D2). The same load, saturating add and store as `add`, and render is still
-    /// the only writer: the swap runs on the render thread between two blocks. A zero count changes
+    /// Render: add `count` carried writes (#1280 D2). Two render-thread callers. A plan swap adds
+    /// the writes the retiring plan's cell held and its successor takes over. A successor's first
+    /// block drain adds one for each carried value it replaces before any sample renders, through
+    /// the builtins compiler's `CarryMarks::applied`. The same load, saturating add and store as
+    /// `add`, and render is still the only writer: the swap runs on the render thread between two
+    /// blocks, and the drain runs inside the successor's first block. A zero count changes
     /// nothing.
     pub fn add_carried(&self, count: u64) {
         if count != 0 {

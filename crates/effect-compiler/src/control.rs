@@ -54,6 +54,8 @@ pub enum EffectControlOwnerError {
     Target(EffectTargetError),
     /// A target the preflight accepted had no cell to take it.
     Invariant,
+    /// The candidate's rows or touched mask could not be allocated; nothing changed.
+    Allocation,
 }
 
 impl From<EffectTargetError> for EffectControlOwnerError {
@@ -67,11 +69,53 @@ pub struct EffectControlOwner {
     factory: Arc<dyn NativeEffectFactory>,
     sample_rate: u32,
     committed: Box<[InitialParameterValue]>,
-    candidate: Box<[InitialParameterValue]>,
-    dirty: Box<[bool]>,
     committed_revision: u64,
-    pending_revision: Option<u64>,
-    phase: EffectControlOwnerPhase,
+    /// The transaction phase, which carries the open transaction's candidate. A candidate exists
+    /// exactly in the phases that may use it, so the phase and the candidate cannot disagree; it
+    /// is built by `begin` and dropped by `commit`, `discard` and a publication fault, so an idle
+    /// owner retains only `committed` (#1624).
+    state: OwnerState,
+}
+
+/// The owner's phase, with the candidate in the phases that have one.
+enum OwnerState {
+    Idle,
+    Open(OpenCandidate),
+    Poisoned(OpenCandidate),
+    Faulted,
+    /// Every target was published; `next_revision` is the revision the one commit takes.
+    Published {
+        candidate: OpenCandidate,
+        next_revision: u64,
+    },
+}
+
+impl OwnerState {
+    const fn phase(&self) -> EffectControlOwnerPhase {
+        match self {
+            Self::Idle => EffectControlOwnerPhase::Idle,
+            Self::Open(_) => EffectControlOwnerPhase::Open,
+            Self::Poisoned(_) => EffectControlOwnerPhase::Poisoned,
+            Self::Faulted => EffectControlOwnerPhase::Faulted,
+            Self::Published { .. } => EffectControlOwnerPhase::Published,
+        }
+    }
+
+    const fn candidate(&self) -> Option<&OpenCandidate> {
+        match self {
+            Self::Open(candidate)
+            | Self::Poisoned(candidate)
+            | Self::Published { candidate, .. } => Some(candidate),
+            Self::Idle | Self::Faulted => None,
+        }
+    }
+}
+
+/// The rows an open transaction edits and the mask of those it touched; both are exactly as long
+/// as the owner's committed rows.
+struct OpenCandidate {
+    rows: Box<[InitialParameterValue]>,
+    dirty: Box<[bool]>,
 }
 
 /// Engine-owned allocations retained by one prepared-target owner.
@@ -88,7 +132,7 @@ impl core::fmt::Debug for EffectControlOwner {
             .field("sample_rate", &self.sample_rate)
             .field("value_count", &self.committed.len())
             .field("committed_revision", &self.committed_revision)
-            .field("phase", &self.phase)
+            .field("phase", &self.state.phase())
             .finish_non_exhaustive()
     }
 }
@@ -108,12 +152,13 @@ impl EffectControlOwner {
         let Some(capability) = factory.target_preparation() else {
             return Err(EffectControlOwnerError::Unsupported);
         };
-        let dirty = vec![false; preparation.initial_values.len()].into_boxed_slice();
+        // Transient: the owner keeps no mask between transactions.
+        let untouched = vec![false; preparation.initial_values.len()];
         capability.validate_targets(
             EffectTargetRequest {
                 sample_rate: preparation.sample_rate,
                 values: preparation.initial_values.as_ref(),
-                changed: &dirty,
+                changed: &untouched,
             },
             &[],
         )?;
@@ -121,12 +166,9 @@ impl EffectControlOwner {
         Ok(Self {
             factory,
             sample_rate: preparation.sample_rate,
-            candidate: committed.clone(),
-            dirty,
             committed,
             committed_revision: 0,
-            pending_revision: None,
-            phase: EffectControlOwnerPhase::Idle,
+            state: OwnerState::Idle,
         })
     }
 
@@ -148,7 +190,7 @@ impl EffectControlOwner {
 
     #[must_use]
     pub const fn phase(&self) -> EffectControlOwnerPhase {
-        self.phase
+        self.state.phase()
     }
 
     /// The last committed canonical rows.
@@ -157,16 +199,17 @@ impl EffectControlOwner {
         &self.committed
     }
 
-    /// The current candidate rows. The slice is borrowed and cannot be retained by preparation.
+    /// The current candidate rows, empty while no transaction is open. The slice is borrowed and
+    /// cannot be retained by preparation.
     #[must_use]
     pub fn candidate(&self) -> &[InitialParameterValue] {
-        &self.candidate
+        self.state.candidate().map_or(&[], |open| &open.rows)
     }
 
-    /// Touched mask for the current candidate.
+    /// Touched mask for the current candidate, empty while no transaction is open.
     #[must_use]
     pub fn dirty(&self) -> &[bool] {
-        &self.dirty
+        self.state.candidate().map_or(&[], |open| &open.dirty)
     }
 
     /// Computes the actual dynamic allocations retained by this owner. The factory allocation is
@@ -177,15 +220,12 @@ impl EffectControlOwner {
         let owner_box = u64::try_from(core::mem::size_of::<Self>())
             .map_err(|_| EffectControlResourceError::Arithmetic)?;
         let committed = checked_slice_bytes::<InitialParameterValue>(self.committed.len())?;
-        let candidate = checked_slice_bytes::<InitialParameterValue>(self.candidate.len())?;
-        let dirty = checked_slice_bytes::<bool>(self.dirty.len())?;
-        let mut owned_payload_bytes = owner_box;
-        owned_payload_bytes = owned_payload_bytes
+        // An open transaction's candidate is transient (built by `begin`, dropped by `commit` or
+        // `discard`), so it is no retained allocation.
+        let owned_payload_bytes = owner_box
             .checked_add(committed)
-            .and_then(|bytes| bytes.checked_add(candidate))
-            .and_then(|bytes| bytes.checked_add(dirty))
             .ok_or(EffectControlResourceError::Arithmetic)?;
-        let largest_owned_allocation_bytes = owner_box.max(committed).max(candidate).max(dirty);
+        let largest_owned_allocation_bytes = owner_box.max(committed);
 
         let header = Layout::new::<AtomicUsize>();
         let (strong_weak, _) = header
@@ -204,16 +244,29 @@ impl EffectControlOwner {
     }
 
     /// Starts one candidate at the caller's checked base revision.
+    ///
+    /// The candidate's rows and touched mask are allocated fallibly: a failed allocation refuses
+    /// with [`EffectControlOwnerError::Allocation`] and leaves the owner idle and unchanged.
     pub fn begin(&mut self, base_revision: u64) -> Result<(), EffectControlOwnerError> {
-        if self.phase != EffectControlOwnerPhase::Idle
+        if !matches!(self.state, OwnerState::Idle)
             || base_revision != self.committed_revision
             || self.committed_revision.checked_add(1).is_none()
         {
             return Err(EffectControlOwnerError::Revision);
         }
-        self.candidate.copy_from_slice(&self.committed);
-        self.dirty.fill(false);
-        self.phase = EffectControlOwnerPhase::Open;
+        let length = self.committed.len();
+        let mut rows = Vec::new();
+        let mut dirty = Vec::new();
+        if rows.try_reserve_exact(length).is_err() || dirty.try_reserve_exact(length).is_err() {
+            return Err(EffectControlOwnerError::Allocation);
+        }
+        // Within the reserved capacity: neither extension reallocates, and each boxes in place.
+        rows.extend_from_slice(&self.committed);
+        dirty.resize(length, false);
+        self.state = OwnerState::Open(OpenCandidate {
+            rows: rows.into_boxed_slice(),
+            dirty: dirty.into_boxed_slice(),
+        });
         Ok(())
     }
 
@@ -227,24 +280,35 @@ impl EffectControlOwner {
         channel: ParameterChannel,
         value: f32,
     ) -> Result<(), EffectControlOwnerError> {
-        if self.phase != EffectControlOwnerPhase::Open {
+        let OwnerState::Open(candidate) = &mut self.state else {
             return Err(EffectControlOwnerError::Revision);
-        }
-        let result = self.edit_inner(parameter_index, channel, value);
+        };
+        let result = Self::edit_inner(
+            self.factory.as_ref(),
+            candidate,
+            parameter_index,
+            channel,
+            value,
+        );
         if result.is_err() {
-            self.phase = EffectControlOwnerPhase::Poisoned;
+            // The candidate moves into the poisoned phase unchanged; only discard may follow.
+            if let OwnerState::Open(candidate) =
+                core::mem::replace(&mut self.state, OwnerState::Faulted)
+            {
+                self.state = OwnerState::Poisoned(candidate);
+            }
         }
         result
     }
 
     fn edit_inner(
-        &mut self,
+        factory: &dyn NativeEffectFactory,
+        candidate: &mut OpenCandidate,
         parameter_index: u32,
         channel: ParameterChannel,
         value: f32,
     ) -> Result<(), EffectControlOwnerError> {
-        let parameter = self
-            .factory
+        let parameter = factory
             .descriptor()
             .parameters
             .get(parameter_index as usize)
@@ -260,28 +324,28 @@ impl EffectControlOwner {
             | (ParameterChannelPolicy::PerLane, ParameterChannel::Left)
             | (ParameterChannelPolicy::PerLane, ParameterChannel::Right) => {
                 let value = normalize_zero(value);
-                let row = self
-                    .candidate
+                let row = candidate
+                    .rows
                     .iter()
                     .position(|item| {
                         item.parameter_index == parameter_index && item.channel == channel
                     })
                     .ok_or(EffectControlOwnerError::Shape)?;
-                self.candidate[row].value = value;
-                self.dirty[row] = true;
+                candidate.rows[row].value = value;
+                candidate.dirty[row] = true;
                 Ok(())
             }
             (ParameterChannelPolicy::PerLane, ParameterChannel::Both) => {
                 for lane in [ParameterChannel::Left, ParameterChannel::Right] {
-                    let row = self
-                        .candidate
+                    let row = candidate
+                        .rows
                         .iter()
                         .position(|item| {
                             item.parameter_index == parameter_index && item.channel == lane
                         })
                         .ok_or(EffectControlOwnerError::Shape)?;
-                    self.candidate[row].value = normalize_zero(value);
-                    self.dirty[row] = true;
+                    candidate.rows[row].value = normalize_zero(value);
+                    candidate.dirty[row] = true;
                 }
                 Ok(())
             }
@@ -291,11 +355,13 @@ impl EffectControlOwner {
 
     /// Borrows the complete candidate request for off-audio preparation.
     pub fn preparation_request(&self) -> Result<EffectTargetRequest<'_>, EffectControlOwnerError> {
-        self.require_open()?;
+        let OwnerState::Open(open) = &self.state else {
+            return Err(EffectControlOwnerError::Revision);
+        };
         Ok(EffectTargetRequest {
             sample_rate: self.sample_rate,
-            values: &self.candidate,
-            changed: &self.dirty,
+            values: &open.rows,
+            changed: &open.dirty,
         })
     }
 
@@ -326,7 +392,7 @@ impl EffectControlOwner {
     }
 
     fn require_open(&self) -> Result<(), EffectControlOwnerError> {
-        if self.phase == EffectControlOwnerPhase::Open {
+        if matches!(self.state, OwnerState::Open(_)) {
             Ok(())
         } else {
             Err(EffectControlOwnerError::Revision)
@@ -335,16 +401,10 @@ impl EffectControlOwner {
 
     /// Discards an open or poisoned candidate.
     pub fn discard(&mut self) -> Result<(), EffectControlOwnerError> {
-        if !matches!(
-            self.phase,
-            EffectControlOwnerPhase::Open | EffectControlOwnerPhase::Poisoned
-        ) {
+        if !matches!(self.state, OwnerState::Open(_) | OwnerState::Poisoned(_)) {
             return Err(EffectControlOwnerError::Revision);
         }
-        self.candidate.copy_from_slice(&self.committed);
-        self.dirty.fill(false);
-        self.pending_revision = None;
-        self.phase = EffectControlOwnerPhase::Idle;
+        self.state = OwnerState::Idle;
         Ok(())
     }
 
@@ -392,29 +452,35 @@ impl EffectControlOwner {
                 .write(stamp, EffectControlRecord::PreparedTarget(*target))
                 .is_err()
             {
-                self.phase = EffectControlOwnerPhase::Faulted;
-                self.pending_revision = None;
+                self.state = OwnerState::Faulted;
                 return Err(EffectControlOwnerError::Invariant);
             }
         }
-        self.pending_revision = Some(next_revision);
-        self.phase = EffectControlOwnerPhase::Published;
-        Ok(())
+        // The preflight held the open phase, so the candidate moves into the published phase.
+        match core::mem::replace(&mut self.state, OwnerState::Faulted) {
+            OwnerState::Open(candidate) => {
+                self.state = OwnerState::Published {
+                    candidate,
+                    next_revision,
+                };
+                Ok(())
+            }
+            _ => Err(EffectControlOwnerError::Invariant),
+        }
     }
 
     /// Commits the candidate after a complete publication.
     pub fn commit(&mut self) -> Result<u64, EffectControlOwnerError> {
-        if self.phase != EffectControlOwnerPhase::Published {
+        let OwnerState::Published {
+            candidate,
+            next_revision,
+        } = &self.state
+        else {
             return Err(EffectControlOwnerError::Revision);
-        }
-        let next_revision = self
-            .pending_revision
-            .take()
-            .ok_or(EffectControlOwnerError::Invariant)?;
-        self.committed.copy_from_slice(&self.candidate);
-        self.dirty.fill(false);
-        self.committed_revision = next_revision;
-        self.phase = EffectControlOwnerPhase::Idle;
+        };
+        self.committed.copy_from_slice(&candidate.rows);
+        self.committed_revision = *next_revision;
+        self.state = OwnerState::Idle;
         Ok(self.committed_revision)
     }
 }
@@ -446,23 +512,20 @@ mod tests {
         let mut owner = EffectControlOwner {
             factory: Arc::new(ParametricEqFactory),
             sample_rate: 48_000,
-            candidate: committed.clone(),
-            dirty: vec![false; committed.len()].into_boxed_slice(),
             committed,
             committed_revision: u64::MAX,
-            pending_revision: None,
-            phase: EffectControlOwnerPhase::Idle,
+            state: OwnerState::Idle,
         };
         let committed_before = owner.committed.clone();
-        let candidate_before = owner.candidate.clone();
-        let dirty_before = owner.dirty.clone();
         assert_eq!(
             owner.begin(u64::MAX),
             Err(EffectControlOwnerError::Revision)
         );
-        assert_eq!(owner.phase, EffectControlOwnerPhase::Idle);
+        assert_eq!(owner.phase(), EffectControlOwnerPhase::Idle);
         assert_eq!(owner.committed, committed_before);
-        assert_eq!(owner.candidate, candidate_before);
-        assert_eq!(owner.dirty, dirty_before);
+        assert!(
+            owner.candidate().is_empty(),
+            "a refused begin builds nothing"
+        );
     }
 }

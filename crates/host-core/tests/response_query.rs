@@ -348,6 +348,52 @@ fn bounds_pass_at_the_limit_and_refuse_one_past_it() {
     ] {
         prepare_response_query(&axis(rate, grid)).expect("an axis inside the rules");
     }
+    // A NaN or infinite override value, or input-filter cutoff, is refused before any owner is
+    // prepared, with its own error (#1623), and after the axis.
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut rows = overrides.clone();
+        rows[1].value = value;
+        assert_eq!(
+            refused(query(48_000, effect(&rows), both, false, POINTS)),
+            Some(ResponseQueryError::OverrideValue),
+            "override value {value}"
+        );
+        assert_eq!(
+            refused(ResponseQuery {
+                grid: linear(f32::NAN, 1_000.0),
+                ..query(48_000, effect(&rows), both, false, POINTS)
+            }),
+            Some(ResponseQueryError::Preview(
+                ResponsePreviewError::InvalidGrid
+            )),
+            "the axis precedes the override value {value}"
+        );
+        let ResponsePreviewTarget::InputFilters {
+            left_lpf_hz,
+            right_hpf_hz,
+            right_lpf_hz,
+            ..
+        } = input_filters()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            refused(query(
+                48_000,
+                ResponsePreviewTarget::InputFilters {
+                    left_hpf_hz: value,
+                    left_lpf_hz,
+                    right_hpf_hz,
+                    right_lpf_hz,
+                },
+                both,
+                false,
+                POINTS
+            )),
+            Some(ResponseQueryError::OverrideValue),
+            "cutoff {value}"
+        );
+    }
     // The axis is checked before the owner: an unknown effect on a bad axis is the axis's error,
     // and the same effect on a good axis is its own.
     let unknown = |grid: ResponsePreviewGrid| ResponseQuery {
@@ -574,6 +620,11 @@ fn every_query_error_has_its_class_and_code() {
             ResponseQueryError::SampleRate,
             InvalidField,
             "response.rate",
+        ),
+        (
+            ResponseQueryError::OverrideValue,
+            InvalidField,
+            "response.override.value",
         ),
         (
             preview(Preview::InvalidShape),

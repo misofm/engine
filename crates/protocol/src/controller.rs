@@ -1706,8 +1706,8 @@ impl<P: ControlProvider> ProtocolController<P> {
     }
 
     /// [`Self::prepare_command_frame`] for a host that commits a transaction of values without a
-    /// compilation (#1613): a `SESSION_TRANSACTION_APPLY` whose edits are all `SetControl`s on
-    /// existing values is prepared with [`SessionStore::prepare_transaction_in_place`], so its token
+    /// compilation (#1613): a `SESSION_TRANSACTION_APPLY` whose edits are all `SetControl`s, on
+    /// existing values or adding parameter entries (#1620), is prepared with [`SessionStore::prepare_transaction_in_place`], so its token
     /// holds the edited owners and no compilation ([`PreparedSessionTransaction::is_in_place`]).
     /// Every other command, and every transaction the in-place preparation cannot prove equal to
     /// the full one, is prepared exactly as [`Self::prepare_command_frame`] prepares it, and its

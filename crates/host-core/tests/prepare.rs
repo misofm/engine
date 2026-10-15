@@ -430,12 +430,7 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         largest_owned = largest_owned.max(writer_array);
         let owner = producer.owner().expect("live EQ owner");
         assert!(std::sync::Arc::ptr_eq(shared_factory, owner.factory()));
-        for bytes in [
-            size_of_val(owner),
-            size_of_val(owner.committed()),
-            size_of_val(owner.candidate()),
-            size_of_val(owner.dirty()),
-        ] {
+        for bytes in [size_of_val(owner), size_of_val(owner.committed())] {
             payload += bytes as u64;
             largest_owned = largest_owned.max(bytes as u64);
         }

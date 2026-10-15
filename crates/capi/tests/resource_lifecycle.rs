@@ -1220,6 +1220,20 @@ impl Budget {
 /// on the lane width), so its ceiling is 165,782 plus 10 %, rounded up to 64: 182,360.2 -> 182,400.
 /// Batch 13b adds #1639's jump-length cell to every plan: measured 165,934 on the integrated tree
 /// (x86-64), within the ceiling, so the ceiling stays.
+///
+/// #1624 (batch 14b): an effect control owner builds its candidate rows and touched mask in `begin`
+/// and frees them at `commit` or `discard`, so an idle owner retains only its committed rows (780
+/// bytes less per EQ: 60 rows of 12 bytes and 60 flags). `capi_retained_bytes` measured 166,374
+/// before and 159,354 after (x86-64, -7,020 = nine EQs; the row does not depend on the lane width),
+/// so its ceiling is 159,354 plus 10 %, rounded up to 64: 175,289.4 -> 175,296 (was 182,400).
+///
+/// #1630 (batch 14b review fold) raises the eight-lane builtin bank row, a structural move: each
+/// strip's input, fader and matrix cell readers keep carry marks (two `u16`s each), so a carried
+/// value the successor's retarget replaces is counted (D15-2). `builtin_bank_bytes` measured 15,321
+/// before and 15,705 after (x86-64, eight lanes, +384), so its ceiling is 15,705 plus 10 %, rounded
+/// up to 64: 17,275.5 -> 17,280 (was 15,680). The four-lane ceiling (21,056) was not re-measured
+/// (no AArch64 run in this fold); `builtin_processor_payload_bytes` moved 36,171 -> 36,387 inside
+/// its ceiling.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1266,7 +1280,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_bank_bytes",
         value: |report| report.builtin_bank_bytes,
-        eight_lanes: 15_680,
+        eight_lanes: 17_280,
         four_lanes: 21_056,
     },
     Budget {
@@ -1326,8 +1340,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 182_400,
-        four_lanes: 182_400,
+        eight_lanes: 175_296,
+        four_lanes: 175_296,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1348,8 +1362,11 @@ const REFERENCE_MODEL_BUDGET: u64 = 25_344;
 /// effect lane and per control cell, not per block). Its measured total for the nine console-slot
 /// EQs is 19,377 bytes at both widths (the row is lane-width independent: 15,345 before #1345's
 /// per-tap cells replaced the control queue and the target FIFO), plus 10 %, rounded up to a
-/// 64-byte multiple: 21,314.7 -> 21,376. The same convention as the model budget above.
-const REFERENCE_EFFECT_CONTROL_BUDGET: u64 = 21_376;
+/// 64-byte multiple: 21,314.7 -> 21,376. The same convention as the model budget above. #1624: the
+/// owners no longer retain a candidate and a mask between transactions (9 x 780 bytes), so the
+/// total measured 12,357 (was 19,377); the ceiling is 12,357 plus 10 %, rounded up to 64:
+/// 13,592.7 -> 13,632.
+const REFERENCE_EFFECT_CONTROL_BUDGET: u64 = 13_632;
 
 /// Sets one C cap row.
 type SetCap = fn(&mut CompileLimits, u64);

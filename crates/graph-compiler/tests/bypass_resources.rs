@@ -514,6 +514,33 @@ fn a_lanes_own_accounting_is_what_the_allocator_sees() {
     }
 }
 
+/// #1621: a per-node live-control effect holds its lane's cells, not the automation capacity.
+///
+/// The same single-track session, with live controls on its per-node EQ, compressor and limiter, is
+/// bound at 128 and at 4,096 automation spans. Every effect's capacity is at least its descriptor's
+/// cells, so the larger capacity changes no window: the audited allocator reads the same retained
+/// bytes, and the estimate charges the same. Before #1621 each window was
+/// `automation_capacity` spans (40 bytes each), so the EQ alone, which has no parameter cell, held
+/// 160 KiB more at 4,096.
+///
+/// Red mutation: size `LiveControlEffect::new`'s window, or the estimate's, by the capacity again
+/// -> both readings grow with it.
+#[test]
+fn a_per_node_live_window_does_not_grow_with_the_automation_capacity() {
+    let model = inserts(1, [0, 0, 0]);
+    let small = bind(&model, Backend::current(), 128, Some(0));
+    let large = bind(&model, Backend::current(), 4096, Some(0));
+    assert_eq!(small.shape.banks, 0, "one track banks nothing");
+    assert_eq!(
+        large.live, small.live,
+        "the plan retains more at a larger capacity, so a window follows the capacity"
+    );
+    assert_eq!(
+        large.estimate, small.estimate,
+        "the estimate charges more at a larger capacity, so a window follows the capacity"
+    );
+}
+
 /// Gate 2, observation: an effect that declares a tap gets a queue, and the estimate charges
 /// exactly what bind retains for it, banked and per node.
 ///

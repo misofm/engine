@@ -1964,14 +1964,17 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
 /// and has its own rule: `rack`'s `a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity`
 /// and `a_bank_window_below_a_lanes_live_cells_is_refused_at_bind`.)
 ///
-/// A window of exactly `automation_capacity` spans is accepted; one span more (which could stage a
-/// twin across the effect's cut-off) or one span fewer (which would drop admitted records) is
-/// refused with the typed `ProcessBlockError::AutomationWindow`.
+/// A window of exactly `automation_capacity` spans, or of the effect's live parameter cells (the
+/// window preparation allocates, #1621 D1), is accepted; one span more than the capacity (which
+/// could stage a twin across the effect's cut-off) is refused with the typed
+/// `ProcessBlockError::AutomationWindow`. A shorter window is sound for the pair; that it still
+/// holds every cell is the lane's bound, `effect-contract`'s `live_window` test
+/// `a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs`.
 ///
 /// Red mutation (issue #1012): make the contract's `check_window` return `Ok(())`
-/// unconditionally -> both refusals below fail, for every effect.
+/// unconditionally -> the refusal below fails, for every effect.
 #[test]
-fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
+fn every_launch_effect_refuses_a_staging_window_longer_than_its_capacity() {
     let registry = registry();
     let window = |spans: usize| {
         vec![
@@ -1996,28 +1999,39 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
             .into_iter()
             .find(|mode| descriptor.supported_link_modes.contains(*mode))
             .expect("a link mode");
-        let Some(request) = prepare_request(descriptor, &values, mode) else {
+        let Some(mut request) = prepare_request(descriptor, &values, mode) else {
             continue;
         };
+        // Preparation raises a request below the live cells to them (#1621 D4), so the window it
+        // allocates always fits; this direct factory call raises it the same way.
+        let cells = EffectLaneShape::live_parameter_cells(descriptor);
+        let raised = u32::try_from(cells).expect("cells fit a u32");
+        request.limits.maximum_automation_spans_per_block = request
+            .limits
+            .maximum_automation_spans_per_block
+            .max(raised);
         let scalar = factory.prepare(request).expect("scalar prepare").metadata;
         let capacity = scalar.automation_capacity as usize;
         assert!(
-            capacity > 0,
-            "{}: a live effect has capacity",
+            capacity > 0 && cells <= capacity,
+            "{}: a live effect has capacity for its {cells} live cells, got {capacity}",
             descriptor.id.as_str()
         );
-        assert_eq!(
-            EffectProcessBlock::check_automation_window(&window(capacity), &scalar),
-            Ok(())
-        );
-        for wrong in [capacity + 1, capacity - 1] {
+        for accepted in [capacity, cells] {
             assert_eq!(
-                EffectProcessBlock::check_automation_window(&window(wrong), &scalar),
-                Err(ProcessBlockError::AutomationWindow),
-                "{}: a scalar window of {wrong} spans against capacity {capacity}",
+                EffectProcessBlock::check_automation_window(&window(accepted), &scalar),
+                Ok(()),
+                "{}: a scalar window of {accepted} spans against capacity {capacity}",
                 descriptor.id.as_str()
             );
         }
+        assert_eq!(
+            EffectProcessBlock::check_automation_window(&window(capacity + 1), &scalar),
+            Err(ProcessBlockError::AutomationWindow),
+            "{}: a scalar window of {} spans against capacity {capacity}",
+            descriptor.id.as_str(),
+            capacity + 1
+        );
         checked.push(descriptor.id.as_str().to_owned());
     }
     assert_eq!(checked.len(), registry.len(), "{checked:?}");

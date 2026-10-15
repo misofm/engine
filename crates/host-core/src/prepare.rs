@@ -8,12 +8,13 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeSet;
 
 use builtins::{
-    BuiltinLaneSelector, MeterConfig, MeterHandle, MeterMetricSet, MeterTap, checked_fader_gain,
+    BuiltinLaneSelector, MeterConfig, MeterHandle, MeterMetricSet, MeterTap,
+    PreparedInputFilterTarget, checked_fader_gain, checked_trim_gain, validate_input_filter_pair,
 };
 use builtins_compiler::{
     BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
     TrackControlProducer, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
-    lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
+    TrackInputRecord, lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
     prepare_selected_session_builtins_with_live_controls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
@@ -54,6 +55,7 @@ use std::collections::BTreeMap;
 
 use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
+    INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::route_controls::{
@@ -2048,10 +2050,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             index,
         });
     }
-    // Issue #1276 D1: the strip input sections that carry, with the predecessor lane each one
-    // copies from. Every strip of this plan attaches the same control kind.
+    // Issue #1276 D1, #1630 D1: the strip input sections that carry, with the predecessor lane
+    // each one copies from and the records that retarget it. Every strip of this plan attaches
+    // the same control kind.
     let live_input = attach_live && lanes.strip_input;
-    let carried_inputs: Vec<(&str, graph::GraphLaneLocation)> = match successor {
+    let carried_inputs: Vec<InputJoin<'_>> = match successor {
         None => Vec::new(),
         Some(base) => {
             // `committed_input_section` binary-searches: a model that is not normalized would
@@ -2068,13 +2071,44 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         .all(|pair| pair[0].id < pair[1].id),
                 "a successor's committed model is normalized: strips in canonical ID order"
             );
+            // #1630 D1: the join keys on the section's structure. Every strip's input section has
+            // the same stages (trim, polarity, two filter sections per channel), so the structure
+            // is the control kind and the rate its designs are for; a live difference carries and
+            // retargets, and a plan without input cells carries only bit-equal values.
+            let ramps = LiveRamps::for_session(model);
+            let rate = compiled.sample_rate().0;
+            let same_rate = base.inventory.sample_rate_hz == rate;
             model
                 .strips()
                 .filter_map(|strip| {
                     let row = base.inventory.input_section(strip.id.as_str())?;
                     let before = committed_input_section(base.committed, &strip)?;
-                    (row.live == live_input && same_input_section(before, strip.builtins))
-                        .then_some((strip.id.as_str(), row.location))
+                    if !same_rate || row.live != live_input {
+                        return None;
+                    }
+                    let retarget = if live_input {
+                        // A retarget is the record of the same edit (#1394 D6): the live path's
+                        // records, so the carried lane ramps as a live edit would. A value the
+                        // live path refuses restarts the section.
+                        let edit = StripEditRamps::of(base.edit_ramps, strip.id);
+                        let records = input_records(before, strip.builtins, rate, ramps, edit);
+                        // A compiled model's values are in the live domain, so a refusal here is
+                        // an internal fault that would silently restart the section.
+                        debug_assert!(
+                            records.is_ok(),
+                            "a compiled strip's input values have live records: {records:?}"
+                        );
+                        records.ok()?
+                    } else if same_input_section(before, strip.builtins) {
+                        Vec::new()
+                    } else {
+                        return None;
+                    };
+                    Some(InputJoin {
+                        id: strip.id.as_str(),
+                        predecessor: row.location,
+                        retarget,
+                    })
                 })
                 .collect()
         }
@@ -2788,10 +2822,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if !carried_inputs.is_empty() {
         let moves: Vec<graph::GraphLaneMove> = carried_inputs
             .iter()
-            .filter_map(|(id, predecessor)| {
-                input_section_row(&input_sections, id).map(|row| graph::GraphLaneMove {
+            .filter_map(|join| {
+                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
                     successor: row.location,
-                    predecessor: *predecessor,
+                    predecessor: join.predecessor,
                 })
             })
             .collect();
@@ -3223,7 +3257,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         successor,
         strip_carry.retargets.is_empty()
             && effect_carry.retargets.is_empty()
-            && route_carry.retargets.is_empty(),
+            && route_carry.retargets.is_empty()
+            && carried_inputs.iter().all(|join| join.retarget.is_empty()),
     ) {
         let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
             return Err(successor_revision_refusal());
@@ -3265,6 +3300,24 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             }
             if let Some(record) = retarget.matrix {
                 producer.producer.write(stamp, record);
+            }
+        }
+        // #1630 D2: the carried input sections' live differences, through the successor's own
+        // input cells, in the same block as the strips'. A carried lane with a retarget exists
+        // only on a plan that attaches input cells, and every record is the live path's (#1556
+        // D5): a trim in domain and a validated filter target.
+        for join in carried_inputs
+            .iter()
+            .filter(|join| !join.retarget.is_empty())
+        {
+            let Some(input) = canonical_index
+                .get(join.id)
+                .and_then(|&index| strip_controls[index].input.as_mut())
+            else {
+                return Err(graph_failure("host.control.order"));
+            };
+            for &record in &join.retarget {
+                input.write(stamp, record);
             }
         }
     }
@@ -3579,6 +3632,14 @@ pub fn pair_carried_meters(
 }
 // REALTIME_POLICY_END
 
+/// One strip input section that carries (#1276 D1, #1630 D1): the predecessor lane it copies
+/// from and the records that retarget it to this model's values, empty when they are equal.
+struct InputJoin<'a> {
+    id: &'a str,
+    predecessor: graph::GraphLaneLocation,
+    retarget: Vec<TrackInputRecord>,
+}
+
 /// Strip `id`'s row of `rows`, which are sorted by strip ID.
 fn input_section_row<'a>(
     rows: &'a [InputSectionInventoryRow],
@@ -3615,7 +3676,8 @@ fn committed_input_section<'a>(
 }
 
 /// Whether two strips' input sections are bit-equal (issue #1276 D1): polarity, trim and both
-/// filter cutoffs, per channel.
+/// filter cutoffs, per channel. Only a plan without input cells, which cannot retarget a carried
+/// section, needs it (#1630 D1).
 fn same_input_section(left: &session::DualMonoBuiltins, right: &session::DualMonoBuiltins) -> bool {
     [(&left.left, &right.left), (&left.right, &right.right)]
         .into_iter()
@@ -4232,6 +4294,149 @@ pub(crate) fn lane_records(
         ],
     };
     records.into_iter().flatten()
+}
+
+/// The input records that bring a strip's input section from `before`'s values to `after`'s
+/// (#1556 D2-D4), in write order: trims, then polarities, then filter targets, each left before
+/// right. A record is emitted only when the value the render plane holds changes.
+///
+/// - `TrimDb`: one per lane whose [`checked_trim_gain`] bits change, or one `Both` when both lanes
+///   change to the same `trim_db` bits. The comparison is of the gain's bits, so `0.0` to `-0.0`
+///   (the same gain) gives no record.
+/// - `PolarityInvert`: one per lane whose value changes, or one `Both` when both change to the
+///   same value.
+/// - `PreparedFilter`: the targets [`InputFilterPreparer`] designs, off the render thread, from the
+///   pre-commit normalized pairs and the changed values (see [`filter_edits`]).
+///
+/// # Errors
+///
+/// [`OutOfDomain`] when a trim is outside the domain, or a pair or a designed target is
+/// refused.
+pub(crate) fn input_records(
+    before: &session::DualMonoBuiltins,
+    after: &session::DualMonoBuiltins,
+    sample_rate_hz: u32,
+    ramps: LiveRamps,
+    edit: StripEditRamps,
+) -> Result<Vec<TrackInputRecord>, OutOfDomain> {
+    let lanes_before = [&before.left, &before.right];
+    let lanes_after = [&after.left, &after.right];
+    let mut records = Vec::with_capacity(4 + INPUT_FILTER_TARGET_CAPACITY);
+
+    let gain_bits = |db: f32| {
+        checked_trim_gain(db)
+            .map(f32::to_bits)
+            .map_err(|_| OutOfDomain)
+    };
+    let mut trim_changed = [false; 2];
+    for lane in 0..2 {
+        trim_changed[lane] =
+            gain_bits(lanes_before[lane].trim_db)? != gain_bits(lanes_after[lane].trim_db)?;
+    }
+    for (lanes, lane) in lane_records(
+        trim_changed,
+        lanes_after[0].trim_db.to_bits() == lanes_after[1].trim_db.to_bits(),
+    ) {
+        records.push(TrackInputRecord::TrimDb {
+            lanes,
+            db: lanes_after[lane].trim_db,
+            smoothing_samples: ramps.resolve(LiveRampRow::InputTrim, edit.input),
+        });
+    }
+
+    let polarity_changed =
+        [0, 1].map(|lane| lanes_before[lane].polarity_invert != lanes_after[lane].polarity_invert);
+    for (lanes, lane) in lane_records(
+        polarity_changed,
+        lanes_after[0].polarity_invert == lanes_after[1].polarity_invert,
+    ) {
+        records.push(TrackInputRecord::PolarityInvert {
+            lanes,
+            inverted: lanes_after[lane].polarity_invert,
+            smoothing_samples: ramps.resolve(LiveRampRow::PolarityInvert, edit.input),
+        });
+    }
+
+    // The filters: compare the values each lane's pair normalizes to, so `-0.0` to `0.0` is no
+    // change (#1556 D4).
+    let pair = |lane: &session::ChannelBuiltins| {
+        validate_input_filter_pair(sample_rate_hz, lane.hpf_hz, lane.lpf_hz)
+            .map_err(|_| OutOfDomain)
+    };
+    let pairs_before = [pair(lanes_before[0])?, pair(lanes_before[1])?];
+    let pairs_after = [pair(lanes_after[0])?, pair(lanes_after[1])?];
+    let mut changed = [(false, false); 2];
+    for lane in 0..2 {
+        changed[lane] = (
+            pairs_before[lane].hpf_hz.to_bits() != pairs_after[lane].hpf_hz.to_bits(),
+            pairs_before[lane].lpf_hz.to_bits() != pairs_after[lane].lpf_hz.to_bits(),
+        );
+    }
+    let edits = filter_edits(changed, pairs_after);
+    if !edits.is_empty() {
+        let seeds = [
+            pairs_before[0].hpf_hz,
+            pairs_before[0].lpf_hz,
+            pairs_before[1].hpf_hz,
+            pairs_before[1].lpf_hz,
+        ];
+        let mut out = [PreparedInputFilterTarget {
+            lanes: BuiltinLaneSelector::Both,
+            section: 0,
+            pair: [0.0; 2],
+            coefficients: [0.0; 6],
+        }; INPUT_FILTER_TARGET_CAPACITY];
+        let (_, count) = InputFilterPreparer
+            .prepare(sample_rate_hz, &seeds, &edits, &mut out)
+            .map_err(|_| OutOfDomain)?;
+        records.extend(
+            out[..count]
+                .iter()
+                .map(|&target| TrackInputRecord::PreparedFilter { target }),
+        );
+    }
+    Ok(records)
+}
+
+/// The semantic edits that carry a strip's changed filter values (#1556 D4): per lane, `3` or `4`
+/// for a one-sided change and the atomic pair `0` when both of the lane's values change (so a
+/// pair that two one-sided edits would refuse, an HPF raised past the old LPF while the LPF
+/// rises, is one valid edit). The same edit on both lanes is one `Both` edit, which is how the
+/// preparer later merges equal targets.
+fn filter_edits(
+    changed: [(bool, bool); 2],
+    after: [builtins::InputFilterPair; 2],
+) -> Vec<InputFilterEdit> {
+    let lane_edit = |lane: usize| {
+        let pair = after[lane];
+        match changed[lane] {
+            (false, false) => None,
+            (true, false) => Some((3, pair.hpf_hz, 0.0)),
+            (false, true) => Some((4, pair.lpf_hz, 0.0)),
+            (true, true) => Some((0, pair.hpf_hz, pair.lpf_hz)),
+        }
+    };
+    let (left, right) = (lane_edit(0), lane_edit(1));
+    let edit = |(parameter_id, value0, value1): (u32, f32, f32), channel| InputFilterEdit {
+        parameter_id,
+        channel,
+        value0,
+        value1,
+    };
+    match (left, right) {
+        (Some(left), Some(right))
+            if left.0 == right.0
+                && left.1.to_bits() == right.1.to_bits()
+                && left.2.to_bits() == right.2.to_bits() =>
+        {
+            vec![edit(left, ParameterChannel::Both)]
+        }
+        _ => left
+            .map(|left| edit(left, ParameterChannel::Left))
+            .into_iter()
+            .chain(right.map(|right| edit(right, ParameterChannel::Right)))
+            .collect(),
+    }
 }
 
 /// The refusal of a successor whose revision its gate cannot stamp (#1277 D10).

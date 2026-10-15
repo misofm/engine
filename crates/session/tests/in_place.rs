@@ -8,9 +8,9 @@
 //! `owners_values_valid`.
 
 use session::{
-    CompileCaps, DualMonoFader, MatrixOrPan, OwnerRef, OwnerSlots, SessionModel, StableId, Submix,
-    Vca, canonical_owner_bytes, canonical_session_json, compile_session, owners_counts_equal,
-    owners_values_valid, parse_session_json,
+    CompileCaps, DualMonoFader, MatrixOrPan, OwnerRef, OwnerSlots, OwnersGrowth, SessionModel,
+    StableId, Submix, Vca, canonical_owner_bytes, canonical_session_json, compile_session,
+    owners_growth, owners_values_valid, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -124,10 +124,14 @@ fn swapping_the_owners_in_gives_the_compiled_session_of_the_edited_model() {
     let recompiled = compile_session(&edited, caps()).expect("compiles");
     let (slots, mut owners) = slots(compiled.normalized_model(), &edited);
     assert!(owners_values_valid(slots.in_owners(&owners)));
-    assert!(owners_counts_equal(
-        slots.in_committed(compiled.normalized_model()),
-        slots.in_owners(&owners)
-    ));
+    assert_eq!(
+        owners_growth(
+            slots.in_committed(compiled.normalized_model()),
+            slots.in_owners(&owners)
+        )
+        .map(growth_pair),
+        Some((0, 0))
+    );
     compiled.swap_owners(&mut owners, &slots);
     compiled.finish_in_place(
         recompiled.normalized_model().revision,
@@ -153,7 +157,8 @@ fn swapping_the_owners_in_gives_the_compiled_session_of_the_edited_model() {
 }
 
 /// The values the compiler refuses are refused by `owners_values_valid`, one owner kind at a time,
-/// and a clone with another count of anything is not a change of values.
+/// and a clone with another count of anything but added parameter entries is not a change of
+/// values.
 #[test]
 fn owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared() {
     let model = model();
@@ -191,18 +196,45 @@ fn owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared
 
     let mut more = model.vcas[0].clone();
     more.members.push(id("extra"));
-    assert!(!owners_counts_equal(
-        [OwnerRef::Vca(&model.vcas[0])],
-        [OwnerRef::Vca(&more)]
-    ));
-    let mut track = model.tracks[0].clone();
-    track.inserts.effects[0].params.clear();
-    assert!(!owners_counts_equal(
-        [OwnerRef::Track(&model.tracks[0])],
-        [OwnerRef::Track(&track)],
-    ));
-    assert!(owners_counts_equal(
-        [OwnerRef::Track(&model.tracks[0])],
-        [OwnerRef::Track(&model.tracks[0].clone())],
-    ));
+    assert_eq!(
+        owners_growth([OwnerRef::Vca(&model.vcas[0])], [OwnerRef::Vca(&more)]),
+        None
+    );
+    let mut fewer = model.tracks[0].clone();
+    fewer.inserts.effects[0].params.clear();
+    assert_eq!(
+        owners_growth(
+            [OwnerRef::Track(&model.tracks[0])],
+            [OwnerRef::Track(&fewer)],
+        ),
+        None
+    );
+    assert_eq!(
+        owners_growth(
+            [OwnerRef::Track(&model.tracks[0])],
+            [OwnerRef::Track(&model.tracks[0].clone())],
+        )
+        .map(growth_pair),
+        Some((0, 0))
+    );
+    // #1620: an added parameter entry is growth, counted with the list it lengthens.
+    let mut added = model.tracks[0].clone();
+    let params = &mut added.inserts.effects[0].params;
+    let mut entry = params[0].clone();
+    entry.parameter_id = u32::MAX;
+    params.push(entry);
+    let length = params.len();
+    assert_eq!(
+        owners_growth(
+            [OwnerRef::Track(&model.tracks[0])],
+            [OwnerRef::Track(&added)],
+        )
+        .map(growth_pair),
+        Some((1, length))
+    );
+}
+
+/// The growth's two counts, the only view of it outside `session`.
+fn growth_pair(growth: OwnersGrowth) -> (usize, usize) {
+    (growth.parameters(), growth.largest_grown_list())
 }

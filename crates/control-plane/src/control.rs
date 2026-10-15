@@ -271,7 +271,8 @@ pub struct TestTransactionSnapshot<Row> {
     pub effect_cells: Vec<EffectCellRow>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
-    /// bits)`.
+    /// bits)`. The candidate is empty while the owner is idle: it exists only between `begin` and
+    /// `commit` or `discard` (#1624).
     pub effect_owners: Vec<TestOwnerState>,
 }
 
@@ -1942,9 +1943,9 @@ where
     /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
     /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     ///
-    /// **A token prepared in place (#1613).** A transaction of `SetControl`s on existing values holds
-    /// the owners it edited and no compilation (`PreparedSessionTransaction::is_in_place`). The
-    /// classification, the admission, the catalog stage and the producers' preflight read the
+    /// **A token prepared in place (#1613).** A transaction of `SetControl`s, on existing values or
+    /// adding parameter entries (#1620), holds the owners it edited and no compilation
+    /// (`PreparedSessionTransaction::is_in_place`). The classification, the admission, the catalog stage and the producers' preflight read the
     /// committed model and those owners as one view (`controls::ModelView`), and nothing writes the
     /// committed model before the commit: the protocol commit swaps the owners in as the last write.
     /// If the fast classification cannot judge the transaction, the token is materialized (the full
@@ -2166,6 +2167,10 @@ where
             else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
+            // `begin` allocates the candidate fallibly (#1624): its `Allocation` refusal maps to
+            // `INTERNAL`, as every failed `try_reserve_exact` of this commit does, before the
+            // stamp. Nothing is written or acknowledged, and `OpenOwners` discards the owners
+            // begun so far.
             if producer.begin_owner(base_revision).is_err() {
                 return LiveCommit::Done(Err(CommandError::Internal));
             }
@@ -2410,10 +2415,11 @@ where
         let transaction = prepared.get().prospective_session();
         let committed = self.controller.session().compiled();
         let models = if transaction.is_in_place() {
-            // #1613: a transaction prepared in place changes values, never a count (the
-            // preparation proved it), so the counts a rebuild would check are those of the
-            // committed model, which passed them when it was admitted. The model charge is the one
-            // the full path would make: the committed estimate and the next one.
+            // #1613: a transaction prepared in place changes values and at most adds parameter
+            // entries (#1620), never a count a rebuild checks (the preparation proved it), so those
+            // counts are the committed model's, which passed them when it was admitted. The model
+            // charge is the one the full path would make: the committed estimate and the next one,
+            // which charges the added entries.
             let next = transaction
                 .in_place_estimate()
                 .unwrap_or_else(|| committed.resource_estimate());
