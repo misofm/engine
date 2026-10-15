@@ -13,7 +13,8 @@ use std::sync::{
 };
 
 use engine::realtime::{
-    Consumer, Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
+    Consumer, ObserverKind, Producer, QueueGeneration, RenderError, bounded_spsc,
+    bounded_spsc_retained_payload,
 };
 use graph::{
     GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphObservationValidity,
@@ -228,7 +229,7 @@ impl SpectrumTarget {
         }
     }
 
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             Self::TrackPostInputBuiltins(track_id)
             | Self::TrackPostMatrix(track_id)
@@ -957,6 +958,51 @@ impl SpectrumCapture {
     pub const fn channels(&self) -> SpectrumChannels {
         self.channels
     }
+
+    /// Take over the capture of the plan this one's plan displaced (#1395 D3), for a swap in which
+    /// the observers exchanged places.
+    ///
+    /// `pairs` is the successor's pairing list ([`PlanStateInventory::spectrum_pairing`]): when it
+    /// names this single capture as the continuation of `predecessor` (entry 0 of both), the two
+    /// captures exchange places and `true` is returned. `self` then holds the consumer, the three
+    /// shared words and the read counters that belong to the observer that now renders in the
+    /// successor's plan, so a reader that held `predecessor` keeps receiving with no `Failed`
+    /// epoch, no `Gap` and no restart; `predecessor` holds the successor's fresh capture, whose
+    /// observer sits in the displaced plan. Anything else changes nothing and returns `false`: an
+    /// empty list, and captures whose target or channels differ (the key of the carry, so a list
+    /// that names such a pair is a fault that must not pair readers).
+    ///
+    /// Allocation-free and drops nothing: the caller drops the displaced capture where it chooses.
+    ///
+    /// [`PlanStateInventory::spectrum_pairing`]: crate::PlanStateInventory::spectrum_pairing
+    pub fn pair_carried(&mut self, predecessor: &mut Self, pairs: &[SpectrumPair]) -> bool {
+        let named = pairs.contains(&SpectrumPair {
+            successor: 0,
+            predecessor: 0,
+        });
+        if !named || self.target != predecessor.target || self.channels != predecessor.channels {
+            return false;
+        }
+        core::mem::swap(self, predecessor);
+        true
+    }
+}
+
+/// One spectrum capture a successor takes from its predecessor (#1395 D1): the successor's
+/// capture at entry `successor` continues the predecessor's at entry `predecessor`. An entry is a
+/// capture's index in its plan's captures (a single capture is entry 0).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpectrumPair {
+    /// The entry in the successor's captures.
+    pub successor: usize,
+    /// The entry in the predecessor's captures.
+    pub predecessor: usize,
+}
+
+/// The binding handle of the observer of capture `index`: handles are positional, so they are not
+/// keys (#1395 D1).
+pub(crate) fn observer_handle(index: usize) -> Option<u64> {
+    SPECTRUM_OBSERVER_HANDLE.checked_sub(u64::try_from(index).ok()?)
 }
 
 /// Control-side ownership of several explicitly prepared spectrum captures.
@@ -989,6 +1035,70 @@ impl SpectrumCaptureCollection {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.captures.is_empty()
+    }
+
+    /// Take over the captures of the collection the plan of this one displaced (#1395 D3), for a
+    /// swap in which the observers exchanged places. Returns whether any capture paired.
+    ///
+    /// `pairs` is the successor's pairing list ([`PlanStateInventory::spectrum_pairing`]): the
+    /// capture at `successor` continues the one at `predecessor`, and the two exchange places, so
+    /// each paired entry of `self` holds the consumer, the three shared words and the read counters
+    /// of the observer that now renders in the successor's plan. A reader that held the
+    /// predecessor's entry keeps receiving, whatever index the entry has now; `predecessor` is left
+    /// holding the successor's fresh captures. The list is checked whole before anything moves: an
+    /// index out of range, a pair whose target or channels differ (the carry's key), or successor
+    /// entries not strictly increasing make it a fault that pairs nothing, as an empty list does.
+    /// (Two pairs cannot then name one predecessor entry: both successor entries would carry its
+    /// key, and a collection admits no duplicate key.)
+    ///
+    /// The selection follows the entry. When the predecessor's selected entry paired, `self`
+    /// selects that entry's new index and keeps the predecessor's `selection_epoch`. When it did
+    /// not, `self` has no selection and its epoch is the predecessor's plus one, so a reader of the
+    /// epoch sees the loss; the host's next `select` arms an entry as it does today. A predecessor
+    /// with no selection leaves `self` with none and with the predecessor's epoch. This runs for an
+    /// empty list too (a refused hand-over carries nothing), and any one-shot or stream armed on an
+    /// entry that did not pair is not settled here (#1618's).
+    ///
+    /// Allocation-free and drops nothing: the caller drops the displaced collection where it
+    /// chooses.
+    ///
+    /// [`PlanStateInventory::spectrum_pairing`]: crate::PlanStateInventory::spectrum_pairing
+    pub fn pair_carried(&mut self, predecessor: &mut Self, pairs: &[SpectrumPair]) -> bool {
+        let mut previous: Option<usize> = None;
+        let sound = pairs.iter().all(|pair| {
+            let increasing = previous.is_none_or(|before| pair.successor > before);
+            previous = Some(pair.successor);
+            increasing
+                && match (
+                    self.captures.get(pair.successor),
+                    predecessor.captures.get(pair.predecessor),
+                ) {
+                    (Some(next), Some(before)) => {
+                        next.target == before.target && next.channels == before.channels
+                    }
+                    _ => false,
+                }
+        });
+        let pairs = if sound { pairs } else { &[] };
+        let mut selected = None;
+        for pair in pairs {
+            core::mem::swap(
+                &mut self.captures[pair.successor],
+                &mut predecessor.captures[pair.predecessor],
+            );
+            if predecessor.selected == Some(pair.predecessor) {
+                selected = Some(pair.successor);
+            }
+        }
+        self.selected = selected;
+        self.selection_epoch = if selected.is_some() || predecessor.selected.is_none() {
+            predecessor.selection_epoch
+        } else {
+            // At the top of the range `select` refuses with `EpochOverflow`, so no identity is
+            // ever reused.
+            predecessor.selection_epoch.saturating_add(1)
+        };
+        !pairs.is_empty()
     }
 
     /// Return the accepted entry at `index`: its stable target identity and its mask.
@@ -2543,6 +2653,13 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
     fn block_end(&mut self) {
         SpectrumCaptureObserver::block_end(self);
     }
+
+    /// A capture's whole observer, its window history, producer and shared words included, is
+    /// state a swap carries (#1395 D2). It keeps no binding handle, so a hand-over needs no
+    /// `adopt_binding_handle`.
+    fn carry_kind(&self) -> Option<ObserverKind> {
+        Some(ObserverKind::Spectrum)
+    }
 }
 
 /// Caller-owned output planes for one analyzed spectrum.
@@ -3131,6 +3248,196 @@ mod tests {
             channels,
         };
         (observer, capture)
+    }
+
+    /// #1395 D3: only a named pair of captures of one key exchange places; the successor's capture
+    /// then holds the state the predecessor's held, and nothing else swaps.
+    #[test]
+    fn pair_carried_swaps_only_a_named_pair_of_one_key() {
+        let pair = [super::SpectrumPair {
+            successor: 0,
+            predecessor: 0,
+        }];
+        let started = |channels| {
+            let (_observer, mut capture) = continuous_pair(channels);
+            capture.start_continuous(48_000, 128).expect("start");
+            capture
+        };
+        // A named pair of one key: the successor's fresh capture takes the running stream.
+        let (_observer, mut next) = continuous_pair(SpectrumChannels::Stereo);
+        let mut before = started(SpectrumChannels::Stereo);
+        assert!(next.pair_carried(&mut before, &pair));
+        assert_eq!(next.stream_epoch(), Some(1));
+        assert_eq!(before.stream_epoch(), None);
+        // An empty list names nothing.
+        let (_observer, mut next) = continuous_pair(SpectrumChannels::Stereo);
+        let mut before = started(SpectrumChannels::Stereo);
+        assert!(!next.pair_carried(&mut before, &[]));
+        assert_eq!(next.stream_epoch(), None);
+        assert_eq!(before.stream_epoch(), Some(1));
+        // A list that names captures of another channel mask is a fault, never a pairing.
+        let (_observer, mut next) = continuous_pair(SpectrumChannels::Left);
+        let mut before = started(SpectrumChannels::Stereo);
+        assert!(!next.pair_carried(&mut before, &pair));
+        assert_eq!(before.channels(), SpectrumChannels::Stereo);
+        assert_eq!(before.stream_epoch(), Some(1));
+    }
+
+    /// Three captures of distinct keys with their observers, as a collection holds them.
+    fn collection_of(
+        keys: &[(&str, SpectrumChannels)],
+    ) -> (Vec<SpectrumCaptureObserver>, SpectrumCaptureCollection) {
+        let mut observers = Vec::new();
+        let mut captures = Vec::new();
+        for (id, channels) in keys {
+            let (observer, mut capture) = continuous_pair(*channels);
+            capture.target = SpectrumTarget::TrackPostMatrix((*id).into());
+            observers.push(observer);
+            captures.push(capture);
+        }
+        (observers, SpectrumCaptureCollection::new(captures))
+    }
+
+    /// Run `frames` frames of the ramp through `observer` in quanta of 128, from `from_sample`.
+    fn feed_blocks(observer: &mut SpectrumCaptureObserver, from_sample: usize, frames: usize) {
+        for first_sample in (from_sample..from_sample + frames).step_by(128) {
+            let (left, right) = ramp_block(first_sample, 128);
+            observer.capture(
+                &left,
+                &right,
+                first_sample as u64,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+    }
+
+    /// #1395b D3: a reordered collection pairs by key. The selection follows its entry to the new
+    /// index with its epoch, a stop reaches the observer that renders (the mode word moved with
+    /// the capture), the other entry arms its own observer, a lost selection advances the epoch,
+    /// and a list that names a pair of two keys is a fault that pairs nothing.
+    #[test]
+    fn collection_pair_carried_follows_keys_and_the_selection() {
+        use super::SpectrumPair;
+        let a_keys = [
+            ("t", SpectrumChannels::Stereo),
+            ("u", SpectrumChannels::Left),
+        ];
+        let b_keys = [
+            ("u", SpectrumChannels::Left),
+            ("t", SpectrumChannels::Stereo),
+        ];
+        let pairs = [
+            SpectrumPair {
+                successor: 0,
+                predecessor: 1,
+            },
+            SpectrumPair {
+                successor: 1,
+                predecessor: 0,
+            },
+        ];
+        // A selects `t` and streams; B lists the entries the other way round.
+        let (mut a_observers, mut a) = collection_of(&a_keys);
+        let (mut b_observers, mut b) = collection_of(&b_keys);
+        a.select(
+            SpectrumTarget::TrackPostMatrix("t".into()).as_ref(),
+            SpectrumChannels::Stereo,
+        )
+        .expect("select t");
+        a.start_continuous(48_000, 128).expect("start");
+        feed_blocks(&mut a_observers[0], 0, 1024);
+        // The swap block: the observers of the keys exchange places.
+        core::mem::swap(&mut a_observers[0], &mut b_observers[1]);
+        core::mem::swap(&mut a_observers[1], &mut b_observers[0]);
+        assert!(b.pair_carried(&mut a, &pairs));
+        assert_eq!(b.selected_index(), Some(1), "t is entry 1 now");
+        assert_eq!(b.selection_epoch(), 1, "the epoch carried");
+        assert_eq!(b.stream_epoch(), Some(1));
+        // The stream goes on from the history the observer kept: the window completes after the
+        // 1024 frames already fed plus 1024 more, and carries the first epoch.
+        feed_blocks(&mut b_observers[1], 1024, 1024);
+        let window = b.try_read_continuous().expect("the carried window");
+        assert_eq!(window.stream_epoch, 1);
+        assert_eq!(window.first_sample, 0);
+        // The observer still publishes at its hop (2048 frames here), so an empty queue after a stop is a stop.
+        feed_blocks(&mut b_observers[1], 2048, 2048);
+        assert_eq!(b.captures[1].consumer.available_at_entry(), 1);
+        b.try_read_continuous().expect("the next window");
+        // A stop through the successor's collection reaches the observer that renders.
+        b.stop_continuous();
+        feed_blocks(&mut b_observers[1], 4096, 4096);
+        assert_eq!(
+            b.captures[1].consumer.available_at_entry(),
+            0,
+            "no window is published after the stop"
+        );
+        // `u` was idle and carried idle: selecting it arms its own observer.
+        b.select(
+            SpectrumTarget::TrackPostMatrix("u".into()).as_ref(),
+            SpectrumChannels::Left,
+        )
+        .expect("select u");
+        assert_eq!(b.selected_index(), Some(0));
+        assert_eq!(b.selection_epoch(), 2);
+        feed_blocks(&mut b_observers[0], 0, SPECTRUM_WINDOW_FRAMES);
+        b_observers[0].block_end();
+        assert!(b.try_read().is_ok(), "u's observer completes its window");
+
+        // A lost selection: the selected key does not pair, so there is none and the epoch moves.
+        let (_o, mut a) = collection_of(&a_keys);
+        let (_p, mut b) = collection_of(&[("t", SpectrumChannels::Left), a_keys[1]]);
+        a.select(
+            SpectrumTarget::TrackPostMatrix("t".into()).as_ref(),
+            SpectrumChannels::Stereo,
+        )
+        .expect("select t");
+        let only_u = [SpectrumPair {
+            successor: 1,
+            predecessor: 1,
+        }];
+        assert!(b.pair_carried(&mut a, &only_u));
+        assert_eq!(b.selected_index(), None);
+        assert_eq!(b.selection_epoch(), 2);
+        assert_eq!(a.selected_index(), Some(0), "the predecessor keeps its own");
+        // A predecessor with no selection leaves none and its epoch.
+        let (_o, mut a) = collection_of(&a_keys);
+        let (_p, mut b) = collection_of(&a_keys);
+        assert!(!b.pair_carried(&mut a, &[]));
+        assert_eq!((b.selected_index(), b.selection_epoch()), (None, 0));
+
+        // A pair across two keys, an index out of range and an out-of-order list pair nothing.
+        for fault in [
+            vec![SpectrumPair {
+                successor: 0,
+                predecessor: 1,
+            }],
+            vec![SpectrumPair {
+                successor: 2,
+                predecessor: 0,
+            }],
+            vec![
+                SpectrumPair {
+                    successor: 1,
+                    predecessor: 1,
+                },
+                SpectrumPair {
+                    successor: 0,
+                    predecessor: 0,
+                },
+            ],
+        ] {
+            let (_o, mut a) = collection_of(&a_keys);
+            let (_p, mut b) = collection_of(&a_keys);
+            a.select(
+                SpectrumTarget::TrackPostMatrix("t".into()).as_ref(),
+                SpectrumChannels::Stereo,
+            )
+            .expect("select t");
+            assert!(!b.pair_carried(&mut a, &fault), "{fault:?}");
+            assert_eq!(a.selected_index(), Some(0), "{fault:?}");
+            assert_eq!(b.selected_index(), None, "{fault:?}");
+            assert_eq!(b.selection_epoch(), 2, "the selection is lost: {fault:?}");
+        }
     }
 
     fn ramp_block(first_sample: usize, frames: usize) -> (Vec<f32>, Vec<f32>) {

@@ -24,8 +24,8 @@ use crate::spectrum::{
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumHop, SpectrumOutput, SpectrumSmoothingConfig, SpectrumTarget, SpectrumTargetRef,
-    SpectrumWindow,
+    SpectrumHop, SpectrumOutput, SpectrumPair, SpectrumSmoothingConfig, SpectrumTarget,
+    SpectrumTargetRef, SpectrumWindow,
 };
 
 /// Spectrum capture target at a track's `post_input` tap, after its input section.
@@ -650,6 +650,58 @@ impl SpectrumService {
     #[must_use]
     pub const fn hop(&self) -> Option<SpectrumHop> {
         self.hop
+    }
+
+    /// Install the captures of a successor plan whose adoption block has run (#1395 D3, D5): the
+    /// service's captures become the successor's, and the displaced ones come back for the caller
+    /// to drop where it chooses.
+    ///
+    /// Control-side work, done at promotion and never in the swap block. `pairing` is the
+    /// successor's [`PlanStateInventory::spectrum_pairing`](crate::PlanStateInventory::spectrum_pairing),
+    /// and `carried` says whether the adoption carried (`CarryOutcome::Carried`); a refused
+    /// hand-over (`PredecessorMismatch`) moved no observer, so every successor capture is fresh.
+    /// A capture the pairing names keeps the reader the service already holds: that capture's
+    /// observer moved into the successor's plan, so its consumer, its shared mode word and its
+    /// read counters stay valid, and the stream epoch, the sequence and an armed one-shot carry on
+    /// unchanged (#1395 gate 3). Until this call, the service's captures are the predecessor's,
+    /// which is correct for a carried capture and reads as pending for the others.
+    ///
+    /// A collection pairs entry by entry (#1395b): each entry the pairing names keeps its reader,
+    /// whatever index it has in the successor, and the selection follows its entry with its epoch
+    /// ([`SpectrumCaptureCollection::pair_carried`]). When the selected entry did not carry, or the
+    /// hand-over was refused, the successor has no selection and its epoch is the predecessor's
+    /// plus one. A single capture and a collection never pair with each other (their keys never
+    /// join), so such a promotion installs the successor's fresh captures.
+    ///
+    /// A capture that does not carry is replaced by the successor's fresh one. What the caller had
+    /// armed or started on the old one (`caller_armed`, a running stream) is not settled here;
+    /// that is #1618's, which lands in this method.
+    ///
+    /// Allocation-free and free-free: nothing is dropped here.
+    #[must_use = "the displaced captures hold a reader and a shared state; drop them off the audio thread"]
+    pub fn adopt_successor(
+        &mut self,
+        mut successor: PreparedSpectrumCaptures,
+        pairing: &[SpectrumPair],
+        carried: bool,
+    ) -> PreparedSpectrumCaptures {
+        match (&mut successor, &mut self.captures) {
+            (PreparedSpectrumCaptures::Single(next), PreparedSpectrumCaptures::Single(before))
+                if carried =>
+            {
+                next.pair_carried(before, pairing);
+            }
+            // A collection also runs without a carry: the selection the service held is gone with
+            // the predecessor's captures, and the successor's epoch must say so.
+            (
+                PreparedSpectrumCaptures::Collection(next),
+                PreparedSpectrumCaptures::Collection(before),
+            ) => {
+                next.pair_carried(before, if carried { pairing } else { &[] });
+            }
+            _ => {}
+        }
+        core::mem::replace(&mut self.captures, successor)
     }
 
     // REALTIME_POLICY_BEGIN: arm, read, cancel, select and the stream calls run inside render-locked exports.
