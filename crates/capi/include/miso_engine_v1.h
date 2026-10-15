@@ -297,6 +297,13 @@ typedef struct miso_engine_v1_compile_limits {
     uint64_t maximum_meter_streams;
     uint64_t maximum_meter_items;
     uint64_t maximum_meter_bytes;
+    /* Largest control frame, in bytes. It also bounds the observation taps a
+       session can keep armed: one commit that ends them all reports them in one OBSERVATION_ENDED
+       event, which must fit this frame, so a subscription that would outgrow it is refused (#1685).
+       That event is 64 bytes plus, per armed tap, 64 bytes + pad8(strip ID bytes) + pad8(effect ID
+       bytes), where pad8 rounds up to a multiple of 8. Example: 64 insert meters whose strip and
+       effect IDs are 8 bytes or shorter need 64 + 64 * 80 = 5,184 bytes (about 5.1 KiB); with
+       16-byte IDs, 6,208 bytes. The browser uses 16 KiB. */
     uint64_t maximum_control_frame_bytes;
     uint64_t maximum_replay_bytes;
     uint64_t maximum_replay_entries;

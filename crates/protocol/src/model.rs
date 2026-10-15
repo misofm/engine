@@ -1328,8 +1328,9 @@ impl SessionStore {
                     controls::check_monitor(&candidate, address, *value, *ramp_samples, rate)
                         .map_err(|error| refused(SessionEditError::Control(error)))?;
                 if let Some(write) = write {
-                    // A later write of one strip replaces the earlier one.
-                    monitor_edits.retain(|earlier| earlier.strip != write.strip);
+                    // A later write of one row of one strip replaces the earlier one.
+                    monitor_edits
+                        .retain(|earlier| earlier.strip != write.strip || earlier.row != write.row);
                     monitor_edits.push(write);
                     continue;
                 }
@@ -1450,7 +1451,8 @@ impl SessionStore {
             if let Some(write) =
                 controls::check_monitor(committed, address, *value, *ramp_samples, rate).ok()?
             {
-                monitor_edits.retain(|earlier| earlier.strip != write.strip);
+                monitor_edits
+                    .retain(|earlier| earlier.strip != write.strip || earlier.row != write.row);
                 monitor_edits.push(write);
                 continue;
             }

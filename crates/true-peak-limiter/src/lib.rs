@@ -48,17 +48,17 @@ pub mod corpus;
 
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    AutomationRate, BankProcessReport, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
+    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
+    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
@@ -3951,12 +3951,9 @@ fn apply_automation(
         };
         let valid = span_index < automation_capacity as usize
             && parameter < RAMP_COUNT
-            && span.kind == AutomationSpanKind::Point
-            && span.start_sample == first_sample
-            && span.end_sample == first_sample
-            && span.start_value.to_bits() == span.end_value.to_bits()
-            && parameter_value_valid(&PARAMETER_SPECS[parameter], span.start_value)
-            && !is_negative_zero(span.start_value)
+            && span.sample == first_sample
+            && parameter_value_valid(&PARAMETER_SPECS[parameter], span.value)
+            && !is_negative_zero(span.value)
             && last_order.is_none_or(|previous| order > previous)
             && pending[channel][parameter].is_none();
         if !valid {
@@ -3964,7 +3961,7 @@ fn apply_automation(
             continue;
         }
         last_order = Some(order);
-        pending[channel][parameter] = Some(normalize_zero(span.start_value));
+        pending[channel][parameter] = Some(normalize_zero(span.value));
     }
     for (channel, state) in [left, right].into_iter().enumerate() {
         if let Some(value) = pending[channel][0] {
@@ -7172,13 +7169,10 @@ mod tests {
         // One more silent block, this time carrying a point that restates the ceiling it already
         // holds. It must be rendered rather than skipped.
         let restated = [PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: ParameterChannel::Left,
             parameter_index: 0,
-            start_sample: 16 * 128,
-            end_sample: 16 * 128,
-            start_value: -6.0,
-            end_value: -6.0,
+            sample: 16 * 128,
+            value: -6.0,
         }];
         let mut left = vec![0.0_f32; 128];
         let mut right = vec![0.0_f32; 128];
@@ -7311,13 +7305,10 @@ mod tests {
                 let mut right = silence_plane(block, FRAMES, 1, quiet, 0.05, true);
                 let first_sample = (block * FRAMES) as u64;
                 let retarget = [PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: 0,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: -3.0,
-                    end_value: -3.0,
+                    sample: first_sample,
+                    value: -3.0,
                 }];
                 let spans: &[PreparedAutomationSpan] = if block == RETARGET_BLOCK {
                     &retarget
@@ -7513,13 +7504,10 @@ mod tests {
         let first_sample = 16 * 128_u64;
         let restated: Vec<PreparedAutomationSpan> = (0..lanes)
             .map(|_| PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Left,
                 parameter_index: 0,
-                start_sample: first_sample,
-                end_sample: first_sample,
-                start_value: -6.0,
-                end_value: -6.0,
+                sample: first_sample,
+                value: -6.0,
             })
             .collect();
         let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
@@ -8766,31 +8754,22 @@ mod tests {
             .expect("prepare");
         let spans = [
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Left,
                 parameter_index: 0,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: -6.0,
-                end_value: -6.0,
+                sample: 0,
+                value: -6.0,
             },
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Both,
                 parameter_index: 1,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 500.0,
-                end_value: 500.0,
+                sample: 0,
+                value: 500.0,
             },
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Left,
                 parameter_index: 2,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 1.0,
-                end_value: 1.0,
+                sample: 0,
+                value: 1.0,
             },
         ];
         let mut left = vec![0.0_f32; 8];
@@ -8827,13 +8806,10 @@ mod tests {
         assert_eq!(snapshot(&effect), fresh);
 
         let spans = [PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: ParameterChannel::Left,
             parameter_index: 0,
-            start_sample: 0,
-            end_sample: 0,
-            start_value: -3.0,
-            end_value: -3.0,
+            sample: 0,
+            value: -3.0,
         }];
         let mut left = vec![0.0_f32; 8];
         let mut right = vec![0.0_f32; 8];
@@ -9403,13 +9379,10 @@ mod tests {
         value: f32,
     ) -> PreparedAutomationSpan {
         PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel,
             parameter_index: parameter,
-            start_sample: first_sample,
-            end_sample: first_sample,
-            start_value: value,
-            end_value: value,
+            sample: first_sample,
+            value,
         }
     }
 

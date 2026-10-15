@@ -37,10 +37,10 @@
 //! look like a numerics bug.
 
 use effect_contract::{
-    AutomationSpanKind, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
-    NativeEffectRegistry, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadInput,
-    StatePayloadOutput, expected_prepared_metadata,
+    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
+    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
+    expected_prepared_metadata,
 };
 use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::state_payload::write_f32;
@@ -545,13 +545,10 @@ fn dispatch_case<L: Lane, const W: usize>(out: &mut [u32]) {
                         continue;
                     }
                     let span = PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
                         channel,
                         parameter_index: parameter,
-                        start_sample: first_sample,
-                        end_sample: first_sample,
-                        start_value: value,
-                        end_value: value,
+                        sample: first_sample,
+                        value,
                     };
                     let lane = track - group * W;
                     instance.apply_automation(

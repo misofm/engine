@@ -1837,13 +1837,10 @@ impl LiveControlEffectBankStage {
 /// The value an unused staging slot holds. It is never handed to a bank: only `[..offsets[lanes]]`
 /// is, and every span inside that range was written by this block's drain.
 const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
-    kind: effect_contract::AutomationSpanKind::Point,
     channel: effect_contract::ParameterChannel::Both,
     parameter_index: 0,
-    start_sample: 0,
-    end_sample: 0,
-    start_value: 0.0,
-    end_value: 0.0,
+    sample: 0,
+    value: 0.0,
 };
 
 impl BankStage for LiveControlEffectBankStage {

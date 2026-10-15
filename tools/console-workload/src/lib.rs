@@ -1592,8 +1592,8 @@ impl SessionRuntime {
     ///
     /// This is the production control path and nothing else: the value is read by the render
     /// thread at the top of the next block and staged as a single
-    /// [`AutomationSpanKind::Point`](effect_contract::AutomationSpanKind) span at that
-    /// block's first sample. One call per block therefore *is* "one Point span per block", by the
+    /// [`PreparedAutomationSpan`](effect_contract::PreparedAutomationSpan) at that
+    /// block's first sample. One call per block therefore *is* "one span per block", by the
     /// contract's own construction rather than by a hand-built span a benchmark asserts is
     /// equivalent.
     ///

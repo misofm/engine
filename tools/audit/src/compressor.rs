@@ -11,10 +11,10 @@
 use bench_support::alloc as bench_alloc;
 use compressor::CompressorFactory;
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel, PortId,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+    BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 use engine::realtime::audit;
 use lane::Backend;
@@ -96,13 +96,10 @@ pub(crate) fn main() {
                 } else {
                     -12.0
                 };
-                points[0].start_value = value;
-                points[0].end_value = value;
-                points[1].start_value = value;
-                points[1].end_value = value;
+                points[0].value = value;
+                points[1].value = value;
                 for point in &mut points {
-                    point.start_sample = first_sample;
-                    point.end_sample = first_sample;
+                    point.sample = first_sample;
                 }
                 automation = &points;
             }
@@ -194,13 +191,10 @@ pub(crate) fn main() {
 /// A block-rate Point on one parameter of one channel.
 fn span(channel: ParameterChannel, parameter_index: u32, value: f32) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: value,
-        end_value: value,
+        sample: 0,
+        value,
     }
 }
 

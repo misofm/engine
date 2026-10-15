@@ -44,9 +44,9 @@
 //!
 //! A drained value takes effect at the **first sample of the next rendered block**, exactly as
 //! #137's matrix retarget does: [`EffectControlLane::stage`] runs at the top of the block, before
-//! a single sample is touched, and emits `AutomationSpanKind::Point` spans whose `start_sample` and
-//! `end_sample` are that block's `first_sample`. Every launch effect accepts precisely that shape
-//! (a `Point` at `first_sample` with bit-identical endpoints) and rejects anything else into
+//! a single sample is touched, and emits [`PreparedAutomationSpan`]s whose `sample` is that block's
+//! `first_sample`. Every launch effect accepts precisely that shape
+//! (a span at `first_sample`) and rejects anything else into
 //! `ProcessReport::invalid_spans`, so the block boundary is proven by the effect contract rather
 //! than asserted by the host.
 //!
@@ -86,9 +86,9 @@ use lane::kernels::{
 use std::sync::Arc;
 
 use crate::{
-    AutomationRate, AutomationSpanKind, ChannelSymmetryWitness, EffectDescriptor,
-    ObservationDescriptor, ObservationFold, ObservationSample, PREPARED_EFFECT_TARGET_WORDS,
-    ParameterChannel, ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget,
+    AutomationRate, ChannelSymmetryWitness, EffectDescriptor, ObservationDescriptor,
+    ObservationFold, ObservationSample, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel,
+    ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget,
 };
 
 /// One admitted live control event for one prepared effect instance.
@@ -1314,13 +1314,10 @@ impl EffectControlLane {
                 };
                 let value = f32::from_bits(bits);
                 staging[staged] = PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: value,
-                    end_value: value,
+                    sample: first_sample,
+                    value,
                 };
                 staged += 1;
                 // The one hook: a record kind cannot reach the render state without declaring

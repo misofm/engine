@@ -25,10 +25,9 @@
 
 use dsp_reference::class_a;
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedPorts, PreparedSidechainPort,
+    BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
 };
 use lane::Backend;
 use true_peak_limiter::{
@@ -176,13 +175,10 @@ fn point(
     value: f32,
 ) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index: parameter,
-        start_sample: first,
-        end_sample: first,
-        start_value: value,
-        end_value: value,
+        sample: first,
+        value,
     }
 }
 

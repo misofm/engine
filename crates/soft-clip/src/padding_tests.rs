@@ -218,13 +218,10 @@ impl Draw {
                 }
                 let value = self.value(parameter);
                 spans.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: index as u32,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: value,
-                    end_value: value,
+                    sample: first_sample,
+                    value,
                 });
             }
         }
@@ -372,13 +369,10 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
                 spans.extend(
                     [ParameterChannel::Both, ParameterChannel::Left].map(|channel| {
                         PreparedAutomationSpan {
-                            kind: AutomationSpanKind::Point,
                             channel,
                             parameter_index: 0,
-                            start_sample: first_sample,
-                            end_sample: first_sample,
-                            start_value: 6.0,
-                            end_value: 6.0,
+                            sample: first_sample,
+                            value: 6.0,
                         }
                     }),
                 );
@@ -931,13 +925,10 @@ fn planted_nonfinite_state<L: Lane>(width: BankWidth) {
         } = scalar(request(&values[source], 48_000, LinkMode::DualMono));
         // A drive ramp set at the poisoned block's first sample is mid-flight when D7 fires.
         let ramp = [PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: ParameterChannel::Left,
             parameter_index: 0,
-            start_sample: (3 * D7_FRAMES) as u64,
-            end_sample: (3 * D7_FRAMES) as u64,
-            start_value: 30.0,
-            end_value: 30.0,
+            sample: (3 * D7_FRAMES) as u64,
+            value: 30.0,
         }];
         for block in 0..5 {
             let context = format!("{context}, block {block}");

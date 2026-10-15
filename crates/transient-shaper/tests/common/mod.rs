@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
+    BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectBank,
     PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
     StatePayloadOutput, StatePayloadSizes,
@@ -225,13 +225,10 @@ pub(crate) fn point(
     value: f32,
 ) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: first_sample,
-        end_sample: first_sample,
-        start_value: value,
-        end_value: value,
+        sample: first_sample,
+        value,
     }
 }
 

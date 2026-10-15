@@ -22,19 +22,29 @@ use crate::view::ModelView;
 
 /// The host-local monitor values. They are not part of the session: they never reach a snapshot.
 ///
-/// In this slice it holds only the soloed strips, as a sorted set of IDs. A soloed ID that names a
-/// submix or no strip has no effect: a submix is solo-safe.
+/// It holds the soloed strips, as a sorted set of IDs, and the designated master strip (#1683). A
+/// soloed ID that names a submix or no strip has no effect: a submix is solo-safe.
+///
+/// The master is a designation, not a discovery (issue #143 D6): the strip whose gain reduction a
+/// host reports as the master's. It names a strip by ID, so a strip added or removed before it
+/// keeps it, and at most one strip is the master. It moves no render value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MonitorOverlay {
     /// Sorted, with no duplicate.
     soloed: Vec<StableId>,
+    /// The designated master strip, or `None`.
+    master: Option<StableId>,
 }
 
 impl MonitorOverlay {
-    /// An overlay that solos nothing. `const`, so a host may keep one in a `static`.
+    /// An overlay that solos nothing and designates no master. `const`, so a host may keep one in
+    /// a `static`.
     #[must_use]
     pub const fn new() -> Self {
-        Self { soloed: Vec::new() }
+        Self {
+            soloed: Vec::new(),
+            master: None,
+        }
     }
 
     /// An overlay that solos exactly the named strips.
@@ -43,7 +53,10 @@ impl MonitorOverlay {
         let mut soloed: Vec<StableId> = ids.into_iter().collect();
         soloed.sort_unstable();
         soloed.dedup();
-        Self { soloed }
+        Self {
+            soloed,
+            master: None,
+        }
     }
 
     /// The soloed IDs, sorted.
@@ -69,43 +82,100 @@ impl MonitorOverlay {
         }
     }
 
-    /// Drop every soloed ID that names no strip of `model`: a removed strip keeps no solo.
+    /// The designated master strip, or `None` (#1683).
+    #[must_use]
+    pub fn master(&self) -> Option<&StableId> {
+        self.master.as_ref()
+    }
+
+    /// Whether `id` is the designated master. Allocation-free.
+    #[must_use]
+    pub fn is_master(&self, id: &StableId) -> bool {
+        self.master.as_ref() == Some(id)
+    }
+
+    /// Designate `id` the master (`on`), which ends any other strip's designation, or end its
+    /// designation (`!on`); ending the designation of a strip that is not the master changes
+    /// nothing.
+    pub fn set_master(&mut self, id: &StableId, on: bool) {
+        if on {
+            self.master = Some(id.clone());
+        } else if self.is_master(id) {
+            self.master = None;
+        }
+    }
+
+    /// Whether the two overlays solo the same strips: a change of the master alone moves no
+    /// effective value.
+    #[must_use]
+    pub fn same_solo(&self, other: &Self) -> bool {
+        self.soloed == other.soloed
+    }
+
+    /// Drop every soloed ID, and the master, that names no strip of `model`: a removed strip keeps
+    /// no solo and is no longer the master.
     pub fn retain_strips_of(&mut self, model: &SessionModel) {
         self.soloed
             .retain(|id| crate::registry::strip_index(model, id).is_some());
+        if self
+            .master
+            .as_ref()
+            .is_some_and(|id| crate::registry::strip_index(model, id).is_none())
+        {
+            self.master = None;
+        }
     }
 
     /// The overlay after `writes`, applied in order, on a session whose strips are `next`'s, and
     /// the ramp the change carries (decision 17, C6 step 4, #1559 D7).
     ///
-    /// The ramp is that of the last write whose strip's solo differs between `self` and the
-    /// result, and `None` (the session's `mute_ms`) when no write changed anything or the last
-    /// such write gave no ramp. A strip `next` no longer has is dropped from the result.
+    /// The ramp is that of the last solo write whose strip's solo differs between `self` and the
+    /// result, and `None` (the session's `mute_ms`) when no solo write changed anything or the last
+    /// such write gave no ramp; a master write has no ramp, since it moves no render value. A strip
+    /// `next` no longer has is dropped from the result.
     #[must_use]
     pub fn after(&self, writes: &[MonitorWrite], next: &SessionModel) -> MonitorChange {
         let mut overlay = self.clone();
         for write in writes {
-            overlay.set_soloed(&write.strip, write.soloed);
+            match write.row {
+                MonitorRow::Solo => overlay.set_soloed(&write.strip, write.on),
+                MonitorRow::Master => overlay.set_master(&write.strip, write.on),
+            }
         }
         overlay.retain_strips_of(next);
         let ramp = writes
             .iter()
             .rev()
-            .find(|write| overlay.is_soloed(&write.strip) != self.is_soloed(&write.strip))
+            .find(|write| {
+                write.row == MonitorRow::Solo
+                    && overlay.is_soloed(&write.strip) != self.is_soloed(&write.strip)
+            })
             .and_then(|write| write.ramp);
         MonitorChange { overlay, ramp }
     }
 }
 
-/// One validated write to a monitor row (solo): the strip, the new state and the explicit ramp
-/// length of the write, in samples. See [`check_monitor`](crate::check_monitor).
+/// Which monitor row a [`MonitorWrite`] sets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MonitorRow {
+    /// The strip's `solo` (#1559).
+    Solo,
+    /// The strip's `master` designation (#1683).
+    Master,
+}
+
+/// One validated write to a monitor row (solo or master): the strip, the row, the new state and
+/// the explicit ramp length of the write, in samples. See [`check_monitor`](crate::check_monitor).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonitorWrite {
-    /// The strip whose solo the write sets.
+    /// The strip whose row the write sets.
     pub strip: StableId,
-    /// Whether the strip is soloed after the write.
-    pub soloed: bool,
-    /// The write's own ramp length in samples; `None` is the session's `mute_ms`.
+    /// The row it sets.
+    pub row: MonitorRow,
+    /// Whether the row is on after the write: the strip soloed, or designated the master.
+    pub on: bool,
+    /// The write's own ramp length in samples; `None` is the session's `mute_ms`. A master row
+    /// takes none.
     pub ramp: Option<u32>,
 }
 

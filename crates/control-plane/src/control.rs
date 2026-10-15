@@ -1714,6 +1714,7 @@ where
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                     revision_gate,
+                    master_track: _,
                 } = prepared_runtime;
                 let mut candidate_provider = ProviderEpoch::candidate(
                     sources,
@@ -2996,6 +2997,15 @@ where
                 }
             }
         }
+    }
+
+    /// The designated master strip of the newest commit (#1683): the strip whose `master`
+    /// monitor row is on, or `None`. Host-local, never saved; the boot word seeds it and a
+    /// `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
+    /// it by ID in each plan it holds.
+    #[must_use]
+    pub fn master_strip(&self) -> Option<&session::StableId> {
+        self.monitor.master()
     }
 
     /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.

@@ -2751,3 +2751,102 @@ fn both_hosts_boot_an_empty_session_and_add_the_first_stem_alike() {
         assert!(heard, "{rate} Hz: the first stem is heard");
     }
 }
+
+/// #1683: the master designation is the core's `master` monitor row on both hosts. Both boot an
+/// empty session, grow a track and a submix by one rebuild, then designate, move and clear the
+/// master with `SET_CONTROL`, and refuse a strip neither has: each transaction's verdict, the
+/// control list and state pages (the row's value) and the snapshot (which never holds it) agree.
+///
+/// Test value: red if one host lacks the row, refuses a designation the other takes, spends a
+/// revision on it, lists another master, holds two masters at once, saves the designation into
+/// the snapshot, or admits a strip the session does not have.
+#[test]
+fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
+    let rate = RATES[0];
+    let mut model = model_at(rate);
+    let (mut source, mut track, mut route) = (
+        model.sources[0].clone(),
+        model.tracks[0].clone(),
+        model.routes[0].clone(),
+    );
+    model.sources.clear();
+    model.tracks.clear();
+    model.routes.clear();
+    model.vcas.clear();
+    source.id = id("stem");
+    track.id = id("t1");
+    track.source_id = source.id.clone();
+    route.id = id("t1-main");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("the fixture routes a track")
+    };
+    *track_id = track.id.clone();
+    let bus = session::Submix::unity(id("bus"), &model.console);
+    let master = |strip: &str, on: bool| SessionEdit::SetControl {
+        address: address(Owner::Strip(id(strip)), Section::Own, 4, Lane::Both),
+        value: if on { 1.0 } else { 0.0 },
+        ramp_samples: None,
+        expected_effect: None,
+    };
+    let transactions = [
+        vec![
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+            SessionEdit::UpsertSubmix { submix: bus },
+        ],
+        vec![master("t1", true)],
+        vec![master("bus", true)],
+        vec![master("nobody", true)],
+        vec![master("t1", false)],
+        vec![master("bus", false)],
+    ];
+
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for (step, edits) in transactions.iter().enumerate() {
+        let before = c_abi.revision;
+        let (b, _) = browser.transaction_reply(edits);
+        let (c, _) = c_abi.transaction(edits);
+        assert_eq!(b, c, "step {step}: the same verdict");
+        match step {
+            0 => assert!(
+                matches!(
+                    b,
+                    Verdict::Applied {
+                        path: EditPath::Rebuild,
+                        ..
+                    }
+                ),
+                "{b:?}"
+            ),
+            3 => assert!(matches!(b, Verdict::Refused { .. }), "{b:?}"),
+            _ => assert_eq!(
+                b,
+                Verdict::Applied {
+                    path: EditPath::Monitor,
+                    revision: before,
+                },
+                "step {step}: a monitor write spends no revision"
+            ),
+        }
+        assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+        let _ = c_abi.render(step as u64);
+        let (b_rows, b_snapshot) = dump(|payload, expected| browser.command(payload, expected));
+        let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(b_rows, c_rows, "step {step}: the control pages agree");
+        assert_eq!(b_snapshot, c_snapshot, "step {step}: the snapshots agree");
+        // The listed masters: the owner of each `master` row whose value is on.
+        let designated: Vec<&str> = b_rows
+            .iter()
+            .filter(|row| row.contains("name: \"master\"") && row.contains("value: 1.0 }"))
+            .filter_map(|row| row.split("owner_id: Some(\"").nth(1)?.split('"').next())
+            .collect();
+        let expected: &[&str] = match step {
+            1 => &["t1"],
+            2..=4 => &["bus"],
+            _ => &[],
+        };
+        assert_eq!(designated, expected, "step {step}: the listed master");
+    }
+}

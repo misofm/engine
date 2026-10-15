@@ -15,7 +15,7 @@
 mod support;
 
 use compressor::corpus::{CASE_NAMES, POINTS, run_case};
-use effect_contract::{AutomationSpanKind, ParameterChannel, PreparedAutomationSpan};
+use effect_contract::{ParameterChannel, PreparedAutomationSpan};
 use support::{
     bind_bank, native_bank_width, noise, prepare, render_bank, render_scalar, request_with_quantum,
     snapshot, snapshot_track, values_with,
@@ -64,26 +64,20 @@ fn bank_matches_scalar_per_lane_bits() {
             3 * 128_u64,
             1_usize,
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Left,
                 parameter_index: 0,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: -44.0,
-                end_value: -44.0,
+                sample: 0,
+                value: -44.0,
             },
         ),
         (
             9 * 128_u64,
             lanes - 1,
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Right,
                 parameter_index: 6,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 0.9,
-                end_value: 0.9,
+                sample: 0,
+                value: 0.9,
             },
         ),
     ];

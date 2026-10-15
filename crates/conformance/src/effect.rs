@@ -9,17 +9,16 @@ use std::{
 use crate::prng::SplitMix64;
 
 use effect_contract::{
-    AutomationSpanKind, BankProcessReport, BankWidth, CompositionBound, EffectDescriptor, EffectId,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, NativeEffectRegistry, NodeTailBound, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffect, PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
-    QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
-    expected_prepared_metadata, valid_runtime_span,
+    BankProcessReport, BankWidth, CompositionBound, EffectDescriptor, EffectId, EffectPrepareError,
+    EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    NativeEffectRegistry, NodeTailBound, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind, RestBound,
+    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
 };
 use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
 
@@ -431,9 +430,7 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
                 ParameterChannel::Both => &[0, 1],
             };
             for &lane in lanes {
-                match span.kind {
-                    AutomationSpanKind::Point => self.gain[lane] = span.start_value,
-                }
+                self.gain[lane] = span.value;
             }
         }
         for frame in 0..block.left.len() {
@@ -1114,13 +1111,10 @@ pub fn run_effect_conformance(
                     lane_isolation_probe(factory, request, expected, config, tier);
                 }
                 let malformed = [PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: u32::MAX,
-                    start_sample: config.quantum as u64,
-                    end_sample: config.quantum as u64,
-                    start_value: 1.0,
-                    end_value: 1.0,
+                    sample: config.quantum as u64,
+                    value: 1.0,
                 }];
                 let mut malformed_left = [0.0];
                 let mut malformed_right = [0.0];

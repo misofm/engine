@@ -8230,8 +8230,8 @@ mod tests {
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let mut report = ProcessReport::default();
-            // The same strictness every launch effect applies: a `Point` at `first_sample` with
-            // bit-identical endpoints, addressed to one lane, inside the declared capacity.
+            // The same strictness every launch effect applies: a span at `first_sample`,
+            // addressed to one lane, inside the declared capacity.
             for (index, span) in block.automation.iter().enumerate() {
                 let lane = match span.channel {
                     ParameterChannel::Left => 0_usize,
@@ -8243,15 +8243,12 @@ mod tests {
                 };
                 let valid = index < self.automation_capacity as usize
                     && span.parameter_index == 0
-                    && span.kind == effect_contract::AutomationSpanKind::Point
-                    && span.start_sample == block.first_sample
-                    && span.end_sample == block.first_sample
-                    && span.start_value.to_bits() == span.end_value.to_bits();
+                    && span.sample == block.first_sample;
                 if !valid {
                     report.invalid_spans += 1;
                     continue;
                 }
-                self.gain[lane] = span.start_value;
+                self.gain[lane] = span.value;
             }
             self.invalid = self.invalid.saturating_add(report.invalid_spans);
             for frame in 0..block.left.len() {

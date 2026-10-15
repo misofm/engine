@@ -405,18 +405,21 @@ pub fn classify_live_delta_with_monitor<'a>(
     let changes = controls::changed_controls(current, next, next.sample_rate_hz)
         .ok_or(LiveRebuild::Structure)?;
     let mut accumulated = Changes {
-        derived: current.vcas != next.vcas || monitor.committed != monitor.next,
+        derived: current.vcas != next.vcas || !monitor.committed.same_solo(monitor.next),
         ..Changes::default()
     };
     for change in &changes {
         accumulated.note(next, change)?;
     }
 
-    // A strip whose solo differs between the two overlays changed its solo row, which is no
-    // model row and so has no entry in `changes` (#1600 D1, #1559).
+    // A strip whose solo or master designation differs between the two overlays changed its
+    // monitor row, which is no model row and so has no entry in `changes` (#1600 D1, #1559,
+    // #1683). The master moves no effective value, only the row.
     if monitor.committed != monitor.next {
         for (index, strip) in next.strips().enumerate() {
-            if monitor.committed.is_soloed(strip.id) != monitor.next.is_soloed(strip.id) {
+            if monitor.committed.is_soloed(strip.id) != monitor.next.is_soloed(strip.id)
+                || monitor.committed.is_master(strip.id) != monitor.next.is_master(strip.id)
+            {
                 accumulated.note_owner(index);
             }
         }
@@ -602,7 +605,7 @@ fn classify_rows<'a>(
     }
 
     let mut accumulated = Changes {
-        derived: monitor.committed != monitor.next,
+        derived: !monitor.committed.same_solo(monitor.next),
         ..Changes::default()
     };
     for change in &changes {
@@ -645,6 +648,18 @@ fn classify_rows<'a>(
         if let Some(index) = controls::strip_index(next, id) {
             seeds.strips.push(index);
             accumulated.note_owner(index);
+        }
+    }
+    // A master designation that moved changed the master row of the strip it left and of the
+    // strip it names (#1683); it moves no level, so it seeds nothing.
+    if monitor.committed.master() != monitor.next.master() {
+        for id in [monitor.committed.master(), monitor.next.master()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(index) = controls::strip_index(next, id) {
+                accumulated.note_owner(index);
+            }
         }
     }
 

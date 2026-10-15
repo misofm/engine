@@ -8,9 +8,7 @@
 
 mod support;
 
-use effect_contract::{
-    AutomationSpanKind, ParameterChannel, PreparedAutomationSpan, StatePayloadOutput,
-};
+use effect_contract::{ParameterChannel, PreparedAutomationSpan, StatePayloadOutput};
 use effect_runtime::state_payload::{read_f32, read_u32};
 
 use support::{
@@ -24,13 +22,10 @@ const SMOOTHING: u32 = 64;
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index: parameter,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: value,
-        end_value: value,
+        sample: 0,
+        value,
     }
 }
 
@@ -182,8 +177,7 @@ fn an_attack_cancel_to_current_keeps_the_64_sample_coefficient_return_live() {
     let current = read_f32(&before, current_word);
 
     let cancel = PreparedAutomationSpan {
-        start_sample: 19,
-        end_sample: 19,
+        sample: 19,
         ..point(3, ParameterChannel::Left, current)
     };
     let mut left = [0.0_f32; 1];
@@ -415,7 +409,7 @@ fn bank_lane_bits_from(
     let mut bank = support::bind_bank(&requests).expect("bank must bind at this build's width");
 
     // Ascending parameter index within a track, because the contract's canonical span order is
-    // `(start_sample, parameter_index, channel)` and a block that presents two spans the other
+    // `(sample, parameter_index, channel)` and a block that presents two spans the other
     // way round has its second one counted as invalid and dropped rather than applied. Sorted
     // here rather than demanded of every caller: a silently dropped span is a test that quietly
     // stops testing what it says it does, which is exactly what it cost to find this once.
@@ -436,13 +430,10 @@ fn bank_lane_bits_from(
             for (at, lane, parameter, value) in &ordered {
                 if *lane == track && *at == block {
                     flat.push(PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
                         channel: ParameterChannel::Left,
                         parameter_index: *parameter,
-                        start_sample: first_sample,
-                        end_sample: first_sample,
-                        start_value: *value,
-                        end_value: *value,
+                        sample: first_sample,
+                        value: *value,
                     });
                 }
             }
@@ -580,24 +571,18 @@ fn silent_ramp_bits(suppress: bool) -> Vec<u32> {
         for track in 0..lanes {
             if suppress {
                 flat.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: 0,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: SILENT_THRESHOLD_DB,
-                    end_value: SILENT_THRESHOLD_DB,
+                    sample: first_sample,
+                    value: SILENT_THRESHOLD_DB,
                 });
             }
             if track == RAMP_LANE && block == SILENT_AUTOMATED_BLOCK {
                 flat.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Right,
                     parameter_index: 0,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: RAMP_TARGET_DB,
-                    end_value: RAMP_TARGET_DB,
+                    sample: first_sample,
+                    value: RAMP_TARGET_DB,
                 });
             }
             offsets[track + 1] = flat.len() as u32;
@@ -770,17 +755,14 @@ fn process_bank_points(
     let mut spans = Vec::new();
     let mut offsets = vec![0_u32; lanes + 1];
     for offset in offsets.iter_mut().skip(1) {
-        // Canonical span order within a track: `(start_sample, parameter_index, channel)`.
+        // Canonical span order within a track: `(sample, parameter_index, channel)`.
         for (parameter, value) in points {
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 spans.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: *parameter,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: *value,
-                    end_value: *value,
+                    sample: first_sample,
+                    value: *value,
                 });
             }
         }
