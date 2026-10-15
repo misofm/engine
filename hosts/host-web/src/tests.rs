@@ -6082,12 +6082,15 @@ mod structural_apply {
             self.host.active_plan_epoch_for_test().expect("a plan")
         }
 
+        /// Whether a committed replacement waits for the block that adopts it.
         fn pending(&self) -> bool {
             self.host
                 .ready
                 .as_ref()
                 .expect("ready")
-                .replacement_pending()
+                .control
+                .newest_plan_epoch()
+                != self.epoch()
         }
 
         fn watermark(&mut self) -> WebPlanWatermark {
@@ -6150,10 +6153,7 @@ mod structural_apply {
             rig.step();
         }
         assert_eq!(rig.epoch(), 1);
-        assert!(
-            rig.pending(),
-            "render adopted the plan; the producers follow at the service step"
-        );
+        assert!(!rig.pending(), "render adopted the plan");
         assert_eq!(rig.host.service(), RESULT_OK);
         assert!(!rig.pending());
         assert_eq!(
@@ -6526,8 +6526,10 @@ mod structural_apply {
     ///
     /// Test value: red if the tables stay the boot plan's after the swap (a track added in front
     /// shifts every index: an observation armed at the catalog's index would arm another strip's
-    /// effect and read another reader), or if a submission that addresses effects by the old
-    /// tables is admitted between the commit and the adoption block.
+    /// effect and read another reader), or if an observation record submitted between the commit
+    /// and the adoption block is refused (the C ABI admits it), is addressed by the rendering
+    /// plan's tables or queued on its producers (it would arm another strip's effect, or none, and
+    /// be lost with the retiring plan), or does not arm the successor's effect at its adoption.
     #[test]
     fn the_catalogs_describe_the_successor_from_the_adoption_block_on() {
         let mut model =
@@ -6579,19 +6581,32 @@ mod structural_apply {
                 ..
             }
         ));
-        // Committed, not adopted: the source table is the committed model's, the tables are still
-        // the plan that renders, and an observation submission waits.
+        // Committed, not adopted: the source table is the committed model's and the catalog is
+        // still the plan that renders.
         assert_eq!(rig.host.session_source_count(), 2);
         assert_eq!(rig.host.session_source_id(0), Some("a-source"));
         assert_eq!(rig.host.session_source_id(1), Some("fixture-source"));
         assert_eq!(ids(&rig.host), ["track"]);
         assert_eq!(binding_tracks(&rig.host), [0]);
+        // An observation record is admitted against the successor, as a live value is: index 1
+        // exists only in the successor's tables (the old track's compressor, shifted by the added
+        // track), and nothing is armed on the plan that renders.
         assert_eq!(
-            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_BACKPRESSURE,
-            "an observation record waits for the adoption block"
+            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK,
+            "an observation record between the commit and the adoption block is admitted"
         );
-        assert_eq!(rig.host.command_report().admitted, 0);
+        assert_eq!(rig.host.command_report().admitted, 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            0,
+            "the plan that renders is not armed by a record addressed to its successor"
+        );
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_BACKPRESSURE,
+            "the record is queued on the successor: its one-slot queue is full until its block"
+        );
 
         rig.step();
         assert_eq!(rig.epoch(), 1);
@@ -6601,18 +6616,12 @@ mod structural_apply {
             [0, 1],
             "both compressors are bound, the old one at its shifted index"
         );
-        // The producers are promoted by the next service step; until then the tables and the
-        // producers are not one plan's and a record waits.
         assert_eq!(
-            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_BACKPRESSURE
+            rig.host.observation_armed_taps(),
+            1,
+            "the record took effect on the successor: the old track's compressor is armed"
         );
         assert_eq!(rig.host.service(), RESULT_OK);
-        // The index the catalog reports for the old track's compressor arms that compressor.
-        assert_eq!(
-            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK
-        );
         for _ in 0..4 {
             rig.step();
         }
@@ -6692,5 +6701,98 @@ mod structural_apply {
         assert_eq!(rig.host.live_control_tracks().len(), 10);
         assert_eq!(rig.host.meter_frame(), &frame[..], "the frame is untouched");
         assert_eq!(rig.host.meter_header().sequence, header.sequence);
+    }
+
+    fn meter_loss(rig: &Rig) -> u64 {
+        rig.host.ready.as_ref().expect("ready").meter_loss_count
+    }
+
+    /// Telemetry is dropped only with a count. A swap that changes the strip count publishes no
+    /// frame, so every window it leaves unpublished is added to the loss count the next published
+    /// frame reports, and the swap does not zero what was counted before it.
+    ///
+    /// Test value: red if the unpublished windows of a strip-count change vanish without a count
+    /// (a page would see a silent gap), or if the restart at the swap zeroes the loss count.
+    #[test]
+    fn meter_windows_a_strip_count_change_leaves_unpublished_are_counted() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(poll_blocks(&mut rig, 6) > 0);
+        // Windows rendered and not polled when the swap comes, and a loss counted before it.
+        for _ in 0..4 {
+            rig.step();
+        }
+        let waiting = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        assert!(waiting > 0, "the render side closed windows nobody polled");
+        let ready = rig.host.ready.as_mut().expect("ready");
+        ready.meter_loss_count = 5;
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        let after_swap = meter_loss(&rig);
+        assert!(
+            after_swap >= 5 + waiting,
+            "the swap keeps the count ({after_swap}) and adds the {waiting} windows it discarded"
+        );
+
+        // Every window closed afterwards is polled, found unpublishable and counted.
+        let windows_before = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        let mut counted = after_swap;
+        for _ in 0..8 {
+            rig.step();
+            let closed = rig.host.ready.as_ref().expect("ready").master_count as u64;
+            assert_eq!(rig.host.poll_meters(), 0);
+            let ready = rig.host.ready.as_ref().expect("ready");
+            assert_eq!(
+                ready.master_count, 0,
+                "the poll drains what it cannot publish"
+            );
+            assert_eq!(meter_loss(&rig), counted + closed);
+            counted += closed;
+        }
+        assert!(
+            counted > after_swap + windows_before,
+            "windows were closed and counted"
+        );
+    }
+
+    /// Run the production control entry on a record the preparer cannot leave its tables in: the
+    /// rebuild is refused before the commit, so no revision, plan or counter moves and no
+    /// acknowledgement is dropped.
+    ///
+    /// Test value: red if a preparation that cannot hand its plan's tables to the host still
+    /// commits (the client would be told the command failed after the revision advanced, and the
+    /// host would swap plans without tables).
+    #[test]
+    fn a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit() {
+        let refused = assert_refusal_changes_nothing(options(), |rig, model| {
+            let record = Arc::clone(&rig.host.ready.as_ref().expect("ready").record);
+            let poisoner = std::thread::spawn(move || {
+                let _guard = record.lock().expect("the record is free");
+                panic!("poison the record");
+            });
+            assert!(poisoner.join().is_err());
+            let error = rig
+                .host
+                .structural_command_for_test(&frame(
+                    &add_muted_track(model, ADDED),
+                    1,
+                    rig.host.committed_revision(),
+                ))
+                .expect_err("the rebuild is refused");
+            let control_plane::CommandError::CompileRejected(failure) = &error else {
+                panic!("a typed refusal, not {error:?}")
+            };
+            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+        });
+        assert!(refused.contains("web.apply.shape_unavailable"), "{refused}");
     }
 }

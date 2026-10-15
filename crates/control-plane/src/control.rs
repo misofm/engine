@@ -2186,19 +2186,11 @@ where
         self.limits.maximum_replacement_peak_bytes = bytes;
     }
 
-    /// The epoch of the plan whose producers [`Self::effect_producers`] lists (#1290a): the plan
-    /// that renders, as of the last service step that saw render adopt a successor. It trails
-    /// [`Self::newest_plan_epoch`] while a replacement waits for its block, and trails the plan
-    /// render has adopted until the next service step promotes the replacement's producers.
-    #[must_use]
-    pub fn current_plan_epoch(&self) -> u64 {
-        self.providers.epoch
-    }
-
     /// The epoch of the newest plan (#1290a): the pending candidate's while one waits for its
     /// swap, else the current plan's. It advances by a published rebuild, so a host that compares
     /// it across a command knows whether the command published a replacement plan, and, against
-    /// the epoch of the plan it renders, whether a replacement is still waiting for its block.
+    /// the epoch of the plan it renders, whether a replacement is still waiting for its block. It
+    /// is the epoch of the plan whose producers [`Self::effect_producers`] lists.
     #[must_use]
     pub fn newest_plan_epoch(&self) -> u64 {
         self.newest_providers().epoch
@@ -2226,21 +2218,24 @@ where
         self.controller.provider().catalog_resources()
     }
 
-    /// The current plan's effect producers, in `HostLiveControlHandles::effect_controls` order
+    /// The newest plan's effect producers, in `HostLiveControlHandles::effect_controls` order
     /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
     /// observation queue. The adapter reaches an effect's observation queue for the browser's
     /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
     /// else of a producer, so it cannot write a live value or open an owner behind the commit.
     ///
-    /// These are the producers of the plan that renders, not a pending candidate's: a
-    /// subscription must reach the observer the active plan's readers belong to. The browser's
+    /// These are the producers of the newest committed plan (#1290a, batch 10 review): the
+    /// pending candidate's while one waits for its swap, else the current plan's. That is the plan
+    /// a live value, a source feed and a seek already reach, so an observation record is admitted
+    /// against the successor the way every other control call is. The adapter pairs them with the
+    /// addressing tables of the plan whose epoch is [`Self::newest_plan_epoch`]. The browser's
     /// feature phase deletes this accessor together with those kinds.
     #[must_use]
     pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
-        &self.providers.effects
+        &self.newest_providers().effects
     }
 
-    /// Queues one observation record on the effect producer at `position` of
+    /// Queues one observation record on the newest plan's effect producer at `position` of
     /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
     ///
     /// # Errors
@@ -2253,7 +2248,7 @@ where
         armed: bool,
         window_blocks: u32,
     ) -> Option<Result<(), effect_contract::ObservePushError>> {
-        self.providers
+        self.newest_providers_mut()
             .effects
             .get_mut(position)
             .map(|producer| producer.try_push_observe(tap_index, armed, window_blocks))
