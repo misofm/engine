@@ -166,3 +166,15 @@ admission through `SessionState`.
    `scripts/check-browser-expected-resources.py`, `scripts/check-sdk-headless.sh` (559 evals),
    `scripts/check-sdk-generated.sh`, `check-command-reason-vocabulary.py`, `realtime-policy`,
    clippy `-D warnings`, `fmt --check`: pass.
+
+**Correction (batch 14a).** The departure above says a 64-tap C ABI frame is "about 5.2 KiB". The
+measured figure is 5,184 bytes (about 5.06 KiB) for strip and effect IDs of 8 bytes or less, and
+6,208 bytes with 16-byte IDs. The comment on `maximum_control_frame_bytes` in
+`crates/capi/include/miso_engine_v1.h` gives the rule: 64 bytes plus, per armed tap, 64 bytes plus
+each ID padded to a multiple of 8.
+
+**Review fold (batch 14a).**
+
+- **The binding-table reserve charges two peaks.** It charges the capacity peak and the text peak
+  separately. The `Vec` keeps its high-water capacity, while the text belongs to a later armed set,
+  so the two peaks do not come from one armed set.

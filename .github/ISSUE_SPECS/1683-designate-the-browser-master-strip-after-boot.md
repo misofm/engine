@@ -116,3 +116,17 @@ before the master, it named another strip, or refused the rebuild).
 - SDK regenerated: `sdk/assets/miso-engine-v1-parameter-metadata.json`,
   `sdk/src/generated/controls.ts`, `sdk/src/generated/control-builders.ts`. No wire change, so no
   schema hash moved.
+
+**Departures (batch 14a, appended).** "Departures: none" above needs one line. The C ABI lists,
+accepts and reads back the `master` row, but nothing on the C ABI consumes it yet. Under decision 17
+C1 this is correct: the designation is core state, readable on both hosts. Its reading on the C ABI
+is the successor TBD36 ("Read the master strip's meter on the C ABI").
+
+**Review fold (batch 14a).**
+
+- **The master takes effect at adoption.** `sync_master` updates only the pending shapes once a
+  replacement is published, so the rendering plan keeps its master until the swap.
+- **A solo and a master write on one strip in one transaction both apply.** The replace rule of
+  `protocol` is per strip and row.
+- **The boot word with no observation taps is refused; the row is accepted with a null reading.**
+  The two are documented side by side.

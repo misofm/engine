@@ -313,7 +313,10 @@ either curve; on each piece a side that is a constant `0` leaves it unchecked, a
 two constants need `H < L` (the static rule); two `linear` or two `exponential` pieces need
 `L > H·(1 + 2^-22)` at both ends; any other pair needs `min(L) > max(H)·(1 + 2^-22)` over the two
 ends, which is sufficient, not necessary, and refuses some pairs that never cross. The margin keeps
-the rendered `f32` values strictly ordered. A failure is `control.automation.order`, once per lane
+the rendered `f32` values strictly ordered. Each piece is checked widened by the cell's reach, 64
+samples (the grid lookahead of the stored curve and the filter's jump ramp), so stored automation
+the render would carry across the order is refused here, never accepted and then refused in render.
+A failure is `control.automation.order`, once per lane
 at the first failing piece, at the segment of the LPF entry (else the HPF entry) that defines its
 value there. The rule reads only the model, so it also judges a static filter value under an
 automated curve.

@@ -127,3 +127,10 @@ No retained byte row or fixture byte count moved (the estimate reads `size_of::<
    console-workload, parameter-metadata, audit: all pass. `check-effect-runtime-policy.sh`,
    `check-workspace-policy.sh`, `check-effect-runtime-fixtures.sh`, `realtime-policy`: ok.
    `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo fmt --all --check`: clean.
+
+**Review fold (batch 14a).** The departure above lists "modulus 5 to 4" for the span validation
+fuzz. That change stands for the span loop, which has four cases. The descriptor loop in the same
+test (`ten_thousand_descriptor_and_span_mutations_reject_without_panic`) also took the modulus 4
+by mistake, and its fifth case, the duplicate parameter ID, became unreachable. Its modulus is
+restored to 5. `docs/EFFECT_CONTRACT_V1.md` near `:358` is rewrapped to the file's width, with no
+word changed.

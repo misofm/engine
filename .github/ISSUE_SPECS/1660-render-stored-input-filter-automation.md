@@ -219,3 +219,14 @@ Checked against `12d4a4f9d`.
   yet" and the dependency on root's confirmation are met. D4's per-block bound is the bound F1's
   condition 2 names; its gate stays. The contract text is #1659's (D5 of its batch-10
   amendment), for owner review.
+
+## Amendment (controls coordinator, batch 14a)
+
+- **#1645's fold now refuses a static HPF or LPF edit that crosses an automated curve.** It does so
+  in the classifier's step 2 and in the fast path, with `LiveRebuild::AutomationTarget` and code
+  `control.automation.order`. The names in this spec, `LiveRebuild::Domain`, `builtin.filter.order`
+  and `input_filter_order_diagnostics`, are superseded by those.
+- **#1660 keeps only the classification of input-filter edits on an automated strip** (the
+  automation edits that are carried rebuilds, and the record rules of #1648).
+- **The reach.** Root ruled on 2026-10-15 that #1645's order rule is checked widened by 64 samples.
+  #1660's render reach must stay at or below 64 samples, or the rule must widen in the same change.

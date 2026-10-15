@@ -355,7 +355,8 @@ and is an effect-identity change, never a contract cleanup. Per-lane audio, dela
 envelope, smoother, and dual-mono detector state stays in the corresponding lane section. Only
 shared configuration and an explicitly linked detector may be common. Full reset restores
 prepared defaults; discontinuity reset keeps targets, clears histories and snaps every parameter
-ramp in flight to its target (a runtime automation span names one sample and one value, so no span stays active).
+ramp in flight to its target (a runtime automation span names one sample and one value, so no span
+stays active).
 
 ## Stable diagnostics
 

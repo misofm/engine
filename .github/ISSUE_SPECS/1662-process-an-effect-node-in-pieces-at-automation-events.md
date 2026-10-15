@@ -219,3 +219,8 @@ Checked against `12d4a4f9d`.
   takes no live record (A10, #1665), so a piece stages each cell at most once. No #1306 term.
 - **D3 also keeps** the bypass crossfade step of #1341a per block.
 - **Dependencies.** #1345 has landed; #1611 and #1621 replace #1306 here.
+
+## Amendment (batch 14a)
+
+- **D1's `Point`.** D1 says `start_sample = end_sample`. After #1686, `PreparedAutomationSpan` is
+  `{channel, parameter_index, sample, value}`: a `Point` has one `sample`, the event's `r0 + offset`.

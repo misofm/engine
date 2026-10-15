@@ -331,3 +331,17 @@ Checked against `12d4a4f9d`.
   again with the step-2 change but without the fast-path fallback, both times `RESULT_OK` (0)
   against `RESULT_COMPILE_REJECTED` (5); a move to 2 kHz commits live). #1660 keeps only the
   classification of input-filter edits on an automated strip, not this refusal.
+
+**Review fold (batch 14a).**
+
+- **Root ruling (2026-10-15): the order rule has a reach.** The input-filter order rule is checked
+  on each sub-interval widened by the cell's reach, 64 samples. That is #1637's grid lookahead
+  (`crates/automation/src/events.rs`, `target_at`) and the filter's jump ramp. So stored automation
+  is never accepted and then refused in render. The reviewer's counterexample is now a refused
+  case: the HPF holds 900 Hz on [0,1000) and then steps to 100; the LPF is linear from 1000 to 300
+  on [1000,1010). Before the widening, each piece was ordered, but the LPF target at sample 950 is
+  its value at 1014, 300 Hz, below the HPF's 900 Hz. `docs/SESSION_SCHEMA_V1.md` states the rule
+  with the reach.
+- **#1660 must keep its reach at or below 64 samples**, or widen this rule in the same change.
+- **Path.** The fold edits `crates/host-core/src/live_delta.rs`. That file is outside the original
+  authorized paths. The coordinator approved the edit.
