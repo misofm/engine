@@ -169,7 +169,10 @@ canonical serialization never turn such a model into an engine session. It is th
 rate in a document; V1 has no per-source rate and no implicit sample-rate conversion.
 
 Each source is exactly `{ id, content, channels, bit_depth, frames }`. `content` must match
-`blake3:[0-9a-f]{64}` exactly. `channels` and `frames` are nonzero; `frames` is the full canonical
+`blake3:[0-9a-f]{64}` exactly. `channels` is 1 or 2: a source is mono or stereo (owner answer of
+2026-10-15), and any other value, zero or more than `SOURCE_CHANNELS_LAUNCH_MAXIMUM`, rejects with
+`source.channels.unsupported` at `$.sources[i].channels` at load and in a structural edit's
+validation, on every host. `frames` is nonzero; `frames` is the full canonical
 content length beginning at frame zero. `bit_depth` is integer `16`, integer `24`, or the string
 `"32f"`; the canonical writer preserves those spellings. Locator, mapping, region, and per-source
 rate are not part of the schema. Host resolver policy maps the content identity to bytes, then

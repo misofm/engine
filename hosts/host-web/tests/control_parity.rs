@@ -2021,7 +2021,11 @@ fn bound_model(tracks: usize, vcas: usize) -> SessionModel {
 /// What the C ABI answers a compile of `model` with: its result code and its diagnostics. A
 /// session that compiles is destroyed again.
 fn c_abi_compile(model: &SessionModel) -> (u32, Vec<u8>) {
-    let document = canonical_session_json(model).expect("canonical session");
+    c_abi_compile_document(&canonical_session_json(model).expect("canonical session"))
+}
+
+/// [`c_abi_compile`] for a session document that need not be one the model can write.
+fn c_abi_compile_document(document: &str) -> (u32, Vec<u8>) {
     let config = EngineConfig {
         struct_size: ENGINE_CONFIG_SIZE,
         abi_version: C_ABI_VERSION,
@@ -2066,9 +2070,16 @@ fn c_abi_compile(model: &SessionModel) -> (u32, Vec<u8>) {
 
 /// The browser's diagnostics for a boot of `model`: `None` when it boots.
 fn browser_boot_refusal(model: &SessionModel) -> Option<Vec<u8>> {
-    let document = canonical_session_json(model).expect("canonical session");
+    browser_boot_refusal_document(
+        &canonical_session_json(model).expect("canonical session"),
+        model.sample_rate_hz,
+    )
+}
+
+/// [`browser_boot_refusal`] for a session document that need not be one the model can write.
+fn browser_boot_refusal_document(document: &str, sample_rate_hz: u32) -> Option<Vec<u8>> {
     let options = host_web::WebBootOptions {
-        require_sample_rate_hz: model.sample_rate_hz,
+        require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: QUANTUM,
         source_ring_frames: QUANTUM * 2,
         ..host_web::WebBootOptions::explicit_defaults()
@@ -2278,5 +2289,90 @@ fn a_rebuild_adds_the_longest_stereo_source_to_a_session_that_booted_with_a_mono
             heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
         }
         assert!(heard, "{rate} Hz: the new source is heard");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A source is mono or stereo (owner answer of 2026-10-15)
+// ---------------------------------------------------------------------------------------------
+
+/// Both hosts refuse a session whose source declares three channels at load, and a structural edit
+/// that adds one before it commits, with the same typed code and the same reply bytes; a mono and a
+/// stereo source load as before.
+///
+/// Test value: red if one host's load or structural-edit path lets a wider-than-stereo source
+/// through (the browser sizes its source staging for two channels, so a three-channel source it
+/// accepted could never be fed), if the two hosts name different codes, or if a refused edit moves
+/// the committed revision.
+#[test]
+fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
+    for rate in RATES {
+        // At load. The model cannot write a three-channel source, so the document is edited.
+        let (model, source, ..) = mono_model(rate);
+        let document = canonical_session_json(&model).expect("a mono session");
+        let stereo = {
+            let mut model = model.clone();
+            model.sources[0].channels = 2;
+            model.tracks[0].right_source_channel = 1;
+            canonical_session_json(&model).expect("a stereo session")
+        };
+        assert_eq!(
+            c_abi_compile_document(&document).0,
+            C_RESULT_OK,
+            "{rate} mono"
+        );
+        assert_eq!(browser_boot_refusal_document(&document, rate), None);
+        assert_eq!(
+            c_abi_compile_document(&stereo).0,
+            C_RESULT_OK,
+            "{rate} stereo"
+        );
+        assert_eq!(browser_boot_refusal_document(&stereo, rate), None);
+        let wide = stereo.replacen(
+            "\"channels\": 2,\n      \"bit_depth\"",
+            "\"channels\": 3,\n      \"bit_depth\"",
+            1,
+        );
+        assert_ne!(wide, stereo, "{rate}: the source declaration is found");
+        let (code, c_diagnostics) = c_abi_compile_document(&wide);
+        assert_ne!(
+            code, C_RESULT_OK,
+            "{rate}: the C ABI refuses three channels"
+        );
+        let browser_diagnostics =
+            browser_boot_refusal_document(&wide, rate).expect("the browser refuses");
+        assert_eq!(c_diagnostics, browser_diagnostics, "{rate}: one diagnostic");
+        assert!(
+            String::from_utf8_lossy(&c_diagnostics).contains("source.channels.unsupported"),
+            "{rate}: the typed code, got {:?}",
+            String::from_utf8_lossy(&c_diagnostics)
+        );
+
+        // In a structural edit: refused before commit, the revision does not move.
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let mut wide_source = source;
+        wide_source.id = id("wide");
+        wide_source.channels = 3;
+        let edits = [SessionEdit::UpsertSource {
+            source: wide_source,
+        }];
+        let (verdict, b_reply) = browser.transaction_reply(&edits);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&edits),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_eq!(b_reply, c_reply, "{rate}: the same reply bytes");
+        assert!(
+            matches!(&verdict, Verdict::Refused { codes, revision }
+                if *revision == model.revision
+                    && codes.as_slice() == ["source.channels.unsupported"]),
+            "{rate}: refused at the committed revision, got {verdict:?}"
+        );
+        assert_eq!(
+            browser.host.session_source_count(),
+            1,
+            "{rate}: nothing committed"
+        );
     }
 }

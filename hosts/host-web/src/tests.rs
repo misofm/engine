@@ -72,11 +72,11 @@ fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlo
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
         buffers.source_pcm.len(),
-        session::SOURCE_CHANNELS_MAXIMUM as usize * 128
+        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize * 128
     );
     assert_eq!(
         buffers.plane_references.len(),
-        session::SOURCE_CHANNELS_MAXIMUM as usize
+        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize
     );
     let longest = [b'x'; session::STABLE_ID_MAXIMUM_BYTES];
     assert_eq!(
@@ -503,7 +503,7 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
         // Source PCM staging holds the most channels a source can declare, not the boot session's.
         assert_eq!(
             host.source_pcm_mut().expect("PCM").len(),
-            session::SOURCE_CHANNELS_MAXIMUM as usize * quantum as usize
+            session::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize * quantum as usize
         );
         assert_eq!(
             host.output_pcm().expect("output").len(),
@@ -4668,8 +4668,8 @@ fn observation_unit_conversion_is_declared_and_clamped() {
 ///
 /// `zeta` is declared first and `alpha` last, so a query that reported *declaration* order rather
 /// than the normalized order would be visible here rather than hidden by an already-sorted
-/// fixture. The shapes are all distinct -- different channel counts and lengths -- so a query that
-/// read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
+/// fixture. The shapes are all distinct -- a source is mono or stereo, so the lengths differ -- so a
+/// query that read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
 /// the last of the three by either ordering.
 fn three_source_session(quantum: u32) -> String {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
@@ -4686,7 +4686,7 @@ fn three_source_session(quantum: u32) -> String {
     model.sources = vec![
         source("zeta", 1, u64::from(quantum) * 3),
         source("mid", 2, u64::from(quantum) * 5),
-        source("alpha", 4, u64::from(quantum) * 2),
+        source("alpha", 1, u64::from(quantum) * 2),
     ];
     model.tracks[0].source_id = session::StableId::parse("mid").expect("stable id");
     canonical_session_json(&model).expect("canonical three-source session")
@@ -4721,7 +4721,7 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     assert_eq!(
         host.session_source_shape(0).expect("alpha"),
         SessionSourceShape {
-            channel_count: 4,
+            channel_count: 1,
             frames: u64::from(QUANTUM) * 2,
         }
     );
@@ -4789,7 +4789,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
             miso_engine_web_v1_source_channels(handle, 1),
             miso_engine_web_v1_source_channels(handle, 2),
         ],
-        [4, 2, 1]
+        [1, 2, 1]
     );
     assert_eq!(
         [

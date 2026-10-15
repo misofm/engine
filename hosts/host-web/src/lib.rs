@@ -57,7 +57,7 @@ use host_core::{
 };
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
-use session::{CompileCaps, SOURCE_CHANNELS_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
+use session::{CompileCaps, SOURCE_CHANNELS_LAUNCH_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
 
 use host_core::EffectRack;
 /// Live effect addressing in the session's own terms (decision 12, issue #1096).
@@ -4701,9 +4701,9 @@ fn project_buffers(
 ) -> Result<PreparedBufferProjection, BootFailure> {
     // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
     // a source, track or submix ID of the longest length the grammar allows, and a source of the
-    // most channels it allows. Sizing from the boot session would let an acked rebuild declare a
+    // most channels a source can have (two). Sizing from the boot session would let an acked rebuild declare a
     // source the host could never stage or feed.
-    let maximum_source_channels = SOURCE_CHANNELS_MAXIMUM;
+    let maximum_source_channels = SOURCE_CHANNELS_LAUNCH_MAXIMUM;
     let id_staging_bytes = STABLE_ID_MAXIMUM_BYTES as u64;
     let (
         spectrum_configured,
@@ -4986,7 +4986,6 @@ fn prepare_caps(
             quantum_frames,
         },
         source_ring_frames,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,

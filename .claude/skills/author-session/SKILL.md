@@ -63,8 +63,9 @@ target it.
 ## Core shapes and vocabularies
 
 - A source has exactly `id`, `content`, `channels`, `bit_depth`, and `frames`. `content` is
-  `blake3:` plus 64 lowercase hex digits; `frames` is a nonzero decimal string; `bit_depth` is
-  `16`, `24`, or `"32f"`.
+  `blake3:` plus 64 lowercase hex digits; `channels` is `1` or `2` (a source is mono or stereo; any
+  other count is refused with `source.channels.unsupported`); `frames` is a nonzero decimal string;
+  `bit_depth` is `16`, `24`, or `"32f"`.
 - An output is `{"id":"main-out"}`.
 - A track is `id`, `source_id`, `left_source_channel`, `right_source_channel`, `builtins`,
   `console`, `inserts`, `fader`, then either `pan` with `left`, `right`, `smoothing_samples`, or

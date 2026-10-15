@@ -367,10 +367,16 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             |s| s.sources[0].content.replace_range(7..8, "g")
         ),
         case!(
-            "source-channels",
-            CapacityZero,
+            "source-channels-zero",
+            SourceChannelsUnsupported,
             "$.sources[0].channels",
             |s| s.sources[0].channels = 0
+        ),
+        case!(
+            "source-channels-three",
+            SourceChannelsUnsupported,
+            "$.sources[0].channels",
+            |s| s.sources[0].channels = 3
         ),
         case!("source-frames", CapacityZero, "$.sources[0].frames", |s| {
             s.sources[0].frames = 0

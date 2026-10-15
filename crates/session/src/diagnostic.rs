@@ -41,6 +41,9 @@ pub enum DiagnosticCode {
     SourceContentIdentityFormat,
     /// A source bit-depth declaration is outside the closed token set.
     SourceBitDepthUnsupported,
+    /// A source declares zero channels or more than the launch maximum of two (a source is mono
+    /// or stereo).
+    SourceChannelsUnsupported,
     /// A numeric token is NaN or infinity.
     NumericNonFinite,
     /// An engine session rate is outside the launch-supported tier.
@@ -98,6 +101,7 @@ impl DiagnosticCode {
             Self::InvalidEnum => "schema.invalid_enum",
             Self::SourceContentIdentityFormat => "source.content.identity_format",
             Self::SourceBitDepthUnsupported => "source.bit_depth.unsupported",
+            Self::SourceChannelsUnsupported => "source.channels.unsupported",
             Self::NumericNonFinite => "numeric.non_finite",
             Self::SampleRateUnsupportedAtLaunch => "sample_rate.unsupported_at_launch",
             Self::NumericNotF32Representable => "numeric.not_f32_representable",

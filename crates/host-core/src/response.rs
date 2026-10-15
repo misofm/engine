@@ -1389,7 +1389,6 @@ mod tests {
         HostPrepareCaps {
             shape: HostShapePolicy::AnyLaunchRate,
             source_ring_frames: 256,
-            maximum_source_channels: None,
             maximum_automation_spans_per_block: 4096,
             maximum_tracks: u64::MAX,
             maximum_submixes: u64::MAX,

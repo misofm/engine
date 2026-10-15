@@ -211,10 +211,13 @@ closed_tokens! {
     }
 }
 
-/// The most channels one source can declare: `Source::channels` is a `u8`, and the grammar has no
-/// narrower launch limit. A host sizes any staging that must hold a source of a session it has not
-/// yet seen (a rebuild can add one) by this.
-pub const SOURCE_CHANNELS_MAXIMUM: u32 = u8::MAX as u32;
+/// The most channels one source can declare at launch: sources are mono or stereo (owner answer of
+/// 2026-10-15), so `Source::channels` is 1 or 2 and the session validator refuses anything else
+/// with `source.channels.unsupported`. This is the one source of the limit: a host sizes any
+/// staging that must hold a source of a session it has not yet seen (a rebuild can add one) by
+/// it, the C ABI's and browser's source checks read it, and the SDK reads it from its generated
+/// ABI constants (`maximumSourceChannels`).
+pub const SOURCE_CHANNELS_LAUNCH_MAXIMUM: u32 = 2;
 
 /// Explicit PCM output profile.
 #[derive(Clone, Debug, PartialEq)]
