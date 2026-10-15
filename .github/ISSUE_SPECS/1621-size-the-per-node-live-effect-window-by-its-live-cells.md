@@ -88,3 +88,16 @@ observed, ceilings unchanged); the browser fixture's eight budget rows identical
 plan row printed by `capi_retained_bytes_charge_every_byte_the_compile_retains`: observed 104,589 ->
 98,781 and its estimate 196,180 -> 190,372 (-5,808 each, slack 91,591 unchanged; the per-node EQ/
 compressor windows of that session, 128-span capacity).
+
+**Review fold (batch 14b).** B1: `console-workload` `paired_spans`
+`every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity` still refused a window of
+`capacity - 1`, which this issue made legal; it is now
+`every_launch_effect_refuses_a_staging_window_longer_than_its_capacity`: it raises the direct
+factory request to the live cells as preparation does (D4), accepts a window of the capacity and of
+`EffectLaneShape::live_parameter_cells`, and refuses `capacity + 1`. The lower bound is the lane's
+(`effect-contract` `live_window` `a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs`).
+Red when `check_window` returns `Ok(())` unconditionally (checked by mutation). Stale prose fixed in
+`effect-contract/src/lib.rs` (`check_window` is the per-node bound, not "shared by both block types")
+and `effect-compiler/tests/native_session.rs` (the window is the lane's cells, which the capacity
+equals there). Gate 3 adds `cargo test --locked --release -p console-workload` (green; `paired_spans`
+13 pass).

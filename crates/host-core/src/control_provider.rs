@@ -610,9 +610,9 @@ fn contract_channel(lane: ParameterChannel) -> effect_contract::ParameterChannel
 
 /// The checks every `RESPONSE_GET` meets first, whatever the endpoint: the target is a
 /// configuration (the address and strip targets are served by later slices), then the core's own
-/// checks in the core's order (rate, points, override count, axis), so the refusal of a request
-/// that is wrong in several ways is the same on every host. It returns the configuration the
-/// request targets and the grid it names.
+/// checks in the core's order (rate, points, override count, axis, override values), so the
+/// refusal of a request that is wrong in several ways is the same on every host. It returns the
+/// configuration the request targets and the grid it names.
 fn response_preflight(
     sample_rate_hz: u32,
     request: &ResponseGetRequest,
@@ -636,7 +636,13 @@ fn response_preflight(
             maximum_hz: request.maximum_hz,
         },
     };
-    check_response_request(sample_rate_hz, grid, request.overrides.len()).map_err(query_refusal)?;
+    check_response_request(
+        sample_rate_hz,
+        grid,
+        request.overrides.len(),
+        request.overrides.iter().all(|row| row.value.is_finite()),
+    )
+    .map_err(query_refusal)?;
     Ok((configuration, grid))
 }
 
@@ -2453,9 +2459,10 @@ mod tests {
     }
 
     /// A request that is wrong in several ways is refused with the core's refusal first, in the
-    /// core's order (rate, points, override count, axis), before the provider's own rules (a
-    /// rate on a session endpoint, a zero byte budget, the bypass); and a bypass value between 0
-    /// and 1 is `response.override.bypass`, not "no such parameter".
+    /// core's order (rate, points, override count, axis, override values), before the provider's
+    /// own rules (a rate on a session endpoint, a zero byte budget, the bypass); a bypass value
+    /// between 0 and 1 is `response.override.bypass`, not "no such parameter"; and a NaN override
+    /// value, a bypass row's included, is `response.override.value` (#1623).
     ///
     /// Red if the provider shapes the overrides before it asks the core, so a request with one bad
     /// point count and one bad bypass value answers the bypass, or the bypass shares the code of an
@@ -2498,6 +2505,13 @@ mod tests {
             "the axis is the core's and precedes the session-rate rule"
         );
         both_wrong.minimum_hz = 20.0;
+        both_wrong.overrides.push(bypass(f32::NAN));
+        assert_eq!(
+            refusal(&both_wrong),
+            (StatusCode::InvalidField, "response.override.value"),
+            "a non-finite override value is the core's, after the axis and before the session rate"
+        );
+        both_wrong.overrides.pop();
         assert_eq!(
             refusal(&both_wrong),
             (StatusCode::InvalidField, "response.rate.session"),

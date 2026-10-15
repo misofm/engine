@@ -176,9 +176,14 @@ function wantsSections(fields: ResponsePreviewQuery["fields"]): boolean {
   throw new MisoUsageError("fields must be total or totalAndSections");
 }
 
-/** An input-filter cutoff as the `f32` the frame carries; a cutoff left out is 0, filter off. */
+/**
+ * An input-filter cutoff as the `f32` the frame carries; a cutoff left out is 0, filter off. A
+ * value that is not a number (`null`, a string) is passed on as given, for the frame encoder to
+ * refuse with a `MisoUsageError` (#1623), never coerced.
+ */
 function cutoff(value: number | undefined): number {
-  return Math.fround(value ?? 0);
+  if (value === undefined) return 0;
+  return typeof value === "number" ? Math.fround(value) : value;
 }
 
 function isInputFilters(
@@ -290,8 +295,8 @@ export class ResponsePreviewModule {
       ...this.#target(configuration),
       grid: request.grid.kind,
       points: request.grid.points,
-      minimumHz: Math.fround(request.grid.minimumHz),
-      maximumHz: Math.fround(request.grid.maximumHz),
+      minimumHz: request.grid.minimumHz,
+      maximumHz: request.grid.maximumHz,
       channels: request.channels ?? "both",
       sections,
       configurationId: request.configurationId,
@@ -390,9 +395,17 @@ export class ResponsePreviewModule {
     const capability = isInputFilters(configuration)
       ? RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "builtins")
       : RESPONSE_CAPABILITIES.find((candidate) => candidate.owner === "effect" && candidate.target === configuration.effectId);
+    // The reply names no more sections than the generated capability declares: a reply that does
+    // is the engine and the SDK out of step, never a request the caller can change.
+    const declared = capability?.sections ?? [];
+    if (sectionCount > declared.length) {
+      throw new MisoEngineError("the response reply has more sections than the target declares", {
+        phase: "output", code: "internal", result: resultValue("internal"),
+      });
+    }
     const returned: ResponsePreviewSection[] = [];
     for (let index = 0; sections && index < sectionCount; index += 1) {
-      const declaration = capability?.sections[index];
+      const declaration = declared[index];
       if (declaration === undefined) continue;
       const leftDb = curves.sectionsLeftDb?.slice(index * points, (index + 1) * points);
       const rightDb = curves.sectionsRightDb?.slice(index * points, (index + 1) * points);

@@ -182,8 +182,13 @@ function putU64(row: Row<typeof WIRE_U64>, value: bigint, what: string): Uint8Ar
   return field(row.id, row.wire, row.mandatory, u64Bytes(requireU64(value, what)));
 }
 
-/** An `f32` field: any number has a spelling (`NaN` and the infinities too); the core refuses it. */
-function putF32(row: Row<typeof WIRE_F32>, value: number): Uint8Array {
+/**
+ * An `f32` field: any number has a spelling (`NaN` and the infinities too), and the core refuses
+ * the ones it does not take. A value that is not a number has none: it is a `MisoUsageError`,
+ * never coerced (`"20"` is not 20, and `null` is not 0).
+ */
+function putF32(row: Row<typeof WIRE_F32>, value: number, what: string): Uint8Array {
+  if (typeof value !== "number") throw new MisoUsageError(`${what} must be a number`);
   return field(row.id, row.wire, row.mandatory, f32Bytes(value));
 }
 
@@ -209,7 +214,7 @@ function overrideMessage(row: ResponseFrameOverride): Uint8Array {
   return messageBody([
     putU32(OVERRIDE.control, row.control, "a control ID"),
     putU8(OVERRIDE.lane, code(LANE_CODES, row.lane, "the override lane")),
-    putF32(OVERRIDE.value, row.value),
+    putF32(OVERRIDE.value, row.value, "an override value"),
   ]);
 }
 
@@ -224,8 +229,8 @@ export function encodeResponseRequest(request: ResponseFrameRequest): Uint8Array
     putMessage(REQUEST.configuration, configurationMessage(request.target)),
     putU8(REQUEST.grid, code(GRID_CODES, request.grid, "the grid")),
     putU32(REQUEST.points, request.points, "points"),
-    putF32(REQUEST.minimumHz, request.minimumHz),
-    putF32(REQUEST.maximumHz, request.maximumHz),
+    putF32(REQUEST.minimumHz, request.minimumHz, "minimumHz"),
+    putF32(REQUEST.maximumHz, request.maximumHz, "maximumHz"),
     putU8(REQUEST.channels, code(LANE_CODES, request.channels, "the channels")),
     putBool(REQUEST.sections, request.sections),
   ];

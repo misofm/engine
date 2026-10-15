@@ -3160,9 +3160,9 @@ fn response_get_round_trips_every_target_reply_and_optional_field() {
 
 /// Gate 1: each shape rule of the request is refused as `INVALID_FIELD` on decode, and on encode
 /// where the typed value can say it: two targets, no target, a strip with `sections` or an
-/// override, a strip ID that is not a stable ID, a bypass override on one lane or with a value
-/// that is not 0 or 1, a NaN or infinite axis endpoint or override value, and a code outside its table (grid, channels, lane, kind, quality, link
-/// mode).
+/// override, a strip ID that is not a stable ID, and a code outside its table (grid, channels,
+/// lane, kind, quality, link mode). The value rules are
+/// `response_get_request_value_rules_are_refused_on_encode_only`.
 ///
 /// Red if the codec admits a request the provider could not read, or only one direction checks.
 #[test]
@@ -3176,7 +3176,7 @@ fn response_get_request_shape_rules_are_refused_both_ways() {
     type Typed = fn(&mut ResponseGetRequest);
     type Wire = fn(&mut Vec<Tlv>);
     // (name, base, typed mutation if representable, wire edit)
-    let rules: [(&str, bool, Option<Typed>, Wire); 17] = [
+    let rules: [(&str, bool, Option<Typed>, Wire); 12] = [
         ("no target", true, None, |f| remove(f, 1)),
         ("two targets", true, None, |f| {
             insert(f, leaf(3, 9, b"vocal"))
@@ -3218,36 +3218,6 @@ fn response_get_request_shape_rules_are_refused_both_ways() {
             false,
             Some(|r| r.target = ResponseTarget::Strip("Not A Stable ID".to_owned())),
             |f| set(f, 3, b"Not A Stable ID"),
-        ),
-        (
-            "a bypass override on the left lane",
-            true,
-            Some(|r| r.overrides[0].lane = ParameterChannel::Left),
-            |f| set(nth(f, 10, 0), 2, &[1]),
-        ),
-        (
-            "a bypass value of one half",
-            true,
-            Some(|r| r.overrides[0].value = 0.5),
-            |f| set(nth(f, 10, 0), 3, &0.5_f32.to_le_bytes()),
-        ),
-        (
-            "a NaN minimum frequency",
-            true,
-            Some(|r| r.minimum_hz = f32::NAN),
-            |f| set(f, 6, &f32::NAN.to_le_bytes()),
-        ),
-        (
-            "an infinite maximum frequency",
-            true,
-            Some(|r| r.maximum_hz = f32::INFINITY),
-            |f| set(f, 7, &f32::INFINITY.to_le_bytes()),
-        ),
-        (
-            "a NaN override value",
-            true,
-            Some(|r| r.overrides[1].value = f32::NAN),
-            |f| set(nth(f, 10, 1), 3, &f32::NAN.to_le_bytes()),
         ),
         ("a grid code outside the table", true, None, |f| {
             set(f, 4, &[3])
@@ -3305,6 +3275,82 @@ fn response_get_request_shape_rules_are_refused_both_ways() {
         codec.decode_response_request(&patched, count),
         Err(DecodeError::InvalidField)
     );
+}
+
+/// #1623: the value rules of a request -- an empty effect ID, a NaN or infinite axis endpoint or
+/// override value, and a bypass override on one lane or with a value that is not 0 or 1 -- are
+/// refused on encode, and decoded as sent: the core refuses each with its own typed code
+/// (host-core's `response_frame` and host-web's `control_parity` tests), which a decode refusal
+/// would replace with the generic `protocol.failure`.
+///
+/// Red if the decoder refuses one again (the typed refusal becomes unreachable), or the encoder
+/// stops refusing one.
+#[test]
+fn response_get_request_value_rules_are_refused_on_encode_only() {
+    let codec = ProtocolCodec::default();
+    let effect = full_effect_request();
+    let effect_bytes = encode_response_request(&codec, &effect);
+
+    type Typed = fn(&mut ResponseGetRequest);
+    type Wire = fn(&mut Vec<Tlv>);
+    let rules: [(&str, Typed, Wire); 6] = [
+        (
+            "an empty effect ID",
+            |r| {
+                if let ResponseTarget::Configuration(ResponseConfiguration::Effect {
+                    effect, ..
+                }) = &mut r.target
+                {
+                    effect.clear();
+                }
+            },
+            |f| set(nth(f, 1, 0), 2, b""),
+        ),
+        (
+            "a bypass override on the left lane",
+            |r| r.overrides[0].lane = ParameterChannel::Left,
+            |f| set(nth(f, 10, 0), 2, &[1]),
+        ),
+        (
+            "a bypass value of one half",
+            |r| r.overrides[0].value = 0.5,
+            |f| set(nth(f, 10, 0), 3, &0.5_f32.to_le_bytes()),
+        ),
+        (
+            "a NaN minimum frequency",
+            |r| r.minimum_hz = f32::NAN,
+            |f| set(f, 6, &f32::NAN.to_le_bytes()),
+        ),
+        (
+            "an infinite maximum frequency",
+            |r| r.maximum_hz = f32::INFINITY,
+            |f| set(f, 7, &f32::INFINITY.to_le_bytes()),
+        ),
+        (
+            "a NaN override value",
+            |r| r.overrides[1].value = f32::NAN,
+            |f| set(nth(f, 10, 1), 3, &f32::NAN.to_le_bytes()),
+        ),
+    ];
+    for (name, typed, wire) in rules {
+        let mut request = effect.clone();
+        typed(&mut request);
+        assert_eq!(
+            codec.encoded_response_request_len(&request),
+            Err(EncodeError::InvalidField),
+            "{name}: encode"
+        );
+        let (patched, count) = edited(&effect_bytes, wire);
+        let decoded = codec
+            .decode_response_request(&patched, count)
+            .unwrap_or_else(|error| panic!("{name}: decode refused it: {error:?}"));
+        // `Debug` compares a NaN with itself, where `PartialEq` would not.
+        assert_eq!(
+            format!("{decoded:?}"),
+            format!("{request:?}"),
+            "{name}: decoded as sent"
+        );
+    }
 }
 
 /// Gate 1: each shape rule of the reply is refused on encode and on decode: a curve reply with

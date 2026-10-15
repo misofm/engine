@@ -757,6 +757,8 @@ pub enum ResponseQueryError {
     Overrides,
     /// The sample rate is not a launch rate.
     SampleRate,
+    /// An override value (or, for the input filters, a cutoff) is NaN or infinite.
+    OverrideValue,
 }
 
 /// The class of a refused response query, which a host maps to its own status.
@@ -788,6 +790,7 @@ impl ResponseQueryError {
             Self::Points => (InvalidField, "response.points"),
             Self::Overrides => (LimitExceeded, "response.override.count"),
             Self::SampleRate => (InvalidField, "response.rate"),
+            Self::OverrideValue => (InvalidField, "response.override.value"),
             Self::Preview(error) => match error {
                 ResponsePreviewError::InvalidShape => (InvalidField, "response.rate"),
                 ResponsePreviewError::InvalidGrid => (InvalidField, "response.grid"),
@@ -825,14 +828,16 @@ impl ResponseQueryError {
 
 /// The checks of a response query that need no owner, in the order every host reports them: an
 /// unsupported rate, a point count outside `2..=4096`, more than [`RESPONSE_MAXIMUM_OVERRIDES`]
-/// override rows, then the frequency axis. [`prepare_response_query`] runs them first; a host that
-/// shapes the request before calling it (the control provider folds override rows into a bypass
-/// and cutoffs) runs them before its own shaping, so the core's refusal wins whichever request
-/// word is wrong first.
+/// override rows, the frequency axis (a NaN or infinite endpoint is `response.grid`), then an
+/// override value that is NaN or infinite (`response.override.value`, #1623).
+/// [`prepare_response_query`] runs them first; a host that shapes the request before calling it
+/// (the control provider folds override rows into a bypass and cutoffs) runs them before its own
+/// shaping, so the core's refusal wins whichever request word is wrong first.
 pub(crate) fn check_response_request(
     sample_rate_hz: u32,
     grid: ResponsePreviewGrid,
     override_count: usize,
+    override_values_finite: bool,
 ) -> Result<(), ResponseQueryError> {
     if !engine::is_launch_sample_rate(engine::SampleRateHz(sample_rate_hz)) {
         return Err(ResponseQueryError::SampleRate);
@@ -845,7 +850,11 @@ pub(crate) fn check_response_request(
     }
     // The axis rules are the query's, not the owner's: refuse a bad axis here, before any owner is
     // prepared, so a host answers it the same way and with the same code.
-    check_response_axis(grid, sample_rate_hz).map_err(ResponseQueryError::Preview)
+    check_response_axis(grid, sample_rate_hz).map_err(ResponseQueryError::Preview)?;
+    if !override_values_finite {
+        return Err(ResponseQueryError::OverrideValue);
+    }
+    Ok(())
 }
 
 /// A response query whose owner is prepared; `curves` evaluates it.
@@ -892,11 +901,26 @@ pub struct ResponseCurves {
 pub fn prepare_response_query(
     query: &ResponseQuery<'_>,
 ) -> Result<PreparedResponseQuery, ResponseQueryError> {
-    let override_count = match query.target {
-        ResponsePreviewTarget::Effect { overrides, .. } => overrides.len(),
-        ResponsePreviewTarget::InputFilters { .. } => 0,
+    // An input-filters target carries its cutoffs, already folded from its rows: they are its
+    // override values.
+    let (override_count, finite) = match query.target {
+        ResponsePreviewTarget::Effect { overrides, .. } => (
+            overrides.len(),
+            overrides.iter().all(|row| row.value.is_finite()),
+        ),
+        ResponsePreviewTarget::InputFilters {
+            left_hpf_hz,
+            left_lpf_hz,
+            right_hpf_hz,
+            right_lpf_hz,
+        } => (
+            0,
+            [left_hpf_hz, left_lpf_hz, right_hpf_hz, right_lpf_hz]
+                .iter()
+                .all(|cutoff| cutoff.is_finite()),
+        ),
     };
-    check_response_request(query.sample_rate_hz, query.grid, override_count)?;
+    check_response_request(query.sample_rate_hz, query.grid, override_count, finite)?;
     let preview = prepare_response_preview(ResponsePreviewRequest {
         configuration_id: query.configuration_id,
         sample_rate_hz: query.sample_rate_hz,

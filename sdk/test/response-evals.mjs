@@ -308,23 +308,23 @@ test("candidate Wasm: a grid, a rate, a quality and a value the SDK used to refu
   const rows = [
     ["a logarithmic axis from zero", { grid: grid({ minimumHz: 0 }) }, "response.grid", "invalidArgument"],
     ["a negative logarithmic minimum", { grid: grid({ minimumHz: -5 }) }, "response.grid", "invalidArgument"],
-    ["a NaN endpoint", { grid: grid({ maximumHz: Number.NaN }) }, "protocol.failure", "invalidArgument"],
-    ["an infinite endpoint", { grid: grid({ kind: "linear", maximumHz: Number.POSITIVE_INFINITY }) }, "protocol.failure", "invalidArgument"],
+    ["a NaN endpoint", { grid: grid({ maximumHz: Number.NaN }) }, "response.grid", "invalidArgument"],
+    ["an infinite endpoint", { grid: grid({ kind: "linear", maximumHz: Number.POSITIVE_INFINITY }) }, "response.grid", "invalidArgument"],
     ["one point", { grid: grid({ points: 1 }) }, "response.points", "invalidArgument"],
     ["a sample rate that is no launch rate", { sampleRateHz: 12_345 }, "response.rate", "invalidArgument"],
     ["a zero quantum", { quantumFrames: 0 }, "response.rate", "invalidArgument"],
     ["draft quality", { configuration: eq({}, { quality: "draft" }) }, "effect.quality.unsupported", "invalidArgument"],
     ["high quality", { configuration: eq({}, { quality: "high" }) }, "effect.quality.unsupported", "invalidArgument"],
-    ["a non-finite value", { configuration: eq({ "band-1-gain": Number.NaN }) }, "protocol.failure", "invalidArgument"],
+    ["a non-finite value", { configuration: eq({ "band-1-gain": Number.NaN }) }, "response.override.value", "invalidArgument"],
+    [
+      "a non-finite cutoff",
+      { configuration: { kind: "inputFilters", left: { hpfHz: Number.POSITIVE_INFINITY }, right: {} } },
+      "response.override.value",
+      "invalidArgument",
+    ],
     ["a gain outside its domain", { configuration: eq({ "band-1-gain": 500 }) }, "effect.parameter.initial", "invalidArgument"],
     ["an effect the engine does not know", { configuration: forged("miso.no-such-effect", {}) }, "response.effect.unknown", "invalidArgument"],
     ["an effect with no response", { configuration: forged("miso.compressor", {}) }, "response.effect.unsupported", "unsupported"],
-    [
-      "a shared parameter on one lane, of an effect with no response",
-      { configuration: forged("miso.compressor", { threshold: -20 }, { channel: "left" }) },
-      "response.effect.unsupported",
-      "unsupported",
-    ],
   ];
   try {
     for (const [name, change, code, result] of rows) {
@@ -335,8 +335,15 @@ test("candidate Wasm: a grid, a rate, a quality and a value the SDK used to refu
         name,
       );
     }
-    // The same request with a left-only scalar lane is accepted: the core, not the SDK, says
-    // which lane an effect takes.
+    // A number the frame cannot spell is the SDK's usage error, never coerced: "20" is not 20 and
+    // a null cutoff is not 0 (filter off).
+    for (const [name, change] of [
+      ["a string endpoint", { grid: grid({ minimumHz: "20" }) }],
+      ["a null cutoff", { configuration: { kind: "inputFilters", left: { hpfHz: null }, right: {} } }],
+    ]) {
+      assert.throws(() => preview.query({ ...query, ...change }), MisoUsageError, name);
+    }
+    // A left-only value of a per-lane parameter is sent as given and accepted.
     const left = preview.query({
       ...query,
       configuration: eq({ "band-1-gain": 3 }, { channel: "left" }),
@@ -382,6 +389,46 @@ test("candidate Wasm: a lane given twice is refused by the core with the C ABI's
   assert.equal(accepted.curves.frequenciesHz.length, 8);
 });
 
+/**
+ * #1623 (root ruling, thick core): a frame the Rust encoder would refuse to write -- an empty
+ * effect ID, a non-finite override value, a bypass row off lane `both` or between 0 and 1 -- is
+ * decoded as sent, and the core answers it with its own typed code, never `protocol.failure`
+ * (`crates/host-core/tests/response_frame.rs` and `hosts/host-web/tests/control_parity.rs` hold
+ * the same codes for both hosts).
+ */
+test("candidate Wasm: a value the Rust encoder refuses is the core's typed refusal", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const instance = await asset.instantiate();
+  const frame = (effect, overrides) => encodeResponseRequest({
+    requestId: 1n,
+    target: { kind: "effect", effect, quality: "normal", linkMode: "dual_mono" },
+    grid: "linear",
+    points: 8,
+    minimumHz: 20,
+    maximumHz: 20_000,
+    channels: "both",
+    sections: false,
+    overrides,
+    configurationId: 1n,
+    sampleRateHz: 48_000,
+    quantumFrames: 128,
+  });
+  const eq = "miso.parametric-eq";
+  for (const [name, effect, overrides, status, code] of [
+    ["an empty effect ID", "", [], "not_found", "response.effect.unknown"],
+    ["a NaN override value", eq, [{ control: 4, lane: "both", value: Number.NaN }], "invalid_field", "response.override.value"],
+    ["a bypass of one half", eq, [{ control: 0, lane: "both", value: 0.5 }], "invalid_field", "response.override.bypass"],
+    ["a bypass on one lane", eq, [{ control: 0, lane: "left", value: 1 }], "invalid_field", "response.override.lane"],
+  ]) {
+    const reply = submitFrame(instance, frame(effect, overrides));
+    assert.equal(reply.ok, false, name);
+    assert.equal(reply.status, status, name);
+    assert.deepEqual(reply.diagnostics.map((row) => row.code), [code], name);
+  }
+});
+
 test("a name or a number with no wire spelling stays a usage error before any byte is made", () => {
   const request = {
     requestId: 1n,
@@ -407,6 +454,10 @@ test("a name or a number with no wire spelling stays a usage error before any by
     ["a point count that is no u32", { points: 2 ** 32 }],
     ["a fractional rate", { sampleRateHz: 48_000.5 }],
     ["a configuration ID that is not a bigint", { configurationId: 1 }],
+    ["a minimum that is a string", { minimumHz: "20" }],
+    ["a maximum that is null", { maximumHz: null }],
+    ["an override value that is a string", { overrides: [{ control: 3, lane: "left", value: "20" }] }],
+    ["an override value that is null", { overrides: [{ control: 3, lane: "left", value: null }] }],
   ]) {
     assert.throws(() => encodeResponseRequest({ ...request, ...change }), MisoUsageError, name);
   }

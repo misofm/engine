@@ -113,3 +113,32 @@ non-number parameter value, and the SDK's own `requestDeadlineMs` timer bound.
 
 **Successor found.** `control-frame.ts` still holds the `WIRE_*` type codes, `FLAG_REVISION_ANY`,
 the header magic and the status names by hand; the same frame table could carry them.
+
+**Review fold (batch 14b).** M1: `check-sdk-generated.sh` with an artifact directory skips the
+SOURCE_ONLY assets (session keys, response frame), and an sdk-only change routes to the `sdk` job, so
+that job now also runs `cargo test --locked -p parameter-metadata --test response_frame --test
+session_keys` (a step inside the existing job: no expectation-table change; `check-ci-path-routing`,
+`check-test-support-ci` and `check-script-reachability` pass). M2 (root ruling, thick core): the
+codec's decoder no longer refuses a request's value rules (an empty effect ID, a NaN or infinite
+endpoint or override value, a bypass row off `both` or not 0/1); the encoder still does, since the
+core refuses every such request too, and the wire format is unchanged. host-core
+`check_response_request` refuses a non-finite endpoint with `response.grid` and a non-finite override
+value or input-filter cutoff with the new `response.override.value` (`ResponseQueryError::OverrideValue`,
+`INVALID_FIELD`), after the axis and before any shaping; an empty effect ID is `response.effect.unknown`,
+a bypass off `both` `response.override.lane`, a bypass between 0 and 1 `response.override.bypass`.
+Registered in `docs/CONTROL_PROTOCOL_REGISTRY.md` (the SDK lists no codes). Tests: protocol
+`response_get_request_value_rules_are_refused_on_encode_only`; host-core
+`a_non_finite_or_bad_value_sent_raw_is_refused_with_the_core_code`, `bounds_pass_at_the_limit_and_refuse_one_past_it`
+(override value and cutoff legs), `response_get_asks_the_core_first_and_names_a_bad_bypass`; host-web
+`control_parity` `a_response_request_with_a_bad_value_is_refused_alike_on_both_hosts` (one frame,
+both hosts: same result, reply bytes, code, unchanged control rows and document); SDK
+`response-evals.mjs` gate-1 rows now `response.grid`/`response.override.value`, plus a raw-frame test
+for the empty ID and the bypass rows. All red with the decoder check restored or the core check
+removed (checked by mutation). Minors: `putF32` refuses a non-number with `MisoUsageError`, and
+`response.ts` no longer coerces (`Math.fround` on the grid removed; `cutoff()` passes a non-number
+on); a reply with more sections than the generated capability declares is an `internal` error; the
+duplicate eval row "a shared parameter on one lane" is deleted and the left-lane comment no longer
+overclaims; capi `every_reachable_refusal_is_typed_and_changes_nothing` pins `effect.parameter.initial`.
+Successor (with `control-frame.ts`): `sdk/src/core/live-response.ts:227-234` and
+`sdk/src/browser/engine.ts:271-286` (the strip-target and live response paths) still hand-code
+grid/lane codes and keep their own grid checks (finite endpoints, logarithmic minimum).

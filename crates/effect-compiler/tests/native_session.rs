@@ -652,11 +652,12 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         assert_eq!(
             lane.check_window(capacity),
             Ok(()),
-            "{id}: the window is the capacity and holds the lane's cells"
+            "{id}: a window of the prepared capacity (here the lane's cells) holds the lane's cells"
         );
         // One transaction writes every live parameter cell of the instance (the two channels of a
         // per-lane parameter apart, so no pair folds into fewer spans), and one block, staging into
-        // a window of exactly the prepared capacity, applies every one of them.
+        // a window of exactly the lane's live cells (which the prepared capacity equals here),
+        // applies every one of them.
         let (gate, mut pin) = engine::realtime::RevisionGate::pair(0);
         let stamp = pin.stamp(1).expect("a legal revision");
         let mut written = 0;

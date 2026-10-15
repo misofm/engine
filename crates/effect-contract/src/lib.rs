@@ -1665,7 +1665,7 @@ pub enum ProcessBlockError {
     AutomationWindow,
 }
 
-/// The one statement of the staging-window bound, shared by both block types.
+/// The one statement of the per-node staging-window bound: the window may not exceed the capacity.
 ///
 /// See [`EffectProcessBlock::check_automation_window`] for why the window may not exceed the capacity.
 const fn check_window(window: usize, automation_capacity: u32) -> Result<(), ProcessBlockError> {

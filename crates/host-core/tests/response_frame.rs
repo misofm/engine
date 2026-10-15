@@ -5,8 +5,8 @@
 //!   refused as the entry documents.
 //! * **The caller's limits.** The request's own `maximum_reply_bytes` lowers the reply bound.
 //! * **The core's refusals, not the client's (#1623).** A logarithmic axis from zero, a quality the
-//!   effect does not publish, a lane given twice and a non-finite endpoint are each refused with a
-//!   status and code of the core. The browser SDK sends them as given and shows exactly these
+//!   effect does not publish, a lane given twice, a non-finite endpoint or override value and a
+//!   bypass value between 0 and 1 are each refused with a status and code of the core. The browser SDK sends them as given and shows exactly these
 //!   (`sdk/test/response-evals.mjs`); `crates/capi/tests/response_get.rs` holds the C ABI session
 //!   to the same codes.
 //!
@@ -236,28 +236,99 @@ fn the_core_refuses_what_a_thin_client_sends_as_given() {
     }
 }
 
-/// A frame the Rust encoder refuses to write (a NaN endpoint) is still a frame a client can send;
-/// the decoder refuses it with the protocol's own code.
-#[test]
-fn a_non_finite_endpoint_sent_raw_is_refused_by_the_decoder() {
-    let mut frame = encode(CommandPayload::ResponseGet(&request()));
-    let finite = 20.0_f32.to_le_bytes();
-    let at = frame
+/// `frame` with the one four-byte occurrence of `from` replaced by `to`.
+fn patched(mut frame: Vec<u8>, from: f32, to: f32) -> Vec<u8> {
+    let from = from.to_le_bytes();
+    let at: Vec<usize> = frame
         .windows(4)
-        .position(|window| window == finite)
-        .expect("the minimum endpoint is in the frame");
-    frame[at..at + 4].copy_from_slice(&f32::NAN.to_le_bytes());
-    let mut reply = Vec::new();
-    serve_response_frame(&frame, &mut reply).expect("a command frame");
-    let (status, message, codes) = refusal(&reply).expect("a refusal");
+        .enumerate()
+        .filter(|(_, window)| *window == from)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(at.len(), 1, "the value is in the frame exactly once");
+    frame[at[0]..at[0] + 4].copy_from_slice(&to.to_le_bytes());
+    frame
+}
+
+/// #1623 (root ruling, thick core): a frame the Rust encoder refuses to write -- a NaN or infinite
+/// endpoint, a NaN override value, a bypass value between 0 and 1 -- is still a frame a client can
+/// send. The decoder reads it as sent and the core refuses it with its own typed code, never the
+/// codec's generic `protocol.failure`.
+///
+/// Red if the decoder refuses the value again (each code becomes `protocol.failure`), or if the core
+/// stops checking the value before the owner is prepared.
+#[test]
+fn a_non_finite_or_bad_value_sent_raw_is_refused_with_the_core_code() {
+    let mut with_rows = request();
+    with_rows.overrides = vec![
+        ResponseOverride {
+            control: protocol::RESPONSE_BYPASS_CONTROL,
+            lane: ParameterChannel::Both,
+            value: 1.0,
+        },
+        ResponseOverride {
+            control: 4,
+            lane: ParameterChannel::Both,
+            value: 3.25,
+        },
+    ];
+    let frame = encode(CommandPayload::ResponseGet(&with_rows));
     assert_eq!(
-        (status, message, codes),
-        (
-            StatusCode::InvalidField,
-            MessageId::ResponseGet,
-            vec!["protocol.failure".to_owned()]
-        )
+        refusal(&{
+            let mut reply = Vec::new();
+            serve_response_frame(&frame, &mut reply).expect("a command frame");
+            reply
+        }),
+        None,
+        "the unpatched frame is answered"
     );
+    for (name, from, to, status, code) in [
+        (
+            "a NaN minimum",
+            20.0,
+            f32::NAN,
+            StatusCode::InvalidField,
+            "response.grid",
+        ),
+        (
+            "an infinite maximum",
+            20_000.0,
+            f32::INFINITY,
+            StatusCode::InvalidField,
+            "response.grid",
+        ),
+        (
+            "a NaN override value",
+            3.25,
+            f32::NAN,
+            StatusCode::InvalidField,
+            "response.override.value",
+        ),
+        (
+            "an infinite override value",
+            3.25,
+            f32::NEG_INFINITY,
+            StatusCode::InvalidField,
+            "response.override.value",
+        ),
+        (
+            "a bypass of one half",
+            1.0,
+            0.5,
+            StatusCode::InvalidField,
+            "response.override.bypass",
+        ),
+    ] {
+        let mut reply = Vec::new();
+        serve_response_frame(&patched(frame.clone(), from, to), &mut reply)
+            .expect("a command frame");
+        let (got_status, message, codes) = refusal(&reply).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(
+            (got_status, message, codes),
+            (status, MessageId::ResponseGet, vec![code.to_owned()]),
+            "{name}"
+        );
+    }
 }
 
 #[test]

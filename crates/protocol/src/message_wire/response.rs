@@ -208,11 +208,15 @@ fn finite_all(values: &[f32]) -> bool {
     values.iter().all(|value| value.is_finite())
 }
 
-/// A request's own rules, shared by both directions.
-fn response_request_is_valid(limits: crate::ProtocolLimits, value: &ResponseGetRequest) -> bool {
-    let target_ok = match &value.target {
+/// A request's shape rules, shared by both directions: what a provider needs to read the request
+/// at all. A request that breaks one is refused with the codec's own `INVALID_FIELD`.
+fn response_request_shape_is_valid(
+    limits: crate::ProtocolLimits,
+    value: &ResponseGetRequest,
+) -> bool {
+    match &value.target {
         ResponseTarget::Configuration(ResponseConfiguration::Effect { effect, .. }) => {
-            !effect.is_empty() && text_fits(limits, effect)
+            text_fits(limits, effect)
         }
         ResponseTarget::Configuration(ResponseConfiguration::InputFilters) => true,
         ResponseTarget::Address(address) => {
@@ -222,25 +226,37 @@ fn response_request_is_valid(limits: crate::ProtocolLimits, value: &ResponseGetR
         ResponseTarget::Strip(id) => {
             stable_id_fits(limits, id) && !value.sections && value.overrides.is_empty()
         }
+    }
+}
+
+/// A request's value rules, checked on encode only: no effect ID is empty, nothing the request
+/// carries as a number is NaN or infinite (the axis endpoints and every override value), and an
+/// effect's bypass row (control 0) is on lane `both` with a value of exactly 0 or 1.
+///
+/// The decoder does not check these (#1623): a client that sends such a request gets the core's
+/// typed refusal for it (`response.effect.unknown`, `response.grid`, `response.override.value`,
+/// `response.override.lane`, `response.override.bypass`) from host-core's response provider, the
+/// same on every host, not the codec's generic failure. The encoder keeps them because every
+/// request they refuse is one the core would refuse too.
+fn response_request_values_are_valid(value: &ResponseGetRequest) -> bool {
+    let effect = match &value.target {
+        ResponseTarget::Configuration(ResponseConfiguration::Effect { effect, .. }) => Some(effect),
+        _ => None,
     };
-    // Nothing the request carries as a number is NaN or infinite: the axis endpoints and every
-    // override value are finite before any host looks at them, so a host never prepares an owner
-    // for a request whose axis or values cannot be meant.
+    if effect.is_some_and(|effect| effect.is_empty()) {
+        return false;
+    }
+    let effect = effect.is_some();
     let finite = value.minimum_hz.is_finite()
         && value.maximum_hz.is_finite()
         && value.overrides.iter().all(|row| row.value.is_finite());
-    // The bypass is the effect-wide switch: lane `both`, value exactly 0 or 1.
-    let overrides_ok = value.overrides.iter().all(|row| {
-        let effect = matches!(
-            value.target,
-            ResponseTarget::Configuration(ResponseConfiguration::Effect { .. })
-        );
+    let bypass_ok = value.overrides.iter().all(|row| {
         !(effect && row.control == RESPONSE_BYPASS_CONTROL)
             || (row.lane == ParameterChannel::Both
                 && (row.value.to_bits() == 0.0_f32.to_bits()
                     || row.value.to_bits() == 1.0_f32.to_bits()))
     });
-    target_ok && overrides_ok && finite
+    finite && bypass_ok
 }
 
 /// A reply's own rules, shared by both directions.
@@ -304,7 +320,9 @@ pub(crate) fn write_response_request(
     sink: &mut dyn Sink,
     value: &ResponseGetRequest,
 ) -> Result<(), EncodeError> {
-    if !response_request_is_valid(sink.limits(), value) {
+    if !response_request_shape_is_valid(sink.limits(), value)
+        || !response_request_values_are_valid(value)
+    {
         return Err(EncodeError::InvalidField);
     }
     let configuration = matches!(value.target, ResponseTarget::Configuration(_));
@@ -571,7 +589,7 @@ fn decode_response_request(
         maximum_automation_spans: optional_u32(response_request::MAXIMUM_AUTOMATION_SPANS)?,
         maximum_reply_bytes: optional_u32(response_request::MAXIMUM_REPLY_BYTES)?,
     };
-    if !response_request_is_valid(limits, &value) {
+    if !response_request_shape_is_valid(limits, &value) {
         return Err(DecodeError::InvalidField);
     }
     Ok(value)

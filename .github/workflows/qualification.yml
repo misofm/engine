@@ -278,6 +278,11 @@ jobs:
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
           bash scripts/sdk-package.sh check target/ci/qualification-artifacts
+      # check-sdk-generated.sh, given the artifact directory, skips the SOURCE_ONLY assets
+      # (sdk/codegen/assets.mjs: session keys and response frame), whose currency tests otherwise run
+      # only on the full route; an sdk-only change routes here, so they run here too (#1623).
+      - name: Check the source-only SDK assets are current
+        run: cargo test --locked -p parameter-metadata --test response_frame --test session_keys
 
   artifact-gates:
     name: AudioWorklet artifact gates

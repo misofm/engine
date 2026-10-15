@@ -735,7 +735,7 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
             "a gain outside its domain",
             eq(&|r| r.overrides = vec![row(BAND_1_GAIN, ParameterChannel::Both, 500.0)]),
             StatusCode::ValidationFailed,
-            "",
+            "effect.parameter.initial",
         ),
         (
             "no preparation budget",
@@ -804,16 +804,7 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
         };
         assert_eq!(actual, status, "{name}");
         assert_eq!(codes.len(), 1, "{name}: one diagnostic");
-        if code.is_empty() {
-            // The owner's own code, such as `effect.parameter.out_of_domain`.
-            assert!(
-                codes[0].split('.').count() >= 2 && !codes[0].starts_with("response."),
-                "{name}: {}",
-                codes[0]
-            );
-        } else {
-            assert_eq!(codes[0], code, "{name}");
-        }
+        assert_eq!(codes[0], code, "{name}");
         assert_eq!(
             endpoint.state(),
             before,
