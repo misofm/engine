@@ -1234,6 +1234,10 @@ impl Budget {
 /// up to 64: 17,275.5 -> 17,280 (was 15,680). The four-lane ceiling (21,056) was not re-measured
 /// (no AArch64 run in this fold); `builtin_processor_payload_bytes` moved 36,171 -> 36,387 inside
 /// its ceiling.
+///
+/// The four-lane row, measured on the AArch64 CI job after #1630 (PR #1693): `builtin_bank_bytes`
+/// 12,969 (four lanes), so its ceiling is 12,969 plus 10 %, rounded up to 64: 14,265.9 -> 14,272
+/// (was 21,056, set before the four-lane value was measured; tightened in batch 15a).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1281,7 +1285,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
         row: "builtin_bank_bytes",
         value: |report| report.builtin_bank_bytes,
         eight_lanes: 17_280,
-        four_lanes: 21_056,
+        four_lanes: 14_272,
     },
     Budget {
         row: "builtin_bank_scratch_bytes",
