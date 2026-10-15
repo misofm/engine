@@ -3195,11 +3195,10 @@ mod tests {
             let banked = bank_width != 0;
             // Issue #1100: every controlled instance also gets a live-control owner around its
             // effect. Each lane here has a live channel, so each owner holds a staging window of
-            // the effect's automation capacity, and a shunt of two dry blocks and two latency
-            // lines.
+            // the lane's live parameter cells (#1621 D1; none for a prepared-target owner), and a
+            // shunt of two dry blocks and two latency lines.
             let metadata = &effects.entries[0].metadata;
             let span = size_of::<effect_contract::PreparedAutomationSpan>();
-            let capacity = metadata.automation_capacity as usize;
             let quantum = metadata.quantum as usize;
             let latency = usize::try_from(metadata.latency.0).expect("EQ latency");
             if banked && controlled != 0 {
@@ -3255,7 +3254,13 @@ mod tests {
                     + size_of::<effect_contract::BypassShunt>()
                     + size_of::<Option<Box<effect_contract::ObservationLane>>>()
                     + size_of::<rack::EffectLaneLayout>();
-                let window = capacity * span;
+                let window = if target_staging {
+                    0
+                } else {
+                    effect_contract::EffectLaneShape::live_parameter_cells(
+                        effects.entries[0].factory.descriptor(),
+                    ) * span
+                };
                 let shunt = 2 * (quantum + latency) * size_of::<f32>();
                 expected_total = expected_total
                     .checked_add((owner + window + shunt) as u64 * controlled as u64)
@@ -3383,16 +3388,6 @@ mod tests {
                 );
                 if controlled == 0 {
                     assert_eq!(expected.total, 0, "no controls retain no owner bytes");
-                } else if label == "scalar-target" {
-                    // The per-node owner's staging window is the effect's automation capacity
-                    // (4,096 spans here), so it is the allocation that outgrows the plain plan's
-                    // largest. A bank's window is the lanes' live cells (#1611 D3) and is empty for
-                    // a prepared-target owner.
-                    assert!(
-                        expected.largest > plain_resource.largest_allocation_bytes,
-                        "the high-cap control owner must exercise {estimate} largest-allocation \
-                         accounting"
-                    );
                 }
             }
 

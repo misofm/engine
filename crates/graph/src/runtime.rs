@@ -1316,15 +1316,16 @@ impl EffectNode {
 
 /// One prepared native effect plus everything its live-control channel needs (issue #140 A).
 ///
-/// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
-/// `PreparedEffectMetadata::automation_capacity` spans when the lane has a live channel, and empty
-/// when it does not (issue #1100), and the shunt's delay line is exactly
-/// `PreparedEffectMetadata::latency` samples. Render allocates nothing and frees nothing.
+/// Sized once, at bind, from the effect's own prepared metadata and lane: the staging window is
+/// exactly the lane's live parameter cells ([`EffectControlLane::parameter_cells`], #1621 D1) --
+/// empty for a lane with no channel (issue #1100) and for a prepared-target owner such as the
+/// parametric EQ -- and the shunt's delay line is exactly `PreparedEffectMetadata::latency`
+/// samples. Render allocates nothing and frees nothing.
 pub(crate) struct LiveControlEffect {
     pub(crate) effect: EffectNode,
     control: Box<EffectControlLane>,
-    /// `automation_capacity` spans for a live channel, and none for a channel-less lane; only
-    /// `[..staged]` is ever handed to the effect.
+    /// One span per live parameter cell of the lane (none for a channel-less lane or a lane with no
+    /// cell, #1621); only `[..staged]` is ever handed to the effect.
     spans: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry path, so live bypass keeps the effect's declared latency exactly
     /// and therefore leaves every compiled PDC route timing correct.
@@ -1418,25 +1419,31 @@ impl LiveControlEffect {
         })
     }
 
-    fn new(
+    /// The spans of this instance's staging window (#1621).
+    #[cfg(test)]
+    pub(crate) fn window_spans(&self) -> usize {
+        self.spans.len()
+    }
+
+    pub(crate) fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
         observation: Option<Box<ObservationLane>>,
         frames: usize,
     ) -> Self {
-        // Issue #1100, the per-node twin of the rack's #1087 fix: only a live channel ever stages
-        // a span. A channel-less lane -- a session bypass with no live controls attached -- drains
-        // nothing into an empty window, and there is no twin pair for the pairing rule to protect.
-        // The window is the effect's automation capacity, which a caller may set as high as
-        // `u32::MAX` spans, so this is what keeps a live-control-free bypass from costing
-        // live-control staging, or aborting bind.
-        let live = control.has_channel();
-        let capacity = if live {
-            effect.metadata.automation_capacity as usize
-        } else {
-            0
-        };
-        let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
+        // Issue #1100, the per-node twin of the rack's #1087 fix, and #1621 D1, the per-node twin of
+        // the bank stage's #1611 D3: the window is what the lane can stage, not the effect's
+        // `automation_capacity`. A lane stages at most one span per live parameter cell
+        // ([`EffectControlLane::parameter_cells`]), a channel-less lane has no cell, and a
+        // prepared-target owner (the parametric EQ) has none either -- its parameters ride its
+        // targets -- so those hold no span storage at all, however large a caller set the capacity
+        // (up to `u32::MAX` spans). A window that holds every cell drops none (#1345 D4), and one
+        // no longer than the capacity can never stage a twin pair across the effect's
+        // `span_index < automation_capacity` cut-off, which the live drain's pairing rule depends
+        // on (issue #1012). Both are checked here, at bind, off the render thread; this node
+        // builder is infallible, so a violation is a bind-time panic, as `stage_for`'s validated
+        // width is.
+        let capacity = control.parameter_cells();
         let spans: Box<[PreparedAutomationSpan]> = vec![
             PreparedAutomationSpan {
                 channel: effect_contract::ParameterChannel::Both,
@@ -1447,19 +1454,12 @@ impl LiveControlEffect {
             capacity
         ]
         .into_boxed_slice();
-        // The live drain's pairing rule needs the window to be exactly the effect's automation
-        // capacity (issue #1012), and a block stages one span for every live parameter cell it
-        // reads, with no deferral (#1345 D4), so the window holds the lane's cells. Checked here,
-        // at bind, off the render thread; this node builder is infallible, so a violation is a
-        // bind-time panic, as `stage_for`'s validated width is. A channel-less lane stages
-        // nothing.
-        if live {
-            effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
-                .expect("a live-control effect's staging window is its automation capacity");
-            control
-                .check_window(spans.len())
-                .expect("a live-control effect's staging window holds every live parameter cell");
-        }
+        effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
+            .expect("a live-control effect's staging window is within its automation capacity");
+        control
+            .check_window(spans.len())
+            .expect("a live-control effect's staging window holds every live parameter cell");
+        let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         let layout = rack::EffectLaneLayout::of(&effect.metadata.program_key());
         Self {
             observation,

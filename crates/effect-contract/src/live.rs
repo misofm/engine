@@ -56,8 +56,8 @@
 //! no deferral and no drop. So the staging window is at least [`EffectControlLane::parameter_cells`]
 //! spans, and every effect accepts that many: preparation raises an instance's
 //! `automation_capacity` to at least [`EffectLaneShape::live_parameter_cells`] of its descriptor,
-//! the window is exactly that capacity (the pairing rule of issue #1012), and a window shorter than
-//! the lane needs is refused at bind ([`EffectControlLane::check_window`]).
+//! the window is the lane's cells, never past that capacity (the pairing rule of issue #1012, #1621),
+//! and a window shorter than the lane needs is refused at bind ([`EffectControlLane::check_window`]).
 //!
 //! # Observation subscriptions stay a FIFO (D2)
 //!
@@ -1201,8 +1201,8 @@ impl EffectControlLane {
     /// declaring what it does to the witness.
     ///
     /// `staging` is the caller's preallocated window for this lane, at least
-    /// [`Self::parameter_cells`] spans long (checked at bind with [`Self::check_window`]) and
-    /// exactly the effect's `automation_capacity`, which the pairing rule depends on
+    /// [`Self::parameter_cells`] spans long (checked at bind with [`Self::check_window`]) and no
+    /// longer than the effect's `automation_capacity`, which the pairing rule depends on
     /// ([`EffectProcessBlock::check_automation_window`](crate::EffectProcessBlock::check_automation_window)):
     /// a staged twin pair is never cut off by the effect's `span_index < automation_capacity`
     /// limit.
