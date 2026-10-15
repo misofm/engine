@@ -14,6 +14,7 @@ publish.workspace = true
 name = "wasm_gate_corpus"
 
 [dependencies]
+automation.workspace = true
 builtins.workspace = true
 compressor.workspace = true
 delay.workspace = true

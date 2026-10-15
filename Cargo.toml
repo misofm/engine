@@ -5,6 +5,7 @@ members = [
     "crates/math",
     "crates/session",
     "crates/controls",
+    "crates/automation",
     "crates/source",
     "crates/effect-contract",
     "crates/effect-runtime",
@@ -60,6 +61,7 @@ dsp-reference = { path = "crates/dsp-reference", version = "0.1.0" }
 conformance = { path = "crates/conformance", version = "0.1.0" }
 session = { path = "crates/session", version = "0.1.0" }
 controls = { path = "crates/controls", version = "0.1.0" }
+automation = { path = "crates/automation", version = "0.1.0" }
 source = { path = "crates/source", version = "0.1.0" }
 protocol = { path = "crates/protocol", version = "0.1.0" }
 capi = { path = "crates/capi", version = "0.1.0" }

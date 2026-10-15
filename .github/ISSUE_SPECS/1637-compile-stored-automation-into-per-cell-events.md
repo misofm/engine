@@ -247,3 +247,77 @@ Checked against `12d4a4f9d`.
   so nothing else changes.
 - **OQ1 = C** adds no evaluator work: the caller adds the offset after `value_at` (#1650 D6,
   #1658).
+
+## Decision record: #1637 (batch 13b)
+
+**Shipped.** `crates/automation` (package, lib and directory `automation`; `#![no_std]` + `alloc`
+for the builder; depends on `math` only): `value_at`, `ProgramBuilder` (neutral `CellDescription`,
+typed `BuildError`, `bytes()` report), `CellProgram`, `CellState`, `NodeSpan`, `CellEvents`, and
+`automation::corpus` (six scalar G5 cases and their pins). The G5 block is appended after the
+builtins tail in `tools/wasm-gate-corpus`, scalar (not width dependent); `g5_native_corpus.rs`
+checks its layout and `g6_full_corpus_ftz.rs` counts it as width independent. Realtime regions
+mark `value_at` (`evaluate.rs`) and the event generator (`events.rs`).
+
+**Departures from the filed text (each a code-truth or correctness call).**
+
+1. **The jump-length key.** The amendment replaces `JumpWord` with `LiveRampRow` resolved by
+   `controls::LiveRamps::for_row`. `effect-contract` is `std` and pulls `engine` and `lane`
+   (the AVX2-pinned crate), and `controls` pulls `session`; either would break D1 ("`math` alone").
+   `JumpLength` is `Block | Fixed(u32)`: a `Block` cell takes one resolved `u32` per block
+   (`CellEvents::new(..., jump)`). The caller resolves the cell's row through `for_row` (which owns
+   the polarity doubling and every other row rule), so no row's rule is written here and the program
+   still stores no copy of `J`. `jump_lengths: [u32; 3]` became that single `jump: u32`.
+2. **A grid or jump ramp never aims past the next discontinuity.** D4 says a grid event aims at
+   `value_at(completion(τ, L))`. Taken literally, a grid event up to 63 samples before an off-grid
+   step aims at the post-step value, the step's own `Jump` then has the same target and change-only
+   drops it, so the step lands on the grid's ramp and not at its exact offset (gate 2 cannot hold).
+   The aim time is `min(completion, d - 1)` for the first discontinuity `d` in `(τ, completion]`;
+   the `Jump` at `d` retargets from there. The same clamp applies to a `Jump` and a ramped seek
+   landing. Test `jump_at_off_grid_discontinuity_at_its_exact_offset` is red without it.
+3. **The discontinuity list is built and stored.** The cursor indexes a per-cell list of
+   discontinuity times (value just before the time differs from the value at it, bit for bit; built
+   by the builder, charged in `bytes`), not the raw segment boundaries. Scanning raw boundaries for
+   "the next discontinuity" is unbounded when continuous segments are dense (one-sample segments);
+   the list makes every lookup `O(1)` and the reposition one binary search.
+4. **`no_restart` also holds grid events.** A jump off the grid starts a ramp that a later grid
+   event (not completing before it) would restart; for a `no_restart` cell every grid event inside
+   a ramp in flight is `held`. The jump itself is deferred to `completion + 1` (`End`) or
+   `completion` (`After`), carried in `CellState` across blocks.
+5. **Held bookkeeping.** `CellState::held` means "a held value is outstanding at the stage": the
+   next retarget or held event emits even when its value equals the target, once, so the stage's
+   remembered value is refreshed (otherwise a curve that leaves the target and returns inside a
+   long ramp leaves a stale value). `CellState` is 32 bytes (limit 48). The spec's "last seek
+   boundary" field has no user and is not stored.
+6. **`NodeSpan::new` is fallible** (`StepOutsideBlock` when the step offset is not below `frames`),
+   so a seek cannot be silently dropped in render. A fresh `CellState` has no target, so its first
+   retarget always emits; `reposition(&program, t)` places the cursor only (target kept, in-flight
+   ramp and deferral dropped).
+7. **Builder limits** beyond D5: `start < end`, every time below `2^53` (the evaluator's exactness
+   bound), finite values, at least one segment per cell. `value_at` on an empty table returns `0.0`
+   and never panics.
+8. **Realtime floors.** `scripts/check-realtime-policy.sh` is gone; `marked_files_floor` and
+   `marked_regions_floor` in `tools/realtime-policy/src/policy.rs` were 28 and 129 but the tree
+   held 29 and 141 before this change (the floors had fallen behind). They are now 31 and 143, the
+   tree's counts with this crate's two files and two regions.
+
+**Observation for successors.** A seek `Set` in `Exact` mode clears the in-flight ramp in the
+state, so the stage must treat `Set` as an immediate assignment. `CellState::hold_until` takes the completion node time in the cell's own `Completion`
+convention.
+
+**Gates and tests.**
+
+| Gate | Test (`cargo test --locked -p automation`) | Result |
+|---|---|---|
+| 1 Evaluation | `evaluate`: `hold_rule_before_inside_after_and_between`, `step_end_value_applies_only_from_its_end`, `linear_at_zero_half_and_one`, `exponential_is_scalar_f64_through_math_pow` (bit equal to the `f64` formula, differs from the `f32` one), `empty_table_is_zero` | pass |
+| 2 Event rules | `events`: `grid_events_sit_on_node_time_multiples_of_64` (quantum 100, start -37), `jump_at_off_grid_discontinuity_at_its_exact_offset`, `end_and_after_completions`, `change_only`, `held_inside_a_reported_ramp_and_the_grid_resumes`, `a_held_value_back_at_the_target_still_emits_once`, `no_restart_jump_waits_for_the_ramp_to_end`, `set_at_a_seek_step_for_exact_and_a_ramped_jump_for_ramp` (offsets 0 and 37), `set_always_emits`, `a_block_keyed_jump_ramps_over_the_blocks_length`, `a_fixed_key_ignores_the_blocks_length`, `a_step_outside_the_block_is_refused` | pass |
+| 3 Bound | `events_per_block_are_bounded` (a discontinuity every 64 samples, every segment moving, seeks mid-block, q in {64, 100, 128, 1024}, at most `2⌈q/64⌉ + 3`) | pass |
+| 4 Invariance | `quantum_invariance` (128 vs 100, both modes), `seek_invariance` (one timeline sample reached at three render positions after three histories, both modes) | pass |
+| 5 No allocation | `allocation::ten_thousand_blocks_allocate_nothing` (0 allocations, 0 frees, seeks every 97th block); `build::bytes_report_equals_the_live_bytes` (`requested - released == bytes()`, 3 reservations, 0 reallocations); `build::refusals_are_typed`, `build::discontinuities_are_the_steps_of_the_hold_rule` | pass |
+| 6 G5 | `cargo test --release -p wasm-gates --test g5_native_corpus --features math/lane` (7 tests incl. `g5_delegated_cases_use_the_owning_crates_pins` for the block, `g5_native_digests_match_pins`); wasm leg `scripts/run-wasm-gates.sh --without-v8-spill --without-native`; `automation::corpus` self-check `corpus::cases_produce_events_and_match_their_pins` | native pass; wasm leg pass (`wasm gates: ok`, no mismatch) |
+| 7 Policy | `./target/release/realtime_policy` (143 regions in 31 files), `scripts/check-workspace-policy.sh` | ok |
+
+**AArch64** cannot run on this host. The pins are scalar `f64` through `math::pow` (no fused
+operations, no lane type), generated on x86-64, and must match on the `aarch64-release` job.
+
+**Measured.** `Segment` 32 bytes, `CellState` 32 bytes (assertion at most 48). The six corpus cases
+yield 20+ events each (case 5, `no_restart`, 42).

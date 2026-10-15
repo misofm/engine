@@ -216,10 +216,12 @@ impl Policy {
             // #1443's seven (three in `crates/source`, four in `spectrum.rs`) and the spectrum
             // service's two (`spectrum_service.rs`: the prepared captures' one-shot methods and the
             // service's arm, read, cancel and select; #1591 fold) and #1609's one (`spectrum.rs`:
-            // the one-shot render functions and the held-window publication). A change that adds
-            // a marker raises them in the same change.
-            marked_files_floor: 28,
-            marked_regions_floor: 129,
+            // the one-shot render functions and the held-window publication) and #1637's two
+            // (`crates/automation`: `value_at`, and the event generator in `events.rs`). The
+            // floors had fallen behind the tree before #1637; they are set to its counts again.
+            // A change that adds a marker raises them in the same change.
+            marked_files_floor: 31,
+            marked_regions_floor: 143,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

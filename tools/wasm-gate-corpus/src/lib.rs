@@ -43,6 +43,7 @@
 //! builtin block and every later index. `tests/g5_native_corpus.rs` checks both the preserved
 //! layout and the two appended cases.
 
+use automation::corpus as automation_corpus;
 use builtins::corpus as builtins_corpus;
 use compressor::corpus as compressor_corpus;
 use delay::corpus as delay_corpus;
@@ -235,6 +236,15 @@ pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 /// live in that crate.
 pub const COMPRESSOR_CASE_COUNT: usize = compressor_corpus::CASE_COUNT;
 
+/// Cases delegated to [`automation::corpus`] (issue #1637), replayed under wasm.
+///
+/// The stored-automation event generator over fixed curve sets and node-time mappings: scalar
+/// `f64` through `math::pow`, rounded once to `f32`, so these cases have no lane type and are run
+/// once, like the math and delay cases. They are appended after the builtins tail, so no earlier
+/// index moves. What they carry across the target boundary is the evaluation law and the grid
+/// arithmetic of the events; their pins live in that crate.
+pub const AUTOMATION_CASE_COUNT: usize = automation_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -247,7 +257,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + GATE_EXPANDER_CASE_COUNT
     + BUILTINS_CASE_COUNT
     + LIMITER_CASE_COUNT
-    + COMPRESSOR_CASE_COUNT;
+    + COMPRESSOR_CASE_COUNT
+    + AUTOMATION_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 13] = [
@@ -460,6 +471,8 @@ enum Case {
     Limiter(usize),
     /// One case of the `compressor` E4 corpus.
     Compressor(usize),
+    /// One case of the `automation` event corpus.
+    Automation(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -532,15 +545,20 @@ fn case_of(index: usize) -> Case {
     if index < COMPRESSOR_CASE_COUNT {
         return Case::Compressor(index);
     }
-    Case::Builtins(BUILTINS_ORIGINAL_CASE_COUNT + index - COMPRESSOR_CASE_COUNT)
+    let index = index - COMPRESSOR_CASE_COUNT;
+    let builtins_tail = BUILTINS_CASE_COUNT - BUILTINS_ORIGINAL_CASE_COUNT;
+    if index < builtins_tail {
+        return Case::Builtins(BUILTINS_ORIGINAL_CASE_COUNT + index);
+    }
+    Case::Automation(index - builtins_tail)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
 /// widths and is compared at each of them.
 ///
-/// The math and delay cases are excluded: the math functions are scalar `f64`/`f32` with no lane
-/// instantiation, and the delay is a `W = 1` effect, so both are run once and their digests cannot
-/// depend on a width.
+/// The math, delay and automation cases are excluded: the math functions are scalar `f64`/`f32`
+/// with no lane instantiation, the delay is a `W = 1` effect, and the automation events are scalar
+/// `f64`, so all three are run once and their digests cannot depend on a width.
 ///
 /// Everything else — this crate's kernels, the effect-runtime helpers and the soft-clip block — is
 /// one generic body instantiated per width, so all three widths must agree.
@@ -550,7 +568,10 @@ fn case_of(index: usize) -> Case {
 /// Panics if `index >= CASE_COUNT`.
 #[must_use]
 pub fn is_width_dependent(index: usize) -> bool {
-    !matches!(case_of(index), Case::Math(_) | Case::Delay(_))
+    !matches!(
+        case_of(index),
+        Case::Math(_) | Case::Delay(_) | Case::Automation(_)
+    )
 }
 
 /// `true` when the case is one of this crate's own kernel or element-wise cases, whose per-lane
@@ -604,6 +625,7 @@ pub fn case_name(index: usize) -> String {
         Case::Compressor(case) => {
             format!("effect/compressor/{}", compressor_corpus::CASE_NAMES[case])
         }
+        Case::Automation(case) => automation_corpus::CASE_NAMES[case].to_string(),
     }
 }
 
@@ -1132,6 +1154,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Builtins(case) => builtins_corpus::BUILTINS_DIGESTS[case],
         Case::Limiter(case) => limiter_corpus::D90_DIGESTS[case],
         Case::Compressor(case) => compressor_corpus::C1_DIGESTS[case],
+        Case::Automation(case) => automation_corpus::G5_DIGESTS[case],
     }
 }
 
@@ -1160,6 +1183,7 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
         Case::Builtins(case) => at_width!(width, |L| digest_builtins::<L>(case)),
         Case::Limiter(case) => at_width!(width, |L| digest_limiter::<L>(case)),
         Case::Compressor(case) => at_width!(width, |L| digest_compressor::<L>(case)),
+        Case::Automation(case) => digest_words(automation_corpus::run_case(case)),
     }
 }
 
@@ -1243,7 +1267,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::GateExpander(_)
         | Case::Builtins(_)
         | Case::Limiter(_)
-        | Case::Compressor(_) => {
+        | Case::Compressor(_)
+        | Case::Automation(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
