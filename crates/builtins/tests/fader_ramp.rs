@@ -1094,3 +1094,130 @@ fn process_with_operations_never_allocates() {
         assert_eq!(delta.deallocations, 0, "{name}: frees");
     }
 }
+
+/// One fused fader-and-matrix subject: a settled fader bank with one padding lane and a matrix
+/// bank of the same shape, so the fused settled path is eligible.
+fn fused_pair(width: BankWidth) -> (BuiltinFaderBank, BuiltinMatrixBank) {
+    let backend = width.backend();
+    let members = width.lanes() as usize - 1;
+    let faders = (0..members)
+        .map(|lane| parameters(-2.0 - lane as f32, -5.0 + lane as f32, false, false))
+        .collect();
+    let matrices = (0..members)
+        .map(|lane| {
+            let k = lane as f32 * 0.0625;
+            let matrix = Matrix2x2 {
+                ll: 0.75 - k,
+                lr: -0.3125 + k,
+                rl: 0.5 - 0.5 * k,
+                rr: -0.875 + k,
+            };
+            (matrix, 0)
+        })
+        .collect();
+    (
+        BuiltinFaderBank::new(backend, width, faders).expect("fader bank"),
+        BuiltinMatrixBank::new(backend, width, matrices).expect("matrix bank"),
+    )
+}
+
+/// Every member lane's fader and matrix state, as comparable text.
+fn fused_words(fader: &BuiltinFaderBank, matrix: &BuiltinMatrixBank) -> String {
+    (0..fader.width().lanes() as usize)
+        .map(|lane| {
+            format!(
+                "{:?} {:?}",
+                fader.export_lane(lane),
+                matrix.export_lane(lane)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// D5: `try_process_settled_with_matrix_and_operations` declines, touching nothing, when an
+/// operation sits inside the block, and otherwise forwards to the fused settled path. Checked
+/// against a twin pair driven by the paths it chooses between.
+#[test]
+fn the_fused_settled_path_declines_only_an_operation_inside_the_block() {
+    const FRAMES: u32 = 128;
+    let held = FaderOperation::RetargetGain {
+        gain: 0.3,
+        samples: 40,
+    };
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        for (case, offset, declines) in [
+            ("inside", Some(10_u32), true),
+            ("at the block end", Some(FRAMES), false),
+            ("none", None, false),
+        ] {
+            let ops: Vec<Timed> = offset.map(|at| (at, 0, held)).into_iter().collect();
+            let (mut fader, mut matrix) = fused_pair(width);
+            let (mut twin_fader, mut twin_matrix) = fused_pair(width);
+            let (mut left, mut right) = signal(FRAMES as usize, lanes, 0);
+            let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+            let input = (bits(&left), bits(&right));
+            let words = fused_words(&fader, &matrix);
+            let mut source = Source {
+                inner: SliceSource::new(&ops),
+                scalar: false,
+            };
+            let fused = fader.try_process_settled_with_matrix_and_operations(
+                &mut matrix,
+                &mut left,
+                &mut right,
+                FRAMES,
+                &mut source,
+            );
+            assert_eq!(fused, !declines, "width={lanes} {case}");
+            assert_eq!(
+                source.next_offset(),
+                offset,
+                "width={lanes} {case}: the source keeps its operation"
+            );
+            if declines {
+                assert_eq!(
+                    (bits(&left), bits(&right)),
+                    input,
+                    "width={lanes} {case}: a declined block is untouched"
+                );
+                assert_eq!(
+                    fused_words(&fader, &matrix),
+                    words,
+                    "width={lanes} {case}: a decline changes no stage word"
+                );
+                // The caller then renders the block with `process_with`; so does the twin.
+                fader.process_with(&mut left, &mut right, FRAMES, &mut source);
+                matrix.process(&mut left, &mut right, FRAMES);
+                let mut twin_source = Source {
+                    inner: SliceSource::new(&ops),
+                    scalar: false,
+                };
+                twin_fader.process_with(&mut twin_left, &mut twin_right, FRAMES, &mut twin_source);
+                twin_matrix.process(&mut twin_left, &mut twin_right, FRAMES);
+            } else {
+                assert!(
+                    twin_fader.try_process_settled_with_matrix(
+                        &mut twin_matrix,
+                        &mut twin_left,
+                        &mut twin_right,
+                        FRAMES,
+                    ),
+                    "width={lanes} {case}: the twin is settled"
+                );
+            }
+            assert_eq!(bits(&left), bits(&twin_left), "width={lanes} {case}: left");
+            assert_eq!(
+                bits(&right),
+                bits(&twin_right),
+                "width={lanes} {case}: right"
+            );
+            assert_eq!(
+                fused_words(&fader, &matrix),
+                fused_words(&twin_fader, &twin_matrix),
+                "width={lanes} {case}: state"
+            );
+        }
+    }
+}

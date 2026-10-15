@@ -227,3 +227,49 @@ or `mute_ramp`), so they also remember during an unmute ramp, as D2 says.
 - Red on revert (copied aside, not stashed): live muted retarget restored -> gate 2 red; timed held
   retarget -> gate 2 red; mutes applied before gains -> gate 3 red; operations one sample late ->
   gate 1 red; flag not cleared at the countdown end -> gate 2 and the flag test red.
+
+**Successor obligation (#1647).** D2 holds a lane's gain during an *unmute* ramp too: a
+`SetMute` with a nonzero window sets `mute_ramp`, and a timed `RetargetGain` or `SetGain` on a held
+lane only remembers the gain (`FaderRampStage::timed_gain`, `crates/builtins/src/lib.rs`), while a
+live gain change during an unmute ramp retargets. #1637 holds only `Grid` events: a `Jump` (on a
+cell that is not `no_restart`) and a seek `Set` always emit and commit the cell's target with
+`held = false`. So when #1647 converts a `Jump` or a `Set` that lands inside an unmute ramp to
+`RetargetGain` or `SetGain`, the stage only remembers it; the unmute ramp settles at the
+pre-unmute gain while `fader_gain` and the cell hold the new value, and on a flat curve the cell
+emits nothing more (its target equals the curve and `held` is false), so the lane stays wrong with
+no end. #1647 D1.2 (`hold_until`) covers only `Grid` events. #1647's amendment from this review
+records the obligation and its gate.
+
+**Attempt 2 (review fold).**
+- Docs: the successor obligation above; #1647 gains an amendment (the reissue at the end of a held
+  ramp, and its gate). `CellState::hold_until` only sets the in-flight completion, and `held` is set
+  only by a held `Grid` event whose value differs from the cell's target, so #1637 cannot re-emit a
+  committed `Jump` or `Set`; the amendment therefore makes #1647 reissue the cell's target itself.
+- `FaderOperationSource` rustdoc states the contract: strictly rising offsets, and a source keeps
+  every operation it did not apply. `BuiltinProcessReport` gains `fader_operations_stopped` (`1`
+  when a `process_with` block stopped pulling on a repeated or lower offset, else `0`), set by both
+  `process_with` methods from a `bool` the stage now returns; the debug assertion stays. Not
+  tested: a debug test build fails the assertion first. No rendered bit moves.
+- Test: `the_fused_settled_path_declines_only_an_operation_inside_the_block`
+  (`crates/builtins/tests/fader_ramp.rs`; Simd4, and Simd8 with AVX2): an operation inside the
+  block (declines, the block and every fader and matrix word unchanged, the source keeps the
+  operation, then `process_with` equals a twin), at `offset == frames` (forwards: equals a twin on
+  `try_process_settled_with_matrix`, the source keeps it), and no operation (forwards). Red, file
+  copied aside and restored with `cp`: `<=` for `<` (the block-end case), no decline (the inside
+  case), a decline that first runs the fused path (block untouched fails), a decline that applies
+  the operation (stage words fail).
+
+**Attempt 3 (record fold, coordinator).** The attempt-2 review measured that #1647's D1.6 as first
+written was not quantum-invariant: refreshing `hold_until` at every block entry inside a held ramp
+overwrote a cell `Jump`'s own ramp end. #1647's amendment now says when D1.2 reports the hold (once,
+at the block entry that starts or restarts the ramp, and after an adoption that carries it), holds
+the grid for the reissue's own ramp, composes the reissued gain as D1.4, and adds a moving-curve
+case to gate 8. No code change. The counter `fader_operations_stopped` is to be summed by #1647
+when it wires `process_with` into production.
+
+**Attempt 3 review and rescope (coordinator).** The attempt-3 review confirmed the hold rule is
+quantum-invariant and found two more design gaps in #1647's D1.6 (a grid event that is not held
+inside the hold's last 64 samples; stopping the cell exactly at the ramp end). Three reviews found
+this slice's code correct; every failure was in the successor's mechanism. The mechanism is
+therefore #1647's design: #1647's amendment now states the requirement, the measured constraints and
+gate 8, and #1648's amendment the carry. This slice's obligation is that record.
