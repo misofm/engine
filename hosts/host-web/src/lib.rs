@@ -1625,7 +1625,7 @@ impl ReadyOwnership {
             let Some(service) = self.spectrum.as_mut() else {
                 continue;
             };
-            drop(service.adopt_successor(handover.captures, &handover.pairing, carried));
+            drop(service.adopt_successor(handover.captures, &handover.pairing, carried, None));
         }
     }
 
