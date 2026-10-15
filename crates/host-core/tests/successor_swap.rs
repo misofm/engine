@@ -894,6 +894,17 @@ fn filtered_session(mono: bool) -> SessionModel {
     model
 }
 
+/// `model` without track `id` and the routes it sources: as a committed base, B's strip of that ID
+/// is new to the join, so its input section restarts at the swap. A live value difference no
+/// longer restarts one (#1630 D1).
+fn without_track(mut model: SessionModel, id: &str) -> SessionModel {
+    model.tracks.retain(|track| track.id.as_str() != id);
+    model.routes.retain(
+        |route| !matches!(&route.source, RouteSource::Track { track_id, .. } if track_id.as_str() == id),
+    );
+    model
+}
+
 /// `model` plus [`MUTED_TRACK`], a muted copy of `eq0` that sorts first.
 fn with_muted_track(mut model: SessionModel) -> SessionModel {
     add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
@@ -1229,10 +1240,10 @@ fn first_direct_difference(left: &DirectRun, right: &DirectRun) -> Option<usize>
 /// B is prepared from, is pending in A's queue at the swap. The carry drains it into the lane
 /// before copying, so B's first block starts the trim ramp exactly where A would have. `strip` is
 /// the written strip: the first bank's `eq2`, or a strip in a later predecessor bank.
-/// `restarting` names a strip whose trim the committed model changes without B following it, so
-/// its input section restarts at the swap (#1276 D1); it sits in the first bank at the lane of the
-/// written strip in its own bank, and it is muted in every session so that its restart leaves the
-/// output bits where the unrestarted reference puts them.
+/// `restarting` names a strip the committed model lacks ([`without_track`]), so B's strip of that
+/// ID is new to the join and its input section restarts at the swap; it sits in the first bank at
+/// the lane of the written strip in its own bank, and it is muted in every session so that its
+/// restart leaves the output bits where the unrestarted reference puts them.
 fn a_pending_trim_record_survives_the_swap(
     backend: Backend,
     strip: &'static str,
@@ -1273,15 +1284,9 @@ fn a_pending_trim_record_survives_the_swap(
     track.builtins.right.trim_db = NEW_TRIM_DB;
     let b = Session::compile(with_muted_track(committed.clone()));
     if let Some(restarting) = restarting {
-        // Committed moves the restarting strip's trim; B keeps the old one, so that input section
-        // restarts instead of carrying.
-        let track = committed
-            .tracks
-            .iter_mut()
-            .find(|track| track.id.as_str() == restarting)
-            .expect("the restarting strip");
-        track.builtins.left.trim_db += 3.0;
-        track.builtins.right.trim_db += 3.0;
+        // A live value difference carries and retargets (#1630 D1); a strip the committed model
+        // lacks has nothing to carry, so that input section restarts.
+        committed = without_track(committed, restarting);
     }
     let reference_session = Session::compile(with_muted_track(session()));
     let feed = Feed::new(SOURCE, 5);
@@ -1328,23 +1333,16 @@ fn a_pending_trim_record_survives_the_swap(
 
 /// #1312 D2 on the input cells: `live_values_superseded` counts the writes the carry drain
 /// replaces on input lanes that carry, and none on an input lane the swap restarts, whichever
-/// lanes share their bank. The committed model differs from B's in the first strip's trim, so
-/// that strip's input section restarts (#1276 D1) while the strip beside it, in the same
-/// predecessor bank at four and at eight lanes, carries. Three trim writes sit unread in each
-/// strip's cells at the hand-over.
+/// lanes share their bank. The committed model lacks the first strip ([`without_track`]), so that
+/// strip's input section restarts while the strip beside it, in the same predecessor bank at four
+/// and at eight lanes, carries. Three trim writes sit unread in each strip's cells at the
+/// hand-over.
 fn a_restarting_input_lane_does_not_count_its_replaced_writes(backend: Backend) {
     const RESTARTING: &str = "eq0";
     const CARRYING: &str = "eq1";
     let a = Session::compile(filtered_session(false));
     let b = Session::compile(with_muted_track(filtered_session(false)));
-    let mut committed = filtered_session(false);
-    let strip = committed
-        .tracks
-        .iter_mut()
-        .find(|track| track.id.as_str() == RESTARTING)
-        .expect("the restarting strip");
-    strip.builtins.left.trim_db = 3.0;
-    strip.builtins.right.trim_db = 3.0;
+    let committed = without_track(filtered_session(false), RESTARTING);
     let feed = Feed::new(SOURCE, 5);
     let run = |strips: &[&'static str]| {
         let writes: Vec<LiveWrite> = strips
@@ -1581,7 +1579,9 @@ fn collapsed_strips_keep_collapsing_across_a_swap_at_four_lanes() {
 
 /// Gate 4 of #1276, one edit. B applies `edit` to `eq0`'s input section in the same transaction
 /// that adds a muted track, so `eq0`'s section does not carry (Q1's default): from the swap block
-/// on it renders exactly what a fresh plan of B renders from rest on the same PCM.
+/// on it renders exactly what a fresh plan of B renders from rest on the same PCM. These plans
+/// attach no input cells, so they cannot retarget a carried section; on plans that do, the section
+/// carries and retargets (#1630, [`an_input_difference_carries_and_retargets`]).
 fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoBuiltins)) {
     let one_track = |model: SessionModel| {
         let mut model = model;
@@ -1792,6 +1792,146 @@ fn the_input_carry_allocates_and_frees_nothing() {
             "{backend:?}: allocator calls and audited allocations at the swap block"
         );
     }
+}
+
+/// #1630 gates 1-3, one edit. B applies `edit` to [`RETARGETED`]'s input section in the same
+/// transaction that adds a muted track, on plans with live input cells. Run 1 prepares B from A's
+/// committed model: the section carries and the successor's cells retarget it (D1, D2). Run 2
+/// writes the classifier's records for the same edit to A's cells just before the swap and
+/// prepares B from a base that holds them: a plan that made the edit live. The runs are
+/// bit-identical in every block, and the swap block allocates and frees nothing (D3).
+#[cfg(feature = "control-provider")]
+fn an_input_difference_carries_and_retargets(name: &str, edit: fn(&mut session::DualMonoBuiltins)) {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    const RETARGETED: &str = "eq2";
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(filtered_session(false));
+    let mut moved = filtered_session(false);
+    edit(
+        &mut moved
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == RETARGETED)
+            .expect("the retargeted strip")
+            .builtins,
+    );
+    let moved = Session::compile(moved).model;
+    let b = Session::compile(with_muted_track(moved.clone()));
+    // The records the live path gives the same edit (#1556), with the session's ramps.
+    let delta = host_core::live_delta::classify_live_delta(
+        &a.model,
+        &moved,
+        LiveRamps::for_session(&moved),
+        &EditRamps::new(),
+    )
+    .unwrap_or_else(|reason| panic!("{name}: the edit is live: {reason:?}"));
+    assert_eq!(delta.strips.len(), 1, "{name}");
+    assert!(!delta.strips[0].input.is_empty(), "{name}: an input record");
+    let writes: Vec<LiveWrite> = delta.strips[0]
+        .input
+        .iter()
+        .map(|&record| LiveWrite {
+            block: SWAP_BLOCK,
+            strip: RETARGETED,
+            record,
+        })
+        .collect();
+    let feed = Feed::new(SOURCE, 17);
+    for backend in backends() {
+        let run = |committed: &SessionModel, writes: &[LiveWrite]| {
+            let run = direct_run(
+                &a,
+                Some((&b, committed)),
+                &feed,
+                QUANTUM,
+                writes,
+                backend,
+                false,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried, "{name}, {backend:?}");
+            run
+        };
+        let retargeted = run(&a.model, &[]);
+        let written = run(&moved, &writes);
+        assert_eq!(
+            retargeted.swap_allocator,
+            ((0, 0, 0), (0, 0)),
+            "{name}, {backend:?}: allocator calls and audited allocations at the swap block"
+        );
+        assert_eq!(
+            first_direct_difference(&retargeted, &written),
+            None,
+            "{name}, {backend:?}: carry then retarget sounds like live edit then structural edit"
+        );
+        // Not vacuous: a section that restarts at the new values is audible at the swap block,
+        // and so is one that carries without the retarget (B without the edit).
+        let restarted = run(&without_track(a.model.clone(), RETARGETED), &[]);
+        assert_eq!(
+            first_direct_difference(&retargeted, &restarted),
+            Some(SWAP_BLOCK),
+            "{name}, {backend:?}: a restart is a transient the carry avoids"
+        );
+        let unmoved = direct_run(
+            &a,
+            Some((
+                &Session::compile(with_muted_track(a.model.clone())),
+                &a.model,
+            )),
+            &feed,
+            QUANTUM,
+            &[],
+            backend,
+            false,
+        );
+        assert_eq!(
+            first_direct_difference(&retargeted, &unmoved),
+            Some(SWAP_BLOCK),
+            "{name}, {backend:?}: the retarget moves the output from the swap block on"
+        );
+    }
+}
+
+/// #1630 gate 1: a trim change. Red if the join still restarts a section whose trim differs (the
+/// restart transient), or if the carried section keeps the old trim (no retarget).
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_trim_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("trim_db", |builtins| {
+        builtins.left.trim_db += 1.5;
+        builtins.right.trim_db += 0.75;
+    });
+}
+
+/// #1630 gate 2: input filter cutoffs, one-sided and on both sides. Red if a filter retarget is
+/// dropped or designed from other seeds than the live path's.
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_filter_cutoff_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("hpf_hz", |builtins| {
+        builtins.left.hpf_hz = 160.0;
+        builtins.right.hpf_hz = 170.0;
+    });
+    an_input_difference_carries_and_retargets("lpf_hz", |builtins| {
+        builtins.right.lpf_hz = 3_500.0;
+    });
+}
+
+/// #1630 gate 2: a polarity change.
+#[cfg(feature = "control-provider")]
+#[test]
+fn a_polarity_change_carries_and_retargets_the_input_section() {
+    an_input_difference_carries_and_retargets("polarity_invert", |builtins| {
+        builtins.right.polarity_invert = true;
+    });
 }
 
 /// Gate 3 of #1276, live term. On the all-mono session a left-only trim record that leaves the

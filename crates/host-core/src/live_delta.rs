@@ -23,21 +23,15 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::control_preparation::{
-    INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
-};
 use crate::route_controls::RouteControlRecord;
-use builtins::{
-    BuiltinLaneSelector, PreparedInputFilterTarget, checked_trim_gain, validate_input_filter_pair,
-    validate_prepared_input_filter_target,
-};
+use builtins::{checked_trim_gain, validate_prepared_input_filter_target};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
     Owner, Section,
 };
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
-use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
+use effect_contract::{EffectControlRecord, PreparedEffectTarget};
 use session::{
     EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, RouteDestination,
     SessionModel, StableId, StripRef, canonical_session_json,
@@ -60,7 +54,7 @@ pub fn take_fast_classification_count() -> usize {
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
     EffectiveDiff, LevelRules, OutOfDomain, RouteEditRamps, StripChange, StripEditRamps,
-    effect_instance_records, effective_fader, fader_records, lane_records, level_differs,
+    effect_instance_records, effective_fader, fader_records, input_records, level_differs,
     matrix_record, route_record_between, route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
@@ -312,8 +306,9 @@ pub use crate::prepare::LiveRebuild;
 /// the same dB bits), a `Mute` per lane whose mute changes (one `Both` when both change to the
 /// same value), a matrix record when a lowered coefficient's bits change, and the strip's input
 /// records (a `TrimDb` and a `PolarityInvert` by the same rules, then the filter targets
-/// [`InputFilterPreparer`] designs for the changed cutoffs, #1556). A send into a submix gets one
-/// record when its folded target or its gate changes (`route_records`). A fader move on a
+/// [`InputFilterPreparer`](crate::InputFilterPreparer) designs for the changed cutoffs, #1556).
+/// A send into a submix gets one record when its folded target or its gate changes
+/// (`route_records`). A fader move on a
 /// lane that stays muted still gets its record, so the stage remembers the gain for a later
 /// unmute. An effect record is emitted only for a resolved value whose bits change: a `Both`
 /// value rewritten as equal per-lane values gives none.
@@ -1420,7 +1415,8 @@ fn lower<'a>(
             ctx.ramps,
             ctx.edit,
         )
-        .map(Lowered::Input),
+        .map(Lowered::Input)
+        .map_err(|_| LiveRebuild::Domain),
         Family::Setting | Family::Route => Ok(Lowered::Nothing),
     }
 }
@@ -1449,149 +1445,6 @@ fn route_records<'a>(
         route_id: target.after.id.as_str(),
         record,
     }))
-}
-
-/// The input records that bring a strip's input section from `before`'s values to `after`'s
-/// (#1556 D2-D4), in write order: trims, then polarities, then filter targets, each left before
-/// right. A record is emitted only when the value the render plane holds changes.
-///
-/// - `TrimDb`: one per lane whose [`checked_trim_gain`] bits change, or one `Both` when both lanes
-///   change to the same `trim_db` bits. The comparison is of the gain's bits, so `0.0` to `-0.0`
-///   (the same gain) gives no record.
-/// - `PolarityInvert`: one per lane whose value changes, or one `Both` when both change to the
-///   same value.
-/// - `PreparedFilter`: the targets [`InputFilterPreparer`] designs, off the render thread, from the
-///   pre-commit normalized pairs and the changed values (see [`filter_edits`]).
-///
-/// # Errors
-///
-/// [`LiveRebuild::Domain`] when a trim is outside the domain, or a pair or a designed target is
-/// refused.
-fn input_records(
-    before: &session::DualMonoBuiltins,
-    after: &session::DualMonoBuiltins,
-    sample_rate_hz: u32,
-    ramps: LiveRamps,
-    edit: StripEditRamps,
-) -> Result<Vec<TrackInputRecord>, LiveRebuild> {
-    let lanes_before = [&before.left, &before.right];
-    let lanes_after = [&after.left, &after.right];
-    let mut records = Vec::with_capacity(4 + INPUT_FILTER_TARGET_CAPACITY);
-
-    let gain_bits = |db: f32| {
-        checked_trim_gain(db)
-            .map(f32::to_bits)
-            .map_err(|_| LiveRebuild::Domain)
-    };
-    let mut trim_changed = [false; 2];
-    for lane in 0..2 {
-        trim_changed[lane] =
-            gain_bits(lanes_before[lane].trim_db)? != gain_bits(lanes_after[lane].trim_db)?;
-    }
-    for (lanes, lane) in lane_records(
-        trim_changed,
-        lanes_after[0].trim_db.to_bits() == lanes_after[1].trim_db.to_bits(),
-    ) {
-        records.push(TrackInputRecord::TrimDb {
-            lanes,
-            db: lanes_after[lane].trim_db,
-            smoothing_samples: ramps.resolve(LiveRampRow::InputTrim, edit.input),
-        });
-    }
-
-    let polarity_changed =
-        [0, 1].map(|lane| lanes_before[lane].polarity_invert != lanes_after[lane].polarity_invert);
-    for (lanes, lane) in lane_records(
-        polarity_changed,
-        lanes_after[0].polarity_invert == lanes_after[1].polarity_invert,
-    ) {
-        records.push(TrackInputRecord::PolarityInvert {
-            lanes,
-            inverted: lanes_after[lane].polarity_invert,
-            smoothing_samples: ramps.resolve(LiveRampRow::PolarityInvert, edit.input),
-        });
-    }
-
-    // The filters: compare the values each lane's pair normalizes to, so `-0.0` to `0.0` is no
-    // change (#1556 D4).
-    let pair = |lane: &session::ChannelBuiltins| {
-        validate_input_filter_pair(sample_rate_hz, lane.hpf_hz, lane.lpf_hz)
-            .map_err(|_| LiveRebuild::Domain)
-    };
-    let pairs_before = [pair(lanes_before[0])?, pair(lanes_before[1])?];
-    let pairs_after = [pair(lanes_after[0])?, pair(lanes_after[1])?];
-    let mut changed = [(false, false); 2];
-    for lane in 0..2 {
-        changed[lane] = (
-            pairs_before[lane].hpf_hz.to_bits() != pairs_after[lane].hpf_hz.to_bits(),
-            pairs_before[lane].lpf_hz.to_bits() != pairs_after[lane].lpf_hz.to_bits(),
-        );
-    }
-    let edits = filter_edits(changed, pairs_after);
-    if !edits.is_empty() {
-        let seeds = [
-            pairs_before[0].hpf_hz,
-            pairs_before[0].lpf_hz,
-            pairs_before[1].hpf_hz,
-            pairs_before[1].lpf_hz,
-        ];
-        let mut out = [PreparedInputFilterTarget {
-            lanes: BuiltinLaneSelector::Both,
-            section: 0,
-            pair: [0.0; 2],
-            coefficients: [0.0; 6],
-        }; INPUT_FILTER_TARGET_CAPACITY];
-        let (_, count) = InputFilterPreparer
-            .prepare(sample_rate_hz, &seeds, &edits, &mut out)
-            .map_err(|_| LiveRebuild::Domain)?;
-        records.extend(
-            out[..count]
-                .iter()
-                .map(|&target| TrackInputRecord::PreparedFilter { target }),
-        );
-    }
-    Ok(records)
-}
-
-/// The semantic edits that carry a strip's changed filter values (#1556 D4): per lane, `3` or `4`
-/// for a one-sided change and the atomic pair `0` when both of the lane's values change (so a
-/// pair that two one-sided edits would refuse, an HPF raised past the old LPF while the LPF
-/// rises, is one valid edit). The same edit on both lanes is one `Both` edit, which is how the
-/// preparer later merges equal targets.
-fn filter_edits(
-    changed: [(bool, bool); 2],
-    after: [builtins::InputFilterPair; 2],
-) -> Vec<InputFilterEdit> {
-    let lane_edit = |lane: usize| {
-        let pair = after[lane];
-        match changed[lane] {
-            (false, false) => None,
-            (true, false) => Some((3, pair.hpf_hz, 0.0)),
-            (false, true) => Some((4, pair.lpf_hz, 0.0)),
-            (true, true) => Some((0, pair.hpf_hz, pair.lpf_hz)),
-        }
-    };
-    let (left, right) = (lane_edit(0), lane_edit(1));
-    let edit = |(parameter_id, value0, value1): (u32, f32, f32), channel| InputFilterEdit {
-        parameter_id,
-        channel,
-        value0,
-        value1,
-    };
-    match (left, right) {
-        (Some(left), Some(right))
-            if left.0 == right.0
-                && left.1.to_bits() == right.1.to_bits()
-                && left.2.to_bits() == right.2.to_bits() =>
-        {
-            vec![edit(left, ParameterChannel::Both)]
-        }
-        _ => left
-            .map(|left| edit(left, ParameterChannel::Left))
-            .into_iter()
-            .chain(right.map(|right| edit(right, ParameterChannel::Right)))
-            .collect(),
-    }
 }
 
 /// Step 4: a changed effect's `params` must resolve, as preparation resolves them. An unknown
