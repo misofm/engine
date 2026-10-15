@@ -215,16 +215,31 @@ Checked against `d5b9410df`.
   lane's fixed event state ("a jump was remembered"). At the sample the held ramp ends with the gain
   free (offset `ramp_remaining` from the block-entry read, after the live drain, when it lies inside
   the block; else a later block), if the bit is set, #1647 pushes one `RetargetGain` toward the
-  cell's current target (`CellState::target()`, read after the cell's own events at that offset)
-  over the fader row's jump length for that block, in place of any gain operation the cell gives at
-  that offset, and clears the bit. A ramp that ends with the lane muted leaves `gain_held` true and
+  gain composed as D1.4 from the cell's current target (`CellState::target()`, the automation value,
+  read after the cell's own events at that offset, with `S` and the #1650 hand offset) over the
+  fader row's jump length `J` for that block, in place of any gain operation the cell gives at that
+  offset, clears the bit, and calls `hold_until(completion_of(End, E, J))` for the reissue's own
+  ramp (`E` the reissue sample), so the cell's grid holds inside it as it does after the cell's own
+  `Jump`; without that, a moving curve's grid events would cut the reissue into 64-sample
+  retargets. A ramp that ends with the lane muted leaves `gain_held` true and
   keeps the bit; the later unmute ramps to the remembered gain, and its end reissues the target
-  once more, which moves no bit when the target is unchanged. The reissue sits at the stage's own
-  ramp end, so it does not depend on the quantum (gate 5). The bit is event state that #1648
+  once more, which moves no bit when the target is unchanged. **When D1.2 reports the hold.** During a held
+  ramp, D1.2's `hold_until` is called once, at the block entry whose live drain starts or restarts
+  that ramp, and again after an adoption that carries it (`CellState::reposition` drops the cell's
+  ramp, so #1648 re-reports it). It is not refreshed at later block entries: a cell `Jump` inside
+  the hold sets the cell's own ramp end, and a later refresh would overwrite it and change which
+  grid events after it are held, so `target()` at the reissue would depend on where block entries
+  fall (measured in #1638's attempt-2 review: -0.0616 dB at quantum 128 against -0.1955 dB at 100,
+  for a `Jump` whose ramp ends after the unmute ramp). With this rule the reissue sample and its
+  target do not depend on the quantum (gate 5). The bit is event state that #1648
   carries across a swap. No allocation; one byte per lane and channel.
 - **Gate 8 (new).** A `Jump`, and separately a seek `Set`, landing inside an unmute ramp, on a flat
   curve after it: the stage takes a `RetargetGain` toward the new automation value at the sample
   the unmute ramp ends, so the lane settles at that value one fader jump length later (at once
   with `control_smoothing` explicit 0); the same bits at quantum 128 and 100; and the lane never
-  settles at the pre-unmute gain. Test value: red if a remembered `Jump` or `Set` is never reissued,
-  or if the reissue follows the block entry instead of the ramp's end.
+  settles at the pre-unmute gain. A moving-curve case: a `Jump` inside the unmute ramp whose
+  own ramp ends after the unmute ramp ends, with a block entry between the `Jump` and the unmute
+  ramp's end at one quantum only: the same bits at quantum 128 and 100, and the reissue's ramp is
+  not cut by grid events. Test value: red if a remembered `Jump` or `Set` is never reissued, if the
+  reissue follows the block entry instead of the ramp's end, if D1.2 refreshes `hold_until` at a
+  later block entry inside the hold, or if the reissue does not hold the grid for its own ramp.

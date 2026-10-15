@@ -258,3 +258,12 @@ records the obligation and its gate.
   copied aside and restored with `cp`: `<=` for `<` (the block-end case), no decline (the inside
   case), a decline that first runs the fused path (block untouched fails), a decline that applies
   the operation (stage words fail).
+
+**Attempt 3 (record fold, coordinator).** The attempt-2 review measured that #1647's D1.6 as first
+written was not quantum-invariant: refreshing `hold_until` at every block entry inside a held ramp
+overwrote a cell `Jump`'s own ramp end. #1647's amendment now says when D1.2 reports the hold (once,
+at the block entry that starts or restarts the ramp, and after an adoption that carries it), holds
+the grid for the reissue's own ramp, composes the reissued gain as D1.4, and adds a moving-curve
+case to gate 8. No code change. The counter `fader_operations_stopped` is to be summed by #1647
+when it wires `process_with` into production.
+
