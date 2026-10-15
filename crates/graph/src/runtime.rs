@@ -4516,6 +4516,49 @@ fn effect_node_mut(
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
+    /// The bytes of carried slots the effect instance at `site` holds once a carry is installed
+    /// into it (#1633 D1): the cell tables of its control lane. Zero for a stage without control
+    /// lanes and for a lane without cells; `None` when `site` resolves to no instance.
+    pub(crate) fn effect_site_carry_slot_bytes(
+        &mut self,
+        site: crate::GraphEffectSite,
+    ) -> Option<u64> {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                let (chain, slot, lane) = effect_lane_mut(&mut self.units, at)?;
+                Some(match effect_stage_mut(chain, slot)? {
+                    EffectStageMut::Plain(_) => 0,
+                    EffectStageMut::Live(stage) => stage.carry_slot_bytes(lane),
+                })
+            }
+            crate::GraphEffectSite::Node(unit) => Some(
+                effect_node_mut(&mut self.units, unit)?
+                    .control
+                    .carry_slot_bytes(),
+            ),
+        }
+    }
+
+    /// Allocate the carried slots of the successor instance at `site` (#1633 D1). Off the render
+    /// thread. A site that resolves to a stage without control lanes or a lane without cells
+    /// takes none.
+    pub(crate) fn install_effect_carry_slots(&mut self, site: crate::GraphEffectSite) {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                if let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, at)
+                    && let Some(EffectStageMut::Live(stage)) = effect_stage_mut(chain, slot)
+                {
+                    stage.install_carry_slots(lane);
+                }
+            }
+            crate::GraphEffectSite::Node(unit) => {
+                if let Some(node) = effect_node_mut(&mut self.units, unit) {
+                    node.control.install_carry_slots();
+                }
+            }
+        }
+    }
+
     /// Every banked strip input section of this runtime: `(strip ID, location)`, in program order
     /// (issue #1276 D6). Read off the render thread, after bind.
     pub(crate) fn builtin_input_lanes(&mut self) -> Vec<(Box<str>, crate::GraphLaneLocation)> {
@@ -4940,7 +4983,7 @@ impl crate::runtime::Runtime {
                     matches!(
                         effect_stage_mut(chain, slot),
                         Some(EffectStageMut::Live(from))
-                            if from.can_carry_instance(predecessor_lane, &node.control, scratch_bytes)
+                            if from.can_carry_lane_into_instance(predecessor_lane, &node.control, scratch_bytes)
                     )
                 }
                 (Node(_), Node(_)) => false,

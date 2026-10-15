@@ -3307,21 +3307,49 @@ pub fn install_effect_carry(
         }
     }
     moves.sort_unstable_by_key(|step| step.predecessor);
+    // #1633 D1: the carried slots of the successor lanes `moves` names, and no others.
+    for step in &moves {
+        executor.runtime.install_effect_carry_slots(step.successor);
+    }
     executor.carry_scratch =
         vec![0_u8; usize::try_from(scratch).unwrap_or(usize::MAX)].into_boxed_slice();
     executor.carry_effects = moves.into_boxed_slice();
     Ok(())
 }
 
+/// The bytes [`install_effect_carry`] allocates for the carried slots of the successor lanes
+/// `moves` names (#1633 D1): the part of a carry's charge that depends on the lanes' cell tables.
+/// Read before the install, so preparation admits the carry before it allocates. `None` when the
+/// plan is not a graph plan, a successor site does not resolve, or the sum overflows.
+pub fn effect_carry_slot_bytes(
+    plan: &mut PreparedRenderPlan,
+    moves: &[GraphEffectMove],
+) -> Option<u64> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    moves.iter().try_fold(0_u64, |total, step| {
+        total.checked_add(
+            executor
+                .runtime
+                .effect_site_carry_slot_bytes(step.successor)?,
+        )
+    })
+}
+
 /// The effect-section bytes a carry of `moves` lanes with a largest payload of `scratch_bytes`
-/// retains in its plan: the move table and the payload scratch ([`install_effect_carry`]).
-/// Checked arithmetic: `None` on overflow. The one place the charge is spelled, so preparation's
-/// admission and [`carry_program_retained_bytes`] cannot disagree.
+/// and `slot_bytes` of carried slots ([`effect_carry_slot_bytes`]) retains in its plan: the move
+/// table, the payload scratch and the slots ([`install_effect_carry`]). Checked arithmetic: `None`
+/// on overflow. The one place the charge is spelled, so preparation's admission and
+/// [`carry_program_retained_bytes`] cannot disagree.
 #[must_use]
-pub fn effect_carry_retained_bytes(moves: usize, scratch_bytes: u64) -> Option<u64> {
+pub fn effect_carry_retained_bytes(
+    moves: usize,
+    scratch_bytes: u64,
+    slot_bytes: u64,
+) -> Option<u64> {
     u64::try_from(moves.checked_mul(core::mem::size_of::<GraphEffectMove>())?)
         .ok()?
-        .checked_add(scratch_bytes)
+        .checked_add(scratch_bytes)?
+        .checked_add(slot_bytes)
 }
 
 /// Restores the console-effect carry refused in this plan's banks, summed over every effect bank
@@ -3406,9 +3434,21 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 &executor.carry_strips,
             ))
             .unwrap_or(u64::MAX);
+            let slots = executor
+                .carry_effects
+                .iter()
+                .try_fold(0_u64, |total, step| {
+                    total.checked_add(
+                        executor
+                            .runtime
+                            .effect_site_carry_slot_bytes(step.successor)?,
+                    )
+                })
+                .unwrap_or(u64::MAX);
             let effects = effect_carry_retained_bytes(
                 executor.carry_effects.len(),
                 u64::try_from(executor.carry_scratch.len()).unwrap_or(u64::MAX),
+                slots,
             )
             .unwrap_or(u64::MAX);
             sources

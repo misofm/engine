@@ -1181,6 +1181,16 @@ impl Budget {
 /// `aarch64-debug` print on this branch confirms them. The eight-lane ceilings hold as they are.
 /// #1629 lowered `capi_retained_bytes` to 165,166 at eight lanes; its ceiling is tightened from the
 /// next four-lane print.
+///
+/// #1633 (batch 11) moved the effect lanes' carried slots out of the build: a lane holds them only
+/// when a successor carries into it. The first-compile reference session carries nothing, so the
+/// three graph rows fall by the slots the batch 10 carry added at eight lanes (`graph_session_plus_plan_bytes`
+/// 321,846 -> 315,798, `graph_incremental_plan_bytes` 321,774 -> 315,726, `graph_metadata_bytes`
+/// 113,601 -> 107,553: 6,048 each, x86-64). `capi_retained_bytes` charges capi's own allocations
+/// and stays 165,166, so its eight-lane ceiling is that plus 10 %, rounded up to 64: 181,682.6 ->
+/// 181,696. The four-lane `capi_retained_bytes` ceiling and the three four-lane graph ceilings
+/// stand until the next `aarch64-debug` print (AArch64 runs only in CI); the window only shrinks, so
+/// they still bound the four-lane rows.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1287,7 +1297,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 216_832,
+        eight_lanes: 181_696,
         four_lanes: 216_832,
     },
     Budget {

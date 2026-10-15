@@ -2559,9 +2559,16 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
-    let effect_carry_bytes =
-        graph::effect_carry_retained_bytes(effect_carry.moves.len(), effect_carry.scratch_bytes)
-            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // The carried slots of the successor lanes the moves name are allocated with the table, and
+    // only for those lanes (#1633 D1).
+    let effect_carry_slot_bytes = graph::effect_carry_slot_bytes(&mut plan, &effect_carry.moves)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let effect_carry_bytes = graph::effect_carry_retained_bytes(
+        effect_carry.moves.len(),
+        effect_carry.scratch_bytes,
+        effect_carry_slot_bytes,
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let effect_carry_scratch_bytes = effect_carry.scratch_bytes;
     if effect_carry_scratch_bytes > caps.maximum_named_allocation_bytes {
         return Err(resource("host.resource.limit"));
