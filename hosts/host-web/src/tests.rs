@@ -8035,6 +8035,187 @@ mod structural_apply {
             "the successor has no insert, so no slot to read"
         );
     }
+
+    /// The `master` monitor row of strip `strip` (#1683), as `SET_CONTROL` addresses it.
+    fn master_edit(strip: &str, on: bool) -> SessionEdit {
+        SessionEdit::SetControl {
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(StableId::parse(strip).expect("a strip ID")),
+                section: controls::Section::Own,
+                control: 4,
+                lane: controls::Lane::Both,
+            },
+            value: if on { 1.0 } else { 0.0 },
+            ramp_samples: None,
+            expected_effect: None,
+        }
+    }
+
+    /// The gain-reduction word of strip `strip` and the master's word, when the header says it
+    /// is present.
+    fn master_reading(host: &AudioWorkletEngineHost, strip: usize) -> (f32, Option<f32>) {
+        let strips = host.live_control_tracks().len() + host.meter_header().submix_count as usize;
+        let frame = host.meter_frame();
+        let base = strips * 2 + 2;
+        let master = (host.meter_header().master_gr_present == 1).then(|| frame[base + strips]);
+        (frame[base + strip], master)
+    }
+
+    /// #1683 gate 1: a session that boots empty (the boot word cannot name a strip it does not
+    /// have) gets its master through the core after boot. A track with a compressor arrives by a
+    /// rebuild; one `SET_CONTROL` of its `master` row designates it, a monitor write that spends no
+    /// revision; the meter header names it and the master reading is that strip's own word, as a
+    /// boot-time designation reads (`the_meter_frame_carries_the_app_shaped_gain_reduction`). A
+    /// track added before it by a later rebuild moves its index and the designation follows it by
+    /// ID; a strip the session does not have is refused before commit; clearing the row makes the
+    /// reading absent, never zero.
+    ///
+    /// Test value: red if the designation cannot be set after boot, is held by index (the reading
+    /// would move to the added track), is not carried into a successor plan, reaches the meter
+    /// header late or never, spends a revision, or a designation of an unknown strip is admitted.
+    #[test]
+    fn a_master_designated_after_an_empty_boot_reads_as_a_boot_designation() {
+        const WINDOW: u64 = 2;
+        let full = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let mut empty = full.clone();
+        empty.sources.clear();
+        empty.tracks.clear();
+        empty.routes.clear();
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: WINDOW,
+            live_control_observation_taps: 4,
+            ..boot_options(QUANTUM)
+        };
+        let document = canonical_session_json(&empty).expect("canonical empty session");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                live_control_master_track_plus_one: 1,
+                ..options
+            },
+        )
+        .err()
+        .expect("the boot word cannot name a strip an empty session lacks");
+        assert!(
+            failure
+                .diagnostic()
+                .starts_with(b"host.observation.master_track\t")
+        );
+
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+        let track = |index: usize, id: &str| {
+            let mut track = full.tracks[index].clone();
+            let mut route = full.routes[index].clone();
+            track.id = StableId::parse(id).expect("a track ID");
+            route.id = StableId::parse(&format!("{id}-main")).expect("a route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("the fixture routes a track")
+            };
+            *track_id = track.id.clone();
+            [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        };
+        let mut first = vec![SessionEdit::UpsertSource {
+            source: full.sources[0].clone(),
+        }];
+        first.extend(track(0, "t0"));
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+
+        // An unknown strip is refused before commit, and nothing is designated.
+        let revision = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(&[master_edit("nobody", true)], 2),
+            Outcome::Refused(..)
+        ));
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+
+        assert_eq!(
+            rig.apply(&[master_edit("t0", true)], 3),
+            Outcome::Applied {
+                path: EditPath::Monitor,
+                revision,
+            },
+            "a monitor write spends no revision"
+        );
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 1);
+
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert_eq!(
+            observe_key(
+                &mut rig.host,
+                "t0",
+                RACK_INSERTS,
+                "comp",
+                1,
+                WINDOW as u32,
+                true
+            ),
+            RESULT_OK
+        );
+        assert_eq!(rig.host.seek_source(SOURCE, 2, 0), RESULT_OK);
+        let mut fed = 0;
+        let mut feed = |host: &mut AudioWorkletEngineHost, blocks: u64| {
+            for _ in 0..blocks {
+                feed_and_render(host, 2, fed, 0.5);
+                fed += 1;
+            }
+        };
+        feed(&mut rig.host, 8 * WINDOW);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 0);
+        assert!(word > 0.0, "the compressor reduces: {word}");
+        assert_eq!(
+            master.map(f32::to_bits),
+            Some(word.to_bits()),
+            "the master is t0's own word"
+        );
+
+        // A track whose ID sorts first arrives by a rebuild: t0 is strip 1 now, and stays the
+        // master.
+        assert!(matches!(
+            rig.apply(&track(1, "a0"), 4),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        feed(&mut rig.host, 8 * WINDOW);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 1);
+        assert!(word > 0.0, "t0 still reduces: {word}");
+        assert_eq!(master.map(f32::to_bits), Some(word.to_bits()));
+
+        // Cleared: absent, not zero.
+        let revision = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&[master_edit("t0", false)], 5),
+            Outcome::Applied {
+                path: EditPath::Monitor,
+                revision,
+            }
+        );
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+        feed(&mut rig.host, 4 * WINDOW);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 1);
+        assert!(word > 0.0);
+        assert_eq!(master, None, "no designation reads absent");
+    }
 }
 
 /// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any

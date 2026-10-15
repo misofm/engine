@@ -536,11 +536,16 @@ fn prepare_successor(
     bindings: &controls::ObservationBindings,
 ) -> Session {
     let request = live_controls(Leg::AllArmed);
+    // #1683: a successor's master designation is its overlay's, never the request's.
+    let successor_request = HostLiveControlRequest {
+        master_track: None,
+        ..live_controls(Leg::AllArmed)
+    };
     let (mut prepared, handles) = match &first {
         Some((first, committed)) => host_core::prepare_host_runtime_with_live_controls_successor(
             compiled,
             &caps(),
-            &request,
+            &successor_request,
             host_core::SuccessorBase {
                 inventory: &first.prepared.inventory,
                 committed,

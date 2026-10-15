@@ -5,7 +5,7 @@ use session::{SessionModel, StableId, StripRef};
 use crate::Family;
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
 use crate::effective::{
-    Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorWrite, effective,
+    Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorRow, MonitorWrite, effective,
 };
 use crate::error::ControlError;
 use crate::lane::{Side, both_sides, toggle};
@@ -205,7 +205,7 @@ pub fn owner_rows_in(
                 &model.console,
                 &strip,
                 &effective.strip(index),
-                overlay.is_soloed(strip.id),
+                overlay,
                 sample_rate,
             );
         }
@@ -326,8 +326,8 @@ pub(crate) enum Source {
     StripDerived(fn(&EffectiveStrip, Side) -> f32),
     /// A route's derived row: computed from the route's effective gate.
     RouteDerived(fn([bool; 2], Side) -> f32),
-    /// Held by the host (solo): the overlay's value.
-    Monitor,
+    /// Held by the host (solo, master): the overlay's value of that row.
+    Monitor(MonitorRow),
 }
 
 /// One row found by address: its descriptor and where its value comes from. Built without
@@ -392,8 +392,8 @@ pub fn get(
     let side = Side::of(address.lane);
     Ok(match resolved.source {
         Source::Stored(values) => side.pick(values[0], values[1]),
-        Source::Monitor => match &address.owner {
-            Owner::Strip(id) => toggle(overlay.is_soloed(id)),
+        Source::Monitor(row) => match &address.owner {
+            Owner::Strip(id) => toggle(crate::strip::monitor_value(overlay, row, id)),
             _ => 0.0,
         },
         // Only a derived row pays for the effective values.
@@ -460,7 +460,7 @@ pub fn set(
     // `check` has refused a derived row, so only a monitor row or a stored row is left.
     let committed = match resolved.source {
         Source::Stored(committed) => committed,
-        Source::Monitor => return Err(ControlError::Monitor),
+        Source::Monitor(_) => return Err(ControlError::Monitor),
         Source::StripDerived(_) | Source::RouteDerived(_) => return Err(ControlError::ReadOnly),
     };
     let unchanged = descriptor
@@ -475,10 +475,12 @@ pub fn set(
     write(model, address, descriptor.lanes, value)
 }
 
-/// Validate a write to a monitor row (solo) and say what it sets (decision 17, C8, #1559 D3).
+/// Validate a write to a monitor row (solo, or the master designation of #1683) and say what it
+/// sets (decision 17, C8, #1559 D3).
 ///
-/// The address is looked up and the value checked exactly as [`set`] does: an unknown strip, a
-/// submix (it has no solo row, a submix is solo-safe) or an unknown control is
+/// The address is looked up and the value checked exactly as [`set`] does: an unknown strip (a
+/// master designation that names a strip the session does not have is refused here, before any
+/// commit), a submix's solo (it has no solo row, a submix is solo-safe) or an unknown control is
 /// [`ControlError::AddressUnknown`], a lane other than `both` is [`ControlError::Lane`], a value
 /// other than exactly `0` or `1` is [`ControlError::Domain`]. Nothing is written: the overlay is
 /// the host's. `Ok(None)` for an address whose row is a model row, which [`set`] writes; its
@@ -502,9 +504,13 @@ pub fn check_monitor(
     let Owner::Strip(strip) = &address.owner else {
         return Err(ControlError::AddressUnknown);
     };
+    let Source::Monitor(row) = resolved.source else {
+        return Err(ControlError::AddressUnknown);
+    };
     Ok(Some(MonitorWrite {
         strip: strip.clone(),
-        soloed: crate::lane::is_on(value),
+        row,
+        on: crate::lane::is_on(value),
         ramp,
     }))
 }

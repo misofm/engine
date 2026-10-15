@@ -1642,8 +1642,34 @@ impl ReadyOwnership {
         }
         if result.is_ok() {
             self.stamp_structure_epoch();
+            self.sync_master();
         }
         result
+    }
+
+    /// Point every plan's tables the host holds at the master strip the core designates now
+    /// (#1683): the rendering plan's and each replacement's that waits for its adoption, each by
+    /// the strip's ID in that plan's own strip order, so a strip added or removed before the
+    /// master never moves the reading to another strip. A plan that does not hold the strip has no
+    /// master. The designation moves no render value; the next poll folds the master reading from
+    /// it. Control side only, as [`Self::stamp_structure_epoch`].
+    fn sync_master(&mut self) {
+        let master = self.control.master_strip();
+        let shapes = core::iter::once(&mut *self.shape).chain(
+            self.pending_shapes
+                .iter_mut()
+                .filter(|entry| !entry.adopted)
+                .map(|entry| &mut *entry.shape),
+        );
+        for shape in shapes {
+            let index = master.and_then(|id| {
+                strip_index(&shape.tracks, &shape.submixes, id.as_str().as_bytes())
+                    .and_then(|index| u32::try_from(index).ok())
+            });
+            shape.master_track = index;
+            shape.meter_header.master_track_plus_one =
+                index.map_or(0, |track| track.saturating_add(1));
+        }
     }
 
     /// Stamp the structure epoch the control list holds now on the newest committed plan's meter
@@ -5542,10 +5568,15 @@ impl WebRuntimePreparer {
         superseded: &host_core::LiveValuesSuperseded,
         boot: bool,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
-        let live_controls =
-            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
+        let mut live_controls = live_control_request(self.options, compiled.quantum().0)
+            .ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
+        // #1683: the boot word designates the first plan's master only; the core's overlay, which
+        // it seeds, designates every successor's.
+        if successor.is_some() {
+            live_controls.master_track = None;
+        }
         // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
         // effect lanes whatever the session's live rows chose, as before the control plane chose
         // the lanes, so a session with no effect to observe still boots.

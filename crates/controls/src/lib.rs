@@ -58,7 +58,7 @@ pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL, check_expected_effect};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
     EffectiveSource, EffectiveStrip, LocalEffective, LocalInputs, ModelInputs, MonitorChange,
-    MonitorOverlay, MonitorWrite, any_solo, any_solo_in, effective, effective_follow,
+    MonitorOverlay, MonitorRow, MonitorWrite, any_solo, any_solo_in, effective, effective_follow,
     effective_gate, effective_into, effective_strip, solo_term,
 };
 pub use error::ControlError;
