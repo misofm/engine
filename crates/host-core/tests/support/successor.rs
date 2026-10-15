@@ -102,6 +102,7 @@ impl Session {
                 revision: SUCCESSOR_REVISION,
                 edit_ramps: &session::EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
         )

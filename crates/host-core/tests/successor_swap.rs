@@ -1016,6 +1016,25 @@ impl LivePlan {
         committed: &SessionModel,
         backend: Backend,
     ) -> Self {
+        Self::successor_observed(
+            session,
+            request,
+            predecessor,
+            committed,
+            &host_core::NO_OBSERVATION,
+            backend,
+        )
+    }
+
+    /// A successor prepared with the taps the host armed (#1584 D6a).
+    fn successor_observed(
+        session: &Session,
+        request: &host_core::HostLiveControlRequest,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        observation: &controls::ObservationBindings,
+        backend: Backend,
+    ) -> Self {
         let (prepared, handles) =
             host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
                 &session.compiled,
@@ -1027,6 +1046,7 @@ impl LivePlan {
                     revision: successor::SUCCESSOR_REVISION,
                     edit_ramps: &EditRamps::new(),
                     monitor: host_core::MonitorBase::NONE,
+                    observation,
                 },
                 backend,
             )
@@ -2646,6 +2666,7 @@ impl CellPlan {
                 revision: successor::SUCCESSOR_REVISION,
                 edit_ramps,
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             form,
@@ -3908,6 +3929,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 revision,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             Form::Split,
@@ -3931,6 +3953,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 revision: accepted,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             Form::Split,
@@ -3960,6 +3983,7 @@ fn successor_handle(
                 revision: successor::SUCCESSOR_REVISION,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
         )
@@ -7138,6 +7162,7 @@ mod meter_carry {
                 revision: SUCCESSOR_REVISION,
                 edit_ramps: &session::EditRamps::new(),
                 monitor: MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             }),
             backend,
         );
@@ -7571,10 +7596,9 @@ mod observation_carry {
                 continue;
             };
             let stream = streams.entry(handle.track_id.to_string()).or_default();
-            if stream
-                .last()
-                .is_none_or(|last| last.sequence != window.sequence)
-            {
+            // A window is new when its sequence or its start differs: a restarted tap's sequence
+            // begins at 1 again, after the predecessor's.
+            if stream.last().is_none_or(|last| *last != window) {
                 stream.push(window);
             }
         }
@@ -7589,6 +7613,36 @@ mod observation_carry {
                 .expect("a control channel for the insert")
                 .try_push_observe(0, true, WINDOW_BLOCKS)
                 .expect("room in the queue");
+        }
+    }
+
+    /// Disarm the same tap, as an app does.
+    fn unsubscribe(plan: &mut LivePlan, strips: &[String]) {
+        for strip in strips {
+            plan.handles
+                .effect_control_mut(strip, LiveEffectAddress::insert(0))
+                .expect("a control channel for the insert")
+                .try_push_observe(0, false, WINDOW_BLOCKS)
+                .expect("room in the queue");
+        }
+    }
+
+    /// The bindings of `strips`' compressor tap 1 (the gain-reduction tap), each armed with
+    /// [`WINDOW_BLOCKS`]: what the host's table holds after the subscribes above.
+    fn bindings_of(strips: &[String]) -> controls::ObservationBindings {
+        let mut bindings = controls::ObservationBindings::new();
+        for strip in strips {
+            bindings.set(tap_key(strip), WINDOW_BLOCKS);
+        }
+        bindings
+    }
+
+    /// The stable key of `strip`'s compressor insert `comp`, gain-reduction tap.
+    fn tap_key(strip: &str) -> controls::TapKey {
+        controls::TapKey {
+            strip: id(strip),
+            section: controls::TapSection::Inserts(id("comp")),
+            tap_id: 1,
         }
     }
 
@@ -7636,20 +7690,57 @@ mod observation_carry {
     /// prepared as its successor and swapped in at [`SWAP_BLOCK`], rendered to [`BLOCKS`]. B
     /// subscribes to nothing: whatever its taps hold at the swap is what the carry brought.
     fn swapped(backend: Backend, a: &Session, b: &Session, subscribed: &[String]) -> Swapped {
+        swapped_with(
+            backend,
+            a,
+            b,
+            &Swap {
+                early: subscribed,
+                ..Swap::default()
+            },
+        )
+    }
+
+    /// What a swapped run subscribes, when, and what the host's table holds at the swap.
+    #[derive(Default)]
+    struct Swap<'a> {
+        /// Subscribes acknowledged before A's first block.
+        early: &'a [String],
+        /// Subscribes acknowledged after A's last block: still in A's queue at the swap block.
+        late: &'a [String],
+        /// Disarms acknowledged after A's last block, likewise.
+        late_disarm: &'a [String],
+        /// Subscribes pushed into B's own queue before its first block: the reference for a tap
+        /// armed at preparation.
+        successor_records: &'a [String],
+        /// The taps the host's table holds (#1584 D6a); none by default.
+        bindings: Option<&'a controls::ObservationBindings>,
+    }
+
+    fn swapped_with(backend: Backend, a: &Session, b: &Session, swap: &Swap<'_>) -> Swapped {
         use bench_support::alloc as bench_alloc;
         let feed = bursty_feed(SOURCE, 5);
         let request = observed_request();
         let mut streams = Streams::new();
         let mut plan = LivePlan::fresh_with(a, &request, backend);
-        subscribe(&mut plan, subscribed);
+        subscribe(&mut plan, swap.early);
         attach(&mut plan);
         for block in 0..SWAP_BLOCK {
             plan.submit(&feed, QUANTUM, block);
             plan.render(QUANTUM);
             read_all(&mut plan, &mut streams);
         }
-        let mut successor =
-            LivePlan::successor_with(b, &request, &plan.prepared.inventory, &a.model, backend);
+        subscribe(&mut plan, swap.late);
+        unsubscribe(&mut plan, swap.late_disarm);
+        let mut successor = LivePlan::successor_observed(
+            b,
+            &request,
+            &plan.prepared.inventory,
+            &a.model,
+            swap.bindings.unwrap_or(&host_core::NO_OBSERVATION),
+            backend,
+        );
+        subscribe(&mut successor, swap.successor_records);
         attach(&mut successor);
         assert_eq!(
             successor
@@ -7927,6 +8018,279 @@ mod observation_carry {
     )]
     fn a_restarted_effect_starts_its_tap_fresh_at_four_lanes() {
         a_restarted_effect_starts_its_tap_fresh(Backend::Simd4);
+    }
+
+    /// A compressor insert whose link mode changed restarts, with a base that holds it and a
+    /// successor that is the base plus one track.
+    fn restarted_pair(backend: Backend) -> (Session, Session) {
+        let base = compressor_insert_session(bank_width(backend) - 2);
+        let mut changed = with_muted_track(base.clone());
+        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        (Session::compile(base), Session::compile(changed))
+    }
+
+    /// #1584 D6a gates 1 and 2: a subscription the host acknowledged survives a rebuild that
+    /// restarts its effect, whether the record was applied before the swap or still waits in the
+    /// predecessor's queue. The restarted tap is armed at preparation and opens its first window at
+    /// the adoption block's first sample, and every window equals the one a record in the
+    /// successor's own queue, applied at that block, produces from the same state and input.
+    ///
+    /// Red mutation: prepare the successor's taps unarmed (drop the arm in
+    /// `attach_effect_observation`) -> eq1 publishes no window after the swap, and a record that
+    /// waited in the predecessor's queue is lost with it.
+    fn a_restarted_effects_subscription_survives_the_rebuild(backend: Backend, pending: bool) {
+        let what = format!("{backend:?} pending={pending}");
+        let (a, b) = restarted_pair(backend);
+        let all = strips_of(&a);
+        let restarted = vec!["eq1".to_owned()];
+        let others: Vec<String> = all.iter().filter(|s| *s != "eq1").cloned().collect();
+        // The reference: B's own queue holds the record for eq1 at its first block.
+        let reference = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &others,
+                successor_records: &restarted,
+                ..Swap::default()
+            },
+        );
+        // The run: the host's table holds eq1's tap (and the carried ones).
+        let bindings = bindings_of(&all);
+        let run = if pending {
+            swapped_with(
+                backend,
+                &a,
+                &b,
+                &Swap {
+                    early: &others,
+                    late: &restarted,
+                    bindings: Some(&bindings),
+                    ..Swap::default()
+                },
+            )
+        } else {
+            swapped_with(
+                backend,
+                &a,
+                &b,
+                &Swap {
+                    early: &all,
+                    bindings: Some(&bindings),
+                    ..Swap::default()
+                },
+            )
+        };
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(
+            run.armed[0],
+            all.len() as u64,
+            "{what}: the restarted effect's tap is armed on the successor, with the carried ones"
+        );
+        let eq1 = run.streams["eq1"]
+            .iter()
+            .find(|window| window.first_sample >= SWAP_SAMPLE)
+            .copied()
+            .expect("eq1 publishes after the swap");
+        assert_eq!(
+            eq1.first_sample, SWAP_SAMPLE,
+            "{what}: the first window opens at the adoption block"
+        );
+        assert_eq!(eq1.sequence, 1, "{what}: a fresh tap starts its sequence");
+        assert!(
+            eq1.left > 0.0 || eq1.right > 0.0,
+            "{what}: the compressor reduces gain, or the reading is vacuous"
+        );
+        for strip in &all {
+            let want = reference.streams[strip]
+                .iter()
+                .filter(|window| window.first_sample >= SWAP_SAMPLE || strip != "eq1");
+            let got = run.streams[strip]
+                .iter()
+                .filter(|window| window.first_sample >= SWAP_SAMPLE || strip != "eq1");
+            assert_eq!(
+                got.collect::<Vec<_>>(),
+                want.collect::<Vec<_>>(),
+                "{what} {strip}: the windows equal a record applied at the adoption block"
+            );
+        }
+        assert_eq!(
+            run.allocator,
+            ((0, 0, 0), (0, 0)),
+            "{what}: allocator and render audit over the swap block"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_restarted_effects_subscription_survives_the_rebuild_at_eight_lanes() {
+        for pending in [false, true] {
+            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd8, pending);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_restarted_effects_subscription_survives_the_rebuild_at_four_lanes() {
+        for pending in [false, true] {
+            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd4, pending);
+        }
+    }
+
+    /// #1584 D6a gate 3: a disarm still waiting in the predecessor's queue at the swap leaves the
+    /// restarted effect's successor tap unarmed: the host's table no longer holds it.
+    ///
+    /// Red mutation: arm every tap the predecessor had armed -> eq1's successor tap is armed and
+    /// publishes after the swap.
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed(backend: Backend) {
+        let what = format!("{backend:?}");
+        let (a, b) = restarted_pair(backend);
+        let all = strips_of(&a);
+        let restarted = vec!["eq1".to_owned()];
+        let others: Vec<String> = all.iter().filter(|s| *s != "eq1").cloned().collect();
+        let bindings = bindings_of(&others);
+        let run = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &all,
+                late_disarm: &restarted,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(
+            run.armed[0],
+            others.len() as u64,
+            "{what}: the disarmed tap starts unarmed"
+        );
+        assert!(
+            run.streams["eq1"]
+                .iter()
+                .all(|window| window.end_sample <= SWAP_SAMPLE),
+            "{what}: eq1 publishes nothing after the swap"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_eight_lanes() {
+        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_four_lanes() {
+        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd4);
+    }
+
+    /// #1584 D6a gate 6: the table arms every carried tap too, and the prepared arm never wins
+    /// over the state a carried tap brings: the windows continue (sequences 1, 2, 3, the one open
+    /// at the swap included) exactly as with an empty table.
+    ///
+    /// Red mutation: let `arm_prepared` survive `swap_state` (restart the window at the first
+    /// block) -> the window spanning the swap restarts and the sequence breaks.
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm(backend: Backend, form: Form) {
+        let what = format!("{backend:?} {form:?}");
+        let (a, b) = pair(backend, form);
+        let subscribed = strips_of(&a);
+        let kept: Vec<String> = subscribed
+            .iter()
+            .filter(|strip| strips_of(&b).contains(strip))
+            .cloned()
+            .collect();
+        let bindings = bindings_of(&kept);
+        let plain = swapped(backend, &a, &b, &subscribed);
+        let armed = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &subscribed,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(armed.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(armed.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(armed.streams, plain.streams, "{what}: no tap restarted");
+        // The retiring predecessor holds whatever the successor's lanes held before the exchange.
+        assert_eq!(armed.armed[0], plain.armed[0], "{what}");
+        for strip in &kept {
+            assert_eq!(
+                armed.streams[strip]
+                    .iter()
+                    .map(|window| window.sequence)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "{what} {strip}: no gap and no restart"
+            );
+        }
+        assert_eq!(armed.allocator, ((0, 0, 0), (0, 0)), "{what}");
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_eight_lanes() {
+        for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
+            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd8, form);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_four_lanes() {
+        for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
+            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd4, form);
+        }
+    }
+
+    /// #1584 D6a gate 4, the plan half: a table that still names a removed insert, a removed
+    /// strip or an ID reused for an effect without the tap arms nothing and fails nothing. (The
+    /// control plane drops such a binding and ends it with an event; this is the plan's own
+    /// guard.)
+    #[test]
+    fn a_stale_binding_arms_nothing() {
+        let backend = Backend::current();
+        let base = compressor_insert_session(bank_width(backend) - 2);
+        let mut stripped = with_muted_track(base.clone());
+        track_mut(&mut stripped, "eq1").inserts.effects.clear();
+        let (a, b) = (Session::compile(base), Session::compile(stripped));
+        let all = strips_of(&a);
+        let mut bindings = bindings_of(&all);
+        // A strip B does not have, and an insert B does not have on a strip it does.
+        bindings.set(tap_key("gone"), WINDOW_BLOCKS);
+        let run = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &all,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(
+            run.armed[0],
+            all.len() as u64 - 1,
+            "every tap B still has is armed; eq1's insert is gone"
+        );
     }
 
     /// Gate 5 for the taps: the swap block -- carry, the attachment hook's pairing and the first
@@ -8603,4 +8967,1169 @@ fn a_carried_send_is_retargeted_to_the_successors_gain_at_eight_lanes() {
 #[test]
 fn a_carried_send_is_retargeted_to_the_successors_gain_at_four_lanes() {
     a_carried_send_is_retargeted_to_the_successors_gain(Backend::Simd4);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1395a: a single spectrum capture keeps its history across a plan swap.
+//
+// A capture whose target and channels are the predecessor's keeps its analysis history, its open
+// window, its stream epoch, its sequence and its one-shot state: the observer moves into the
+// successor's plan in the swap block, and the control side keeps the reader that is connected to
+// it, pairing it at promotion from the list the successor's preparation built. The oracle is the
+// post-edit session prepared fresh with the same capture, started at the same block and fed from
+// frame 0.
+
+mod spectrum_carry {
+    use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanAdoption};
+    use host_core::{
+        HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, MonitorBase, PreparedHost,
+        PreparedSpectrumCaptures, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
+        SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
+        SpectrumPair, SpectrumService, SpectrumServiceError, SpectrumSmoothingConfig,
+        SpectrumSnapshot, SpectrumStreamStatus, SpectrumTarget, SuccessorBase,
+        prepare_host_runtime_with_live_controls_and_spectrum,
+        prepare_host_runtime_with_live_controls_and_spectrum_collection,
+        prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
+        prepare_host_runtime_with_live_controls_and_spectrum_successor,
+        spectrum_capture_collection_resources, spectrum_capture_resources_for,
+    };
+
+    use super::successor::{self, Block, SUCCESSOR_REVISION};
+    use super::*;
+
+    /// Blocks per run: 8192 frames, four windows of the 2048-frame capture and then some.
+    const TOTAL: usize = 64;
+    /// The swap block: sample 5120, inside the window that opened at 4608 (hop 512).
+    const SWAP: usize = 40;
+    const SWAP_SAMPLE: u64 = (SWAP * QUANTUM) as u64;
+    /// A one-shot is armed at block 30 and completes 16 blocks later, past the swap.
+    const ARM: usize = 30;
+    const TRACK: &str = "eq0";
+
+    fn request(target: SpectrumTarget, channels: SpectrumChannels) -> SpectrumCaptureRequest {
+        SpectrumCaptureRequest {
+            maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
+            target,
+            channels,
+        }
+    }
+
+    fn stereo_post_matrix() -> SpectrumCaptureRequest {
+        request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Stereo,
+        )
+    }
+
+    /// What the host does to the service of a collection: which entry it selects before the stream
+    /// starts, and which entry it switches the running stream to, at which block.
+    #[derive(Clone, Default)]
+    struct Script {
+        select: Option<(SpectrumTarget, SpectrumChannels)>,
+        switch: Option<(usize, SpectrumTarget, SpectrumChannels)>,
+    }
+
+    /// A capture request of either kind, prepared fresh or as a successor.
+    trait Spec {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures);
+
+        fn script(&self) -> Script {
+            Script::default()
+        }
+    }
+
+    impl Spec for SpectrumCaptureRequest {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures) {
+            let live = HostLiveControlRequest::default();
+            let superseded = LiveValuesSuperseded::default();
+            let (host, _handles, capture) = match base {
+                None => prepare_host_runtime_with_live_controls_and_spectrum(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    self,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                ),
+                Some(base) => prepare_host_runtime_with_live_controls_and_spectrum_successor(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    self,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                    base,
+                ),
+            }
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+            (host, capture.into())
+        }
+    }
+
+    /// A collection request with the host's script for it.
+    struct Many {
+        request: SpectrumCaptureCollectionRequest,
+        script: Script,
+    }
+
+    impl Spec for Many {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures) {
+            let live = HostLiveControlRequest::default();
+            let superseded = LiveValuesSuperseded::default();
+            let (host, _handles, capture) = match base {
+                None => prepare_host_runtime_with_live_controls_and_spectrum_collection(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    &self.request,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                ),
+                Some(base) => {
+                    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
+                        &session.compiled,
+                        &caps(),
+                        &live,
+                        &self.request,
+                        HostLiveLanes::ALL,
+                        &superseded,
+                        base,
+                    )
+                }
+            }
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+            (host, capture.into())
+        }
+
+        fn script(&self) -> Script {
+            self.script.clone()
+        }
+    }
+
+    /// The test's host attachment: it records the carry record the swap block hands it, within the
+    /// capacity reserved at construction.
+    struct Rig {
+        carries: Vec<ObserverCarry>,
+    }
+
+    impl Rig {
+        fn new() -> Box<Self> {
+            Box::new(Self {
+                carries: Vec::with_capacity(16),
+            })
+        }
+    }
+
+    impl HostAttachment for Rig {
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn adopt_predecessor(
+            &mut self,
+            predecessor: &mut dyn HostAttachment,
+            carries: &[ObserverCarry],
+        ) {
+            if predecessor.as_any_mut().downcast_mut::<Self>().is_some() {
+                self.carries.extend_from_slice(carries);
+            }
+        }
+    }
+
+    /// What one read of the stream returned.
+    #[derive(Clone, Copy)]
+    struct Read {
+        status: SpectrumStreamStatus,
+        window: Option<SpectrumContinuousWindow>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Drive {
+        /// A continuous stream started before block 0 and read after every block.
+        Stream,
+        /// A one-shot armed before the given block and read after every block from there on.
+        OneShot(usize),
+        /// As `OneShot`, but a refused read is recorded, and after `CaptureInvalid` the host arms
+        /// again at once (#1618).
+        OneShotRearm(usize),
+    }
+
+    /// The host's reader of one run: the service and what it read.
+    struct Driver {
+        service: SpectrumService,
+        drive: Drive,
+        script: Script,
+        reads: Vec<Read>,
+        shot: Option<SpectrumSnapshot>,
+        /// The refusals the one-shot's reads answered, with the block after which each came.
+        refused: Vec<(usize, SpectrumServiceError)>,
+        /// The block after which the one-shot completed.
+        shot_at: Option<usize>,
+    }
+
+    impl Driver {
+        fn new(
+            captures: PreparedSpectrumCaptures,
+            rate: u32,
+            drive: Drive,
+            script: Script,
+        ) -> Self {
+            let mut service = SpectrumService::new(
+                captures,
+                rate,
+                QUANTUM as u32,
+                Some(SpectrumHop::new(512).expect("hop")),
+            );
+            if let Some((target, channels)) = &script.select {
+                service
+                    .select(target.as_ref(), *channels)
+                    .expect("select the first entry");
+            }
+            if matches!(drive, Drive::Stream) {
+                service
+                    .start_stream(SpectrumSmoothingConfig::default(), None)
+                    .expect("start the stream");
+            }
+            Self {
+                service,
+                drive,
+                script,
+                reads: Vec::new(),
+                shot: None,
+                refused: Vec::new(),
+                shot_at: None,
+            }
+        }
+
+        fn before(&mut self, block: usize) {
+            if let Some((at, target, channels)) = &self.script.switch
+                && *at == block
+            {
+                self.service
+                    .select_stream(target.as_ref(), *channels, None, None)
+                    .expect("switch the stream to the other entry");
+            }
+            if matches!(self.drive, Drive::OneShot(at) | Drive::OneShotRearm(at) if at == block) {
+                if matches!(self.drive, Drive::OneShotRearm(_)) {
+                    // A collection's select armed its entry for nobody: the host's own arm
+                    // replaces that one.
+                    let _ = self.service.cancel();
+                }
+                self.service.arm().expect("arm");
+            }
+        }
+
+        fn after(&mut self, block: usize) {
+            match self.drive {
+                Drive::Stream => {
+                    self.service.read_stream(None).expect("read the stream");
+                    self.reads.push(Read {
+                        status: self.service.stream_metadata().status,
+                        window: self.service.stream_window().copied(),
+                    });
+                }
+                Drive::OneShot(at) if block >= at && self.shot.is_none() => {
+                    self.shot = self
+                        .service
+                        .read(SpectrumChannels::Stereo)
+                        .expect("read the one-shot");
+                }
+                Drive::OneShotRearm(at) if block >= at && self.shot.is_none() => {
+                    // Without a selection the read refuses before it looks at the mask.
+                    let channels = self.service.channels().unwrap_or(SpectrumChannels::Stereo);
+                    match self.service.read(channels) {
+                        Ok(Some(snapshot)) => {
+                            self.shot = Some(snapshot);
+                            self.shot_at = Some(block);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.refused.push((block, error));
+                            if error == SpectrumServiceError::CaptureInvalid {
+                                self.service.arm().expect("arm again after the refusal");
+                            }
+                        }
+                    }
+                }
+                Drive::OneShot(_) | Drive::OneShotRearm(_) => {}
+            }
+        }
+    }
+
+    /// How the host promotes the successor after its adoption block.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Promote {
+        /// As the engine reported the block: `carried` is `CarryOutcome::Carried`.
+        AsReported,
+        /// As after a refused hand-over: `carried` is false although the list names a pair.
+        Refused,
+    }
+
+    struct Run {
+        blocks: Vec<Block>,
+        driver: Driver,
+        /// The spectrum entries of the carry record the swap block wrote.
+        record: Vec<ObserverCarry>,
+        /// The successor's pairing list.
+        pairing: Vec<SpectrumPair>,
+        /// `(allocations, reallocations, deallocations)` of the promotion call.
+        adopt_counts: (u64, u64, u64),
+        /// The captures the promotion displaced, dropped last.
+        displaced: PreparedSpectrumCaptures,
+        _exchange: (
+            engine::realtime::PlanPublisher,
+            engine::realtime::PlanRetirer,
+        ),
+    }
+
+    /// `a` rendered to [`SWAP`], `b` prepared as its successor and swapped in, promoted after its
+    /// adoption block, rendered to [`TOTAL`].
+    fn swapped(
+        a: &Session,
+        a_request: &impl Spec,
+        b: &Session,
+        b_request: &impl Spec,
+        drive: Drive,
+        promote: Promote,
+    ) -> Run {
+        let backend = Backend::current();
+        let _ = backend;
+        let feed = Feed::with_blocks(SOURCE, 1, TOTAL);
+        let (mut a_prepared, a_capture) = a_request.prepare(a, None);
+        a_prepared.plan.set_host_attachment(Rig::new());
+        let rate = a_prepared.report.sample_rate_hz;
+        let PreparedHost {
+            plan,
+            sources: mut a_sources,
+            inventory,
+            ..
+        } = a_prepared;
+        let (mut publisher, mut owner, retirer) = successor::exchange(plan);
+        let mut driver = Driver::new(a_capture, rate, drive, a_request.script());
+        let mut blocks = Vec::new();
+        feed.submit(&mut a_sources, rate, 0);
+        for block in 0..SWAP {
+            feed.submit(&mut a_sources, rate, block + 1);
+            driver.before(block);
+            blocks.push(successor::render(&mut owner));
+            driver.after(block);
+        }
+        let (mut b_prepared, b_capture) = b_request.prepare(
+            b,
+            Some(SuccessorBase {
+                inventory: &inventory,
+                committed: &a.model,
+                revision: SUCCESSOR_REVISION,
+                edit_ramps: &session::EditRamps::new(),
+                monitor: MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
+            }),
+        );
+        b_prepared.sources.adopt_persisting(&mut a_sources);
+        let pairing = b_prepared.inventory.spectrum_pairing().to_vec();
+        b_prepared.plan.set_host_attachment(Rig::new());
+        let PreparedHost {
+            mut plan,
+            sources: mut b_sources,
+            ..
+        } = b_prepared;
+        plan.take_revision_gate()
+            .expect("the successor's handle")
+            .publish(SUCCESSOR_REVISION);
+        publisher
+            .reserve_replacement(plan, PlanAdoption::Next)
+            .unwrap_or_else(|_| panic!("reserve the successor"))
+            .commit();
+        // From the swap on the host acts on the successor's collection, in the successor's terms.
+        driver.script = b_request.script();
+        let mut b_capture = Some(b_capture);
+        let mut adopt_counts = (0, 0, 0);
+        let mut displaced = None;
+        for block in SWAP..TOTAL {
+            if block + 1 < TOTAL {
+                feed.submit(&mut b_sources, rate, block + 1);
+            }
+            driver.before(block);
+            blocks.push(successor::render(&mut owner));
+            if block == SWAP {
+                let carried =
+                    blocks[SWAP].carry == CarryOutcome::Carried && promote == Promote::AsReported;
+                let mark = bench_support::alloc::current_thread_counters();
+                displaced = Some(driver.service.adopt_successor(
+                    b_capture.take().expect("the successor's capture"),
+                    &pairing,
+                    carried,
+                    None,
+                ));
+                let delta = bench_support::alloc::current_thread_delta_since(mark);
+                adopt_counts = (delta.allocations, delta.reallocations, delta.deallocations);
+            }
+            driver.after(block);
+        }
+        let record = owner
+            .active_attachment_mut::<Rig>()
+            .expect("attachment")
+            .carries
+            .iter()
+            .copied()
+            .filter(|carry| carry.kind == ObserverKind::Spectrum)
+            .collect();
+        Run {
+            blocks,
+            driver,
+            record,
+            pairing,
+            adopt_counts,
+            displaced: displaced.expect("promoted"),
+            _exchange: (publisher, retirer),
+        }
+    }
+
+    /// `b` prepared fresh with `request` and read as `drive` from frame 0.
+    fn reference(b: &Session, request: &impl Spec, drive: Drive) -> Driver {
+        let feed = Feed::with_blocks(SOURCE, 1, TOTAL);
+        let (prepared, capture) = request.prepare(b, None);
+        let rate = prepared.report.sample_rate_hz;
+        let PreparedHost {
+            plan, mut sources, ..
+        } = prepared;
+        let (_publisher, mut owner, _retirer) = successor::exchange(plan);
+        let mut driver = Driver::new(capture, rate, drive, request.script());
+        feed.submit(&mut sources, rate, 0);
+        for block in 0..TOTAL {
+            if block + 1 < TOTAL {
+                feed.submit(&mut sources, rate, block + 1);
+            }
+            driver.before(block);
+            successor::render(&mut owner);
+            driver.after(block);
+        }
+        driver
+    }
+
+    /// A: `eq0` and `eq1`. B adds a muted track that sorts first, so every observer of the
+    /// successor sits at another place than the predecessor's.
+    fn sessions() -> (Session, Session) {
+        let a = Session::compile(session_a());
+        let mut b_model = session_a();
+        add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+        (a, Session::compile(b_model))
+    }
+
+    fn assert_same_window(
+        got: &SpectrumContinuousWindow,
+        want: &SpectrumContinuousWindow,
+        label: &str,
+    ) {
+        assert_eq!(got.first_sample, want.first_sample, "{label}: first_sample");
+        assert_eq!(got.channels, want.channels, "{label}: channels");
+        assert_eq!(got.source_underrun, want.source_underrun, "{label}");
+        assert_eq!(got.stream_epoch, want.stream_epoch, "{label}: epoch");
+        assert_eq!(got.sequence, want.sequence, "{label}: sequence");
+        assert_eq!(got.dropped_captures, want.dropped_captures, "{label}");
+        assert!(
+            got.left
+                .iter()
+                .zip(&want.left)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+                && got
+                    .right
+                    .iter()
+                    .zip(&want.right)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{label}: the planes equal the reference's bit for bit"
+        );
+    }
+
+    /// Gate 1: a continuous capture keeps reading, window for window, across the swap.
+    #[test]
+    fn a_continuous_capture_carries_and_its_reader_keeps_receiving() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let expected = reference(&b, &request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(run.blocks[SWAP].swap, SwapOutcome::Applied);
+        assert_eq!(
+            run.pairing,
+            vec![SpectrumPair {
+                successor: 0,
+                predecessor: 0
+            }]
+        );
+        assert_eq!(
+            run.record,
+            vec![ObserverCarry {
+                kind: ObserverKind::Spectrum,
+                successor: 0,
+                predecessor: 0
+            }],
+            "the swap block moved exactly the observers the control side's list pairs"
+        );
+
+        let reads = &run.driver.reads;
+        assert_eq!(reads.len(), TOTAL);
+        let first_ready = reads
+            .iter()
+            .position(|read| read.status == SpectrumStreamStatus::Ready)
+            .expect("the stream produces before the swap");
+        assert!(first_ready < SWAP, "a window is complete before the swap");
+        let mut next_sequence = 0;
+        let mut spanning = false;
+        let mut after_swap = 0;
+        for (block, (got, want)) in reads.iter().zip(&expected.reads).enumerate() {
+            assert_eq!(got.status, want.status, "block {block}: status");
+            if block > first_ready {
+                assert!(
+                    matches!(
+                        got.status,
+                        SpectrumStreamStatus::Ready | SpectrumStreamStatus::Pending
+                    ),
+                    "block {block}: no Failed, Gap or Warming after the stream first produced, got {:?}",
+                    got.status
+                );
+            }
+            match (&got.window, &want.window) {
+                (Some(got), Some(want)) => {
+                    assert_same_window(got, want, &format!("block {block}"));
+                    assert_eq!(got.sequence, next_sequence, "block {block}: no gap");
+                    assert_eq!(got.stream_epoch, 1, "block {block}: the epoch never moved");
+                    next_sequence += 1;
+                    spanning |= got.first_sample < SWAP_SAMPLE
+                        && got.end_sample().expect("end") > SWAP_SAMPLE;
+                    after_swap += usize::from(block >= SWAP);
+                }
+                (None, None) => {}
+                _ => panic!("block {block}: a window on one side only"),
+            }
+        }
+        assert!(
+            spanning,
+            "a window spans the swap, or the carry is not tested"
+        );
+        assert!(after_swap >= 3, "the reader keeps receiving after the swap");
+    }
+
+    /// Without the pairing the host reads the predecessor's capture, whose observer sits in the
+    /// displaced plan: the oracle above can fail.
+    #[test]
+    fn a_refused_hand_over_installs_the_fresh_capture() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let run = swapped(&a, &request, &b, &request, Drive::Stream, Promote::Refused);
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        // The service reads the successor's own capture now. Its observer sits in a plan that
+        // carried its predecessor's observer away, so it renders nothing: the stream the service
+        // still believes it runs has no epoch and no window.
+        let after = &run.driver.reads[SWAP + 1..];
+        assert!(
+            after.iter().all(|read| read.window.is_none()),
+            "the fresh capture has no stream: the carried observer is not its producer"
+        );
+        assert_eq!(
+            after.last().expect("read").status,
+            SpectrumStreamStatus::Inactive
+        );
+        // The capture that was displaced is the predecessor's, still connected to the observer
+        // that renders on, and still on its stream (the host drops it off the audio thread).
+        let PreparedSpectrumCaptures::Single(old) = &run.displaced else {
+            panic!("a single capture");
+        };
+        assert_eq!(old.stream_epoch(), Some(1));
+        // The stream the service ran on the old capture ended with it (#1618): the host starts
+        // one anew on the successor's capture.
+        let mut run = run;
+        assert!(!run.driver.service.stream_active());
+        assert_eq!(run.driver.service.stream_cadence(), None);
+        run.driver
+            .service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("a stream starts on the fresh capture");
+    }
+
+    /// Gate 3, one-shot: a capture armed before the swap and carried completes with a window that
+    /// began before the swap block.
+    #[test]
+    fn an_armed_one_shot_completes_across_the_swap() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let expected = reference(&b, &request, Drive::OneShot(ARM));
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::OneShot(ARM),
+            Promote::AsReported,
+        );
+        let got = run.driver.shot.expect("the carried one-shot completes");
+        let want = expected.shot.expect("the reference completes");
+        assert!(
+            got.window.first_sample < SWAP_SAMPLE
+                && got.window.end_sample().expect("end") > SWAP_SAMPLE,
+            "the window spans the swap block"
+        );
+        assert_eq!(got.window.first_sample, want.window.first_sample);
+        assert_eq!(got.window.channels, want.window.channels);
+        assert!(
+            got.window
+                .left
+                .iter()
+                .zip(&want.window.left)
+                .chain(got.window.right.iter().zip(&want.window.right))
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the planes equal the reference's bit for bit"
+        );
+    }
+
+    /// Gate 3, key: a changed channel mask carries nothing, the list is empty, and the fresh
+    /// capture starts its own stream.
+    #[test]
+    fn a_changed_key_starts_fresh() {
+        let (a, b) = sessions();
+        let a_request = stereo_post_matrix();
+        let b_request = request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Left,
+        );
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert!(
+            run.pairing.is_empty(),
+            "no pair across a changed channel mask"
+        );
+        assert!(run.record.is_empty(), "the swap block moved no capture");
+        // The host restarts the stream it had on the old capture, on the successor's.
+        run.driver.service.stop_stream(None);
+        run.driver
+            .service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("restart");
+        // The successor's plan renders on past TOTAL: not available here, so the proof is the
+        // service's own: it reports the fresh capture's mask, not the carried one's.
+        assert_eq!(run.driver.service.channels(), Some(SpectrumChannels::Left));
+        assert_eq!(
+            run.driver.service.stream_epoch(),
+            Some(1),
+            "a fresh epoch, not the predecessor's"
+        );
+    }
+
+    /// #1618 gate 1: a one-shot armed on a capture that does not carry (its channel mask changed)
+    /// would wait for an observer that no longer renders. The service settles it: the read after
+    /// the promotion answers `CaptureInvalid` once, and the arm that follows completes on the
+    /// successor with the window a fresh arm there gives.
+    #[test]
+    fn a_one_shot_that_does_not_carry_settles_invalid_and_a_new_arm_completes() {
+        let (a, b) = sessions();
+        let a_request = stereo_post_matrix();
+        let b_request = request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Left,
+        );
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(ARM),
+            Promote::AsReported,
+        );
+        assert!(run.pairing.is_empty(), "the changed key carries nothing");
+        assert_eq!(
+            run.driver.refused,
+            vec![(SWAP, SpectrumServiceError::CaptureInvalid)],
+            "pending until the promotion, one refusal at it, none after"
+        );
+        let got = run
+            .driver
+            .shot
+            .expect("the new arm completes on the successor");
+        let shot_at = run.driver.shot_at.expect("completed");
+        assert!(shot_at > SWAP && shot_at < TOTAL, "completed at {shot_at}");
+        assert!(
+            got.window.first_sample > SWAP_SAMPLE,
+            "a window of the successor, armed after the promotion"
+        );
+        assert_eq!(got.window.channels, SpectrumChannels::Left);
+        // The window equals what a fresh arm on the same plan gives at the same block.
+        let expected = reference(&b, &b_request, Drive::OneShotRearm(SWAP + 1));
+        let want = expected.shot.expect("the reference completes");
+        assert_eq!(got.window.first_sample, want.window.first_sample);
+        assert!(
+            got.window
+                .left
+                .iter()
+                .zip(&want.window.left)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the plane equals the reference's bit for bit"
+        );
+    }
+
+    /// #1618 gate 1, refused hand-over: the list names a pair but the adoption did not carry, so
+    /// the capture is settled the same way. (The engine did carry the observer here, so the
+    /// re-armed fresh capture has no producer and stays pending: the point is the refusal.)
+    #[test]
+    fn a_one_shot_after_a_refused_hand_over_settles_invalid() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::OneShotRearm(ARM),
+            Promote::Refused,
+        );
+        assert_eq!(
+            run.driver.refused,
+            vec![(SWAP, SpectrumServiceError::CaptureInvalid)]
+        );
+        assert!(run.driver.shot.is_none());
+    }
+
+    /// A one-shot that completed and was read before the swap leaves nothing to settle: the next
+    /// read after the promotion is not a refusal, and a stream may start on the fresh capture.
+    #[test]
+    fn an_idle_capture_that_does_not_carry_settles_nothing() {
+        let (a, b) = sessions();
+        let a_request = stereo_post_matrix();
+        let b_request = request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Left,
+        );
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(0),
+            Promote::AsReported,
+        );
+        // Armed at block 0: it completed at block 15, long before the swap.
+        assert!(
+            run.driver.refused.is_empty(),
+            "nothing in flight at the swap"
+        );
+        run.driver
+            .service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the fresh capture is idle");
+    }
+
+    /// Gate 4: the swap block and the promotion allocate and free nothing.
+    #[test]
+    fn the_swap_block_and_the_promotion_allocate_and_free_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert!(
+            !run.record.is_empty(),
+            "a capture carried through the measured block"
+        );
+        for (index, block) in run.blocks.iter().enumerate().skip(1) {
+            assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
+            assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+        }
+        assert_eq!(
+            run.adopt_counts,
+            (0, 0, 0),
+            "the promotion allocates and frees nothing"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #1395b: a collection of captures carries entry by entry, matched by key.
+
+    /// The block at which the host switches the running stream to the other entry.
+    const SWITCH: usize = 44;
+
+    fn entry(target: SpectrumTarget, channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
+        SpectrumCaptureCollectionEntry { target, channels }
+    }
+
+    /// Track `eq0` after its matrix, both channels: the entry the stream runs on.
+    fn t_stereo() -> SpectrumCaptureCollectionEntry {
+        entry(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Stereo,
+        )
+    }
+
+    /// Track `eq1` after its input builtins, one channel.
+    fn u_entry(channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
+        entry(
+            SpectrumTarget::TrackPostInputBuiltins("eq1".into()),
+            channels,
+        )
+    }
+
+    fn many(
+        entries: Vec<SpectrumCaptureCollectionEntry>,
+        switch: Option<SpectrumCaptureCollectionEntry>,
+    ) -> Many {
+        let maximum_capture_bytes = spectrum_capture_collection_resources(&entries)
+            .expect("collection resources")
+            .retained_bytes;
+        Many {
+            request: SpectrumCaptureCollectionRequest {
+                entries,
+                maximum_capture_bytes,
+            },
+            script: Script {
+                select: Some((t_stereo().target, t_stereo().channels)),
+                switch: switch.map(|entry| (SWITCH, entry.target, entry.channels)),
+            },
+        }
+    }
+
+    fn sorted(mut pairs: Vec<SpectrumPair>) -> Vec<(usize, usize)> {
+        pairs.sort_by_key(|pair| pair.successor);
+        pairs
+            .into_iter()
+            .map(|pair| (pair.successor, pair.predecessor))
+            .collect()
+    }
+
+    /// The reads of `got` equal `want`'s block for block from `from` on, windows bit for bit.
+    fn assert_reads_equal(got: &Driver, want: &Driver, from: usize) -> usize {
+        let mut windows = 0;
+        for (block, (got, want)) in got.reads.iter().zip(&want.reads).enumerate().skip(from) {
+            assert_eq!(got.status, want.status, "block {block}: status");
+            match (&got.window, &want.window) {
+                (Some(got), Some(want)) => {
+                    assert_same_window(got, want, &format!("block {block}"));
+                    windows += 1;
+                }
+                (None, None) => {}
+                _ => panic!("block {block}: a window on one side only"),
+            }
+        }
+        windows
+    }
+
+    /// The stream on `t` kept receiving across the swap, as in gate 1: no `Failed`, `Gap` or
+    /// `Warming` after it first produced, one epoch, consecutive sequences, a window across the
+    /// swap, and windows after it.
+    fn assert_stream_kept_receiving(driver: &Driver) {
+        let reads = &driver.reads[..SWITCH];
+        let first_ready = reads
+            .iter()
+            .position(|read| read.status == SpectrumStreamStatus::Ready)
+            .expect("the stream produces before the swap");
+        assert!(first_ready < SWAP);
+        let mut next_sequence = 0;
+        let mut spanning = false;
+        let mut after_swap = 0;
+        for (block, read) in reads.iter().enumerate().skip(first_ready) {
+            assert!(
+                matches!(
+                    read.status,
+                    SpectrumStreamStatus::Ready | SpectrumStreamStatus::Pending
+                ),
+                "block {block}: no Failed, Gap or Warming, got {:?}",
+                read.status
+            );
+            if let Some(window) = &read.window {
+                assert_eq!(window.sequence, next_sequence, "block {block}: no gap");
+                assert_eq!(
+                    window.stream_epoch, 1,
+                    "block {block}: the epoch never moved"
+                );
+                next_sequence += 1;
+                spanning |= window.first_sample < SWAP_SAMPLE
+                    && window.end_sample().expect("end") > SWAP_SAMPLE;
+                after_swap += usize::from(block >= SWAP);
+            }
+        }
+        assert!(
+            spanning,
+            "a window spans the swap, or the carry is not tested"
+        );
+        assert!(after_swap >= 1, "the reader keeps receiving after the swap");
+    }
+
+    /// Gate 2: B lists the entries in the other order. Each pairs by key, the selection follows
+    /// its entry to the new index with its epoch, the stream reads on, and a switch to the other
+    /// entry (which also carried, idle) starts it as the reference does.
+    #[test]
+    fn a_reordered_collection_pairs_by_key_and_its_reader_keeps_receiving() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(
+            vec![u_entry(SpectrumChannels::Left), t_stereo()],
+            Some(u_entry(SpectrumChannels::Left)),
+        );
+        let expected = reference(&b, &b_request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(
+            sorted(run.pairing.clone()),
+            vec![(0, 1), (1, 0)],
+            "paired by key, not by position"
+        );
+        assert_eq!(
+            sorted(
+                run.record
+                    .iter()
+                    .map(|carry| SpectrumPair {
+                        successor: carry.successor,
+                        predecessor: carry.predecessor
+                    })
+                    .collect()
+            ),
+            vec![(0, 1), (1, 0)],
+            "the swap block moved exactly the observers the control side's list pairs"
+        );
+        assert_stream_kept_receiving(&run.driver);
+        let windows = assert_reads_equal(&run.driver, &expected, 0);
+        assert!(windows >= 8, "windows on both entries compared: {windows}");
+        let switched = run.driver.reads[SWITCH..]
+            .iter()
+            .filter_map(|read| read.window.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            !switched.is_empty()
+                && switched
+                    .iter()
+                    .all(|window| window.channels == SpectrumChannels::Left),
+            "the second entry produced its own windows after the switch"
+        );
+        // The selection moved with its entry: still `t`, with the epoch it had.
+        assert_eq!(
+            run.driver.service.selection_epoch(),
+            expected.service.selection_epoch()
+        );
+    }
+
+    /// Gate 3, collection: one entry's channels changed. That entry starts fresh, the other
+    /// carries as in gate 1.
+    #[test]
+    fn a_collection_entry_with_a_changed_key_starts_fresh() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(
+            vec![t_stereo(), u_entry(SpectrumChannels::Right)],
+            Some(u_entry(SpectrumChannels::Right)),
+        );
+        let expected = reference(&b, &b_request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(sorted(run.pairing.clone()), vec![(0, 0)]);
+        assert_eq!(run.record.len(), 1, "only the unchanged key moved");
+        assert_stream_kept_receiving(&run.driver);
+        assert!(assert_reads_equal(&run.driver, &expected, 0) >= 8);
+        assert!(
+            run.driver.reads[SWITCH..]
+                .iter()
+                .filter_map(|read| read.window.as_ref())
+                .all(|window| window.channels == SpectrumChannels::Right),
+            "the changed entry reads its own channel, from the plane it copies"
+        );
+    }
+
+    /// A refused hand-over moved no observer: the successor's fresh collection is installed,
+    /// without a selection, and its epoch says the selection was lost.
+    #[test]
+    fn a_refused_hand_over_installs_the_fresh_collection_without_a_selection() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::Refused,
+        );
+        assert_eq!(run.driver.service.target(), None, "no selection");
+        assert_eq!(
+            run.driver.service.selection_epoch(),
+            2,
+            "the epoch the predecessor's selection reached, plus one"
+        );
+        assert!(
+            run.driver.reads[SWAP + 1..]
+                .iter()
+                .all(|read| read.window.is_none()),
+            "the fresh collection has no stream"
+        );
+        // The displaced collection is the predecessor's, still on its selection.
+        let PreparedSpectrumCaptures::Collection(old) = &run.displaced else {
+            panic!("a collection");
+        };
+        assert_eq!(old.selected_index(), Some(0));
+        assert_eq!(old.selection_epoch(), 1);
+    }
+
+    /// #1618 / #1395b: the selected entry did not carry, so the service holds no stream any more.
+    /// `select_stream` answers `StreamInactive`; a plain select and a new start run the cadence
+    /// again on the entry (it does not arm a one-shot in the stream's place).
+    #[test]
+    fn a_lost_selection_ends_the_stream_and_a_new_start_restarts_the_cadence() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::Refused,
+        );
+        let service = &mut run.driver.service;
+        assert!(!service.stream_active(), "no stream without a selection");
+        assert_eq!(service.stream_cadence(), None);
+        assert_eq!(
+            service
+                .select_stream(
+                    t_stereo().target.as_ref(),
+                    SpectrumChannels::Stereo,
+                    None,
+                    None
+                )
+                .expect_err("nothing to restart"),
+            SpectrumServiceError::StreamInactive
+        );
+        service
+            .select(t_stereo().target.as_ref(), SpectrumChannels::Stereo)
+            .expect("select the entry");
+        service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the cadence starts again");
+        assert!(service.stream_active());
+        assert!(service.stream_cadence().is_some());
+        assert_eq!(
+            service.stream_metadata().status,
+            SpectrumStreamStatus::Warming
+        );
+    }
+
+    /// #1618: a one-shot armed on the selected entry of a collection whose selection did not carry
+    /// ends with the selection. The read answers `NotArmed`, the caller's arm is released (a
+    /// select and a stream start are not `Busy`), and the epoch says the selection was lost.
+    #[test]
+    fn a_one_shot_on_a_lost_selection_is_released() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(ARM),
+            Promote::Refused,
+        );
+        assert_eq!(
+            run.driver.refused.first(),
+            Some(&(SWAP, SpectrumServiceError::NotArmed))
+        );
+        assert!(run.driver.shot.is_none());
+        let service = &mut run.driver.service;
+        assert_eq!(service.selection_epoch(), 2);
+        service
+            .select(t_stereo().target.as_ref(), SpectrumChannels::Stereo)
+            .expect("the arm is released: select is not Busy");
+        service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("and neither is a stream start");
+    }
+
+    /// Gate 4, collection: the swap block and the promotion allocate and free nothing.
+    #[test]
+    fn a_collection_swap_block_and_promotion_allocate_and_free_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(run.record.len(), 2, "both captures carried");
+        for (index, block) in run.blocks.iter().enumerate().skip(1) {
+            assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
+            assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+        }
+        assert_eq!(
+            run.adopt_counts,
+            (0, 0, 0),
+            "the promotion allocates and frees nothing"
+        );
+    }
 }

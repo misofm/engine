@@ -218,7 +218,7 @@ pub struct TestOwnerCounters {
     pub reservation_committed: u64,
 }
 
-/// One effect producer's row of [`SessionControlSnapshot::effect_cells`]: `(epoch, strip ID,
+/// One effect producer's row of `SessionControlSnapshot::effect_cells`: `(epoch, strip ID,
 /// effect instance ID, writes per cell)`.
 #[cfg(feature = "test-support")]
 pub type EffectCellRow = (u64, Box<str>, Box<str>, Vec<u64>);
@@ -405,6 +405,94 @@ pub struct SessionState<A: ControlAdapter> {
     /// catalog shows it (D11), and it is written only after every fallible step of the
     /// transaction that sets it has passed (D8).
     pub(crate) monitor: controls::MonitorOverlay,
+    /// The observation taps the host has armed (#1584 D6a), kept beside the monitor overlay and
+    /// apart from it: solo and subscriptions are different things. Host-local, never saved and
+    /// never in a snapshot; empty at boot. Written after a successful push to a tap's queue, and
+    /// by a rebuild with the commit, which drops each binding whose target the transaction removed
+    /// and tells the subscribers. Every successor is prepared from it, so a subscription the host
+    /// acknowledged survives a rebuild that restarts its effect.
+    pub(crate) observation: controls::ObservationBindings,
+    /// The subscription state each observation slot of the newest plan was last pushed, waiting
+    /// to be folded into [`Self::observation`] (#1584 D6a). The browser admits a subscription
+    /// inside `process()`, where nothing may allocate, and a binding owns its key's text, so the
+    /// push records the absolute state here, in storage sized when the plan is published, and the
+    /// next service step folds it into the table. A rebuild folds first: it only starts from
+    /// [`Self::command`], which services.
+    pub(crate) observation_pending: Box<[PendingArm]>,
+    /// For each position of the newest plan's effect producers, the first of its slots in
+    /// `observation_pending`, and one entry past the last: a producer's slots are
+    /// `offsets[position]..offsets[position + 1]`, one per declared tap in declaration order.
+    pub(crate) observation_offsets: Box<[u32]>,
+}
+
+/// A plan's observation slot offsets and its pending-subscription storage.
+pub(crate) type ObservationSlots = (Box<[u32]>, Box<[PendingArm]>);
+
+/// The pending-subscription storage for `producers`, the newest plan's: the first slot of each
+/// producer (and one past the last), and one slot per declared tap (#1584 D6a). Built when a plan
+/// is prepared, fallibly and before anything commits; the session takes it after the commit and
+/// after the fold, so nothing pending is lost to a change of positions.
+pub(crate) fn observation_slots(
+    producers: &[host_core::EffectControlProducer],
+) -> Result<ObservationSlots, std::collections::TryReserveError> {
+    let mut offsets = Vec::new();
+    offsets.try_reserve_exact(producers.len() + 1)?;
+    let mut total = 0_u32;
+    for producer in producers {
+        offsets.push(total);
+        total =
+            total.saturating_add(u32::try_from(producer.observe_capacity()).unwrap_or(u32::MAX));
+    }
+    offsets.push(total);
+    let mut pending = Vec::new();
+    pending.try_reserve_exact(total as usize)?;
+    pending.resize(total as usize, PendingArm::None);
+    Ok((offsets.into_boxed_slice(), pending.into_boxed_slice()))
+}
+
+/// What the host last pushed to one observation slot (#1584 D6a).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PendingArm {
+    /// Nothing since the last fold.
+    #[default]
+    None,
+    /// Armed, with this window length in blocks (`0` is the plan's meter window).
+    Arm(u32),
+    /// Disarmed.
+    Disarm,
+}
+
+/// The stable key of the tap `tap_index` of the effect `producer` addresses, or `None` for an index
+/// the effect does not declare.
+fn tap_key_of(
+    producer: &host_core::EffectControlProducer,
+    tap_index: u32,
+) -> Option<controls::TapKey> {
+    let tap = producer.descriptor.observations.get(tap_index as usize)?;
+    let effect = session::StableId::parse(&producer.effect_id)?;
+    let section = match producer.address.rack {
+        host_core::LiveEffectRack::Console => controls::TapSection::Console(effect),
+        host_core::LiveEffectRack::Inserts => controls::TapSection::Inserts(effect),
+    };
+    Some(controls::TapKey {
+        strip: session::StableId::parse(&producer.track_id)?,
+        section,
+        tap_id: tap.id.0,
+    })
+}
+
+/// The wire key of an ended binding.
+fn ended_key(key: &controls::TapKey) -> protocol::ObservationTapKey {
+    protocol::ObservationTapKey {
+        strip_id: key.strip.as_str().to_owned(),
+        section: if key.section.is_console() {
+            protocol::ObservationSection::Console
+        } else {
+            protocol::ObservationSection::Inserts
+        },
+        effect_id: key.section.id().as_str().to_owned(),
+        tap_id: key.tap_id,
+    }
 }
 
 pub(crate) struct ObservedController {
@@ -703,6 +791,7 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
         EventEgressError::ReliableQueueFull(_) => EventError::Backpressure,
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
+        | EventEgressError::ObservationEndedCellMissing
         | EventEgressError::Encode(_) => EventError::Internal,
     }
 }
@@ -1183,6 +1272,7 @@ where
     /// acknowledges nothing and adds no queue. The only things it discards are plans render has
     /// already displaced; a committed revision's plan is never among them.
     pub fn service(&mut self) -> Result<(), CommandError> {
+        self.fold_observation_pending();
         self.synchronize_plan_epochs()?;
         self.refresh_provider_counters();
         self.collect_render_activity();
@@ -1248,7 +1338,7 @@ where
                 // #1257 D1: a value-only delta of track faders, mutes, pans and live effect
                 // parameters (#1264) rides the newest plan's live lanes; every other delta takes
                 // the rebuild below, unchanged.
-                let prepared = match self.commit_live(prepared) {
+                let mut prepared = match self.commit_live(prepared) {
                     LiveCommit::Done(result) => return result,
                     LiveCommit::Rebuild(prepared) => prepared,
                     // `commit_live` materializes an in-place token before it returns.
@@ -1320,6 +1410,52 @@ where
                 );
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
+                // #1584 D6a: the subscriptions the successor is prepared with, and those the
+                // transaction ends. The room for their one `OBSERVATION_ENDED` event (every ended
+                // key in it) is reserved with the token's `SESSION_COMMITTED`, before anything is
+                // prepared, published or queued: a lane holding unread events is retryable
+                // backpressure and nothing has changed (the acked-batch rule: a subscription is
+                // never dropped without its event). An event over one control frame can never
+                // be sent, so it is a resource refusal, not backpressure.
+                let observation_change = self
+                    .observation
+                    .after(
+                        prepared
+                            .get()
+                            .prospective_session()
+                            .compiled()
+                            .ok_or(CommandError::Internal)?
+                            .normalized_model(),
+                    )
+                    .map_err(|_| {
+                        CommandError::CompileRejected(failure(ResourceFault::Allocation))
+                    })?;
+                if !observation_change.ended.is_empty() {
+                    let mut ended = Vec::new();
+                    ended
+                        .try_reserve_exact(observation_change.ended.len())
+                        .map_err(|_| {
+                            CommandError::CompileRejected(failure(ResourceFault::Allocation))
+                        })?;
+                    ended.extend(observation_change.ended.iter().map(ended_key));
+                    match self
+                        .controller
+                        .attach_observation_ended(prepared.get_mut(), ended)
+                    {
+                        Ok(_) => {}
+                        Err(protocol::AttachObservationEndedError::NoRoom(_)) => {
+                            drop(prepared);
+                            return Err(CommandError::Backpressure);
+                        }
+                        Err(protocol::AttachObservationEndedError::Unencodable) => {
+                            drop(prepared);
+                            return Err(CommandError::CompileRejected(failure(
+                                ResourceFault::Limit,
+                            )));
+                        }
+                        Err(_) => return Err(CommandError::Internal),
+                    }
+                }
                 let prepared_runtime = prepare_runtime::<A>(
                     &*self.preparer,
                     prepared
@@ -1340,6 +1476,7 @@ where
                             next: &monitor_change.overlay,
                             ramp: monitor_change.ramp,
                         },
+                        observation: &observation_change.bindings,
                     }),
                     &self.live_values_superseded,
                 )
@@ -1470,12 +1607,29 @@ where
                     drop(prepared);
                     return Err(CommandError::Internal);
                 }
+                // #1584 D6a: the newest plan's pending-subscription storage is built here, with
+                // the other fallible steps, so no allocation follows the commit; the commit then
+                // only assigns it. A refusal drops what was built and changes nothing.
+                let slots = match observation_slots(&candidate_provider.effects) {
+                    Ok(slots) => slots,
+                    Err(_) => {
+                        drop(reports);
+                        drop(reservation);
+                        drop(candidate_provider);
+                        drop(prepared);
+                        return Err(CommandError::CompileRejected(failure(
+                            ResourceFault::Allocation,
+                        )));
+                    }
+                };
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
                 let committed = prepared
                     .commit(&mut self.controller, protocol::EditPath::Rebuild)
                     .map_err(|_| CommandError::Internal)?;
                 // #1559 D8: the overlay is written after the last fallible step, with the commit.
                 self.monitor = monitor_change.overlay;
+                // #1584 D6a: and the subscriptions the successor was prepared with.
+                self.observation = observation_change.bindings;
                 // Issue #1273 D2: the protocol commit was the last fallible step, so the
                 // persisting producers move now and never move back. Infallible.
                 // The newest epoch, spelled by field: the reservation borrows the publisher.
@@ -1500,6 +1654,9 @@ where
                 );
                 candidate_provider.revision_gate.publish(revision);
                 self.pending_providers.push(candidate_provider);
+                // #1584 D6a: the newest plan's slots, built above. The fold ran when this command
+                // was serviced and nothing has been pushed since (one thread), so none is lost.
+                (self.observation_offsets, self.observation_pending) = slots;
                 reports.push((epoch, A::Row::from(resources)));
                 reservation.commit();
                 #[cfg(feature = "test-support")]
@@ -2248,10 +2405,80 @@ where
         armed: bool,
         window_blocks: u32,
     ) -> Option<Result<(), effect_contract::ObservePushError>> {
-        self.newest_providers_mut()
+        let producer = self
+            .pending_providers
+            .last_mut()
+            .unwrap_or(&mut self.providers)
             .effects
-            .get_mut(position)
-            .map(|producer| producer.try_push_observe(tap_index, armed, window_blocks))
+            .get_mut(position)?;
+        let pushed = producer.try_push_observe(tap_index, armed, window_blocks);
+        if pushed.is_ok() {
+            // #1584 D6a: the push is the acknowledgement, so the state every later successor is
+            // prepared from is recorded with it, after the only fallible step and without
+            // allocating: this runs inside the browser's `process()`. A record the lane refused
+            // records nothing. The next service step folds it into the table.
+            let slots = self
+                .observation_offsets
+                .get(position)
+                .copied()
+                .zip(self.observation_offsets.get(position + 1).copied());
+            if let Some((first, end)) = slots
+                && let Some(slot) = first.checked_add(tap_index).filter(|slot| *slot < end)
+                && let Some(pending) = self.observation_pending.get_mut(slot as usize)
+            {
+                *pending = if armed {
+                    PendingArm::Arm(window_blocks)
+                } else {
+                    PendingArm::Disarm
+                };
+            }
+        }
+        Some(pushed)
+    }
+
+    /// Folds what the host pushed to the observation slots into the table of armed taps, in slot
+    /// order, and clears it. Control thread: it allocates for a new binding's key.
+    pub(crate) fn fold_observation_pending(&mut self) {
+        if self
+            .observation_pending
+            .iter()
+            .all(|arm| *arm == PendingArm::None)
+        {
+            return;
+        }
+        let producers = &self
+            .pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .effects;
+        for (position, producer) in producers.iter().enumerate() {
+            let (Some(&first), Some(&end)) = (
+                self.observation_offsets.get(position),
+                self.observation_offsets.get(position + 1),
+            ) else {
+                break;
+            };
+            for slot in first..end {
+                let arm = core::mem::take(&mut self.observation_pending[slot as usize]);
+                let Some(key) = tap_key_of(producer, slot - first) else {
+                    continue;
+                };
+                match arm {
+                    PendingArm::None => {}
+                    PendingArm::Arm(window) => self.observation.set(key, window),
+                    PendingArm::Disarm => {
+                        self.observation.clear(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.
+    #[must_use]
+    pub fn observation_bindings(&mut self) -> &controls::ObservationBindings {
+        self.fold_observation_pending();
+        &self.observation
     }
 
     /// Feeds a source of the newest committed session. A source that persists across a pending

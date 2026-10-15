@@ -199,3 +199,148 @@ Checked against `12d4a4f9d`.
 - **Split (plan v2).** #1395a: the single capture (gates 1, 3's single part, 4); #1395b: the
   collection (gate 2, 3's collection part).
 - **Dependencies.** #1327a (the table, the record and the section). #1401 is closed.
+
+## Amendment (controls coordinator, batch 12, 2026-10-15)
+
+Checked against `ea336c039`.
+
+- **No engine edit.** #1327a declared `ObserverKind::Spectrum` (`crates/engine/src/realtime/plan.rs:548-555`).
+  This slice edits nothing under `crates/engine/src/realtime`.
+- **The observer table is generic.** `GraphRuntimeObserver::carry_kind` returns
+  `Option<ObserverKind>` (default `None`, `crates/graph/src/lib.rs:2887`). `GraphObserverRow` and
+  `GraphObserverMove` carry their kind (`:3519`, `:3533`), and the move section writes the kind of
+  each move into the record. So D2 is: `SpectrumCaptureObserver` (`spectrum.rs:2497`) answers
+  `Some(Spectrum)`, and host-core gives spectrum rows keyed by D1, as `MeterInventoryRow` and
+  `resolve_meter_carry` do for meters (`crates/host-core/src/prepare.rs:3152`). A graph edit is still
+  "only if needed". The spectrum observer's binding handle is positional
+  (`SPECTRUM_OBSERVER_HANDLE - index`, `spectrum.rs:31`). So when a collection is reordered, the
+  observer swapped in must take its new binding's handle (`adopt_binding_handle`), as the meter
+  observer does.
+- **D3 and D5 as amended in batch 10 still hold.** Pairing happens on the control side when the
+  adopted candidate is promoted, as one `SpectrumService` method (`spectrum_service.rs:585`) that
+  uses D3's two functions. No `pair_carried` exists yet. Add `crates/host-core/src/spectrum_service.rs`
+  to the authorized paths (the batch 10 amendment requires it, but the list was not changed).
+- **Where the browser's successor capture is.** The boot plan's capture is moved into
+  `SpectrumService` (`take_spectrum_capture`, `hosts/host-web/src/lib.rs:5139`, called at `:5932`).
+  A successor's capture stays in the successor's `RenderCompanions` (`:5055`). #1290 (d) takes it
+  out at promotion, in the service step after the adoption block, and calls this slice's method.
+  Between adoption and promotion, a carried entry is served by the capture that the service
+  already holds, because its observer was swapped. An entry that is not carried reads as pending
+  until promotion.
+- **A refused hand-over.** `RealtimePlanOwner::carry_mismatch_count`
+  (`crates/engine/src/realtime/plan_exchange.rs:719`) is readable at promotion only when the
+  control and render halves are one instance (single mode, the only browser mode today). The C ABI's
+  #1593 and the browser's Worker mode (#1332) must publish it to the control side. Record this as
+  a rule for those slices. This slice does not change it.
+- **Anchors.** The batch 10 anchors in `spectrum.rs` are unchanged. The successor entries are now at
+  `prepare.rs:1339` (single) and `:1371` (collection).
+- **#1618** lands after #1395b, as root ruled. Its settle is part of the same `SpectrumService`
+  method: an entry that is not carried, or all entries after a refused hand-over. So
+  `spectrum_service.rs` is edited in this order: #1395a, #1395b, #1618.
+- **Order in lane K.** #1395a, then #1395b, after #1584 D6a. Both slices edit
+  `crates/host-core/src/prepare.rs` and `crates/host-core/tests/successor_swap.rs`.
+
+## Decision record: #1395a, the single capture (batch 8)
+
+**Shipped.** A single spectrum capture carries across a plan swap, and the control side keeps
+reading it.
+
+- *Swap block (D1, D2).* `SpectrumCaptureObserver` answers `carry_kind() = Some(Spectrum)`
+  (`spectrum.rs`). `prepare.rs` gives each single capture an inventory row keyed by
+  `(target, channels)` (`SpectrumInventoryRow`), and `resolve_spectrum_carry` joins the rows with the
+  predecessor's by key, never by entry or handle, and only at equal sample rate and quantum (both
+  are now in `PlanStateInventory`). The moves go into the one observer section with the meters'
+  (`install_observer_carry`), and a carry program is requested when a capture may carry
+  (`spectrum_may_carry`). No engine, graph or `latest_cell` edit. The observer keeps no binding
+  handle, so `adopt_binding_handle` has nothing to do (a collection's reorder in #1395b needs no
+  handle work either).
+- *Pairing at promotion (D3, D5, batch-10 amendment).* The pairing list is built at preparation
+  from the same join (`PlanStateInventory::spectrum_pairing`, `SpectrumPair`), so it names exactly
+  the observers the swap block moves. `SpectrumCapture::pair_carried(&mut self, predecessor,
+  pairs)` swaps the two captures only when the list names entry 0 of both and their target and
+  channels are equal. `SpectrumService::adopt_successor(successor, pairing, carried)` applies it
+  when the adoption carried, installs the successor's fresh captures otherwise (a refused
+  hand-over), and returns the displaced captures so the caller drops them off the audio thread.
+  The service is allocation- and free-free here. No host pairs in the swap block.
+- *Departures.* (1) `pair_carried` takes the control-side pairing list, not the swap block's
+  `ObserverCarry` slice (the record exists and a test proves it equals the list). (2) The
+  inventory carries only single captures' rows: a collection has none, so it never moves an
+  observer; #1395b adds its rows and the collection arm of `adopt_successor`. (3) An in-flight
+  arm or stream on a capture that does not carry is not settled by `adopt_successor`; that is
+  #1618's, in this method. (4) `browser_successor.rs` gate 2 read the successor's own capture; that
+  observer is now carried away, so the test pairs the captures first (a mechanical update).
+
+**Gates -> tests** (`crates/host-core/tests/successor_swap.rs`, `mod spectrum_carry`):
+gate 1 `a_continuous_capture_carries_and_its_reader_keeps_receiving` (status, window fields and
+planes equal the reference's block by block, epoch 1, no gap; record == pairing list);
+`a_refused_hand_over_installs_the_fresh_capture` (the oracle can fail);
+gate 3 `an_armed_one_shot_completes_across_the_swap` (a window that spans the swap, equal to the
+reference's) and `a_changed_key_starts_fresh`; gate 4
+`the_swap_block_and_the_promotion_allocate_and_free_nothing` (zero allocator calls in every
+block and in `adopt_successor`). Unit tests: `spectrum::tests::pair_carried_swaps_only_a_named_pair_of_one_key`,
+`prepare::tests::a_spectrum_capture_carries_by_key_at_one_shape`. Gate 2 (collection) is #1395b.
+
+## Decision record: #1395b, the collection (batch 8)
+
+**Shipped.** A collection's entries carry across a plan swap, matched by `(target, channels)`, and
+the control side keeps each entry's reader.
+
+- *Swap block (D1, D2).* `prepare.rs` gives every collection entry an inventory row (`entry` is its
+  index, its location is looked up by the positional handle `observer_handle(entry)`), and
+  `resolve_spectrum_carry` joins the rows by key in any order, at equal rate and quantum, into the
+  same observer section and the same pairing list as the single capture. No engine, graph or
+  `latest_cell` edit. A collection's reorder needs no handle work: the observer keeps no binding
+  handle (#1395a).
+- *Pairing at promotion (D3).* `SpectrumCaptureCollection::pair_carried(&mut self, predecessor,
+  pairs) -> bool` swaps each named pair of captures (successor index, predecessor index). It
+  checks the whole list first (index range, equal key per pair, successor entries strictly
+  increasing; two pairs on one predecessor entry cannot pass, because a collection admits no
+  duplicate key); a fault pairs nothing, like an empty list. The selection follows its entry: the
+  successor selects the entry's new index and keeps `selection_epoch`; when the predecessor's
+  selected entry did not pair, the successor has no selection and its epoch is the predecessor's
+  plus one; a predecessor with no selection leaves none and its epoch. It runs for an empty list
+  too. `SpectrumService::adopt_successor` calls it for a collection with the list when the
+  adoption carried and with an empty list after a refused hand-over, so a refused hand-over also
+  advances the epoch. Allocation-free, drops nothing; the caller drops the displaced collection.
+- *Departures.* (1) `PlanStateInventory` records whether its captures are a collection
+  (`spectrum_collection`). A single capture and a collection never carry into each other: the
+  service holds one kind and pairs inside it, so a plan whose capture kind changed starts fresh.
+  The spec does not say; no host changes kind across a swap today. (2) As in #1395a,
+  `pair_carried` takes the control-side `SpectrumPair` list, not the swap block's record (a test
+  proves the two are equal). (3) The O(n) validation pass uses the key-uniqueness argument above,
+  not a set. (4) Not settled here, and left to #1618: the stream or arm that the service holds when
+  the selected entry did not carry. After a lost selection the service still has `stream_active`;
+  a later `select_stream` then arms a one-shot (a collection restarts a cadence only from a
+  selected entry), so #1618's settle must reset the service's stream state in the same method.
+
+**Gates -> tests.** `crates/host-core/tests/successor_swap.rs`, `mod spectrum_carry`: gate 2
+`a_reordered_collection_pairs_by_key_and_its_reader_keeps_receiving` (B lists the entries in the
+other order; pairing `[(0,1),(1,0)]` equals the swap block's record; the stream on `t` reads window
+for window with no `Failed`/`Gap`/`Warming`, epoch 1, no sequence gap, a window across the swap;
+the selection epoch equals the reference's; a `select_stream` to the second entry (which carried
+idle) reads windows equal to the reference's, bit for bit; the stop that this switch makes reaches
+the rendering observer);
+gate 3 collection part `a_collection_entry_with_a_changed_key_starts_fresh` (`u` Left to Right: one
+pair, one record, the changed entry reads its own plane like the reference);
+`a_refused_hand_over_installs_the_fresh_collection_without_a_selection` (no selection, epoch 2, the
+displaced collection keeps its selection); gate 4
+`a_collection_swap_block_and_promotion_allocate_and_free_nothing` (zero allocator calls in every
+block and in `adopt_successor`, two entries moved). Unit tests:
+`spectrum::tests::collection_pair_carried_follows_keys_and_the_selection` (selection index and
+epoch, a stop through the successor's collection leaves the rendering observer's queue empty after
+a window was published without it, the other entry arms its own observer, lost selection, three
+list faults), `prepare::tests::a_spectrum_collection_carries_by_key_in_any_order`. The harness
+now takes either request kind (`Spec`), and the host's script (`Script`) is replaced by the
+successor's at the swap. All #1395a tests are unchanged and green.
+
+**Commands run.** `cargo test --locked -p host-core --all-features`, `-p graph`, `-p control-plane
+--features test-support`, `-p host-web --features host-web/test-support`; clippy `-D warnings` on
+host-core with no features, default and all features (all targets); the host-core loom step
+(`spectrum_handoff_loom`); `realtime-policy`; `check-bench-policy.sh`; `cargo fmt --all --check`;
+`check-cross-targets.sh`; `RUSTDOCFLAGS='-D warnings' cargo doc -p host-core --no-deps
+--all-features`. All pass.
+
+## Fold (batch 12a review)
+
+`PlanStateInventory::spectrum_count` had no caller and no gate that it would defend (the capture
+rows are read through `spectrum_carry_pairs`, which the carry gates pin), so it is deleted.

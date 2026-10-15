@@ -24,8 +24,8 @@ use crate::spectrum::{
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumHop, SpectrumOutput, SpectrumSmoothingConfig, SpectrumTarget, SpectrumTargetRef,
-    SpectrumWindow,
+    SpectrumHop, SpectrumOutput, SpectrumPair, SpectrumSmoothingConfig, SpectrumTarget,
+    SpectrumTargetRef, SpectrumWindow,
 };
 
 /// Spectrum capture target at a track's `post_input` tap, after its input section.
@@ -652,6 +652,88 @@ impl SpectrumService {
         self.hop
     }
 
+    /// Install the captures of a successor plan whose adoption block has run (#1395 D3, D5): the
+    /// service's captures become the successor's, and the displaced ones come back for the caller
+    /// to drop where it chooses.
+    ///
+    /// Control-side work, done at promotion and never in the swap block. `pairing` is the
+    /// successor's [`PlanStateInventory::spectrum_pairing`](crate::PlanStateInventory::spectrum_pairing),
+    /// and `carried` says whether the adoption carried (`CarryOutcome::Carried`); a refused
+    /// hand-over (`PredecessorMismatch`) moved no observer, so every successor capture is fresh.
+    /// A capture the pairing names keeps the reader the service already holds: that capture's
+    /// observer moved into the successor's plan, so its consumer, its shared mode word and its
+    /// read counters stay valid, and the stream epoch, the sequence and an armed one-shot carry on
+    /// unchanged (#1395 gate 3). Until this call, the service's captures are the predecessor's,
+    /// which is correct for a carried capture and reads as pending for the others.
+    ///
+    /// A collection pairs entry by entry (#1395b): each entry the pairing names keeps its reader,
+    /// whatever index it has in the successor, and the selection follows its entry with its epoch
+    /// ([`SpectrumCaptureCollection::pair_carried`]). When the selected entry did not carry, or the
+    /// hand-over was refused, the successor has no selection and its epoch is the predecessor's
+    /// plus one. A single capture and a collection never pair with each other (their keys never
+    /// join), so such a promotion installs the successor's fresh captures.
+    ///
+    /// A capture that does not carry is replaced by the successor's fresh one, and what the
+    /// caller had on the old one is settled here (#1618), so nothing waits on an observer that no
+    /// longer renders:
+    ///
+    /// - A one-shot arm, capturing or held (with or without a result queued), settles to
+    ///   [`SpectrumServiceError::CaptureInvalid`] with its arm generation: the successor's capture
+    ///   starts `INVALID` at the predecessor's generation ([`SpectrumCapture::settle_unpaired`]),
+    ///   the caller's next [`Self::read`] returns the refusal once, and a new arm then completes on
+    ///   the successor. The arm stays the caller's until that read.
+    /// - A collection whose selected entry did not carry has no selection (see above), so an arm
+    ///   on it ends with the selection: the caller's arm is released and a read answers
+    ///   [`SpectrumServiceError::NotArmed`]; the selection epoch tells the caller to select again.
+    /// - A running stream ends: [`Self::stream_active`] is `false`, the cadence, the smoothing and
+    ///   the window at hand are gone, the metadata is `Stopped`, and `analysis` (the history's
+    ///   owner, when the caller has one) ends with it. The caller starts a stream anew with
+    ///   [`Self::start_stream`] (after [`Self::select`] on a collection); [`Self::select_stream`]
+    ///   answers [`SpectrumServiceError::StreamInactive`] until then.
+    ///
+    /// A carried capture is untouched: its one-shot state and its stream run on (#1395 gate 3).
+    /// A caller that owns an analysis passes it, or the analysis keeps facts of a stream that
+    /// ended.
+    ///
+    /// Allocation-free and free-free: nothing is dropped here.
+    #[must_use = "the displaced captures hold a reader and a shared state; drop them off the audio thread"]
+    pub fn adopt_successor(
+        &mut self,
+        mut successor: PreparedSpectrumCaptures,
+        pairing: &[SpectrumPair],
+        carried: bool,
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) -> PreparedSpectrumCaptures {
+        // `kept`: the capture the caller used carried, so its arm and stream run on.
+        // `settled`: the arm stands as an `INVALID` result for the caller's read.
+        let (kept, settled) = match (&mut successor, &mut self.captures) {
+            (PreparedSpectrumCaptures::Single(next), PreparedSpectrumCaptures::Single(before)) => {
+                if carried && next.pair_carried(before, pairing) {
+                    (true, false)
+                } else {
+                    (false, next.settle_unpaired(before))
+                }
+            }
+            // A collection also runs without a carry: the selection the service held is gone with
+            // the predecessor's captures, and the successor's epoch must say so.
+            (
+                PreparedSpectrumCaptures::Collection(next),
+                PreparedSpectrumCaptures::Collection(before),
+            ) => {
+                next.pair_carried(before, if carried { pairing } else { &[] });
+                (next.selected_index().is_some(), false)
+            }
+            _ => (false, false),
+        };
+        if !kept {
+            self.caller_armed &= settled;
+            if self.stream_active {
+                self.end_stream_state(analysis);
+            }
+        }
+        core::mem::replace(&mut self.captures, successor)
+    }
+
     // REALTIME_POLICY_BEGIN: arm, read, cancel, select and the stream calls run inside render-locked exports.
     /// Arm the selected capture for its next complete window. A success makes the arm the
     /// caller's.
@@ -1151,8 +1233,13 @@ impl SpectrumService {
     /// Stop the stream, discard its queued window and make the metadata `Stopped`. Allowed
     /// without a running stream. With `analysis`, the analysis of the stream ends at the same
     /// call (its history stays, the next stream resets it) and the metadata carries its facts.
-    pub fn stop_stream(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
+    pub fn stop_stream(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
         self.captures.stop_continuous();
+        self.end_stream_state(analysis);
+    }
+
+    /// End the stream's state in the service and in its analysis; the capture is the caller's.
+    fn end_stream_state(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
         self.stream_active = false;
         self.stream_cadence = None;
         self.stream_smoothing = None;

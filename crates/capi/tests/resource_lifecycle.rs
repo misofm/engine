@@ -700,9 +700,15 @@ impl HostHalf {
             + effects
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes;
+        // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
+        // control plane bounds by the frame it must fit.
+        let (_, ended_event) =
+            control_plane::observation_reserve_bytes(compile_limits.maximum_control_frame_bytes, 0)
+                .expect("the observation reserve");
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
             + size_of::<protocol::PreparedStructuralCommand>() as u64
             + compile_limits.maximum_control_frame_bytes
+            + ended_event
             + self.catalog_charge();
         (epoch, prepared_protocol)
     }
@@ -754,6 +760,11 @@ struct CompileObservation {
     owners: HostOwners,
     /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
     strip_table_charge: u64,
+    /// The observation rows that are bounds, not allocations (#1584 D6a): the cells' event heap,
+    /// the binding table and its transient copies, from `control_plane::observation_reserve_bytes`
+    /// at the compile's control frame and observation slots. Nothing holds them until a host arms
+    /// a tap, so they are on the observed side as the send producers' upper bound is.
+    observation_reserve: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -789,6 +800,14 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         });
     let strip_table_charge = host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
         .expect("the strip table's charge");
+    let (observation_reserve, _) = control_plane::observation_reserve_bytes(
+        compile_limits.maximum_control_frame_bytes,
+        effects
+            .iter()
+            .map(|producer| producer.observe_capacity())
+            .sum(),
+    )
+    .expect("the observation reserve");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -826,6 +845,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         host_live,
         owners,
         strip_table_charge,
+        observation_reserve,
     }
 }
 
@@ -869,12 +889,14 @@ impl CompileObservation {
                 + self.owners.sources
                 + self.owners.catalog
                 + self.owners.inventory
+                + self.observation_reserve
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total), against `capi_retained_bytes` (right)"
+             function's total, and the observation reserve is the control plane's bound), against \
+             `capi_retained_bytes` (right)"
         );
     }
 
@@ -1187,6 +1209,12 @@ impl Budget {
 /// 113,601 -> 107,553: 6,048 each, x86-64). `capi_retained_bytes` charges capi's own allocations
 /// and stays 165,166. The graph ceilings stand until the next `aarch64-debug` print tightens them
 /// (AArch64 runs only in CI); the rows only shrank, so they still bound them.
+///
+/// The batch 12a review fold charges the observation reserve (#1584 D6a) as a bound that does not
+/// depend on the plan's producers: the cells' `OBSERVATION_ENDED` heap at what one control frame
+/// can hold (4,096 bytes here), the binding table and its transient copies. `capi_retained_bytes`
+/// measured 165,758 before and 186,614 after (x86-64; the rows do not depend on the lane width),
+/// so its ceiling is 186,614 plus 10 %, rounded up to 64: 205,275.4 -> 205,312.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1293,8 +1321,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 181_696,
-        four_lanes: 181_696,
+        eight_lanes: 205_312,
+        four_lanes: 205_312,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1775,6 +1803,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             revision: 1,
             edit_ramps: &session::EditRamps::new(),
             monitor: host_core::MonitorBase::NONE,
+            observation: &host_core::NO_OBSERVATION,
         },
         &host_core::LiveValuesSuperseded::default(),
     )

@@ -133,9 +133,20 @@ The frame is `3 * (trackCount + submixCount) + 3` `f32` words (issue #1209): one
 strip -- the tracks, then the submix strips in canonical submix order -- the master pair, then one
 **non-negative decibel magnitude** per strip in the same order and the designated master's. With no
 submixes every word is where it was before submixes existed. The sample window and the submix count
-ride a fixed 72-byte `WebMeterHeader` structure (`submix_count` at offset 64), because a `u64` does
+ride a fixed 80-byte `WebMeterHeader` structure (`submix_count` at offset 64), because a `u64` does
 not survive an `f32` and splitting one across two lanes would put a decoding rule in the app that
 nothing could check. With meters on, host-web meters every strip at `PostMatrix`.
+
+The frame and its header belong to the plan (issue #1290d1): a plan with another strip count, after
+a structural apply, publishes a frame sized for its own strips. The header names its frame
+(`frame_pointer`, offset 72) and, from the moment a command commits a replacement plan until the
+block that adopts it, the replacement's header (`successor_pointer`, offset 76); the header the
+adopting block leaves behind reads `retired` (offset 68) as `1` and names the adopted one. A page
+cuts its views over the successor's frame in the message handler that committed the plan, and the
+render path only switches to them, so no view is made and nothing is allocated in `process()`. The
+stream (`sequence`, generation, loss count) continues in the adopted plan's header; a window the
+predecessor closed before the swap is published by the strip it was carried to, and one the added
+strip cannot describe is counted lost.
 
 The `miso.meter.v1` message keeps its track fields unchanged -- `peaks` is the `2T + 2` track and
 master peaks, `trackGrDb` the `T` track magnitudes, `masterGrDb` the master's or `null` -- and

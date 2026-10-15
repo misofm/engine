@@ -860,7 +860,14 @@ pub enum ConformanceDecoder {
 /// Issue #1628 (draft 21b) repinned it from `cfa58ab7b7bbb7c4`: the event `AUTOMATION_CANCELED`
 /// (`0x8002`) is retired and never reallocated, so the corpus loses `event.automation_canceled`
 /// and the capabilities response lists no event `0x8002`. The frame count is 45.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x4b21_d9e6_f520_afd9;
+/// Issue #1584 (D6a) repinned it from `4b21d9e6f520afd9`: the reliable event `OBSERVATION_ENDED`
+/// (`0x8011`) is added, so the corpus gains `event.observation_ended` (the frame count is 46 and the
+/// events are six) and the capabilities response lists event `0x8011`.
+/// #1584 D6a fold: one OBSERVATION_ENDED per commit. Root ruling A repinned it from
+/// `33e4b1cebcbfd902`: the event carries a repeated `key` message (the wire shape is the sequence
+/// and one nested key per ended tap), so `event.observation_ended` carries two keys. The frame
+/// count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xcc9a_7bcc_502c_4936;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1027,7 +1034,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
         supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
-        supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
+        supported_events: &[0x8001, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
     macro_rules! success {
@@ -1227,6 +1234,27 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             position: SampleTime(0),
             effective_sample: SampleTime(0),
             origin_request_id: None
+        })
+    );
+    event!(
+        "event.observation_ended",
+        EventPayload::ObservationEnded(&ObservationEnded {
+            event_sequence: 2,
+            // Two keys of one commit: a console slot, then an insert (console sorts first).
+            keys: vec![
+                ObservationTapKey {
+                    strip_id: "vocal".to_owned(),
+                    section: ObservationSection::Console,
+                    effect_id: "glue".to_owned(),
+                    tap_id: 3,
+                },
+                ObservationTapKey {
+                    strip_id: "vocal".to_owned(),
+                    section: ObservationSection::Inserts,
+                    effect_id: "comp".to_owned(),
+                    tap_id: 1,
+                },
+            ],
         })
     );
     event!(

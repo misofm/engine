@@ -449,3 +449,39 @@ Checked against `12d4a4f9d`.
 
 #1562b-W lands first, then #1562b-K, with the dependencies in the batch-10 amendment (#1290 d+e,
 #1280a, #1280c, #1281, #1282).
+
+## Amendment (controls coordinator, batch 12, 2026-10-15): #1562b
+
+Checked against `ea336c039`.
+
+- **Dependencies at this head.** Landed: #1562a, #1381b, #1290 (a), #1280a, #1280c, #1281, #1282,
+  #1283, #1284, #1327a, #1327b and #1622. Still open: #1290 (d1) and (d2) (see #1290's batch 12
+  amendment; (e) needs no code). Added: #1584 D6a and D6b. Without them, the first browser rebuild
+  that can be reached loses an acknowledged subscription on a restarted effect owner, and ends a
+  removed owner's subscription silently. #1630 (the input-section carry) is still not a blocker,
+  because the C ABI behaves the same.
+- **Anchors moved.** `REBUILD_PENDING` is at `hosts/host-web/src/lib.rs:5260`. The
+  `WebRuntimePreparer` override is at `:5301`, `allow_rebuild` at `:5278`, and
+  `structural_command_for_test` at `:2107`. The core hook is still `compile.rs:676`, and it is
+  called at `crates/control-plane/src/control.rs:1260`. Gate 11's test is
+  `hosts/host-web/tests/control_admission.rs:476`.
+- **#1562b-W, additions to the batch 10 list:**
+  - Delete `structural_command_for_test` and the `allow_rebuild` switch with D9. Their tests
+    (#1290a, #1381b, #1584 D6b) then drive the rebuild through `control_command`. Delete each
+    test that #1562b-W supersedes in the same slice.
+  - The structural part of gate 3 ("a structural transaction keeps the solo"), which #1562a's
+    record deferred. The batch 10 list does not have it.
+  - Meters and observation follow the new strip order after a rebuild that adds or removes a strip
+    (batch 8). This includes `meterProjection`'s fixed strip IDs (`sdk/src/browser/measurement.ts:208`,
+    `:302`), which is lane W's.
+  - The structure epoch in the meter header. `WebMeterHeader` (`hosts/host-web/src/lib.rs:937`) has
+    a `reserved_pad` word that is always zero, or the header can grow at its end. The ABI layout rows
+    and the regenerated `sdk/src/generated` copies change with it.
+- **#1562b-K, additions:**
+  - `sdk/src/core/observation-subscriptions.ts` addresses a tap by strip and effect index. After a
+    rebuild, it maps its managed subscriptions to the new control list order. It ends a managed
+    subscription on #1584's `OBSERVATION_ENDED` event and reports this to its subscribers.
+  - It deletes the core hook only after #1562b-W has deleted the browser's override, so the two
+    lanes compile at every merge.
+- **Frozen decisions.** D1-D6 and the batch 10 split hold.
+- **No edit under `crates/engine/src/realtime`.**

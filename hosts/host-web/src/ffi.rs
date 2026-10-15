@@ -3462,7 +3462,9 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
     render_locked(|| with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters))
 }
 
-/// Return the stable meter-header address, or zero for an invalid handle (issue #143 D5).
+/// Return the address of the header that describes the plan now rendering, or zero for an invalid
+/// handle (issue #143 D5). The address changes at a plan swap (issue #1290d1: each plan carries its
+/// own header), so a page reads it again after a swap or follows `successor_pointer`.
 ///
 /// The `f32` meter frame carries numbers a meter draws; the window those numbers describe is a
 /// pair of absolute sample counts, which an `f32` cannot hold. They ride this fixed structure, read
@@ -4060,6 +4062,15 @@ pub mod native_staging {
     /// reads it through `miso_engine_web_v1_watermark_ptr`; `None` for an unknown handle.
     pub fn watermark(handle: u32) -> Option<crate::WebPlanWatermark> {
         super::with_host(handle, None, |host| Some(*host.watermark()))
+    }
+
+    /// The meter header and frame the host `handle` names last published, as the worklet reads
+    /// them through `miso_engine_web_v1_meter_header_ptr` and the header's frame pointer (#1290d1);
+    /// `None` for an unknown handle.
+    pub fn meter_frame(handle: u32) -> Option<(crate::WebMeterHeader, Vec<f32>)> {
+        super::with_host(handle, None, |host| {
+            Some((*host.meter_header(), host.meter_frame().to_vec()))
+        })
     }
 
     /// Stage live-control command records, as the worklet writes them through

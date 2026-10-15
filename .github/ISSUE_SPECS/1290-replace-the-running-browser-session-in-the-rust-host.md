@@ -415,3 +415,157 @@ Gates -> tests: `structural_apply::the_catalogs_describe_the_successor_from_the_
 successor's full one-slot queue, leaves the rendering plan unarmed and arms the successor's
 compressor at the adoption block); `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`;
 `a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit` (nothing committed).
+
+## Amendment (controls coordinator, batch 12, 2026-10-15): (d+e)
+
+Checked against `ea336c039`.
+
+- **Where things are.** #1381b pairs the meter consumers and the observation readers in the swap
+  block (`RenderCompanions::adopt_predecessor`, `hosts/host-web/src/lib.rs:5190`). `adopt_shape`
+  (`:1562`) moves the meter pending windows and the tap state. A swap that carries a meter keeps
+  `meter_generation`. What is not done yet:
+  - The published frame does not grow or shrink with the plan. `meter_frame` is sized at boot
+    (`:1450`, `:6054`), and `poll_meters` publishes nothing when the strip count differs (`:3411`).
+    The worklet cuts fixed views and builds a fixed `meterMessage` at boot from the header's counts
+    (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:728-747`).
+  - The successor's spectrum capture is not paired (#1395 is open).
+  - #1381's gate 3, the frame with a changed strip count (`track_count` 3, the shifted strip's word,
+    `master_track_plus_one` 3), was left to (d) by #1381b.
+- **D7.** The batch 10 amendment still holds: meters and taps pair in the swap block, and spectrum
+  pairs at promotion through #1395's `SpectrumService` method.
+- **Meter frame growth, options.** `process()` must not cut a view or allocate (#1562a record).
+  - (1) Size the frame and the worklet's views for a boot maximum of strips. The `3(T + S) + 3`
+    layout is packed by count, so the view offsets still move with `T`. This needs a new layout at
+    capacity offsets, which changes the ABI rows and `sdk/src/core/boundary.ts`, and every post
+    clones the capacity.
+  - (2) The frame goes with the plan's tables. It is allocated in `build_plan_shape` beside the
+    per-meter scratch and exchanged in `adopt_shape` (a pointer exchange). The message handler that
+    commits the rebuild also cuts the successor's views and builds its `meterMessage` in advance.
+    `process()` changes to them by reference at the first poll after adoption.
+    `rebindMemoryViews` also cuts the pending views again. The layout and the ABI rows do not
+    change, except for an export that gives the pending frame pointer, if one is necessary.
+  - **Recommendation: (2).** It is the #1290a `PlanShape` pattern, and it keeps exact sizes.
+- **A handle shift must not lose a carried window.** The #1381b fold records this: a snapshot
+  published before the swap keeps the old meter handle. When the handles shift (an added strip
+  sorts first), the poll's handle check drops the snapshot and counts it as loss. Gate 7 polls after
+  every block, so gate 7 does not see this. (d) matches a carried pending snapshot by its carried
+  slot, and adds a gate: gate 7's script with a poll every second block shows no counted loss.
+- **Split, so lane W does not wait for lane K:**
+  - **(d1) meters.** Option (2), #1381's gate 3 with a changed strip count, the handle-shift gate,
+    and gate 7's meter part. This has no lane K dependency.
+  - **(d2) spectrum.** Gate 7's spectrum part: at promotion, take the successor's capture out of
+    the adopted plan's attachment and call #1395's method with the pairing list kept beside the
+    `PendingShape`. Dependencies: #1395a and #1395b.
+- **(e) needs no code.** Gate 9's native part is already met by (a):
+  - (a)'s gates run on one thread, so the apply runs between render calls, as the message handler
+    runs it.
+  - `blocking_rebuilds() == 1` is asserted at `hosts/host-web/src/tests.rs:6150` and
+    `hosts/host-web/tests/structural_apply_realtime.rs:393`.
+  - The browser legs are #1295's.
+  - Record (e) as met when (d2) closes.
+- **Restarted and removed effect owners.** A subscription on an owner that restarts or is removed
+  is #1584 D6a and D6b, not (d). (d)'s gate 7 has no effect.
+- **No edit under `crates/engine/src/realtime`.**
+- **Order in lane W:** (d1), #1584 D6b, (d2), #1562b-W. The four slices edit `hosts/host-web/src/lib.rs`
+  and `src/tests.rs` in that order. (d1) and #1562b-W also edit the worklet JS and the ABI layout
+  mirrors, in that order.
+
+## Ruling (root, 2026-10-15): meter frame growth, (d1)
+
+The meter frame travels with the `PlanShape`; its views are cut in the message handler that
+commits (control side, counted on a non-isolated page), and `process()` switches to them by
+reference at the swap block. `process()` never cuts a view or allocates. Gate: a strip-count change
+publishes a correctly shaped frame on the first block after adoption, with zero render
+allocations. (d1) lands in batch 12a; (d2) in batch 12b after #1395.
+
+## Decision record: (d1) meters (batch 12, lane W)
+
+**Shipped.** A strip-count change no longer leaves the browser publishing nothing. The meter frame and
+its header travel with the `PlanShape` (root's ruling); the page cuts its views over the successor's
+frame in the message handler that commits, and `process()` switches to them by reference.
+
+- **Frame and header in the shape.** `PlanShape` owns `meter_frame` (`3(T + S) + 3` words, built by
+  `build_plan_shape`), `meter_header` (counts, master index and frame address from the plan; the poll's
+  stream fields at run time) and `meter_carried_from`. `ReadyOwnership` lost its own frame and header.
+  `adopt_shape` copies the stream fields (`windows`, `first/end_sample`, `sequence`, `master_gr_present`,
+  `reserved[0..1]`) into the adopted header: the same stream continues in a frame of the new size. A
+  pointer exchange and scalar writes; nothing allocates in the swap block.
+- **`WebMeterHeader` 72 -> 80 bytes, nothing moved.** `reserved_pad` (68) became `retired`; appended
+  `frame_pointer` (72) and `successor_pointer` (76). A commit writes the newest candidate's header
+  address into the rendering plan's `successor_pointer` (`run_command`); the adopting block marks the
+  header it leaves `retired = 1`, names the adopted header in its `successor_pointer`, and points the
+  adopted header at any candidate still waiting. ABI mirrors regenerated (`abi_layout.rs`,
+  `sdk/assets`, `sdk/src/generated/abi.ts`, `check-abi-layout-v1.py`, its self-test fixture, the
+  direct oracle, `docs/BUILTINS_AND_METERING_V1.md`).
+- **Worklet.** The views are per meter set (`meterSet`, `pendingMeterSet`), cut by `cutMeterSet` in
+  `syncMeterViews`, which every message handler runs last (and `rebindMemoryViews` re-cuts both sets
+  on a memory growth). `postMeterFrame` reads the active header's `retired` word; if set it switches
+  `meterSet = pendingMeterSet` (a reference assignment) before the poll; a retired header with no set
+  cut for the header it names is sticky `RESULT_INTERNAL` (cannot happen in single mode). A lease
+  released across a swap is caught by `syncMeterViews`, which compares the host's current header
+  address with the page's. The pinned post spelling in `check-web-audioworklet.sh` and its mutation in
+  `test-web-audioworklet.sh` follow (`this.port.postMessage(set.message)`: the set's message is
+  allocated with its views, in the handler).
+- **Handle shift.** A meter's handle is its position, so a strip added or removed in front shifts the
+  survivors' handles. The hook records both handles per carried meter (`CarriedReader`), the shape keeps
+  the predecessor's in `meter_carried_from[successor]`, and the poll accepts a snapshot named by either.
+  A queue is one strip's, so the second handle names the same strip (by carry identity, not position).
+  Not kept: a window two swaps old still names a handle the table no longer holds and is dropped with a
+  count; it needs a second swap between two polls.
+- **Counted loss kept.** A window the predecessor closed before an added strip existed cannot be
+  described by the successor's frame (that strip has no data for it): it is dropped with a count by the
+  poll that finds it, as before. A removed strip's window is published without it (gate below).
+- **Charging.** The frame was an uncharged allocation at boot. It is now a row of the shape
+  (`ShapeRows::frame_bytes`, `carried_bytes`): the boot adds it to the bridge rows, a replacement to its
+  plan row. `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes` gained the frame
+  term. Boot high-water growth 20,447,232 bytes (before: 20,447,232); `check-browser-expected-resources`
+  green with no re-pin.
+
+**Departures.** None from root's ruling. Mechanical edits outside lane W's own files, listed for the
+coordinator: `tools/realtime-policy/render-thread-exports.json` and `src/policy.rs` (the handler now
+calls `meter_header_ptr` after construction: one table row and one named unwrapped export),
+`scripts/check-web-audioworklet.sh` and `scripts/test-web-audioworklet.sh` (the pinned post), the ABI
+mirrors named above.
+
+**Gates -> tests.**
+- Root's gate (a strip-count change publishes a correctly shaped frame on the first block after
+  adoption, zero render allocations): `tests/structural_apply_realtime.rs`
+  `a_strip_count_change_publishes_the_successors_frame_on_the_first_block_after_adoption` (render and
+  `meter_poll` under the render-locked counters, adoption block included; every frame after it equals a
+  fresh boot of the committed model for the same window); `structural_apply::
+  a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block` (the same in the lib, with
+  the retired/successor words).
+- #1381 gate 3 (changed strip count, `track_count` 10, shifted words): the two tests above.
+- Handle shift: `a_window_closed_before_a_handle_shift_is_published_by_its_carried_strip` (remove the
+  first strip, poll every second block so the window is polled after the swap: published, sequence
+  continues, no counted loss; red when the carried-from acceptance is disabled, checked).
+  `an_aligned_poll_every_second_block_loses_nothing_across_an_added_strip` is gate 7's cadence variant.
+- Counted loss: `windows_an_added_strip_cannot_describe_are_counted_and_the_next_frame_is_the_successors`
+  (replaces `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`);
+  `meter_delivery_carries_through_a_swap_that_keeps_the_strips` (first half of the old
+  `..._never_publishes_a_misshaped_frame`).
+- Worklet: three blocks in `scripts/test-web-audioworklet.mjs` (views cut in the handler and switched by
+  reference at the adopting block, sequence continues; lease released across a swap; retired header with
+  no pending set is sticky).
+
+**Limits found.** (1) The shipped module cannot run a rebuild until #1562b, so the real-wasm pointer
+chain (`retired`, `successor_pointer`) is covered by the hermetic worklet fake and, on native, by
+equality with `address_word` (which is `0` for a 64-bit address); the chromium leg proves the boot
+`frame_pointer` path with real addresses. (2) The SDK's `meterProjection` still checks a frame against
+its own session map, so after a structural apply it refuses the successor's frame until the SDK map
+follows the apply (#1296's); the engine side is complete.
+
+## Fold (batch 12a review)
+
+- **Pointer checks at full width.** The native check of `successor_pointer` compared two
+  `address_word` results, and `address_word` is `0` for any address above 4 GiB, so on a 64-bit
+  host both sides were `0` and the check was always true (the "Limits found" note above recorded
+  the weakness and left it). `PlanShape` now keeps the full-width address beside the header word
+  (`name_successor` sets both where the commit and `adopt_shape` set the word; test builds only),
+  and the gate `a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block`
+  compares that address with the candidate's and the adopted plan's header addresses
+  (`AudioWorkletEngineHost::meter_successor_address`). Quick mutation, reverted: with the
+  address not recorded the gate fails (`assertion left != right`, tests.rs:6777).
+- **Doc fixes.** `miso_engine_web_v1_meter_header_ptr` no longer says "stable" (the address changes
+  at each swap, each plan carrying its own header); the browser oracle's header size comment says
+  80 bytes.

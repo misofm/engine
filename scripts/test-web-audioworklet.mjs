@@ -2606,17 +2606,41 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const submixCount = submixIds.length;
   const strips = trackIds.length + submixCount;
   const meterFrameFloats = strips * 3 + 3;
-  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 72);
-  meterHeader.setUint32(0, 72, true);
-  meterHeader.setUint32(64, submixCount, true);
-  meterHeader.setUint32(4, 0x00010000, true);
-  meterHeader.setUint32(8, trackIds.length, true);
-  meterHeader.setUint32(40, 1, true);
-  meterHeader.setUint32(44, 1, true);
-  meterHeader.setBigUint64(16, 512n, true);
-  meterHeader.setBigUint64(24, 768n, true);
-  meterHeader.setBigUint64(48, 1n, true);
-  meterHeader.setBigUint64(56, 0xbn, true);
+  // Issue #1290d1: the header is 80 bytes and names its frame (offset 72); `retired` (68) and
+  // `successor` (76) are zero until a replacement plan is committed and adopted. The replacement
+  // plan's own header and frame, sized for one more track, sit beside it: `commitMeterSuccessor`
+  // names it in the active header, as the host does when a command commits a rebuild, and
+  // `adoptOnNextRender` makes the next render call model the swap block (the old header is marked
+  // retired and names the new one, whose stream fields are the old header's).
+  const successorHeaderPointer = 41300;
+  const successorFramePointer = 44000;
+  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 80);
+  const successorHeader = new DataView(memory.buffer, successorHeaderPointer, 80);
+  for (const [header, tracks, framePointer] of [
+    [meterHeader, trackIds.length, meterFramePointer],
+    [successorHeader, trackIds.length + 1, successorFramePointer],
+  ]) {
+    header.setUint32(0, 80, true);
+    header.setUint32(64, submixCount, true);
+    header.setUint32(4, 0x00010000, true);
+    header.setUint32(8, tracks, true);
+    header.setUint32(40, 1, true);
+    header.setUint32(44, 1, true);
+    header.setBigUint64(16, 512n, true);
+    header.setBigUint64(24, 768n, true);
+    header.setBigUint64(48, 1n, true);
+    header.setBigUint64(56, 0xbn, true);
+    header.setUint32(72, framePointer, true);
+  }
+  let meterAdopted = false;
+  const adoptMeterPlan = () => {
+    meterHeader.setUint32(68, 1, true);
+    meterHeader.setUint32(76, successorHeaderPointer, true);
+    for (let offset = 12; offset < 64; offset += 4) {
+      successorHeader.setUint32(offset, meterHeader.getUint32(offset, true), true);
+    }
+    meterAdopted = true;
+  };
   let report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
@@ -2691,6 +2715,10 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       if (actualFrames !== quantum) return 9;
       new Float32Array(memory.buffer, 8192, quantum).fill(0.25);
       new Float32Array(memory.buffer, 8192 + quantum * 4, quantum).fill(-0.25);
+      if (calls.adoptOnNextRender) {
+        calls.adoptOnNextRender = false;
+        adoptMeterPlan();
+      }
       const quanta = status.getBigUint64(40, true) + 1n;
       status.setBigUint64(40, quanta, true);
       status.setBigUint64(32, quanta * BigInt(quantum), true);
@@ -2720,7 +2748,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.meterLease.push(enabled);
       return 0;
     },
-    miso_engine_web_v1_meter_header_ptr: () => meterHeaderPointer,
+    miso_engine_web_v1_meter_header_ptr: () => (
+      meterAdopted ? successorHeaderPointer : meterHeaderPointer),
     miso_engine_web_v1_meter_poll: () => {
       if (calls.meterWindows === 0) return 0;
       calls.meterWindows -= 1;
@@ -2729,14 +2758,19 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       // hidden by a uniform fill. Issue #1209: so do the submix sections and the master pair,
       // which follows the submix peaks, so a worklet that reads the master after the tracks or
       // a bus from a track's slot is visible too.
-      const frame = new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats);
-      const tracks = trackIds.length;
+      const tracks = trackIds.length + (meterAdopted ? 1 : 0);
+      const stripsNow = tracks + submixCount;
+      const frame = new Float32Array(
+        memory.buffer,
+        meterAdopted ? successorFramePointer : meterFramePointer,
+        stripsNow * 3 + 3,
+      );
       frame.fill(0.5, 0, tracks * 2);
-      frame.fill(0.75, tracks * 2, strips * 2);
-      frame.fill(0.625, strips * 2, strips * 2 + 2);
-      frame.fill(6.5, strips * 2 + 2, strips * 2 + 2 + tracks);
-      frame.fill(2.25, strips * 2 + 2 + tracks, strips * 3 + 2);
-      frame[strips * 3 + 2] = 7.5;
+      frame.fill(0.75, tracks * 2, stripsNow * 2);
+      frame.fill(0.625, stripsNow * 2, stripsNow * 2 + 2);
+      frame.fill(6.5, stripsNow * 2 + 2, stripsNow * 2 + 2 + tracks);
+      frame.fill(2.25, stripsNow * 2 + 2 + tracks, stripsNow * 3 + 2);
+      frame[stripsNow * 3 + 2] = 7.5;
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
@@ -2826,6 +2860,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   };
   return {
     exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader, growMemory,
+    successorHeader, commitMeterSuccessor: () => meterHeader.setUint32(76, successorHeaderPointer, true),
+    memory,
   };
 }
 
@@ -3774,7 +3810,18 @@ async function testProcessor() {
           `${spec.field} is re-bound to the grown memory`,
         );
       }
-      assert(processor.viewSpecs.length >= 12, "every persistent view is registered");
+      // The meter set's views are the plan's, not registered by name (#1290d1): the active set
+      // is re-cut with the rest.
+      for (const field of [
+        "header", "frame", "trackPeaks", "submixPeaks", "masterPeaks", "trackGain", "submixGain",
+      ]) {
+        assert.equal(
+          processor.meterSet[field].buffer,
+          fake.exports.memory.buffer,
+          `the meter set's ${field} is re-bound to the grown memory`,
+        );
+      }
+      assert(processor.viewSpecs.length >= 5, "every persistent view is registered");
       const left = new Float32Array(64).fill(1);
       const right = new Float32Array(64).fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
@@ -4196,6 +4243,95 @@ async function testProcessor() {
       assert.equal(frame.submixCount, S);
       assert.deepEqual([...frame.submixPeaks], Array(2 * S).fill(0.75), `S = ${S}: bus peaks`);
       assert.deepEqual([...frame.submixGrDb], Array(S).fill(2.25), `S = ${S}: bus gain reduction`);
+    }
+
+    {
+      // Issue #1290d1: the meter frame travels with the plan. A command that commits a
+      // replacement plan names the plan's header in the active one, and the handler cuts the
+      // views over that header and its frame (control side, allocating). The block that adopts the
+      // plan marks the header it left retired, and `process()` switches to the views by reference:
+      // it cuts none, so the very objects the handler made are the ones it posts from.
+      const { processor, fake } = makeProcessor();
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.at(-1).message.trackCount, 2);
+      assert.equal(processor.pendingMeterSet, null, "nothing waits");
+
+      fake.commitMeterSuccessor();
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      const pending = processor.pendingMeterSet;
+      assert.notEqual(pending, null, "the handler cut the successor's views");
+      assert.equal(pending.trackCount, 3);
+      assert.equal(pending.frame.length, (3 + 1) * 3 + 3);
+      const active = processor.meterSet;
+      assert.equal(active.trackCount, 2, "the plan that renders keeps its views");
+
+      // A block that does not adopt keeps the active set, whatever waits.
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.meterSet, active);
+      assert.equal(processor.port.posts.at(-1).message.trackCount, 2);
+
+      // The adopting block: the frame posted is the successor's, sized for its strips.
+      fake.calls.adoptOnNextRender = true;
+      fake.calls.meterWindows = 1;
+      const posts = processor.port.posts.length;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.length, posts + 1, "the first block after adoption posts");
+      assert.equal(processor.meterSet, pending, "switched by reference to the set cut in advance");
+      assert.equal(processor.pendingMeterSet, null);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.trackCount, 3);
+      assert.deepEqual([...frame.peaks], [...Array(6).fill(0.5), 0.625, 0.625]);
+      assert.deepEqual([...frame.trackGrDb], [6.5, 6.5, 6.5]);
+      assert.deepEqual([...frame.submixPeaks], [0.75, 0.75]);
+      assert.deepEqual([...frame.submixGrDb], [2.25]);
+      assert.equal(frame.masterGrDb, 7.5);
+      assert.equal(frame.sequence, 3, "the page's sequence continues across the swap");
+
+      // A memory growth re-cuts both sets, so a later swap still reads live memory.
+      fake.growMemory();
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(processor.meterSet.frame.buffer, fake.exports.memory.buffer);
+      assert.equal(processor.meterSet.header.buffer, fake.exports.memory.buffer);
+    }
+
+    {
+      // The lease released across a swap: nothing switched the views, and the next handler finds
+      // the host's header is not the one the page holds and cuts the new plan's.
+      const { processor, fake } = makeProcessor();
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      fake.commitMeterSuccessor();
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      fake.calls.adoptOnNextRender = true;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.meterSet.trackCount, 2, "no lease, no switch");
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      assert.equal(processor.meterSet.trackCount, 3);
+      assert.equal(processor.pendingMeterSet, null);
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.at(-1).message.trackCount, 3);
+    }
+
+    {
+      // A header that says it was replaced with no set cut for its successor is a protocol
+      // fault: sticky and silent, never a frame read through views over a retired plan.
+      const { processor, fake } = makeProcessor();
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      fake.calls.adoptOnNextRender = true;
+      fake.calls.meterWindows = 1;
+      const posts = processor.port.posts.length;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.length, posts);
+      assert.equal(processor.stickyResult, 255);
+      assert.equal(processor.ready, false);
     }
 
     {

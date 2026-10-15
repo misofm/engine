@@ -618,6 +618,29 @@ async function createContinuousSpectrumBrowser(
   return browser;
 }
 
+/**
+ * Wait until `read()` reports `required` items, bounded by `deadlineMs` of wall-clock time and
+ * never by a poll count (#1106). `pump()` can return at once, so each poll is followed by a
+ * `pollMs` timer: the loop yields to the event loop and the audio clock instead of spinning, and
+ * a slow audio start only costs time. Returns what it saw so a failure can name it.
+ */
+async function waitForCount(options: {
+  readonly read: () => number;
+  readonly pump: () => Promise<unknown>;
+  readonly required: number;
+  readonly deadlineMs: number;
+  readonly pollMs: number;
+}) {
+  const began = performance.now();
+  let polls = 0;
+  while (options.read() < options.required && performance.now() - began < options.deadlineMs) {
+    await options.pump();
+    polls += 1;
+    await new Promise((resolve) => globalThis.setTimeout(resolve, options.pollMs));
+  }
+  return { count: options.read(), polls, elapsedMs: performance.now() - began };
+}
+
 function streamMetadataFields(metadata) {
   if (metadata === undefined) return undefined;
   return {
@@ -921,6 +944,12 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
 }
 
 /** A short live probe drains two overlapping H1024 windows through the real Worklet queue. */
+/** The configured hop probe's waits (#1106): a planted slow audio start, and the bounds it must outlast. */
+const HOP_PROBE_START_DELAY_MS = 750;
+const HOP_PROBE_DEADLINE_MS = 10_000;
+const HOP_PROBE_NEVER_DEADLINE_MS = 250;
+const HOP_PROBE_POLL_MS = 5;
+
 async function runConfiguredSpectrumHopQualification(): Promise<Record<string, unknown>> {
   const query = {
     target: { kind: "output" as const, outputId: "main-out" },
@@ -934,7 +963,13 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   const nativeStarts = [];
   const nativeReads = [];
   const nativeStartSpectrumStream = browser.host.startSpectrumStream.bind(browser.host);
+  // Plant a slow audio start (#1106): the native stream starts, and so its first window can publish,
+  // only when `streamStartGate` opens, `HOP_PROBE_START_DELAY_MS` after the click that resumed the
+  // context. Until then the context runs and every `pump()` returns at once with nothing published.
+  let openStreamStart!: () => void;
+  const streamStartGate = new Promise<void>((resolve) => { openStreamStart = resolve; });
   browser.host.startSpectrumStream = async (...args) => {
+    await streamStartGate;
     const reply = await nativeStartSpectrumStream(...args);
     nativeStarts.push(reply.metadata);
     return reply;
@@ -948,6 +983,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   let subscription;
   const notifications = [];
   const publications = [];
+  const publicationTimes: number[] = [];
   const publicationKeys = new Set();
   const remember = (notification) => {
     notifications.push(notification);
@@ -958,14 +994,17 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
     if (publicationKeys.has(key)) return;
     publicationKeys.add(key);
     publications.push({ metadata: notification.metadata, result });
+    publicationTimes.push(performance.now());
   };
   try {
-    subscription = (await browser.subscribeSpectrum({
+    const subscribing = browser.subscribeSpectrum({
       ...query,
       smoothingMs,
       cadenceMs: 1,
       onUpdate: remember,
-    })).handle;
+    }).then((subscribed) => { subscription = subscribed.handle; });
+    // Settled by the await after the wait; a failure before it must not become an unhandled rejection.
+    subscribing.catch(() => undefined);
     await submitSpectrumSource(browser, frames);
     const context = browser.context as AudioContext;
     const resumeButton = document.createElement("button");
@@ -974,6 +1013,8 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
     document.body.append(resumeButton);
     let resumeTimer: ReturnType<typeof setTimeout> | undefined;
     let resumeGesture = false;
+    let resumeCall!: Promise<void>;
+    let clickedAt = 0;
     try {
       await new Promise<void>((resolve, reject) => {
         resumeTimer = setTimeout(() => reject(new Error(
@@ -981,23 +1022,61 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
         )), 10_000);
         resumeButton.addEventListener("click", () => {
           resumeGesture = true;
-          void context.resume().then(resolve, reject);
+          clickedAt = performance.now();
+          globalThis.setTimeout(openStreamStart, HOP_PROBE_START_DELAY_MS);
+          resumeCall = context.resume();
+          resumeCall.catch(reject);
+          resolve();
         }, { once: true });
       });
     } finally {
-      if (resumeTimer !== undefined) clearTimeout(resumeTimer);
       resumeButton.remove();
     }
-    const deadline = performance.now() + 10_000;
-    for (let attempt = 0; attempt < 512 && publications.length < 2; attempt += 1) {
-      await subscription.pump();
-      if (performance.now() >= deadline) break;
+    // The wait starts at the click, not when `resume()` resolves: a browser may resolve it before or
+    // after its first render. No window can publish for `HOP_PROBE_START_DELAY_MS`, and the wait
+    // must outlast that by its deadline, never by a poll count. It ends on two windows one hop
+    // apart: a late start can leave the first reads behind the audio and drop windows, and the hop
+    // is the distance between two consecutive publications.
+    const consecutive = () => {
+      for (let index = 0; index + 1 < publications.length; index += 1) {
+        const a = publications[index].metadata;
+        const b = publications[index + 1].metadata;
+        if (a.captureEpoch === b.captureEpoch && b.capturedSample - a.capturedSample === BigInt(hopFrames)) {
+          return index;
+        }
+      }
+      return -1;
+    };
+    let waited;
+    try {
+      waited = await waitForCount({
+        read: () => (consecutive() >= 0 ? 2 : Math.min(1, publications.length)),
+        pump: async () => { await subscription?.pump(); },
+        required: 2,
+        deadlineMs: HOP_PROBE_DEADLINE_MS,
+        pollMs: HOP_PROBE_POLL_MS,
+      });
+      await resumeCall;
+    } finally {
+      if (resumeTimer !== undefined) clearTimeout(resumeTimer);
     }
-    if (publications.length < 2) {
-      throw new Error(`H1024 browser probe published ${publications.length} windows`);
+    await subscribing;
+    const pairIndex = consecutive();
+    if (pairIndex < 0) {
+      throw new Error(`H1024 browser probe published ${publications.length} windows `
+        + `[${publications.map(({ metadata }) => metadata.capturedSample).join(", ")}], none one hop apart, in ${waited.elapsedMs.toFixed(0)} ms `
+        + `(deadline ${HOP_PROBE_DEADLINE_MS} ms, ${waited.polls} polls, audio start delayed ${HOP_PROBE_START_DELAY_MS} ms, `
+        + `${notifications.length} notifications, context ${context.state})`);
     }
-    const first = publications[0];
-    const second = publications[1];
+    const neverPublishes = await waitForCount({
+      read: () => 0,
+      pump: async () => undefined,
+      required: 1,
+      deadlineMs: HOP_PROBE_NEVER_DEADLINE_MS,
+      pollMs: HOP_PROBE_POLL_MS,
+    });
+    const first = publications[pairIndex];
+    const second = publications[pairIndex + 1];
     const firstResult = first.result;
     const secondResult = second.result;
     const firstFrequencies = firstResult.frequenciesHz.slice();
@@ -1017,9 +1096,21 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
       nativeStart: streamMetadataFields(nativeStarts[0]),
       nativeRead: nativeReads.slice(0, 4).map(streamMetadataFields),
       publicationCount: publications.length,
+      wait: {
+        startDelayMs: HOP_PROBE_START_DELAY_MS,
+        deadlineMs: HOP_PROBE_DEADLINE_MS,
+        pollMs: HOP_PROBE_POLL_MS,
+        firstPublicationAfterMs: publicationTimes[0]! - clickedAt,
+        secondPublicationAfterMs: publicationTimes[pairIndex + 1]! - clickedAt,
+        elapsedMs: waited.elapsedMs,
+        polls: waited.polls,
+        // A wait that can never be satisfied ends at its own deadline and spins no faster than
+        // its poll timer.
+        neverPublishes: { ...neverPublishes, deadlineMs: HOP_PROBE_NEVER_DEADLINE_MS },
+      },
       notificationHops: notifications.map((notification) => notification.metadata.hopFrames),
       notificationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
-      publications: publications.slice(0, 2).map(({ metadata, result }) => ({
+      publications: [first, second].map(({ metadata, result }) => ({
         metadata: streamMetadataFields(metadata),
         result: {
           capturedSample: result.capturedSample.toString(),
@@ -1044,6 +1135,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   } catch (error) {
     throw sdkEngineFailed(browser, error);
   } finally {
+    openStreamStart();
     await finishSdkEngine(browser, () => subscription?.close());
   }
 }
@@ -1191,7 +1283,8 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   const submitBlocks = async (firstBlock: number, lastBlock: number, endOfRegion: boolean) => {
     for (let block = firstBlock; block < lastBlock; block += 1) {
       let acknowledgement;
-      for (let retry = 0; retry < 200; retry += 1) {
+      const submitDeadline = performance.now() + readinessTimeoutMs;
+      for (;;) {
         acknowledgement = await browser.host.submitSource({
           sourceId: "live-control-source",
           generation: 1n,
@@ -1205,6 +1298,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
         if (acknowledgement.result !== 6) {
           throw new Error(`SDK spectrum collection source submission refused (${acknowledgement.result}) at block ${block}`);
         }
+        if (performance.now() >= submitDeadline) break;
         await new Promise((resolve) => globalThis.setTimeout(resolve, 5));
       }
       if (acknowledgement?.result !== 0) {

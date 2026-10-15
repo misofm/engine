@@ -961,8 +961,21 @@ pub struct WebMeterHeader {
     /// Submix strips the frame carries after the tracks (issue #1209 D2), in canonical submix
     /// order. Appended in place, so every earlier offset is unmoved.
     pub submix_count: u32,
-    /// Always zero; pads the structure to its eight-byte alignment.
-    pub reserved_pad: u32,
+    /// `0` while this header describes the plan that renders; `1` once a swap block replaced it
+    /// (issue #1290d1). The plan's meter frame travels with its header, so the worklet's views
+    /// over the frame are the plan's: a header that reads `1` is the page's signal to switch to
+    /// the views it cut over [`Self::successor_pointer`]'s header and frame, in the block that
+    /// adopted the plan. The retired header stays alive until the service step after that block.
+    pub retired: u32,
+    /// Linear-memory address of the `3(T + S) + 3` word `f32` frame this header describes, or `0`
+    /// for a handle with no compiled session (issue #1290d1).
+    pub frame_pointer: u32,
+    /// Linear-memory address of the header that replaces this one: the newest committed
+    /// replacement plan's, from its commit until its adoption block, and the adopted plan's once
+    /// [`Self::retired`] is set. `0` when no replacement waits. A page cuts the views over that
+    /// header and its frame in the message handler that commits the plan, so the render path
+    /// switches views by reference and never cuts one (issue #1290d1).
+    pub successor_pointer: u32,
 }
 
 /// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
@@ -999,7 +1012,9 @@ const fn empty_meter_header() -> WebMeterHeader {
         master_gr_present: 0,
         reserved: [0; 2],
         submix_count: 0,
-        reserved_pad: 0,
+        retired: 0,
+        frame_pointer: 0,
+        successor_pointer: 0,
     }
 }
 
@@ -1285,8 +1300,11 @@ struct EffectInstance {
 /// [`RenderCompanions`]. The host swaps the pair at the block that adopts the plan, a pointer
 /// exchange that allocates and frees nothing.
 ///
-/// The published meter frame and header are not here: the worklet binds fixed views over them at
-/// boot, so they keep the boot's size (#1290d owns their growth).
+/// The published meter frame and its header are here too (#1290d1): the frame is `3(T + S) + 3`
+/// words for this plan's strips, so a plan with another strip count publishes a frame of its own
+/// size. They travel with the tables, in the same pointer exchange, and the page cuts its views
+/// over the successor's frame in the message handler that commits it ([`WebMeterHeader::retired`]
+/// and [`WebMeterHeader::successor_pointer`] tell the render path which views to use).
 struct PlanShape {
     /// Canonical normalized track order: the leading segment of the strip order that
     /// `track_index` addresses (issue #1213 D1).
@@ -1368,6 +1386,30 @@ struct PlanShape {
     /// entry before it pops, so delivery resets do not touch it. Allocated at preparation, sized
     /// by the meter count.
     meter_remaining: Box<[usize]>,
+    /// Per meter, the handle its carried predecessor published under, or `0` (#1290d1). The swap
+    /// block pairs a meter with the predecessor's at a strip identity, and a strip added or
+    /// removed in front shifts the handles (a handle is a position), so a window the predecessor
+    /// closed before the swap and the poll finds after it names the predecessor's handle. The poll
+    /// accepts it for this meter, for the plan's life: a meter's queue is its strip's alone, so
+    /// the second handle names the same strip. A window two swaps old names a handle this table
+    /// no longer holds and is dropped with a count.
+    meter_carried_from: Box<[u64]>,
+    /// The published frame, `3(T + S) + 3` words (issue #1209 D1): `[track0 L, track0 R, .., trackN
+    /// L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L, master R, track0 GR, .., trackN
+    /// GR, bus0 GR, .., busM GR, master GR]`, one peak pair and one gain-reduction word per strip.
+    /// With `S = 0` every word is where it always was.
+    meter_frame: Box<[f32]>,
+    /// The header of [`Self::meter_frame`]: the plan's strip counts and designated master, and the
+    /// window the poll published. The swap block copies the stream's fields from the retiring
+    /// plan's header into the adopted plan's.
+    meter_header: WebMeterHeader,
+    /// The full-width address of the header [`WebMeterHeader::successor_pointer`] names, or `0`.
+    /// The header word is a `u32` linear-memory address, which reads `0` for an address above
+    /// 4 GiB (a native test host), so a gate that compares the word with the same conversion
+    /// would pass vacuously. This is the pointer itself, set beside the word by
+    /// [`Self::name_successor`], and a gate compares it with `core::ptr::eq`.
+    #[cfg(any(test, feature = "test-support"))]
+    successor_address: usize,
     /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
     /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
     observation_present: Box<[bool]>,
@@ -1443,13 +1485,6 @@ struct ReadyOwnership {
     /// collection. It is declared before the prepared host so consumers are released before the
     /// plan's producers.
     spectrum: Option<SpectrumService>,
-    /// `[track0 L, track0 R, .., trackN L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L,
-    /// master R, track0 GR, .., trackN GR, bus0 GR, .., busM GR, master GR]` -- `3(T + S) + 3`
-    /// words, one peak pair and one gain-reduction word per strip (issue #1209 D1). With `S = 0`
-    /// every word is where it always was.
-    meter_frame: Box<[f32]>,
-    /// The window and shape the `f32` frame cannot carry (issue #143 D5).
-    meter_header: WebMeterHeader,
     /// Master peaks folded over the rendered block while the lease is on.
     master_peak: [f32; 2],
     /// Half-open span covered by `master_peak`; retained across empty polls until a track span is
@@ -1533,6 +1568,12 @@ impl ReadyOwnership {
                 shape: Box::new(shape),
                 adopted: false,
             });
+            // The rendering plan's header names the newest replacement's, so the page cuts its
+            // views over the successor's frame in the handler that committed it (#1290d1).
+            if let Some(entry) = self.pending_shapes.last() {
+                self.shape
+                    .name_successor(core::ptr::from_ref(&entry.shape.meter_header));
+            }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
         result
@@ -1554,11 +1595,16 @@ impl ReadyOwnership {
     /// executors carried, which this hand-over follows with the per-reader state the tables hold.
     /// A swap that carried a meter keeps the meter delivery running, because the carried meters
     /// keep their window grid and the host's master windows are continuous; one that carried none
-    /// restarts it, because its meters open their first window at the adoption block. The poll
-    /// finds the carried pending windows where it left them only while the meter handles are
-    /// unchanged: a swap that removes one strip and adds another shifts handles, so a carried
-    /// pending snapshot fails the poll's handle check, is dropped, and is added to the meter loss
-    /// count.
+    /// restarts it, because its meters open their first window at the adoption block. A swap that
+    /// adds or removes a strip in front shifts the meters' handles (a handle is a position): each
+    /// carried meter remembers the handle its predecessor published under
+    /// ([`PlanShape::meter_carried_from`]), so a window closed before the swap, pending or still
+    /// queued, is accepted by the strip it was carried to, not dropped.
+    ///
+    /// The meter frame travels with the tables (#1290d1): the adopted plan's frame and header are
+    /// the published ones from this block on. The retiring header is marked
+    /// ([`WebMeterHeader::retired`]) and names the adopted one, so the page's render path switches
+    /// to the views it cut over them in advance. Pointer exchanges and scalar writes only.
     fn adopt_shape(&mut self, epoch: u64, carried: &[CarriedReader]) {
         self.shape_epoch = epoch;
         let meters_carried = carried
@@ -1582,7 +1628,22 @@ impl ReadyOwnership {
                 entry.adopted = true;
                 taken = true;
                 // `self.shape` is the adopted plan's and `entry.shape` the retired one's. The
-                // pending track snapshots and the tap state follow their readers.
+                // stream the page reads continues in the adopted plan's header (#1290d1): its
+                // window, sequence, generation and loss are the stream's, its strip counts and
+                // frame are the plan's. The retired header says so and names the adopted one, so
+                // the page's render path switches to the views it cut in advance.
+                let stream = entry.shape.meter_header;
+                entry.shape.meter_header.retired = 1;
+                entry
+                    .shape
+                    .name_successor(core::ptr::from_ref(&self.shape.meter_header));
+                self.shape.meter_header.windows = stream.windows;
+                self.shape.meter_header.first_sample = stream.first_sample;
+                self.shape.meter_header.end_sample = stream.end_sample;
+                self.shape.meter_header.sequence = stream.sequence;
+                self.shape.meter_header.master_gr_present = stream.master_gr_present;
+                self.shape.meter_header.reserved = stream.reserved;
+                // The pending track snapshots and the tap state follow their readers.
                 for reader in carried {
                     let (Ok(successor), Ok(predecessor)) = (
                         usize::try_from(reader.successor),
@@ -1598,6 +1659,15 @@ impl ReadyOwnership {
                             ) {
                                 core::mem::swap(into, from);
                             }
+                            // The windows the predecessor closed under its handle and the poll
+                            // finds after this block belong to this strip (#1290d1).
+                            if let Some(from) = self.shape.meter_carried_from.get_mut(successor) {
+                                *from = if reader.predecessor_handle == reader.successor_handle {
+                                    0
+                                } else {
+                                    reader.predecessor_handle
+                                };
+                            }
                         }
                         ObserverKind::Observation => {
                             self.shape
@@ -1611,6 +1681,16 @@ impl ReadyOwnership {
             }
         }
         if taken {
+            // A replacement committed after this one waits behind it (#1290d1).
+            let waiting = self
+                .pending_shapes
+                .iter()
+                .rev()
+                .find(|entry| !entry.adopted)
+                .map_or(core::ptr::null(), |entry| {
+                    core::ptr::from_ref(&entry.shape.meter_header)
+                });
+            self.shape.name_successor(waiting);
             if meters_carried {
                 // The delivery epoch is the stream's, not the plan's: the page sees the same
                 // generation, and the poll finds the carried windows where it left them.
@@ -1681,15 +1761,15 @@ impl ReadyOwnership {
         if clear_publication {
             // Keep the callback-reachable reset free of slice-fill's bounds-panic owner in the
             // shipped Wasm call graph. The iterator walks the already prepared frame exactly once.
-            for slot in &mut self.meter_frame {
+            for slot in &mut self.shape.meter_frame {
                 *slot = 0.0;
             }
-            self.meter_header.sequence = 0;
-            self.meter_header.windows = 0;
-            self.meter_header.first_sample = 0;
-            self.meter_header.end_sample = 0;
-            self.meter_header.master_gr_present = 0;
-            self.meter_header.reserved[1] = 0;
+            self.shape.meter_header.sequence = 0;
+            self.shape.meter_header.windows = 0;
+            self.shape.meter_header.first_sample = 0;
+            self.shape.meter_header.end_sample = 0;
+            self.shape.meter_header.master_gr_present = 0;
+            self.shape.meter_header.reserved[1] = 0;
             self.meter_windows = 0;
         }
     }
@@ -2461,7 +2541,9 @@ impl AudioWorkletEngineHost {
     /// `masterGrDb` is `null` when the designated strip has none.
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
-        self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
+        self.ready
+            .as_ref()
+            .map_or(&[], |ready| &ready.shape.meter_frame)
     }
 
     /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
@@ -2469,7 +2551,18 @@ impl AudioWorkletEngineHost {
     pub fn meter_header(&self) -> &WebMeterHeader {
         self.ready
             .as_ref()
-            .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
+            .map_or(&EMPTY_METER_HEADER, |ready| &ready.shape.meter_header)
+    }
+
+    /// The full-width address of the header the rendering plan's header names as its successor,
+    /// or `0` when none waits (a gate compares it with the candidate's or the adopted header's
+    /// address; the header's own `u32` word reads `0` above 4 GiB on a native host).
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn meter_successor_address(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.shape.successor_address)
     }
 
     /// Armed taps, in the dense effect-slot order. Off-ABI introspection for the tests.
@@ -2952,7 +3045,7 @@ impl AudioWorkletEngineHost {
         if let Some(ready) = self.ready.as_mut() {
             ready.meter_generation = ready.meter_generation.saturating_add(1);
             ready.reset_meter_delivery(true);
-            ready.meter_header.reserved[0] = ready.meter_generation;
+            ready.shape.meter_header.reserved[0] = ready.meter_generation;
         }
         self.meter_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
         self.record(RESULT_OK)
@@ -3398,24 +3491,6 @@ impl AudioWorkletEngineHost {
         if meter_count == 0 {
             return 0;
         }
-        // #1290a: the published frame keeps the boot's size (the worklet binds fixed views over
-        // it), so a plan whose strip count differs cannot be described by it. Publish nothing
-        // rather than a frame whose words name other strips; #1290d grows the frame with the plan.
-        let frame_words = ready
-            .shape
-            .tracks
-            .len()
-            .saturating_add(ready.shape.submixes.len())
-            .saturating_mul(3)
-            .saturating_add(3);
-        if ready.meter_frame.len() != frame_words {
-            // Each interval the render side closes in this state is a window that is not
-            // published: dropped with a count, which the next frame that is published reports.
-            while ready.pop_master_window().is_some() {
-                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-            }
-            return 0;
-        }
         // The render path is the sole producer of this fixed-capacity ring and increments the
         // count only when the configured master interval closes. An empty ring therefore proves
         // that no coherent track/master publication can exist. Preserve pending/public bytes and
@@ -3479,11 +3554,16 @@ impl AudioWorkletEngineHost {
                 .enumerate()
                 .all(|(index, entry)| {
                     let Some(snapshot) = entry else { return false };
-                    companions
-                        .meters
-                        .get(index)
-                        .is_some_and(|meter| snapshot.handle == meter.handle)
-                        && snapshot.reset_generation == first.reset_generation
+                    // A window the predecessor closed before a swap names the predecessor's handle
+                    // for the strip the meter was carried from (#1290d1).
+                    companions.meters.get(index).is_some_and(|meter| {
+                        snapshot.handle == meter.handle
+                            || ready
+                                .shape
+                                .meter_carried_from
+                                .get(index)
+                                .is_some_and(|from| *from != 0 && snapshot.handle.0.get() == *from)
+                    }) && snapshot.reset_generation == first.reset_generation
                         && snapshot.window_sequence == first.window_sequence
                         && snapshot.start_sample == first.start_sample
                         && snapshot.end_sample == first.end_sample
@@ -3549,9 +3629,9 @@ impl AudioWorkletEngineHost {
                 self.meter_activation_sample = reset_activation_sample;
                 return 0;
             }
-            if ready.meter_header.sequence > 0
-                && ready.meter_header.reserved[0] == ready.meter_generation
-                && first.start_sample != ready.meter_header.end_sample
+            if ready.shape.meter_header.sequence > 0
+                && ready.shape.meter_header.reserved[0] == ready.meter_generation
+                && first.start_sample != ready.shape.meter_header.end_sample
             {
                 ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
             }
@@ -3628,16 +3708,16 @@ impl AudioWorkletEngineHost {
                 );
                 ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
             }
-            if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
+            if let Some(slot) = ready.shape.meter_frame.get_mut(index * 2) {
                 *slot = snapshot.left.sample_peak;
             }
-            if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
+            if let Some(slot) = ready.shape.meter_frame.get_mut(index * 2 + 1) {
                 *slot = snapshot.right.sample_peak;
             }
             ready.meter_snapshot_generation = Some(snapshot.reset_generation);
         }
         for (plane, peak) in master_peak.iter().enumerate() {
-            if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
+            if let Some(slot) = ready.shape.meter_frame.get_mut(master + plane) {
                 *slot = *peak;
             }
         }
@@ -3649,7 +3729,7 @@ impl AudioWorkletEngineHost {
         // reduction word) becomes decibels once per closed window, never per sample and never on a
         // lane kernel.
         let gain_base = strips * 2 + 2;
-        for slot in ready.meter_frame.iter_mut().skip(gain_base) {
+        for slot in ready.shape.meter_frame.iter_mut().skip(gain_base) {
             *slot = 0.0;
         }
         for slot in ready.shape.observation_present.iter_mut() {
@@ -3719,7 +3799,7 @@ impl AudioWorkletEngineHost {
                 let value = observed_decibels(*tap, magnitude);
                 // Several armed taps on one track fold max-magnitude into the one positional slot
                 // the frame carries for that track, on the control plane.
-                if let Some(slot) = ready.meter_frame.get_mut(gain_base + track as usize)
+                if let Some(slot) = ready.shape.meter_frame.get_mut(gain_base + track as usize)
                     && value > *slot
                 {
                     *slot = value;
@@ -3744,16 +3824,20 @@ impl AudioWorkletEngineHost {
         };
         if master_present
             && let Some(track) = ready.shape.master_track
-            && let Some(value) = ready.meter_frame.get(gain_base + track as usize).copied()
-            && let Some(slot) = ready.meter_frame.get_mut(gain_base + strips)
+            && let Some(value) = ready
+                .shape
+                .meter_frame
+                .get(gain_base + track as usize)
+                .copied()
+            && let Some(slot) = ready.shape.meter_frame.get_mut(gain_base + strips)
         {
             *slot = value;
         }
-        ready.meter_header.windows = windows;
-        ready.meter_header.sequence = ready.meter_header.sequence.saturating_add(1);
-        ready.meter_header.master_gr_present = u32::from(master_present);
-        ready.meter_header.first_sample = folded_start;
-        ready.meter_header.end_sample = folded_end;
+        ready.shape.meter_header.windows = windows;
+        ready.shape.meter_header.sequence = ready.shape.meter_header.sequence.saturating_add(1);
+        ready.shape.meter_header.master_gr_present = u32::from(master_present);
+        ready.shape.meter_header.first_sample = folded_start;
+        ready.shape.meter_header.end_sample = folded_end;
         let mut validity = METER_VALID_COMPLETE;
         if master_valid {
             validity |= METER_VALID_MASTER;
@@ -3764,8 +3848,8 @@ impl AudioWorkletEngineHost {
         if observed_any {
             validity |= METER_VALID_GAIN_REDUCTION;
         }
-        ready.meter_header.reserved[0] = ready.meter_generation;
-        ready.meter_header.reserved[1] =
+        ready.shape.meter_header.reserved[0] = ready.meter_generation;
+        ready.shape.meter_header.reserved[1] =
             validity | (ready.meter_loss_count.min(u64::from(u32::MAX)) << METER_LOSS_SHIFT);
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows
@@ -5074,6 +5158,10 @@ struct CarriedReader {
     kind: ObserverKind,
     successor: u32,
     predecessor: u32,
+    /// For a meter, the handles the two positions' meters publish under (`0` for any other kind):
+    /// the poll accepts the predecessor's for windows it closed before the swap (#1290d1).
+    successor_handle: u64,
+    predecessor_handle: u64,
 }
 
 impl CarriedReader {
@@ -5082,6 +5170,8 @@ impl CarriedReader {
         kind: ObserverKind::Meter,
         successor: 0,
         predecessor: 0,
+        successor_handle: 0,
+        predecessor_handle: 0,
     };
 }
 
@@ -5168,8 +5258,6 @@ impl Drop for RenderCompanions {
 struct BootRecord {
     /// The engine-owned report of the boot plan, after the attachment's rows were charged.
     report: Option<HostPrepareReport>,
-    /// The designated master strip, echoed back by preparation after validation.
-    master_track: Option<u32>,
     /// The session's `live_values_superseded` count, shared with every cell reader of its plans.
     superseded: Option<host_core::LiveValuesSuperseded>,
     /// The class of the preparation refusal, so a refused boot keeps its result code.
@@ -5239,10 +5327,24 @@ impl HostAttachment for RenderCompanions {
             let Some(entry) = self.carried.get_mut(written) else {
                 break;
             };
+            let (successor_handle, predecessor_handle) = match carry.kind {
+                ObserverKind::Meter => (
+                    self.meters
+                        .get(carry.successor)
+                        .map_or(0, |meter| meter.handle.0.get()),
+                    previous
+                        .meters
+                        .get(carry.predecessor)
+                        .map_or(0, |meter| meter.handle.0.get()),
+                ),
+                _ => (0, 0),
+            };
             *entry = CarriedReader {
                 kind: carry.kind,
                 successor,
                 predecessor,
+                successor_handle,
+                predecessor_handle,
             };
             written += 1;
         }
@@ -5413,7 +5515,6 @@ impl WebRuntimePreparer {
             })?;
             if boot {
                 record.report = Some(host.report);
-                record.master_track = handles.master_track;
                 record.superseded = Some(handles.live_values_superseded.clone());
             }
             record.shape = Some(shape);
@@ -5554,6 +5655,16 @@ fn build_plan_shape(
         .try_reserve_exact(observations.len())
         .map_err(|_| "web.resource.allocation")?;
     let observation_present = vec![false; strip_count];
+    // The plan's published frame and the header that describes it (#1290d1). The frame's address
+    // is the heap block's, so it stays put as the tables move.
+    let meter_frame = zero_meter_frame(strip_count)?;
+    let mut meter_header = empty_meter_header();
+    meter_header.track_count =
+        u32::try_from(track_count).map_err(|_| "web.live_controls.effects")?;
+    meter_header.submix_count =
+        u32::try_from(submix_count).map_err(|_| "web.live_controls.effects")?;
+    meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
+    meter_header.frame_pointer = address_word(meter_frame.as_ptr());
     for (reader, handle) in observations.iter().enumerate() {
         let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
             return Err("web.live_controls.observation");
@@ -5607,8 +5718,51 @@ fn build_plan_shape(
             .map(|_| 0)
             .collect::<Vec<_>>()
             .into_boxed_slice(),
+        meter_carried_from: (0..meter_count)
+            .map(|_| 0)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        meter_frame,
+        meter_header,
+        #[cfg(any(test, feature = "test-support"))]
+        successor_address: 0,
         observation_present: observation_present.into_boxed_slice(),
     })
+}
+
+impl PlanShape {
+    /// Name `successor` as the header that replaces this plan's (null for none): the `u32` word
+    /// the page reads, and beside it the full-width pointer a gate compares.
+    #[inline]
+    fn name_successor(&mut self, successor: *const WebMeterHeader) {
+        self.meter_header.successor_pointer = address_word(successor);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.successor_address = successor.addr();
+        }
+    }
+}
+
+/// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the
+/// master's (issue #1209 D1). With `S = 0` it is the `3T + 3` frame every reader already knows.
+fn zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, &'static str> {
+    let count = strip_count
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(3))
+        .ok_or("web.resource.arithmetic")?;
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| "web.resource.allocation")?;
+    value.resize(count, 0.0);
+    Ok(value.into_boxed_slice())
+}
+
+/// The linear-memory address a header names a structure by: the pointer's address as a `u32`, or
+/// `0` where the address does not fit (a native test host; the shipped `wasm32` module's always
+/// does). The same conversion the exports use.
+fn address_word<T>(pointer: *const T) -> u32 {
+    u32::try_from(pointer.addr()).unwrap_or(0)
 }
 
 /// `count` zero words, or the allocation refusal.
@@ -5634,6 +5788,10 @@ struct ShapeRows {
     pending_bytes: u64,
     /// The per-meter remaining counts.
     remaining_bytes: u64,
+    /// The per-meter carried-from handles.
+    carried_bytes: u64,
+    /// The published meter frame (#1290d1).
+    frame_bytes: u64,
 }
 
 impl PlanShape {
@@ -5744,12 +5902,20 @@ impl PlanShape {
         let remaining_bytes = u64::try_from(self.meter_remaining.len())
             .ok()?
             .checked_mul(size_of::<usize>() as u64)?;
+        let carried_bytes = u64::try_from(self.meter_carried_from.len())
+            .ok()?
+            .checked_mul(size_of::<u64>() as u64)?;
+        let frame_bytes = u64::try_from(self.meter_frame.len())
+            .ok()?
+            .checked_mul(size_of::<f32>() as u64)?;
         Some(ShapeRows {
             arm_table_bytes,
             arm_sample_bytes,
             arm_largest: arm_sample_largest.max(arm_table_bytes),
             pending_bytes,
             remaining_bytes,
+            carried_bytes,
+            frame_bytes,
         })
     }
 
@@ -5762,11 +5928,15 @@ impl PlanShape {
             .checked_add(rows.arm_table_bytes)?
             .checked_add(rows.arm_sample_bytes)?
             .checked_add(rows.pending_bytes)?
-            .checked_add(rows.remaining_bytes)?;
+            .checked_add(rows.remaining_bytes)?
+            .checked_add(rows.carried_bytes)?
+            .checked_add(rows.frame_bytes)?;
         let largest = shell
             .max(rows.arm_largest)
             .max(rows.pending_bytes)
-            .max(rows.remaining_bytes);
+            .max(rows.remaining_bytes)
+            .max(rows.carried_bytes)
+            .max(rows.frame_bytes);
         Some((total, largest))
     }
 }
@@ -5856,7 +6026,7 @@ fn compile_ready(
         mut plan,
     } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
         .map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, master_track, live_values_superseded, shape) = {
+    let (engine, live_values_superseded, shape) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
@@ -5865,9 +6035,7 @@ fn compile_ready(
             record.superseded.take(),
             record.shape.take(),
         ) {
-            (Some(engine), Some(superseded), Some(shape)) => {
-                (engine, record.master_track, superseded, shape)
-            }
+            (Some(engine), Some(superseded), Some(shape)) => (engine, superseded, shape),
             _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
         }
     };
@@ -5922,10 +6090,6 @@ fn compile_ready(
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
     // same function every replacement plan's preparation runs. The companions' spectrum capture is
     // the one thing moved out here, to the spectrum service.
-    let model = session.normalized_model();
-    let track_count = model.tracks.len();
-    let submix_count = model.submixes.len();
-    let strip_count = track_count + submix_count;
     let companions = plan
         .active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
@@ -5952,24 +6116,22 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
-    let mut meter_header = empty_meter_header();
-    meter_header.track_count =
-        u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
-    meter_header.submix_count =
-        u32::try_from(submix_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
-    meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
     let master_capacity = companions
         .meters()
         .first()
         .map_or(0, |meter| meter.consumer.capacity());
     let pending_meter_bytes = rows.pending_bytes;
     let remaining_meter_bytes = rows.remaining_bytes;
+    let carried_meter_bytes = rows.carried_bytes;
+    let frame_meter_bytes = rows.frame_bytes;
     let master_meter_bytes = u64::try_from(master_capacity)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let meter_delivery_bytes = pending_meter_bytes
         .checked_add(remaining_meter_bytes)
+        .and_then(|bytes| bytes.checked_add(carried_meter_bytes))
+        .and_then(|bytes| bytes.checked_add(frame_meter_bytes))
         .and_then(|bytes| bytes.checked_add(master_meter_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
@@ -5984,6 +6146,8 @@ fn compile_ready(
         .largest_bridge_allocation_bytes
         .max(pending_meter_bytes)
         .max(remaining_meter_bytes)
+        .max(carried_meter_bytes)
+        .max(frame_meter_bytes)
         .max(master_meter_bytes);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
@@ -6040,7 +6204,6 @@ fn compile_ready(
             pending
         },
         blocking_rebuilds: 0,
-        meter_header,
         command_decoded: boxed_observe_staging(decoded_count)?,
         has_in_flight_commands: false,
         spectrum: spectrum_capture.map(|captures| {
@@ -6051,7 +6214,6 @@ fn compile_ready(
                 spectrum_hop,
             )
         }),
-        meter_frame: boxed_zero_meter_frame(strip_count)?,
         master_peak: [0.0, 0.0],
         master_start_sample: None,
         master_end_sample: 0,
@@ -6099,21 +6261,6 @@ fn live_control_request(
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },
     })
-}
-
-/// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the
-/// master's (issue #1209 D1). With `S = 0` it is the `3T + 3` frame every reader already knows.
-fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
-    let count = strip_count
-        .checked_mul(3)
-        .and_then(|value| value.checked_add(3))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let mut value = Vec::new();
-    value
-        .try_reserve_exact(count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    value.resize(count, 0.0);
-    Ok(value.into_boxed_slice())
 }
 
 /// The decode staging of the observation records: `count` entries, none when the boot asked for no

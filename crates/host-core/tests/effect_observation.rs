@@ -527,12 +527,107 @@ fn the_first_window_at_or_after_applied_at_sample_reflects_the_command() {
     assert!(quiet.first_sample < applied_at);
 }
 
-/// **E13** (D7): a plan replacement drops every subscription, and re-subscribing works.
+/// A plan of `compiled` with live controls and observation capacity: fresh with no predecessor, or
+/// the successor of `first`, swapped in at `first`'s next block, under the taps `bindings` names.
+/// `committed` is the model `first` was prepared from.
+fn prepare_successor(
+    compiled: &host_core::CompiledSession,
+    first: Option<(&mut Session, &session::SessionModel)>,
+    bindings: &controls::ObservationBindings,
+) -> Session {
+    let request = live_controls(Leg::AllArmed);
+    let (mut prepared, handles) = match &first {
+        Some((first, committed)) => host_core::prepare_host_runtime_with_live_controls_successor(
+            compiled,
+            &caps(),
+            &request,
+            host_core::SuccessorBase {
+                inventory: &first.prepared.inventory,
+                committed,
+                revision: 2,
+                edit_ramps: &session::EditRamps::new(),
+                monitor: host_core::MonitorBase::NONE,
+                observation: bindings,
+            },
+        ),
+        None => host_core::prepare_host_runtime_with_live_controls(compiled, &caps(), &request),
+    }
+    .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    let mut block = 0;
+    if let Some((first, _)) = first {
+        assert_eq!(
+            prepared
+                .sources
+                .adopt_persisting(&mut first.prepared.sources),
+            1
+        );
+        // The swap happens at the successor's first block: the exchange runs inside it.
+        assert_eq!(
+            prepared
+                .plan
+                .adopt_predecessor_plan(&mut first.prepared.plan),
+            engine::realtime::CarryOutcome::Carried
+        );
+        block = first.block;
+    }
+    Session {
+        prepared,
+        gate,
+        handles,
+        block,
+    }
+}
+
+/// The table of every observed tap 0 of `session`, each armed with [`WINDOW_BLOCKS`].
+fn bindings_of_all(session: &Session) -> controls::ObservationBindings {
+    let mut bindings = controls::ObservationBindings::new();
+    for handle in &session.handles.effect_observations {
+        let effect = session::StableId::parse(&handle.effect_id).expect("a stable effect ID");
+        let section = match handle.address.rack {
+            LiveEffectRack::Console => controls::TapSection::Console(effect),
+            LiveEffectRack::Inserts => controls::TapSection::Inserts(effect),
+        };
+        bindings.set(
+            controls::TapKey {
+                strip: session::StableId::parse(&handle.track_id).expect("a stable strip ID"),
+                section,
+                tap_id: handle.descriptor.observations[0].id.0,
+            },
+            WINDOW_BLOCKS,
+        );
+    }
+    assert_eq!(bindings.len(), TRACKS);
+    bindings
+}
+
+/// **E13** (D7, rewritten by #1584 D6a): a replacement plan prepared with the taps the host armed
+/// keeps every subscription, and one prepared with none starts unarmed.
 ///
-/// Red mutation: carry armed flags across the replacement -> the absence assertion fails.
+/// The kept subscription opens its first window at the replacement's first block, so its windows
+/// equal those of a fresh plan whose record arms the same tap at that block. A replacement prepared
+/// from an empty table has the capacity, carries nothing and publishes nothing until the app
+/// subscribes again, which works.
+///
+/// Red mutation: prepare the replacement's taps unarmed whatever the table holds -> the kept
+/// replacement publishes nothing. Carry armed flags into a replacement with an empty table -> the
+/// unarmed assertions fail.
 #[test]
-fn a_plan_replacement_drops_every_subscription() {
-    let mut first = prepare(Leg::AllArmed);
+fn a_plan_replacement_keeps_the_subscriptions_the_host_armed() {
+    // The replacement changes the console slot's link mode, a prepared setup: every lane restarts,
+    // so nothing carries and the taps are the plan's own.
+    let committed = compile_host_session(SESSION, &caps()).expect("compile");
+    let changed_document = SESSION.replacen(
+        "\"link_mode\": \"dual_mono\"",
+        "\"link_mode\": \"average\"",
+        1,
+    );
+    assert_ne!(changed_document, SESSION);
+    let changed = compile_host_session(&changed_document, &caps()).expect("compile");
+    let mut first = prepare_successor(&committed, None, &controls::ObservationBindings::new());
     subscribe_all(&mut first, true, WINDOW_BLOCKS);
     let _ = render(&mut first, WINDOW_BLOCKS as usize * 2);
     assert_eq!(
@@ -542,33 +637,91 @@ fn a_plan_replacement_drops_every_subscription() {
     );
     let before = reader(&first.handles, 3).read().expect("a window");
     assert!(before.left > 0.0);
+    let bindings = bindings_of_all(&first);
 
-    // The structural edit: a replacement plan, prepared from the same session. Subscriptions are
-    // per-plan, so the new plan's lanes exist and are **unarmed** -- there is nowhere for an old
-    // subscription to have been carried to.
-    let mut second = prepare(Leg::AllArmed);
-    assert_eq!(
-        second.prepared.plan.observation_binding_counts(),
-        [TRACKS as u64, TRACKS as u64, 0],
-        "the replacement plan carries capacity and no subscription"
+    // Prepared with the table: every tap is armed before the plan renders, and no record was queued.
+    let mut kept = prepare_successor(
+        &changed,
+        Some((&mut first, committed.normalized_model())),
+        &bindings,
     );
-    let _ = render(&mut second, WINDOW_BLOCKS as usize * 2);
+    assert_eq!(
+        kept.prepared.plan.observation_binding_counts(),
+        [TRACKS as u64, TRACKS as u64, TRACKS as u64],
+        "the replacement is armed at preparation"
+    );
+    for producer in &kept.handles.effect_controls {
+        assert_eq!(
+            producer.observe_available_capacity(),
+            producer.observe_capacity(),
+            "the arm queued no record: a carried tap would be restarted by one"
+        );
+    }
+    let opens_at = (kept.block * QUANTUM) as u64;
+    let _ = render(&mut kept, WINDOW_BLOCKS as usize);
+    assert_eq!(
+        kept.prepared.plan.observation_binding_counts()[2],
+        TRACKS as u64,
+        "and it stays armed through the swap block"
+    );
+
+    // The reference: a fresh plan of the same session whose record arms the tap at its first
+    // block. The replacement's effects restarted, so both run from rest on the same input.
+    let mut reference = prepare_successor(&changed, None, &controls::ObservationBindings::new());
+    subscribe_all(&mut reference, true, WINDOW_BLOCKS);
+    let _ = render(&mut reference, WINDOW_BLOCKS as usize);
+    for track in 0..TRACKS {
+        let window = reader(&kept.handles, track)
+            .read()
+            .unwrap_or_else(|| panic!("track {track} publishes on the replacement"));
+        let expected = reader(&reference.handles, track)
+            .read()
+            .expect("the reference publishes");
+        assert_eq!(
+            window.first_sample, opens_at,
+            "the window opens at the replacement's first block"
+        );
+        assert_eq!(
+            (window.sequence, window.blocks, window.left, window.right),
+            (
+                expected.sequence,
+                expected.blocks,
+                expected.left,
+                expected.right
+            ),
+            "track {track}: the prepared arm equals a record at the first block"
+        );
+    }
+
+    // Prepared with an empty table, as `MonitorBase::NONE` and no subscription leave it: the
+    // capacity is there, and no subscription is.
+    let mut bare = prepare_successor(
+        &committed,
+        Some((&mut kept, changed.normalized_model())),
+        &controls::ObservationBindings::new(),
+    );
+    assert_eq!(
+        bare.prepared.plan.observation_binding_counts(),
+        [TRACKS as u64, TRACKS as u64, 0],
+        "the replacement carries capacity and no subscription"
+    );
+    let _ = render(&mut bare, WINDOW_BLOCKS as usize * 2);
     for track in 0..TRACKS {
         assert_eq!(
-            reader(&second.handles, track).read(),
+            reader(&bare.handles, track).read(),
             None,
             "track {track} published nothing against an unsubscribed replacement plan"
         );
     }
 
     // Re-subscribing against the new plan works, and acks a fresh map: the sequence restarts at 1.
-    subscribe_all(&mut second, true, WINDOW_BLOCKS);
+    let resubscribed_at = subscribe_all(&mut bare, true, WINDOW_BLOCKS);
     // Exactly one window, so the sequence number is checked rather than merely bounded.
-    let _ = render(&mut second, WINDOW_BLOCKS as usize);
-    let after = reader(&second.handles, 3).read().expect("a window");
+    let _ = render(&mut bare, WINDOW_BLOCKS as usize);
+    let after = reader(&bare.handles, 3).read().expect("a window");
     assert_eq!(after.sequence, 1, "the replacement plan starts a fresh map");
-    assert!(
-        after.first_sample >= before.end_sample,
+    assert_eq!(
+        after.first_sample, resubscribed_at,
         "and a fresh window, opened where the subscription was applied"
     );
     assert!(after.left > 0.0, "and it publishes again");

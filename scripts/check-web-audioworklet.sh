@@ -14,8 +14,11 @@ process_policy_re='BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch
 # exactly this way, each posting a body preallocated at construction, and nothing else. A third
 # post, a post of a freshly built object, or a post that is not one of these two lines fails the
 # gate. `new ` remains banned in the body, so the frames cannot be allocated here either.
+# Issue #1290d1: the meter body is the active meter set's, preallocated with its views in the
+# message handler that committed the plan (a replacement plan's frame is sized for its strips), so
+# the pinned spelling names the set.
 process_policy_posts=(
-  'this.port.postMessage(this.meterMessage);'
+  'this.port.postMessage(set.message);'
   'this.port.postMessage(frame);'
 )
 check_process_policy() {

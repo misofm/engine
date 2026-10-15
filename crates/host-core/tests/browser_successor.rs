@@ -37,7 +37,7 @@ use host_core::{
     LiveValuesSuperseded, PlanStateInventory, PrepareDiagnostics, PreparedHost,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumCapture, SpectrumCaptureCollection,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumTarget, SuccessorBase, compile_host_session,
+    SpectrumChannels, SpectrumPair, SpectrumTarget, SuccessorBase, compile_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
     prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
@@ -181,7 +181,8 @@ fn live_controls(branch: Branch) -> HostLiveControlRequest {
 #[allow(dead_code)] // The handles stay alive with the plan; only the captures are read.
 enum Kept {
     None(HostLiveControlHandles),
-    Single(HostLiveControlHandles, SpectrumCapture),
+    /// The plan's handles, its capture and the pairs it takes over from its predecessor (#1395).
+    Single(HostLiveControlHandles, SpectrumCapture, Vec<SpectrumPair>),
     Collection(HostLiveControlHandles, SpectrumCaptureCollection),
 }
 
@@ -207,7 +208,8 @@ fn prepare(
                 lanes,
                 &superseded,
             )?;
-            (host, Kept::Single(handles, capture))
+            let pairing = host.inventory.spectrum_pairing().to_vec();
+            (host, Kept::Single(handles, capture, pairing))
         }
         (Branch::Single, Some(base)) => {
             let (host, handles, capture) =
@@ -220,7 +222,8 @@ fn prepare(
                     &superseded,
                     base,
                 )?;
-            (host, Kept::Single(handles, capture))
+            let pairing = host.inventory.spectrum_pairing().to_vec();
+            (host, Kept::Single(handles, capture, pairing))
         }
         (Branch::Collection, None) => {
             let (host, handles, capture) =
@@ -284,6 +287,7 @@ fn base<'a>(
         revision: SUCCESSOR_REVISION,
         edit_ramps,
         monitor: host_core::MonitorBase::NONE,
+        observation: &host_core::NO_OBSERVATION,
     }
 }
 
@@ -359,16 +363,21 @@ fn every_branch_swaps_in_without_a_gap() {
     }
 }
 
-/// Gate 2. Red if the successor's capture is not wired to its plan's graph taps.
+/// Gate 2. Red if the successor's plan does not run the capture's observer at its graph tap.
 #[test]
 fn the_successors_capture_completes_a_window() {
     let a = Session::compile(session_a());
     let b = Session::compile(session_b());
-    let (mut swapped, _a_kept, b_kept) = run(Branch::Single, &a, &b, Successor::Carry);
-    let Kept::Single(_handles, mut capture) = b_kept else {
+    let (mut swapped, a_kept, b_kept) = run(Branch::Single, &a, &b, Successor::Carry);
+    let (Kept::Single(_, mut previous, _), Kept::Single(_handles, mut capture, pairing)) =
+        (a_kept, b_kept)
+    else {
         panic!("a single capture");
     };
-    capture.arm().expect("arm the successor's capture");
+    // The swap carried the predecessor's observer into this plan: the capture that reads it is
+    // the predecessor's, which the control side pairs at promotion (#1395 D3).
+    assert!(capture.pair_carried(&mut previous, &pairing));
+    capture.arm().expect("arm the paired capture");
     let rate = swapped.successor.sample_rate_hz;
     let plane = vec![0.25_f32; QUANTUM];
     let window_blocks = SPECTRUM_WINDOW_FRAMES / QUANTUM;

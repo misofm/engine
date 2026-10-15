@@ -194,10 +194,14 @@ pub(crate) fn protocol_queue_config(
         )
         .ok_or_else(|| failure(ResourceFault::Limit))?,
         reliable_response_slots: one,
-        reliable_event_slots: NonZeroUsize::new(2).expect("two is nonzero"),
+        reliable_event_slots: NonZeroUsize::new(RELIABLE_EVENT_SLOTS).expect("two is nonzero"),
         telemetry_slots: one,
     })
 }
+
+/// The reliable event queue's slots: the transaction's `SESSION_COMMITTED` and its one
+/// `OBSERVATION_ENDED` (#1584 D6a).
+const RELIABLE_EVENT_SLOTS: usize = 2;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn capi_resources<A: ControlAdapter>(
@@ -209,6 +213,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     inventory_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
+    observation: ObservationResources,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -278,6 +283,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         effect_row,
         route_row,
     ];
+    let ObservationReserve {
+        ended_event,
+        cell_heap,
+        bindings_table,
+        bindings_transient,
+    } = observation_reserve(limits.maximum_control_frame_bytes, observation.slots)?;
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?
         / size_of::<u16>();
@@ -290,6 +301,27 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
+        // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
+        // event popped for egress keeps its cell until its frame is delivered), and the heap the
+        // events in them own. A cell can hold the keys of any earlier plan's subscriptions, so
+        // the ceiling is not a function of this plan's producers (a successor that removed
+        // producers still holds their keys): an event must fit one control frame, which bounds
+        // its key count and its text (`ended_event_ceiling`). The heap is allocated when a
+        // transaction prepares, never at the commit.
+        checked_layout::<Option<protocol::ObservationEnded>>(
+            queue_config.reliable_event_slots.get() + 1,
+        )?,
+        checked_byte_layout(cell_heap)?,
+        // #1584 D6a: the binding table the session keeps for the newest plan and the transient
+        // copies `ObservationBindings::after` makes of it while a rebuild prepares: at most one
+        // binding per observation slot, so at most `slots` bindings kept or ended, and as many
+        // protocol keys for the ended ones. A binding owns the text of its two IDs.
+        checked_byte_layout(bindings_table)?,
+        checked_byte_layout(bindings_transient)?,
+        // #1584 D6a: the newest plan's pending-subscription slots and the first slot of each
+        // producer (one entry past the last).
+        checked_layout::<crate::control::PendingArm>(observation.slots)?,
+        checked_layout::<u32>(observation.producers + 1)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and SessionControlProvider each retain their own telemetry config.
@@ -317,6 +349,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<protocol::PreparedStructuralCommand>(1)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
+        // The token holds the commit's one `OBSERVATION_ENDED` event until the commit moves it.
+        checked_byte_layout(ended_event)?,
     ];
     let epoch_retained = checked_sum(&epoch_rows)?;
     let fixed_allocations = checked_sum(&fixed_allocation_rows)?
@@ -365,6 +399,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
+    observation: ObservationResources,
     limits: ControlLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
@@ -403,7 +438,173 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         inventory.retained_bytes(),
         effect_controls,
         route_controls,
+        observation,
     )
+}
+
+/// What a plan's observation subscriptions retain (#1584 D6a).
+#[derive(Clone, Copy)]
+pub(crate) struct ObservationResources {
+    /// Observation slots of the plan: one per declared tap of every producer that has a queue.
+    /// The binding table holds at most one binding per slot.
+    pub(crate) slots: usize,
+    /// Effect producers of the plan.
+    pub(crate) producers: usize,
+}
+
+/// The observation rows of `effects`, the newest plan's producers.
+pub(crate) fn observation_resources(
+    effects: &[host_core::EffectControlProducer],
+) -> Result<ObservationResources, CompileFailure> {
+    let mut slots = 0_usize;
+    for producer in effects {
+        slots = slots
+            .checked_add(producer.observe_capacity())
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    }
+    Ok(ObservationResources {
+        producers: effects.len(),
+        slots,
+    })
+}
+
+/// The longest a stable ID is (`[a-z][a-z0-9._-]{0,126}`), which bounds the text of a key.
+const STABLE_ID_MAXIMUM_BYTES: usize = 127;
+
+/// The smallest encoded size of one key of an `OBSERVATION_ENDED` event: two one-character IDs,
+/// the section and the tap ID with their field headers, measured as what a second key adds to the
+/// frame. It bounds how many keys fit one frame.
+fn minimum_ended_key_bytes() -> Result<u64, CompileFailure> {
+    let codec = protocol::ProtocolCodec::default();
+    let size = |ids: &[&str]| -> Option<usize> {
+        let event = protocol::ObservationEnded {
+            event_sequence: 0,
+            keys: ids
+                .iter()
+                .map(|id| protocol::ObservationTapKey {
+                    strip_id: (*id).to_owned(),
+                    section: protocol::ObservationSection::Console,
+                    effect_id: (*id).to_owned(),
+                    tap_id: 0,
+                })
+                .collect(),
+        };
+        match codec.encode_event_frame_into(
+            &protocol::TypedEventFrame {
+                revision: protocol::SessionRevision(1),
+                payload: protocol::EventPayload::ObservationEnded(&event),
+            },
+            &mut [],
+        ) {
+            Err(protocol::EncodeError::OutputTooSmall { required }) => Some(required),
+            Err(_) | Ok(_) => None,
+        }
+    };
+    let (one, two) = (size(&["a"]), size(&["a", "b"]));
+    one.zip(two)
+        .and_then(|(one, two)| two.checked_sub(one))
+        .filter(|bytes| *bytes > 0)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
+}
+
+/// The observation rows that are bounds, not allocations: nothing holds them until a host arms a
+/// tap, a transaction ends one, or an event waits for egress.
+struct ObservationReserve {
+    /// The heap one event can own ([`ended_event_ceiling`]); the token holds one.
+    ended_event: u64,
+    /// That heap in every cell, one more cell than the reliable queue has slots.
+    cell_heap: u64,
+    /// The binding table's capacity bound.
+    bindings_table: u64,
+    /// `ObservationBindings::after`'s transient copies.
+    bindings_transient: u64,
+}
+
+fn observation_reserve(
+    frame_bytes: u64,
+    slots: usize,
+) -> Result<ObservationReserve, CompileFailure> {
+    let ended_event = ended_event_ceiling(frame_bytes)?;
+    let cell_heap = ended_event
+        .checked_mul(
+            u64::try_from(RELIABLE_EVENT_SLOTS + 1)
+                .map_err(|_| failure(ResourceFault::Platform))?,
+        )
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    let (bindings_table, bindings_transient) = observation_binding_rows(slots)?;
+    Ok(ObservationReserve {
+        ended_event,
+        cell_heap,
+        bindings_table,
+        bindings_transient,
+    })
+}
+
+/// What the active row charges for observation subscriptions beyond the allocations a compile
+/// makes, as `(active, token)` bytes: the cells' event heap, the binding table and its transient
+/// copies, and the one event the prepared token holds (#1584 D6a). The adapters' resource tests
+/// add the first to the allocations they observe, as they add the send producers' upper bound.
+///
+/// # Errors
+///
+/// The arithmetic overflowed.
+#[cfg(feature = "test-support")]
+pub fn observation_reserve_bytes(
+    frame_bytes: u64,
+    slots: usize,
+) -> Result<(u64, u64), CompileFailure> {
+    let reserve = observation_reserve(frame_bytes, slots)?;
+    Ok((
+        checked_sum(&[
+            reserve.cell_heap,
+            reserve.bindings_table,
+            reserve.bindings_transient,
+        ])?,
+        reserve.ended_event,
+    ))
+}
+
+/// The heap one `OBSERVATION_ENDED` event can own, bounded by the control frame it must fit: its
+/// text is encoded in the frame, so it is at most the frame; its key count is at most the frame
+/// over the smallest key, and each key is a `protocol::ObservationTapKey` (#1584 D6a). The bound
+/// does not depend on any plan's producers: a cell can hold the keys of an earlier plan.
+pub(crate) fn ended_event_ceiling(frame_bytes: u64) -> Result<u64, CompileFailure> {
+    let keys = frame_bytes / minimum_ended_key_bytes()?;
+    u64::try_from(size_of::<protocol::ObservationTapKey>())
+        .ok()
+        .and_then(|key| key.checked_mul(keys))
+        .and_then(|table| table.checked_add(frame_bytes))
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
+}
+
+/// What the binding table and a rebuild's transient copies of it hold for a plan with `slots`
+/// observation slots, as `(table, transient)` bytes (#1584 D6a). The table's `Vec` grows by
+/// insertion, so its capacity is at most twice its length (and at least four entries). The
+/// transient is what `ObservationBindings::after` builds from the table: each binding goes to the
+/// kept table or the ended list, so at most `slots` of them together, and the protocol keys the
+/// ended ones are copied into. Every binding and key owns the text of two IDs.
+fn observation_binding_rows(slots: usize) -> Result<(u64, u64), CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let text = 2 * STABLE_ID_MAXIMUM_BYTES;
+    let binding = size_of::<controls::ObservationBinding>()
+        .checked_add(text)
+        .ok_or_else(arithmetic)?;
+    let key = size_of::<protocol::ObservationTapKey>()
+        .checked_add(text)
+        .ok_or_else(arithmetic)?;
+    let table = if slots == 0 { 0 } else { slots.max(4) }
+        .checked_mul(2)
+        .and_then(|capacity| capacity.checked_mul(binding))
+        .ok_or_else(arithmetic)?;
+    let transient = slots
+        .checked_mul(binding)
+        .and_then(|bytes| bytes.checked_add(slots.checked_mul(key)?))
+        .ok_or_else(arithmetic)?;
+    Ok((
+        u64::try_from(table).map_err(|_| failure(ResourceFault::Platform))?,
+        u64::try_from(transient).map_err(|_| failure(ResourceFault::Platform))?,
+    ))
 }
 
 pub(crate) fn controller_retained_capacity(
@@ -734,6 +935,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         &prepared.inventory,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
+        observation_resources(&effects)?,
         limits,
     )?;
     if capi.active_retained > limits.maximum_control_retained_bytes
@@ -952,35 +1154,35 @@ where
         .try_reserve_exact(decode_field_count)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     decode_fields.resize(decode_field_count, 0);
+    let mut session = SessionState {
+        controller: ObservedController::new(controller),
+        providers: ProviderEpoch::current(sources, inventory, strips, effects, capi, revision_gate),
+        pending_providers,
+        retired_providers,
+        publisher,
+        retirer,
+        limits,
+        preparer,
+        live_values_superseded,
+        decode_fields: decode_fields.into_boxed_slice(),
+        response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
+        shared: Arc::clone(&shared),
+        observed_render_sequence: 0,
+        counter_snapshot_sequence: 0,
+        render_diagnostics: prepare_render_diagnostic_slots()?,
+        render_diagnostic_head: 0,
+        render_diagnostic_len: 0,
+        protocol_reliable_pending: false,
+        monitor: controls::MonitorOverlay::new(),
+        observation: controls::ObservationBindings::new(),
+        observation_pending: Box::default(),
+        observation_offsets: Box::default(),
+    };
+    (session.observation_offsets, session.observation_pending) =
+        crate::control::observation_slots(&session.providers.effects)
+            .map_err(|_| failure(ResourceFault::Allocation))?;
     Ok(CompiledChildren {
-        session: SessionState {
-            controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(
-                sources,
-                inventory,
-                strips,
-                effects,
-                capi,
-                revision_gate,
-            ),
-            pending_providers,
-            retired_providers,
-            publisher,
-            retirer,
-            limits,
-            preparer,
-            live_values_superseded,
-            decode_fields: decode_fields.into_boxed_slice(),
-            response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
-            shared: Arc::clone(&shared),
-            observed_render_sequence: 0,
-            counter_snapshot_sequence: 0,
-            render_diagnostics: prepare_render_diagnostic_slots()?,
-            render_diagnostic_head: 0,
-            render_diagnostic_len: 0,
-            protocol_reliable_pending: false,
-            monitor: controls::MonitorOverlay::new(),
-        },
+        session,
         plan: PlanState::new(owner, shared),
     })
 }
