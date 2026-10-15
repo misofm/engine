@@ -5842,19 +5842,50 @@ fn pending_observe_records_are_applied_at_the_carry(
     tracks: usize,
     pending: PendingObserve,
 ) {
-    use bench_support::alloc as bench_alloc;
-    let a = Session::compile(compressor_insert_session(tracks));
     let mut b_model = with_muted_track(compressor_insert_session(tracks));
     track_mut(&mut b_model, MUTED_TRACK).inserts.effects.clear();
+    pending_observe_swap(
+        backend,
+        compressor_insert_session(tracks),
+        b_model,
+        pending,
+        None,
+    );
+}
+
+/// The swap of [`pending_observe_records_are_applied_at_the_carry`] between any two sessions
+/// whose inserts all carry. `form` is `(predecessor, successor)` as `(per node, banked)` flags
+/// when the swap changes the inserts' representation (#1281), which the test checks first.
+fn pending_observe_swap(
+    backend: Backend,
+    a_model: SessionModel,
+    b_model: SessionModel,
+    pending: PendingObserve,
+    form: Option<(bool, bool)>,
+) {
+    use bench_support::alloc as bench_alloc;
+    let a = Session::compile(a_model);
     let b = Session::compile(b_model);
+    if let Some((a_per_node, b_per_node)) = form {
+        assert_eq!(
+            insert_forms(&a, backend),
+            vec![a_per_node; a.model.tracks.len()]
+        );
+        assert_eq!(
+            insert_forms(&b, backend),
+            vec![b_per_node; b.model.tracks.len()]
+        );
+    }
     let feed = bursty_feed(SOURCE, 5);
     let quantum = a.model.quantum_frames as usize;
     let request = observed_request();
+    // A strip B removes has no lane to carry, and its tap goes with it.
     let strips: Vec<&str> = a
         .model
         .tracks
         .iter()
         .map(|track| track.id.as_str())
+        .filter(|id| b.model.tracks.iter().any(|track| track.id.as_str() == *id))
         .collect();
     let what = format!("{backend:?} {pending:?}");
 
@@ -6006,4 +6037,350 @@ fn a_pending_subscribe_is_applied_at_the_carry_at_four_lanes() {
 )]
 fn full_observe_queues_are_applied_at_the_carry_at_four_lanes() {
     pending_observe_records_are_applied_at_the_carry(Backend::Simd4, 4, PendingObserve::FullQueues);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1281: an insert lane that moves between a bank and a per-node instance.
+//
+// An insert group banks only when it is full, so adding the eighth insert of a kind (the fourth at
+// four lanes) turns seven per-node instances into one bank of eight lanes, and removing one turns
+// the bank back. Every lane keeps its exact state, live state included, in both directions.
+
+/// Which insert the form-change gates run.
+#[derive(Clone, Copy, Debug)]
+enum Insert {
+    Compressor,
+    Limiter,
+}
+
+impl Insert {
+    fn session(self, tracks: usize) -> SessionModel {
+        match self {
+            Self::Compressor => compressor_insert_session(tracks),
+            Self::Limiter => limiter_insert_session(tracks),
+        }
+    }
+}
+
+/// The lanes of one bank at `backend`.
+fn bank_width(backend: Backend) -> usize {
+    match backend {
+        Backend::Simd8 => 8,
+        _ => 4,
+    }
+}
+
+/// Whether each insert of `session` is a per-node instance (`true`) or a lane of a bank (`false`),
+/// in strip order.
+fn insert_forms(session: &Session, backend: Backend) -> Vec<bool> {
+    let mut plan = LivePlan::fresh(session, backend);
+    let mut forms: Vec<(Box<str>, bool)> = graph::bank_effect_lanes(&mut plan.prepared.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .filter(|(_, lane)| lane.rack == graph::RackId::Dynamic)
+        .map(|(strip, lane)| {
+            (
+                strip,
+                matches!(lane.location, graph::GraphEffectSite::Node(_)),
+            )
+        })
+        .collect();
+    forms.sort();
+    forms.into_iter().map(|(_, per_node)| per_node).collect()
+}
+
+/// A group one lane short of a bank (per-node instances) and the full bank it becomes when
+/// [`MUTED_TRACK`], a muted copy of `eq0` with the same insert, joins it.
+fn short_and_full(insert: Insert, backend: Backend) -> (SessionModel, SessionModel) {
+    let short = insert.session(bank_width(backend) - 1);
+    let full = with_muted_track(short.clone());
+    (short, full)
+}
+
+/// `model` with parameter `parameter_id` of `track`'s insert `insert` set to `value` on every
+/// channel entry.
+fn with_insert_param_all(
+    mut model: SessionModel,
+    track: &str,
+    insert: &str,
+    parameter_id: u32,
+    value: f32,
+) -> SessionModel {
+    let entry = track_mut(&mut model, track)
+        .inserts
+        .effects
+        .iter_mut()
+        .find(|entry| entry.id.as_str() == insert)
+        .expect("insert");
+    let mut found = false;
+    for param in entry
+        .params
+        .iter_mut()
+        .filter(|param| param.parameter_id == parameter_id)
+    {
+        param.value = value;
+        found = true;
+    }
+    assert!(found, "parameter {parameter_id} of {insert}");
+    model
+}
+
+/// The sessions of a swap in one direction: forward is short to full (per node to bank), the
+/// reverse full to short (bank to per node). Returns `(a, b, a per node, b per node)`.
+fn form_pair(insert: Insert, backend: Backend, forward: bool) -> (Session, Session) {
+    let (short, full) = short_and_full(insert, backend);
+    let (a, b) = if forward {
+        (short, full)
+    } else {
+        (full, short)
+    };
+    let (a, b) = (Session::compile(a), Session::compile(b));
+    let width = bank_width(backend);
+    let (a_tracks, b_tracks) = if forward {
+        (width - 1, width)
+    } else {
+        (width, width - 1)
+    };
+    assert_eq!(
+        insert_forms(&a, backend),
+        vec![forward; a_tracks],
+        "{backend:?} {insert:?}: A's inserts are {}",
+        if forward { "per node" } else { "one bank" }
+    );
+    assert_eq!(
+        insert_forms(&b, backend),
+        vec![!forward; b_tracks],
+        "{backend:?} {insert:?}: B's inserts are {}",
+        if forward { "one bank" } else { "per node" }
+    );
+    (a, b)
+}
+
+/// Gates 1 and 2: every block of the swapped run equals B rendered from frame 0, nothing
+/// restarts, the carry refuses nothing and the swap block makes no allocator call. A swap whose
+/// strips all restart renders other bits, which the last assertion shows.
+fn an_insert_group_changes_form(backend: Backend, insert: Insert, forward: bool) {
+    let what = format!("{backend:?} {insert:?} forward={forward}");
+    let (a, b) = form_pair(insert, backend, forward);
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = effect_run(&b, None, &feed, &[], &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B rendered from frame 0"
+    );
+    // Not vacuous: with the inserts declared another quality in A's committed base, every strip
+    // restarts, the lanes start at rest, and the blocks differ.
+    let mut committed = a.model.clone();
+    for track in &mut committed.tracks {
+        for entry in &mut track.inserts.effects {
+            entry.quality = session::EffectQuality::High;
+        }
+    }
+    let restarted = effect_run(&a, Some((&b, &committed)), &feed, &[], &[], backend);
+    assert!(
+        !restarted.restarted.is_empty(),
+        "{what}: the strips restart"
+    );
+    assert_ne!(
+        first_effect_difference(&restarted, &reference),
+        None,
+        "{what}: the insert state is audible in the blocks after the swap"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_group_of_inserts_becomes_a_bank_at_eight_lanes() {
+    for insert in [Insert::Compressor, Insert::Limiter] {
+        an_insert_group_changes_form(Backend::Simd8, insert, true);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_bank_of_inserts_falls_apart_at_eight_lanes() {
+    for insert in [Insert::Compressor, Insert::Limiter] {
+        an_insert_group_changes_form(Backend::Simd8, insert, false);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_group_of_inserts_becomes_a_bank_at_four_lanes() {
+    for insert in [Insert::Compressor, Insert::Limiter] {
+        an_insert_group_changes_form(Backend::Simd4, insert, true);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_bank_of_inserts_falls_apart_at_four_lanes() {
+    for insert in [Insert::Compressor, Insert::Limiter] {
+        an_insert_group_changes_form(Backend::Simd4, insert, false);
+    }
+}
+
+/// The compressor's `threshold` as a session parameter ID.
+const THRESHOLD_PARAMETER_ID: u32 = 1;
+/// The insert strips gate 3 writes to and retargets; every one is in both sessions of a pair.
+const LIVE_STRIPS: [&str; 2] = ["eq1", "eq2"];
+
+/// Gate 3, first case: a threshold is rendered in A, and another is written to A's cells just
+/// before the swap and not rendered. Every block equals B rendered from frame 0 and fed the same
+/// values at the same blocks.
+fn an_unread_value_crosses_the_form_change(backend: Backend, forward: bool) {
+    let what = format!("{backend:?} forward={forward}");
+    let (a, b) = form_pair(Insert::Compressor, backend, forward);
+    let feed = bursty_feed(SOURCE, 5);
+    let writes = |unread_too: bool| {
+        let mut writes = Vec::new();
+        for strip in LIVE_STRIPS {
+            let threshold = |block, value| EffectWrite {
+                block,
+                strip,
+                address: LiveEffectAddress::insert(0),
+                value: EffectValue::Parameter {
+                    index: THRESHOLD_INDEX,
+                    value,
+                },
+            };
+            // The block-5 signal is quiet: only the lower threshold compresses it.
+            writes.push(threshold(3, -5.0));
+            if unread_too {
+                writes.push(threshold(SWAP_BLOCK, -50.0));
+            }
+        }
+        writes
+    };
+    let reference = effect_run(&b, None, &feed, &writes(true), &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes(true), &[], backend);
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B fed the same values"
+    );
+    // Not vacuous: the value left unread in A changes the swap block.
+    let lost = effect_run(&b, None, &feed, &writes(false), &[], backend);
+    assert_ne!(
+        lost.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{what}: the unread value is audible in the swap block"
+    );
+}
+
+/// Gate 3, second case: B also changes the threshold of two lanes that change form. Run 1 is the
+/// structural swap, where the successor retargets the carried lanes. Run 2 writes the same edit
+/// to A just before the swap and prepares B from a base that holds it ("live edit, then
+/// structural edit"). The two are bit-identical in every block and no strip restarts.
+fn a_live_difference_crosses_the_form_change(backend: Backend, forward: bool) {
+    let what = format!("{backend:?} forward={forward}");
+    let (a, b) = form_pair(Insert::Compressor, backend, forward);
+    let feed = bursty_feed(SOURCE, 5);
+    let edit_all = |model: &SessionModel| {
+        LIVE_STRIPS.into_iter().fold(model.clone(), |model, strip| {
+            with_insert_param_all(model, strip, "comp", THRESHOLD_PARAMETER_ID, -40.0)
+        })
+    };
+    let b_edited = Session::compile(edit_all(&b.model));
+    let a_edited = edit_all(&a.model);
+    let writes: Vec<EffectWrite> = LIVE_STRIPS
+        .into_iter()
+        .map(|strip| EffectWrite {
+            block: SWAP_BLOCK,
+            strip,
+            address: LiveEffectAddress::insert(0),
+            value: EffectValue::Parameter {
+                index: THRESHOLD_INDEX,
+                value: -40.0,
+            },
+        })
+        .collect();
+    let run = effect_run(&a, Some((&b_edited, &a.model)), &feed, &[], &[], backend);
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.restarted,
+        Vec::<Box<str>>::new(),
+        "{what}: nothing restarts"
+    );
+    let reference = effect_run(
+        &a,
+        Some((&b_edited, &a_edited)),
+        &feed,
+        &writes,
+        &[],
+        backend,
+    );
+    assert_clean_swap(&reference, &format!("{what} reference"));
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: carry, then retarget equals live edit, then structural edit"
+    );
+    // Not vacuous: without the retarget the carried lanes keep their old threshold.
+    let stale = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+    assert_ne!(
+        stale.blocks[SWAP_BLOCK + 1],
+        run.blocks[SWAP_BLOCK + 1],
+        "{what}: the edit is audible after the swap"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn live_values_cross_the_form_change_at_eight_lanes() {
+    for forward in [true, false] {
+        an_unread_value_crosses_the_form_change(Backend::Simd8, forward);
+        a_live_difference_crosses_the_form_change(Backend::Simd8, forward);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn live_values_cross_the_form_change_at_four_lanes() {
+    for forward in [true, false] {
+        an_unread_value_crosses_the_form_change(Backend::Simd4, forward);
+        a_live_difference_crosses_the_form_change(Backend::Simd4, forward);
+    }
+}
+
+/// A pending Observe record of a lane that changes form is applied to the predecessor's tap at the
+/// carry (#1280 D3), for a per-node predecessor too: its queue is read at the sample its next block
+/// would have started at.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn pending_observe_records_cross_the_form_change_at_eight_lanes() {
+    let (short, full) = short_and_full(Insert::Compressor, Backend::Simd8);
+    for pending in [PendingObserve::OneSubscribe, PendingObserve::FullQueues] {
+        pending_observe_swap(
+            Backend::Simd8,
+            short.clone(),
+            full.clone(),
+            pending,
+            Some((true, false)),
+        );
+        pending_observe_swap(
+            Backend::Simd8,
+            full.clone(),
+            short.clone(),
+            pending,
+            Some((false, true)),
+        );
+    }
 }

@@ -725,10 +725,11 @@ pub(crate) struct StripStageInventoryRow {
     pub(crate) live: bool,
 }
 
-/// One banked effect lane of a prepared plan, owner key `(strip ID, rack, effect ID)` (issues
-/// #1279 D1, #1280): a lane of a bank stage, with or without a live control lane. A console slot's
-/// effect ID is its slot ID, and its rack is `Simd1` in `pre_insert` and `Simd2` in `post_insert`;
-/// an insert's effect ID is its insert ID, in `Dynamic`. An effect that is not banked has no row.
+/// One effect instance of a prepared plan that a swap can move, owner key `(strip ID, rack, effect
+/// ID)` (issues #1279 D1, #1280, #1281): a lane of a bank stage, with or without a live control
+/// lane, or a live-controlled per-node instance. A console slot's effect ID is its slot ID, and
+/// its rack is `Simd1` in `pre_insert` and `Simd2` in `post_insert`; an insert's effect ID is its
+/// insert ID, in `Dynamic`. A per-node effect with no control lane has no row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EffectLaneInventoryRow {
     /// The strip ID: a track's or a submix's.
@@ -737,9 +738,10 @@ pub(crate) struct EffectLaneInventoryRow {
     pub(crate) rack: graph::RackId,
     /// The effect ID: a console slot's slot ID.
     pub(crate) effect_id: Box<str>,
-    /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
-    /// program, which names it as the lane to copy from.
-    pub(crate) location: graph::GraphLaneLocation,
+    /// Where the instance sits in this plan: a bank lane, or a per-node instance (#1281).
+    /// Meaningful only to this plan's successor's carry program, which names it as the instance to
+    /// copy from.
+    pub(crate) location: graph::GraphEffectSite,
     /// What the successor's lane must share with this one for the state to move.
     pub(crate) layout: graph::EffectLaneLayout,
     /// The kind of stage and control lane the lane has: the successor's must be the same (#1280).
@@ -1957,6 +1959,30 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(resource("host.effect.resource.limit"));
     }
+    // Issue #1281: the layout of every prepared instance, by owner key. A bound plan keeps no
+    // metadata for a per-node instance, so the inventory row of one takes its layout from here,
+    // where the bank rows' layout is the bank's own: the two compare equal exactly when a state
+    // payload moves between them.
+    let mut instance_layouts: Vec<InstanceLayout> = effects
+        .entries
+        .iter()
+        .map(|entry| InstanceLayout {
+            id: entry.track_id.as_str().into(),
+            rack: match entry.rack {
+                effect_compiler::EffectRack::Simd1 => graph::RackId::Simd1,
+                effect_compiler::EffectRack::Dynamic => graph::RackId::Dynamic,
+                effect_compiler::EffectRack::Simd2 => graph::RackId::Simd2,
+            },
+            effect_id: entry.effect_id.as_str().into(),
+            layout: graph::EffectLaneLayout::of(&entry.metadata.program_key()),
+        })
+        .collect();
+    instance_layouts.sort_unstable_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.rack.cmp(&right.rack))
+            .then_with(|| left.effect_id.cmp(&right.effect_id))
+    });
     #[cfg(feature = "control-provider")]
     let control_catalog = crate::ControlCatalog::build(
         compiled.normalized_model(),
@@ -2524,13 +2550,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
         .ok_or_else(|| graph_failure("host.inventory.identity"))?
         .into_iter()
-        .map(|(id, lane)| EffectLaneInventoryRow {
-            id,
-            rack: lane.rack,
-            effect_id: lane.effect_id,
-            location: lane.location,
-            layout: lane.layout,
-            kind: lane.kind,
+        .filter_map(|(id, lane)| {
+            // A per-node instance has no bank layout (#1281): its prepared one. An instance the
+            // table does not have (none exists) carries nothing.
+            let layout = lane
+                .layout
+                .or_else(|| instance_layout(&instance_layouts, &id, lane.rack, &lane.effect_id))?;
+            Some(EffectLaneInventoryRow {
+                id,
+                rack: lane.rack,
+                effect_id: lane.effect_id,
+                location: lane.location,
+                layout,
+                kind: lane.kind,
+            })
         })
         .collect();
     effect_lanes.sort_unstable_by(|left, right| {
@@ -2577,7 +2610,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     if !effect_carry.moves.is_empty() {
-        graph::install_effect_carry(&mut plan, effect_carry.moves)
+        graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
@@ -3708,6 +3741,33 @@ fn resolve_strip_carry<'a>(
     carry
 }
 
+/// The prepared layout of one effect instance, by owner key (#1281).
+struct InstanceLayout {
+    id: Box<str>,
+    rack: graph::RackId,
+    effect_id: Box<str>,
+    layout: graph::EffectLaneLayout,
+}
+
+/// The prepared layout of effect `effect_id` in `rack` of strip `id` in `layouts`, which are
+/// sorted by strip ID, rack, then effect ID.
+fn instance_layout(
+    layouts: &[InstanceLayout],
+    id: &str,
+    rack: graph::RackId,
+    effect_id: &str,
+) -> Option<graph::EffectLaneLayout> {
+    layouts
+        .binary_search_by(|row| {
+            (*row.id)
+                .cmp(id)
+                .then(row.rack.cmp(&rack))
+                .then_with(|| (*row.effect_id).cmp(effect_id))
+        })
+        .ok()
+        .map(|index| layouts[index].layout)
+}
+
 /// Effect `effect_id` in `rack` of strip `id` in `rows`, which are sorted by strip ID, rack, then
 /// effect ID.
 fn effect_lane_row<'a>(
@@ -4075,7 +4135,15 @@ fn resolve_effect_carry(
             let rows = effect_lane_row(own, join.id, rack, effect_id)
                 .zip(predecessor.effect_lane(join.id, rack, effect_id));
             let Some((own, before)) = rows.filter(|(own, before)| {
-                !state.is_prepared() && own.layout == before.layout && own.kind == before.kind
+                !state.is_prepared()
+                    && own.layout == before.layout
+                    && own.kind == before.kind
+                    // A move between two per-node instances is #1282's; until it lands, a strip
+                    // that holds one restarts, as it always did.
+                    && !matches!(
+                        (own.location, before.location),
+                        (graph::GraphEffectSite::Node(_), graph::GraphEffectSite::Node(_))
+                    )
             }) else {
                 restart = true;
                 continue;
@@ -4218,11 +4286,11 @@ mod tests {
             id: "eq0".into(),
             rack: graph::RackId::Simd1,
             effect_id: SLOT.into(),
-            location: graph::GraphLaneLocation {
+            location: graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
                 unit: 0,
                 slot: 0,
                 lane,
-            },
+            }),
             layout,
             kind: graph::EffectLaneKind::Plain,
         }
@@ -4268,8 +4336,22 @@ mod tests {
             &mut |_, _, _| None,
         );
         assert_eq!(carry.moves.len(), 1);
-        assert_eq!(carry.moves[0].successor.lane, 3);
-        assert_eq!(carry.moves[0].predecessor.lane, 1);
+        assert_eq!(
+            carry.moves[0].successor,
+            graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
+                unit: 0,
+                slot: 0,
+                lane: 3
+            })
+        );
+        assert_eq!(
+            carry.moves[0].predecessor,
+            graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
+                unit: 0,
+                slot: 0,
+                lane: 1
+            })
+        );
         assert_eq!(carry.scratch_bytes, 136);
         assert!(carry.restarted.is_empty());
         let other = |edit: fn(&mut graph::EffectLaneLayout)| {

@@ -13,8 +13,8 @@ use effect_contract::{
     BankCrossfade, BankCrossfadeLane, BankWidth, BypassShunt, ChannelSymmetryWitness,
     EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectId, EffectProgramKey,
     LatencySamples, ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedEffectBank,
-    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, apply_observe, transpose_tile_4,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, SeamSide,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, apply_observe, transpose_tile_4,
 };
 use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
@@ -832,7 +832,49 @@ pub enum EffectLaneKind {
     Cells,
 }
 
+impl EffectLaneKind {
+    /// The kind of a per-node live-controlled instance, from its control lane: a live channel
+    /// makes it [`Self::Cells`], and a lane with none [`Self::BypassOnly`] (#1281). A per-node
+    /// instance always has a control lane, so it is never [`Self::Uncontrolled`].
+    #[must_use]
+    pub const fn of_instance(control: &EffectControlLane) -> Self {
+        if control.has_channel() {
+            Self::Cells
+        } else {
+            Self::BypassOnly
+        }
+    }
+}
+
+/// A per-node live-controlled effect instance, as a plan swap reads it to move its state into a
+/// bank lane (#1281): the prepared processor, its control lane and its dry shunt.
+pub struct EffectInstance<'a> {
+    pub processor: &'a dyn PreparedNativeEffect,
+    pub control: &'a EffectControlLane,
+    pub shunt: &'a BypassShunt,
+}
+
+/// A per-node live-controlled effect instance, as a plan swap writes it to take the state of a
+/// bank lane (#1281).
+pub struct EffectInstanceMut<'a> {
+    pub processor: &'a mut dyn PreparedNativeEffect,
+    pub control: &'a mut EffectControlLane,
+    pub shunt: &'a mut BypassShunt,
+}
+
 // REALTIME_POLICY_BEGIN
+/// The three sections of a payload in `scratch`, cut at the prepared `sizes`; `None` when the
+/// scratch is short.
+fn payload_sections(
+    scratch: &mut [u8],
+    sizes: StatePayloadSizes,
+) -> Option<(&mut [u8], &mut [u8], &mut [u8])> {
+    let (common, rest) = scratch.split_at_mut_checked(sizes.common_bytes as usize)?;
+    let (left, rest) = rest.split_at_mut_checked(sizes.left_bytes as usize)?;
+    let right = rest.get_mut(..sizes.right_bytes as usize)?;
+    Some((common, left, right))
+}
+
 /// The payload move of a plan swap's effect carry (#1279 D3), for both stage types: snapshot
 /// `predecessor`'s lane `predecessor_lane` into `scratch` and restore it into `into`'s lane
 /// `lane`. Returns whether the restored payload's left and right sections agree, or `None` when a
@@ -847,9 +889,7 @@ fn carry_payload(
     scratch: &mut [u8],
 ) -> Option<bool> {
     let sizes = layout.state_sizes;
-    let (common, rest) = scratch.split_at_mut_checked(sizes.common_bytes as usize)?;
-    let (left, rest) = rest.split_at_mut_checked(sizes.left_bytes as usize)?;
-    let right = rest.get_mut(..sizes.right_bytes as usize)?;
+    let (common, left, right) = payload_sections(scratch, sizes)?;
     predecessor
         .snapshot_track_state_payload(
             u32::try_from(predecessor_lane).ok()?,
@@ -864,6 +904,55 @@ fn carry_payload(
     )
     .ok()?;
     Some(effect_contract::payload_sections_agree(left, right))
+}
+
+/// [`carry_payload`] from a per-node instance into a bank lane (#1281 D2): the instance's
+/// `snapshot_state_payload` goes into `scratch`, and the bank's `restore_track_state_payload`
+/// takes it. The two payloads share one layout (#1278).
+fn carry_payload_from_instance(
+    into: &mut dyn PreparedNativeEffectBank,
+    lane: usize,
+    from: &dyn PreparedNativeEffect,
+    layout: &EffectLaneLayout,
+    scratch: &mut [u8],
+) -> Option<bool> {
+    let sizes = layout.state_sizes;
+    let (common, left, right) = payload_sections(scratch, sizes)?;
+    from.snapshot_state_payload(StatePayloadOutput::new(common, left, right, sizes).ok()?)
+        .ok()?;
+    let (common, left, right): (&[u8], &[u8], &[u8]) = (common, left, right);
+    into.restore_track_state_payload(
+        u32::try_from(lane).ok()?,
+        layout.state_layout_version,
+        StatePayloadInput::new(common, left, right, sizes).ok()?,
+    )
+    .ok()?;
+    Some(effect_contract::payload_sections_agree(left, right))
+}
+
+/// [`carry_payload`] from a bank lane into a per-node instance (#1281 D2): the bank's
+/// `snapshot_track_state_payload` goes into `scratch`, and the instance's `restore_state_payload`
+/// takes it.
+fn carry_payload_into_instance(
+    into: &mut dyn PreparedNativeEffect,
+    from: &dyn PreparedNativeEffectBank,
+    from_lane: usize,
+    layout: &EffectLaneLayout,
+    scratch: &mut [u8],
+) -> Option<()> {
+    let sizes = layout.state_sizes;
+    let (common, left, right) = payload_sections(scratch, sizes)?;
+    from.snapshot_track_state_payload(
+        u32::try_from(from_lane).ok()?,
+        StatePayloadOutput::new(common, left, right, sizes).ok()?,
+    )
+    .ok()?;
+    let (common, left, right): (&[u8], &[u8], &[u8]) = (common, left, right);
+    into.restore_state_payload(
+        layout.state_layout_version,
+        StatePayloadInput::new(common, left, right, sizes).ok()?,
+    )
+    .ok()
 }
 // REALTIME_POLICY_END
 
@@ -1516,6 +1605,126 @@ impl LiveControlEffectBankStage {
             self.unrestored &= !(1_u8 << lane);
         } else {
             self.unrestored |= 1_u8 << lane;
+        }
+        true
+    }
+
+    /// Whether a per-node instance with control lane `control` could exchange its state with this
+    /// stage's lane `lane` in a plan swap, in either direction (#1281): the lane exists and is of
+    /// the instance's kind, the two control lanes have one cell shape, and `scratch_bytes` holds
+    /// the payload. The two layouts agree by the join that named the move, which compares them
+    /// where both are known. Allocation-free and bounded.
+    #[must_use]
+    pub fn can_carry_instance(
+        &self,
+        lane: usize,
+        control: &EffectControlLane,
+        scratch_bytes: usize,
+    ) -> bool {
+        self.lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .is_some_and(|own| own.can_carry_from(control))
+            && self.lane_kind(lane) == Some(EffectLaneKind::of_instance(control))
+            && usize::try_from(self.layout.payload_bytes())
+                .is_ok_and(|payload| payload <= scratch_bytes)
+    }
+
+    /// Move the per-node instance `from` into this stage's lane `lane` at the swap block (#1281
+    /// D2): its whole state payload through `scratch` (the instance's snapshot into the bank's
+    /// per-lane restore, a ramp in flight included), then its control lane
+    /// ([`EffectControlLane::carry_from`]), then its dry shunt's latency line (D5, as one lane of
+    /// one), and last the witness this stage holds for the lane, recomputed after the restore.
+    /// Returns whether the lane was taken.
+    ///
+    /// The caller has checked [`Self::can_carry_instance`]. A per-node instance renders dual
+    /// always, so both its channels hold real state and there is no collapse to take down first. A
+    /// snapshot or a restore that refuses leaves this lane as prepared, at rest, takes nothing
+    /// else of the instance and counts in [`Self::carry_refused`] (D6). Allocation-free and bounded
+    /// by the prepared state size and the latency.
+    pub fn carry_lane_from_instance(
+        &mut self,
+        lane: usize,
+        from: EffectInstance<'_>,
+        scratch: &mut [u8],
+    ) -> bool {
+        let taken = if self.can_carry_instance(lane, from.control, scratch.len()) {
+            carry_payload_from_instance(
+                &mut *self.processor,
+                lane,
+                from.processor,
+                &self.layout,
+                scratch,
+            )
+        } else {
+            None
+        };
+        let Some(restored) = taken else {
+            self.carry_refused = self.carry_refused.saturating_add(1);
+            return false;
+        };
+        if let Some(into) = self.lanes.get_mut(lane).and_then(Option::as_mut) {
+            let carried = into.carry_from(from.control);
+            debug_assert!(carried, "a checked control lane carries");
+        }
+        if let Some(into) = self.shunt.as_mut().filter(|shunt| shunt.feeds_line())
+            && from.shunt.feeds_line()
+        {
+            let carried =
+                into.carry_line_lane_from(lane, self.width.lanes() as usize, from.shunt, 0, 1);
+            debug_assert!(carried, "a checked shunt line carries");
+        }
+        self.designed[lane] = self.processor.lane_channel_symmetry(lane);
+        if restored {
+            self.unrestored &= !(1_u8 << lane);
+        } else {
+            self.unrestored |= 1_u8 << lane;
+        }
+        true
+    }
+
+    /// Move this stage's lane `lane` into the per-node instance `into` at the swap block (#1281
+    /// D2): the bank's per-lane snapshot into the instance's restore, then the lane's control
+    /// ([`EffectControlLane::carry_from`]) and its words of the dry shunt's line (D5). Returns
+    /// whether the instance took it; `false` leaves the instance as prepared, at rest, and the
+    /// caller counts the refusal (D6).
+    ///
+    /// The caller has checked [`Self::can_carry_instance`], and has disengaged this stage's chain
+    /// ([`BankChain::disengage_for_carry`], D3), so a collapsed bank's right channel holds the
+    /// state a dual run would and the instance continues it bit for bit. Reads this stage only:
+    /// it never renders again. Allocation-free and bounded by the prepared state size and the
+    /// latency.
+    pub fn carry_lane_into_instance(
+        &self,
+        lane: usize,
+        into: EffectInstanceMut<'_>,
+        scratch: &mut [u8],
+    ) -> bool {
+        if !self.can_carry_instance(lane, into.control, scratch.len()) {
+            return false;
+        }
+        if carry_payload_into_instance(
+            into.processor,
+            &*self.processor,
+            lane,
+            &self.layout,
+            scratch,
+        )
+        .is_none()
+        {
+            return false;
+        }
+        if let Some(from) = self.lanes.get(lane).and_then(Option::as_ref) {
+            let carried = into.control.carry_from(from);
+            debug_assert!(carried, "a checked control lane carries");
+        }
+        if let Some(from) = self.shunt.as_ref().filter(|shunt| shunt.feeds_line())
+            && into.shunt.feeds_line()
+        {
+            let carried =
+                into.shunt
+                    .carry_line_lane_from(0, 1, from, lane, self.width.lanes() as usize);
+            debug_assert!(carried, "a checked shunt line carries");
         }
         true
     }
