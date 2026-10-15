@@ -119,7 +119,7 @@ left/right/both, while matrix IDs 7-10 accept `both` only, and only on a strip i
 `console` and `inserts`, `control` is the effect's parameter ID (`0` is its bypass). The session
 validator checks only that the owner, slot or insert exists; whether the row is automatable (not
 rebuild-only like `delay_samples` 11 or an EQ band's `enabled`, not derived, not a monitor or
-setting row), takes the lane, unit and values is `control.address.unknown`,
+setting row, and not a send's `follows_mute` (route row 7) or a strip's `matrix_mode` (own row 1): live controls that a ruling keeps out of automation, #1632), takes the lane, unit and values is `control.address.unknown`,
 `control.automation.target`, `control.inactive`, `control.lane` or `control.domain` at prepare-effects. A
 parameter does not have to be declared on the strip. Stored automation is inert today: it authors
 and round-trips, and renders nothing.

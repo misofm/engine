@@ -271,7 +271,7 @@ owner uses the `own` section (`schema.invalid_enum` at `target.section` otherwis
 lane and takes the segment's unit and values is the control core's rule
 (`controls::automation_diagnostics`), reported by host preparation and `session-validator` stage 5
 beside the effect diagnostics: `control.address.unknown` (no row), `control.automation.target`
-(the row is rebuild-only, derived, a monitor row or a setting), `control.inactive` (the owner's shape
+(the row is rebuild-only, derived, a monitor row, a setting, or one of the two live rows that a ruling keeps out of automation: a send's `follows_mute`, a routing setting, and a strip's `matrix_mode`, a mode; #1632), `control.inactive` (the owner's shape
 does not use the row), `control.lane` (`left` or `right` on a shared row) and `control.domain` (a
 segment whose unit is not the row's, or a value the row refuses). A console target on a submix
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter

@@ -112,7 +112,7 @@ export const CONTROLS = deepFreeze(
       "reason": null,
       "reasonIssue": null,
       "reopen": null,
-      "automatable": true
+      "automatable": false
     },
     {
       "control": 2,
@@ -999,7 +999,7 @@ export const CONTROLS = deepFreeze(
         "reason": null,
         "reasonIssue": null,
         "reopen": null,
-        "automatable": true,
+        "automatable": false,
         "active": true
       },
       "intoOutput": {
