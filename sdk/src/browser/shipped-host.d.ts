@@ -912,9 +912,11 @@ export interface MisoAudioWorkletHost {
     request: { enabled: boolean; onFrame: ((frame: MisoTelemetryFrame) => void) | null },
   ): Promise<MisoAck>;
   /// @internal Subscribe to the engine's protocol events (issue 1570b D5): every command's
-  /// `SESSION_COMMITTED`, `TRANSPORT_STATE`, `METER_BATCH`, `COUNTER_SNAPSHOT`, `DIAGNOSTIC` and the
-  /// other events of the control protocol, as the engine encoded them. The listener gets each
-  /// event with its lane (`0` reliable, `1` lossy) in arrival order. Returns the unsubscribe
+  /// `SESSION_COMMITTED`, `OBSERVATION_ENDED` (reliable: a commit removed the effect of a
+  /// subscribed observation tap, and the event names every ended tap key, #1584), `TRANSPORT_STATE`,
+  /// `METER_BATCH`, `COUNTER_SNAPSHOT`, `DIAGNOSTIC` and the other events of the control protocol,
+  /// as the engine encoded them. The listener gets each event with its lane (`0` reliable, `1`
+  /// lossy) in arrival order. Returns the unsubscribe
   /// function. An event is not the ack of a command: the command's reply is.
   onControlEvent(listener: (event: MisoControlEvent) => void): () => void;
   /// @internal The count of engine events that arrived while no listener was subscribed (issue

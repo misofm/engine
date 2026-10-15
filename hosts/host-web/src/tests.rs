@@ -7174,4 +7174,207 @@ mod structural_apply {
         });
         assert!(refused.contains("web.apply.shape_unavailable"), "{refused}");
     }
+
+    /// The model of the observation gates: the command fixture with the observed compressor
+    /// (insert `comp`, tap 1) as the first track's only insert.
+    fn observed_model() -> SessionModel {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        model
+    }
+
+    fn comp_address() -> ObservationAddress {
+        ObservationAddress {
+            track_index: 0,
+            rack: LiveEffectRack::Inserts,
+            effect_index: 0,
+            tap_id: 1,
+            channels: ObservationReadChannels::Both,
+        }
+    }
+
+    /// Every reliable event the control plane has queued, drained the way the worklet does, as
+    /// `(revision, payload)` for the two this gate reads.
+    fn drain_reliable(host: &mut AudioWorkletEngineHost) -> Vec<(u64, String)> {
+        let codec = ProtocolCodec::default();
+        let mut events = Vec::new();
+        loop {
+            assert_eq!(host.control_event(EVENT_LANE_RELIABLE), RESULT_OK);
+            if host.control_response().is_empty() {
+                return events;
+            }
+            let bytes = host.control_response().to_vec();
+            let mut fields = vec![0_u16; 4_096];
+            let decoded = codec
+                .decode_typed_event(&bytes, &mut DecodeScratch::new(&mut fields))
+                .expect("an event frame");
+            let revision = decoded.header.revision.0;
+            match decoded.payload {
+                protocol::DecodedEventPayload::SessionCommitted(_) => {
+                    events.push((revision, "committed".to_owned()));
+                }
+                protocol::DecodedEventPayload::ObservationEnded(ended) => {
+                    for key in &ended.keys {
+                        events.push((
+                            revision,
+                            format!(
+                                "ended {} {:?} {} {}",
+                                key.strip_id, key.section, key.effect_id, key.tap_id
+                            ),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// #1584 D6b, restart: a subscribed compressor whose link mode changes is prepared again (a
+    /// rebuild with no carry), and the successor's tables say what its lanes were armed with. The
+    /// tap is armed on the browser's side, the first window opens at the adoption block's first
+    /// sample, and the windows continue block after block.
+    ///
+    /// Test value: red if `build_plan_shape` leaves the successor's armed bits clear for a tap the
+    /// plan's lane armed (the read would answer `Unarmed` and the page's subscription would
+    /// silently stop at every restart of its effect, as `observation_armed_taps` reads zero).
+    #[test]
+    fn a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser() {
+        let model = observed_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..8 {
+            rig.step();
+        }
+        let before = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the armed tap published a window")
+            .sequence;
+        assert!(before > 1);
+
+        let mut restarted = model.tracks[0].inserts.effects[0].clone();
+        restarted.link_mode = session::LinkMode::Maximum;
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::PutTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 0,
+                    effect: restarted,
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        let adoption_sample = rig.block * u64::from(QUANTUM);
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            1,
+            "the successor's tables carry the subscription the host had acknowledged"
+        );
+        rig.step();
+        let first = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the restarted tap published its first window");
+        assert_eq!(
+            first.first_sample, adoption_sample,
+            "from the adoption block on"
+        );
+        assert_eq!(
+            first.sequence, 1,
+            "a restarted tap numbers its windows afresh"
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        let later = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the windows continue");
+        assert_eq!(later.sequence, 3);
+        assert!(rig.host.poll_meters() > 0);
+        assert!(
+            gain_reduction(&rig.host).0[0] > 0.0,
+            "the meter frame's gain-reduction word follows the restarted tap"
+        );
+    }
+
+    /// #1584 D6b, removal: the removed insert has no slot on the successor, the browser's read
+    /// finds no tap there, and the event drain returns the commit and one `OBSERVATION_ENDED`
+    /// that names the tap.
+    ///
+    /// Test value: red if the browser's drain loses the event (the page would keep a subscription
+    /// whose effect is gone and never be told), or if a removed insert's tap stays armed in the
+    /// successor's tables.
+    #[test]
+    fn a_removed_inserts_subscription_ends_with_an_event_and_has_no_slot() {
+        let model = observed_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.host.observation_armed_taps(), 1);
+        assert!(
+            drain_reliable(&mut rig.host).is_empty(),
+            "nothing is queued yet"
+        );
+
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::RemoveTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    effect_id: model.tracks[0].inserts.effects[0].id.clone(),
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        let events = drain_reliable(&mut rig.host);
+        assert_eq!(
+            events,
+            vec![
+                (base + 1, "committed".to_owned()),
+                (base + 1, "ended track Inserts comp 1".to_owned()),
+            ]
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(rig.host.observation_armed_taps(), 0);
+        assert!(
+            rig.host
+                .read_observation_addresses(&[comp_address()])
+                .is_err(),
+            "the successor has no insert, so no slot to read"
+        );
+    }
 }

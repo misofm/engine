@@ -497,3 +497,42 @@ Root ruling A replaces D6a's one event per ended binding with one `OBSERVATION_E
   `observation_pending` slots were allocated and never charged. `capi_resources` now charges both
   (`ObservationResources { producers, slots, ended_heap_bytes }`), beside the fold's ended-event heap; the whole
   `cargo test -p capi` passes (132 passed). Audit capi `pcm_digest` `bf7dcedd1d92621f`, allocations 0.
+
+## Decision record: #1584 D6b (batch 12b, lane W)
+
+What shipped, in `hosts/host-web/src/lib.rs`:
+
+- `build_plan_shape` takes the bindings (`&[controls::ObservationBinding]`, from the `SuccessorBase` the
+  preparer received; empty at boot) and sets `observation_armed` for each binding whose strip, section
+  (console or inserts), effect ID and tap ID match an observed instance of the plan. The bit is the tap's
+  index in the descriptor's observations, as `push_observe` sets it. The arm sample stays 0 and the
+  commanded bit stays clear. The match is the one host-core uses for the lane's prepared arm, so the
+  table and the lane cannot disagree; a binding the plan lacks sets nothing. A carried reader still
+  takes the predecessor's bits (`carry_tap_state`), so the prepared arm never wins over carried state.
+  Nothing new runs in `process()`: the bits are written on the control side while the shape is built.
+- Doc comment of `onControlEvent` names `OBSERVATION_ENDED` in
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its copy
+  `sdk/src/browser/shipped-host.d.ts` (equal). The worklet drain (`drainControlEvents`) copies any
+  frame it dequeues and decodes none, so the event passes through with no JS change (the reliable lane
+  holds `SESSION_COMMITTED` and `OBSERVATION_ENDED`, within the drain's 16-call bound). The SDK reaction
+  stays with #1562b-K.
+
+Gates (`structural_apply` in `hosts/host-web/src/tests.rs`, through `structural_command_for_test`):
+
+1. `a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser`: the subscribed compressor's
+   link mode changes (rebuild, no carry); the successor has `observation_armed_taps() == 1`, its first
+   window opens at the adoption block's first sample with sequence 1, the windows continue (sequence 3
+   after four more blocks), and the meter frame's gain-reduction word is positive. Red with the
+   bindings passed as `&[]` (armed taps 0 after the swap).
+2. `a_removed_inserts_subscription_ends_with_an_event_and_has_no_slot`: after the insert removal the
+   browser's event drain returns `SESSION_COMMITTED` then one `OBSERVATION_ENDED` with the committing
+   revision and the key (`track`, inserts, `comp`, tap 1); the successor has no armed tap and
+   `read_observation_addresses` refuses the removed insert's address.
+3. `tests/structural_apply_realtime.rs`: 3 passed, zero render-locked allocations.
+
+Runs: `cargo test -p host-web --features host-web/test-support` (all), `cargo test -p control-plane
+--features test-support`, clippy `-D warnings` on host-web, fmt, the wasm build, `check-web-audioworklet.sh`,
+`test-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `check-sdk-generated.sh`,
+`check-sdk-types.sh`, `check-sdk-headless.sh`, the chromium qualification (151.0.7922.34, all
+render-allocation rows 0), `realtime-policy` (141 regions) and `check-bench-policy.sh` all pass. The
+shipped module sha256 is `179a933a...c3c1ae`; no export, layout or JS file changed.

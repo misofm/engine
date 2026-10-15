@@ -5426,6 +5426,11 @@ impl WebRuntimePreparer {
             effects: lanes.effects || live_controls.observation_taps != 0,
             ..lanes
         };
+        // #1584 D6b: the taps the host had armed, which host-core arms the successor's lanes from;
+        // the plan's tables must say the same.
+        let bindings: &[controls::ObservationBinding] = successor
+            .map(|base| base.observation.bindings())
+            .unwrap_or_default();
         let (mut host, mut handles, spectrum_capture) = prepare_web_host(
             compiled,
             caps,
@@ -5445,6 +5450,7 @@ impl WebRuntimePreparer {
             &handles.effect_observations,
             handles.meters.len(),
             handles.master_track,
+            bindings,
         )
         .map_err(|code| {
             let rejection = if code.starts_with("web.resource.") {
@@ -5514,6 +5520,11 @@ impl WebRuntimePreparer {
 /// model's, the order host-core's addressing authority uses and the control plane's producers
 /// follow.
 ///
+/// `bindings` are the taps the host had armed when this plan was prepared (#1584 D6b): the same
+/// table host-core armed the plan's lanes from, so a bound tap's `observation_armed` bit is set
+/// here with arm sample 0 and its commanded bit clear (a fresh tap has no stale window). A binding
+/// whose effect or tap the plan lacks sets nothing, as host-core arms nothing for it.
+///
 /// Errors are the diagnostic code of the refusal.
 fn build_plan_shape(
     model: &session::SessionModel,
@@ -5521,6 +5532,7 @@ fn build_plan_shape(
     observations: &[EffectObservationHandle],
     meter_count: usize,
     master_track: Option<u32>,
+    bindings: &[controls::ObservationBinding],
 ) -> Result<PlanShape, &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
@@ -5635,6 +5647,7 @@ fn build_plan_shape(
         .try_reserve_exact(observations.len())
         .map_err(|_| "web.resource.allocation")?;
     let observation_present = vec![false; strip_count];
+    let mut observation_armed = zero_u32(total_effects as usize)?;
     // The plan's published frame and the header that describes it (#1290d1). The frame's address
     // is the heap block's, so it stays put as the tables move.
     let meter_frame = zero_meter_frame(strip_count)?;
@@ -5672,6 +5685,29 @@ fn build_plan_shape(
             .map_err(|_| "web.resource.allocation")?;
         arm_samples.resize(tap_count, 0);
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
+        // #1584 D6b: the bits of the taps the host had armed, in the descriptor's tap order (the
+        // bit is the effect-local tap index, as `push_observe` sets it).
+        let console = handle.address.rack == LiveEffectRack::Console;
+        for binding in bindings {
+            if binding.key.section.is_console() != console
+                || binding.key.section.id().as_str() != &*handle.effect_id
+                || binding.key.strip.as_str() != &*handle.track_id
+            {
+                continue;
+            }
+            if let Some(index) = handle
+                .descriptor
+                .observations
+                .iter()
+                .position(|tap| tap.id.0 == binding.key.tap_id)
+                && let Some(bit) = u32::try_from(index)
+                    .ok()
+                    .and_then(|index| 1_u32.checked_shl(index))
+                && let Some(word) = observation_armed.get_mut(slot)
+            {
+                *word |= bit;
+            }
+        }
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
         reader_slots.push(u32::try_from(slot).map_err(|_| "web.live_controls.observation")?);
     }
@@ -5683,7 +5719,7 @@ fn build_plan_shape(
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
         reader_slots: reader_slots.into_boxed_slice(),
-        observation_armed: zero_u32(total_effects as usize)?,
+        observation_armed,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
         observation_commanded: zero_u32(total_effects as usize)?,
         master_track,
