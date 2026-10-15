@@ -34,7 +34,7 @@ use builtins::{
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
-    Owner, RebuildReason, Section,
+    Owner, Section,
 };
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
@@ -204,29 +204,7 @@ impl LiveDelta<'_> {
     }
 }
 
-/// Why a delta needs a plan rebuild.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LiveRebuild {
-    /// The models differ in something that is not a control value: the strip, route, slot or
-    /// insert set or order, an effect's identity, quality or sidechain, a profile's other fields,
-    /// or any other field no control row describes.
-    Structure,
-    /// A fader, pan/matrix or input value is outside the domain its render-side setter accepts, a
-    /// send's gain or matrix is outside the route domain or its ramp is too long, or an
-    /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
-    /// preparation diagnostic it always has.
-    Domain,
-    /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
-    /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
-    /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
-    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
-    RebuildOnly(RebuildReason),
-    /// The stored automation changes and one of `next`'s automations names a row that its rule
-    /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
-    /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
-    /// refusal has one author and no live commit can ack it first.
-    AutomationTarget,
-}
+pub use crate::prepare::LiveRebuild;
 
 /// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1, #1554).
 ///
