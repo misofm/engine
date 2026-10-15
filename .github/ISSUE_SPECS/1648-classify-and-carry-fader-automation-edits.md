@@ -257,3 +257,14 @@ Checked against `12d4a4f9d`.
   automation value at a held ramp's end carries with the cell's event state, and the successor
   re-reports a carried held ramp to the cell with `hold_until` at adoption (`CellState::reposition`
   drops it).
+
+## Amendment (controls coordinator, batch 13b, from #1639's review; root ruling 2026-10-15)
+
+- **Jump lengths follow a rebuild.** Every automation edit on a row that `automation_jump_row`
+  returns (builtin, route, VCA and effect-bypass rows; `crates/host-core/src/live_delta.rs`, #1639)
+  is a rebuild, and its successor seeds the plan's jump-length cell from the committed model
+  (#1639 D4). So a `control_smoothing` change committed while no automation reads a length (#1639
+  D3 writes nothing then) reaches render with the first entry that does.
+- **Gate.** Add to the objective gates: `control_smoothing` changed on a session with no reading
+  automation, then a fader entry added: the next block holds the new lengths
+  (`graph::test_only_block_jump_lengths`).
