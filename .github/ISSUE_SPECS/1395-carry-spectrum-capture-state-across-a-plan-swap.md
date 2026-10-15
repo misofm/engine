@@ -199,3 +199,43 @@ Checked against `12d4a4f9d`.
 - **Split (plan v2).** #1395a: the single capture (gates 1, 3's single part, 4); #1395b: the
   collection (gate 2, 3's collection part).
 - **Dependencies.** #1327a (the table, the record and the section). #1401 is closed.
+
+## Amendment (controls coordinator, batch 12, 2026-10-15)
+
+Checked against `ea336c039`.
+
+- **No engine edit.** #1327a declared `ObserverKind::Spectrum` (`crates/engine/src/realtime/plan.rs:548-555`).
+  This slice edits nothing under `crates/engine/src/realtime`.
+- **The observer table is generic.** `GraphRuntimeObserver::carry_kind` returns
+  `Option<ObserverKind>` (default `None`, `crates/graph/src/lib.rs:2887`). `GraphObserverRow` and
+  `GraphObserverMove` carry their kind (`:3519`, `:3533`), and the move section writes the kind of
+  each move into the record. So D2 is: `SpectrumCaptureObserver` (`spectrum.rs:2497`) answers
+  `Some(Spectrum)`, and host-core gives spectrum rows keyed by D1, as `MeterInventoryRow` and
+  `resolve_meter_carry` do for meters (`crates/host-core/src/prepare.rs:3152`). A graph edit is still
+  "only if needed". The spectrum observer's binding handle is positional
+  (`SPECTRUM_OBSERVER_HANDLE - index`, `spectrum.rs:31`). So when a collection is reordered, the
+  observer swapped in must take its new binding's handle (`adopt_binding_handle`), as the meter
+  observer does.
+- **D3 and D5 as amended in batch 10 still hold.** Pairing happens on the control side when the
+  adopted candidate is promoted, as one `SpectrumService` method (`spectrum_service.rs:585`) that
+  uses D3's two functions. No `pair_carried` exists yet. Add `crates/host-core/src/spectrum_service.rs`
+  to the authorized paths (the batch 10 amendment requires it, but the list was not changed).
+- **Where the browser's successor capture is.** The boot plan's capture is moved into
+  `SpectrumService` (`take_spectrum_capture`, `hosts/host-web/src/lib.rs:5139`, called at `:5932`).
+  A successor's capture stays in the successor's `RenderCompanions` (`:5055`). #1290 (d) takes it
+  out at promotion, in the service step after the adoption block, and calls this slice's method.
+  Between adoption and promotion, a carried entry is served by the capture that the service
+  already holds, because its observer was swapped. An entry that is not carried reads as pending
+  until promotion.
+- **A refused hand-over.** `RealtimePlanOwner::carry_mismatch_count`
+  (`crates/engine/src/realtime/plan_exchange.rs:719`) is readable at promotion only when the
+  control and render halves are one instance (single mode, the only browser mode today). The C ABI's
+  #1593 and the browser's Worker mode (#1332) must publish it to the control side. Record this as
+  a rule for those slices. This slice does not change it.
+- **Anchors.** The batch 10 anchors in `spectrum.rs` are unchanged. The successor entries are now at
+  `prepare.rs:1339` (single) and `:1371` (collection).
+- **#1618** lands after #1395b, as root ruled. Its settle is part of the same `SpectrumService`
+  method: an entry that is not carried, or all entries after a refused hand-over. So
+  `spectrum_service.rs` is edited in this order: #1395a, #1395b, #1618.
+- **Order in lane K.** #1395a, then #1395b, after #1584 D6a. Both slices edit
+  `crates/host-core/src/prepare.rs` and `crates/host-core/tests/successor_swap.rs`.

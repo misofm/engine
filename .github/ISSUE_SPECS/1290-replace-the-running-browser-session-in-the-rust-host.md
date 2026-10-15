@@ -415,3 +415,57 @@ Gates -> tests: `structural_apply::the_catalogs_describe_the_successor_from_the_
 successor's full one-slot queue, leaves the rendering plan unarmed and arms the successor's
 compressor at the adoption block); `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`;
 `a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit` (nothing committed).
+
+## Amendment (controls coordinator, batch 12, 2026-10-15): (d+e)
+
+Checked against `ea336c039`.
+
+- **Where things are.** #1381b pairs the meter consumers and the observation readers in the swap
+  block (`RenderCompanions::adopt_predecessor`, `hosts/host-web/src/lib.rs:5190`). `adopt_shape`
+  (`:1562`) moves the meter pending windows and the tap state. A swap that carries a meter keeps
+  `meter_generation`. What is not done yet:
+  - The published frame does not grow or shrink with the plan. `meter_frame` is sized at boot
+    (`:1450`, `:6054`), and `poll_meters` publishes nothing when the strip count differs (`:3411`).
+    The worklet cuts fixed views and builds a fixed `meterMessage` at boot from the header's counts
+    (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:728-747`).
+  - The successor's spectrum capture is not paired (#1395 is open).
+  - #1381's gate 3, the frame with a changed strip count (`track_count` 3, the shifted strip's word,
+    `master_track_plus_one` 3), was left to (d) by #1381b.
+- **D7.** The batch 10 amendment still holds: meters and taps pair in the swap block, and spectrum
+  pairs at promotion through #1395's `SpectrumService` method.
+- **Meter frame growth, options.** `process()` must not cut a view or allocate (#1562a record).
+  - (1) Size the frame and the worklet's views for a boot maximum of strips. The `3(T + S) + 3`
+    layout is packed by count, so the view offsets still move with `T`. This needs a new layout at
+    capacity offsets, which changes the ABI rows and `sdk/src/core/boundary.ts`, and every post
+    clones the capacity.
+  - (2) The frame goes with the plan's tables. It is allocated in `build_plan_shape` beside the
+    per-meter scratch and exchanged in `adopt_shape` (a pointer exchange). The message handler that
+    commits the rebuild also cuts the successor's views and builds its `meterMessage` in advance.
+    `process()` changes to them by reference at the first poll after adoption.
+    `rebindMemoryViews` also cuts the pending views again. The layout and the ABI rows do not
+    change, except for an export that gives the pending frame pointer, if one is necessary.
+  - **Recommendation: (2).** It is the #1290a `PlanShape` pattern, and it keeps exact sizes.
+- **A handle shift must not lose a carried window.** The #1381b fold records this: a snapshot
+  published before the swap keeps the old meter handle. When the handles shift (an added strip
+  sorts first), the poll's handle check drops the snapshot and counts it as loss. Gate 7 polls after
+  every block, so gate 7 does not see this. (d) matches a carried pending snapshot by its carried
+  slot, and adds a gate: gate 7's script with a poll every second block shows no counted loss.
+- **Split, so lane W does not wait for lane K:**
+  - **(d1) meters.** Option (2), #1381's gate 3 with a changed strip count, the handle-shift gate,
+    and gate 7's meter part. This has no lane K dependency.
+  - **(d2) spectrum.** Gate 7's spectrum part: at promotion, take the successor's capture out of
+    the adopted plan's attachment and call #1395's method with the pairing list kept beside the
+    `PendingShape`. Dependencies: #1395a and #1395b.
+- **(e) needs no code.** Gate 9's native part is already met by (a):
+  - (a)'s gates run on one thread, so the apply runs between render calls, as the message handler
+    runs it.
+  - `blocking_rebuilds() == 1` is asserted at `hosts/host-web/src/tests.rs:6150` and
+    `hosts/host-web/tests/structural_apply_realtime.rs:393`.
+  - The browser legs are #1295's.
+  - Record (e) as met when (d2) closes.
+- **Restarted and removed effect owners.** A subscription on an owner that restarts or is removed
+  is #1584 D6a and D6b, not (d). (d)'s gate 7 has no effect.
+- **No edit under `crates/engine/src/realtime`.**
+- **Order in lane W:** (d1), #1584 D6b, (d2), #1562b-W. The four slices edit `hosts/host-web/src/lib.rs`
+  and `src/tests.rs` in that order. (d1) and #1562b-W also edit the worklet JS and the ABI layout
+  mirrors, in that order.

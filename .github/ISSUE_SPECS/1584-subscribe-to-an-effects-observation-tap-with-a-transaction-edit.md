@@ -209,3 +209,156 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None. The SDK's own sharing goes in #1590.
+
+## Amendment (controls coordinator, batch 12, 2026-10-15)
+
+Checked against `ea336c039`.
+
+### The defect D6 closes first (root, batch 12)
+
+- **What is dropped today.** A subscribe that the host acknowledged is lost at a swap when its effect
+  owner does not carry. The carry drain applies pending `Observe` records only for effect moves: its
+  second loop iterates `moves` (`crates/graph/src/runtime.rs:5443-5470`). A record in the queue of a
+  restarted owner (a prepared change, such as link mode) or a removed owner is never applied and
+  never counted, and the successor's tap is prepared unarmed (#1327b record, "Departures"; #1327
+  batch 11 fold). A carried owner keeps its subscription (#1280b drain, then #1327b's
+  `Runtime::carry_taps`, `:5494`).
+- **Which host can reach it.** Only the browser acknowledges a subscribe today (kinds 7 and 8,
+  through `SessionState::push_effect_observe`, `crates/control-plane/src/control.rs:2244`, on the
+  newest plan's producer). The C ABI has no subscribe path until D1-D5 and D7. The browser rebuild
+  path is test-support only until #1562b-W, so D6 must land before #1562b-W.
+- **A candidate that a later rebuild supersedes** cannot hold a subscribe now: a rebuild while a
+  candidate waits returns `BACKPRESSURE` (`control.rs:1292`). The slice that makes supersession
+  reachable (#1290 (b) or #1310) owns that gate.
+
+### Frozen decisions that do not hold as written
+
+- **D3, where the table lives.** #1559 shipped the monitor overlay as `controls::MonitorOverlay`
+  (`crates/controls/src/effective.rs:28`), held at `SessionState.monitor` (`control.rs:403`), and not
+  on `ProtocolController`. The monitor edits are `controls::MonitorWrite` (`effective.rs:103`), not
+  `MonitorEdit`. `host_core::SuccessorBase` already passes the overlay to every successor preparation
+  as `MonitorBase { committed, next, ramp }` (`crates/host-core/src/prepare.rs:1004`, `:1034`).
+  - Option 1, as filed: `ObservationBindings` on `ProtocolController`, and a new `armed_taps`
+    argument through `RuntimePreparer::prepare` and every host-core successor entry. That gives two
+    owners of monitor state and two paths into the preparation.
+  - Option 2: the bindings are a field of `controls::MonitorOverlay`. `MonitorOverlay::after` applies
+    the observe writes in transaction order and drops each binding whose target the next model does
+    not have, and `MonitorChange` returns those ended keys. Host-core arms the taps of
+    `MonitorBase.next` when it prepares a successor. No preparation signature changes.
+  - **Recommendation: option 2.** D3's sharing rule (refs, `observation.window_conflict`,
+    `observation.not_subscribed`) does not change. Only its owner changes.
+- **D6, `armed_taps`.** With option 2, `ArmedTap` and the `armed_taps` argument are not needed:
+  host-core resolves `MonitorBase.next`'s bindings against the successor's model.
+- **D6, "opens its first window at its first rendered block".** At preparation the adoption sample
+  is not known. `ObservationLane::arm` takes the window's `first_sample`
+  (`crates/effect-contract/src/live.rs:1630`), and `accumulate` keeps it (`:1754`). So the slice
+  adds a prepared arm to `ObservationLane`: the tap is armed, and `accumulate` takes the block's
+  `first_sample` as the window start on its first block. `swap_state` moves this state with the tap
+  table, so a carried tap replaces the prepared arm completely. Do not queue a record into the
+  successor's own queue instead: a carried tap would then be re-armed by its first block, and its
+  window would restart.
+- **D6, the removed owner.** As filed, the binding goes silently. Root needs a typed end. Options:
+  - (A) A reliable event, `OBSERVATION_ENDED { event_sequence, revision, strip_id, section, tap_id }`,
+    one for each ended binding, queued with the transaction's `SESSION_COMMITTED`. The room for
+    all of these events is checked before commit (`required_events`,
+    `crates/protocol/src/controller.rs:1897-1901`). If there is not sufficient room, the transaction
+    is refused with `BACKPRESSURE` and nothing changes. The end takes effect at the revision's
+    watermark. All listeners see it on both hosts (the browser drains the lane since #1570b).
+  - (B) A list of ended keys in the transaction reply. Only the sender sees it, and other
+    subscribers stay silent.
+  - (C) Refuse a transaction that removes a subscribed target (`observation.subscribed`) until every
+    subscriber disarms. This is honest, but a mixer cannot remove an insert while a meter shows it,
+    and shared refs make this worse.
+  - **Recommendation: (A).** A binding also ends when the next model keeps the owner but its tap ID
+    does not resolve to a `Resident` tap (an insert ID reused for another effect type).
+- **Records left in a predecessor queue that did not move.** With D6, these records do not need a
+  counter. The overlay is the record of what was acknowledged, and the successor is prepared from
+  it. The queue is not that record. This closes the #1327 batch 11 fold item.
+- **D7a.** Holds. Until #1589, the browser's kinds 7 and 8 write the overlay's bindings through
+  `push_effect_observe` (absolute set and clear, refs 1). The `Observe` edit is refused on the
+  browser (`ProviderFeatures::observation` false), so one host never has two writers of one
+  observation queue.
+- **D7, the capacity request moved.** Since #1400 the C ABI asks for its live request in
+  `CapiPreparer` (`crates/capi/src/runtime/mod.rs:97`, `HostLiveControlRequest::default()`,
+  `observation_taps` 0). `prepare_runtime` (`crates/control-plane/src/compile.rs:689`) keeps the
+  strip, effect and route producers and drops the other handles (`:713-719`). D7's edits go there.
+  Add `crates/capi/src/runtime/mod.rs` to the authorized paths.
+
+### The batch 12 slice: #1584 D6a (lane K), then D6b (lane W)
+
+- **D6a scope.** Option 2's bindings on `controls::MonitorOverlay`, with the ended keys from `after`.
+  `push_effect_observe` writes the bindings after a successful push. Host-core arms the bindings of
+  `MonitorBase.next` in each successor preparation that attaches observation, with
+  `attach_effect_observation` (`crates/effect-compiler/src/prepare.rs:1776`) and the prepared arm on
+  `ObservationLane`. `OBSERVATION_ENDED` (option A) is added to the protocol wire, schema, corpus,
+  and `docs/CONTROL_PROTOCOL_{REGISTRY,SEMANTICS}.md`, with its room check. D6a does not include
+  D1-D5, D7 or D8's C ABI parts. The C ABI keeps `observation_taps` 0, so its overlay has no
+  bindings yet.
+- **D6a gates** (control-plane test-support, with a test preparer that asks for observation
+  capacity; and host-core `successor_swap.rs`):
+  1. Restarted owner, subscribe already applied: compressor insert `c1` on `t1`, gain-reduction tap
+     armed with window 4, 6 blocks rendered. Commit a prepared-only change of `c1` (link mode). After
+     adoption, the successor's tap is armed with window 4, its first window opens at the adoption
+     block's first sample, and every window equals a fresh plan of the committed model with the tap
+     armed at that block.
+  2. Restarted owner, subscribe still pending (root's case): the same, with the arm admitted after
+     the last block before the swap, so that it is still in the predecessor's queue at the swap
+     block. The result is the same as gate 1.
+  3. Pending disarm on a restarted owner: the tap was armed before, and the disarm is still in the
+     queue at the swap. The successor's tap is unarmed and publishes nothing.
+  4. Removed owner: commit the removal of `c1`, then a variant that removes `t1`, then a variant
+     that reuses `c1`'s ID for an effect without that tap. The binding is gone. The reliable lane
+     holds `SESSION_COMMITTED` and one `OBSERVATION_ENDED` with the committing revision and the
+     stable key. The successor has no such tap.
+  5. Room before commit: the reliable lane has room for `SESSION_COMMITTED` but not for the ended
+     event. The removal is refused with `BACKPRESSURE`, and the model, revision, overlay and plan do
+     not change. After a drain, the same request commits.
+  6. Carried owner: #1327b's `observation_carry` tests stay green. A carried tap that the overlay
+     arms continues its window sequence with no restart: the prepared arm never wins over the
+     swapped state.
+  7. Realtime: zero allocations and frees on the swap block and the successor's first block. The
+     `ObservationLane` change stays inside its `REALTIME_POLICY` region, and `realtime-policy`
+     passes.
+  - `crates/host-core/tests/effect_observation.rs:534` (`a_plan_replacement_drops_every_subscription`,
+    E13) is superseded. Rewrite it: a replacement prepared with the overlay keeps the subscription,
+    and a replacement prepared with `MonitorBase::NONE` starts unarmed.
+- **D6a authorized paths:** `crates/controls/src/effective.rs`,
+  `crates/control-plane/src/control.rs`, `crates/host-core/src/prepare.rs`,
+  `crates/effect-compiler/src/prepare.rs` (`attach_effect_observation` only),
+  `crates/effect-contract/src/live.rs` (`ObservationLane` only),
+  `crates/protocol/src/{message_wire.rs,schema.rs,controller.rs,lib.rs}`,
+  `crates/conformance/src/protocol_corpus.rs`, `fuzz/corpus/complete-schema-manifest.md`, the
+  host-core and control-plane tests above, and `docs/CONTROL_PROTOCOL_{REGISTRY,SEMANTICS}.md`.
+- **D6b (lane W, after D6a).** `build_plan_shape` (`hosts/host-web/src/lib.rs:5437`) sets
+  `observation_armed` for the bindings of `MonitorBase.next`, with arm sample 0 and the commanded bit
+  clear: a fresh tap has no stale window. Gates through `structural_command_for_test`:
+  - After a restart of a subscribed compressor, the meter frame's gain-reduction word and the
+    observation read return windows from the adoption block on.
+  - After an insert removal, there is no slot for the removed insert, and the browser's event drain
+    returns `OBSERVATION_ENDED`.
+  - `tests/structural_apply_realtime.rs` stays at zero render-locked allocations.
+- **The SDK's reaction** (`sdk/src/core/observation-subscriptions.ts` ends a managed subscription
+  on `OBSERVATION_ENDED`) goes to #1562b-K.
+- **No edit under `crates/engine/src/realtime`.**
+- **Remainder of #1584.** D1-D5, D7 and D8 (the C ABI `Observe` edit) are a later slice. It writes
+  the same bindings through `MonitorWrite`, and gate 5's removal case then also checks
+  `observation.not_subscribed` after the end.
+
+### Anchors moved
+
+- `hosts/host-web/src/lib.rs`: kinds 7 and 8 are at `:754` and `:756`, `into_observe_record` at
+  `:3944`, and the admission push is `push_observe` at `:1759`.
+- `crates/effect-contract/src/live.rs`: `Observe` `:126`, `apply_observe` `:1471`,
+  `ObservationLane` `:1528`, `arm` `:1630`, `disarm_all` `:1670`.
+- `crates/effect-compiler/src/prepare.rs`: `try_push_observe` `:782`, `observe_available_capacity`
+  `:801`.
+- `crates/protocol/src/controller.rs`: `ProviderFeatures` `:109`, `telemetry_configuration`
+  `:663`, `commit_prepared_structural` `:2150`.
+- `crates/host-core/tests/effect_observation.rs`: the replacement test is at `:534`, and
+  `scalar_reference_windows` at `:587`.
+- The capi race loop is at `crates/capi/tests/resource_lifecycle.rs:3350`.
+- `sdk/src/core/observation-subscriptions.ts`: `ObservationSubscriptionOwner` `:477`, `refs`
+  `:212`, the conflict `:570`.
+- `SessionState::command` is at `control.rs:1208`, and `miso_engine_v1_submit_command` at
+  `crates/capi/src/ffi.rs:680`.
+- `host_core::launch_maximum_observation_taps` does not exist yet (D7 adds it).
