@@ -197,3 +197,18 @@ Each form test first checks that A is per node and B banked (or the reverse) thr
 `graph` (103), `graph-compiler` (178) and `capi` (153), and `host-web --features
 host-web/test-support` (127), all green; clippy `-D warnings` and fmt clean;
 `realtime-policy` ok.
+
+## Fold (batch 10 gates): the per-node layout comes from the bound plan
+
+The browser boot-budget gate failed on the batch 10 integration branch: wasm high-water growth
+21,102,592 > 21,037,056 (pin 20 MiB plus one page). #1280a's carried slots put growth at exactly
+20,971,520; the compile-time `instance_layouts` table this issue added in `host-core` (one 88-byte
+row with two `Box<str>` names for each of the 768 effect entries, alive through the compile peak)
+cost two more pages, and serves only per-node instances. The fold deletes the table (and
+`InstanceLayout`, `instance_layout()`). `graph`'s per-node `LiveControlEffect` now keeps a `layout:
+rack::EffectLaneLayout` (`Copy`) read off the effect metadata's program key in
+`LiveControlEffect::new`; `bank_effect_lanes` returns it, `GraphEffectLane.layout` is a plain
+`EffectLaneLayout` again (not `Option`), and the inventory row takes `lane.layout`. The
+graph-compiler per-node live-control owner charge (`estimate.rs`) and its independent test sum add
+`size_of::<rack::EffectLaneLayout>()`, so retained == charged in every `bypass_resources` case.
+Measured growth: 21,102,592 -> 20,971,520 (back to the #1280a figure; the gate passes).

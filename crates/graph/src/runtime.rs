@@ -1238,6 +1238,9 @@ pub(crate) struct LiveControlEffect {
     /// capacity. `None` is one null pointer and one predicted branch per block -- and, crucially,
     /// it is the *only* observation state such a plan holds.
     observation: Option<Box<ObservationLane>>,
+    /// What a state payload must share with the lane it is moved to or from (#1281): read off the
+    /// prepared metadata at bind, which `EffectNode` does not keep.
+    layout: rack::EffectLaneLayout,
 }
 
 impl LiveControlEffect {
@@ -1332,12 +1335,14 @@ impl LiveControlEffect {
                 .check_window(spans.len())
                 .expect("a live-control effect's staging window holds every live parameter cell");
         }
+        let layout = rack::EffectLaneLayout::of(&effect.metadata.program_key());
         Self {
             observation,
             spans,
             shunt: BypassShunt::new(frames, latency),
             effect: EffectNode::new(effect),
             control,
+            layout,
         }
     }
 }
@@ -4626,7 +4631,7 @@ impl crate::runtime::Runtime {
                                 rack,
                                 effect_id: binding.stable_id.clone(),
                                 location: crate::GraphEffectSite::Node(unit),
-                                layout: None,
+                                layout: live.layout,
                                 kind: rack::EffectLaneKind::of_instance(&live.control),
                             },
                         ));
@@ -4661,7 +4666,7 @@ impl crate::runtime::Runtime {
                     rack,
                     effect_id: binding.stable_id.clone(),
                     location: crate::GraphEffectSite::Lane(location),
-                    layout: Some(stage.layout()),
+                    layout: stage.layout(),
                     kind,
                 },
             ));

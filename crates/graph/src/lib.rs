@@ -3237,10 +3237,8 @@ pub struct GraphEffectLane {
     pub effect_id: Box<str>,
     /// Where the instance sits.
     pub location: GraphEffectSite,
-    /// What the lane must share with the lane it is moved to or from. `None` for a per-node
-    /// instance: a bound plan keeps no prepared metadata for it, so the caller that prepared the
-    /// effect supplies the layout.
-    pub layout: Option<EffectLaneLayout>,
+    /// What the lane must share with the lane it is moved to or from.
+    pub layout: EffectLaneLayout,
     /// The kind of stage and control lane the instance has: the instance it is moved to or from
     /// must have the same (#1280).
     pub kind: EffectLaneKind,

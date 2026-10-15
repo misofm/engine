@@ -288,3 +288,9 @@ and the C ABI counters tests and the pinned counters response vector (request 8:
   `docs/CONTROL_PROTOCOL_SIZING.md` line 34 (the word "density").
 - `docs/C_ABI_V1_QUALIFICATION.md` states no exact retained-byte figure that included the queue, so
   it is unchanged (Hazards: nothing moved there).
+
+## Fold (batch 10 gates): the set-control timeline memory re-pin
+
+`hosts/host-web/tests/browser-v1/expected.json` `memoryBytes` for the set-control timeline row
+re-pinned 2,949,120 -> 2,883,584 (one page, 65,536 bytes: the removed protocol automation queue's
+heap), measured with `scripts/check-browser-expected-resources.py` on the batch 10 build.

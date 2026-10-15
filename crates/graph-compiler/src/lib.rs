@@ -3253,7 +3253,8 @@ mod tests {
                     + size_of::<Box<EffectControlLane>>()
                     + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
                     + size_of::<effect_contract::BypassShunt>()
-                    + size_of::<Option<Box<effect_contract::ObservationLane>>>();
+                    + size_of::<Option<Box<effect_contract::ObservationLane>>>()
+                    + size_of::<rack::EffectLaneLayout>();
                 let window = capacity * span;
                 let shunt = 2 * (quantum + latency) * size_of::<f32>();
                 expected_total = expected_total
