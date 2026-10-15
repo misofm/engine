@@ -276,19 +276,30 @@ authorized paths, for the construction sites only: `crates/host-core/tests/brows
   engine's `withdraw` exists (`crates/engine/src/realtime/plan_exchange.rs:552`, #1343), but #1310's
   compare-and-swap and its D2, D5 and D6 do not. #1310 also waits on #1344 and #1398, both open.
 - #1403 (open) adds `PrimedCandidate` later. It is not a dependency.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+  The rest of batch 15 follows. This slice is in the rest (R5).
 
-**NEEDS ROOT RULING: a pending candidate before #1310.** D2 supersedes a pending candidate
+**ROOT RULING (2026-10-15): order #1310, #1344 and #1398 before #1323. No placeholder
+refusal.** (R5.) #1344, #1398 and #1310 are in batch 15a; #1323 follows in the rest of batch 15.
+The finding follows. D2 supersedes a pending candidate
 through #1310, which is not planned for this batch. A declaration while a candidate is pending has
 no rule without it. Proposed: order #1310, #1344 and #1398 before #1323. Do not ship a placeholder,
 such as a typed backpressure refusal while a candidate is pending.
 
-**NEEDS ROOT RULING: revision 0 (root's open question above).** Proposed answer: no special
+**ROOT RULING (2026-10-15): no revision-0 special case. At revision 0 the call returns OK and
+publishes nothing.** (R6.) D2 adds that sentence. Gate 3 adds a revision-0 case: a declaration
+on a host at revision 0 returns OK, publishes no candidate, and leaves the next render and the
+reported latency unchanged. The finding follows. Proposed answer: no special
 case. Floors and source-read offsets come only from a successor. A successor needs
 `1 <= revision` (`host.successor.revision`, `prepare.rs:1915`, `:3200`), and the committed revision
 only grows. So when D2's test holds, the committed revision is at least 1. At revision 0 the call
 returns OK and publishes nothing. Add that sentence to D2 and a revision-0 case to gate 3.
 
-**NEEDS ROOT RULING: the browser entry (decision 17 C1).** D5 leaves the browser to #1332 and
+**ROOT RULING (2026-10-15): this slice also adds `miso_engine_web_v1_declare_discontinuity(handle)
+-> u32`.** (R7.) It forwards to the same control-plane function. It adds the export-list mirrors
+of #1293 D7 and a native host-web gate equal to gate 2 (in `hosts/host-web/src/tests.rs`).
+#1643 calls it before its seek. Add `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs` and
+the mirror files of #1293 D7 to Authorized paths. The finding follows. D5 leaves the browser to #1332 and
 #1296. Since #1381a the browser runs `control_plane::SessionState` in its one instance
 (`hosts/host-web/src/lib.rs:6-16`), so the function is reachable there now. Only a browser entry
 is missing. Decision 17 C1 says a behaviour on one host only is a defect. #1642 makes a C ABI host

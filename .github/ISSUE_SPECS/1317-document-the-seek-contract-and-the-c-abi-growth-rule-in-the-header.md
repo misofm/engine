@@ -169,7 +169,11 @@ the lines moved.
 **Decisions.**
 
 - D1, D3 and D4 hold against the code and decision 17.
-- **NEEDS ROOT RULING (R3, D2 against decision 17 C13).** Since decision 17, new features reach
+- **ROOT RULING (2026-10-15): D2 keeps its text and adds two sentences: "A feature added as a
+  protocol message is announced by its protocol capability flag in the CAPABILITIES reply, not by
+  a feature bit. The registry, not this rule, governs protocol flags."** (R3, D2 against decision
+  17 C13.) The header states the two sentences and points to the registry for the rest. The
+  finding follows. Since decision 17, new features reach
   the C ABI as protocol messages through `miso_engine_v1_submit_command`, with no new export
   (C13). Each is announced by a protocol capability flag in the `CAPABILITIES` reply, not by a C
   feature bit (header `:105`, `RESPONSE_GET`, "capability flag bit 14"). The protocol decoder

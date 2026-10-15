@@ -223,14 +223,20 @@ until #1332 adds `worker` mode.
   `miso_engine_v1_source_seek_report`. So these exports put the same function on the second host
   (C1). They are not a browser-only feature, and source transport is not a control.
 
-**NEEDS ROOT RULING: D1 has no user that decision 17 allows.** D1's staging stays only for
-#1386's document replace. But #1386 (open) also uses D3's outcome record, which is dropped. And
-#1386's diff sits in `hosts/host-web` with no C ABI form, which is a browser-only feature under
-decision 17 C1. The generic entry's staging (`control_request_ptr`, bounded by the boot's
-`maximum_control_frame_bytes`) already carries a frame. Proposed: drop D1 from this slice.
-Re-scope #1386 under C1: the diff goes in the core (`control-plane`) as a protocol frame through
-`submit_command` and `control_command` on both hosts. Its staging is `control_request_ptr`, and its
-outcome is the response frame.
+**ROOT RULING (2026-10-15): drop D1 from this slice. Re-scope #1386 under C1.** (R8.) #1386's diff
+goes in `control-plane` as a protocol frame through `submit_command` and `control_command` on both
+hosts. Its staging is `control_request_ptr`, and its outcome is the response frame. #1386 and #1643
+record this in their own amendments. Deliverable 1 is now D5 and D6. D7's exports are three:
+`source_seek_at`, `source_seek_report` and `source_seek_report_ptr`. Only D1's staging export
+`edit_ptr` goes. D1's other rule stays: each remaining export runs on the control half and refuses
+with `RESULT_REFUSED_LIFECYCLE` (a pointer export returns 0) on an instance with no control half.
+The finding follows. D1's staging stays only for #1386's document replace. But #1386 (open) also
+uses D3's outcome record, which is dropped. And #1386's diff sits in `hosts/host-web` with no C ABI
+form, which is a browser-only feature under decision 17 C1. The generic entry's staging
+(`control_request_ptr`, bounded by the boot's `maximum_control_frame_bytes`) already carries a
+frame. Proposed: drop D1 from this slice. Re-scope #1386 under C1: the diff goes in the core
+(`control-plane`) as a protocol frame through `submit_command` and `control_command` on both hosts.
+Its staging is `control_request_ptr`, and its outcome is the response frame.
 
 **Hazard on D5.** The SDK PCM feed calls the plain seek from `process()` too: `applySharedSeek` is
 "shared by render and the between-block control handler"
@@ -248,9 +254,12 @@ calls it from the message handler only (#1294, #1297). A render-side caller woul
   source export through `SessionState`, and #1387's amendment only moves that routing to the
   Worker. Proposed: make #1332 and #1387 ordering-only, for the `worker`-mode case of gate 5. D5 and
   D6 in `single` mode do not wait for them. Root confirms.
+- **ROOT RULING (2026-10-15) (R8):** #1293's dependencies drop #1290 and #1313. #1332 and #1387
+  are ordering-only.
 
 **Other specs that name dropped exports.** #1386 names `miso_engine_web_v1_edit_outcome_ptr`.
 #1643 gate uses `miso_engine_web_v1_apply` and cites this slice for it. Root fixes those specs.
+Done under R8: #1386 and #1643 each carry an amendment of 2026-10-15.
 
 **Gates and commands.** Every named script and file exists. `build-web-audioworklet.sh
 --named-twin`, `check-sdk-generated.sh [DIR]`, the parameter-metadata `--check`

@@ -211,6 +211,8 @@ Checked against `228fca26c`.
 - #1323 depends on *Supersede an unadopted candidate plan by compare-and-swap* (#1310, open),
   and #1310 depends on #1344 (open). Neither is in the batch-15/16 list. So D2's declaration
   term and gate 5 cannot run until #1310 and #1323 land.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+  The rest of batch 15 follows. #1323 lands after #1310 (R5 in #1323).
 - #1314 and #1309 are closed. The control plane is `crates/control-plane/src/`, as the spec says.
 - #1354, #1355, #1320, #1358, #1360 and #1361 are open. They are follow-ons or non-goals, not
   dependencies.

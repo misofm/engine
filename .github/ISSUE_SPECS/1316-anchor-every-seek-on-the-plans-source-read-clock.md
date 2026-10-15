@@ -202,8 +202,11 @@ Checked against `228fca26c`.
   Add both to Authorized paths for re-exports only.
 - D6's feature bit: the mask is 255 today (`MISO_ENGINE_V1_FEATURE_SERVICE` is 128). The rule
   "next free bit when it merges, by symbol" stands.
-- **NEEDS ROOT RULING (R1, D2 against #1482 D3).** D2 makes #1314's record a generic
-  `PublishedWords<const N: usize>` in `watermark.rs`. *Attribute each claim's revisions exactly in
+- **ROOT RULING (2026-10-15): one shared seqlock module, `crates/engine/src/realtime/seqlock.rs`.
+  #1316 lands first and creates it. #1482 D3 later moves `observe.rs` onto it.** (R1, D2 against
+  #1482 D3.) D2 puts the generic part in `seqlock.rs`, not in `watermark.rs`, and `watermark.rs`
+  uses it. Add `crates/engine/src/realtime/seqlock.rs` (new) to Authorized paths. The finding
+  follows. D2 makes #1314's record a generic `PublishedWords<const N: usize>` in `watermark.rs`. *Attribute each claim's revisions exactly in
   the watermark and share one seqlock* (#1482, open, not in the batch-15/16 list) D3 puts the
   seqlock protocol in a new `crates/engine/src/realtime/seqlock.rs` that `observe.rs` and
   `watermark.rs` both use. Done in either order without a rule, the two slices build two shared
@@ -211,7 +214,12 @@ Checked against `228fca26c`.
   If #1482 lands first, D2 builds the seek report on `seqlock.rs` and leaves `watermark.rs`
   untouched. If this slice lands first, D2 puts the generic part in `seqlock.rs` (added to
   Authorized paths) and #1482 D3 then moves `observe.rs` onto it. Root picks the order.
-- **NEEDS ROOT RULING (R2, D6 against decision 17 C13).** C13 says a new feature gets "its C ABI
+- **ROOT RULING (2026-10-15): keep D6 as a direct C export, `miso_engine_v1_source_seek_report`.**
+  (R2, D6 against decision 17 C13.) The logic is one core function,
+  `SourceControlSet::seek_report`, behind both hosts. Source submission, seeks and the seek report
+  are transport under decision 17 C1, so their direct exports are not C13 exceptions. Decision 17's
+  C13 line records this (`docs/rulings/one-control-abstraction-2026-10-13.md`). The finding
+  follows. C13 says a new feature gets "its C ABI
   form (a protocol message through `miso_engine_v1_submit_command`, no new C export)". D6 adds
   a new C export, `miso_engine_v1_source_seek_report`. Root's decision-17 amendments to #1293 kept
   that slice's browser seek-report export (#1293 D6), so root seems to treat source seeks and
@@ -227,6 +235,6 @@ the unit test named above. Moved pins from the new per-ring row can reach
 `crates/capi/tests/resource_lifecycle.rs` and `hosts/host-web/tests/browser-v1/expected.json`.
 Re-pin from the measurement, with the reason.
 
-**Realtime-path edits.** D2 edits `crates/engine/src/realtime/watermark.rs` and `mod.rs` (and
-`seqlock.rs` under R1). D3 adds a render-side publication in the source consumer. That slice gets
+**Realtime-path edits.** D2 edits `crates/engine/src/realtime/watermark.rs` and `mod.rs` and adds
+the new `seqlock.rs` (R1). D3 adds a render-side publication in the source consumer. That slice gets
 one attempt.

@@ -154,6 +154,8 @@ Checked against `228fca26c`.
   `route_mute.rs`, `submix_strip.rs`, `tools/audit/src/builtins_graph.rs`, `fixture_builtins.rs`,
   `graph.rs` and `tools/console-workload/src/lib.rs`. Proposed: add them for the neutral field only
   (an empty floor map). Root confirms at filing.
+- **ROOT RULING (2026-10-15) (R9): the eight files above are allowed, for a neutral-field-only
+  addition to the graph request struct literal.** No other edit to them is authorized.
 
 **Decisions.**
 - D1-D6 hold against the code and against decision 17. Decision 17 does not touch latency (C11
@@ -171,6 +173,10 @@ Checked against `228fca26c`.
 
 **Dependencies.**
 - #1284 is closed. #1283, #1279 and #1277 are closed.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+  The rest of batch 15 follows, so #1324 is ordered before this slice. #1324's batch-15
+  amendment asks root to move it out of 15a (it needs #1288, #1325, #1363 and #1391). Until
+  #1324 lands, the fallback below applies.
 - #1324 is open and not in batch 15/16. D3's duck-swap needs it. Until it lands, a restarted
   strip starts at rest with no duck.
 - #1287 is open. D2 names it as later work only. #1323 is in the batch.

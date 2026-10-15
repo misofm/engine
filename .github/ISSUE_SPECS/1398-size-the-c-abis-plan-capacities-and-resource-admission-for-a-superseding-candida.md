@@ -154,3 +154,71 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `e2f6cfb24`.
+
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, #1324, in
+that order. The rest of batch 15 follows.
+
+**Moved anchors.** #1309 has landed; the files are in `crates/control-plane/src/` as the spec
+expects. Each fact in Context still holds; only the lines moved.
+- The lag refusal and its comment are `control.rs:1579-1586`. `synchronize_plan_epochs` is
+  `:1401`.
+- `plan_alive == false` is `control.rs:1541-1543`.
+- The reservation refusals are `control.rs:1751-1765`. Since #1343 and #1311 the error has four
+  arms: `PublicationFull`, `RetirementFull`, `Incompatible` and `EpochExhausted`. D3 covers the
+  first two only; the other two stay as they are.
+- The full report table or pending list is `control.rs:1781-1788`. The one-candidate refusal
+  `if !self.pending_providers.is_empty()` is `:1742-1744`; it is #1310's, not this slice's.
+- Capacities in `compile.rs`: the exchange resource row's retirement capacity `:237-239`; the
+  exchange's own `:1121` (`one`, `:1092`); report rows `:1125-1128`; pending providers
+  `:1168-1171`; retired providers `:1172-1175`.
+- `validate_replacement_peak` is `compile.rs:646`; `validate_live_peak` is `:770`;
+  `CompiledModelAdmission` is `:82`.
+- `all_limits_nonzero` is `crates/capi/src/runtime/mod.rs:144-169`.
+- The three #1042 tests are `crates/capi/src/runtime/tests.rs:1715`, `:1885` and `:2005`; the
+  outcome helper is `:1687-1706`. Each still asserts `Backpressure` in the window.
+- `audit_limits` is `tools/audit/src/capi.rs:599`. `limits` is `crates/capi/tests/plan_swap_race.rs:56`
+  and `crates/capi/tests/resource_lifecycle.rs:176`.
+
+**Code notes for the implementer.**
+- D1 holds against #1343. The exchange's `retirement_capacity` now counts retirement credits:
+  reserved candidates, unadopted candidates and retired plans together
+  (`crates/engine/src/realtime/plan_exchange.rs:70-71`). D1's three are exactly those. Only the
+  config value changes; `plan_exchange.rs` does not.
+- D4 misses one admission term. #1290a D3 added `ControlLimits::maximum_replacement_peak_bytes`
+  (`crates/control-plane/src/adapter.rs:81-87`), checked in `validate_replacement_peak` as
+  `control.resource.replacement_peak` (`compile.rs:686-697`). It sums graph, models and
+  allocated source bytes. D4's "every held row" rule applies to it too, and gates 2 and 3 cover
+  it. The C ABI sets it to `u64::MAX` (`crates/capi/src/runtime/mod.rs:211`); the browser sets
+  its one budget (`hosts/host-web/src/lib.rs:5081`, and `set_replacement_peak_limit` at
+  `:6347`).
+- D4's `maximum_capi_retained_bytes` is `ControlLimits::maximum_control_retained_bytes` in the
+  control plane (`adapter.rs:59`); the C ABI maps one to the other (`runtime/mod.rs:199`).
+
+**Decisions.** D1-D4 and D6 hold against the code and decision 17. D5 does not hold as written.
+- **NEEDS ROOT RULING: the browser now runs this control plane.** D5 says "The browser's caps
+  follow the same rule when it adopts the control plane (#1332)", and the non-goals leave the
+  browser's caps to #1332. Since #1381a the browser runs `control_plane::SessionState` in its one
+  instance (`hosts/host-web/src/lib.rs:6-16`). So D1's capacities and D4's sums reach the browser
+  in this slice, through the same code (decision 17 C1). The browser's limits are its one memory
+  budget (`control_limits`, `hosts/host-web/src/lib.rs:5053-5083`). D1's larger tables add fixed
+  bytes there, and browser byte pins can move. Proposed: this slice covers both hosts. D5's
+  browser sentence becomes: "The browser's caps are its memory budget; its replacement-peak term
+  must cover the three-plan peak when #1403 admits a warm candidate." Add to Authorized paths,
+  for moved pins only, with the measured reason: `hosts/host-web/src/tests.rs`,
+  `hosts/host-web/tests/` and `hosts/host-web/tests/browser-v1/expected.json`. Gate 4 adds
+  `cargo test --locked -p host-web --features host-web/test-support`.
+
+**Dependencies on GitHub.**
+- #1309 is closed. #1343 and #1311 are closed.
+- Downstream: #1310 (batch 15a). #1403, #1358 and #1397 are open and not in batch 15; they are the
+  users of `AdmissionPeak::WithReprepare`, which this slice adds unused.
+
+**Gates and commands.** Every named command, package, feature and script exists. Gate 4's
+`./target/release/audit capi` is built by gate 5's `cargo build` line.
+
+**Realtime-path edits.** None under `crates/engine/src/realtime`. The capacities are control-side
+configuration (`PlanExchangeConfig`), read at boot.

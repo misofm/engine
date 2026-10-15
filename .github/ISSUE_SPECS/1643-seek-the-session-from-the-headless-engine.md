@@ -176,3 +176,16 @@ Checked against `12d4a4f9d`.
   exports of #1562a are `:3308-3383`.
 - **Dependencies.** #1293 (open) for the anchored export's rules; #1381a has landed, #1381 and #1387
   are open. Decision 17 C13 applies as in #1642's amendment.
+
+## Amendment (controls coordinator, root rulings, 2026-10-15)
+
+- **Gate 3a uses a dropped export.** Root ruling R8 (2026-10-15, recorded in #1293) drops #1293's
+  D1 staging, and decision 17 dropped `miso_engine_web_v1_apply`. Gate 3a commits its structural
+  transaction as a `SESSION_TRANSACTION_APPLY` frame through #1562's generic entry
+  (`miso_engine_web_v1_control_request_ptr` and `miso_engine_web_v1_control_command`), and reads
+  the outcome from the response frame. The rest of the gate is unchanged.
+- **Discontinuity first.** Root ruling R7 (2026-10-15, recorded in #1323): the headless `seek`
+  (D2) calls `miso_engine_web_v1_declare_discontinuity` (#1323) before it calls the session seek
+  export, as a C ABI host declares before its session seek (#1642). So browser latency floors reset
+  as they do on the C ABI. `WasmBoundary` gets the call. #1323 adds the export and its mirrors and
+  is a dependency. Gate 2 asserts the declaration comes first.

@@ -114,3 +114,18 @@ transaction apply. The SDK's `replaceSession` (*Apply session transactions from 
 
 - *Replace the running browser session in the Rust host* (#1290).
 - *Export transaction apply and anchored seek from the browser engine module* (#1293).
+
+## Amendment (controls coordinator, root rulings, 2026-10-15)
+
+- **Re-scoped under decision 17 C1** (root ruling R8, 2026-10-15, recorded in #1293). The diff and
+  `apply_document` go in the core, `crates/control-plane/src/`, not in `hosts/host-web`. A document
+  replace is a protocol frame through `miso_engine_v1_submit_command` on the C ABI and
+  `miso_engine_web_v1_control_command` on the browser (#1562's generic entry). Its staging is
+  `miso_engine_web_v1_control_request_ptr`, bounded by the boot's `maximum_control_frame_bytes`. Its
+  outcome is the response frame (revision, `edit_path`, diagnostics).
+- **Stale references.** `miso_engine_web_v1_edit_ptr` and `miso_engine_web_v1_edit_outcome_ptr`
+  are not built: #1293 dropped D1's staging (R8) and D3's outcome record (decision 17). D3's export
+  `miso_engine_web_v1_replace` and D4's mirrors go with them. D2's "#1290's `apply`" is the control
+  plane's transaction apply.
+- The new message ID, its fields, both hosts' gates and the new authorized paths are re-briefed
+  before implementation. That re-brief is root's.

@@ -178,12 +178,17 @@ Checked against `228fca26c`.
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310) is open and is not in the
   batch-15/16 list. #1310 depends on *Prepare a successor across a withdrawn candidate plan*
   (#1344), also open and not in the list. D2, D3 and the withdrawal counters need both.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398, #1310 and #1324.
+  The rest of batch 15 follows, so #1310 and #1344 land before this slice.
 
 **Decisions.**
 
 - D1 and D4 hold against the code and decision 17.
 - D2 and D3 hold as designs, but they cannot run before #1310.
-- **NEEDS ROOT RULING (R4, scope against #1310).** Deliverable 1 says D2 and D3 come "after #1310
+- **ROOT RULING (2026-10-15): keep #1319 whole. #1310 and #1344 land first, in batch 15a.**
+  (R4, scope against #1310.) No successor issue is split off. #1319 closes on D1-D4 after #1310,
+  in the rest of batch 15.
+  The finding follows. Deliverable 1 says D2 and D3 come "after #1310
   has landed", and #1310 is outside the batch-15/16 list. Proposed resolution: split D2 and D3
   (with gate 3's D2/D3 records) into a successor issue that depends on #1310. #1319 then closes on
   D1 and D4 in batch 15. The alternative is to keep #1319 open across batches, which the

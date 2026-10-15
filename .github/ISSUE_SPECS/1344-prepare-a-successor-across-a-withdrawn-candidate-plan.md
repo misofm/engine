@@ -168,3 +168,82 @@ it needs; on its own it changes no host behaviour.
 
 - *Carry fader, mute and pan ramps across a plan swap* (#1277): stream A's open edit of
   `prepare.rs` lands first. Its new carry section is then reported by `installed_carry_reads` (D1).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `e2f6cfb24`.
+
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, #1324, in
+that order. The rest of batch 15 follows. This slice is first.
+
+**Moved anchors.** Each fact in Context still holds, except as noted.
+- `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`. It now has six fields:
+  `inventory`, `committed`, `revision` (#1277 D10), `edit_ramps` (#1394), `monitor` (#1559) and
+  `observation` (#1584). D2's literal `SuccessorBase { inventory, committed }` must set all six.
+  Tests here use the neutral values: `EditRamps::new()`, `MonitorBase::NONE` (`prepare.rs:1125`),
+  `NO_OBSERVATION` (`:1100`) and a revision of at least 1 (`host.successor.revision`). The real
+  values for a superseding successor are #1310's.
+- The carry program is built at `prepare.rs:2131-2134` and installed at `:2744`. A second
+  install, with no sources, is at `:3067-3073` (a plan whose only carry is a line or a send).
+- `carried_inputs` is no longer a function. It is a local at `prepare.rs:2016`; the input moves
+  are installed at `:2772`. `carried_sources` is the local at `:1953`.
+- `PreparedHost` is `prepare.rs:659-675`. `SourceInventoryRow` is `:695-703` (`index` at `:702`).
+  `InputSectionInventoryRow` is `:871` (its `location` at `:876`). `PlanStateInventory` is
+  `:711-751`.
+- The executor's carry fields are `crates/graph/src/lib.rs:3211-3244`. The layout witness
+  `GraphExecutorWithoutSplitPairTable` repeats them at `:4445-4456`. The installers are
+  `install_builtin_input_carry` `:3390` and `install_carry_program` `:3662`.
+- `GraphPreparedSourceSetDriver` is `graph/src/lib.rs:2565`; its `adopt_sources` is `:2629`.
+- In `crates/source/src/lib.rs`: `adopt_sources` is `:1902-1938`, `held_seek` `:1018`,
+  `begin_block` `:1103`, `begin_block_at` `:1115`, `begin_block_with` `:1119`. `begin_block_with`
+  now takes a private `SeekClock` (`:1030-1038`).
+- `PreparedRenderPlan::adopt_predecessor_plan` (gate 1's twin) is
+  `crates/engine/src/realtime/plan.rs:1201`.
+- `SourceControlSet::adopt_persisting` is still `crates/host-core/src/source.rs:286`.
+
+**D1: the carry families at HEAD.** The executor now installs nine carry sections, not two:
+`carry` (sources), `carry_inputs`, `carry_strips` (#1277), `carry_effects` with `carry_scratch`
+(#1279-#1282), `observer_carry` (meters and observation taps, #1327), `carry_delays` (#1283),
+`carry_strip_delays` and `carry_routes` (#1284). Host-core also carries spectrum captures
+(#1395): the pairing is `PlanStateInventory::spectrum_pairing`, built in host-core, not in the
+executor. D1 holds as a design. Its scope follows from it:
+- `installed_carry_reads` reports a predecessor key for every executor section above.
+- The restriction keeps the inventory rows each section reads: `sources`, `input_sections`,
+  `strip_stages`, `effect_lanes`, `meters`, `observations`, `delay_lines`, `strip_delays` and
+  `live_routes`. It keeps the `spectrum` rows that A's own `spectrum_pairing` names.
+- The scalar fields keep P0's values (`plan_identity`, `sample_rate_hz`, `quantum_frames`,
+  `spectrum_collection`). `spectrum_pairing` and `restarted` describe A against P0, not P0, so
+  the restricted base holds them empty.
+- Gate 2 covers each family above, one row each, not only sources and input moves. Its test
+  value covers the same defect for every family.
+- The restart set still works across a withdrawn plan. A strip A restarted has no row in the
+  base, but the joins come from the committed models. `resolve_strip_carry` (`prepare.rs:4799`)
+  and `resolve_effect_carry` (`:5197`) mark a strip restarted when its predecessor row is
+  missing. So B lists it in `restarted_strips()` and #1324 ducks it.
+- Size: nine families make this slice larger than its brief assumed. The rows are mechanical;
+  the attempt budget stands.
+
+**D2-D6 hold** against the code. Decision 17 does not touch them: the base and donation are
+host-core internals, with no host surface.
+- D3's donor is an `UnadoptedCandidate` (#1343, `crates/engine/src/realtime/plan_exchange.rs:251`).
+  It gives `plan()` (shared) and `into_plan()`. `check_donation` needs only `plan()`.
+  `apply_donation` needs `&mut` on the donor; #1310 calls it after the commit, when A is never
+  republished, so `into_plan()` serves. No `plan_exchange.rs` edit is needed.
+- D5's flag is one render-side store in `begin_block_with`. The non-goal "Any render-thread
+  change" means no change beyond that store. `realtime-policy` covers it.
+
+**Dependencies on GitHub.**
+- #1277 is closed, and so are #1279-#1284, #1311 and #1343.
+- #1325 (open) is named in gate 3 for scope only. It is not a dependency.
+- Downstream: #1310 (batch 15a), #1358 and #1397 (open, not in batch 15).
+
+**Authorized paths.** Unchanged. The spectrum rows are read in `prepare.rs`, so
+`crates/host-core/src/spectrum.rs` is not needed.
+
+**Gates and commands.** Every named package, feature and script exists: host-core features
+`control-provider` and `test-support`, graph `test-support`, `scripts/check-graph-policy.sh`,
+`scripts/check-host-core-policy.sh`, `tools/realtime-policy`. `withdrawn_successor.rs` is new here.
+
+**Realtime-path edits.** None under `crates/engine/src/realtime`. D5 adds one `bool` store to the
+source consumer's block entry (`crates/source/src/lib.rs`, render-side). D4's swap runs on the
+control thread.
