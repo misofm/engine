@@ -132,8 +132,8 @@ transaction apply. The SDK's `replaceSession` (*Apply session transactions from 
 
 ## Re-brief (controls coordinator, batch 15 docs, 2026-10-15; root reviews at the push)
 
-Code anchors verified on `c43b65870`. This section is the brief. Where it and the filed text
-above differ, this section governs.
+Code anchors verified on `c43b65870` (the staging anchors on `bed928efb`). This section is the
+brief. Where it and the filed text above differ, this section governs.
 
 **Superseded filed text (kept above, not deleted).**
 - Title and Product outcome, "export replace from the browser engine module": superseded; the
@@ -143,7 +143,8 @@ above differ, this section governs.
 - D1's path `hosts/host-web/src/document_diff.rs`: superseded by `crates/control-plane/src/document.rs`.
   D1's edit order stays, with the additions below.
 - D2 (`AudioWorkletEngineHost::apply_document`): superseded by D2 below.
-- D3 (`miso_engine_web_v1_replace`) and D4 (export mirrors): superseded; no export is added.
+- D3 (`miso_engine_web_v1_replace`) and D4 (export mirrors): superseded; no replace export is
+  added. Each host gains one document transport export only (D7).
 - Deliverables, Authorized paths, Objective gates 3, 5 and 6, Test value and Dependencies:
   superseded by the sections below. Gates 1, 2 and 4 are restated below.
 
@@ -154,7 +155,10 @@ diffs the document against the committed model and applies the result as one tra
 outcome is the same as the equivalent transaction: the same revision, edit path, events and
 rendered bits. The C ABI and the browser serve it through the same core function, as the protocol
 command `SESSION_REPLACE` (`0x0013`). The SDK's `replaceSession` (#1296) sends this frame and
-nothing else, so there is still one edit path (D15-11).
+nothing else, so there is still one edit path (D15-11). A replace accepts every document the boot
+accepts, up to the boot's `maximum_document_bytes` (1 MiB on the browser), on both hosts. The
+document does not go in the frame: the frame names a document the host passes beside it (D7), and
+the control plane validates and parses it off the render thread.
 
 ### Context (verified code anchors)
 
@@ -188,7 +192,35 @@ nothing else, so there is still one edit path (D15-11).
   the boot's `maximum_control_frame_bytes` (`compile.rs:1085-1091`). The replay cache stores each
   new request's whole bytes (`controller.rs:336-366`). The browser's frame bound is 16 KiB
   (`CONTROL_FRAME_BYTES`, `hosts/host-web/src/lib.rs:5087`); its document bound is 1 MiB
-  (`MAXIMUM_DOCUMENT_BYTES`, `:74`). The C ABI's are caller-chosen (`CompileLimits`).
+  (`MAXIMUM_DOCUMENT_BYTES`, `:74`). The C ABI's are caller-chosen (`CompileLimits`). So a
+  document cannot go in a frame: 16 KiB would cap the browser's replace far below its boot.
+- **The browser's boot document staging** (anchors verified on `bed928efb`). It is the
+  module's thread-local `BOOT_STAGING` (`hosts/host-web/src/ffi.rs:566`), a `BootStaging`
+  (`:105-115`) whose `document: ManuallyDrop<Vec<u8>>` is freed only by assignment, never by a
+  thread-local destructor (#1333 D5). `miso_engine_web_v1_document_ptr(len)` (`:2957-2992`)
+  refuses a live instance with `RESULT_REFUSED_LIFECYCLE` (`:2964-2969`), refuses
+  `len > MAXIMUM_DOCUMENT_BYTES` (`:2971`), then `try_reserve_exact`s a `Vec` of exactly `len`
+  bytes, assigns it over the old one and returns its address (`:2976-2990`). `boot_staged`
+  (`:3006-3124`) parses the staged bytes and, on success, clears `document_valid` but keeps the
+  bytes (`:3051-3055`): after boot the instance retains a copy of the boot document, not charged
+  in the budget's bridge rows (`hosts/host-web/src/lib.rs:4774-4790`); dispose frees it
+  (`ffi.rs:526-554`, `reset_after_dispose`). The page hands the document over in the worklet's
+  message handler (`port.onmessage`, `hosts/host-web/web/miso-engine-v1-audio-worklet.js:287`):
+  boot writes it at `document_ptr` and calls `boot` (`:360-369`), and every control frame goes
+  through `miso.control.v1` (`CONTROL_FIELDS = ["tag", "requestId", "frame"]`, `:93`;
+  `receiveControl` `:1699`; `readControlCommand` `:1727-1735`). `process()` (`:1911`) never
+  stages or parses. The live-instance refusal of `document_ptr` is pinned by
+  `sdk/test/boot-evals.mjs:325-350`. The frame path is `control_request_mut` (`lib.rs:2305`,
+  bounded by `CONTROL_FRAME_BYTES`), `control_command` (`lib.rs:2345`) and `run_command`
+  (`lib.rs:1604`), which calls `SessionState::command` (`:1615`).
+- **The C ABI's boot document.** It has no staging. `miso_engine_v1_compile_session`
+  (`crates/capi/src/ffi.rs:311`) takes `document: *const u8, document_bytes: u64`, refuses
+  `document_bytes > limits.maximum_document_bytes` (`:347`) and borrows the bytes for the call
+  only (`borrowed_bytes`, `:361`). `CompileLimits::maximum_document_bytes` is
+  `crates/capi/src/abi.rs:122`. `miso_engine_v1_submit_command` (`ffi.rs:681`) borrows only the
+  frame. The bound reaches the control plane as `ControlLimits::maximum_document_bytes`
+  (`crates/control-plane/src/adapter.rs:35`, set at `crates/capi/src/runtime/mod.rs:187` and
+  `hosts/host-web/src/lib.rs:5057`), but the control plane does not read it today.
 - **Parse.** `host_core::parse_host_session` (`crates/host-core/src/prepare.rs:1145`) is what the
   boot uses (`compile.rs:1054`).
 - **The model.** `SessionModel` is `crates/session/src/model.rs:89-127`. Every keyed list is sorted
@@ -222,8 +254,13 @@ nothing else, so there is still one edit path (D15-11).
   (open). A search of the code, the docs and `.github/ISSUE_SPECS/` finds no other use of `0x0013`
   as a message ID. If this slice lands before those three, `0x000f`-`0x0012` stay unallocated and
   decode as `UNSUPPORTED_MESSAGE` until they land.
-  - Command: `1:document BYTES R`, a session JSON document as the boot takes it. Exact revision
-    only (`requires_exact_revision`). An empty document is `INVALID_FIELD`.
+  - Command: `1:document-bytes U32 R`, the exact length of the document the host passes beside
+    the frame (D7), and `2:document-sha256 BYTES R`, exactly 32 bytes, the SHA-256 of that
+    document. The frame carries no document bytes. Exact revision only
+    (`requires_exact_revision`). `document-bytes` 0 or a digest that is not 32 bytes is
+    `INVALID_FIELD`. Why the digest: the replay cache compares frame bytes, and the document is
+    not in the frame. With the digest, the same request ID with another document is other frame
+    bytes, so it is `REQUEST_ID_REUSE`, never a cached reply for a document it did not apply.
   - Success response: the `0003` payload, `1:applied-operations U32 R`, `2:edit-path U8 R`
     (`TransactionApplied`). `edit_path` is live, model_only or rebuild. It is never monitor: a
     document does not carry solo, and the monitor overlay is kept.
@@ -243,22 +280,36 @@ nothing else, so there is still one edit path (D15-11).
   - `control_smoothing`: when `next` holds an explicit arm whose lengths differ from the
     committed lengths, the diff emits one `SetControl` per changed session row (`fader_ms`,
     `mute_ms`, `pan_ms`). When `next` holds the default arm and the committed model holds an
-    explicit arm, no edit can express it. The replace path then sets the candidate's
-    `control_smoothing` to `None` after the edits and before the final validation, through one
-    new `SessionStore` preparation entry for the replace path only. No wire edit is added. The
-    change is model-only (no prepared plan reads the key). **Root checks this point at the
-    push.**
+    explicit arm, no edit can express it. Decided (root review, 2026-10-15): a replace-only
+    preparation step applies the document's `control_smoothing` to the candidate (an absent key
+    is the session default, `None`) after the edits and before the final validation, through one
+    new `SessionStore` preparation entry that only the replace path calls. No wire edit is
+    added. The change is model-only (no prepared plan reads the key).
 - **D3. The path.** The controller does the frame work; the control plane owns parse and diff.
+  - The core entry. `SessionState` gains `command_with_document(&mut self, request: &[u8],
+    document: &[u8], output_capacity: u64)`; `command(request, output_capacity)` is
+    `command_with_document(request, &[], output_capacity)`. The document is borrowed for the call
+    only; nothing in the control plane or the protocol crate keeps it. The controller's frame
+    preparation (`prepare_command_frame`, `prepare_command_frame_in_place`) threads the same
+    borrowed slice to `plan_structural_command`. `SessionState` keeps `maximum_document_bytes`
+    from its `ControlLimits` (today unread) as the replace's bound.
   - `ProtocolControllerConfig` gains `document_replace: Option<DocumentReplaceFn>`, a plain `fn`
-    pointer that takes the committed `SessionModel`, the document bytes and the document byte
-    bound, and returns the edits plus the replace's `control_smoothing` value, or a typed refusal
-    (status and diagnostic). The control plane sets it to its own function in
-    `compile_children`. The protocol crate holds no diff code. `0x0013` is advertised only when
-    it is set and session transactions are on.
+    pointer that takes the committed `SessionModel`, the borrowed document, the frame's
+    `document-bytes` and `document-sha256`, and the document byte bound, and returns the edits
+    plus the replace's `control_smoothing` value, or a typed refusal (status and diagnostic). The
+    control plane sets it to its own function in `compile_children`. The protocol crate holds no
+    diff, parse or hash code. `0x0013` is advertised only when it is set and session
+    transactions are on.
+  - `document_replace` checks, in this order: the document length equals `document-bytes`; the
+    length is at most `maximum_document_bytes`; the SHA-256 of the document equals
+    `document-sha256` (`sha2`, the workspace pin, added to `crates/control-plane/Cargo.toml`);
+    then it parses with `parse_host_session` and diffs. All of it is control work, never render.
   - `plan_structural_command` accepts `SessionReplace` beside `SessionTransactionApply`. It runs
     the same replay preflight, exact-revision check and output reservation first, then calls
-    `document_replace`, then the same edit-count check and the same preparation. Every refusal goes
-    through the controller's non-OK response, so the replay cache holds it like any other reply.
+    `document_replace`, then the same edit-count check and the same preparation. A replayed
+    request returns its cached reply before the document is read, so a retry needs only the
+    same frame bytes. Every refusal goes through the controller's non-OK response, so the replay
+    cache holds it like any other reply.
   - An empty diff (and no smoothing change) commits nothing. The reply is OK with
     `applied_operations` 0, `edit_path` model_only and the unchanged revision. No
     `SESSION_COMMITTED` is queued and no candidate is published.
@@ -266,13 +317,17 @@ nothing else, so there is still one edit path (D15-11).
     the live commit or the rebuild, the rate and quantum refusal, the plan admission and the
     `SESSION_COMMITTED` event (operation count = `applied_operations`). The reply's message ID is
     `0x0013`.
-  - Both hosts call `SessionState::command`. Neither host adds code for this message, and no
-    export is added.
+  - Both hosts call `SessionState::command_with_document`. Neither host decodes the frame or
+    runs replace code; each host adds only the document transport of D7.
 - **D4. Refusals, all before commit.** Each one leaves the revision, the committed document and
   the rendered bits unchanged, and queues no event:
+  - no document beside the frame (the plain `submit_command` or a browser command with nothing
+    staged), or a document whose length is not `document-bytes`: `INVALID_FIELD`,
+    `session.replace.document_length`;
   - a document longer than the boot's `maximum_document_bytes`: `LIMIT_EXCEEDED`,
-    `session.replace.document_too_large`;
-  - a frame over the codec's bound: the codec's own refusal, as for any frame;
+    `session.replace.document_too_large` (the browser's D7 staging refuses this length first);
+  - a document whose SHA-256 is not `document-sha256`: `INVALID_FIELD`,
+    `session.replace.document_digest`;
   - a document that does not parse or validate: `VALIDATION_FAILED` with the parser's
     diagnostics;
   - more edits than `maximum_transaction_edits`: `LIMIT_EXCEEDED`, as for a transaction;
@@ -285,13 +340,47 @@ nothing else, so there is still one edit path (D15-11).
   returned before any state changes. No queue is added. An ack can never precede a drop.
 - **D6. Docs.** `docs/CONTROL_PROTOCOL_REGISTRY.md` (the command row, the appended-ID note, the
   capability rule), `docs/CONTROL_PROTOCOL_SEMANTICS.md` (the replace rules of D2-D5),
-  `docs/CONTROL_PROTOCOL_SIZING.md` (the request is the document plus the header; the bound is
-  the smaller of the frame bound and `maximum_document_bytes`), the C ABI header prose and
-  `docs/C_ABI_V1_QUALIFICATION.md`.
-- **Open for root at the push (not frozen).** The browser's frame bound is 16 KiB, so on the
-  browser a document larger than about 16 KiB cannot be replaced; the 1 MiB document bound does
-  not help. This slice does not change `CONTROL_FRAME_BYTES`. Root decides whether a successor
-  raises the browser's frame bound (it is charged in the memory budget) or adds a chunked form.
+  `docs/CONTROL_PROTOCOL_SIZING.md` (the request is the header plus two fixed fields, under
+  every frame bound; the document's only bound is `maximum_document_bytes`), the C ABI header
+  prose for D7's export and `docs/C_ABI_V1_QUALIFICATION.md`.
+- **D7. The document transport: one core rule, each host's existing document shape.** The
+  core rule is D3's: the host passes the document as a borrowed `&[u8]` beside the frame, and
+  the control plane checks, hashes, parses and diffs it on the control side. A host differs only
+  in how the bytes reach that borrow, as it already does for frames (the browser stages frames,
+  the C ABI borrows them). Neither host keeps the document after the call.
+  - **Browser: reuse the boot document staging.** New export
+    `miso_engine_web_v1_replace_document_ptr(handle: u32, len: u32) -> u32`. It returns the
+    address of the same `BOOT_STAGING.document` buffer the boot uses, sized exactly as
+    `document_ptr` sizes it (`try_reserve_exact`, assignment over the old `Vec`), and sets
+    `document_valid`. It is the live twin of `document_ptr`: it returns 0, and stages nothing,
+    for a wrong handle, a host that is not ready, `len` 0, `len > MAXIMUM_DOCUMENT_BYTES` or a
+    failed reservation. It does not touch the boot result word. `document_ptr` stays pre-boot
+    only (its lifecycle refusal is pinned, `sdk/test/boot-evals.mjs:325-350`).
+    `miso_engine_web_v1_control_command(handle, len)` keeps its signature: it passes
+    `&BOOT_STAGING.document` when `document_valid` (else `&[]`) to
+    `SessionState::command_with_document` through `run_command`, and after every command,
+    whatever its message, it frees the staging (`*document = Vec::new()`) and clears
+    `document_valid`. So a staged document serves exactly the next command and is never
+    retained; the first command after boot also frees the boot document copy that boot kept.
+    The worklet's `miso.control.v1` message accepts an optional `document` field (a
+    `Uint8Array`, the same checks as `frame`); `readControlCommand` stages it with
+    `replace_document_ptr` before it stages the frame. This is the message handler's work
+    (`single` mode) or the control side's; `process()` never stages, hashes or parses.
+    **ROOT CHECK: a new browser export.** Reason: `document_ptr` refuses a live instance and
+    that refusal is a pinned contract; relaxing it would change the single-live-handle
+    lifecycle rule. The export moves the ABI layout mirrors (D7 paths).
+  - **C ABI: borrow the document beside the frame.** The C ABI has no staging a frame can name
+    (Context). New export `miso_engine_v1_submit_document_command(session: *mut Session,
+    request: *const u8, request_bytes: u64, document: *const u8, document_bytes: u64, response:
+    *mut BytesOut) -> u32`, Thread: control. It is `miso_engine_v1_submit_command`'s contract
+    plus the document borrowed for this call only under `compile_session`'s pointer-plus-length
+    rule (`borrowed_bytes`, `ffi.rs:361`); `document` must be nonnull when `document_bytes` is
+    nonzero, else `RESULT_INVALID_ARGUMENT`. It calls `command_with_document` and maps results
+    exactly as `submit_command` does. `submit_command` is unchanged; a `SESSION_REPLACE` frame
+    sent through it is the D4 `session.replace.document_length` refusal. The C ABI retains
+    nothing. A session-owned copy staging (a stage export plus a buffer) was rejected: it would
+    retain up to `maximum_document_bytes` per session and add a stale-staging state.
+    **ROOT CHECK: a new C export.**
 
 ### Deliverables
 
@@ -300,7 +389,8 @@ nothing else, so there is still one edit path (D15-11).
 2. D2 in `crates/control-plane/src/document.rs`; D3 in `crates/protocol/src/controller.rs`,
    `crates/protocol/src/model.rs` (the replace preparation entry only) and
    `crates/control-plane/src/{compile.rs,control.rs,lib.rs}`.
-3. D6 and the gates below.
+3. D7: the browser's export, staging consumption and worklet message field; the C ABI's export.
+4. D6 and the gates below.
 
 ### Authorized paths
 
@@ -309,20 +399,37 @@ nothing else, so there is still one edit path (D15-11).
   `fuzz/corpus/complete-schema-manifest.md`, `scripts/check-protocol-wasm-parity.sh` (the
   self-test hash strings only).
 - `crates/control-plane/src/{document.rs,compile.rs,control.rs,lib.rs}`,
+  `crates/control-plane/Cargo.toml` (`sha2` only), `Cargo.lock`,
   `crates/control-plane/tests/session_replace.rs` (new).
-- `crates/capi/tests/session_replace.rs` (new), `crates/capi/include/miso_engine_v1.h` (prose),
-  `tools/audit/src/protocol.rs` (one frame).
+- `crates/capi/src/ffi.rs` (D7's export only), `crates/capi/tests/session_replace.rs` (new),
+  `crates/capi/include/miso_engine_v1.h` (D7's declaration and prose),
+  `crates/capi/tests/c/abi_smoke.c` (the declaration's link check, if the smoke lists every
+  export), `scripts/check-capi-abi.sh` (the export list), `tools/audit/src/protocol.rs` (one
+  frame).
+- `hosts/host-web/src/{ffi.rs,lib.rs}` (D7 only), `hosts/host-web/web/miso-engine-v1-audio-worklet.js`
+  (the optional `document` field only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+  (the field's type, if the message is typed there),
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` (re-pinned by
+  `scripts/build-web-audioworklet.sh`), `scripts/check-web-audioworklet.sh` (the export list),
+  `tools/parameter-metadata/src/abi_layout.rs`, `scripts/check-abi-layout-v1.py`,
+  `scripts/fixtures/abi-layout-v1-self-test.json` and the generated mirrors
+  `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts` (the export name
+  only, regenerated, never hand-edited), `scripts/test-web-audioworklet.mjs` (the fake module's
+  export and the message-field cases).
 - `hosts/host-web/tests/control_parity.rs`.
 - `docs/CONTROL_PROTOCOL_{REGISTRY,SEMANTICS,SIZING,CONFORMANCE}.md`,
   `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ### Non-goals
 
-- No SDK change. `replaceSession` and its frame encoder are #1296's
-  (`sdk/src/core/control-frame.ts`). No generated SDK table lists message IDs, so none moves.
-- No browser export, no export mirror, no change to `hosts/host-web/src/`.
+- No hand-written SDK change. `replaceSession`, its frame encoder and its use of the worklet's
+  `document` field are #1296's (`sdk/src/core/control-frame.ts`, `sdk/src/core/boundary.ts`).
+  No generated SDK table lists message IDs, so none moves; only the generated ABI export list
+  gains D7's browser export.
+- No browser replace export and no change to the browser's boot path or `document_ptr`.
 - No change to classification, the live commit or the rebuild.
-- No change to the browser's frame bound (see the open point in D6).
+- No change to the browser's frame bound (`CONTROL_FRAME_BYTES` stays 16 KiB) and no chunked
+  frame: D7 carries the document.
 - No supersession of a pending candidate (#1310).
 
 ### Objective gates
@@ -336,6 +443,11 @@ Commands:
 - `bash scripts/check-protocol-wasm-parity.sh`, `bash scripts/check-protocol-control-policy.sh`,
   `bash scripts/check-conformance-boundaries.sh`, `bash scripts/check-capi-abi.sh`,
   `bash scripts/check-workspace-policy.sh`
+- The web artifact gates with the arguments `.github/workflows/qualification.yml` gives them:
+  `scripts/build-web-audioworklet.sh` (`:132`), `scripts/check-web-audioworklet.sh` (`:342`),
+  `scripts/test-web-audioworklet.mjs` (`:356`); then `bash scripts/check-sdk-generated.sh`,
+  `python3 scripts/check-abi-layout-v1.py` and
+  `node scripts/check-web-boot-budget.mjs <the built module>.wasm`
 - `CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol`
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
   `cargo fmt --all -- --check`
@@ -348,7 +460,7 @@ Commands:
    that of a session booted from the document, except the revision.
 2. **Dependent removal.** A document that removes a source and the track that reads it commits.
 3. **Same as a transaction (C ABI, `crates/capi/tests/session_replace.rs`).** Through
-   `miso_engine_v1_submit_command`: a replace with the boot document plus a muted track returns
+   `miso_engine_v1_submit_document_command`: a replace with the boot document plus a muted track returns
    OK, path rebuild, revision +1, and renders the same blocks as the equivalent
    `SESSION_TRANSACTION_APPLY` on a twin session. A document that changes one fader returns path
    live. An identical document returns OK, model_only, the unchanged revision; no
@@ -357,18 +469,40 @@ Commands:
    candidate. Each returns its typed status (or result) and diagnostic. After each, the revision
    and the `SESSION_SNAPSHOT_GET` bytes are unchanged, no event is dequeued, and the next 8 blocks
    are bit-identical to a twin that got no command.
-5. **Replay.** The same request ID with the same bytes returns the cached reply and commits once.
-   The same request ID with other bytes is `REQUEST_ID_REUSE`.
+5. **Replay.** The same request ID with the same frame bytes returns the cached reply and commits
+   once, also when the retry passes no document. The same request ID with another document (so
+   another `document-sha256`) is `REQUEST_ID_REUSE` and commits nothing.
 6. **Both hosts (parity row).** A new test in `hosts/host-web/tests/control_parity.rs` sends the
-   same `SESSION_REPLACE` frames to the C ABI and the browser: one rebuild, one live, one
-   identical document and one refusal. The two hosts return the same reply bytes (request ID
-   aside), the same revision, the same `SESSION_SNAPSHOT_GET` bytes and bit-identical blocks, at
-   44.1 and 48 kHz.
+   same `SESSION_REPLACE` frames and documents to the C ABI (D7's export) and the browser (D7's
+   staging, then `control_command`): one rebuild, one live, one identical document and one
+   refusal. The two hosts return the same reply bytes (request ID aside), the same revision, the
+   same `SESSION_SNAPSHOT_GET` bytes and bit-identical blocks, at 44.1 and 48 kHz.
 7. **Wire and pins.** Codec round trips of the command and the reply. Decode refuses a missing
-   field 1 and a capability record that lists `0x0013` without the session family. The corpus
-   gains `command.session_replace` and `response.session_replace`. `COMPLETE_SCHEMA_HASH` is
-   re-pinned once, with a history line naming #1386, and its other spellings (parity script,
-   manifest, conformance doc) move with it. The allocation audit includes the new frame.
+   field 1 or 2, a digest that is not 32 bytes, and a capability record that lists `0x0013`
+   without the session family. The corpus gains `command.session_replace` and
+   `response.session_replace`. `COMPLETE_SCHEMA_HASH` is re-pinned once, with a history line
+   naming #1386, and its other spellings (parity script, manifest, conformance doc) move with
+   it. The allocation audit includes the new frame. The web artifact digest and the ABI layout
+   mirrors move once, regenerated by their own tools.
+8. **A document larger than the frame (parity row, root review a).** A new test in
+   `hosts/host-web/tests/control_parity.rs` boots a small session on both hosts and replaces it
+   with a document of more than 64 KiB (four times the browser's 16 KiB frame bound; a valid
+   session whose size comes from more tracks, not padding), then with a second large document
+   that changes one fader (path live). Both hosts return OK, the same reply bytes (request ID
+   aside), revision, snapshot bytes and bit-identical blocks. A browser case at exactly
+   `MAXIMUM_DOCUMENT_BYTES` stages and commits, and one byte more gets 0 from
+   `replace_document_ptr`. The gate records, per host, from a measurement in the test:
+   - bytes the host retains for the document after the reply: browser, the capacity of
+     `BOOT_STAGING.document` (expected 0, D7 frees it, including the boot copy); C ABI, 0
+     (borrowed, nothing kept);
+   - bytes the host holds for the document during the call: browser, the staged length; C ABI,
+     none of its own (the caller's buffer);
+   - on the browser, the wasm linear memory growth across one replace of the 1 MiB boot ceiling
+     document (`scripts/check-web-boot-budget.mjs` method), against the boot's projection
+     `document_bytes * PARSE_TRANSIENT_MULTIPLIER` (`hosts/host-web/src/lib.rs:76-98`).
+   Any retained byte row these numbers move (`exact_retained_bytes`, the boot budget script's
+   pin) is re-pinned from the measurement, with the measured figure in its history comment. A
+   replace growth above the boot projection is reported to root, not pinned.
 
 ### Test value
 
@@ -379,9 +513,13 @@ Commands:
   turns red.
 - Gate 4: a refusal that moves the model, the revision or a rendered bit before it fails turns
   red.
-- Gate 5: a replace path that skips the replay preflight commits twice.
+- Gate 5: a replace path that skips the replay preflight commits twice; a frame without the
+  digest answers a cached reply for another document.
 - Gate 6: a host that runs its own replace code, or answers other bytes, turns red.
 - Gate 7: a frame shape or capability rule that differs from the registry turns red.
+- Gate 8: a replace bounded by the frame instead of `maximum_document_bytes`, a browser staging
+  that keeps the document after the command, or a host whose large-document reply differs,
+  turns red.
 
 ### Dependencies (checked with `gh issue view` on 2026-10-15)
 
@@ -392,3 +530,16 @@ Commands:
 - Ordering only: #1586, #1594 and #1595 (open) hold `0x000f`-`0x0012`. #1310 (open, batch 15a)
   changes what a structural replace gets while a candidate is pending; this slice inherits it.
 - Downstream: #1296 (open) sends this frame from `replaceSession`.
+
+### Root review (2026-10-15)
+
+Root approved D1 (`0x0013` `SESSION_REPLACE`), the diff in the control plane (D2), the
+`TransactionApplied` reply and the gates, and ruled the two open points. The sections above
+already carry both rulings.
+- **(a) Document size.** A replace accepts every document the boot accepts, up to
+  `maximum_document_bytes`, on both hosts; it is not capped by the control frame. The frame names
+  the document and does not carry it; the bytes are validated and parsed off the render thread,
+  by one rule on both hosts. Applied as D1's fields, D3's core entry, D4's refusals, D7 and
+  gate 8. D7 adds one export per host; both are marked ROOT CHECK.
+- **(b) `control_smoothing`.** Approved: a replace-only preparation step applies the document's
+  `control_smoothing` (absent = the session default), with no new wire edit. Applied in D2.
