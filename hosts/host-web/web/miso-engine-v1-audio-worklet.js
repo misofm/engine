@@ -1,8 +1,13 @@
 const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 // Issue #143 D5: the fixed structure carrying the sample window an `f32` frame cannot hold.
-// Issue #1209 D2 appended `submix_count` at 64 and its pad at 68.
-const METER_HEADER_BYTES = 72;
+// Issue #1209 D2 appended `submix_count` at 64 and its pad at 68. Issue #1290d1 made the pad
+// `retired` and appended the frame and successor pointers: the frame travels with the plan, so the
+// header names its own frame and, while a replacement plan waits, the replacement's header.
+const METER_HEADER_BYTES = 80;
+const METER_HEADER_RETIRED = 68;
+const METER_HEADER_FRAME_POINTER = 72;
+const METER_HEADER_SUCCESSOR_POINTER = 76;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
@@ -265,6 +270,13 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // the memory moved before a handler re-bound; the status reports it.
     this.viewSpecs = [];
     this.staleViewQuanta = 0;
+    // Issue #1290d1: the meter frame travels with the plan, so the views over it do too. The
+    // active set is the views over the frame the host publishes into; the pending set was cut, in
+    // the message handler that committed a replacement plan, over that plan's header and frame.
+    // `process()` switches from the one to the other by reference when the header says the plan
+    // was replaced, and never cuts a view.
+    this.meterSet = null;
+    this.pendingMeterSet = null;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -281,6 +293,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.drainControlEvents(requestId);
       } finally {
         this.rebindMemoryViews();
+        // A command may have committed a replacement plan, whose frame is sized for its strips:
+        // its views are cut here, before any quantum can adopt it (#1290d1).
+        this.syncMeterViews();
       }
     };
     try {
@@ -455,6 +470,128 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.memoryBuffer = buffer;
     for (const spec of this.viewSpecs) {
       this[spec.field] = new spec.Constructor(buffer, spec.pointer, spec.length);
+    }
+    if (this.meterSet !== null) this.cutMeterViews(this.meterSet, buffer);
+    if (this.pendingMeterSet !== null) this.cutMeterViews(this.pendingMeterSet, buffer);
+  }
+
+  /// Issue #1290d1: cut the views of one meter set over `buffer` and remember nothing else; the
+  /// set's pointers and counts are its identity. Control side only.
+  cutMeterViews(set, buffer) {
+    const strips = set.trackCount + set.submixCount;
+    set.header = new DataView(buffer, set.headerPointer, METER_HEADER_BYTES);
+    set.frame = new Float32Array(buffer, set.framePointer, strips * 3 + 3);
+    // Fixed views over the one buffer, built here and never again: the frozen render-callback
+    // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
+    // allocation. With buses the master pair no longer follows the tracks, so the message's
+    // `2T + 2` peaks are assembled from the track view and the master view.
+    set.trackPeaks = new Float32Array(buffer, set.framePointer, set.trackCount * 2);
+    set.submixPeaks = new Float32Array(
+      buffer, set.framePointer + set.trackCount * 2 * 4, set.submixCount * 2);
+    set.masterPeaks = new Float32Array(buffer, set.framePointer + strips * 2 * 4, 2);
+    set.trackGain = new Float32Array(
+      buffer, set.framePointer + (strips * 2 + 2) * 4, set.trackCount);
+    set.submixGain = new Float32Array(
+      buffer, set.framePointer + (strips * 2 + 2 + set.trackCount) * 4, set.submixCount);
+  }
+
+  /// Issue #1290d1: the meter set for the header at `headerPointer`: the views over the header and
+  /// over the frame the header names, and the message that frame is posted in. `null` for a header
+  /// or frame the module's memory cannot hold. The strip counts are the plan's, so a plan with
+  /// another strip count gets a set of its own. Control side only; allocates.
+  cutMeterSet(headerPointer) {
+    const buffer = this.memoryBuffer;
+    if (!u32(headerPointer) || headerPointer === 0
+        || headerPointer + METER_HEADER_BYTES > buffer.byteLength) return null;
+    const header = new DataView(buffer, headerPointer, METER_HEADER_BYTES);
+    // The header owns the strip counts; the strip order is the core's control list (the owner
+    // header rows), which the frame's sections follow.
+    if (header.getUint32(0, true) !== METER_HEADER_BYTES
+        || header.getUint32(4, true) !== ABI_VERSION) return null;
+    const trackCount = header.getUint32(8, true);
+    const submixCount = header.getUint32(64, true);
+    const framePointer = header.getUint32(METER_HEADER_FRAME_POINTER, true);
+    // Issue #1209 D1: the frame is `3(T + S) + 3` words -- a peak pair per strip (the tracks,
+    // then the submixes), the master pair, then one non-negative gain-reduction magnitude per
+    // strip in the same order and the master's.
+    const words = (trackCount + submixCount) * 3 + 3;
+    if (framePointer === 0 || framePointer % 4 !== 0
+        || framePointer + words * 4 > buffer.byteLength) return null;
+    const set = {
+      headerPointer,
+      framePointer,
+      trackCount,
+      submixCount,
+      masterGainIndex: words - 1,
+      header,
+      frame: null,
+      trackPeaks: null,
+      submixPeaks: null,
+      masterPeaks: null,
+      trackGain: null,
+      submixGain: null,
+      message: {
+        tag: "miso.meter.v1",
+        sequence: 0,
+        generation: 0n,
+        validity: 0,
+        lossCount: 0,
+        windows: 0,
+        trackCount,
+        // The frozen `2T + 2` track and master peaks: an existing reader indexes it exactly as
+        // before, whatever the submix count.
+        peaks: new Float32Array(trackCount * 2 + 2),
+        // Issue #143: one non-negative decibel magnitude per track. Positional and always finite;
+        // `0` deliberately conflates "not reducing" with "no observed effect", because the array
+        // is read without null checks and the distinction lives in the subscription map.
+        trackGrDb: new Float32Array(trackCount),
+        masterGrDb: null,
+        firstSample: 0n,
+        endSample: 0n,
+        // Issue #1209 D4: the buses, appended. `submixPeaks` is `[bus0 L, bus0 R, ..]`, and
+        // `submixGrDb` one non-negative decibel magnitude per bus, in canonical submix order.
+        submixCount,
+        submixPeaks: new Float32Array(submixCount * 2),
+        submixGrDb: new Float32Array(submixCount),
+      },
+    };
+    this.cutMeterViews(set, buffer);
+    return set;
+  }
+
+  /// Issue #1290d1: bring the page's meter sets in line with the host's, in a message handler. The
+  /// active set follows the header the host publishes through (a swap the render path did not
+  /// switch for, a lease released across it, is picked up here), and the pending set follows the
+  /// header the active one names as its successor: the replacement plan a command just committed,
+  /// whose views are cut now so the quantum that adopts it only switches to them. A header or
+  /// frame the module's memory cannot hold is a protocol fault, sticky.
+  syncMeterViews() {
+    if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
+        || this.handle === 0) return;
+    this.rebindMemoryViews();
+    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    let active = this.meterSet;
+    if (active === null || active.headerPointer !== current) {
+      active = this.cutMeterSet(current);
+      if (active === null) {
+        this.sticky(RESULT_INTERNAL, this.lastRequestId);
+        return;
+      }
+      this.meterSet = active;
+      this.pendingMeterSet = null;
+    }
+    const successor = active.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true);
+    if (successor === 0) {
+      this.pendingMeterSet = null;
+      return;
+    }
+    if (this.pendingMeterSet === null || this.pendingMeterSet.headerPointer !== successor) {
+      const pending = this.cutMeterSet(successor);
+      if (pending === null) {
+        this.sticky(RESULT_INTERNAL, this.lastRequestId);
+        return;
+      }
+      this.pendingMeterSet = pending;
     }
   }
 
@@ -712,62 +849,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
     this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
-      // Issue #1209 D1: the frame is `3(T + S) + 3` words -- a peak pair per strip (the tracks,
-      // then the submixes), the master pair, then one non-negative gain-reduction magnitude per
-      // strip in the same order and the master's. The header says how many submixes it holds.
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
-      this.bindView("meterHeaderView", DataView, headerPointer, METER_HEADER_BYTES);
-      if (this.meterHeaderView.getUint32(0, true) !== METER_HEADER_BYTES
-          || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION) {
-        return false;
-      }
-      // The header owns the strip counts; the strip order is the core's control list (the
-      // owner header rows), which the frame's sections follow. The capacity check below rejects
-      // a header whose counts do not match the frame the engine sized.
-      this.trackCount = this.meterHeaderView.getUint32(8, true);
-      this.submixCount = this.meterHeaderView.getUint32(64, true);
-      const strips = this.trackCount + this.submixCount;
-      if (!u32(framePointer) || framePointer === 0
-          || frameCapacity !== (strips * 3 + 3) * 4) return false;
-      this.bindView("meterView", Float32Array, framePointer, frameCapacity / 4);
-      // Fixed views over the one buffer, built here and never again: the frozen render-callback
-      // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
-      // allocation. With buses the master pair no longer follows the tracks, so the message's
-      // `2T + 2` peaks are assembled from the track view and the master view.
-      this.bindView("meterTrackPeakView", Float32Array, framePointer, this.trackCount * 2);
-      this.bindView("meterSubmixPeakView", Float32Array,
-        framePointer + this.trackCount * 2 * 4, this.submixCount * 2);
-      this.bindView("meterMasterPeakView", Float32Array, framePointer + strips * 2 * 4, 2);
-      this.bindView("meterGainView", Float32Array,
-        framePointer + (strips * 2 + 2) * 4, this.trackCount);
-      this.bindView("meterSubmixGainView", Float32Array,
-        framePointer + (strips * 2 + 2 + this.trackCount) * 4, this.submixCount);
-      this.meterMasterGainIndex = strips * 3 + 2;
-      this.meterMessage = {
-        tag: "miso.meter.v1",
-        sequence: 0,
-        generation: 0n,
-        validity: 0,
-        lossCount: 0,
-        windows: 0,
-        trackCount: this.trackCount,
-        // The frozen `2T + 2` track and master peaks: an existing reader indexes it exactly as
-        // before, whatever the submix count.
-        peaks: new Float32Array(this.trackCount * 2 + 2),
-        // Issue #143: one non-negative decibel magnitude per track. Positional and always finite;
-        // `0` deliberately conflates "not reducing" with "no observed effect", because the array
-        // is read without null checks and the distinction lives in the subscription map.
-        trackGrDb: new Float32Array(this.trackCount),
-        masterGrDb: null,
-        firstSample: 0n,
-        endSample: 0n,
-        // Issue #1209 D4: the buses, appended. `submixPeaks` is `[bus0 L, bus0 R, ..]`, and
-        // `submixGrDb` one non-negative decibel magnitude per bus, in canonical submix order.
-        submixCount: this.submixCount,
-        submixPeaks: new Float32Array(this.submixCount * 2),
-        submixGrDb: new Float32Array(this.submixCount),
-      };
+      const set = this.cutMeterSet(headerPointer);
+      // The buffer exports and the header describe one frame: the capacity check rejects a header
+      // whose counts do not match the frame the engine sized.
+      if (set === null || !u32(framePointer) || framePointer !== set.framePointer
+          || frameCapacity !== (set.trackCount + set.submixCount) * 3 * 4 + 12) return false;
+      this.meterSet = set;
     }
     this.telemetryMessage = {
       tag: "miso.telemetry.v1",
@@ -1684,31 +1773,52 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// allocation, and it is the one this ABI exists to pay: one flat numeric payload per window
   /// instead of one per block.
   postMeterFrame() {
+    let set = this.meterSet;
+    // A host booted without meters has no frame; the lease is then a no-op the host refuses.
+    if (set === null) return;
+    // Issue #1290d1: a block that adopted a replacement plan published its frame and header in
+    // the plan's own, and marked the header it left. Switch to the views the handler that
+    // committed the plan cut over them: a reference assignment, no view is made here. A header
+    // that says it was replaced, without the set cut for the header it names, is a fault.
+    if (set.header.getUint32(METER_HEADER_RETIRED, true) !== 0) {
+      const next = this.pendingMeterSet;
+      if (next === null
+          || next.headerPointer !== set.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true)) {
+        this.stickyResult = RESULT_INTERNAL;
+        this.ready = false;
+        return;
+      }
+      this.meterSet = next;
+      this.pendingMeterSet = null;
+      set = next;
+    }
     const windows = this.exports.miso_engine_web_v1_meter_poll(this.handle);
     if (windows === 0) return;
-    const metadata = this.meterHeaderView.getBigUint64(56, true);
+    const header = set.header;
+    const metadata = header.getBigUint64(56, true);
     // The Rust adapter only publishes complete track/master spans. Keep this guard at the
     // transport boundary so a future invalid publication cannot reach legacy numeric consumers.
     if ((metadata & 1n) === 0n || (metadata & 2n) === 0n) return;
     this.meterSequence += 1;
-    this.meterMessage.sequence = this.meterSequence;
-    this.meterMessage.generation = this.meterHeaderView.getBigUint64(48, true);
-    this.meterMessage.validity = Number(metadata & 0xffffffffn);
-    this.meterMessage.lossCount = Number(metadata >> 32n);
-    this.meterMessage.windows = windows;
-    this.meterMessage.peaks.set(this.meterTrackPeakView);
-    this.meterMessage.peaks.set(this.meterMasterPeakView, this.trackCount * 2);
-    this.meterMessage.submixPeaks.set(this.meterSubmixPeakView);
+    const message = set.message;
+    message.sequence = this.meterSequence;
+    message.generation = header.getBigUint64(48, true);
+    message.validity = Number(metadata & 0xffffffffn);
+    message.lossCount = Number(metadata >> 32n);
+    message.windows = windows;
+    message.peaks.set(set.trackPeaks);
+    message.peaks.set(set.masterPeaks, set.trackCount * 2);
+    message.submixPeaks.set(set.submixPeaks);
     // Issue #143 D5: the gain-reduction section rides the same post. There is no second message
     // and no second clock -- the pinned-occurrence rule does not move.
-    this.meterMessage.trackGrDb.set(this.meterGainView);
-    this.meterMessage.submixGrDb.set(this.meterSubmixGainView);
-    this.meterMessage.masterGrDb = this.meterHeaderView.getUint32(44, true) === 1
-      ? this.meterView[this.meterMasterGainIndex]
+    message.trackGrDb.set(set.trackGain);
+    message.submixGrDb.set(set.submixGain);
+    message.masterGrDb = header.getUint32(44, true) === 1
+      ? set.frame[set.masterGainIndex]
       : null;
-    this.meterMessage.firstSample = this.meterHeaderView.getBigUint64(16, true);
-    this.meterMessage.endSample = this.meterHeaderView.getBigUint64(24, true);
-    this.port.postMessage(this.meterMessage);
+    message.firstSample = header.getBigUint64(16, true);
+    message.endSample = header.getBigUint64(24, true);
+    this.port.postMessage(set.message);
   }
 
   /// Fold one render-time window and post it (issue #137 D3).

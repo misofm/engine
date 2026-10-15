@@ -416,7 +416,7 @@ export const ABI_LAYOUT = deepFreeze(
       ]
     },
     "meterHeader": {
-      "bytes": 72,
+      "bytes": 80,
       "fields": [
         {
           "name": "structSize",
@@ -474,8 +474,18 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u32"
         },
         {
-          "name": "reservedPad",
+          "name": "retired",
           "offset": 68,
+          "type": "u32"
+        },
+        {
+          "name": "framePointer",
+          "offset": 72,
+          "type": "u32"
+        },
+        {
+          "name": "successorPointer",
+          "offset": 76,
           "type": "u32"
         }
       ]

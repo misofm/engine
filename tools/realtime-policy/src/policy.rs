@@ -22,7 +22,12 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// Issue #1570b adds `control_event` (D1), the event entry: the worklet's message handler dequeues
 /// both event lanes through it after each message, and `SessionState::dequeue_event` runs the
 /// service step and encodes the frame, so it is control work of the same kind.
-const UNWRAPPED_EXPORTS: [&str; 10] = [
+///
+/// Issue #1290d1 adds `meter_header_ptr`: the worklet's message handler reads the header the host
+/// publishes the meter frame through, after each message, to cut the views over a replacement
+/// plan's frame in advance. It reads one address and allocates nothing; it is never inside
+/// `process()` or a render-locked window.
+const UNWRAPPED_EXPORTS: [&str; 11] = [
     "dispose",
     "render_allocation_count",
     "service",
@@ -33,6 +38,7 @@ const UNWRAPPED_EXPORTS: [&str; 10] = [
     "control_response_ptr",
     "control_response_bytes",
     "control_revision",
+    "meter_header_ptr",
 ];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a

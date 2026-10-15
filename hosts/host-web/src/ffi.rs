@@ -4062,6 +4062,15 @@ pub mod native_staging {
         super::with_host(handle, None, |host| Some(*host.watermark()))
     }
 
+    /// The meter header and frame the host `handle` names last published, as the worklet reads
+    /// them through `miso_engine_web_v1_meter_header_ptr` and the header's frame pointer (#1290d1);
+    /// `None` for an unknown handle.
+    pub fn meter_frame(handle: u32) -> Option<(crate::WebMeterHeader, Vec<f32>)> {
+        super::with_host(handle, None, |host| {
+            Some((*host.meter_header(), host.meter_frame().to_vec()))
+        })
+    }
+
     /// Stage live-control command records, as the worklet writes them through
     /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`.
     pub fn command_records(handle: u32, records: &[u8]) -> bool {

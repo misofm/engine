@@ -413,3 +413,147 @@ fn a_live_edit_in_flight_at_the_adoption_block_costs_no_render_call_an_allocatio
     assert_eq!(swapped.drops_at_first_service, 1);
     assert_eq!(swapped.blocking_rebuilds, 1);
 }
+
+/// What a metered script published.
+struct Metered {
+    /// Every frame the polls published, in order: the header and the frame's words.
+    frames: Vec<(host_web::WebMeterHeader, Vec<f32>)>,
+    /// Render-locked allocator calls over every render call and every meter poll.
+    render_allocations: u32,
+    /// The frames the polls after the block `ADOPTION_WITH_WINDOW` published.
+    published_at_adoption: usize,
+}
+
+/// Windows close after the odd blocks (a two-block period), so a transaction before block 5 is
+/// adopted by the block that closes the window opening at sample 512.
+const ADOPTION_WITH_WINDOW: usize = 5;
+
+fn run_metered(structural: bool) -> Metered {
+    std::thread::spawn(move || {
+        let base = model();
+        let handle = boot(&if structural {
+            base.clone()
+        } else {
+            with_muted_track(&base)
+        });
+        assert_eq!(
+            host_web::miso_engine_web_v1_meter_lease(handle, 1),
+            RESULT_OK
+        );
+        let mut run = Metered {
+            frames: Vec::new(),
+            render_allocations: 0,
+            published_at_adoption: 0,
+        };
+        for block in 0..BLOCKS {
+            feed(handle, block);
+            if structural && block == ADOPTION_WITH_WINDOW {
+                let revision = host_web::miso_engine_web_v1_control_revision(handle);
+                native_staging::structural_command(
+                    handle,
+                    &frame(&add_muted_track(&base), 1, revision),
+                )
+                .expect("a live handle")
+                .expect("the structural transaction publishes");
+            }
+            let allocations = host_web::miso_engine_web_v1_render_allocation_count();
+            assert_eq!(
+                host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
+                RESULT_OK,
+                "block {block}: the render"
+            );
+            let windows = host_web::miso_engine_web_v1_meter_poll(handle);
+            run.render_allocations +=
+                host_web::miso_engine_web_v1_render_allocation_count() - allocations;
+            if windows > 0 {
+                run.frames
+                    .push(native_staging::meter_frame(handle).expect("a handle"));
+                if block == ADOPTION_WITH_WINDOW {
+                    run.published_at_adoption += 1;
+                }
+            }
+            if structural && block == ADOPTION_WITH_WINDOW {
+                assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+            }
+        }
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+        run
+    })
+    .join()
+    .expect("the run completes")
+}
+
+/// #1290d1 gate: a strip-count change publishes a correctly shaped frame on the first block after
+/// adoption, with zero render allocations. The frame travels with the plan's tables, so the
+/// adoption block exchanges a pointer and the poll that follows writes into the successor's frame.
+///
+/// Test value: red if the swap block or the poll after it allocates or frees (a frame cut or
+/// grown in render), if the first poll after adoption publishes nothing or a frame of the
+/// predecessor's size, or if the window is not what a fresh boot of the committed model publishes
+/// for it.
+#[test]
+fn a_strip_count_change_publishes_the_successors_frame_on_the_first_block_after_adoption() {
+    let _turn = TURN.lock().expect("the turn");
+    let fresh = run_metered(false);
+    let swapped = run_metered(true);
+
+    assert_eq!(fresh.render_allocations, 0);
+    assert_eq!(
+        swapped.render_allocations, 0,
+        "a render call or a poll allocated or freed"
+    );
+    assert_eq!(
+        swapped.published_at_adoption, 1,
+        "the poll after the adoption block publishes"
+    );
+    let sizes = |run: &Metered| {
+        run.frames
+            .iter()
+            .map(|(header, frame)| (header.track_count, frame.len()))
+            .collect::<Vec<_>>()
+    };
+    let published = sizes(&swapped);
+    assert_eq!(
+        published.first(),
+        Some(&(9, 3 * 9 + 3)),
+        "the boot plan's frames"
+    );
+    let adopted = published
+        .iter()
+        .position(|shape| *shape == (10, 3 * 10 + 3))
+        .expect("the successor's frames follow");
+    assert!(
+        published[adopted..]
+            .iter()
+            .all(|shape| *shape == (10, 3 * 10 + 3)),
+        "every frame after the adoption block is the successor's"
+    );
+    let (adoption_header, adoption_frame) = &swapped.frames[adopted];
+    assert_eq!(
+        adoption_header.first_sample,
+        (ADOPTION_WITH_WINDOW as u64 - 1) * u64::from(QUANTUM_FRAMES)
+    );
+    assert_eq!(
+        adoption_header.sequence,
+        swapped.frames[adopted - 1].0.sequence + 1,
+        "the stream continues"
+    );
+    assert_eq!(adoption_header.reserved[1] >> 32, 0, "nothing counted lost");
+    for (header, frame) in &swapped.frames[adopted..] {
+        let (_, reference) = fresh
+            .frames
+            .iter()
+            .find(|(candidate, _)| candidate.first_sample == header.first_sample)
+            .expect("the fresh boot published the same window");
+        assert_eq!(
+            frame.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+            reference
+                .iter()
+                .map(|word| word.to_bits())
+                .collect::<Vec<_>>(),
+            "the window opening at {} equals a fresh boot of the committed model",
+            header.first_sample
+        );
+    }
+    assert!(adoption_frame.iter().any(|word| *word != 0.0));
+}
