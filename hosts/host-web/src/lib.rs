@@ -57,7 +57,7 @@ use host_core::{
 };
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
-use session::{CompileCaps, SOURCE_CHANNELS_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
+use session::{CompileCaps, SOURCE_CHANNELS_LAUNCH_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
 
 use host_core::EffectRack;
 /// Live effect addressing in the session's own terms (decision 12, issue #1096).
@@ -3106,18 +3106,19 @@ impl AudioWorkletEngineHost {
         (meters, scans)
     }
 
-    /// Whether meter observers were attached at preparation (issue #137 D2).
+    /// Whether the host was prepared with a meter window (issue #137 D2). It is the
+    /// configuration's word, not the plan's strip count: a session with no strip (TBD30) is
+    /// metered by the master alone, and takes the lease so that the first strip's meters are
+    /// delivered from the block that adopts them.
     #[must_use]
     pub fn meters_attached(&self) -> bool {
-        self.ready
-            .as_ref()
-            .is_some_and(|ready| !ready.shape.meter_pending.is_empty())
+        self.ready.is_some() && self.options.live_control_meter_blocks != 0
     }
 
     /// Take or release the meter lease. Returns the frozen result code.
     ///
-    /// A lease over a host that attached no observers is refused with [`RESULT_UNSUPPORTED`]: the
-    /// caller asked for numbers this preparation cannot produce, and silently reporting zeros
+    /// A lease over a host prepared with no meter window is refused with [`RESULT_UNSUPPORTED`]:
+    /// the caller asked for numbers this preparation cannot produce, and silently reporting zeros
     /// would be worse than saying so.
     pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
         if self.status.state != STATE_READY {
@@ -3591,15 +3592,45 @@ impl AudioWorkletEngineHost {
         // keeps in range. This export is called from `process()`, so the shipped artifact's
         // call-graph gate covers it as it covers the render export.
         let meter_count = companions.meters.len();
-        if meter_count == 0 {
-            return 0;
-        }
         // The render path is the sole producer of this fixed-capacity ring and increments the
         // count only when the configured master interval closes. An empty ring therefore proves
         // that no coherent track/master publication can exist. Preserve pending/public bytes and
         // avoid walking every track consumer on incomplete quanta.
         if ready.master_count == 0 {
             return 0;
+        }
+        let mut windows = 0_u32;
+        let mut folded_start = 0_u64;
+        let mut folded_end = 0_u64;
+        let mut folded = false;
+        if meter_count == 0 {
+            // A plan with no strip (TBD30) has no strip window to pair the master with, so the
+            // master's own windows are the stream: the frame is the master's three words.
+            let Some(front) = ready
+                .master_windows
+                .get(ready.master_read)
+                .and_then(Option::as_ref)
+                .copied()
+            else {
+                return 0;
+            };
+            if front.start_sample < self.meter_activation_sample
+                || front.end_sample <= front.start_sample
+            {
+                let _ = ready.pop_master_window();
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+                return 0;
+            }
+            if ready.shape.meter_header.sequence > 0
+                && ready.shape.meter_header.reserved[0] == ready.meter_generation
+                && front.start_sample != ready.shape.meter_header.end_sample
+            {
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+            }
+            folded_start = front.start_sample;
+            folded_end = front.end_sample;
+            folded = true;
+            windows = 1;
         }
         // Issue #1448 D2: each meter's queue pops at most its own count read here, at entry, capped
         // at the configured depth, whatever a producer on another thread publishes meanwhile. A
@@ -3617,10 +3648,6 @@ impl AudioWorkletEngineHost {
         for remaining in ready.shape.meter_remaining.iter() {
             passes = passes.saturating_add(*remaining);
         }
-        let mut windows = 0_u32;
-        let mut folded_start = 0_u64;
-        let mut folded_end = 0_u64;
-        let mut folded = false;
         for _ in 0..passes {
             for ((meter, pending), remaining) in companions
                 .meters
@@ -4667,9 +4694,9 @@ fn project_buffers(
 ) -> Result<PreparedBufferProjection, BootFailure> {
     // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
     // a source, track or submix ID of the longest length the grammar allows, and a source of the
-    // most channels it allows. Sizing from the boot session would let an acked rebuild declare a
+    // most channels a source can have (two). Sizing from the boot session would let an acked rebuild declare a
     // source the host could never stage or feed.
-    let maximum_source_channels = SOURCE_CHANNELS_MAXIMUM;
+    let maximum_source_channels = SOURCE_CHANNELS_LAUNCH_MAXIMUM;
     let id_staging_bytes = STABLE_ID_MAXIMUM_BYTES as u64;
     let (
         spectrum_configured,
@@ -4952,7 +4979,6 @@ fn prepare_caps(
             quantum_frames,
         },
         source_ring_frames,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,
@@ -6197,10 +6223,19 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
-    let master_capacity = companions
-        .meters()
-        .first()
-        .map_or(0, |meter| meter.consumer.capacity());
+    // The master windows queue as deep as a strip meter's. A session with no strip (TBD30) has no
+    // meter to size it from, and still meters its master when a window is configured: the
+    // ring is the boot's, so it must already hold the depth the first strip will use.
+    let master_capacity = companions.meters().first().map_or_else(
+        || {
+            if options.live_control_meter_blocks == 0 {
+                0
+            } else {
+                METER_QUEUE_DEPTH
+            }
+        },
+        |meter| meter.consumer.capacity(),
+    );
     let pending_meter_bytes = rows.pending_bytes;
     let remaining_meter_bytes = rows.remaining_bytes;
     let carried_meter_bytes = rows.carried_bytes;

@@ -541,7 +541,6 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
     host_core::HostPrepareCaps {
         shape: host_core::HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
         maximum_submixes: if limits.maximum_submixes == 0 {

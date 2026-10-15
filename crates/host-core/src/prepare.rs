@@ -136,8 +136,6 @@ pub struct HostPrepareCaps {
     pub shape: HostShapePolicy,
     /// Per-source ring capacity in frames; must be a nonzero multiple of the session quantum.
     pub source_ring_frames: u32,
-    /// Optional per-source channel-count cap. `None` accepts whatever the session declares.
-    pub maximum_source_channels: Option<u32>,
     /// Automation spans the effect compiler may schedule in one block.
     pub maximum_automation_spans_per_block: u32,
     /// Maximum tracks in the session.
@@ -1939,12 +1937,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut carried_overhead_bytes = 0_u64;
     let mut carried_largest_bytes = 0_u64;
     for (index, source) in model.sources.iter().enumerate() {
-        if caps
-            .maximum_source_channels
-            .is_some_and(|maximum| u32::from(source.channels) > maximum)
-        {
-            return Err(shape("host.source.channels"));
-        }
         let index = u32::try_from(index).map_err(|_| platform("host.count"))?;
         let ring = PcmSourceRingConfig {
             channel_count: u32::from(source.channels),

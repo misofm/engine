@@ -364,6 +364,26 @@ describe("validation refusals name the offending path", () => {
     );
   });
 
+  test("a source of other than one or two channels is refused at its own path", () => {
+    // The limit is the engine's own, read from its generated ABI constants (a source is mono or
+    // stereo). Red mutation: hard-code a wider limit in the builder and a three-channel source is
+    // built, then refused only at boot.
+    for (const channels of [0, 3, 255, 1.5]) {
+      assert.throws(
+        () =>
+          session({ id: "wide", sampleRateHz: 48_000 })
+            .source("stem", { channels, bitDepth: 16, frames: 480, content: CONTENT_A }),
+        (error) => {
+          assert.ok(error instanceof MisoUsageError);
+          assert.match(error.message, /source\("stem"\)\.channels/);
+          assert.match(error.message, /1 to 2 channels/);
+          return true;
+        },
+        `channels ${channels}`,
+      );
+    }
+  });
+
   test("a malformed content digest is refused at its own path", () => {
     // The schema is exact: `blake3:` and 64 lowercase hex digits. Red mutation: relax the regex to
     // a prefix check, and every one of these becomes a boot-time refusal instead.

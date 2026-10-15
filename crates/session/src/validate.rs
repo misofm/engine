@@ -3,8 +3,8 @@ use crate::{
     Automation, AutomationSegment, AutomationShape, ConsoleEntry, ControlAddress, Diagnostic,
     DiagnosticCode, DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, Owner,
     ParameterChannel, ParameterUnit, ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM,
-    ROUTE_GAIN_DB_MINIMUM, Rack, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section,
-    SessionModel, Source, StableId, Submix, Track,
+    ROUTE_GAIN_DB_MINIMUM, Rack, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1,
+    SOURCE_CHANNELS_LAUNCH_MAXIMUM, Section, SessionModel, Source, StableId, Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -216,12 +216,12 @@ fn validate_sources(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
                 "source content must match blake3:[0-9a-f]{64}",
             );
         }
-        if source.channels == 0 {
+        if source.channels == 0 || u32::from(source.channels) > SOURCE_CHANNELS_LAUNCH_MAXIMUM {
             error(
                 diagnostics,
-                DiagnosticCode::CapacityZero,
+                DiagnosticCode::SourceChannelsUnsupported,
                 &path.key("channels"),
-                "source channels must be nonzero",
+                "a source is mono or stereo: channels must be 1 or 2",
             );
         }
         if source.frames == 0 {

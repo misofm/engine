@@ -1647,7 +1647,6 @@ pub struct SourceGraphTrackMapping {
 /// Rejection while sealing source consumers and mappings for graph fan-out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceGraphSourceSetError {
-    EmptySources,
     SourceIndex,
     ChannelIndex,
     ArithmeticOverflow,
@@ -1950,9 +1949,6 @@ pub fn prepare_graph_source_set(
     sources: Vec<SourceGraphSource>,
     mappings: Vec<SourceGraphTrackMapping>,
 ) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
-    if sources.is_empty() {
-        return Err(SourceGraphSourceSetError::EmptySources);
-    }
     let retained = source_set_retained_resources(&sources, &mappings)?;
     let mut pcm_payload = 0_u64;
     let mut overhead = 0_u64;

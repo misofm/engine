@@ -3213,7 +3213,7 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
             let id_pointer = ids.as_ptr();
             for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
                 let offset = channel * quantum;
-                // SAFETY: Preparation allocated `SOURCE_CHANNELS_MAXIMUM * quantum` stable PCM
+                // SAFETY: Preparation allocated `SOURCE_CHANNELS_LAUNCH_MAXIMUM * quantum` stable PCM
                 // samples. The checked channel bound/product and `frames <= quantum` prove this
                 // exact plane prefix is readable for the synchronous source submission below.
                 let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };

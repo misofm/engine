@@ -411,7 +411,7 @@ fn stable_id_category_has_20_distinct_cases() {
 }
 
 #[test]
-fn source_identity_and_shape_category_has_21_distinct_cases() {
+fn source_identity_and_shape_category_has_22_distinct_cases() {
     let mut count = 0;
     model_case(
         &mut count,
@@ -456,7 +456,13 @@ fn source_identity_and_shape_category_has_21_distinct_cases() {
     model_case(
         &mut count,
         |s| s.sources[0].channels = 0,
-        DiagnosticCode::CapacityZero,
+        DiagnosticCode::SourceChannelsUnsupported,
+        "$.sources[0].channels",
+    );
+    model_case(
+        &mut count,
+        |s| s.sources[0].channels = 3,
+        DiagnosticCode::SourceChannelsUnsupported,
         "$.sources[0].channels",
     );
     model_case(
@@ -535,7 +541,7 @@ fn source_identity_and_shape_category_has_21_distinct_cases() {
             "$.sources[0].bit_depth",
         );
     }
-    assert_eq!(count, 21);
+    assert_eq!(count, 22);
 }
 
 /// #1203 D1: a submix source is `{ kind = "submix", submix_id, tap }` for a route and a sidechain

@@ -67,11 +67,6 @@ the two sides are independent witnesses. M-04 is the same mutation against the f
 * Red: `shape_policy_pins_rate_and_quantum` — a session with quantum 128 is accepted under a policy
   demanding 64.
 
-### M-06 — the per-source channel cap is ignored
-* Mutation: delete the `caps.maximum_source_channels` check in `prepare_host_runtime`.
-* Command: `cargo test -p host-core --test prepare`
-* Red: `source_channel_cap_is_optional` — a stereo source is admitted under `Some(1)`.
-
 ### M-07 — the named-allocation cap rejects its own reported row
 * Mutation: `largest_engine_allocation_bytes.max(..) > caps.maximum_named_allocation_bytes` → `>=`.
 * Command: `cargo test -p host-core --test prepare`

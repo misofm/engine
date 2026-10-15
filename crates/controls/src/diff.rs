@@ -77,6 +77,35 @@ pub fn changed_controls(
     Some(changed)
 }
 
+/// Whether any control row's `active` flag differs between `current` and `next` (#1631 D1).
+///
+/// A row's activity depends on a value of the model, not on the row's own value: a strip's
+/// `matrix_mode` decides which of its pan and matrix rows are active. Today the predicate is true
+/// exactly when a strip's `matrix_or_pan` variant differs; a later row whose activity depends on a
+/// value joins it here, so a caller keeps no row list. Two models that do not hold the same strips
+/// in the same order differ in structure, which counts as a change.
+///
+/// Allocation: none.
+#[must_use]
+pub fn activity_changed(current: &SessionModel, next: &SessionModel) -> bool {
+    let mut before = current.strips();
+    let mut after = next.strips();
+    loop {
+        match (before.next(), after.next()) {
+            (None, None) => return false,
+            (Some(old), Some(new)) => {
+                if old.id != new.id
+                    || std::mem::discriminant(old.matrix_or_pan)
+                        != std::mem::discriminant(new.matrix_or_pan)
+                {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+    }
+}
+
 /// Whether a write to the row at `address` changes that row alone: the session's rows do not (a ramp
 /// length changes every owner's descriptors) and a strip's `matrix_mode` does not (the switch flips
 /// which rows are active and rewrites the pan or the matrix). A host that applies a transaction of

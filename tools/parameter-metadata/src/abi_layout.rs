@@ -1623,6 +1623,11 @@ pub fn render() -> String {
         &mut out,
         "    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"
     );
+    append!(
+        &mut out,
+        "    \"maximumSourceChannels\": {},\n",
+        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM
+    );
     append!(&mut out, "    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n");
     append!(
         &mut out,

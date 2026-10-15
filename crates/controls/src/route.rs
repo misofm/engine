@@ -10,7 +10,9 @@ use session::{
     RouteDestination, SessionModel, StableId,
 };
 
-use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
+use crate::descriptor::{
+    AutomationExclusion, AutomationRule, BASE, ControlDescriptor, Lanes, Motion,
+};
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control};
@@ -177,6 +179,10 @@ pub(crate) static ROWS: [RouteRow; 8] = [
             taper: Taper::Stepped,
             lattice: ParameterLattice::indices(),
             motion: Motion::Ramp(LiveRampRow::SendFollowsMute),
+            automation: AutomationRule::Excluded(&AutomationExclusion {
+                reason: "a routing setting, not a performance value",
+                reopen: "an owner request",
+            }),
             ..ROUTE_BASE
         },
         // A route into the output carries `false` (#1218): the row does not apply.

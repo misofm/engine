@@ -52,7 +52,6 @@ fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 4_096,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
         maximum_submixes: 100,
@@ -1119,6 +1118,107 @@ fn fader_ride(model: &SessionModel) -> Automation {
             unit: ParameterUnit::Db,
         }],
     }
+}
+
+/// A ride on the first track's pan (builtin 12, left lane) or, with `matrix`, on its `matrix_ll`
+/// (builtin 7, a shared row): the rows `matrix_mode` flips between.
+fn pan_ride(model: &SessionModel, matrix: bool) -> Automation {
+    let mut ride = fader_ride(model);
+    ride.id = id("pan-ride");
+    ride.target.control = if matrix { 7 } else { 12 };
+    ride.target.lane = if matrix {
+        ParameterChannel::Both
+    } else {
+        ParameterChannel::Left
+    };
+    ride.segments[0].unit = ParameterUnit::Linear;
+    ride.segments[0].start_value = 0.0;
+    ride.segments[0].end_value = 0.5;
+    ride
+}
+
+fn switch_to_matrix(next: &mut SessionModel) {
+    next.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+        smoothing_samples: 0,
+    };
+}
+
+/// #1631 gate 1 and 2 and 3. A mode switch that leaves a stored pan entry on an inactive row is a
+/// rebuild (the row rule refuses it `control.inactive` at preparation, before any commit); the
+/// same switch with the entry retargeted to the matrix row, or on a strip without such an entry,
+/// stays live.
+///
+/// Red if step 2 runs only when the automation table changes: the switch is then live and the
+/// committed model holds an entry that its next rebuild refuses.
+#[test]
+fn a_mode_switch_that_strands_an_automation_needs_a_rebuild() {
+    let mut declared = two_tracks();
+    let ride = pan_ride(&declared, false);
+    declared.automation.push(ride);
+    let current = normalized(&declared);
+    assert!(
+        controls::automation_diagnostics(&current, current.sample_rate_hz).is_empty(),
+        "the pan entry is accepted on a pan strip"
+    );
+
+    assert_eq!(
+        classify(&current, switch_to_matrix),
+        Err(LiveRebuild::AutomationTarget),
+        "a switch under a pan entry"
+    );
+    assert!(
+        classify(&current, |next| {
+            switch_to_matrix(next);
+            next.automation[0] = pan_ride(next, true);
+        })
+        .is_ok(),
+        "the switch with the entry retargeted to the matrix row"
+    );
+    assert!(
+        classify(&current, |next| {
+            switch_to_matrix(next);
+            next.automation.clear();
+        })
+        .is_ok(),
+        "the switch with the entry removed"
+    );
+
+    let mut plain = two_tracks();
+    plain.automation.push(fader_ride(&plain));
+    let plain = normalized(&plain);
+    assert!(
+        classify(&plain, switch_to_matrix).is_ok(),
+        "a strip with no pan or matrix entry switches live"
+    );
+    let mut other = two_tracks();
+    let mut ride = pan_ride(&other, false);
+    ride.target.owner = Owner::Strip(other.tracks[1].id.clone());
+    other.automation.push(ride);
+    assert!(
+        classify(&normalized(&other), switch_to_matrix).is_ok(),
+        "an entry on another strip is not stranded"
+    );
+    // The reverse: a matrix entry on a matrix strip, switched back to pan.
+    let mut matrix = two_tracks();
+    switch_to_matrix(&mut matrix);
+    let ride = pan_ride(&matrix, true);
+    matrix.automation.push(ride);
+    let matrix = normalized(&matrix);
+    assert_eq!(
+        classify(&matrix, |next| {
+            next.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
+                left: 0.0,
+                right: 0.0,
+                smoothing_samples: 0,
+            };
+        }),
+        Err(LiveRebuild::AutomationTarget),
+        "a switch back to pan under a matrix entry"
+    );
 }
 
 /// The model-only edits: #1260 D1's four and #1365 D4's `control_smoothing`.

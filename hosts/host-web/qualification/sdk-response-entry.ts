@@ -1,7 +1,8 @@
 import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
 import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
-import { createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
+import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
+import { decodeControlReply } from "../../../sdk/src/core/control-frame.ts";
 import type { MisoAudioWorkletHost } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
@@ -2493,6 +2494,33 @@ export async function applyDelayThroughSdk(
     path: report.path,
     appliedOperations: report.appliedOperations,
     revision: String(report.revision),
+  };
+}
+
+/**
+ * Send one structural command frame the protocol codec wrote (TBD30: the frame that adds the first
+ * stem) through the SDK's endpoint for the host. The SDK has no encoder for a structural edit, and
+ * the engine's replay cache refuses a request ID twice, so the frame takes the next ID of the
+ * host's one allocator and the committed revision, the two header words that depend on the engine.
+ * Returns the core's verdict: its status, the edit path and the committed revision.
+ */
+export async function sendStructuralFrameThroughSdk(
+  host: MisoAudioWorkletHost,
+  hex: string,
+  revision: string,
+): Promise<{ status: string; path: string | undefined; revision: string; replyBytes: number }> {
+  const transport = await createBrowserControlListTransport(host);
+  const frame = Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(24, transport.requestIds.next(), true);
+  view.setBigUint64(32, BigInt(revision), true);
+  const response = await transport.send(frame);
+  const reply = decodeControlReply(response);
+  return {
+    status: reply.status,
+    path: reply.applied?.editPath,
+    revision: String(reply.revision),
+    replyBytes: response.length,
   };
 }
 

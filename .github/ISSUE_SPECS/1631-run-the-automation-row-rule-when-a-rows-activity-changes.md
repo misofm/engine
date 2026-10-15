@@ -70,3 +70,32 @@ transaction also retargets or removes the entry. Found by reading, not reproduce
 ## Size
 
 Half a day.
+
+## Decision record: #1631 (batch 8)
+
+Shipped. Anchors moved: step 2 sits at `crates/host-core/src/live_delta.rs` ~344 (the spec said
+371-376); the rule is otherwise as filed.
+
+- `controls::activity_changed(current, next)` (`crates/controls/src/diff.rs`, re-exported from
+  `lib.rs`): true when the two models do not list the same strips in the same order, or when a strip's
+  `matrix_or_pan` variant differs. A later value-dependent row joins it there.
+- Classifier step 2 runs `automation_diagnostics(next, ..)` when the automation table changes or
+  `activity_changed` holds. A refusal is `LiveRebuild::AutomationTarget`; the rebuild's preparation
+  refuses it `control.inactive` at `$.automation[id=<id>].target` before any commit.
+- Departure (test shape): the browser parity gate is a separate test, not a script row. A rebuild
+  route refusal is a non-ok entry result with the diagnostic in the last-error buffer on both hosts
+  (browser 10, C ABI 5: each host numbers its results), not a typed verdict frame, and the script
+  harness asserts an ok result. `CAbi::send_status` and `CAbi::last_error` were added to
+  `control_parity.rs` for it (the diagnostic is read before the reliable-lane drain, which clears it).
+
+Gates and tests:
+- Gate 1 and 3 (classifier): `host-core/tests/live_delta.rs::a_mode_switch_that_strands_an_automation_needs_a_rebuild`
+  (pan entry then matrix switch, and the reverse, give `AutomationTarget`; another strip's entry and a
+  strip with only a fader entry stay live).
+- Gate 1 and 2 (C ABI): `capi/src/runtime/live_tests.rs::set_control::a_mode_switch_under_a_stored_pan_entry_is_refused_before_any_commit`
+  (refused, diagnostic names `control.inactive` and the path, state unchanged; switch plus
+  `SetAutomationTarget` commits; an entry-free strip switches live).
+- Gate 1 and 2 (parity): `hosts/host-web/tests/control_parity.rs::a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts`
+  at all four rates (same diagnostic bytes; the same expected revision then commits the switch with
+  the retarget, `model_only` because the switch keeps the effective 2x2).
+- Red on revert: all three fail with step 2 restored to the table-only condition.

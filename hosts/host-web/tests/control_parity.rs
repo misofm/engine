@@ -68,6 +68,9 @@ const OUTER_VCA: VcaRef = VcaRef { id: "outer" };
 const MATRIX_MODE_ROW: u32 = 1;
 /// The builtin row of a strip's `delay_samples`.
 const DELAY_SAMPLES_ROW: u32 = 11;
+/// The builtin rows of a strip's `pan` and `matrix_ll`.
+const PAN_ROW: u32 = 12;
+const MATRIX_LL_ROW: u32 = 7;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
 /// Which lane(s) of a dual-mono value an edit writes.
@@ -1232,6 +1235,35 @@ impl CAbi {
 
     /// Send one frame and decode the answer.
     fn send(&mut self, payload: CommandPayload<'_>, expected: ExpectedRevision) -> Vec<u8> {
+        let (code, response) = self.send_status(payload, expected);
+        assert_eq!(code, C_RESULT_OK, "C ABI command");
+        response
+    }
+
+    /// The session's last diagnostic, through `miso_engine_v1_last_error`.
+    fn last_error(&self) -> Vec<u8> {
+        let mut storage = vec![0_u8; 4_096];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the buffer is owned.
+        let code = unsafe { capi::miso_engine_v1_last_error(self.session.cast(), &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI last error");
+        storage.truncate(out.required_bytes as usize);
+        storage
+    }
+
+    /// [`Self::send`] for a command that may be refused: the entry's result, and the response frame
+    /// after `RESULT_OK` or else the refusal's diagnostic.
+    fn send_status(
+        &mut self,
+        payload: CommandPayload<'_>,
+        expected: ExpectedRevision,
+    ) -> (u32, Vec<u8>) {
         self.request += 1;
         let mut bytes = vec![0_u8; 4_096];
         let length = ProtocolCodec::default()
@@ -1262,10 +1294,13 @@ impl CAbi {
                 &mut out,
             )
         };
-        assert_eq!(code, C_RESULT_OK, "C ABI command");
         response.truncate(out.required_bytes as usize);
+        // Before the drain: a later entry clears the diagnostic.
+        if code != C_RESULT_OK {
+            response = self.last_error();
+        }
         self.drain_reliable();
-        response
+        (code, response)
     }
 
     /// One scripted edit as one transaction at the committed revision, and the reply frame's bytes.
@@ -2155,7 +2190,11 @@ fn bound_model(tracks: usize, vcas: usize) -> SessionModel {
 /// What the C ABI answers a compile of `model` with: its result code and its diagnostics. A
 /// session that compiles is destroyed again.
 fn c_abi_compile(model: &SessionModel) -> (u32, Vec<u8>) {
-    let document = canonical_session_json(model).expect("canonical session");
+    c_abi_compile_document(&canonical_session_json(model).expect("canonical session"))
+}
+
+/// [`c_abi_compile`] for a session document that need not be one the model can write.
+fn c_abi_compile_document(document: &str) -> (u32, Vec<u8>) {
     let config = EngineConfig {
         struct_size: ENGINE_CONFIG_SIZE,
         abi_version: C_ABI_VERSION,
@@ -2200,9 +2239,16 @@ fn c_abi_compile(model: &SessionModel) -> (u32, Vec<u8>) {
 
 /// The browser's diagnostics for a boot of `model`: `None` when it boots.
 fn browser_boot_refusal(model: &SessionModel) -> Option<Vec<u8>> {
-    let document = canonical_session_json(model).expect("canonical session");
+    browser_boot_refusal_document(
+        &canonical_session_json(model).expect("canonical session"),
+        model.sample_rate_hz,
+    )
+}
+
+/// [`browser_boot_refusal`] for a session document that need not be one the model can write.
+fn browser_boot_refusal_document(document: &str, sample_rate_hz: u32) -> Option<Vec<u8>> {
     let options = host_web::WebBootOptions {
-        require_sample_rate_hz: model.sample_rate_hz,
+        require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: QUANTUM,
         source_ring_frames: QUANTUM * 2,
         ..host_web::WebBootOptions::explicit_defaults()
@@ -2261,8 +2307,7 @@ fn longest_id() -> String {
 }
 
 /// A session whose only source is mono (ID `m`), with one track and one route, no console slot,
-/// no submix and no VCA, and the fixture's stereo source, track and route to add later. (A session
-/// with no source or track does not prepare: its graph is empty.)
+/// no submix and no VCA, and the fixture's stereo source, track and route to add later.
 fn mono_model(
     rate: u32,
 ) -> (
@@ -2412,5 +2457,297 @@ fn a_rebuild_adds_the_longest_stereo_source_to_a_session_that_booted_with_a_mono
             heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
         }
         assert!(heard, "{rate} Hz: the new source is heard");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A source is mono or stereo (owner answer of 2026-10-15)
+// ---------------------------------------------------------------------------------------------
+
+/// Both hosts refuse a session whose source declares three channels at load, and a structural edit
+/// that adds one before it commits, with the same typed code and the same reply bytes; a mono and a
+/// stereo source load as before.
+///
+/// Test value: red if one host's load or structural-edit path lets a wider-than-stereo source
+/// through (the browser sizes its source staging for two channels, so a three-channel source it
+/// accepted could never be fed), if the two hosts name different codes, or if a refused edit moves
+/// the committed revision.
+#[test]
+fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
+    for rate in RATES {
+        // At load. The model cannot write a three-channel source, so the document is edited.
+        let (model, source, ..) = mono_model(rate);
+        let document = canonical_session_json(&model).expect("a mono session");
+        let stereo = {
+            let mut model = model.clone();
+            model.sources[0].channels = 2;
+            model.tracks[0].right_source_channel = 1;
+            canonical_session_json(&model).expect("a stereo session")
+        };
+        assert_eq!(
+            c_abi_compile_document(&document).0,
+            C_RESULT_OK,
+            "{rate} mono"
+        );
+        assert_eq!(browser_boot_refusal_document(&document, rate), None);
+        assert_eq!(
+            c_abi_compile_document(&stereo).0,
+            C_RESULT_OK,
+            "{rate} stereo"
+        );
+        assert_eq!(browser_boot_refusal_document(&stereo, rate), None);
+        let wide = stereo.replacen(
+            "\"channels\": 2,\n      \"bit_depth\"",
+            "\"channels\": 3,\n      \"bit_depth\"",
+            1,
+        );
+        assert_ne!(wide, stereo, "{rate}: the source declaration is found");
+        let (code, c_diagnostics) = c_abi_compile_document(&wide);
+        assert_ne!(
+            code, C_RESULT_OK,
+            "{rate}: the C ABI refuses three channels"
+        );
+        let browser_diagnostics =
+            browser_boot_refusal_document(&wide, rate).expect("the browser refuses");
+        assert_eq!(c_diagnostics, browser_diagnostics, "{rate}: one diagnostic");
+        assert!(
+            String::from_utf8_lossy(&c_diagnostics).contains("source.channels.unsupported"),
+            "{rate}: the typed code, got {:?}",
+            String::from_utf8_lossy(&c_diagnostics)
+        );
+
+        // In a structural edit: refused before commit, the revision does not move.
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let mut wide_source = source;
+        wide_source.id = id("wide");
+        wide_source.channels = 3;
+        let edits = [SessionEdit::UpsertSource {
+            source: wide_source,
+        }];
+        let (verdict, b_reply) = browser.transaction_reply(&edits);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&edits),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_eq!(b_reply, c_reply, "{rate}: the same reply bytes");
+        assert!(
+            matches!(&verdict, Verdict::Refused { codes, revision }
+                if *revision == model.revision
+                    && codes.as_slice() == ["source.channels.unsupported"]),
+            "{rate}: refused at the committed revision, got {verdict:?}"
+        );
+        assert_eq!(
+            browser.host.session_source_count(),
+            1,
+            "{rate}: nothing committed"
+        );
+    }
+}
+
+/// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
+/// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
+/// own, through the rebuild route), and nothing commits -- the same expected revision still
+/// commits the switch together with the entry's retarget to the matrix row, without a rebuild, on both.
+///
+/// Red mutation: run the classifier's row rule only when the automation table changes -> the switch
+/// commits live on both hosts and the first assertion fails.
+#[test]
+fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
+    for rate in RATES {
+        let mut model = model_at(rate);
+        model.automation.push(session::Automation {
+            id: id("t2-pan-ride"),
+            target: address(
+                Owner::Strip(id(T2.id)),
+                Section::Builtins,
+                PAN_ROW,
+                ParameterChannel::Left,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 960,
+                start_value: 0.0,
+                end_value: 0.5,
+                unit: session::ParameterUnit::Linear,
+            }],
+        });
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let switch = CAbi::edits(
+            Edit::MatrixMode {
+                strip: T2,
+                matrix: true,
+            },
+            None,
+        );
+
+        let frame = browser.encode(
+            CommandPayload::SessionTransactionApply(&switch),
+            ExpectedRevision::Exact(SessionRevision(browser.revision)),
+        );
+        let (b_code, b_diagnostic) = browser.send_frame(&frame);
+        let (c_code, c_diagnostic) = c_abi.send_status(
+            CommandPayload::SessionTransactionApply(&switch),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_ne!(
+            b_code, C_RESULT_OK,
+            "{rate}: the browser refuses the switch"
+        );
+        // Each host has its own result numbering; the diagnostic is the shared contract.
+        assert_ne!(c_code, C_RESULT_OK, "{rate}: the C ABI refuses the switch");
+        assert_eq!(b_diagnostic, c_diagnostic, "{rate}: one diagnostic");
+        let diagnostic = String::from_utf8_lossy(&c_diagnostic);
+        assert!(
+            diagnostic.contains("control.inactive")
+                && diagnostic.contains("$.automation[id=t2-pan-ride].target"),
+            "{rate}: {diagnostic}"
+        );
+
+        // Nothing committed: the revision the refused transaction named still commits, with the
+        // entry moved to the matrix row in the same transaction.
+        let mut retargeted = switch.clone();
+        retargeted.push(SessionEdit::SetAutomationTarget {
+            automation_id: id("t2-pan-ride"),
+            target: address(
+                Owner::Strip(id(T2.id)),
+                Section::Builtins,
+                MATRIX_LL_ROW,
+                ParameterChannel::Both,
+            ),
+        });
+        let (b_verdict, b_reply) = browser.transaction_reply(&retargeted);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&retargeted),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_eq!(b_reply, c_reply, "{rate}: the same reply bytes");
+        assert!(
+            // The switch keeps the effective 2x2 the plan holds, so it writes no record.
+            matches!(&b_verdict, Verdict::Applied { path: EditPath::ModelOnly, revision }
+                if *revision == model.revision + 1),
+            "{rate}: committed without a rebuild at the next revision, got {b_verdict:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// An empty session boots and grows by a structural transaction (TBD30)
+// ---------------------------------------------------------------------------------------------
+
+/// Both hosts boot a session with no source and no track (one console slot stays declared), render
+/// silence, and report one empty mixer; one structural transaction then adds a stereo stem, its
+/// track and its route, and both hosts render the same bits for the fed stem. The C ABI leg alone
+/// is `crates/capi/tests/empty_boot.rs`.
+///
+/// Test value: red if the browser has a boot-time size that fails at zero (a strip order, a meter
+/// frame, a source map, an observation table or a staging buffer sized for the first strip), if its
+/// silence or its session map, control list or snapshot differ from the C ABI's, or if the first
+/// strip cannot arrive through the successor paths and be heard bit for bit like the C ABI's.
+#[test]
+fn both_hosts_boot_an_empty_session_and_add_the_first_stem_alike() {
+    for rate in RATES {
+        let mut model = model_at(rate);
+        let (mut source, mut track, mut route) = (
+            model.sources[0].clone(),
+            model.tracks[0].clone(),
+            model.routes[0].clone(),
+        );
+        model.sources.clear();
+        model.tracks.clear();
+        model.routes.clear();
+        model.vcas.clear();
+        assert_eq!(model.console.pre_insert.len(), 1, "a declared console slot");
+        source.id = id("stem");
+        source.frames = u64::from(QUANTUM) * (BLOCKS + 8);
+        track.id = id("t1");
+        track.source_id = source.id.clone();
+        route.id = id("t1-main");
+        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the fixture routes a track")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        assert_eq!(browser.host.session_source_count(), 0, "{rate} Hz: empty");
+        for block in 0..3 {
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            let c = c_abi.render(block);
+            assert_eq!(b, c, "{rate} Hz: block {block}: the empty mixers agree");
+            assert!(b.iter().all(|word| *word == 0), "{rate} Hz: silence");
+        }
+        let (b_rows, b_snapshot) = dump(|payload, expected| browser.command(payload, expected));
+        let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(b_rows, c_rows, "{rate} Hz: the empty control list agrees");
+        assert_eq!(
+            b_snapshot, c_snapshot,
+            "{rate} Hz: the empty snapshot agrees"
+        );
+
+        let (rebuilt, _) = browser.transaction_reply(&edits);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&edits),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        // The two legs have sent different numbers of frames, so their request IDs differ: the
+        // verdicts are compared, not the bytes.
+        assert_eq!(
+            rebuilt,
+            decode_verdict(&c_reply),
+            "{rate} Hz: the same verdict"
+        );
+        assert!(
+            matches!(
+                rebuilt,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: the first stem is a rebuild, got {rebuilt:?}"
+        );
+        assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+        let _ = c_abi.render(3);
+        assert_eq!(browser.host.session_source_count(), 1, "{rate} Hz: the map");
+        assert_eq!(browser.host.session_source_id(0), Some("stem"));
+
+        assert_eq!(browser.host.seek_source(b"stem", 2, 0), host_web::RESULT_OK);
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code =
+            unsafe { capi::miso_engine_v1_source_seek(c_abi.session, b"stem".as_ptr(), 4, 2, 0) };
+        assert_eq!(code, C_RESULT_OK, "{rate} Hz: C ABI seek");
+        let mut heard = false;
+        for block in 4..12 {
+            let [left, right] = planes(0, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    b"stem",
+                    2,
+                    (block - 4) * u64::from(QUANTUM),
+                    rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "{rate} Hz: the browser takes the first stem's PCM"
+            );
+            c_abi.submit_from("stem", 0, block, block - 4, 2);
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            let c = c_abi.render(block);
+            assert_eq!(b, c, "{rate} Hz: block {block}: the two hosts render alike");
+            heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
+        }
+        assert!(heard, "{rate} Hz: the first stem is heard");
     }
 }

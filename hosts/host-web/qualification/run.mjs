@@ -28,6 +28,9 @@ const MUTATIONS = [
   // moved the output off the declared delay, or whose meter stream was not the successor's.
   "structural-apply-path", "structural-apply-early", "structural-apply-output",
   "structural-apply-meter",
+  // TBD30: an empty session that did not boot silent and empty, one whose first stem was not a
+  // rebuild heard unchanged, and one whose meter stream did not follow the strip count.
+  "empty-boot-silence", "empty-boot-shape", "empty-boot-first-stem", "empty-boot-meter",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -246,6 +249,44 @@ function validate(browserName, result) {
     && Number.isSafeInteger(structural.structureEpochs[0]) && structural.structureEpochs[0] >= 1,
   `the meter stream after the swap was not the successor's with one structure epoch: ${JSON.stringify(structural)}`);
 
+  // TBD30: an empty session in a real browser. It boots and renders exact silence with no source
+  // and no strip in the session map and the control list, the meter stream is the master's two
+  // peaks alone, and one structural transaction adds the source, the track and the route: the fed
+  // PCM then comes out unchanged from the swap block, the applied revision was not early, and the
+  // meter stream grew to the strip.
+  const empty = result.emptyBoot;
+  gate(browserName, "empty-boot-silence", empty?.boot?.silent === true
+    && empty?.boot?.renderedQuanta === String(empty?.boot?.expectedQuanta),
+  `the empty session did not render exact silence for every quantum: ${JSON.stringify(empty?.boot)}`);
+  gate(browserName, "empty-boot-shape", empty?.boot?.sources === 0 && empty?.boot?.tracks === 0
+    && empty?.boot?.metersAttached === true,
+  `the empty session map or control list named a source or a strip: ${JSON.stringify(empty?.boot)}`);
+  gate(browserName, "empty-boot-meter", empty?.boot?.meterLeaseResult === 0
+    && empty?.boot?.meterFrames >= 1
+    && JSON.stringify(empty?.boot?.meterTrackCounts) === "[0]"
+    && JSON.stringify(empty?.boot?.meterWidths) === "[2]",
+  `the empty session's meter stream was not the master's two peaks: ${JSON.stringify(empty?.boot)}`);
+  const first = empty?.firstStem;
+  gate(browserName, "empty-boot-first-stem", first?.replyStatus === "ok" && first?.commandPath === "rebuild"
+    && first?.replyBytes > 0
+    && first?.sourcesAfter === 1
+    && JSON.stringify(first?.tracksAfter) === JSON.stringify(["track"])
+    && /^[0-9]+$/.test(first?.committedRevision ?? "")
+    && first?.pendingRevision === first?.initialRevision
+    && first?.finalRevision === first?.committedRevision
+    && BigInt(first?.finalRevision ?? "0") > BigInt(first?.initialRevision ?? "0")
+    && BigInt(first?.finalSample ?? "-1") === 0n,
+  `the first stem was not committed once, by a structural transaction, and applied at the swap block: ${JSON.stringify(first)}`);
+  gate(browserName, "empty-boot-first-stem", first?.heard === true && first?.exactInputOutput === true
+    && first?.renderedDigest === first?.expectedDigest,
+  "the first stem was not heard exactly as it was fed");
+  gate(browserName, "empty-boot-meter", first?.meterLeaseResult === 0 && first?.meterFrames >= 1
+    && JSON.stringify(first?.meterTrackCounts) === "[1]"
+    && JSON.stringify(first?.meterWidths) === "[4]"
+    && Array.isArray(first?.structureEpochs) && first.structureEpochs.length === 1
+    && Number.isSafeInteger(first.structureEpochs[0]) && first.structureEpochs[0] >= 1,
+  `the meter stream after the first stem was not the strip's with one structure epoch: ${JSON.stringify(first)}`);
+
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
@@ -326,7 +367,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 11
+    && allocations.length === 13
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -881,6 +922,10 @@ function mutate(result, mutation) {
   }
   if (mutation === "structural-apply-output") copy.structuralApply.exactDelayedOutput = false;
   if (mutation === "structural-apply-meter") copy.structuralApply.meterFrames = 0;
+  if (mutation === "empty-boot-silence") copy.emptyBoot.boot.silent = false;
+  if (mutation === "empty-boot-shape") copy.emptyBoot.boot.tracks = 1;
+  if (mutation === "empty-boot-first-stem") copy.emptyBoot.firstStem.exactInputOutput = false;
+  if (mutation === "empty-boot-meter") copy.emptyBoot.firstStem.meterWidths = [2];
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
