@@ -63,8 +63,6 @@ pub enum ReliablePayload {
         event_sequence: u64,
         /// Effective absolute stopped/playing state code.
         state: crate::TransportState,
-        /// Effective absolute transport position.
-        position: SampleTime,
         /// Effective engine sample.
         effective_sample: SampleTime,
         /// Originating transport-set command, when any.
@@ -139,7 +137,6 @@ impl ReliableSlot {
         revision: SessionRevision,
         event_sequence: u64,
         state: crate::TransportState,
-        position: SampleTime,
         effective_sample: SampleTime,
         origin_request_id: Option<RequestId>,
     ) -> Self {
@@ -150,7 +147,6 @@ impl ReliableSlot {
             payload: ReliablePayload::TransportState {
                 event_sequence,
                 state,
-                position,
                 effective_sample,
                 origin_request_id,
             },

@@ -856,30 +856,22 @@ mod tests {
     #[test]
     fn complete_frame_header_uses_sizing_sink_optional_and_repeated_counts() {
         let codec = ProtocolCodec::default();
-        let without_position = encode_command(
-            &codec,
-            &TypedCommandFrame {
-                request_id: request_id(),
-                expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
-                payload: CommandPayload::TransportSet(TransportSetRequest {
-                    state: crate::TransportState::Playing,
-                    position: None,
-                }),
-            },
-        );
-        let with_position = encode_command(
-            &codec,
-            &TypedCommandFrame {
-                request_id: request_id(),
-                expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
-                payload: CommandPayload::TransportSet(TransportSetRequest {
-                    state: crate::TransportState::Playing,
-                    position: Some(crate::SampleTime(9)),
-                }),
-            },
-        );
-        assert_eq!(outer_field_count(&without_position), 1);
-        assert_eq!(outer_field_count(&with_position), 2);
+        let event = |origin_request_id| {
+            encode_event(
+                &codec,
+                &TypedEventFrame {
+                    revision: SessionRevision(7),
+                    payload: EventPayload::TransportState(TransportStateEvent {
+                        event_sequence: 1,
+                        state: crate::TransportState::Playing,
+                        effective_sample: crate::SampleTime(9),
+                        origin_request_id,
+                    }),
+                },
+            )
+        };
+        assert_eq!(outer_field_count(&event(None)), 3);
+        assert_eq!(outer_field_count(&event(Some(request_id()))), 4);
 
         let diagnostic = crate::Diagnostic {
             code: "protocol.count".to_owned(),
@@ -996,7 +988,6 @@ mod tests {
                     expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
                     payload: CommandPayload::TransportSet(TransportSetRequest {
                         state: crate::TransportState::Playing,
-                        position: Some(crate::SampleTime(9)),
                     }),
                 },
                 MessageId::TransportSet,
@@ -1062,7 +1053,6 @@ mod tests {
             expected_revision: crate::ExpectedRevision::Any,
             payload: CommandPayload::TransportSet(TransportSetRequest {
                 state: crate::TransportState::Stopped,
-                position: None,
             }),
         };
         assert_eq!(
@@ -1115,7 +1105,6 @@ mod tests {
                     revision: SessionRevision(7),
                     payload: SuccessResponsePayload::TransportGetSnapshot(TransportSnapshot {
                         state: crate::TransportState::Stopped,
-                        position: crate::SampleTime(0),
                         effective_sample: crate::SampleTime(0),
                     }),
                 },
@@ -1127,7 +1116,6 @@ mod tests {
                     revision: SessionRevision(7),
                     payload: SuccessResponsePayload::TransportSetSnapshot(TransportSnapshot {
                         state: crate::TransportState::Playing,
-                        position: crate::SampleTime(9),
                         effective_sample: crate::SampleTime(9),
                     }),
                 },
@@ -1346,7 +1334,6 @@ mod tests {
                     payload: EventPayload::TransportState(TransportStateEvent {
                         event_sequence: 1,
                         state: crate::TransportState::Stopped,
-                        position: crate::SampleTime(0),
                         effective_sample: crate::SampleTime(0),
                         origin_request_id: None,
                     }),

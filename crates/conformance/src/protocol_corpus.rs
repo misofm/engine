@@ -320,6 +320,11 @@ pub struct RetiredCodeRow {
 ///   `0x020b`, `0x020d`-`0x0210`, `0x0504`-`0x0507` and `0x0702`, spliced into a frame that
 ///   otherwise carries a `SET_CONTROL` payload: an unallocated opcode, refused at decode
 ///   (`MALFORMED_FRAME`) whatever the payload holds;
+/// - the stored transport position (#1635), `TRANSPORT_SET` field 2, mandatory
+///   (`UNKNOWN_REQUIRED_FIELD`) and optional (`MALFORMED_FRAME`): refused at decode, so the
+///   transport state, the revision and the reliable lane stay as they were. The snapshot's field 2
+///   and the `TRANSPORT_STATE` event's field 3 are responses and events no endpoint decodes;
+///   the codec's decoder tests refuse them in the same two flag forms;
 /// - a `SetTrackConsole` in a transaction with no `SetConsole` before it that changes the console
 ///   (`VALIDATION_FAILED`, `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
@@ -481,6 +486,19 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             diagnostic: DECODE_REFUSAL,
         });
     }
+    // The stored transport position (#1635): `TRANSPORT_SET` field 2 is refused at decode in both
+    // flag forms, before the transport state moves or a `TRANSPORT_STATE` event is queued.
+    for (flag, status) in [
+        ("mandatory", UNKNOWN_REQUIRED_FIELD),
+        ("optional", MALFORMED_FRAME),
+    ] {
+        rows.push(RetiredCodeRow {
+            name: format!("retired.transport_set_field_2.{flag}"),
+            bytes: transport_set_with_position(flag == "mandatory"),
+            status,
+            diagnostic: DECODE_REFUSAL,
+        });
+    }
     rows.push(RetiredCodeRow {
         name: "control.unknown_optional_track_field_12".to_owned(),
         bytes: upsert_track_with_field(&track, 12, false),
@@ -495,12 +513,14 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
 const RETIRED_COUNTER_IDS: [u32; 5] = [2, 11, 12, 13, 14];
 
 /// One complete command frame, request ID 1: exact revision 7 for the state-changing
-/// `TELEMETRY_CONFIGURE`, any revision for the read.
+/// `TELEMETRY_CONFIGURE` and `TRANSPORT_SET`, any revision for the read.
 fn counter_command_frame(payload: CommandPayload<'_>) -> Vec<u8> {
     let frame = TypedCommandFrame {
         request_id: RequestId::new(1).expect("literal request ID"),
         expected_revision: match payload {
-            CommandPayload::TelemetryConfigure(_) => ExpectedRevision::Exact(SessionRevision(7)),
+            CommandPayload::TelemetryConfigure(_) | CommandPayload::TransportSet(_) => {
+                ExpectedRevision::Exact(SessionRevision(7))
+            }
             _ => ExpectedRevision::Any,
         },
         payload,
@@ -510,6 +530,22 @@ fn counter_command_frame(payload: CommandPayload<'_>) -> Vec<u8> {
         .encode_command_frame_into(&frame, &mut bytes)
         .expect("a counter command frame encodes");
     bytes.truncate(len);
+    bytes
+}
+
+/// A `TRANSPORT_SET` to playing that also carries the retired field 2, the absolute position
+/// (#1635), as a `U64` (wire code 4) of 9 in the given flag form: the frame a peer of the old build sent.
+fn transport_set_with_position(mandatory: bool) -> Vec<u8> {
+    let mut bytes = counter_command_frame(CommandPayload::TransportSet(TransportSetRequest {
+        state: TransportState::Playing,
+    }));
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&[4, u8::from(mandatory)]);
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    bytes.extend_from_slice(&9_u64.to_le_bytes());
+    let payload_len = u32::try_from(bytes.len() - OUTER_HEADER_BYTES).expect("a short frame");
+    bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());
+    bytes[40..44].copy_from_slice(&2_u32.to_le_bytes());
     bytes
 }
 
@@ -867,7 +903,11 @@ pub enum ConformanceDecoder {
 /// `33e4b1cebcbfd902`: the event carries a repeated `key` message (the wire shape is the sequence
 /// and one nested key per ended tap), so `event.observation_ended` carries two keys. The frame
 /// count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xcc9a_7bcc_502c_4936;
+/// Issue #1635 repinned it from `cc9a7bcc502c4936`: #1635 retires the stored transport position.
+/// `TRANSPORT_SET` field 2, `TransportSnapshot` field 2 and `TransportStateEvent` field 3 are
+/// refused and never reallocated, so `command.transport_set` carries the state alone and the
+/// snapshot and event frames carry the state and the effective sample. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x3316_54b3_24d0_76e8;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -993,8 +1033,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     command!(
         "command.transport_set",
         CommandPayload::TransportSet(TransportSetRequest {
-            state: TransportState::Playing,
-            position: Some(SampleTime(9))
+            state: TransportState::Playing
         })
     );
     command!(
@@ -1113,7 +1152,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "response.transport_get",
         SuccessResponsePayload::TransportGetSnapshot(TransportSnapshot {
             state: TransportState::Stopped,
-            position: SampleTime(0),
             effective_sample: SampleTime(0)
         })
     );
@@ -1121,7 +1159,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "response.transport_set",
         SuccessResponsePayload::TransportSetSnapshot(TransportSnapshot {
             state: TransportState::Playing,
-            position: SampleTime(9),
             effective_sample: SampleTime(9)
         })
     );
@@ -1231,7 +1268,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         EventPayload::TransportState(TransportStateEvent {
             event_sequence: 1,
             state: TransportState::Stopped,
-            position: SampleTime(0),
             effective_sample: SampleTime(0),
             origin_request_id: None
         })
