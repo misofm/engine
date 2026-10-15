@@ -8983,12 +8983,15 @@ mod spectrum_carry {
     use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanAdoption};
     use host_core::{
         HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, MonitorBase, PreparedHost,
-        PreparedSpectrumCaptures, SpectrumCapture, SpectrumCaptureRequest, SpectrumChannels,
-        SpectrumContinuousWindow, SpectrumHop, SpectrumPair, SpectrumService,
-        SpectrumSmoothingConfig, SpectrumSnapshot, SpectrumStreamStatus, SpectrumTarget,
-        SuccessorBase, prepare_host_runtime_with_live_controls_and_spectrum,
+        PreparedSpectrumCaptures, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
+        SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
+        SpectrumPair, SpectrumService, SpectrumSmoothingConfig, SpectrumSnapshot,
+        SpectrumStreamStatus, SpectrumTarget, SuccessorBase,
+        prepare_host_runtime_with_live_controls_and_spectrum,
+        prepare_host_runtime_with_live_controls_and_spectrum_collection,
+        prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
         prepare_host_runtime_with_live_controls_and_spectrum_successor,
-        spectrum_capture_resources_for,
+        spectrum_capture_collection_resources, spectrum_capture_resources_for,
     };
 
     use super::successor::{self, Block, SUCCESSOR_REVISION};
@@ -9018,34 +9021,101 @@ mod spectrum_carry {
         )
     }
 
-    fn prepare(
-        session: &Session,
-        request: &SpectrumCaptureRequest,
-        base: Option<SuccessorBase<'_>>,
-    ) -> (PreparedHost, SpectrumCapture) {
-        let live = HostLiveControlRequest::default();
-        let superseded = LiveValuesSuperseded::default();
-        let (host, _handles, capture) = match base {
-            None => prepare_host_runtime_with_live_controls_and_spectrum(
-                &session.compiled,
-                &caps(),
-                &live,
-                request,
-                HostLiveLanes::ALL,
-                &superseded,
-            ),
-            Some(base) => prepare_host_runtime_with_live_controls_and_spectrum_successor(
-                &session.compiled,
-                &caps(),
-                &live,
-                request,
-                HostLiveLanes::ALL,
-                &superseded,
-                base,
-            ),
+    /// What the host does to the service of a collection: which entry it selects before the stream
+    /// starts, and which entry it switches the running stream to, at which block.
+    #[derive(Clone, Default)]
+    struct Script {
+        select: Option<(SpectrumTarget, SpectrumChannels)>,
+        switch: Option<(usize, SpectrumTarget, SpectrumChannels)>,
+    }
+
+    /// A capture request of either kind, prepared fresh or as a successor.
+    trait Spec {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures);
+
+        fn script(&self) -> Script {
+            Script::default()
         }
-        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
-        (host, capture)
+    }
+
+    impl Spec for SpectrumCaptureRequest {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures) {
+            let live = HostLiveControlRequest::default();
+            let superseded = LiveValuesSuperseded::default();
+            let (host, _handles, capture) = match base {
+                None => prepare_host_runtime_with_live_controls_and_spectrum(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    self,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                ),
+                Some(base) => prepare_host_runtime_with_live_controls_and_spectrum_successor(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    self,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                    base,
+                ),
+            }
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+            (host, capture.into())
+        }
+    }
+
+    /// A collection request with the host's script for it.
+    struct Many {
+        request: SpectrumCaptureCollectionRequest,
+        script: Script,
+    }
+
+    impl Spec for Many {
+        fn prepare(
+            &self,
+            session: &Session,
+            base: Option<SuccessorBase<'_>>,
+        ) -> (PreparedHost, PreparedSpectrumCaptures) {
+            let live = HostLiveControlRequest::default();
+            let superseded = LiveValuesSuperseded::default();
+            let (host, _handles, capture) = match base {
+                None => prepare_host_runtime_with_live_controls_and_spectrum_collection(
+                    &session.compiled,
+                    &caps(),
+                    &live,
+                    &self.request,
+                    HostLiveLanes::ALL,
+                    &superseded,
+                ),
+                Some(base) => {
+                    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
+                        &session.compiled,
+                        &caps(),
+                        &live,
+                        &self.request,
+                        HostLiveLanes::ALL,
+                        &superseded,
+                        base,
+                    )
+                }
+            }
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+            (host, capture.into())
+        }
+
+        fn script(&self) -> Script {
+            self.script.clone()
+        }
     }
 
     /// The test's host attachment: it records the carry record the swap block hands it, within the
@@ -9097,18 +9167,29 @@ mod spectrum_carry {
     struct Driver {
         service: SpectrumService,
         drive: Drive,
+        script: Script,
         reads: Vec<Read>,
         shot: Option<SpectrumSnapshot>,
     }
 
     impl Driver {
-        fn new(capture: SpectrumCapture, rate: u32, drive: Drive) -> Self {
+        fn new(
+            captures: PreparedSpectrumCaptures,
+            rate: u32,
+            drive: Drive,
+            script: Script,
+        ) -> Self {
             let mut service = SpectrumService::new(
-                capture.into(),
+                captures,
                 rate,
                 QUANTUM as u32,
                 Some(SpectrumHop::new(512).expect("hop")),
             );
+            if let Some((target, channels)) = &script.select {
+                service
+                    .select(target.as_ref(), *channels)
+                    .expect("select the first entry");
+            }
             if matches!(drive, Drive::Stream) {
                 service
                     .start_stream(SpectrumSmoothingConfig::default(), None)
@@ -9117,12 +9198,20 @@ mod spectrum_carry {
             Self {
                 service,
                 drive,
+                script,
                 reads: Vec::new(),
                 shot: None,
             }
         }
 
         fn before(&mut self, block: usize) {
+            if let Some((at, target, channels)) = &self.script.switch
+                && *at == block
+            {
+                self.service
+                    .select_stream(target.as_ref(), *channels, None, None)
+                    .expect("switch the stream to the other entry");
+            }
             if matches!(self.drive, Drive::OneShot(at) if at == block) {
                 self.service.arm().expect("arm");
             }
@@ -9178,16 +9267,16 @@ mod spectrum_carry {
     /// adoption block, rendered to [`TOTAL`].
     fn swapped(
         a: &Session,
-        a_request: &SpectrumCaptureRequest,
+        a_request: &impl Spec,
         b: &Session,
-        b_request: &SpectrumCaptureRequest,
+        b_request: &impl Spec,
         drive: Drive,
         promote: Promote,
     ) -> Run {
         let backend = Backend::current();
         let _ = backend;
         let feed = Feed::with_blocks(SOURCE, 1, TOTAL);
-        let (mut a_prepared, a_capture) = prepare(a, a_request, None);
+        let (mut a_prepared, a_capture) = a_request.prepare(a, None);
         a_prepared.plan.set_host_attachment(Rig::new());
         let rate = a_prepared.report.sample_rate_hz;
         let PreparedHost {
@@ -9197,7 +9286,7 @@ mod spectrum_carry {
             ..
         } = a_prepared;
         let (mut publisher, mut owner, retirer) = successor::exchange(plan);
-        let mut driver = Driver::new(a_capture, rate, drive);
+        let mut driver = Driver::new(a_capture, rate, drive, a_request.script());
         let mut blocks = Vec::new();
         feed.submit(&mut a_sources, rate, 0);
         for block in 0..SWAP {
@@ -9206,9 +9295,8 @@ mod spectrum_carry {
             blocks.push(successor::render(&mut owner));
             driver.after(block);
         }
-        let (mut b_prepared, b_capture) = prepare(
+        let (mut b_prepared, b_capture) = b_request.prepare(
             b,
-            b_request,
             Some(SuccessorBase {
                 inventory: &inventory,
                 committed: &a.model,
@@ -9233,6 +9321,8 @@ mod spectrum_carry {
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
             .commit();
+        // From the swap on the host acts on the successor's collection, in the successor's terms.
+        driver.script = b_request.script();
         let mut b_capture = Some(b_capture);
         let mut adopt_counts = (0, 0, 0);
         let mut displaced = None;
@@ -9247,7 +9337,7 @@ mod spectrum_carry {
                     blocks[SWAP].carry == CarryOutcome::Carried && promote == Promote::AsReported;
                 let mark = bench_support::alloc::current_thread_counters();
                 displaced = Some(driver.service.adopt_successor(
-                    b_capture.take().expect("the successor's capture").into(),
+                    b_capture.take().expect("the successor's capture"),
                     &pairing,
                     carried,
                 ));
@@ -9276,15 +9366,15 @@ mod spectrum_carry {
     }
 
     /// `b` prepared fresh with `request` and read as `drive` from frame 0.
-    fn reference(b: &Session, request: &SpectrumCaptureRequest, drive: Drive) -> Driver {
+    fn reference(b: &Session, request: &impl Spec, drive: Drive) -> Driver {
         let feed = Feed::with_blocks(SOURCE, 1, TOTAL);
-        let (prepared, capture) = prepare(b, request, None);
+        let (prepared, capture) = request.prepare(b, None);
         let rate = prepared.report.sample_rate_hz;
         let PreparedHost {
             plan, mut sources, ..
         } = prepared;
         let (_publisher, mut owner, _retirer) = successor::exchange(plan);
-        let mut driver = Driver::new(capture, rate, drive);
+        let mut driver = Driver::new(capture, rate, drive, request.script());
         feed.submit(&mut sources, rate, 0);
         for block in 0..TOTAL {
             if block + 1 < TOTAL {
@@ -9538,6 +9628,283 @@ mod spectrum_carry {
             !run.record.is_empty(),
             "a capture carried through the measured block"
         );
+        for (index, block) in run.blocks.iter().enumerate().skip(1) {
+            assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
+            assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+        }
+        assert_eq!(
+            run.adopt_counts,
+            (0, 0, 0),
+            "the promotion allocates and frees nothing"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #1395b: a collection of captures carries entry by entry, matched by key.
+
+    /// The block at which the host switches the running stream to the other entry.
+    const SWITCH: usize = 44;
+
+    fn entry(target: SpectrumTarget, channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
+        SpectrumCaptureCollectionEntry { target, channels }
+    }
+
+    /// Track `eq0` after its matrix, both channels: the entry the stream runs on.
+    fn t_stereo() -> SpectrumCaptureCollectionEntry {
+        entry(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Stereo,
+        )
+    }
+
+    /// Track `eq1` after its input builtins, one channel.
+    fn u_entry(channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
+        entry(
+            SpectrumTarget::TrackPostInputBuiltins("eq1".into()),
+            channels,
+        )
+    }
+
+    fn many(
+        entries: Vec<SpectrumCaptureCollectionEntry>,
+        switch: Option<SpectrumCaptureCollectionEntry>,
+    ) -> Many {
+        let maximum_capture_bytes = spectrum_capture_collection_resources(&entries)
+            .expect("collection resources")
+            .retained_bytes;
+        Many {
+            request: SpectrumCaptureCollectionRequest {
+                entries,
+                maximum_capture_bytes,
+            },
+            script: Script {
+                select: Some((t_stereo().target, t_stereo().channels)),
+                switch: switch.map(|entry| (SWITCH, entry.target, entry.channels)),
+            },
+        }
+    }
+
+    fn sorted(mut pairs: Vec<SpectrumPair>) -> Vec<(usize, usize)> {
+        pairs.sort_by_key(|pair| pair.successor);
+        pairs
+            .into_iter()
+            .map(|pair| (pair.successor, pair.predecessor))
+            .collect()
+    }
+
+    /// The reads of `got` equal `want`'s block for block from `from` on, windows bit for bit.
+    fn assert_reads_equal(got: &Driver, want: &Driver, from: usize) -> usize {
+        let mut windows = 0;
+        for (block, (got, want)) in got.reads.iter().zip(&want.reads).enumerate().skip(from) {
+            assert_eq!(got.status, want.status, "block {block}: status");
+            match (&got.window, &want.window) {
+                (Some(got), Some(want)) => {
+                    assert_same_window(got, want, &format!("block {block}"));
+                    windows += 1;
+                }
+                (None, None) => {}
+                _ => panic!("block {block}: a window on one side only"),
+            }
+        }
+        windows
+    }
+
+    /// The stream on `t` kept receiving across the swap, as in gate 1: no `Failed`, `Gap` or
+    /// `Warming` after it first produced, one epoch, consecutive sequences, a window across the
+    /// swap, and windows after it.
+    fn assert_stream_kept_receiving(driver: &Driver) {
+        let reads = &driver.reads[..SWITCH];
+        let first_ready = reads
+            .iter()
+            .position(|read| read.status == SpectrumStreamStatus::Ready)
+            .expect("the stream produces before the swap");
+        assert!(first_ready < SWAP);
+        let mut next_sequence = 0;
+        let mut spanning = false;
+        let mut after_swap = 0;
+        for (block, read) in reads.iter().enumerate().skip(first_ready) {
+            assert!(
+                matches!(
+                    read.status,
+                    SpectrumStreamStatus::Ready | SpectrumStreamStatus::Pending
+                ),
+                "block {block}: no Failed, Gap or Warming, got {:?}",
+                read.status
+            );
+            if let Some(window) = &read.window {
+                assert_eq!(window.sequence, next_sequence, "block {block}: no gap");
+                assert_eq!(
+                    window.stream_epoch, 1,
+                    "block {block}: the epoch never moved"
+                );
+                next_sequence += 1;
+                spanning |= window.first_sample < SWAP_SAMPLE
+                    && window.end_sample().expect("end") > SWAP_SAMPLE;
+                after_swap += usize::from(block >= SWAP);
+            }
+        }
+        assert!(
+            spanning,
+            "a window spans the swap, or the carry is not tested"
+        );
+        assert!(after_swap >= 1, "the reader keeps receiving after the swap");
+    }
+
+    /// Gate 2: B lists the entries in the other order. Each pairs by key, the selection follows
+    /// its entry to the new index with its epoch, the stream reads on, and a switch to the other
+    /// entry (which also carried, idle) starts it as the reference does.
+    #[test]
+    fn a_reordered_collection_pairs_by_key_and_its_reader_keeps_receiving() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(
+            vec![u_entry(SpectrumChannels::Left), t_stereo()],
+            Some(u_entry(SpectrumChannels::Left)),
+        );
+        let expected = reference(&b, &b_request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(
+            sorted(run.pairing.clone()),
+            vec![(0, 1), (1, 0)],
+            "paired by key, not by position"
+        );
+        assert_eq!(
+            sorted(
+                run.record
+                    .iter()
+                    .map(|carry| SpectrumPair {
+                        successor: carry.successor,
+                        predecessor: carry.predecessor
+                    })
+                    .collect()
+            ),
+            vec![(0, 1), (1, 0)],
+            "the swap block moved exactly the observers the control side's list pairs"
+        );
+        assert_stream_kept_receiving(&run.driver);
+        let windows = assert_reads_equal(&run.driver, &expected, 0);
+        assert!(windows >= 8, "windows on both entries compared: {windows}");
+        let switched = run.driver.reads[SWITCH..]
+            .iter()
+            .filter_map(|read| read.window.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            !switched.is_empty()
+                && switched
+                    .iter()
+                    .all(|window| window.channels == SpectrumChannels::Left),
+            "the second entry produced its own windows after the switch"
+        );
+        // The selection moved with its entry: still `t`, with the epoch it had.
+        assert_eq!(
+            run.driver.service.selection_epoch(),
+            expected.service.selection_epoch()
+        );
+    }
+
+    /// Gate 3, collection: one entry's channels changed. That entry starts fresh, the other
+    /// carries as in gate 1.
+    #[test]
+    fn a_collection_entry_with_a_changed_key_starts_fresh() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(
+            vec![t_stereo(), u_entry(SpectrumChannels::Right)],
+            Some(u_entry(SpectrumChannels::Right)),
+        );
+        let expected = reference(&b, &b_request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(sorted(run.pairing.clone()), vec![(0, 0)]);
+        assert_eq!(run.record.len(), 1, "only the unchanged key moved");
+        assert_stream_kept_receiving(&run.driver);
+        assert!(assert_reads_equal(&run.driver, &expected, 0) >= 8);
+        assert!(
+            run.driver.reads[SWITCH..]
+                .iter()
+                .filter_map(|read| read.window.as_ref())
+                .all(|window| window.channels == SpectrumChannels::Right),
+            "the changed entry reads its own channel, from the plane it copies"
+        );
+    }
+
+    /// A refused hand-over moved no observer: the successor's fresh collection is installed,
+    /// without a selection, and its epoch says the selection was lost. (Settling the stream the
+    /// service still believes it runs is #1618's.)
+    #[test]
+    fn a_refused_hand_over_installs_the_fresh_collection_without_a_selection() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::Refused,
+        );
+        assert_eq!(run.driver.service.target(), None, "no selection");
+        assert_eq!(
+            run.driver.service.selection_epoch(),
+            2,
+            "the epoch the predecessor's selection reached, plus one"
+        );
+        assert!(
+            run.driver.reads[SWAP + 1..]
+                .iter()
+                .all(|read| read.window.is_none()),
+            "the fresh collection has no stream"
+        );
+        // The displaced collection is the predecessor's, still on its selection.
+        let PreparedSpectrumCaptures::Collection(old) = &run.displaced else {
+            panic!("a collection");
+        };
+        assert_eq!(old.selected_index(), Some(0));
+        assert_eq!(old.selection_epoch(), 1);
+    }
+
+    /// Gate 4, collection: the swap block and the promotion allocate and free nothing.
+    #[test]
+    fn a_collection_swap_block_and_promotion_allocate_and_free_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(run.record.len(), 2, "both captures carried");
         for (index, block) in run.blocks.iter().enumerate().skip(1) {
             assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
             assert_eq!(block.audit, (0, 0), "block {index}: render audit");

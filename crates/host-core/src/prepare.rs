@@ -714,8 +714,12 @@ pub struct PlanStateInventory {
     sample_rate_hz: u32,
     quantum_frames: u32,
     /// One row per spectrum capture, in the order of the plan's captures, so a row's `entry` is
-    /// its position (#1395 D1). A collection's captures have no rows yet (#1395b).
+    /// its position (#1395 D1): a single capture's is 0, a collection's is its entry index.
     spectrum: Box<[SpectrumInventoryRow]>,
+    /// Whether the captures are a collection (#1395b). A single capture and a collection never
+    /// carry into each other: the control side holds one or the other, so a plan whose capture
+    /// kind changed starts its captures fresh.
+    spectrum_collection: bool,
     /// The captures this plan takes over from its predecessor (#1395 D3), built at preparation.
     spectrum_pairing: Box<[crate::spectrum::SpectrumPair]>,
     /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
@@ -905,7 +909,7 @@ impl PlanStateInventory {
         self.observations.len()
     }
 
-    /// Spectrum capture rows, one per capture of a single-capture preparation (#1395).
+    /// Spectrum capture rows: one for a single capture, one per entry for a collection (#1395).
     #[must_use]
     pub fn spectrum_count(&self) -> usize {
         self.spectrum.len()
@@ -917,7 +921,9 @@ impl PlanStateInventory {
     /// adoption carried. Built at preparation from each capture's target and channels, never from
     /// positions; it names exactly the observers the plan's swap block moves, so the swap block
     /// pairs nothing itself. Empty for a plan prepared without a predecessor, one whose
-    /// predecessor has no equal capture, and one of another sample rate or quantum.
+    /// predecessor has no equal capture, one of another sample rate or quantum, and one whose capture
+    /// kind (single or collection) differs from its predecessor's. A collection's pairs are in the
+    /// successor's entry order.
     #[must_use]
     pub fn spectrum_pairing(&self) -> &[crate::spectrum::SpectrumPair] {
         &self.spectrum_pairing
@@ -2082,18 +2088,30 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         _ => false,
     };
-    // Issue #1395 D1: a single spectrum capture carries when its target and channels are the
+    // Issue #1395 D1: a spectrum capture carries when its target and channels are the
     // predecessor's and the two plans run at one rate and quantum; as for meters, this only decides
     // that a program is needed.
     let spectrum_may_carry = match (successor, &spectrum_request) {
         (Some(base), Some(SpectrumPreparationRequest::Single(request))) => {
             base.inventory.sample_rate_hz == compiled.sample_rate().0
                 && base.inventory.quantum_frames == compiled.quantum().0
+                && !base.inventory.spectrum_collection
                 && base
                     .inventory
                     .spectrum
                     .iter()
                     .any(|row| row.target == request.target && row.channels == request.channels)
+        }
+        (Some(base), Some(SpectrumPreparationRequest::Collection(request))) => {
+            base.inventory.sample_rate_hz == compiled.sample_rate().0
+                && base.inventory.quantum_frames == compiled.quantum().0
+                && base.inventory.spectrum_collection
+                && request.entries.iter().any(|entry| {
+                    base.inventory
+                        .spectrum
+                        .iter()
+                        .any(|row| row.target == entry.target && row.channels == entry.channels)
+                })
         }
         _ => false,
     };
@@ -2784,32 +2802,50 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         None => MeterCarry::default(),
     };
     // Issue #1395 D1: this plan's own spectrum captures, in capture order: the inventory its
-    // successor joins with, and the rows the join below looks this plan's observers up in. Only a
-    // single capture has rows (a collection's are #1395b).
+    // successor joins with, and the rows the join below looks this plan's observers up in. A
+    // single capture is entry 0; a collection's entries are its entries in order.
+    let spectrum_locations: BTreeMap<u64, graph::GraphObserverLocation> = observer_rows
+        .iter()
+        .filter(|row| row.kind == engine::realtime::ObserverKind::Spectrum)
+        .map(|row| (row.handle, row.location))
+        .collect();
+    let spectrum_row = |entry: usize,
+                        target: &crate::spectrum::SpectrumTarget,
+                        channels: crate::spectrum::SpectrumChannels|
+     -> Result<SpectrumInventoryRow, PrepareDiagnostics> {
+        let location = crate::spectrum::observer_handle(entry)
+            .and_then(|handle| spectrum_locations.get(&handle).copied())
+            .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+        Ok(SpectrumInventoryRow {
+            target: target.clone(),
+            channels,
+            entry,
+            location,
+        })
+    };
     let spectrum_rows: Vec<SpectrumInventoryRow> = match &spectrum_capture {
         Some(PreparedSpectrumCapture::Single(capture)) => {
-            let handle = crate::spectrum::observer_handle(0)
-                .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-            let location = observer_rows
-                .iter()
-                .find(|row| {
-                    row.kind == engine::realtime::ObserverKind::Spectrum && row.handle == handle
-                })
-                .map(|row| row.location)
-                .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-            vec![SpectrumInventoryRow {
-                target: capture.target().clone(),
-                channels: capture.channels(),
-                entry: 0,
-                location,
-            }]
+            vec![spectrum_row(0, capture.target(), capture.channels())?]
         }
-        _ => Vec::new(),
+        Some(PreparedSpectrumCapture::Collection(collection)) => (0..collection.len())
+            .map(|entry| {
+                let (target, channels) = collection
+                    .entry(entry)
+                    .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+                spectrum_row(entry, target, channels)
+            })
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
     };
+    let spectrum_collection = matches!(
+        &spectrum_capture,
+        Some(PreparedSpectrumCapture::Collection(_))
+    );
     let spectrum_carry = match successor {
         Some(base) => resolve_spectrum_carry(
             base.inventory,
             &spectrum_rows,
+            spectrum_collection,
             compiled.sample_rate().0,
             compiled.quantum().0,
         ),
@@ -3068,6 +3104,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         sample_rate_hz: compiled.sample_rate().0,
         quantum_frames: compiled.quantum().0,
         spectrum: spectrum_rows.into_boxed_slice(),
+        spectrum_collection,
         spectrum_pairing: spectrum_carry.pairing.into_boxed_slice(),
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
@@ -3341,18 +3378,22 @@ struct SpectrumCarry {
 
 /// Join the successor's spectrum rows `own` with the predecessor's (#1395 D1).
 ///
-/// A capture carries when its target and channels equal a predecessor capture's and both plans run
-/// at one sample rate and quantum; nothing else matters, and nothing in it is a live value, so
+/// A capture carries when its target and channels equal a predecessor capture's, both plans run at
+/// one sample rate and quantum, and both hold a single capture or both a collection (the control
+/// side holds one kind and pairs within it); nothing else matters, and nothing in it is a live value, so
 /// there is no retarget. Matching is by key, never by entry or handle. Every other capture is
 /// fresh.
 fn resolve_spectrum_carry(
     predecessor: &PlanStateInventory,
     own: &[SpectrumInventoryRow],
+    own_is_collection: bool,
     sample_rate_hz: u32,
     quantum_frames: u32,
 ) -> SpectrumCarry {
     let mut carry = SpectrumCarry::default();
-    if predecessor.sample_rate_hz != sample_rate_hz || predecessor.quantum_frames != quantum_frames
+    if predecessor.sample_rate_hz != sample_rate_hz
+        || predecessor.quantum_frames != quantum_frames
+        || predecessor.spectrum_collection != own_is_collection
     {
         return carry;
     }
@@ -5543,6 +5584,7 @@ mod tests {
             sample_rate_hz: 48_000,
             quantum_frames: 128,
             spectrum: Box::default(),
+            spectrum_collection: false,
             spectrum_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
@@ -5578,7 +5620,7 @@ mod tests {
         let mut before = inventory_with(lane_row(1, layout()));
         before.spectrum = Box::new([spectrum_row(target(), SpectrumChannels::Stereo, 0, 7)]);
         let own = [spectrum_row(target(), SpectrumChannels::Stereo, 0, 2)];
-        let carry = super::resolve_spectrum_carry(&before, &own, 48_000, 128);
+        let carry = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128);
         assert_eq!(carry.moves.len(), 1);
         assert_eq!(
             carry.moves[0].predecessor.unit, 7,
@@ -5617,12 +5659,63 @@ mod tests {
                 256,
             ),
         ] {
-            let carry = super::resolve_spectrum_carry(&before, &own, rate, quantum);
+            let carry = super::resolve_spectrum_carry(&before, &own, false, rate, quantum);
             assert!(
                 carry.moves.is_empty() && carry.pairing.is_empty(),
                 "a changed {label} starts fresh"
             );
         }
+    }
+
+    /// #1395b D1: a collection's entries are matched by key in any order, an entry whose key is
+    /// absent from the predecessor is fresh, and a single capture and a collection never carry
+    /// into each other.
+    #[test]
+    fn a_spectrum_collection_carries_by_key_in_any_order() {
+        use crate::spectrum::{SpectrumChannels, SpectrumTarget};
+        let t = || SpectrumTarget::TrackPostMatrix("t".into());
+        let u = || SpectrumTarget::TrackPostInputBuiltins("u".into());
+        let mut before = inventory_with(lane_row(1, layout()));
+        before.spectrum_collection = true;
+        before.spectrum = Box::new([
+            spectrum_row(t(), SpectrumChannels::Stereo, 0, 10),
+            spectrum_row(u(), SpectrumChannels::Left, 1, 11),
+        ]);
+        // Reordered, with a changed key and an added entry.
+        let own = [
+            spectrum_row(u(), SpectrumChannels::Left, 0, 20),
+            spectrum_row(t(), SpectrumChannels::Stereo, 1, 21),
+            spectrum_row(u(), SpectrumChannels::Right, 2, 22),
+        ];
+        let carry = super::resolve_spectrum_carry(&before, &own, true, 48_000, 128);
+        let pairs: Vec<(usize, usize)> = carry
+            .pairing
+            .iter()
+            .map(|pair| (pair.successor, pair.predecessor))
+            .collect();
+        assert_eq!(pairs, vec![(0, 1), (1, 0)], "by key, not by position");
+        let moves: Vec<(u32, u32)> = carry
+            .moves
+            .iter()
+            .map(|step| (step.successor.unit, step.predecessor.unit))
+            .collect();
+        assert_eq!(
+            moves,
+            vec![(20, 11), (21, 10)],
+            "named by their own locations"
+        );
+        let none = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128);
+        assert!(
+            none.moves.is_empty() && none.pairing.is_empty(),
+            "a collection does not carry into a single capture"
+        );
+        let mut single = inventory_with(lane_row(1, layout()));
+        single.spectrum = Box::new([spectrum_row(t(), SpectrumChannels::Stereo, 0, 10)]);
+        let none = super::resolve_spectrum_carry(&single, &own, true, 48_000, 128);
+        assert!(
+            none.moves.is_empty() && none.pairing.is_empty(),
+            "a single capture does not carry into a collection"
+        );
     }
 
     /// D1: the slot's model values are equal and both plans bank it, but the predecessor's lane has

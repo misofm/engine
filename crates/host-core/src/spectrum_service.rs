@@ -666,6 +666,13 @@ impl SpectrumService {
     /// unchanged (#1395 gate 3). Until this call, the service's captures are the predecessor's,
     /// which is correct for a carried capture and reads as pending for the others.
     ///
+    /// A collection pairs entry by entry (#1395b): each entry the pairing names keeps its reader,
+    /// whatever index it has in the successor, and the selection follows its entry with its epoch
+    /// ([`SpectrumCaptureCollection::pair_carried`]). When the selected entry did not carry, or the
+    /// hand-over was refused, the successor has no selection and its epoch is the predecessor's
+    /// plus one. A single capture and a collection never pair with each other (their keys never
+    /// join), so such a promotion installs the successor's fresh captures.
+    ///
     /// A capture that does not carry is replaced by the successor's fresh one. What the caller had
     /// armed or started on the old one (`caller_armed`, a running stream) is not settled here;
     /// that is #1618's, which lands in this method.
@@ -678,13 +685,21 @@ impl SpectrumService {
         pairing: &[SpectrumPair],
         carried: bool,
     ) -> PreparedSpectrumCaptures {
-        if carried
-            && let (
-                PreparedSpectrumCaptures::Single(next),
-                PreparedSpectrumCaptures::Single(before),
-            ) = (&mut successor, &mut self.captures)
-        {
-            next.pair_carried(before, pairing);
+        match (&mut successor, &mut self.captures) {
+            (PreparedSpectrumCaptures::Single(next), PreparedSpectrumCaptures::Single(before))
+                if carried =>
+            {
+                next.pair_carried(before, pairing);
+            }
+            // A collection also runs without a carry: the selection the service held is gone with
+            // the predecessor's captures, and the successor's epoch must say so.
+            (
+                PreparedSpectrumCaptures::Collection(next),
+                PreparedSpectrumCaptures::Collection(before),
+            ) => {
+                next.pair_carried(before, if carried { pairing } else { &[] });
+            }
+            _ => {}
         }
         core::mem::replace(&mut self.captures, successor)
     }
