@@ -1171,24 +1171,34 @@ impl Budget {
 /// 346,368 and 117,340.3 -> 117,376. The four-lane ceilings stand (AArch64 runs only in CI, which
 /// prints the four-lane values; the window only shrinks, so the old ceilings still bound them).
 /// `capi_retained_bytes` and the other rows did not move (197,521 before and after).
+///
+/// Batch 10 tightens the four-lane graph rows. CI's `aarch64-debug` job on PR #1625 (job
+/// 116156576326, the batch 9 head) printed 287,994, 287,922 and 102,917. The batch 10 carry
+/// (#1280a-#1280c, #1281: the effect lane inventory with its kinds and sites) adds the same
+/// 6,960 bytes to each row at eight lanes on x86-64 (314,918 -> 321,878, 314,846 -> 321,806,
+/// 106,673 -> 113,633); the ceilings are the AArch64 print plus that delta plus 10 %, rounded up
+/// to 64: 324,449.4 -> 324,480, 324,370.2 -> 324,416 and 120,864.7 -> 120,896. The next
+/// `aarch64-debug` print on this branch confirms them. The eight-lane ceilings hold as they are.
+/// #1629 lowered `capi_retained_bytes` to 165,166 at eight lanes; its ceiling is tightened from the
+/// next four-lane print.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
         eight_lanes: 346_432,
-        four_lanes: 375_360,
+        four_lanes: 324_480,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
         eight_lanes: 346_368,
-        four_lanes: 375_360,
+        four_lanes: 324_416,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
         eight_lanes: 117_376,
-        four_lanes: 182_976,
+        four_lanes: 120_896,
     },
     Budget {
         row: "graph_delay_bytes",

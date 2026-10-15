@@ -93,7 +93,7 @@ A control row's own rules: all numbers are finite and `minimum <= maximum`; choi
 
 Reliable `8001` contains sequence, origin request ID, previous revision, and operation count. Reliable `8010` contains sequence, state, position, effective sample, and optional origin request ID. Lossy `8020` contains observed sample plus the fixed 16-byte meter array. Lossy `8021` contains observed sample plus ascending counter values. Reliable `8030` contains one diagnostic with provider sequence. Events have header request ID zero; reliable events have endpoint-monotonic payload sequence.
 
-A stored automation segment applies on `[start,end)` and holds its end value until replaced; this was the one rule the retired 32-byte record carried that the session schema does not yet state (#1626 gives it a home there).
+A stored automation segment applies on `[start,end)` and holds its end value until replaced; the session schema states this hold rule (`SESSION_SCHEMA_V1.md`, #1626).
 
 ## Session edit registry
 
