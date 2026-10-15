@@ -50,3 +50,55 @@ then ramps to the new value, on both hosts, instead of restarting the section.
 ## Size
 
 Half a day to a day.
+
+## Decision record: #1630 (batch 14b)
+
+**Shipped.** The input join in `crates/host-core/src/prepare.rs` (the `carried_inputs` block of
+the successor's preparation) now keys on the section's structure. Every strip's input section has
+the same stages (trim, polarity, two filter sections per channel), so the structure is the control
+kind (`row.live == live_input`, as before) plus the rate the designs are for. On a plan with input
+cells, a surviving strip of the same kind always carries, and the records the live path gives the
+same edit (`input_records`, #1556) become its retarget (`InputJoin::retarget`). They are written
+through the successor's own `InputCells`, stamped on its held gate in the same block as the strip,
+effect and route retargets, with the session's ramps or the transaction's edit ramp for
+`(Strip, Input)` (#1394 D6). A plan without input cells cannot retarget, so it still carries only
+bit-equal sections (`same_input_section`, unchanged #1276 behaviour).
+
+**Departures and code truth.**
+
+- `input_records` and `filter_edits` moved from `live_delta.rs` (built only with
+  `control-provider`) to `prepare.rs` (every build), as the strip-retarget helpers did for #1277
+  D5; the classifier imports them and maps `OutOfDomain` to `LiveRebuild::Domain`. One function,
+  so a retarget and a live edit cannot disagree. This edits `crates/host-core/src/live_delta.rs`,
+  outside the authorized paths, mechanically (move, imports, one doc link).
+- The join adds a sample-rate check (`base.inventory.sample_rate_hz == compiled rate`): a carried
+  lane's coefficients and filter state are designed for the predecessor's rate, so a rate change
+  is a structural difference (D1, "their designs' shape"). Before, a rate change with bit-equal
+  values carried.
+- A value the live path refuses (out of domain) restarts the section instead of carrying; a
+  compiled model does not reach it.
+- No builtins or `crates/engine/src/realtime/` edit was needed: the input stage's carry entry
+  (#1276 `export_lane`/`import_lane`) and the successor's cell drain already order carry before
+  retarget on the swap block. No new realtime region.
+
+**Superseded tests.** `a_restarting_input_lane_does_not_count_its_replaced_writes` and
+`a_pending_trim_record_in_a_later_bank_survives_the_swap` restarted one strip by a trim difference
+between committed and B, which now carries. They now restart it with a committed model that lacks
+the strip (`without_track`), so they keep their discrimination. Gate 4 of #1276
+(`a_strip_whose_input_section_changed_starts_at_rest`) runs on plans without input cells and stays.
+
+**Gates** (`crates/host-core/tests/successor_swap.rs`, `control-provider`, both widths each):
+
+1. `a_trim_change_carries_and_retargets_the_input_section`
+2. `a_filter_cutoff_change_carries_and_retargets_the_input_section` (HPF on both lanes, LPF one
+   lane), `a_polarity_change_carries_and_retargets_the_input_section`.
+
+Each: the carry-then-retarget run equals, in every block, a run that wrote the classifier's records
+for the same edit to the predecessor before the swap; it differs at the swap block from a run whose
+section restarts and from a run without the edit. Red on the old join (first difference at block 6)
+and red when the retarget write is dropped.
+3. The same runs: swap block 0 allocations, reallocations and frees (`bench_support::alloc` thread
+   counters after `audit::warm_up`) and 0 audited allocations. `cargo test --locked -p host-core
+   --all-features`, `-p capi`, `-p host-web --features host-web/test-support`: pass. Clippy
+   `-p host-core --all-targets` with and without `--all-features`: clean. `audit capi`:
+   `pcm_digest` `bf7dcedd1d92621f`, 0 violations. `realtime_policy`: ok, 149 regions (unchanged).

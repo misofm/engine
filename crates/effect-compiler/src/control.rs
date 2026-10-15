@@ -67,11 +67,19 @@ pub struct EffectControlOwner {
     factory: Arc<dyn NativeEffectFactory>,
     sample_rate: u32,
     committed: Box<[InitialParameterValue]>,
-    candidate: Box<[InitialParameterValue]>,
-    dirty: Box<[bool]>,
+    /// The open transaction's rows and touched mask. Built by `begin`, dropped by `commit`,
+    /// `discard` and a publication fault, so an idle owner retains only `committed` (#1624).
+    candidate: Option<OpenCandidate>,
     committed_revision: u64,
     pending_revision: Option<u64>,
     phase: EffectControlOwnerPhase,
+}
+
+/// The rows an open transaction edits and the mask of those it touched; both are exactly as long
+/// as the owner's committed rows.
+struct OpenCandidate {
+    rows: Box<[InitialParameterValue]>,
+    dirty: Box<[bool]>,
 }
 
 /// Engine-owned allocations retained by one prepared-target owner.
@@ -108,12 +116,13 @@ impl EffectControlOwner {
         let Some(capability) = factory.target_preparation() else {
             return Err(EffectControlOwnerError::Unsupported);
         };
-        let dirty = vec![false; preparation.initial_values.len()].into_boxed_slice();
+        // Transient: the owner keeps no mask between transactions.
+        let untouched = vec![false; preparation.initial_values.len()];
         capability.validate_targets(
             EffectTargetRequest {
                 sample_rate: preparation.sample_rate,
                 values: preparation.initial_values.as_ref(),
-                changed: &dirty,
+                changed: &untouched,
             },
             &[],
         )?;
@@ -121,8 +130,7 @@ impl EffectControlOwner {
         Ok(Self {
             factory,
             sample_rate: preparation.sample_rate,
-            candidate: committed.clone(),
-            dirty,
+            candidate: None,
             committed,
             committed_revision: 0,
             pending_revision: None,
@@ -157,16 +165,17 @@ impl EffectControlOwner {
         &self.committed
     }
 
-    /// The current candidate rows. The slice is borrowed and cannot be retained by preparation.
+    /// The current candidate rows, empty while no transaction is open. The slice is borrowed and
+    /// cannot be retained by preparation.
     #[must_use]
     pub fn candidate(&self) -> &[InitialParameterValue] {
-        &self.candidate
+        self.candidate.as_ref().map_or(&[], |open| &open.rows)
     }
 
-    /// Touched mask for the current candidate.
+    /// Touched mask for the current candidate, empty while no transaction is open.
     #[must_use]
     pub fn dirty(&self) -> &[bool] {
-        &self.dirty
+        self.candidate.as_ref().map_or(&[], |open| &open.dirty)
     }
 
     /// Computes the actual dynamic allocations retained by this owner. The factory allocation is
@@ -177,15 +186,12 @@ impl EffectControlOwner {
         let owner_box = u64::try_from(core::mem::size_of::<Self>())
             .map_err(|_| EffectControlResourceError::Arithmetic)?;
         let committed = checked_slice_bytes::<InitialParameterValue>(self.committed.len())?;
-        let candidate = checked_slice_bytes::<InitialParameterValue>(self.candidate.len())?;
-        let dirty = checked_slice_bytes::<bool>(self.dirty.len())?;
-        let mut owned_payload_bytes = owner_box;
-        owned_payload_bytes = owned_payload_bytes
+        // An open transaction's candidate is transient (built by `begin`, dropped by `commit` or
+        // `discard`), so it is no retained allocation.
+        let owned_payload_bytes = owner_box
             .checked_add(committed)
-            .and_then(|bytes| bytes.checked_add(candidate))
-            .and_then(|bytes| bytes.checked_add(dirty))
             .ok_or(EffectControlResourceError::Arithmetic)?;
-        let largest_owned_allocation_bytes = owner_box.max(committed).max(candidate).max(dirty);
+        let largest_owned_allocation_bytes = owner_box.max(committed);
 
         let header = Layout::new::<AtomicUsize>();
         let (strong_weak, _) = header
@@ -211,8 +217,10 @@ impl EffectControlOwner {
         {
             return Err(EffectControlOwnerError::Revision);
         }
-        self.candidate.copy_from_slice(&self.committed);
-        self.dirty.fill(false);
+        self.candidate = Some(OpenCandidate {
+            rows: self.committed.clone(),
+            dirty: vec![false; self.committed.len()].into_boxed_slice(),
+        });
         self.phase = EffectControlOwnerPhase::Open;
         Ok(())
     }
@@ -243,6 +251,10 @@ impl EffectControlOwner {
         channel: ParameterChannel,
         value: f32,
     ) -> Result<(), EffectControlOwnerError> {
+        let candidate = self
+            .candidate
+            .as_mut()
+            .ok_or(EffectControlOwnerError::Revision)?;
         let parameter = self
             .factory
             .descriptor()
@@ -260,28 +272,28 @@ impl EffectControlOwner {
             | (ParameterChannelPolicy::PerLane, ParameterChannel::Left)
             | (ParameterChannelPolicy::PerLane, ParameterChannel::Right) => {
                 let value = normalize_zero(value);
-                let row = self
-                    .candidate
+                let row = candidate
+                    .rows
                     .iter()
                     .position(|item| {
                         item.parameter_index == parameter_index && item.channel == channel
                     })
                     .ok_or(EffectControlOwnerError::Shape)?;
-                self.candidate[row].value = value;
-                self.dirty[row] = true;
+                candidate.rows[row].value = value;
+                candidate.dirty[row] = true;
                 Ok(())
             }
             (ParameterChannelPolicy::PerLane, ParameterChannel::Both) => {
                 for lane in [ParameterChannel::Left, ParameterChannel::Right] {
-                    let row = self
-                        .candidate
+                    let row = candidate
+                        .rows
                         .iter()
                         .position(|item| {
                             item.parameter_index == parameter_index && item.channel == lane
                         })
                         .ok_or(EffectControlOwnerError::Shape)?;
-                    self.candidate[row].value = normalize_zero(value);
-                    self.dirty[row] = true;
+                    candidate.rows[row].value = normalize_zero(value);
+                    candidate.dirty[row] = true;
                 }
                 Ok(())
             }
@@ -292,10 +304,14 @@ impl EffectControlOwner {
     /// Borrows the complete candidate request for off-audio preparation.
     pub fn preparation_request(&self) -> Result<EffectTargetRequest<'_>, EffectControlOwnerError> {
         self.require_open()?;
+        let open = self
+            .candidate
+            .as_ref()
+            .ok_or(EffectControlOwnerError::Invariant)?;
         Ok(EffectTargetRequest {
             sample_rate: self.sample_rate,
-            values: &self.candidate,
-            changed: &self.dirty,
+            values: &open.rows,
+            changed: &open.dirty,
         })
     }
 
@@ -341,8 +357,7 @@ impl EffectControlOwner {
         ) {
             return Err(EffectControlOwnerError::Revision);
         }
-        self.candidate.copy_from_slice(&self.committed);
-        self.dirty.fill(false);
+        self.candidate = None;
         self.pending_revision = None;
         self.phase = EffectControlOwnerPhase::Idle;
         Ok(())
@@ -393,6 +408,7 @@ impl EffectControlOwner {
                 .is_err()
             {
                 self.phase = EffectControlOwnerPhase::Faulted;
+                self.candidate = None;
                 self.pending_revision = None;
                 return Err(EffectControlOwnerError::Invariant);
             }
@@ -411,8 +427,11 @@ impl EffectControlOwner {
             .pending_revision
             .take()
             .ok_or(EffectControlOwnerError::Invariant)?;
-        self.committed.copy_from_slice(&self.candidate);
-        self.dirty.fill(false);
+        let open = self
+            .candidate
+            .take()
+            .ok_or(EffectControlOwnerError::Invariant)?;
+        self.committed.copy_from_slice(&open.rows);
         self.committed_revision = next_revision;
         self.phase = EffectControlOwnerPhase::Idle;
         Ok(self.committed_revision)
@@ -446,23 +465,64 @@ mod tests {
         let mut owner = EffectControlOwner {
             factory: Arc::new(ParametricEqFactory),
             sample_rate: 48_000,
-            candidate: committed.clone(),
-            dirty: vec![false; committed.len()].into_boxed_slice(),
+            candidate: None,
             committed,
             committed_revision: u64::MAX,
             pending_revision: None,
             phase: EffectControlOwnerPhase::Idle,
         };
         let committed_before = owner.committed.clone();
-        let candidate_before = owner.candidate.clone();
-        let dirty_before = owner.dirty.clone();
         assert_eq!(
             owner.begin(u64::MAX),
             Err(EffectControlOwnerError::Revision)
         );
         assert_eq!(owner.phase, EffectControlOwnerPhase::Idle);
         assert_eq!(owner.committed, committed_before);
-        assert_eq!(owner.candidate, candidate_before);
-        assert_eq!(owner.dirty, dirty_before);
+        assert!(owner.candidate.is_none(), "a refused begin builds nothing");
+    }
+
+    /// An idle owner retains only its committed rows: the candidate and the touched mask exist
+    /// from `begin` to `commit` or `discard` and nowhere else (#1624).
+    #[test]
+    fn the_candidate_lives_only_between_begin_and_commit_or_discard() {
+        let committed: Box<[InitialParameterValue]> =
+            default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        let rows = committed.len();
+        let mut owner = EffectControlOwner {
+            factory: Arc::new(ParametricEqFactory),
+            sample_rate: 48_000,
+            candidate: None,
+            committed,
+            committed_revision: 0,
+            pending_revision: None,
+            phase: EffectControlOwnerPhase::Idle,
+        };
+        let idle_bytes = owner.resource_facts().expect("facts").owned_payload_bytes;
+        assert!(owner.candidate().is_empty() && owner.dirty().is_empty());
+
+        owner.begin(0).expect("begin");
+        assert_eq!(owner.candidate(), &owner.committed[..]);
+        assert_eq!(owner.dirty().len(), rows);
+        assert!(owner.dirty().iter().all(|touched| !touched));
+        owner.edit(2, ParameterChannel::Both, 100.0).expect("edit");
+        assert!(owner.dirty().iter().any(|touched| *touched));
+        owner.discard().expect("discard");
+        assert!(owner.candidate().is_empty() && owner.dirty().is_empty());
+
+        // A second candidate starts from the committed rows, not from the discarded edit.
+        owner.begin(0).expect("begin again");
+        assert_eq!(owner.candidate(), &owner.committed[..]);
+        assert!(owner.dirty().iter().all(|touched| !touched));
+        // A poisoned candidate is still the open one until discarded.
+        assert!(owner.edit(9_999, ParameterChannel::Both, 0.0).is_err());
+        assert_eq!(owner.phase(), EffectControlOwnerPhase::Poisoned);
+        assert_eq!(owner.dirty().len(), rows);
+        owner.discard().expect("discard poisoned");
+        assert!(owner.candidate().is_empty());
+        assert_eq!(
+            owner.resource_facts().expect("facts").owned_payload_bytes,
+            idle_bytes,
+            "the retained facts do not depend on a candidate"
+        );
     }
 }

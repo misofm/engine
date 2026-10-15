@@ -132,7 +132,7 @@ pub fn compile_session(
     caps: CompileCaps,
 ) -> Result<CompiledSession, DiagnosticSet> {
     let estimate = estimate_session(session)?;
-    check_caps(session, estimate, caps)?;
+    check_caps(estimate, caps)?;
     validate_session(session)?;
     let canonical_json = write_canonical(session);
     let estimate = with_canonical_bytes(estimate, canonical_json.len())?;
@@ -213,8 +213,7 @@ pub fn compile_session(
         resource_estimate: estimate,
     })
 }
-fn check_caps(
-    _session: &SessionModel,
+pub(crate) fn check_caps(
     estimate: ResourceEstimate,
     caps: CompileCaps,
 ) -> Result<(), DiagnosticSet> {

@@ -9,8 +9,8 @@
 //! heap live at the call's entry.
 //!
 //! The ceilings are the numbers measured on this head with a few KB of slack. The steady call is
-//! the same at every track count: a live-only commit must not depend on the session's size. The
-//! numbers print with `--nocapture`.
+//! the same at every track count, and so is the first (#1620): a live-only commit must not depend
+//! on the session's size. The numbers print with `--nocapture`.
 //!
 //! It lives in `parameter-metadata`, which links host-web and the audited allocator already:
 //! `scripts/check-bench-policy.sh` keeps `bench-support` out of every `hosts/` package.
@@ -214,10 +214,12 @@ fn run(tracks: usize) -> (Heap, Heap) {
 /// 101,025 bytes in 753 allocations. Before #1615 they were 172,790 and 168,031, requesting 293,477
 /// in 786.
 ///
-/// A transaction on a larger session is the same number once the first call has built what it
-/// keeps; the first call of 64 and 256 tracks still grows with the session and is recorded, not
-/// gated.
-const FIRST_PEAK_CEILING_ONE_TRACK: usize = 78_000;
+/// #1620: the first call is in place too. It used to take the full path, because its edits add
+/// parameter entries to the sparse EQ list (peak 77,600 / 198,182 / 663,179 bytes at 1 / 64 / 256
+/// tracks, 839 / 1,853 / 4,927 allocations); in place, it peaks at 72,865 bytes, requesting 103,033
+/// in 757 allocations, at every size. Its ceiling was 78,000 at one track and none above.
+const FIRST_PEAK_CEILING: usize = 74_000;
+const FIRST_REQUESTED_CEILING: usize = 105_000;
 const STEADY_PEAK_CEILING: usize = 73_000;
 const STEADY_REQUESTED_CEILING: usize = 104_000;
 
@@ -228,20 +230,19 @@ fn a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size() {
         // what this test is not measuring.
         host_core::verify_stages(false);
         let mut peaks = Vec::new();
+        let mut firsts = Vec::new();
         for tracks in [1_usize, 64, 256] {
             let (first, steady) = run(tracks);
             println!("tracks {tracks}: first {first:?}; steady {steady:?}");
-            // A steady call keeps only its 80-byte response; the first also seeds some state.
+            // A call keeps only its 80-byte response.
             assert!(
-                steady.left <= 256 && first.left <= 4_096,
+                steady.left <= 256 && first.left <= 256,
                 "a call leaves heap live"
             );
-            if tracks == 1 {
-                assert!(
-                    first.peak <= FIRST_PEAK_CEILING_ONE_TRACK,
-                    "{tracks}: first {first:?}"
-                );
-            }
+            assert!(
+                first.peak <= FIRST_PEAK_CEILING && first.requested <= FIRST_REQUESTED_CEILING,
+                "{tracks}: first {first:?}"
+            );
             assert!(
                 steady.peak <= STEADY_PEAK_CEILING,
                 "{tracks}: steady {steady:?}"
@@ -251,7 +252,15 @@ fn a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size() {
                 "{tracks}: steady {steady:?}"
             );
             peaks.push(steady);
+            firsts.push(first);
         }
+        // #1620: nor does the first call, which adds parameter entries.
+        assert!(
+            firsts
+                .iter()
+                .all(|first| first.allocations == firsts[0].allocations),
+            "the first call's allocations depend on the track count: {firsts:?}"
+        );
         // A live-only commit does not depend on the session's size.
         assert_eq!(
             peaks[1].peak, peaks[2].peak,

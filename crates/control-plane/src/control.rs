@@ -271,7 +271,8 @@ pub struct TestTransactionSnapshot<Row> {
     pub effect_cells: Vec<EffectCellRow>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
-    /// bits)`.
+    /// bits)`. The candidate is empty while the owner is idle: it exists only between `begin` and
+    /// `commit` or `discard` (#1624).
     pub effect_owners: Vec<TestOwnerState>,
 }
 
@@ -2410,10 +2411,11 @@ where
         let transaction = prepared.get().prospective_session();
         let committed = self.controller.session().compiled();
         let models = if transaction.is_in_place() {
-            // #1613: a transaction prepared in place changes values, never a count (the
-            // preparation proved it), so the counts a rebuild would check are those of the
-            // committed model, which passed them when it was admitted. The model charge is the one
-            // the full path would make: the committed estimate and the next one.
+            // #1613: a transaction prepared in place changes values and at most adds parameter
+            // entries (#1620), never a count a rebuild checks (the preparation proved it), so those
+            // counts are the committed model's, which passed them when it was admitted. The model
+            // charge is the one the full path would make: the committed estimate and the next one,
+            // which charges the added entries.
             let next = transaction
                 .in_place_estimate()
                 .unwrap_or_else(|| committed.resource_estimate());
