@@ -131,19 +131,20 @@ pub enum EffectControlRecord {
         /// Render blocks per published window, or `0` for the plan's default.
         window_blocks: u32,
     },
-    /// Set this instance's live bypass as a **step**: the crossfade ramp is zero samples.
+    /// Set this instance's live bypass, with the crossfade ramp that carries it.
     ///
     /// Bypass is not a parameter and has no span: it is applied by the rack's latency-preserving
     /// shunt (see [`BypassShunt`]), never by the effect, because
     /// [`PreparedEffectMetadata::bypass`](crate::PreparedEffectMetadata) is baked into the
     /// program key and a bank's lanes must be able to disagree about it.
     ///
-    /// A host that crossfades the switch over the session's ramp writes a [`BypassSwitch`] with
-    /// [`EffectCellWriter::write_bypass`] instead; this record is the same write with
-    /// `ramp_samples == 0`. The control plane writes the pair, so a host that edits through the core
-    /// (the C ABI and the browser alike) always crossfades; a bare record is for a host that drives
-    /// the lane directly.
-    Bypass(bool),
+    /// The record is the whole bypass cell, two words: the bypass and its ramp
+    /// ([`BypassSwitch`]), written and drained as one unit. A host fills the ramp from the
+    /// session's mute ramp (`LiveRamps::mute_samples`); a bare step is
+    /// [`BypassSwitch::step`]. A ramp longer than [`INDEXED_RAMP_LENGTH_MAXIMUM`] is refused as
+    /// [`EffectWriteRefusal::Ramp`] by [`EffectCellWriter::check`] and
+    /// [`EffectCellWriter::write`], with nothing written.
+    Bypass(BypassSwitch),
 }
 
 /// A live bypass and the crossfade ramp that carries it: the two words of the bypass cell, written
@@ -468,7 +469,10 @@ impl EffectCellWriter {
                 };
                 Ok(Address::Targets(first, last, target.words))
             }
-            EffectControlRecord::Bypass(bypass) => Ok(Address::Bypass(BypassSwitch::step(bypass))),
+            EffectControlRecord::Bypass(switch) => {
+                switch.check()?;
+                Ok(Address::Bypass(switch))
+            }
             EffectControlRecord::Observe { .. } => Err(EffectWriteRefusal::Observe),
         }
     }
@@ -530,31 +534,6 @@ impl EffectCellWriter {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Write `switch` as the newest value of the bypass cell, stamped with the revision of the
-    /// transaction that commits it: the bypass and the ramp that carries it, as one unit.
-    ///
-    /// # Errors
-    ///
-    /// [`EffectWriteRefusal::Ramp`], with nothing written, when the ramp is longer than
-    /// [`INDEXED_RAMP_LENGTH_MAXIMUM`]. The caller has checked the switch ([`BypassSwitch::check`])
-    /// before the first write of its transaction.
-    pub fn write_bypass(
-        &mut self,
-        stamp: LiveStamp<'_>,
-        switch: BypassSwitch,
-    ) -> Result<(), EffectWriteRefusal> {
-        switch.check()?;
-        let cells = &*self.cells;
-        self.bypass.write(
-            &cells.bypass,
-            &cells.dirty[0],
-            0,
-            stamp,
-            [u32::from(switch.bypassed), switch.ramp_samples],
-        );
         Ok(())
     }
 
@@ -724,6 +703,10 @@ pub fn effect_control_lane(
         mix: settled_mix(bypass),
         mix_position: 0,
         symmetry,
+        carried_bypass: CarriedCell::EMPTY,
+        carried_parameters: vec![CarriedCell::EMPTY; parameter_cells].into_boxed_slice(),
+        carried_targets: vec![CarriedCell::EMPTY; target_cells].into_boxed_slice(),
+        carried_pending: false,
     };
     Some((writer, lane))
 }
@@ -790,6 +773,45 @@ pub struct EffectControlLane {
     /// Only the two live terms move here. `SOURCE`, `DESIGNED` and `RESTORED` are decided off
     /// render, at preparation and at restore, and are conjoined by the stage that owns this lane.
     symmetry: ChannelSymmetryWitness,
+    /// The predecessor's unread bypass write this lane took at a plan swap (#1280 D2).
+    carried_bypass: CarriedCell<2>,
+    /// The predecessor's unread parameter writes, one per parameter cell.
+    carried_parameters: Box<[CarriedCell<1>]>,
+    /// The predecessor's unread target writes, one per target cell.
+    carried_targets: Box<[CarriedCell<PREPARED_EFFECT_TARGET_WORDS>]>,
+    /// Whether any carried slot holds a write: the next [`Self::stage`] resolves them before it
+    /// decides it has nothing to read.
+    carried_pending: bool,
+}
+
+/// A write the retiring plan's cell held unread at a plan swap, which its successor's lane applies
+/// at its first rendered block (#1280 D2): the newest unread write's words, and how many unread
+/// writes the predecessor's cell held (`0` for none).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CarriedCell<const N: usize> {
+    words: [u32; N],
+    unread: u64,
+}
+
+impl<const N: usize> CarriedCell<N> {
+    const EMPTY: Self = Self {
+        words: [0; N],
+        unread: 0,
+    };
+
+    /// The slot a successor lane takes for one predecessor cell: the predecessor's newest unread
+    /// write, with the writes it still holds from an earlier swap that had not rendered yet.
+    fn of(reader: &CellReader, cell: &LatestCell<N>, earlier: Self) -> Self {
+        match reader.peek_unread(cell) {
+            Some((words, sequence)) => Self {
+                words,
+                unread: sequence
+                    .saturating_sub(reader.last_applied())
+                    .saturating_add(earlier.unread),
+            },
+            None => earlier,
+        }
+    }
 }
 
 /// The mix of a lane settled at bypass state `bypass`: `0` (dry) when bypassed, else `1` (wet).
@@ -826,6 +848,10 @@ impl EffectControlLane {
             mix: settled_mix(bypass),
             mix_position: 0,
             symmetry,
+            carried_bypass: CarriedCell::EMPTY,
+            carried_parameters: Box::default(),
+            carried_targets: Box::default(),
+            carried_pending: false,
         }
     }
 
@@ -876,6 +902,14 @@ impl EffectControlLane {
         self.observe.take()
     }
 
+    /// The observation queue's consumer, borrowed, when the lane still holds it (a per-node lane
+    /// does; a bank lane's was taken at bind). A plan swap's carry pops it in a loop of its own
+    /// (#1280 D3); this pops nothing.
+    #[must_use]
+    pub fn observe_queue_mut(&mut self) -> Option<&mut Consumer<EffectControlRecord>> {
+        self.observe.as_mut()
+    }
+
     /// Exact heap this lane and its shared cells retain, each allocation counted once, including
     /// the observation queue if the lane still holds it. The lane's own struct is charged by its
     /// owner. The writer's arrays are [`EffectCellWriter::retained_resources`].
@@ -896,6 +930,9 @@ impl EffectControlLane {
         resources.add_array::<DirtyReader>(self.dirty.len());
         resources.add_array::<u64>(self.pending.len());
         resources.add_array::<PreparedEffectTarget>(self.targets.len());
+        resources.add_array::<CarriedCell<1>>(self.carried_parameters.len());
+        resources
+            .add_array::<CarriedCell<PREPARED_EFFECT_TARGET_WORDS>>(self.carried_targets.len());
         if let Some(queue) = self.observe.as_ref()
             && let Some(capacity) = NonZeroUsize::new(queue.capacity())
             && let Ok(payload) = bounded_spsc_retained_payload::<EffectControlRecord>(capacity)
@@ -1003,8 +1040,78 @@ impl EffectControlLane {
             .saturating_add(frames)
             .min(self.mix.length);
         if self.mix_position >= self.mix.length && !self.bypass {
-            self.symmetry.admit(&EffectControlRecord::Bypass(false));
+            self.symmetry
+                .admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
         }
+    }
+
+    /// Whether [`Self::carry_from`] would take `predecessor`: both lanes have no cells, or both
+    /// have cells of one shape (the same parameter groups and target slots), so every cell of the
+    /// predecessor has a carried slot here. Allocation-free and bounded by the group count.
+    #[must_use]
+    pub fn can_carry_from(&self, predecessor: &Self) -> bool {
+        match (self.cells.as_deref(), predecessor.cells.as_deref()) {
+            (None, None) => true,
+            (Some(own), Some(before)) => own.shape == before.shape,
+            _ => false,
+        }
+    }
+
+    /// Take the live state of `predecessor`, the lane of the plan this lane's plan displaces, at
+    /// the swap block (#1280 D2). The predecessor never renders again, so nothing here consumes
+    /// from it and nothing writes a cell: control stays each cell's only writer.
+    ///
+    /// * The applied live bypass flag, the bypass crossfade (its mix and position, so a swap inside
+    ///   a ramp continues it, #1341 D7) and the live symmetry terms are copied.
+    /// * Each predecessor cell's newest unread write ([`CellReader::peek_unread`]) goes to this
+    ///   lane's carried slot of the cell, with the count of unread writes. The slot resolves at
+    ///   this lane's first rendered block, before that block stages anything ([`Self::stage`]):
+    ///   the successor's own newer write wins, otherwise the carried write applies, and the
+    ///   writes replaced join `live_values_superseded` exactly once. A slot the predecessor
+    ///   itself had not resolved yet stays pending, with its writes added.
+    ///
+    /// The caller has checked [`Self::can_carry_from`]; a lane that fails it takes nothing and
+    /// reports `false`. Allocation-free, lock-free and bounded by the cell count.
+    pub fn carry_from(&mut self, predecessor: &Self) -> bool {
+        if !self.can_carry_from(predecessor) {
+            return false;
+        }
+        self.bypass = predecessor.bypass;
+        self.mix = predecessor.mix;
+        self.mix_position = predecessor.mix_position;
+        self.symmetry = predecessor.symmetry;
+        let Some(before) = predecessor.cells.as_deref() else {
+            return true;
+        };
+        let mut pending = false;
+        self.carried_bypass = CarriedCell::of(
+            &predecessor.bypass_reader,
+            &before.bypass,
+            predecessor.carried_bypass,
+        );
+        pending |= self.carried_bypass.unread != 0;
+        for (((slot, cell), reader), earlier) in self
+            .carried_parameters
+            .iter_mut()
+            .zip(&before.parameters)
+            .zip(&predecessor.parameter_readers)
+            .zip(&predecessor.carried_parameters)
+        {
+            *slot = CarriedCell::of(reader, cell, *earlier);
+            pending |= slot.unread != 0;
+        }
+        for (((slot, cell), reader), earlier) in self
+            .carried_targets
+            .iter_mut()
+            .zip(&before.targets)
+            .zip(&predecessor.target_readers)
+            .zip(&predecessor.carried_targets)
+        {
+            *slot = CarriedCell::of(reader, cell, *earlier);
+            pending |= slot.unread != 0;
+        }
+        self.carried_pending = pending;
+        true
     }
 
     /// The targets applied by the most recent [`stage`](Self::stage), in `(slot, channel)` order.
@@ -1052,6 +1159,10 @@ impl EffectControlLane {
             mix,
             mix_position,
             symmetry,
+            carried_bypass,
+            carried_parameters,
+            carried_targets,
+            carried_pending,
             ..
         } = self;
         *staged_targets = 0;
@@ -1067,16 +1178,21 @@ impl EffectControlLane {
             *mask = reader.pending(word);
             any |= *mask;
         }
-        if any == 0 {
+        // A lane that took a plan swap's carried writes resolves them in its first block, whether or
+        // not its own cells hold anything (#1280 D2).
+        if any == 0 && !*carried_pending {
             return Staged::default();
         }
+        *carried_pending = false;
         let mut reads = Reads {
             pending,
             dirty,
             snapshot,
             superseded,
         };
-        if let Some([word, ramp_samples]) = reads.read(0, &cells.bypass, bypass_reader) {
+        if let Some([word, ramp_samples]) =
+            reads.read(0, &cells.bypass, bypass_reader, carried_bypass)
+        {
             let value = word != 0;
             // A record whose target is the lane's current target changes nothing, whether the
             // lane is settled there or still on its way (#1341 D2). Otherwise the crossfade starts
@@ -1093,7 +1209,9 @@ impl EffectControlLane {
                 *mix_position = 0;
                 *bypass = value;
                 // A ramping lane counts as bypassed until it settles at wet (#1341 D6).
-                symmetry.admit(&EffectControlRecord::Bypass(value || mix.length != 0));
+                symmetry.admit(&EffectControlRecord::Bypass(BypassSwitch::step(
+                    value || mix.length != 0,
+                )));
             }
         }
         let mut staged = 0_usize;
@@ -1111,6 +1229,7 @@ impl EffectControlLane {
                         1 + first + offset,
                         &cells.parameters[first + offset],
                         &mut parameter_readers[first + offset],
+                        &mut carried_parameters[first + offset],
                     )
                     .map(|[bits]| bits);
             }
@@ -1158,6 +1277,7 @@ impl EffectControlLane {
                     cells.shape.target_bit(index),
                     &cells.targets[index],
                     &mut target_readers[index],
+                    &mut carried_targets[index],
                 );
             }
             let slot = slot as u32;
@@ -1231,24 +1351,43 @@ struct Reads<'a> {
 impl Reads<'_> {
     /// Read the cell at dirty bit `bit` if it is pending: the newest write at or below the
     /// snapshot, if it was not applied before. The writes it replaced join the session count.
+    ///
+    /// `carried` is the write the retiring plan's cell held unread at a plan swap (#1280 D2),
+    /// resolved here in #1345 D3's order, and emptied. When the cell's own newer write applies,
+    /// it wins and every carried write was replaced: the count gains `unread`. Otherwise the
+    /// carried write applies and the older ones it replaced join the count: `unread - 1`. The
+    /// predecessor never reads again, so this lane counts for it.
     fn read<const N: usize>(
         &mut self,
         bit: usize,
         cell: &LatestCell<N>,
         reader: &mut CellReader,
+        carried: &mut CarriedCell<N>,
     ) -> Option<[u32; N]> {
-        if self.pending[bit / 64] & (1 << (bit % 64)) == 0 {
-            return None;
+        let own = if self.pending[bit / 64] & (1 << (bit % 64)) == 0 {
+            None
+        } else {
+            match reader.read_counted(
+                cell,
+                self.snapshot,
+                &mut self.dirty[bit / 64],
+                (bit % 64) as u32,
+                self.superseded,
+            ) {
+                CellRead::Applied { words, .. } => Some(words),
+                CellRead::Unchanged => None,
+            }
+        };
+        if carried.unread == 0 {
+            return own;
         }
-        match reader.read_counted(
-            cell,
-            self.snapshot,
-            &mut self.dirty[bit / 64],
-            (bit % 64) as u32,
-            self.superseded,
-        ) {
-            CellRead::Applied { words, .. } => Some(words),
-            CellRead::Unchanged => None,
+        let unread = core::mem::replace(&mut carried.unread, 0);
+        if own.is_some() {
+            self.superseded.add_carried(unread);
+            own
+        } else {
+            self.superseded.add_carried(unread - 1);
+            Some(carried.words)
         }
     }
 }
@@ -1728,6 +1867,65 @@ impl BypassShunt {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// Copy lane `predecessor_lane` of `predecessor`'s interleaved latency line into lane `lane`
+    /// of this one, at a plan swap (#1280 D5). Both shunts are the lines of an AoSoA bank, of
+    /// `predecessor_lanes` and `lanes` lanes, and one lane's samples are every `lanes`-th word of
+    /// its line. The line is a ring whose shared cursor is its oldest word, and the block it
+    /// receives is a whole number of frames of `lanes` words, so the word `t * lanes + lane`
+    /// after the cursor is lane `lane`'s sample of age `latency - t`. The copy walks both rings
+    /// from their own cursors, so a successor whose cursor sits elsewhere, or whose bank has
+    /// another width, keeps the lane's delayed dry signal exactly.
+    ///
+    /// Returns `false`, copying nothing, when either line is not a whole number of frames of its
+    /// lanes, the lane indexes are out of range, or the two lanes' latencies differ; two shunts
+    /// both without a line (zero latency) copy nothing and return `true`. Allocation-free and
+    /// bounded by the latency.
+    pub fn carry_line_lane_from(
+        &mut self,
+        lane: usize,
+        lanes: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        predecessor_lanes: usize,
+    ) -> bool {
+        let (length, before_length) = (self.line_left.len(), predecessor.line_left.len());
+        if length == 0 && before_length == 0 {
+            return true;
+        }
+        if lanes == 0
+            || predecessor_lanes == 0
+            || lane >= lanes
+            || predecessor_lane >= predecessor_lanes
+            || self.line_right.len() != length
+            || predecessor.line_right.len() != before_length
+            || length % lanes != 0
+            || before_length % predecessor_lanes != 0
+            || length / lanes != before_length / predecessor_lanes
+        {
+            return false;
+        }
+        let latency = length / lanes;
+        // Each ring's position of the lane's sample of age rank `t`, advanced by one frame of
+        // words per step and wrapped at the ring's end.
+        let mut to = self.cursor + lane;
+        let mut from = predecessor.cursor + predecessor_lane;
+        for _ in 0..latency {
+            if to >= length {
+                to -= length;
+            }
+            if from >= before_length {
+                from -= before_length;
+            }
+            self.line_left[to] = predecessor.line_left[from];
+            self.line_right[to] = predecessor.line_right[from];
+            to += lanes;
+            from += predecessor_lanes;
+        }
+        true
+    }
+    // REALTIME_POLICY_END
+
     /// Replace the wet block with the latency-matched dry block.
     pub fn apply(&self, left: &mut [f32], right: &mut [f32]) {
         let frames = left.len().min(self.dry_left.len()).min(right.len());
@@ -2003,3 +2201,50 @@ fn crossfade_tail(
     }
 }
 // REALTIME_POLICY_END
+
+#[cfg(test)]
+mod carry_tests {
+    use super::BypassShunt;
+
+    /// One frame of an AoSoA block of `lanes` lanes: lane `l` of frame `f` holds `10 f + l`, and
+    /// the right plane its negation.
+    fn frame(f: usize, lanes: usize) -> (Vec<f32>, Vec<f32>) {
+        let left: Vec<f32> = (0..lanes).map(|l| (10 * f + l) as f32).collect();
+        let right = left.iter().map(|value| -value).collect();
+        (left, right)
+    }
+
+    /// #1280 D5: a lane's samples keep their age order when they move to another lane of a bank
+    /// of another width whose shared cursor sits elsewhere. A copy that ignores either cursor, or
+    /// that indexes the lane by the wrong width, hands the lane other samples.
+    #[test]
+    fn a_shunt_lane_moves_to_a_bank_of_another_width_and_cursor() {
+        let latency = 3;
+        let mut from = BypassShunt::new(4, latency * 4);
+        // Five frames in: the line holds frames 2, 3 and 4, and its cursor is eight words in.
+        for f in 0..5 {
+            let (left, right) = frame(f, 4);
+            from.capture(&left, &right);
+        }
+        let mut into = BypassShunt::new(8, latency * 8);
+        // One frame of another content moves this line's cursor off zero.
+        let (left, right) = frame(9, 8);
+        into.capture(&left, &right);
+        assert!(into.carry_line_lane_from(5, 8, &from, 2, 4));
+        // The next three frames read the carried lane's samples back, oldest first.
+        for expected in [2, 3, 4] {
+            let zero = vec![0.0_f32; 8];
+            into.capture(&zero, &zero);
+            let (left, right) = into.dry();
+            assert_eq!(left[5], (10 * expected + 2) as f32);
+            assert_eq!(right[5], -((10 * expected + 2) as f32));
+        }
+        // A line of another latency, or a lane out of range, takes nothing.
+        let mut other = BypassShunt::new(8, (latency + 1) * 8);
+        assert!(!other.carry_line_lane_from(5, 8, &from, 2, 4));
+        assert!(!into.carry_line_lane_from(8, 8, &from, 2, 4));
+        // Neither shunt has a line: nothing to move.
+        let mut empty = BypassShunt::new(8, 0);
+        assert!(empty.carry_line_lane_from(0, 8, &BypassShunt::new(4, 0), 0, 4));
+    }
+}

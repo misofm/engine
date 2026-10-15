@@ -316,7 +316,10 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
     let (mut chain, mut producers) = live_control_chain(LATENCY, [true, true, false, false]);
     // Lane 0 is bypassed and gained; lane 1 is only gained.
     producers.push(0, gain(0.5));
-    producers.push(0, EffectControlRecord::Bypass(true));
+    producers.push(
+        0,
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+    );
     producers.push(1, gain(0.5));
 
     let mut seen_left: Vec<Vec<f32>> = vec![Vec::new(); LANES];
@@ -372,14 +375,20 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
 fn un_bypassing_returns_the_current_wet_signal() {
     let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
     producers.push(0, gain(0.25));
-    producers.push(0, EffectControlRecord::Bypass(true));
+    producers.push(
+        0,
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+    );
     let mut members = planes(1.0);
     chain
         .run(&mut members, 8, 0, LiveSnapshot::ALL)
         .expect("run");
     assert!(members.left[0].iter().all(|value| *value == 1.0), "dry");
 
-    producers.push(0, EffectControlRecord::Bypass(false));
+    producers.push(
+        0,
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(false)),
+    );
     let mut members = planes(1.0);
     chain
         .run(&mut members, 8, 8, LiveSnapshot::ALL)
@@ -709,7 +718,10 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
         // first bypassed one. Its dry signal is input the shunt could only hold if the capture ran
         // during the wet blocks.
         if block == 2 {
-            producers.push(0, EffectControlRecord::Bypass(true));
+            producers.push(
+                0,
+                EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+            );
         }
         let mut members = Planes {
             left: (0..LANES)
@@ -776,7 +788,10 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
         "block 0 renders wet"
     );
 
-    producers.push(0, EffectControlRecord::Bypass(true));
+    producers.push(
+        0,
+        EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
+    );
     let mut members = planes(5.0);
     chain
         .run(

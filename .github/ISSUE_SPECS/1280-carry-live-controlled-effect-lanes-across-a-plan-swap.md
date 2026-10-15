@@ -296,3 +296,184 @@ The batch-10 split is approved: #1280a (D2 with #1341 D7, D5, the live-stage car
 banked-insert join, `add_carried`; gates 1-4, 6 and #1341's gate 6), #1280c (D4, gate 5), #1280b
 (D3, gate 8). #1341 closes when #1280a lands. #1622 follows #1280a in batch 10 lane K and rebases
 on it.
+
+## Decision record: #1280a (batch 10)
+
+**Shipped.** D2 with #1341 D7, D5, the live-stage carry, the join for console slots and banked
+inserts, and `add_carried`.
+
+- `LiveValuesSuperseded::add_carried` (`crates/engine/src/realtime/latest_cell.rs`): the same body as
+  `add`, public, in the realtime-policy region. One attempt, accepted by the permission system. Its
+  unit test is `add_carried_adds_saturates_and_ignores_zero`.
+- `EffectControlLane::carry_from` (`effect-contract/src/live.rs`) copies `bypass`, `mix`,
+  `mix_position` and `symmetry`, and gives each cell a render-owned carried slot (`CarriedCell`:
+  the newest unread words and the unread count `s - p`). `stage` resolves the slots before its
+  `any == 0` early return, in `Reads::read`: the successor's own `Applied` read wins and adds `n`;
+  otherwise the carried words apply and add `n - 1`. A slot the predecessor had not resolved yet is
+  merged (its count is added), so a successor that is replaced before its first stage loses nothing.
+  `can_carry_from` compares the two cell shapes (`EffectLaneShape` equality). The slots are
+  preallocated with the lane and counted in `retained_resources`.
+- `BypassShunt::carry_line_lane_from` (D5): one lane's samples of the interleaved line, walked from
+  each ring's own cursor in age order, so another width and another cursor are correct. It copies
+  nothing when neither bank keeps a latency line, and refuses a line of another latency.
+- `LiveControlEffectBankStage` gains `layout`, `lanes`, `lane_kind`, `can_carry_lane_from`,
+  `carry_lane_from`, `carry_refused`, `as_any_mut`, and a `RESTORED` bit per lane (a byte, no new
+  allocation). The payload move is one function (`carry_payload`) shared with `EffectBankStage`.
+  `EffectLaneKind { Plain, Uncontrolled, BypassOnly, Cells }` is the "kind" of the join: a pair of
+  unlike kinds does not carry.
+- `graph`: `EffectStageMut` reaches both stage types in `effect_stage_mut` / `effect_lane_mut`;
+  `GraphEffectLane` gains `kind`; the swap block's check and carry run for both.
+- `host-core`: `EffectLaneInventoryRow` gains `kind`. The join adds the owner key (strip, `Dynamic`,
+  insert ID) for a surviving insert (`InsertOwnerJoin`, bit-equal declaration in both models). A
+  live difference is a prepared one until #1280c: the strip restarts, as today.
+
+**Departures.**
+
+- The live stage had no `RESTORED` witness term. A restore whose left and
+  right sections differ must decline the mono collapse as `EffectBankStage` does, so the live
+  stage holds the term now (not in the text of the issue).
+- A lane kind that is not `Cells` carries its payload (and a lowered bypass) and no cells; the
+  swap block never refuses the hand-over for a shunt that exists on one side only.
+- Gate 3's count is per cell. The compressor threshold is a `PerLane` parameter with a left and a
+  right cell, so the test writes both and the counts are 2 x 79 and 2 x 39.
+
+**Gates and tests** (`crates/host-core/tests/successor_swap.rs`):
+
+| Gate | Test |
+|---|---|
+| 1 | `unrendered_live_writes_survive_the_swap_at_{eight,four}_lanes` (EQ band gain target and compressor threshold) |
+| 2 | `a_live_ramp_in_flight_finishes_after_the_swap_at_{eight,four}_lanes` (quantum 32, 64-sample ramp half done) |
+| 3 | `the_newest_value_wins_and_the_count_is_exact_at_{eight,four}_lanes` (158 and 78, i.e. 79 and 39 per cell) |
+| 4 | `a_bypassed_lane_keeps_its_delayed_dry_signal_at_{eight,four}_lanes` (banked limiter insert, nonzero cursor) |
+| 6 | `assert_clean_swap` in every case above: allocator and render audit zero over the swap block |
+| #1341 6 | `a_bypass_crossfade_in_flight_continues_after_the_swap_at_{eight,four}_lanes` (comp, and limiter with latency) |
+| join | `a_changed_control_kind_carries_no_effect_lane_at_{eight,four}_lanes` |
+| engine | `add_carried_adds_saturates_and_ignores_zero` |
+| shunt | `carry_tests::a_shunt_lane_moves_to_a_bank_of_another_width_and_cursor` |
+
+Red under mutation (each run once, reverted): no cell carry (gate 1), no `add_carried` and a
+carried value that overrides the successor's (gate 3), no shunt copy and a copy that ignores the
+cursors (gate 4 and #1341 6), no `mix` copy (#1341 6). The four-lane cases are `ignore`d on this
+AVX2 host (a console bank binds at the width its build executes, #1017).
+`a_console_slot_with_live_controls_restarts_its_strip` is deleted: a live console slot now carries.
+
+**Found, not fixed (successors).**
+
+- A route's PDC delay line is a state of its own that no carry moves. A session where one strip has
+  an insert with latency and another has none gets a delay line on the second strip's route, and a
+  swap restarts it: the first limiter-insert case failed on exactly that until every track had the
+  insert. The gates use sessions without unequal latency.
+- Pending Observe records of a carried lane are still lost at the swap (D3, #1280b).
+- `cargo run -p realtime-policy` fails at the base on `hosts/host-web/tests/control_command_heap.rs`
+  (`unsafe` outside the approved files); it is not from this slice.
+
+## Decision record: #1280c (batch 10)
+
+**Shipped.** D4 (the extraction and the retarget) and gate 5. After this slice a live difference on a
+carried effect lane no longer restarts the strip: the lane carries, then the successor retargets it
+to the new committed value.
+
+- **One per-instance function.** `effect_instance_records` (`host-core/src/prepare.rs`, beside the
+  strip derivation it mirrors) holds what `live_delta.rs` had in `effect_records`'s body,
+  `parameter_records` and `design_targets`, and `same_params`; `live_delta.rs` keeps `locate` and
+  `effect_records`, which now only adds the live address. It returns `Ok(None)` for no difference,
+  `Ok(Some(EffectInstanceRecords))` for a live one and `Err(LiveRebuild)` for a prepared one
+  (another identity, quality, sidechain or link mode; a bypass of an effect that does not lower it,
+  by `lowers_session_bypass`; a parameter that is not `Block`-rate; a parameter that does not
+  resolve; a ramp the indexed law refuses). The join calls it per surviving instance through
+  `join_chains`, so a difference is live in the carry exactly when it is live on the live path.
+  `same_console_entry`, `same_insert` and `committed_chain` are deleted: the lowered pair
+  (`SessionModel::lower_strip`) of both models is compared by that function.
+- **Join states.** `ConsoleOwnerJoin` and `InsertOwnerJoin` hold `FamilyJoin<EffectInstanceRecords>`
+  and the instance's `LiveEffectAddress`. A live difference of a slot or insert at another position
+  is prepared (another address); a `Same` one still carries.
+- **The write.** `resolve_effect_carry` takes the producer step as a callback, called only for a
+  lane whose layout and kind already match: `prepare_effect_retarget` preflights every record on the
+  successor's own producer (a record the lane has no cell for refuses the lane, and the strip
+  restarts), and, for the EQ, begins the owner transaction, applies the edits and preflights the
+  targets. The writes happen after `stamp_held_gate(base.revision)`, in the block that writes the
+  strip retargets: `write_bypass` with a `BypassSwitch` at the session's `mute_ms` ramp
+  (`bypass_ramp_samples`), `write` for a parameter record, `publish_candidate_targets` and
+  `commit_owner` for the EQ. Nothing is written when preparation fails before that block.
+
+**Departures.**
+
+- Parameter ramps from `SuccessorBase::edit_ramps`: an effect parameter record has no ramp (the
+  effect smooths it itself) and `EditRampRow` has no effect-parameter row, so only the bypass has a
+  length, and it is the session's. Nothing to read from `edit_ramps` here.
+- The test gate's successor helper (`LivePlan::successor`) now takes the commit's gate steps (stamp
+  the revision again, publish it), as `CellPlan::successor_at` already did. Without them a retarget
+  stamped at preparation is never published on the successor's gate.
+
+**Gate and tests** (`crates/host-core/tests/successor_swap.rs`, `crates/host-core/src/prepare.rs`):
+
+| Gate | Test |
+|---|---|
+| 5 | `a_live_difference_on_a_carried_lane_is_retargeted_at_{eight,four}_lanes`: a compressor threshold, an EQ band gain and a compressor bypass, each on three carried lanes. Run 1 is the structural swap with the retarget, run 2 writes the same edit to A before the swap and prepares B from a base that holds it. Bit-identical in every block, `restarted` empty, a clean swap block (zero allocations and frees), and not vacuous against a swap that leaves the lane at its old value. |
+| join | `the_per_instance_function_separates_live_from_prepared`, `a_live_difference_carries_only_when_the_successor_accepts_its_records` |
+| classifier | `a_changed_effect_row_without_a_record_is_a_rebuild` (unchanged, through the moved function) |
+
+The four-lane case is `ignore`d on this AVX2 host (#1017), as the #1280a cases are.
+
+**Found, not fixed.** `ChainJoin::may_carry` ignores surviving inserts, so a strip that could carry
+only inserts builds no `carry_program` for sources; the insert carry installs its own table and
+works, so nothing is wrong today, but the name says more than it checks.
+
+### `audit capi` digest (batch 10)
+
+The C ABI render audit commits one structural transaction after its first call (it adds a muted track, `tools/audit/src/capi.rs`). Before #1280a that swap restarted every strip with a console EQ slot; now the slots carry their state across it. So `audit capi`'s `pcm_digest` moves from `76525e7ef9e78cf4` (every batch through 9) to `9bc5ec3d8a4c223c`, measured at `f0e387307` and its parent `869ffb78b`; allocations, frees and render errors stay 0. CI checks the digest's format only.
+
+## Decision record: #1280b (batch 10)
+
+**Shipped.** D3 (pending Observe records) and gate 8. (D5 shipped in #1280a.)
+
+- `LiveControlEffectBankStage::apply_pending_observations(lane) -> u64` (`crates/rack/src/lib.rs`):
+  pops lane `lane`'s observation queue to the count it held at entry and applies each record to the
+  lane's `ObservationLane` (`apply_observe`), at the first sample of the block the stage would have
+  rendered next. It has the same counted-drain shape as `drain` and counts a record with no tap in
+  `unbound_observations` as `drain` does. The two loops are written twice, not shared: the
+  realtime-policy call rule refuses a call to a popping function from inside a marked loop.
+- `Runtime::carry_effect_lanes` (`crates/graph/src/runtime.rs`) calls it on the predecessor's lane
+  through `EffectStageMut::settle_observations` (a stage with no control lane has no queue) right
+  after each lane's hand-over, so it runs for every moved effect lane. Bounded by the queue's count
+  at entry and by the number of moves; allocation-, lock- and syscall-free. The wrapper is named
+  apart from the popping method on purpose: the carry's move loop may not call a popping function
+  by name, and `begin_block` over `drain` is the same two-level shape (the tool's stated limit of a
+  helper two calls deep). Root may want to rule on whether that shape is the intended one.
+- The sample: `adopt_predecessor` gets no clock, and the engine trait is outside this slice (no edit
+  under `crates/engine/src/realtime`). The stage keeps `next_block_sample`, the first sample of the
+  block after the last one it drained (`first_sample + quantum`, one saturating add in `drain`), and
+  the carry applies at it. A stage that never drained a block applies at sample 0.
+
+**Departures.**
+
+- Every shipped compressor, gate, multiband and limiter declares one tap, so a queue's capacity is
+  one record. "The queue filled to its capacity" is therefore every lane's queue full (a further push
+  is refused), and "one subscribe" is one lane's queue holding a record while the others are empty.
+- The tap state is observed by the armed count and by the window a further block of A closes: the
+  window opens at the sample A's next block starts at, equal to the reference's.
+
+**Gate 8** (`crates/host-core/tests/successor_swap.rs`, compressor insert on a full bank with live
+controls and one observation tap):
+`a_pending_subscribe_is_applied_at_the_carry_at_{eight,four}_lanes` and
+`full_observe_queues_are_applied_at_the_carry_at_{eight,four}_lanes`. Each admits the records after
+A's last block, hands over, and checks: zero allocations, reallocations and frees on the swap block
+(allocator and render audit), no restart, no refused restore; every retired queue reads empty; A's
+armed-tap count equals the reference's (the same session that rendered the swap block itself with
+the same records); and after one more block of A the published windows (`first_sample`,
+`end_sample`, `blocks`) equal the reference's, subscribed lanes only. Red under mutation (each run
+once, reverted): no call in the carry (queues not empty), and the carry applying at sample 0 (window
+opens at 0 instead of 768). The four-lane cases are `ignore`d on this AVX2 host (#1017).
+
+**Found, not fixed.** The tap state A now holds is not carried to B: that is the observer carry
+(#1327). Until it lands, an acknowledged subscribe armed on A's retired tap is not armed on B.
+
+## Fold (root ruling B, batch 10)
+
+Root ruled that the `settle_observations` wrappers of #1280b put the pop two calls deep, which the realtime policy does not see, and that this routes around the policy. Rewritten so the policy checks the pop directly:
+
+- `Runtime::carry_effect_lanes` (`crates/graph/src/runtime.rs`) no longer drains in its move loop. After that loop, a second marked loop (`for step in moves.iter()`) resolves each predecessor site and pops the queue itself: `let mut available = queue.available_at_entry(); while available != 0 { available -= 1; queue.try_pop() .. }`, the count read where the loop is, one pass per move. Each record goes through `effect_contract::apply_observe` at the sample as before (a bank stage's own `next_block_sample`, a per-node instance's `predecessor_next_sample`).
+- Deleted: `LiveControlEffectBankStage::apply_pending_observations` (the duplicate of `drain`'s loop), `EffectStageMut::settle_observations` and `LiveControlEffect::settle_observations`. `drain` and the per-node `drain_observations` stay, one per caller, each with its bound at its loop. One function cannot serve `drain` and the carry: `drain` walks every queue of the stage, the carry one lane.
+- New, non-popping accessors that hand the carry the parts: `rack::ObserveTarget { queue, tap, first_sample, unbound }`, `LiveControlEffectBankStage::observe_target_mut(lane)`, `EffectControlLane::observe_queue_mut()` (effect-contract), and in graph `observe_target_at` over `EffectStageMut::into_observe_target` and `LiveControlEffect::observe_target_mut`. A record with no tap still counts in `unbound_observations` of a bank stage.
+- Departure: no new "pending lanes" table. The carry program `moves` is the plan-sized table, it does not change between the two loops, and the second loop reads the queue's count and the sample from the instance itself. So there is no new storage and the resource estimate does not move. One behavior difference: the old code settled only a move whose successor resolved; the new loop settles every move whose predecessor resolves (the predecessor never renders again either way). `can_carry_effect_lanes` already refuses a program whose successor does not resolve, so no reachable case differs.
+- Policy note: the loop iterates `moves.iter()`, not `moves`. The slice-parameter form requires that nothing names the parameter earlier in the function body, and the first loop does. `<fields>.iter()` is the same finite collection form. With `available -= 1;` removed the tool refuses the loop at `runtime.rs` (`marked realtime unbounded try_pop drain`), so the pop is judged here.

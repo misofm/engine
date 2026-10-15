@@ -978,8 +978,23 @@ impl LiveValuesSuperseded {
     /// caller is [`CellReader::read_counted`], which render's drains call: only a cell read writes
     /// the count. `read_counted` is public, so a reader built over a stamped cell could call it
     /// elsewhere; the rule rests on who holds the readers, not on a type barrier (#1347 attempt 2,
-    /// n1).
+    /// n1). [`LiveValuesSuperseded::add_carried`] is the second render path that writes the count
+    /// (#1280 D2).
     fn add(&self, count: u64) {
+        if count != 0 {
+            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+            self.0.store(
+                now.saturating_add(count),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Render, at a plan swap: add `count` writes the retiring plan's cell held and its successor
+    /// takes over (#1280 D2). The same load, saturating add and store as `add`, and render is still
+    /// the only writer: the swap runs on the render thread between two blocks. A zero count changes
+    /// nothing.
+    pub fn add_carried(&self, count: u64) {
         if count != 0 {
             let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
             self.0.store(
@@ -1570,6 +1585,21 @@ mod tests {
         let (snapshot, read) = f.block();
         assert_eq!((snapshot.publication(), snapshot.revision()), (8, 2));
         assert!(matches!(read, CellRead::Applied { sequence: 8, .. }));
+    }
+
+    #[test]
+    fn add_carried_adds_saturates_and_ignores_zero() {
+        let count = LiveValuesSuperseded::new();
+        let shared = count.clone();
+        count.add_carried(0);
+        assert_eq!(count.get(), 0, "zero changes nothing");
+        count.add_carried(3);
+        count.add_carried(4);
+        assert_eq!(shared.get(), 7, "a clone shares the count");
+        count.add_carried(u64::MAX);
+        assert_eq!(count.get(), u64::MAX, "the add saturates");
+        count.add_carried(1);
+        assert_eq!(count.get(), u64::MAX, "a saturated count stays");
     }
 }
 

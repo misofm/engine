@@ -1256,6 +1256,36 @@ impl LiveControlEffect {
     }
     // REALTIME_POLICY_END
 
+    /// This instance as a swap reads it to move its state into a bank lane (#1281).
+    fn instance(&self) -> rack::EffectInstance<'_> {
+        rack::EffectInstance {
+            processor: self.effect.processor.as_ref(),
+            control: &self.control,
+            shunt: &self.shunt,
+        }
+    }
+
+    /// This instance as a swap writes it to take the state of a bank lane (#1281).
+    fn instance_mut(&mut self) -> rack::EffectInstanceMut<'_> {
+        rack::EffectInstanceMut {
+            processor: self.effect.processor.as_mut(),
+            control: &mut self.control,
+            shunt: &mut self.shunt,
+        }
+    }
+
+    /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
+    /// queue, its tap, and `sample`, the first sample of the block it would have rendered next.
+    /// Pops nothing; the carry pops in a loop of its own. `None` when the instance holds no queue.
+    fn observe_target_mut(&mut self, sample: u64) -> Option<rack::ObserveTarget<'_>> {
+        Some(rack::ObserveTarget {
+            queue: self.control.observe_queue_mut()?,
+            tap: self.observation.as_deref_mut(),
+            first_sample: sample,
+            unbound: None,
+        })
+    }
+
     fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
@@ -4314,17 +4344,134 @@ fn strip_lane_mut(
     }
 }
 
-/// The effect bank stage slot `slot` of `chain` holds, if that slot is one with no live control
-/// lane (issue #1279). Allocation-free: a slot borrow and one downcast.
-fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<&mut rack::EffectBankStage> {
-    chain
-        .slot_stage_mut(slot)?
-        .as_any_mut()?
-        .downcast_mut::<rack::EffectBankStage>()
+/// An effect bank stage a plan swap can move lanes of: one with no live control lane or lowered
+/// bypass ([`rack::EffectBankStage`]), or the live-control twin ([`rack::LiveControlEffectBankStage`],
+/// #1280).
+pub(crate) enum EffectStageMut<'a> {
+    /// A stage with no control lane at all.
+    Plain(&'a mut rack::EffectBankStage),
+    /// A stage whose lanes hold a live channel or a lowered session bypass.
+    Live(&'a mut rack::LiveControlEffectBankStage),
 }
 
-/// The populated lane at `at` of an effect bank stage with no live control lane: its chain, slot
-/// and lane (issue #1279 D1). A padded lane is not populated: it has no member.
+impl EffectStageMut<'_> {
+    /// The layout a swap checks before it moves a lane in or out.
+    fn layout(&self) -> rack::EffectLaneLayout {
+        match self {
+            Self::Plain(stage) => stage.layout(),
+            Self::Live(stage) => stage.layout(),
+        }
+    }
+
+    /// The stage's lanes, populated or padded.
+    fn lanes(&self) -> usize {
+        match self {
+            Self::Plain(stage) => stage.lanes(),
+            Self::Live(stage) => stage.lanes(),
+        }
+    }
+
+    /// The kind of lane `lane`, if it exists.
+    fn lane_kind(&self, lane: usize) -> Option<rack::EffectLaneKind> {
+        match self {
+            Self::Plain(stage) => (lane < stage.lanes()).then_some(rack::EffectLaneKind::Plain),
+            Self::Live(stage) => stage.lane_kind(lane),
+        }
+    }
+
+    /// Restores a plan swap's carry refused on this stage.
+    fn carry_refused(&self) -> u64 {
+        match self {
+            Self::Plain(stage) => stage.carry_refused(),
+            Self::Live(stage) => stage.carry_refused(),
+        }
+    }
+
+    /// [`rack::EffectBankStage::can_carry_lane_from`] or its live twin; a pair of unlike stage
+    /// types joins nothing.
+    fn can_carry_lane_from(
+        &self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch_bytes: usize,
+    ) -> bool {
+        match (self, predecessor) {
+            (Self::Plain(into), Self::Plain(from)) => {
+                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+            }
+            (Self::Live(into), Self::Live(from)) => {
+                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+            }
+            _ => false,
+        }
+    }
+
+    /// [`rack::EffectBankStage::carry_lane_from`] or its live twin, for a checked pair.
+    fn carry_lane_from(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch: &mut [u8],
+    ) -> bool {
+        match (self, predecessor) {
+            (Self::Plain(into), Self::Plain(from)) => {
+                into.carry_lane_from(lane, from, predecessor_lane, scratch)
+            }
+            (Self::Live(into), Self::Live(from)) => {
+                into.carry_lane_from(lane, from, predecessor_lane, scratch)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'a> EffectStageMut<'a> {
+    /// The pending-`Observe` drain of a live stage's lane (#1280 D3). A plain stage has no
+    /// control lane, so no queue. Pops nothing.
+    fn into_observe_target(self, lane: usize) -> Option<rack::ObserveTarget<'a>> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Live(stage) => stage.observe_target_mut(lane),
+        }
+    }
+}
+
+/// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and the first
+/// sample of the block it would have rendered next (`node_sample` for a per-node instance, the
+/// bank stage's own for a lane). Pops nothing (#1280 D3).
+fn observe_target_at(
+    units: &mut [crate::runtime::RuntimeUnit],
+    site: crate::GraphEffectSite,
+    node_sample: u64,
+) -> Option<rack::ObserveTarget<'_>> {
+    match site {
+        crate::GraphEffectSite::Lane(at) => {
+            let (chain, slot, lane) = effect_lane_mut(units, at)?;
+            effect_stage_mut(chain, slot)?.into_observe_target(lane)
+        }
+        crate::GraphEffectSite::Node(unit) => {
+            effect_node_mut(units, unit)?.observe_target_mut(node_sample)
+        }
+    }
+}
+
+/// The effect bank stage slot `slot` of `chain` holds, of either type (issues #1279, #1280).
+/// Allocation-free: a slot borrow and one downcast.
+fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<EffectStageMut<'_>> {
+    let any = chain.slot_stage_mut(slot)?.as_any_mut()?;
+    if any.is::<rack::EffectBankStage>() {
+        any.downcast_mut::<rack::EffectBankStage>()
+            .map(EffectStageMut::Plain)
+    } else {
+        any.downcast_mut::<rack::LiveControlEffectBankStage>()
+            .map(EffectStageMut::Live)
+    }
+}
+
+/// The populated lane at `at` of an effect bank stage of either type: its chain, slot and lane
+/// (issues #1279 D1, #1280). A padded lane is not populated: it has no member.
 fn effect_lane_mut(
     units: &mut [crate::runtime::RuntimeUnit],
     at: crate::GraphLaneLocation,
@@ -4346,6 +4493,21 @@ fn effect_lane_mut(
             (populated && lane < stage.lanes()).then_some((chain, slot, lane))
         }
         crate::runtime::RuntimeUnit::Op(_) => None,
+    }
+}
+
+/// The live-controlled per-node effect instance whose op sits in runtime unit `unit` (#1281).
+/// Allocation-free: a bounds-checked unit borrow and a match.
+fn effect_node_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    unit: u32,
+) -> Option<&mut LiveControlEffect> {
+    match units.get_mut(unit as usize)? {
+        crate::runtime::RuntimeUnit::Op(op) => match &mut op.kind {
+            NodeKind::LiveControlEffect(live) => Some(live),
+            _ => None,
+        },
+        crate::runtime::RuntimeUnit::Bank { .. } => None,
     }
 }
 // REALTIME_POLICY_END
@@ -4436,9 +4598,10 @@ impl crate::runtime::Runtime {
         lanes
     }
 
-    /// Every banked effect lane of this runtime whose stage has no live control lane:
-    /// `(strip ID, lane)`, in program order (issue #1279 D1). Read off the render thread, after
-    /// bind.
+    /// Every effect instance of this runtime a swap can move: a banked effect lane, of a stage with
+    /// or without a live control lane, and a live-controlled per-node effect: `(strip ID,
+    /// instance)`, in program order (issues #1279 D1, #1280, #1281). Read off the render thread,
+    /// after bind.
     pub(crate) fn bank_effect_lanes(&mut self) -> Vec<(Box<str>, crate::GraphEffectLane)> {
         let mut lanes = Vec::new();
         for binding in &self.response_bindings {
@@ -4451,26 +4614,47 @@ impl crate::runtime::Runtime {
                 3 => crate::RackId::Simd2,
                 _ => continue,
             };
-            let Some(crate::runtime::RuntimeUnit::Bank { lanes: width, .. }) =
-                self.units.get(binding.unit)
-            else {
-                continue;
+            let width = match self.units.get(binding.unit) {
+                Some(crate::runtime::RuntimeUnit::Bank { lanes: width, .. }) => *width,
+                Some(crate::runtime::RuntimeUnit::Op(op)) => {
+                    // A per-node live-controlled effect (#1281). A per-node effect with no control
+                    // lane has no bank counterpart with a kind to match, and is not listed.
+                    if let (NodeKind::LiveControlEffect(live), Ok(unit)) =
+                        (&op.kind, u32::try_from(binding.unit))
+                    {
+                        lanes.push((
+                            binding.track_id.clone(),
+                            crate::GraphEffectLane {
+                                rack,
+                                effect_id: binding.stable_id.clone(),
+                                location: crate::GraphEffectSite::Node(unit),
+                                layout: None,
+                                kind: rack::EffectLaneKind::of_instance(&live.control),
+                            },
+                        ));
+                    }
+                    continue;
+                }
+                None => continue,
             };
-            if *width == 0 {
+            if width == 0 {
                 continue;
             }
             let (Ok(unit), Ok(slot), Ok(lane)) = (
                 u32::try_from(binding.unit),
-                u16::try_from(binding.member / *width),
-                u16::try_from(binding.member % *width),
+                u16::try_from(binding.member / width),
+                u16::try_from(binding.member % width),
             ) else {
                 continue;
             };
             let location = crate::GraphLaneLocation { unit, slot, lane };
-            let Some((chain, slot, _)) = effect_lane_mut(&mut self.units, location) else {
+            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, location) else {
                 continue;
             };
             let Some(stage) = effect_stage_mut(chain, slot) else {
+                continue;
+            };
+            let Some(kind) = stage.lane_kind(lane) else {
                 continue;
             };
             lanes.push((
@@ -4478,12 +4662,22 @@ impl crate::runtime::Runtime {
                 crate::GraphEffectLane {
                     rack,
                     effect_id: binding.stable_id.clone(),
-                    location,
-                    layout: stage.layout(),
+                    location: crate::GraphEffectSite::Lane(location),
+                    layout: Some(stage.layout()),
+                    kind,
                 },
             ));
         }
         lanes
+    }
+
+    /// Whether `site` names a populated effect lane or a live-controlled per-node effect of this
+    /// runtime (#1281).
+    pub(crate) fn has_effect_site(&mut self, site: crate::GraphEffectSite) -> bool {
+        match site {
+            crate::GraphEffectSite::Lane(at) => effect_lane_mut(&mut self.units, at).is_some(),
+            crate::GraphEffectSite::Node(unit) => effect_node_mut(&mut self.units, unit).is_some(),
+        }
     }
 
     /// The layout of the populated effect lane at `at`, if it names one (issue #1279 D3).
@@ -4685,76 +4879,204 @@ impl crate::runtime::Runtime {
     }
 
     /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
-    /// to two effect lanes [`rack::EffectBankStage::carry_lane_from`] would join, with a scratch
-    /// of `scratch_bytes` (issue #1279 D3). Checked before anything moves, so the carry is all or
-    /// nothing. Allocation-free.
+    /// to two effect instances a carry would join, with a scratch of `scratch_bytes` (issues #1279
+    /// D3, #1281): two lanes of stages [`rack::EffectBankStage::can_carry_lane_from`] or its live
+    /// twin would join, or a lane of a live stage and a per-node instance it
+    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts. Checked before anything
+    /// moves, so the carry is all or nothing. Allocation-free.
     pub(crate) fn can_carry_effect_lanes(
         &mut self,
         predecessor: &mut Self,
         moves: &[crate::GraphEffectMove],
         scratch_bytes: usize,
     ) -> bool {
-        moves.iter().all(|step| {
-            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
-                return false;
-            };
-            let Some(into) = effect_stage_mut(chain, slot) else {
-                return false;
-            };
-            let Some((chain, slot, predecessor_lane)) =
-                effect_lane_mut(&mut predecessor.units, step.predecessor)
-            else {
-                return false;
-            };
-            effect_stage_mut(chain, slot).is_some_and(|from| {
-                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+        use crate::GraphEffectSite::{Lane, Node};
+        moves
+            .iter()
+            .all(|step| match (step.successor, step.predecessor) {
+                (Lane(successor), Lane(before)) => {
+                    let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
+                    else {
+                        return false;
+                    };
+                    let Some(into) = effect_stage_mut(chain, slot) else {
+                        return false;
+                    };
+                    let Some((chain, slot, predecessor_lane)) =
+                        effect_lane_mut(&mut predecessor.units, before)
+                    else {
+                        return false;
+                    };
+                    effect_stage_mut(chain, slot).is_some_and(|from| {
+                        into.can_carry_lane_from(lane, &from, predecessor_lane, scratch_bytes)
+                    })
+                }
+                (Lane(successor), Node(before)) => {
+                    let Some(node) = effect_node_mut(&mut predecessor.units, before) else {
+                        return false;
+                    };
+                    let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
+                    else {
+                        return false;
+                    };
+                    matches!(
+                        effect_stage_mut(chain, slot),
+                        Some(EffectStageMut::Live(into))
+                            if into.can_carry_instance(lane, &node.control, scratch_bytes)
+                    )
+                }
+                (Node(successor), Lane(before)) => {
+                    let Some(node) = effect_node_mut(&mut self.units, successor) else {
+                        return false;
+                    };
+                    let Some((chain, slot, predecessor_lane)) =
+                        effect_lane_mut(&mut predecessor.units, before)
+                    else {
+                        return false;
+                    };
+                    matches!(
+                        effect_stage_mut(chain, slot),
+                        Some(EffectStageMut::Live(from))
+                            if from.can_carry_instance(predecessor_lane, &node.control, scratch_bytes)
+                    )
+                }
+                (Node(_), Node(_)) => false,
             })
-        })
     }
 
-    /// Run the console-effect section of a carry program at the swap block (issue #1279 D3-D6).
+    /// Run the effect section of a carry program at the swap block (issue #1279 D3-D6, #1281).
     ///
-    /// `moves` is sorted by predecessor location. Each predecessor chain is disengaged once, when
-    /// it rendered its last block collapsed (D3 step 1, D4), so every bank's right channel holds
-    /// the state a dual run would. Then, for each lane, the predecessor lane's payload goes
-    /// through `scratch` into the successor lane (step 2-3), the successor stage recomputes the
-    /// witness it holds for the lane (D5), and its chain inherits the predecessor chain's channel
-    /// agreement as the input carry does (#1276 D5). A lane whose restore refuses stays as
-    /// prepared and is counted by its stage (D6); it carries no agreement, being at rest. The
-    /// caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()` and the
-    /// prepared state sizes; allocation-free, and never panics.
+    /// `moves` is sorted by predecessor site. Each predecessor chain is disengaged once, when it
+    /// rendered its last block collapsed (D3 step 1, D4), so every bank's right channel holds the
+    /// state a dual run would. Then, for each move, the predecessor instance's payload goes
+    /// through `scratch` into the successor instance (step 2-3): lane to lane, per-node instance
+    /// to lane, or lane to per-node instance. A successor stage recomputes the witness it holds
+    /// for the lane (D5), and a successor lane of a bank chain inherits the predecessor chain's
+    /// channel agreement as the input carry does (#1276 D5); a per-node instance renders dual
+    /// always and has none. A lane whose restore refuses stays as prepared; a bank stage counts it
+    /// (D6), and this returns the count of per-node instances that refused, which have no stage to
+    /// count them. A refused lane carries no agreement, being at rest.
+    ///
+    /// The pending `Observe` records of every moved predecessor instance are applied to its tap
+    /// as its next block would have (#1280 D3), by a second loop over `moves` after the first has
+    /// moved every state: a bank stage at its own `next_block_sample`, a per-node instance at
+    /// `predecessor_next_sample`. That loop pops each queue at most as many times as its count at
+    /// entry. The caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()`,
+    /// the prepared state sizes and those counts; allocation-free, and never panics.
     pub(crate) fn carry_effect_lanes(
         &mut self,
         predecessor: &mut Self,
         moves: &[crate::GraphEffectMove],
         scratch: &mut [u8],
-    ) {
+        predecessor_next_sample: u64,
+    ) -> u64 {
+        use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
+        let mut node_refused = 0_u64;
         for step in moves {
-            let Some((chain, slot, predecessor_lane)) =
-                effect_lane_mut(&mut predecessor.units, step.predecessor)
-            else {
-                continue;
-            };
-            if disengaged != Some(step.predecessor.unit) {
-                chain.disengage_for_carry();
-                disengaged = Some(step.predecessor.unit);
-            }
-            let agree = chain.carried_channel_agreement();
-            let Some(from) = effect_stage_mut(chain, slot) else {
-                continue;
-            };
-            let from: &rack::EffectBankStage = from;
-            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
-                continue;
-            };
-            let Some(into) = effect_stage_mut(chain, slot) else {
-                continue;
-            };
-            if into.carry_lane_from(lane, from, predecessor_lane, scratch) {
-                chain.inherit_channel_agreement(agree);
+            match (step.successor, step.predecessor) {
+                (Lane(successor), Lane(before)) => {
+                    let Some((chain, slot, predecessor_lane)) =
+                        effect_lane_mut(&mut predecessor.units, before)
+                    else {
+                        continue;
+                    };
+                    if disengaged != Some(before.unit) {
+                        chain.disengage_for_carry();
+                        disengaged = Some(before.unit);
+                    }
+                    let agree = chain.carried_channel_agreement();
+                    let Some(from) = effect_stage_mut(chain, slot) else {
+                        continue;
+                    };
+                    let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
+                    else {
+                        continue;
+                    };
+                    let Some(mut into) = effect_stage_mut(chain, slot) else {
+                        continue;
+                    };
+                    if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
+                        chain.inherit_channel_agreement(agree);
+                    }
+                }
+                (Lane(successor), Node(before)) => {
+                    let Some(node) = effect_node_mut(&mut predecessor.units, before) else {
+                        continue;
+                    };
+                    let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
+                    else {
+                        continue;
+                    };
+                    if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
+                        into.carry_lane_from_instance(lane, node.instance(), scratch);
+                    }
+                }
+                (Node(successor), Lane(before)) => {
+                    let Some((chain, slot, predecessor_lane)) =
+                        effect_lane_mut(&mut predecessor.units, before)
+                    else {
+                        continue;
+                    };
+                    if disengaged != Some(before.unit) {
+                        chain.disengage_for_carry();
+                        disengaged = Some(before.unit);
+                    }
+                    let Some(from) = effect_stage_mut(chain, slot) else {
+                        continue;
+                    };
+                    let Some(node) = effect_node_mut(&mut self.units, successor) else {
+                        continue;
+                    };
+                    if let EffectStageMut::Live(stage) = &from
+                        && !stage.carry_lane_into_instance(
+                            predecessor_lane,
+                            node.instance_mut(),
+                            scratch,
+                        )
+                    {
+                        node_refused = node_refused.saturating_add(1);
+                    }
+                }
+                (Node(_), Node(_)) => {}
             }
         }
+        // The predecessor never renders again: an `Observe` record admitted after its last block
+        // is applied to its tap now, as its next block would have (#1280 D3). A loop of its own
+        // over the same program, so each pop is bounded where it stands: the queue's count at
+        // entry, one pass per move.
+        for step in moves.iter() {
+            let Some(target) = observe_target_at(
+                &mut predecessor.units,
+                step.predecessor,
+                predecessor_next_sample,
+            ) else {
+                continue;
+            };
+            let rack::ObserveTarget {
+                queue,
+                mut tap,
+                first_sample,
+                unbound,
+            } = target;
+            let mut available = queue.available_at_entry();
+            let mut unapplied = 0_u64;
+            while available != 0 {
+                available -= 1;
+                let Ok(record) = queue.try_pop() else {
+                    // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep
+                    // the drain bounded if a malformed test double violates that invariant.
+                    break;
+                };
+                if !effect_contract::apply_observe(record, first_sample, tap.as_deref_mut()) {
+                    unapplied = unapplied.saturating_add(1);
+                }
+            }
+            if let Some(count) = unbound {
+                *count = count.saturating_add(unapplied);
+            }
+        }
+        node_refused
     }
     // REALTIME_POLICY_END
 }

@@ -21,12 +21,17 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
     LiveEffectAddress, attach_effect_live_controls, attach_effect_observation,
-    effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
+    effect_control_resources, launch_native_effect_registry, lowers_session_bypass,
+    prepare_native_session_effects, resolve_initial_values,
 };
-use effect_contract::TailSamples;
+use effect_contract::{
+    AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget, TailSamples,
+};
 // `LiveRampRow` and `LiveRamps` moved to `effect_contract::control` and `controls` (decision 17);
 // these re-exports keep the old paths, so no call site changes.
 pub use controls::LiveRamps;
+use controls::RebuildReason;
 pub use effect_contract::control::LiveRampRow;
 use engine::realtime::{GATE_REVISION_MAX, PreparedRenderPlan};
 use graph::{
@@ -34,9 +39,11 @@ use graph::{
     TrackStage,
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
+use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
-    CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, MatrixOrPan,
-    SessionModel, StripKind, StripRef, compile_session, parse_session_json,
+    CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity,
+    EffectParam, MatrixOrPan, SessionModel, StripKind, StripRef, compile_session,
+    parse_session_json,
 };
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
@@ -44,7 +51,11 @@ use source::{
 };
 use std::collections::BTreeMap;
 
+use crate::control_preparation::{
+    EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
+};
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
+use crate::live_delta::LiveRebuild;
 use crate::route_controls::{RouteControlProducer, RouteControlResources};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
@@ -645,15 +656,14 @@ pub struct PreparedHost {
 
 impl PreparedHost {
     /// The strip IDs present in both this plan and the plan it was prepared to displace for which
-    /// at least one fader, mute or matrix stage or console effect slot does not carry, so it
-    /// starts at rest (#1277 D4, D6; #1279 D1): a prepared value differs, the two plans bank the
-    /// stage in different forms or attach different control kinds, or a console slot has no
-    /// effect bank lane without live control in both plans. A strip whose effect chain changed (an
+    /// at least one fader, mute or matrix stage, console effect slot or insert does not carry, so
+    /// it starts at rest (#1277 D4, D6; #1279 D1; #1280): a prepared or live value differs, the
+    /// two plans bank the stage in different forms or attach different control kinds, or an
+    /// effect has no banked lane of one kind in both plans. A strip whose effect chain changed (an
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
     /// listed too, even when its remaining owners carry (D15-9). A strip whose surviving insert
-    /// (an insert present in both plans' chains) has a lane that does not carry is listed as well:
-    /// its insert starts at rest on the swap, and no insert lane carries until #1281 and #1282
-    /// (root amendment of 2026-10-12 to #1277 D6 and #1279). Sorted. Added strips are not
+    /// (an insert present in both plans' chains) is not banked in both plans, or differs, is
+    /// listed as well: its insert starts at rest on the swap. Sorted. Added strips are not
     /// listed, and neither is any strip of a plan prepared without a predecessor.
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
@@ -715,10 +725,11 @@ pub(crate) struct StripStageInventoryRow {
     pub(crate) live: bool,
 }
 
-/// One banked effect lane of a prepared plan, owner key `(strip ID, rack, effect ID)` (issue
-/// #1279 D1): a lane of a bank stage with no live control lane. A console slot's effect ID is its
-/// slot ID, and its rack is `Simd1` in `pre_insert` and `Simd2` in `post_insert`. A lane of a
-/// bank with a live control lane, a lowered bypass or no bank at all has no row.
+/// One effect instance of a prepared plan that a swap can move, owner key `(strip ID, rack, effect
+/// ID)` (issues #1279 D1, #1280, #1281): a lane of a bank stage, with or without a live control
+/// lane, or a live-controlled per-node instance. A console slot's effect ID is its slot ID, and
+/// its rack is `Simd1` in `pre_insert` and `Simd2` in `post_insert`; an insert's effect ID is its
+/// insert ID, in `Dynamic`. A per-node effect with no control lane has no row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EffectLaneInventoryRow {
     /// The strip ID: a track's or a submix's.
@@ -727,11 +738,14 @@ pub(crate) struct EffectLaneInventoryRow {
     pub(crate) rack: graph::RackId,
     /// The effect ID: a console slot's slot ID.
     pub(crate) effect_id: Box<str>,
-    /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
-    /// program, which names it as the lane to copy from.
-    pub(crate) location: graph::GraphLaneLocation,
+    /// Where the instance sits in this plan: a bank lane, or a per-node instance (#1281).
+    /// Meaningful only to this plan's successor's carry program, which names it as the instance to
+    /// copy from.
+    pub(crate) location: graph::GraphEffectSite,
     /// What the successor's lane must share with this one for the state to move.
     pub(crate) layout: graph::EffectLaneLayout,
+    /// The kind of stage and control lane the lane has: the successor's must be the same (#1280).
+    pub(crate) kind: graph::EffectLaneKind,
 }
 
 /// One banked strip input section of a prepared plan, owner key `(strip ID,
@@ -788,8 +802,7 @@ impl PlanStateInventory {
         self.strip_stages.len()
     }
 
-    /// Banked effect lane rows, one per lane of an effect bank stage with no live control lane
-    /// (issue #1279).
+    /// Banked effect lane rows, one per lane of an effect bank stage (issues #1279, #1280).
     #[must_use]
     pub fn effect_lane_count(&self) -> usize {
         self.effect_lanes.len()
@@ -859,9 +872,11 @@ impl PlanStateInventory {
 /// stage sounds as "live edit, then structural edit" (D15-7). A source carries when its ID is in
 /// both models, its declaration (content, channels, bit depth, frames) is equal, and its ring
 /// configuration is the inventory row's; which tracks read it does not matter. A console effect
-/// slot (#1279) carries when no prepared value of it differs, its two plans bank it in an effect
-/// stage with no live control lane, and the prepared layouts of the two lanes are equal; a
-/// strip whose effect chain changed restarts even if its remaining slots carry.
+/// slot (#1279) or a surviving insert (#1280) carries when no prepared value of it differs, its
+/// two plans hold it in an effect bank stage of one kind, and the prepared layouts of the two lanes
+/// are equal; a difference in its live values (a bypass, a `Block`-rate parameter) is written to
+/// the successor's cells as a retarget stamped with `revision`, as a strip's is. A strip whose
+/// effect chain changed restarts even if its remaining slots carry.
 #[derive(Clone, Copy, Debug)]
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
@@ -1944,6 +1959,30 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(resource("host.effect.resource.limit"));
     }
+    // Issue #1281: the layout of every prepared instance, by owner key. A bound plan keeps no
+    // metadata for a per-node instance, so the inventory row of one takes its layout from here,
+    // where the bank rows' layout is the bank's own: the two compare equal exactly when a state
+    // payload moves between them.
+    let mut instance_layouts: Vec<InstanceLayout> = effects
+        .entries
+        .iter()
+        .map(|entry| InstanceLayout {
+            id: entry.track_id.as_str().into(),
+            rack: match entry.rack {
+                effect_compiler::EffectRack::Simd1 => graph::RackId::Simd1,
+                effect_compiler::EffectRack::Dynamic => graph::RackId::Dynamic,
+                effect_compiler::EffectRack::Simd2 => graph::RackId::Simd2,
+            },
+            effect_id: entry.effect_id.as_str().into(),
+            layout: graph::EffectLaneLayout::of(&entry.metadata.program_key()),
+        })
+        .collect();
+    instance_layouts.sort_unstable_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.rack.cmp(&right.rack))
+            .then_with(|| left.effect_id.cmp(&right.effect_id))
+    });
     #[cfg(feature = "control-provider")]
     let control_catalog = crate::ControlCatalog::build(
         compiled.normalized_model(),
@@ -2511,12 +2550,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
         .ok_or_else(|| graph_failure("host.inventory.identity"))?
         .into_iter()
-        .map(|(id, lane)| EffectLaneInventoryRow {
-            id,
-            rack: lane.rack,
-            effect_id: lane.effect_id,
-            location: lane.location,
-            layout: lane.layout,
+        .filter_map(|(id, lane)| {
+            // A per-node instance has no bank layout (#1281): its prepared one. An instance the
+            // table does not have (none exists) carries nothing.
+            let layout = lane
+                .layout
+                .or_else(|| instance_layout(&instance_layouts, &id, lane.rack, &lane.effect_id))?;
+            Some(EffectLaneInventoryRow {
+                id,
+                rack: lane.rack,
+                effect_id: lane.effect_id,
+                location: lane.location,
+                layout,
+                kind: lane.kind,
+            })
         })
         .collect();
     effect_lanes.sort_unstable_by(|left, right| {
@@ -2525,8 +2572,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .then(left.rack.cmp(&right.rack))
             .then_with(|| left.effect_id.cmp(&right.effect_id))
     });
+    // Issue #1280 D4: a carried lane's live difference is opened against the successor's own
+    // producer here, so a lane whose producer has no cell for a record restarts instead of
+    // writing it (and a preparation that fails later writes nothing).
     let effect_carry = match successor {
-        Some(base) => resolve_effect_carry(base.inventory, &chain_joins, &effect_lanes),
+        Some(base) => resolve_effect_carry(
+            base.inventory,
+            &chain_joins,
+            &effect_lanes,
+            &mut |strip_id, address, instance| {
+                let position =
+                    effect_producer_position(&effect_controls, strip_rank, strip_id, address)?;
+                prepare_effect_retarget(&mut effect_controls[position], position, instance)
+            },
+        ),
         None => EffectCarry::default(),
     };
     // The effect moves' table and payload scratch are charged at their exact size, against the
@@ -2551,7 +2610,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     if !effect_carry.moves.is_empty() {
-        graph::install_effect_carry(&mut plan, effect_carry.moves)
+        graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
@@ -2641,10 +2700,31 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // preparation that fails writes nothing, and nothing writes the retargets again: the host's
     // commit stamps `revision` once more on the handle that inherits the open stamp, and
     // publishes it. A preparation that writes no retarget does not stamp.
-    if let (Some(base), false) = (successor, strip_carry.retargets.is_empty()) {
+    if let (Some(base), false) = (
+        successor,
+        strip_carry.retargets.is_empty() && effect_carry.retargets.is_empty(),
+    ) {
         let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
             return Err(successor_revision_refusal());
         };
+        // Issue #1280 D4: the carried effect lanes' live differences, through the successor's own
+        // producers: a bypass with the session's crossfade ramp, the parameter records as they
+        // are, an EQ's targets through its owner's transaction. Every record passed its
+        // producer's preflight when the lane was resolved, so a refusal here is an internal
+        // fault.
+        for retarget in &effect_carry.retargets {
+            let producer = &mut effect_controls[retarget.producer];
+            let fault = || graph_failure("host.control.order");
+            for &record in &retarget.records {
+                producer.write(stamp, record).map_err(|_| fault())?;
+            }
+            if let Some((base_revision, targets)) = &retarget.targets {
+                producer
+                    .publish_candidate_targets(stamp, *base_revision, targets)
+                    .map_err(|_| fault())?;
+                producer.commit_owner().map_err(|_| fault())?;
+            }
+        }
         for retarget in &strip_carry.retargets {
             let Some(&index) = canonical_index.get(retarget.id) else {
                 return Err(graph_failure("host.control.order"));
@@ -3257,6 +3337,192 @@ fn successor_revision_refusal() -> PrepareDiagnostics {
     PrepareDiagnostics::fixed(PrepareRejection::Session, "host.successor.revision")
 }
 
+/// The records that bring one effect instance from `before` to `after`, and the targets of an
+/// instance that rides prepared targets (#1264 D2, #1265 D1, #1266 D1).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EffectInstanceRecords {
+    /// One [`EffectControlRecord::Bypass`] first when the bypass changes (it carries the session's
+    /// `mute_ms` crossfade, [`LiveRampRow::BypassCrossfade`], #1341 D1), then one `Parameter`
+    /// record per `(parameter_index, channel)` whose resolved value changes, in descriptor order,
+    /// `Left` before `Right`; never empty. For an instance with `targets` the `Parameter` records
+    /// are its owner's edits, never written as they are.
+    pub(crate) records: Vec<EffectControlRecord>,
+    /// The targets [`EqTargetPreparer`] designed from the pre-commit values and the records.
+    pub(crate) targets: Option<Vec<PreparedEffectTarget>>,
+}
+
+/// The one per-instance function that decides whether a difference between two lowered instances
+/// is live or prepared, and derives the records when it is live (decision 17, #1280 D1, D4). The
+/// classifier lowers a live commit with it, and a successor's join asks it for every surviving
+/// instance, so a difference is live in the carry exactly when it is live on the live path.
+///
+/// `Ok(None)` is no difference in any value the plan keeps. `Ok(Some(_))` is a live difference:
+/// the bypass of an effect that lowers it to a lane shunt, and each `Block`-rate parameter whose
+/// resolved value bits change. `Err` is a prepared difference: another structure (identity,
+/// quality, sidechain or link mode), a rebuild-only row (the delay and the multiband compressor
+/// bypass, a parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp
+/// that the indexed law refuses.
+pub(crate) fn effect_instance_records(
+    before: &Effect,
+    after: &Effect,
+    sample_rate_hz: u32,
+    ramps: LiveRamps,
+) -> Result<Option<EffectInstanceRecords>, LiveRebuild> {
+    if before.id != after.id
+        || before.identity != after.identity
+        || before.quality != after.quality
+        || before.sidechain != after.sidechain
+    {
+        return Err(LiveRebuild::Structure);
+    }
+    // This lowering carries a bypass and parameters. Any other changed effect row (today the link
+    // mode, whose row is rebuild-only) has no record here, so a live classification of it would be
+    // acked and then dropped: it is a rebuild until its own lowering exists.
+    if before.link_mode != after.link_mode {
+        return Err(LiveRebuild::Structure);
+    }
+    let bypass = (before.bypass != after.bypass).then_some(after.bypass);
+    if bypass.is_some() {
+        // The session bypass of an effect that does not lower it stays a prepared bypass.
+        let EffectIdentity::Native { effect_id } = &after.identity else {
+            return Err(LiveRebuild::Structure);
+        };
+        if !lowers_session_bypass(effect_id.as_str()) {
+            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
+        }
+    }
+    let (mut records, targets) = if same_params(&before.params, &after.params) {
+        (Vec::new(), None)
+    } else {
+        parameter_records(before, after, sample_rate_hz)?
+    };
+    if let Some(bypassed) = bypass {
+        // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
+        let ramp_samples = ramps.for_row(LiveRampRow::BypassCrossfade);
+        if ramp_samples > INDEXED_RAMP_LENGTH_MAXIMUM {
+            return Err(LiveRebuild::Domain);
+        }
+        records.insert(
+            0,
+            EffectControlRecord::Bypass(BypassSwitch {
+                bypassed,
+                ramp_samples,
+            }),
+        );
+    }
+    Ok((!records.is_empty()).then_some(EffectInstanceRecords { records, targets }))
+}
+
+/// The parameter records of one instance, and the targets of a target-capable one.
+type ParameterRecords = (Vec<EffectControlRecord>, Option<Vec<PreparedEffectTarget>>);
+
+/// The parameter records that bring one instance from `before`'s resolved values to `after`'s,
+/// and, for a target-capable instance (the EQ), the targets that carry them (#1265 D1).
+fn parameter_records(
+    before: &Effect,
+    after: &Effect,
+    sample_rate_hz: u32,
+) -> Result<ParameterRecords, LiveRebuild> {
+    // A third-party or unknown identity never prepared; the rebuild reports it.
+    let EffectIdentity::Native { effect_id } = &after.identity else {
+        return Err(LiveRebuild::Structure);
+    };
+    let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
+    let factory = registry
+        .get_shared_ascii(effect_id.as_str())
+        .ok_or(LiveRebuild::Structure)?;
+    let descriptor = factory.descriptor();
+    let values_before =
+        resolve_initial_values(descriptor, &before.params).map_err(|_| LiveRebuild::Domain)?;
+    let values_after =
+        resolve_initial_values(descriptor, &after.params).map_err(|_| LiveRebuild::Domain)?;
+    let mut records = Vec::new();
+    for (value_before, value_after) in values_before.iter().zip(&values_after) {
+        if value_before.value.to_bits() == value_after.value.to_bits() {
+            continue;
+        }
+        let parameter = &descriptor.parameters[value_after.parameter_index as usize];
+        // A row is live only when the plan keeps a block-rate cell for it, and the control rows
+        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `Sample`-rate
+        // one is rebuild-only for correctness. This guard keeps the classifier from trusting a row
+        // that ever claimed more than the plan holds.
+        if parameter.automation_rate != AutomationRate::Block {
+            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
+        }
+        records.push(EffectControlRecord::Parameter {
+            parameter_index: value_after.parameter_index,
+            channel: value_after.channel,
+            value: value_after.value,
+        });
+    }
+    // The EQ's parameters ride its owner's prepared targets: its producer refuses a bare
+    // parameter record (`EffectControlProducer::preflight`), so the records become the owner's
+    // edits and the targets are designed here, on the control thread (#1265 D1).
+    if records.is_empty() || factory.target_preparation().is_none() {
+        return Ok((records, None));
+    }
+    let seeds: Vec<f32> = values_before.iter().map(|value| value.value).collect();
+    let targets = design_targets(factory, sample_rate_hz, &seeds, &records)?;
+    Ok((records, Some(targets)))
+}
+
+/// Designs a target-capable instance's targets with [`EqTargetPreparer`], from its pre-commit
+/// `seeds` (canonical row order) and its changed `records` (#1265 D1).
+fn design_targets(
+    factory: std::sync::Arc<dyn NativeEffectFactory>,
+    sample_rate_hz: u32,
+    seeds: &[f32],
+    records: &[EffectControlRecord],
+) -> Result<Vec<PreparedEffectTarget>, LiveRebuild> {
+    let descriptor = factory.descriptor();
+    // A capability other than the 60-row EQ's has no control-thread designer: rebuild.
+    let preparer = EqTargetPreparer::new(factory)
+        .map_err(|_| LiveRebuild::RebuildOnly(RebuildReason::Correctness))?;
+    if seeds.len() != EQ_VALUE_COUNT {
+        return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
+    }
+    let edits: Vec<EqTargetEdit> = records
+        .iter()
+        .map(|record| match *record {
+            EffectControlRecord::Parameter {
+                parameter_index,
+                channel,
+                value,
+            } => Ok(EqTargetEdit {
+                parameter_id: descriptor.parameters[parameter_index as usize].id.0,
+                channel,
+                value,
+            }),
+            _ => Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness)),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut out = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, count) = preparer
+        .prepare(sample_rate_hz, seeds, &edits, &mut out)
+        .map_err(|error| match error {
+            EqTargetPreparerError::Unsupported => {
+                LiveRebuild::RebuildOnly(RebuildReason::Correctness)
+            }
+            _ => LiveRebuild::Domain,
+        })?;
+    Ok(out[..count].to_vec())
+}
+
+/// Whether two `params` lists are the same entries, value bits included.
+pub(crate) fn same_params(before: &[EffectParam], after: &[EffectParam]) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).all(|(left, right)| {
+            left.parameter_id == right.parameter_id
+                && left.channel == right.channel
+                && left.unit == right.unit
+                && left.value.to_bits() == right.value.to_bits()
+        })
+}
+
 /// How one family of a strip's values differs between the predecessor's base and the successor's
 /// model (#1277 D3): by the records the classifier would emit for the change.
 #[derive(Clone, Copy, Debug)]
@@ -3475,6 +3741,33 @@ fn resolve_strip_carry<'a>(
     carry
 }
 
+/// The prepared layout of one effect instance, by owner key (#1281).
+struct InstanceLayout {
+    id: Box<str>,
+    rack: graph::RackId,
+    effect_id: Box<str>,
+    layout: graph::EffectLaneLayout,
+}
+
+/// The prepared layout of effect `effect_id` in `rack` of strip `id` in `layouts`, which are
+/// sorted by strip ID, rack, then effect ID.
+fn instance_layout(
+    layouts: &[InstanceLayout],
+    id: &str,
+    rack: graph::RackId,
+    effect_id: &str,
+) -> Option<graph::EffectLaneLayout> {
+    layouts
+        .binary_search_by(|row| {
+            (*row.id)
+                .cmp(id)
+                .then(row.rack.cmp(&rack))
+                .then_with(|| (*row.effect_id).cmp(effect_id))
+        })
+        .ok()
+        .map(|index| layouts[index].layout)
+}
+
 /// Effect `effect_id` in `rack` of strip `id` in `rows`, which are sorted by strip ID, rack, then
 /// effect ID.
 fn effect_lane_row<'a>(
@@ -3493,18 +3786,20 @@ fn effect_lane_row<'a>(
     .map(|index| &rows[index])
 }
 
-/// One console slot of a strip present in both models, and whether the successor's model leaves
-/// every prepared value of it as the predecessor's base holds it (#1279 D1).
+/// One console slot of a strip present in both models, and how the successor's model differs from
+/// the predecessor's base in everything the slot's lane holds (#1279 D1, #1280 D1).
 struct ConsoleOwnerJoin<'a> {
     /// `Simd1` for a `pre_insert` slot, `Simd2` for a `post_insert` one.
     rack: graph::RackId,
     /// The slot ID, which is the effect ID of the owner key.
     slot: &'a str,
-    /// The slot's identity, quality and link mode (session-level), and this strip's bypass and
-    /// parameter values for it, are bit-equal in both models, and the slot sits in the same
-    /// section. An effect bank stage without a live control lane has no live value, so every
-    /// difference is prepared (D2).
-    same: bool,
+    /// The slot's live address in the strip.
+    address: LiveEffectAddress,
+    /// [`FamilyJoin::Same`] when the slot's declaration (identity, quality and link mode) and the
+    /// strip's bypass and parameter values for it are equal in both models, and the slot sits in
+    /// the same section; [`FamilyJoin::Live`] when only live values differ, as
+    /// [`effect_instance_records`] decides; [`FamilyJoin::Prepared`] otherwise.
+    state: FamilyJoin<EffectInstanceRecords>,
 }
 
 /// One strip present in both models, with how its console slots and effect chain differ.
@@ -3516,16 +3811,28 @@ struct ChainJoin<'a> {
     chain_changed: bool,
     /// The strip's console slots in the successor's model.
     owners: Vec<ConsoleOwnerJoin<'a>>,
-    /// The IDs of the inserts the strip has in both models (the surviving inserts), in the
-    /// successor's chain order. An insert's owner key is the strip, [`graph::RackId::Dynamic`]
-    /// and this ID.
-    surviving_inserts: Vec<&'a str>,
+    /// The inserts the strip has in both models (the surviving inserts), in the successor's chain
+    /// order. An insert's owner key is the strip, [`graph::RackId::Dynamic`] and its ID.
+    surviving_inserts: Vec<InsertOwnerJoin<'a>>,
+}
+
+/// One insert of a strip present in both models, and how the successor's model differs from the
+/// predecessor's base (#1280).
+struct InsertOwnerJoin<'a> {
+    /// The insert ID, which is the effect ID of the owner key.
+    id: &'a str,
+    /// The insert's live address in the strip.
+    address: LiveEffectAddress,
+    /// [`FamilyJoin::Same`] when its identity, quality, bypass, link mode, sidechain and every
+    /// parameter value are equal in both models and it sits at the same position;
+    /// [`FamilyJoin::Live`] when only live values differ; [`FamilyJoin::Prepared`] otherwise.
+    state: FamilyJoin<EffectInstanceRecords>,
 }
 
 impl ChainJoin<'_> {
     /// Whether any console slot of the strip could carry.
     fn may_carry(&self) -> bool {
-        self.owners.iter().any(|owner| owner.same)
+        self.owners.iter().any(|owner| !owner.state.is_prepared())
     }
 }
 
@@ -3546,53 +3853,52 @@ fn console_slots(model: &SessionModel) -> Vec<(graph::RackId, &session::ConsoleS
         .collect()
 }
 
-/// Whether two strips' knobs for one console slot are bit-equal: bypass and every parameter.
-fn same_console_entry(left: &session::ConsoleEntry, right: &session::ConsoleEntry) -> bool {
-    left.bypass == right.bypass
-        && left.params.len() == right.params.len()
-        && left.params.iter().zip(&right.params).all(|(left, right)| {
-            left.parameter_id == right.parameter_id
-                && left.channel == right.channel
-                && left.unit == right.unit
-                && left.value.to_bits() == right.value.to_bits()
-        })
-}
-
-/// The console entries and inserts `strip` had in `committed`, among strips of its own kind
-/// (#1279 D1). A strip whose kind changed is not found.
-fn committed_chain<'a>(
+/// The strip `strip` was in `committed`, among strips of its own kind (#1279 D1). A strip whose
+/// kind changed is not found.
+fn committed_strip_ref<'a>(
     committed: &'a SessionModel,
     strip: &StripRef<'_>,
-) -> Option<(&'a [session::ConsoleEntry], &'a [session::Effect])> {
+) -> Option<StripRef<'a>> {
     let id = strip.id.as_str();
     match strip.kind {
         StripKind::Track(_) => committed
             .tracks
             .binary_search_by(|track| track.id.as_str().cmp(id))
             .ok()
-            .map(|index| {
-                let track = &committed.tracks[index];
-                (&*track.console, &*track.inserts.effects)
-            }),
+            .map(|index| StripRef::track(&committed.tracks[index])),
         StripKind::Submix(_) => committed
             .submixes
             .binary_search_by(|submix| submix.id.as_str().cmp(id))
             .ok()
-            .map(|index| {
-                let submix = &committed.submixes[index];
-                (&*submix.console, &*submix.inserts.effects)
-            }),
+            .map(|index| StripRef::submix(&committed.submixes[index])),
     }
 }
 
-/// The model half of the console-effect join (#1279 D1): for every strip of `model` that
-/// `committed` also has, whether its effect chain changed and which console slots keep every
-/// prepared value.
+/// How one instance differs between the two models (#1280 D1): the per-instance function's answer
+/// as a join state.
+fn instance_join(
+    before: Option<&session::Effect>,
+    after: Option<&session::Effect>,
+    sample_rate_hz: u32,
+    ramps: LiveRamps,
+) -> FamilyJoin<EffectInstanceRecords> {
+    let (Some(before), Some(after)) = (before, after) else {
+        return FamilyJoin::Prepared;
+    };
+    match effect_instance_records(before, after, sample_rate_hz, ramps) {
+        Err(_) => FamilyJoin::Prepared,
+        Ok(None) => FamilyJoin::Same,
+        Ok(Some(records)) => FamilyJoin::Live(records),
+    }
+}
+
+/// The model half of the console-effect join (#1279 D1, #1280 D1): for every strip of `model` that
+/// `committed` also has, whether its effect chain changed and, for each console slot and each
+/// surviving insert, how its declaration and values differ ([`effect_instance_records`]).
 ///
 /// An insert added, removed or reordered changes the chain, and an insert present in both models
-/// is recorded as a surviving insert, an owner whose lane the lane half resolves (it carries with
-/// #1281 and #1282). A strip whose kind changed has no counterpart:
-/// its chain is changed and no slot carries.
+/// is recorded as a surviving insert, an owner whose lane the lane half resolves. A strip whose
+/// kind changed has no counterpart: its chain is changed and no slot carries.
 fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<ChainJoin<'a>> {
     let committed_slots = console_slots(committed);
     let slots = console_slots(model);
@@ -3603,10 +3909,12 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
             .any(|((before_rack, before), (rack, slot))| {
                 before_rack != rack || before.slot != slot.slot
             });
+    let ramps = LiveRamps::for_session(model);
+    let sample_rate_hz = model.sample_rate_hz;
     let mut joins = Vec::new();
     for strip in model.strips() {
         let id = strip.id.as_str();
-        let Some((before_console, before_inserts)) = committed_chain(committed, &strip) else {
+        let Some(before) = committed_strip_ref(committed, &strip) else {
             if committed_has_strip(committed, id) {
                 joins.push(ChainJoin {
                     id,
@@ -3618,31 +3926,56 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
             continue;
         };
         let inserts = &strip.inserts.effects;
+        let before_inserts = &before.inserts.effects;
         let inserts_changed = before_inserts.len() != inserts.len()
             || before_inserts.iter().zip(inserts).any(|(before, insert)| {
                 before.id != insert.id || before.identity != insert.identity
             });
+        // The strip's console slots as instances, in slot order (`pre_insert`, then `post_insert`):
+        // the lowering the live path reads (`LoweredRacks`).
+        let racks_before = committed.lower_strip(&before);
+        let racks_after = model.lower_strip(&strip);
+        let lowered_before: Vec<&session::Effect> = racks_before
+            .pre_insert
+            .iter()
+            .chain(&racks_before.post_insert)
+            .collect();
+        let lowered_after: Vec<&session::Effect> = racks_after
+            .pre_insert
+            .iter()
+            .chain(&racks_after.post_insert)
+            .collect();
         let owners = slots
             .iter()
-            .zip(strip.console)
-            .map(|((rack, slot), entry)| {
-                let same = committed_slots
+            .enumerate()
+            .map(|(position, (rack, slot))| {
+                let state = committed_slots
                     .iter()
                     .position(|(_, before)| before.slot == slot.slot)
-                    .and_then(|index| {
+                    // A slot whose section or declaration differs is prepared.
+                    .filter(|&index| {
                         let (before_rack, before_slot) = committed_slots[index];
-                        let before_entry = before_console.get(index)?;
-                        Some(
-                            before_rack == *rack
-                                && before_slot == *slot
-                                && same_console_entry(before_entry, entry),
-                        )
+                        before_rack == *rack && before_slot == *slot
                     })
-                    .unwrap_or(false);
+                    .map_or(FamilyJoin::Prepared, |index| {
+                        let state = instance_join(
+                            lowered_before.get(index).copied(),
+                            lowered_after.get(position).copied(),
+                            sample_rate_hz,
+                            ramps,
+                        );
+                        // A slot at another position has another live address: its live
+                        // difference is prepared (the chain changed, so the strip restarts).
+                        match state {
+                            FamilyJoin::Live(_) if index != position => FamilyJoin::Prepared,
+                            state => state,
+                        }
+                    });
                 ConsoleOwnerJoin {
                     rack: *rack,
                     slot: slot.slot.as_str(),
-                    same,
+                    address: LiveEffectAddress::console(position as u32),
+                    state,
                 }
             })
             .collect();
@@ -3652,12 +3985,47 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
             owners,
             surviving_inserts: inserts
                 .iter()
-                .filter(|insert| before_inserts.iter().any(|before| before.id == insert.id))
-                .map(|insert| insert.id.as_str())
+                .enumerate()
+                .filter_map(|(position, insert)| {
+                    let index = before_inserts
+                        .iter()
+                        .position(|before| before.id == insert.id)?;
+                    let state = instance_join(
+                        Some(&before_inserts[index]),
+                        Some(insert),
+                        sample_rate_hz,
+                        ramps,
+                    );
+                    // An insert at another position has another live address: its live
+                    // difference is prepared.
+                    let state = match state {
+                        FamilyJoin::Live(_) if index != position => FamilyJoin::Prepared,
+                        state => state,
+                    };
+                    Some(InsertOwnerJoin {
+                        id: insert.id.as_str(),
+                        address: LiveEffectAddress::insert(position as u32),
+                        state,
+                    })
+                })
                 .collect(),
         });
     }
     joins
+}
+
+/// One carried lane's retarget, to write into the successor's cells (#1280 D4): the records of the
+/// instance's live difference, preflighted against the successor's producer.
+struct EffectRetarget {
+    /// The instance's position in the successor's sorted effect producers.
+    producer: usize,
+    /// The bypass record (it carries its crossfade ramp, #1341 D1, #1622) first, then the parameter
+    /// records, all written as they are; the parameter records are empty for an instance with
+    /// `targets`.
+    records: Vec<EffectControlRecord>,
+    /// For an instance that rides prepared targets: the owner's committed revision its open
+    /// candidate began at, and the targets to publish.
+    targets: Option<(u64, Vec<PreparedEffectTarget>)>,
 }
 
 /// What the console-effect join resolved against both plans' lanes.
@@ -3667,48 +4035,136 @@ struct EffectCarry {
     restarted: Vec<Box<str>>,
     /// The largest payload of a carried lane: the scratch every move goes through.
     scratch_bytes: u64,
+    /// The carried lanes' live differences (#1280 D4).
+    retargets: Vec<EffectRetarget>,
 }
 
-/// The lane half of the console-effect join (#1279 D1, D2): which console slot of which strip
-/// moves, and which strips restart.
+/// Opens the successor producer's side of `instance`'s live difference: every record preflighted
+/// (a record the lane has no cell for refuses the whole instance), an EQ's owner transaction begun,
+/// edited and preflighted with its targets. `None` leaves the producer untouched, and the lane
+/// restarts.
+fn prepare_effect_retarget(
+    producer: &mut EffectControlProducer,
+    position: usize,
+    instance: &EffectInstanceRecords,
+) -> Option<EffectRetarget> {
+    let mut records = Vec::new();
+    for &record in &instance.records {
+        match record {
+            EffectControlRecord::Bypass(_) => {
+                producer.preflight(record).ok()?;
+                records.push(record);
+            }
+            // An instance with targets takes its parameters as the owner's edits.
+            EffectControlRecord::Parameter { .. } if instance.targets.is_some() => {}
+            EffectControlRecord::Parameter { .. } => {
+                producer.preflight(record).ok()?;
+                records.push(record);
+            }
+            _ => return None,
+        }
+    }
+    let targets = match &instance.targets {
+        None => None,
+        Some(targets) => {
+            let base_revision = producer.owner()?.committed_revision();
+            producer.begin_owner(base_revision).ok()?;
+            let opened = instance
+                .records
+                .iter()
+                .try_for_each(|&record| match record {
+                    EffectControlRecord::Parameter {
+                        parameter_index,
+                        channel,
+                        value,
+                    } => producer.edit_owner(parameter_index, channel, value),
+                    _ => Ok(()),
+                })
+                .and_then(|()| producer.preflight_candidate_targets(base_revision, targets));
+            if opened.is_err() {
+                let _ = producer.discard_owner();
+                return None;
+            }
+            Some((base_revision, targets.clone()))
+        }
+    };
+    Some(EffectRetarget {
+        producer: position,
+        records,
+        targets,
+    })
+}
+
+/// The lane half of the effect join (#1279 D1, D2; #1280): which console slot or insert of which
+/// strip moves, and which strips restart.
 ///
-/// A slot carries when no prepared value of it differs and both plans hold it as a lane of an
-/// effect bank stage with no live control lane, with equal layouts (prepared bypass, latency, state
-/// sizes and state layout version). A lane of a stage with a live control lane or a lowered bypass
-/// has no row: it does not carry here (#1280) and its strip restarts. A surviving insert carries
-/// when its owner key (strip, [`graph::RackId::Dynamic`], insert ID) is among the keys carried:
-/// no insert lane has a carry until #1281 and #1282, which add their keys to `carried` when their
-/// move covers the lane (root amendment, 2026-10-12). A strip with a slot or a surviving insert
-/// that does not carry, or whose chain changed, is listed in `restarted`.
+/// An owner carries when its difference is not a prepared one, and both plans hold it as a lane
+/// of an effect bank stage, of one kind (a plain stage, or a live-control stage whose lane has
+/// cells, only a lowered bypass or nothing), with equal layouts (prepared bypass, latency, state
+/// sizes and state layout version). A live difference also needs `retarget` to accept it (the
+/// successor's producer has a cell for every record); a lane it refuses restarts. A console slot's
+/// key is (strip, `Simd1` or `Simd2`, slot ID), a surviving insert's is (strip,
+/// [`graph::RackId::Dynamic`], insert ID). A strip with an owner that does not carry, or whose
+/// chain changed, is listed in `restarted`.
 fn resolve_effect_carry(
     predecessor: &PlanStateInventory,
     joins: &[ChainJoin<'_>],
     own: &[EffectLaneInventoryRow],
+    retarget: &mut dyn FnMut(
+        &str,
+        LiveEffectAddress,
+        &EffectInstanceRecords,
+    ) -> Option<EffectRetarget>,
 ) -> EffectCarry {
     let mut carry = EffectCarry::default();
     for join in joins {
         let mut restart = join.chain_changed;
-        // The owner keys of this strip that carry: (rack, effect ID).
-        let mut carried: Vec<(graph::RackId, &str)> = Vec::new();
-        for owner in &join.owners {
-            let rows = effect_lane_row(own, join.id, owner.rack, owner.slot)
-                .zip(predecessor.effect_lane(join.id, owner.rack, owner.slot));
-            match rows {
-                Some((own, before)) if owner.same && own.layout == before.layout => {
-                    carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
-                    carry.moves.push(graph::GraphEffectMove {
-                        successor: own.location,
-                        predecessor: before.location,
-                    });
-                    carried.push((owner.rack, owner.slot));
-                }
-                _ => restart = true,
-            }
-        }
-        restart |= join
-            .surviving_inserts
+        let owners = join
+            .owners
             .iter()
-            .any(|insert| !carried.contains(&(graph::RackId::Dynamic, insert)));
+            .map(|owner| (owner.rack, owner.slot, owner.address, &owner.state))
+            .chain(join.surviving_inserts.iter().map(|insert| {
+                (
+                    graph::RackId::Dynamic,
+                    insert.id,
+                    insert.address,
+                    &insert.state,
+                )
+            }));
+        for (rack, effect_id, address, state) in owners {
+            let rows = effect_lane_row(own, join.id, rack, effect_id)
+                .zip(predecessor.effect_lane(join.id, rack, effect_id));
+            let Some((own, before)) = rows.filter(|(own, before)| {
+                !state.is_prepared()
+                    && own.layout == before.layout
+                    && own.kind == before.kind
+                    // A move between two per-node instances is #1282's; until it lands, a strip
+                    // that holds one restarts, as it always did.
+                    && !matches!(
+                        (own.location, before.location),
+                        (graph::GraphEffectSite::Node(_), graph::GraphEffectSite::Node(_))
+                    )
+            }) else {
+                restart = true;
+                continue;
+            };
+            let retargeted = match state {
+                FamilyJoin::Live(instance) => {
+                    let Some(retargeted) = retarget(join.id, address, instance) else {
+                        restart = true;
+                        continue;
+                    };
+                    Some(retargeted)
+                }
+                _ => None,
+            };
+            carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+            carry.moves.push(graph::GraphEffectMove {
+                successor: own.location,
+                predecessor: before.location,
+            });
+            carry.retargets.extend(retargeted);
+        }
         if restart {
             carry.restarted.push(join.id.into());
         }
@@ -3830,12 +4286,13 @@ mod tests {
             id: "eq0".into(),
             rack: graph::RackId::Simd1,
             effect_id: SLOT.into(),
-            location: graph::GraphLaneLocation {
+            location: graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
                 unit: 0,
                 slot: 0,
                 lane,
-            },
+            }),
             layout,
+            kind: graph::EffectLaneKind::Plain,
         }
     }
 
@@ -3856,14 +4313,19 @@ mod tests {
     /// moves a payload the successor's bank would refuse, or read at another size.
     #[test]
     fn a_lane_of_another_prepared_layout_is_not_moved() {
-        let join = |same| super::ChainJoin {
+        let join = |same: bool| super::ChainJoin {
             id: "eq0",
             chain_changed: false,
             surviving_inserts: Vec::new(),
             owners: vec![super::ConsoleOwnerJoin {
                 rack: graph::RackId::Simd1,
                 slot: SLOT,
-                same,
+                address: super::LiveEffectAddress::console(0),
+                state: if same {
+                    super::FamilyJoin::Same
+                } else {
+                    super::FamilyJoin::Prepared
+                },
             }],
         };
         let own = [lane_row(3, layout())];
@@ -3871,10 +4333,25 @@ mod tests {
             &inventory_with(lane_row(1, layout())),
             &[join(true)],
             &own,
+            &mut |_, _, _| None,
         );
         assert_eq!(carry.moves.len(), 1);
-        assert_eq!(carry.moves[0].successor.lane, 3);
-        assert_eq!(carry.moves[0].predecessor.lane, 1);
+        assert_eq!(
+            carry.moves[0].successor,
+            graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
+                unit: 0,
+                slot: 0,
+                lane: 3
+            })
+        );
+        assert_eq!(
+            carry.moves[0].predecessor,
+            graph::GraphEffectSite::Lane(graph::GraphLaneLocation {
+                unit: 0,
+                slot: 0,
+                lane: 1
+            })
+        );
         assert_eq!(carry.scratch_bytes, 136);
         assert!(carry.restarted.is_empty());
         let other = |edit: fn(&mut graph::EffectLaneLayout)| {
@@ -3893,6 +4370,7 @@ mod tests {
                 &inventory_with(lane_row(1, different)),
                 &[join(true)],
                 &own,
+                &mut |_, _, _| None,
             );
             assert!(carry.moves.is_empty(), "layout {index}");
             assert_eq!(
@@ -3907,9 +4385,136 @@ mod tests {
             &inventory_with(lane_row(1, layout())),
             &[join(false)],
             &own,
+            &mut |_, _, _| None,
         );
         assert!(carry.moves.is_empty());
         assert_eq!(carry.restarted, vec![Box::<str>::from("eq0")]);
+    }
+
+    /// #1280 D1: a live difference carries the lane only when the successor's producer accepts its
+    /// records. A producer that refuses one (no cell for it) restarts the strip and moves nothing,
+    /// so a record is never written to a cell that is not there; one that accepts gives the lane
+    /// its retarget.
+    #[test]
+    fn a_live_difference_carries_only_when_the_successor_accepts_its_records() {
+        let live = || super::ChainJoin {
+            id: "eq0",
+            chain_changed: false,
+            surviving_inserts: Vec::new(),
+            owners: vec![super::ConsoleOwnerJoin {
+                rack: graph::RackId::Simd1,
+                slot: SLOT,
+                address: super::LiveEffectAddress::console(0),
+                state: super::FamilyJoin::Live(super::EffectInstanceRecords {
+                    records: vec![effect_contract::EffectControlRecord::Bypass(
+                        effect_contract::BypassSwitch {
+                            bypassed: true,
+                            ramp_samples: 64,
+                        },
+                    )],
+                    targets: None,
+                }),
+            }],
+        };
+        let own = [lane_row(3, layout())];
+        let inventory = inventory_with(lane_row(1, layout()));
+        let refused = super::resolve_effect_carry(&inventory, &[live()], &own, &mut |_, _, _| None);
+        assert!(refused.moves.is_empty() && refused.retargets.is_empty());
+        assert_eq!(refused.restarted, vec![Box::<str>::from("eq0")]);
+        let mut asked = Vec::new();
+        let accepted = super::resolve_effect_carry(
+            &inventory,
+            &[live()],
+            &own,
+            &mut |strip, address, instance| {
+                asked.push((strip.to_owned(), address, instance.records[0]));
+                Some(super::EffectRetarget {
+                    producer: 7,
+                    records: Vec::new(),
+                    targets: None,
+                })
+            },
+        );
+        assert_eq!(accepted.moves.len(), 1);
+        assert_eq!(accepted.retargets.len(), 1);
+        assert_eq!(accepted.retargets[0].producer, 7);
+        assert!(accepted.restarted.is_empty());
+        assert_eq!(
+            asked,
+            vec![(
+                "eq0".to_owned(),
+                super::LiveEffectAddress::console(0),
+                effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch {
+                    bypassed: true,
+                    ramp_samples: 64,
+                })
+            )]
+        );
+    }
+
+    fn instance(effect_id: &str, bypass: bool, threshold: f32) -> session::Effect {
+        session::Effect {
+            id: session::StableId::parse("fx").expect("stable id"),
+            identity: session::EffectIdentity::Native {
+                effect_id: session::StableId::parse(effect_id).expect("effect id"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass,
+            link_mode: session::LinkMode::DualMono,
+            params: vec![session::EffectParam {
+                parameter_id: 1,
+                channel: session::ParameterChannel::Both,
+                unit: session::ParameterUnit::Db,
+                value: threshold,
+            }],
+            sidechain: session::SidechainDeclaration::None,
+        }
+    }
+
+    /// #1280 D1: the one per-instance function says which difference is live. A compressor's
+    /// bypass and `Block`-rate threshold are live records (the bypass first, with the session's
+    /// ramp); the delay's bypass is a rebuild-only row, so the join must count it prepared. A join
+    /// that took any bypass for live would retarget a prepared bypass into a cell the lane lacks.
+    #[test]
+    fn the_per_instance_function_separates_live_from_prepared() {
+        let ramps = controls::LiveRamps::for_session(
+            &parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+                .expect("fixture"),
+        );
+        let records = |before: &session::Effect, after: &session::Effect| {
+            super::effect_instance_records(before, after, 48_000, ramps)
+        };
+        let compressor = |bypass, threshold| instance("miso.compressor", bypass, threshold);
+        assert_eq!(
+            records(&compressor(false, -10.0), &compressor(false, -10.0)),
+            Ok(None)
+        );
+        let live = records(&compressor(false, -10.0), &compressor(true, -20.0))
+            .expect("live")
+            .expect("records");
+        assert_eq!(
+            live.records.len(),
+            3,
+            "the bypass, then the threshold on both lanes"
+        );
+        assert_eq!(
+            live.records[0],
+            effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch {
+                bypassed: true,
+                ramp_samples: ramps.for_row(super::LiveRampRow::BypassCrossfade),
+            })
+        );
+        assert!(
+            records(
+                &instance("miso.delay", false, 0.0),
+                &instance("miso.delay", true, 0.0)
+            )
+            .is_err(),
+            "the delay's bypass is prepared"
+        );
+        let mut other = compressor(false, -10.0);
+        other.quality = session::EffectQuality::High;
+        assert!(records(&compressor(false, -10.0), &other).is_err());
     }
 
     #[test]

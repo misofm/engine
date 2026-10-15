@@ -1,10 +1,10 @@
 //! E5: every text-expressible validator mutation has text/typed entry-point parity.
 
 use session::{
-    AutomationShape, CompileCaps, Console, ConsoleEntry, ConsoleSlot, DiagnosticCode,
-    DiagnosticSet, EffectIdentity, MatrixOrPan, Output, ParameterUnit, RouteDestination,
-    RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId,
-    canonical_session_json, compile_session, parse_session_json,
+    AutomationSegment, AutomationShape, CompileCaps, Console, ConsoleEntry, ConsoleSlot,
+    DiagnosticCode, DiagnosticSet, EffectIdentity, MatrixOrPan, Output, ParameterChannel,
+    ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
+    SidechainDeclaration, StableId, canonical_session_json, compile_session, parse_session_json,
 };
 
 const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -76,6 +76,43 @@ fn with_console(model: &mut SessionModel) {
         params: model.tracks[0].inserts.effects[0].params.clone(),
     };
     model.tracks[0].console = vec![entry("desk-eq"), entry("desk-limit")];
+}
+/// Replace the fixture's automation with two fader (`builtins` 5) entries on its track, `fader-a`
+/// then `fader-b`, on the given lanes.
+fn two_fader_rides(model: &mut SessionModel, first: ParameterChannel, second: ParameterChannel) {
+    let ride = |name: &str, lane| {
+        let mut entry = model.automation[0].clone();
+        entry.id = id(name);
+        entry.target.section = session::Section::Builtins;
+        entry.target.control = 5;
+        entry.target.lane = lane;
+        entry
+    };
+    let rides = vec![ride("fader-a", first), ride("fader-b", second)];
+    model.automation = rides;
+}
+
+/// The fixture's one automation entry gets two segments that start at the given samples, a `step`
+/// from 0 to 1 on `[0, 960)` and then a `linear` one from `second_start` that begins at 0.5, so the
+/// discontinuities are at 960 and `second_start`.
+fn step_then_ramp(model: &mut SessionModel, second_start: u64) {
+    let step = AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample: 0,
+        end_sample: 960,
+        start_value: 0.0,
+        end_value: 1.0,
+        unit: ParameterUnit::Db,
+    };
+    let ramp = AutomationSegment {
+        shape: AutomationShape::Linear,
+        start_sample: second_start,
+        end_sample: second_start + 480,
+        start_value: 0.5,
+        end_value: 0.0,
+        unit: ParameterUnit::Db,
+    };
+    model.automation[0].segments = vec![step, ramp];
 }
 macro_rules! case {
     ($name:literal,$code:ident,$path:literal,$typed:expr) => {
@@ -654,6 +691,40 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
                 p.end_sample = 200;
                 s.automation[0].segments.push(p)
             }
+        ),
+        case!(
+            "lane-both-both",
+            AutomationDuplicateLane,
+            "$.automation[1].target.lane",
+            |s| two_fader_rides(s, ParameterChannel::Both, ParameterChannel::Both)
+        ),
+        case!(
+            "lane-both-left",
+            AutomationDuplicateLane,
+            "$.automation[1].target.lane",
+            |s| two_fader_rides(s, ParameterChannel::Both, ParameterChannel::Left)
+        ),
+        case!(
+            "lane-left-left",
+            AutomationDuplicateLane,
+            "$.automation[1].target.lane",
+            |s| two_fader_rides(s, ParameterChannel::Left, ParameterChannel::Left)
+        ),
+        case!(
+            "lane-insert-copy",
+            AutomationDuplicateLane,
+            "$.automation[1].target.lane",
+            |s| {
+                let mut copy = s.automation[0].clone();
+                copy.id = id("eq-gain-copy");
+                s.automation.push(copy)
+            }
+        ),
+        case!(
+            "discontinuity-spacing",
+            AutomationDiscontinuitySpacing,
+            "$.automation[0].segments[1].start_sample",
+            |s| step_then_ramp(s, 1023)
         ),
         case!(
             "exponential-zero-start",

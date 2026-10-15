@@ -789,7 +789,12 @@ mod effect_bank {
                     let revision = gate.last_published() + 1;
                     let stamp = gate.stamp(revision).expect("a legal revision");
                     writer
-                        .write(stamp, EffectControlRecord::Bypass(bypass))
+                        .write(
+                            stamp,
+                            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(
+                                bypass,
+                            )),
+                        )
                         .expect("a bypass cell");
                     revision
                 };

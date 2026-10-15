@@ -4169,7 +4169,11 @@ fn a_bypass_lifted_beside_a_parameter_renders_like_the_browsers_lane() {
             reference.push(first, "comp", 1, Right, -40.0);
         }
         for reference in [&mut both, &mut lift_only] {
-            reference.write(first, "comp", Bypass(false));
+            reference.write(
+                first,
+                "comp",
+                Bypass(effect_contract::BypassSwitch::step(false)),
+            );
         }
 
         let (mut differs_from_lift, mut differs_from_threshold) = (false, false);
@@ -4233,7 +4237,7 @@ fn live_eq_bypass_pcm_shape(sample_rate_hz: u32) {
     lanes.write(
         "eq0",
         "eq",
-        effect_contract::EffectControlRecord::Bypass(true),
+        effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
     );
     lanes.publish_eq("eq0", "eq", &[(4, Left, 3.0)]);
     for block in 0..12 {
@@ -6397,7 +6401,9 @@ mod set_control {
                 lanes.write(
                     "bus",
                     "bcomp",
-                    effect_contract::EffectControlRecord::Bypass(true),
+                    effect_contract::EffectControlRecord::Bypass(
+                        effect_contract::BypassSwitch::step(true),
+                    ),
                 );
             }
             let mut heard = false;

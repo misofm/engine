@@ -151,6 +151,15 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
 | A repeated member; a VCA ID already used by a track, submix, output or VCA | `id.duplicate` | typed-model |
 | A VCA offset outside `[-144, 24]` dB | `numeric.out_of_schema_range` | typed-model |
 
+## Automation refusals, by code
+
+| Defect | Code | Stage |
+| --- | --- | --- |
+| A second entry on a lane an entry with a lesser `id` drives (`both` overlaps `left` and `right`), at `$.automation[<i>].target.lane` | `automation.duplicate_lane` | typed-model |
+| Two discontinuities of one entry less than 64 samples apart, at the later one's `start_sample` or `end_sample` | `automation.discontinuity_spacing` | typed-model |
+| A repeated entry `id` | `id.duplicate` | typed-model |
+| Segments out of order, overlapping or empty | `automation.out_of_order`, `automation.segment_overlap`, `automation.invalid_range` | typed-model |
+
 ## Buses: submix strips and their taps
 
 - **A bus is a submix strip.** Route tracks (or other submixes) to `submix_input`, and route the
@@ -198,6 +207,12 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
   canonical writer choose spelling.
 - Automation segments are ordered and nonoverlapping with `end_sample > start_sample`;
   exponential endpoints must both be positive.
+- The hold rule: a lane holds the first `start_value` before its first segment, follows the
+  segment inside it (`linear`, `exponential`; a `step` holds `start_value` on `[start, end)` and
+  takes `end_value` at `end`), and holds a segment's `end_value` after it and in a gap. One entry
+  per lane: `left` and `right` entries on one control are two lanes, `both` overlaps each. A jump
+  (a segment start away from the held value, a `step` end whose values differ) must be 64 samples
+  from the entry's previous jump. Start a ride at the value the lane holds to avoid a jump.
 - A validator PASS establishes Session V1 validity, builtin preparation, and launch native effect
   preparation, including console eligibility. It does not certify graph/PDC compilation, source
   availability, host resource budgets, or that declared automation currently renders.
