@@ -55,3 +55,10 @@ the caller reads its window, or reads a typed refusal and can arm again. It neve
 ## Size
 
 Half a day, one sonnet-high implementer.
+
+## Ruling (root, 2026-10-14): rescoped after #1395
+
+A carried spectrum observer keeps its one-shot state across a swap (#1395 gate 3). This issue is
+rescoped to the captures that do not carry (no successor observer at the same tap, or a refused
+hand-over): such a capture settles to `Invalid` with its generation (option A), and a new arm
+completes on the successor. It lands after #1395.

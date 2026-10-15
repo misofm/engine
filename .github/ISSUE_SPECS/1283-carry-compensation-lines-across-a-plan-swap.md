@@ -122,3 +122,18 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 ## Dependencies
 
 - *Carry per-node effect instances across a plan swap* (#1282).
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** `timings` is still `crates/graph-compiler/src/pdc.rs:38`; `InsertedDelay` is
+  `crates/graph/src/lib.rs:344` and `GraphEdgeId` `:306-311`; `CompensationDelay` is
+  `crates/graph/src/runtime.rs:958`, `Runtime::delays` `:2603`, `StagedInput` `:1359`;
+  `GraphCarryProgram` is `crates/graph/src/lib.rs:3005`. The carry runs in
+  `GraphExecutor::adopt_predecessor` (`lib.rs:3598`): every section's check runs before any section
+  moves, so this section's check joins that list.
+- #1285, #1287, #1363 and #1402 are open; D1-D5 and the gates stand.
+- **Dependency on #1282.** The lines hold no effect state; the dependency orders the shared files
+  (`graph/src/{lib.rs,runtime.rs}`, `host-core/src/prepare.rs`, `successor_swap.rs`) only. This
+  slice can land before #1327 or after it.

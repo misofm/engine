@@ -104,3 +104,33 @@ homes as well as the cells; #1280's D3 states the carry rule.
 ## Dependencies
 
 - *Carry live-controlled effect lanes across a plan swap* (#1280).
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Anchors moved.** `NodeKind::LiveControlEffect` is `crates/graph/src/runtime.rs:1161`, struct
+  `LiveControlEffect` `:1228`; `GraphPreparedEffect` is `crates/graph/src/lib.rs:909`; the per-node
+  payload pair is `crates/effect-contract/src/lib.rs:2325` and `:2370`, the bank pair `:2468` and
+  `:2483`; `desymmetrize_channels` is the trait method at `:2588`; `pads` is still
+  `crates/graph-compiler/src/banks.rs:76`. `LiveControlEffectBankStage` is
+  `crates/rack/src/lib.rs:1154`. #888, #889 and #1069 are still open, so the Context and gate
+  choices stand.
+- **Every production lane is live-controlled** (see #1280's batch 10 amendment): a bank lane is a
+  `LiveControlEffectBankStage` lane and a per-node insert is a `LiveControlEffect`. The non-live
+  forms are reached only by test entries. The gates use the live entries.
+- **D3.** Use `BankChain::disengage_for_carry`, once per predecessor chain, as
+  `Runtime::carry_effect_lanes` does (`runtime.rs:4726`), not a direct `desymmetrize_channels`
+  call: the chain owns the collapse state.
+- **The observation consumers do not move.** Each plan keeps its own queue consumers (a bank's in
+  `observe_queues`, a per-node lane's in its `EffectControlLane`). The control plane writes only the
+  newest plan's queue, and #1280b applies the predecessor's pending records to its
+  `ObservationLane` at the carry; #1327b then moves the tap state. So the Note's "moves the
+  consumer" reads "applies the pending records, then moves the tap state".
+- **Live retarget.** D1's "live differences retarget as #1280 D4" is #1280c (the per-instance
+  function). Gate 3's second case needs it.
+- **Shunt copy.** The per-node `BypassShunt` holds `dry_*`, `line_*` and one `cursor`; a bank's line
+  is interleaved by lane. The copy helper of #1280a (D5) serves both directions; if it does not,
+  this slice adds a `BypassShunt` lane-word copy in `crates/effect-contract/src/live.rs` (added to
+  the authorized paths for that helper only).
+- **Dependencies.** #1280a and #1280c (gate 3's second case). Not #1280b.

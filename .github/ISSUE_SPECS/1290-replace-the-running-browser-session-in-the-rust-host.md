@@ -283,3 +283,38 @@ handler in `single` mode (first), and the Worker after #1332. `blockingRebuilds`
   - **(b)** gate 4 (supersession). Dependencies: (a), #1310 (after stream B's #1344 and #1398).
   - (c), the spectrum refusal, is dropped (root Q4).
 - #1332 and #1387 are removed from the dependencies.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **(a) is reachable now.** `SessionState::command` runs the rebuild arm through
+  `WebRuntimePreparer` with a `SuccessorBase` (`hosts/host-web/src/lib.rs:4549-4660`, every boot
+  branch has its successor entry), and `refuse_rebuild` stops it unless `allow_rebuild` is set
+  (#1562a D9). (a)'s native gates drive the arm through the test-support switch
+  (`structural_command_for_test`, `:1870-1890`); deleting the refusal stays #1562b's.
+  `blockingRebuilds` (D6) does not exist yet; (a) adds it.
+- **D4 step 3 and gate 6 are stale.** `host_generation` and the prepared companions bound to it are
+  gone (#1565 deleted the prepared commands). Options: (1) delete D4 step 3 and gate 6; (2) restate
+  gate 6 on what is still bound to boot-time indices: after the adoption block, the observation
+  catalog exports (`miso_engine_web_v1_observation_*`, until #1590 deletes them) and the source
+  table (`miso_engine_web_v1_source_count`, `_source_id`) describe the successor. Recommendation:
+  (2), with its observation part void once #1590 lands.
+- **D7.** Meter consumers and observation handles are in the plan's attachment and pair in the swap
+  block (#1381b). Spectrum captures are in `SpectrumService` on the control side: (d) keeps the
+  successor's prepared captures beside the candidate and calls #1395's `SpectrumService` pairing
+  when the candidate is promoted (#1395's batch 10 amendment). Gate 7's spectrum part is (d)'s.
+- **Effects.** Gates 1 and 2 as written have no effect, so (a) does not wait for the carry chain. A
+  session with a console slot or an insert is bit-identical after the swap only with #1280a (and
+  #1281, #1282 for inserts that change representation or render per node).
+- **Dependencies.** (a): #1381a, #1562a (both landed). (d+e): (a), #1381b, #1327a, #1327b, #1395a,
+  #1395b.
+- **Anchors moved** in `hosts/host-web/src/lib.rs`: `AudioWorkletEngineHost` `:1598`,
+  `boot_with_spectrum_config` `:1655`, `render_next` `:2904`, `compile_ready` `:4982`. #1349 is
+  closed; the watermark is in the browser status (D5).
+
+## Ruling (root, 2026-10-14): gate 6
+
+Gate 6 is restated on what is still bound to boot-time indices: after adoption, the observation
+catalog exports (until #1590) and the source table describe the successor. D4 step 3's prepared
+commands no longer exist (#1565A) and leave the gate.

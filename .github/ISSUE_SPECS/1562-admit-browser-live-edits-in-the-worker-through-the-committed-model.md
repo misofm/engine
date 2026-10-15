@@ -416,3 +416,36 @@ known host difference, and it is a sequenced refusal, not a divergent result.
   re-reads the strip order only when a frame's `trackCount` differs, so after #1562b a structural
   edit that keeps the count would name the wrong strips. #1562b carries the structure epoch in the
   meter header (or an equal signal) and re-reads the strip order when it differs.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14): #1562b
+
+Checked against `12d4a4f9d`.
+
+- **#1562b spans both lanes.** Lane W is the only lane that edits `hosts/host-web/**`; lane K owns
+  the crates and the `sdk/` files outside `hosts/`. Split, in this order:
+  - **#1562b-W:** delete D9 in the browser (`WebRuntimePreparer::refuse_rebuild`'s override,
+    `allow_rebuild`, `REBUILD_PENDING` at `hosts/host-web/src/lib.rs:4802`, gate 11 and its test),
+    gate 1's `delay_samples` row, gate 8's rebuild part with the batch 7 parity rows, the watermark
+    rebuild leg, and the meter header's structure epoch with its ABI layout rows and the
+    regenerated `sdk/src/generated` copies.
+  - **#1562b-K:** delete the then-unused hook `RuntimePreparer::refuse_rebuild`
+    (`crates/control-plane/src/compile.rs:676`) and its call in `SessionState::command`; the SDK's
+    named effect rows from the control list's section headers (`sdk/src/core/live-controls.ts`);
+    and `pollMeters`' re-read of the strip order on the structure epoch (`sdk/src/core/boundary.ts`).
+    It reads the header field that #1562b-W adds.
+- **Dependencies of #1562b:** #1562a, #1381b, #1290 (a) and #1290 (d+e), so the browser's first
+  reachable rebuild keeps meters, observation taps and the spectrum stream continuous (D15-14); and
+  #1280a, #1280c, #1281 and #1282, so it does not restart every strip that holds an effect. A strip
+  in the restart set is not ducked until #1324 (open); the C ABI behaves the same today, so parity
+  holds.
+- **A gap no chain slice closes.** A structural transaction that also changes a strip's live input
+  value (trim, polarity, a filter) restarts that strip's input section: the input join carries a
+  section only when every value is equal (`same_input_section`, `crates/host-core/src/prepare.rs:2726`),
+  and there is no input twin of #1277 D5's retarget. It is not a #1562b blocker (the C ABI does the
+  same). Proposed successor: *Carry, then retarget a strip input section across a plan swap*
+  (lane K, `prepare.rs` and `live_delta.rs`), after #1280c.
+
+## Ruling (root, 2026-10-14): #1562b order
+
+#1562b-W lands first, then #1562b-K, with the dependencies in the batch-10 amendment (#1290 d+e,
+#1280a, #1280c, #1281, #1282).
