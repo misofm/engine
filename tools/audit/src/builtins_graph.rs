@@ -63,8 +63,11 @@ const B_RENDERS: u64 = REFUSED_RANGE + 2;
 // `resources.jsonl` and its manifest row moved (+2 bytes, +1 allocation per row).
 // Re-pinned for #1609: `GraphNodeObserverBinding` is 88 bytes (the `block_end` flag), so the
 // meter-bearing `resources.jsonl` rows and its manifest row moved (+8 bytes per meter).
+// Re-pinned for #1630 carry marks (batch 14b review fold): each input, fader and matrix cell
+// reader keeps two u16 masks, so `StripPreparation` grew by 24 bytes per track (1136 -> 1160) and
+// `resources.jsonl` and its manifest row moved.
 const ACCEPTED_MANIFEST_SHA256: &str =
-    "f99fdbf2e91782a98f044b35ec71d044303b8a11bc53a232707db3e17b4c795a";
+    "58ba5b37f3ae85692472b2c36731c3a5ab56f9aef323e376c9bc820699fc75f7";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const ACCEPTED_GRAPH_METERS_SHA256: &str =

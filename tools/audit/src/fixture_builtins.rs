@@ -372,7 +372,11 @@ const INPUT_PROCESSOR_BYTES: u64 = 696;
 // (`FaderReader` 56 bytes, `MatrixReader` 32) in place of two 40-byte ring consumers.
 // #1346: +48 (1088 before): it holds the input cell reader (`InputReader` 88 bytes) in place of
 // the 40-byte input ring consumer.
-const STRIP_PREPARATION_BYTES: u64 = 1136;
+// #1630 carry marks (batch 14b review fold): each input, fader and matrix cell reader keeps two
+// u16 masks (`CarryMarks`, 4 bytes, which the readers' 8-byte alignment rounds to +8 each), so
+// +24 (1136 before). The masks are plain `u16`s, not lane-width banks: the size is the same on
+// every 64-bit target, AVX2 and NEON/simd128 alike.
+const STRIP_PREPARATION_BYTES: u64 = 1160;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 // #1080 removed the controlled-activation flag #816 added, so the binding was 80 bytes again;
@@ -5373,7 +5377,13 @@ mod tests {
             // Re-pinned by issue #1609: `GraphNodeObserverBinding` grows from 80 to 88 bytes after
             // the bind-time `block_end` acceptance flag is added; only the meter-bearing resource
             // rows (eight bytes per meter) and this joined manifest identity move.
-            "f99fdbf2e91782a98f044b35ec71d044303b8a11bc53a232707db3e17b4c795a",
+            //
+            // Re-pinned by issue #1630 carry marks (batch 14b review fold): each input, fader and
+            // matrix cell reader keeps two u16 masks, so `resources.jsonl` alone moves, by +24
+            // bytes per track in every processor payload count and in the largest allocation
+            // (`StripPreparation` 1136 -> 1160). The allocation counts do not move. No PCM,
+            // meter, response or benchmark fixture moved.
+            "58ba5b37f3ae85692472b2c36731c3a5ab56f9aef323e376c9bc820699fc75f7",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
