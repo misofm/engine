@@ -88,6 +88,53 @@ fn common_error_payload_is_canonical_and_caller_owned() {
     assert!(short.iter().all(|byte| *byte == 0xaa));
 }
 
+/// #1629 gate 1. Queue kind 2 (the automation queue) is retired: a backpressure payload that
+/// names it fails typed decode, while the allocated kinds decode. Never reallocated.
+///
+/// Test value: red if the retired queue code decodes again or is given to another queue.
+#[test]
+fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
+    let codec = codec();
+    let encode = |queue_kind: BackpressureQueueKind| {
+        let mut value = response();
+        value
+            .backpressure
+            .as_mut()
+            .expect("backpressure")
+            .queue_kind = queue_kind;
+        let mut output = vec![0_u8; codec.encoded_non_ok_payload_len(&value).expect("size")];
+        codec
+            .encode_non_ok_payload(&value, &mut output)
+            .expect("encode");
+        output
+    };
+    let reliable_response = encode(BackpressureQueueKind::ReliableResponse);
+    let control = encode(BackpressureQueueKind::ControlCommand);
+    let at = reliable_response
+        .iter()
+        .zip(&control)
+        .position(|(left, right)| left != right)
+        .expect("the queue kind is the one byte that differs");
+    assert_eq!((control[at], reliable_response[at]), (1, 3));
+    for allocated in [1_u8, 3, 4, 5] {
+        let mut bytes = reliable_response.clone();
+        bytes[at] = allocated;
+        assert!(
+            codec.decode_non_ok_payload(&bytes, 3).is_ok(),
+            "{allocated}"
+        );
+    }
+    for refused in [0_u8, 2, 7] {
+        let mut bytes = reliable_response.clone();
+        bytes[at] = refused;
+        assert_eq!(
+            codec.decode_non_ok_payload(&bytes, 3),
+            Err(DecodeError::InvalidTlv),
+            "queue kind {refused}"
+        );
+    }
+}
+
 #[test]
 fn unknown_optional_skips_but_required_and_wrong_variant_reject() {
     let codec = codec();
@@ -1994,7 +2041,8 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
 }
 
 /// Issue #1351 gate 4: every registered counter ID, the newest `TRANSITION_REPREPARE_REFUSALS`
-/// included, round-trips through the telemetry configuration, and the next ID is refused.
+/// included, round-trips through the telemetry configuration; the next ID and the retired IDs
+/// 2 and 11 to 14 (#1629) are refused.
 ///
 /// Test value: red if a counter joins the enum but not `parse_counter_id`, so that a host's
 /// configuration of it decodes as malformed.
@@ -2003,7 +2051,6 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let codec = codec();
     let all = [
         CounterId::ControlCommandBackpressure,
-        CounterId::AutomationBackpressure,
         CounterId::ReliableResponseBackpressure,
         CounterId::ReliableEventBackpressure,
         CounterId::TelemetryCoalesced,
@@ -2012,17 +2059,16 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::ReplayHits,
         CounterId::RequestIdReuse,
         CounterId::ReplayExpired,
-        CounterId::LateAutomation,
-        CounterId::CanceledAutomation,
-        CounterId::AutomationTimePast,
-        CounterId::AutomationOrderReject,
         CounterId::ValidationFailures,
         CounterId::LiveValuesSuperseded,
         CounterId::TransitionReprepareRefusals,
     ];
-    for (index, id) in all.iter().enumerate() {
-        assert_eq!(*id as usize, index + 1, "the registry has no gap or reuse");
-    }
+    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17];
+    assert_eq!(
+        all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
+        allocated,
+        "IDs 2 and 11 to 14 are retired, never reallocated"
+    );
     let configuration = TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
@@ -2037,21 +2083,33 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         .expect("configuration");
     assert_eq!(
         codec.decode_telemetry_configuration(&bytes[..len], 6),
-        Ok(configuration)
+        Ok(configuration.clone())
     );
-    let next = u32::try_from(all.len() + 1).expect("small");
-    let mut refused = bytes;
-    let id_bytes = (all.len() as u32).to_le_bytes();
-    let at = refused[..len]
+    // One ID per request, so a refusal cannot come from the sorted-unique rule.
+    let single = TelemetryConfiguration {
+        counter_ids: vec![CounterId::TransitionReprepareRefusals],
+        counter_period_blocks: 3,
+        ..configuration
+    };
+    let mut bytes = [0_u8; 192];
+    let len = codec
+        .encode_telemetry_configuration(&single, &mut bytes)
+        .expect("single");
+    let id_bytes = 17_u32.to_le_bytes();
+    let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
-        .expect("last counter ID");
-    refused[at..at + 4].copy_from_slice(&next.to_le_bytes());
-    assert!(
-        codec
-            .decode_telemetry_configuration(&refused[..len], 6)
-            .is_err()
-    );
+        .expect("counter ID");
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 18] {
+        let mut refused = bytes;
+        refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
+        assert!(
+            codec
+                .decode_telemetry_configuration(&refused[..len], 6)
+                .is_err(),
+            "counter ID {refused_id} must be refused"
+        );
+    }
 }
 
 #[test]

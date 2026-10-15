@@ -111,7 +111,9 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
     // #1312 re-pin: the counter snapshot gains `LIVE_VALUES_SUPERSEDED` (id 16), value 0, as a
     // third value (a 40-byte `CounterValue` message): the length 0x70 became 0xa0 and the
     // frame's TLV count 3 became 4.
-    "4d49534f43544c0001000000300002000a0000000001000008000000000000002a0000000000000006000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b0128000000020000000000000001000301040000000c000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000110000000000000002000401080000000000000000000000",
+    // #1629 re-pin: the served set loses `CANCELED_AUTOMATION` (id 12), whose 40-byte value
+    // message leaves: the length 0x100 became 0xd0 and the TLV count 6 became 5.
+    "4d49534f43544c0001000000300002000a000000d000000008000000000000002a0000000000000005000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000110000000000000002000401080000000000000000000000",
     "4d49534f43544c0001000000300002000b0000002000000009000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020003000000200000000a000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000300000000000000",
 ];
@@ -288,24 +290,16 @@ pub(super) fn retired_automation_frame(request_id: u64, revision: u64) -> Vec<u8
     bytes[15] = 0; // the revision precondition is exact, as the command's was
     bytes[32..40].copy_from_slice(&revision.to_le_bytes());
     bytes[16..18].copy_from_slice(&0x0006_u16.to_le_bytes());
-    let mut record = [0_u8; protocol::AUTOMATION_RECORD_BYTES];
-    protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(1),
-        start: protocol::SampleTime(1 << 20),
-        end: protocol::SampleTime(1 << 20),
-        start_value: 0.0,
-        end_value: 0.0,
-    }
-    .encode_le(&mut record)
-    .expect("the former record is valid");
+    // One 32-byte point record: kind 1, three reserved zero bytes, handle 1, start and end
+    // 1 << 20 (two `u64`), then both values 0.0 (two `f32`).
+    let mut record = [0_u8; 32];
+    record[0] = 1;
+    record[4] = 1;
+    record[8..16].copy_from_slice(&(1_u64 << 20).to_le_bytes());
+    record[16..24].copy_from_slice(&(1_u64 << 20).to_le_bytes());
     for (id, wire, value) in [
         (1_u16, 2_u8, &1_u16.to_le_bytes()[..]),
-        (
-            2,
-            2,
-            &(protocol::AUTOMATION_RECORD_BYTES as u16).to_le_bytes()[..],
-        ),
+        (2, 2, &32_u16.to_le_bytes()[..]),
         (3, 10, &record[..]),
     ] {
         bytes.extend_from_slice(&id.to_le_bytes());
@@ -2101,7 +2095,6 @@ fn the_retired_automation_command_is_refused_at_decode_and_not_advertised() {
     assert_eq!(storage, vec![0xa5; 4_096], "nothing is written");
     let snapshot = crate::ffi::test_transaction_snapshot(c_session);
     assert_eq!(snapshot.revision, revision);
-    assert_eq!(snapshot.automation.occupancy, 0, "nothing was queued");
     assert_eq!(snapshot.revision, snapshot_before.revision);
     let after = crate::ffi::test_session_state_summary(c_session);
     assert_eq!((after.0, after.2, after.3), (before.0, before.2, before.3));
@@ -4133,7 +4126,6 @@ fn every_served_counter_reads_zero_on_a_fresh_session() {
         vec![
             protocol::CounterId::TelemetryCoalesced,
             protocol::CounterId::TelemetryDropped,
-            protocol::CounterId::CanceledAutomation,
             protocol::CounterId::LiveValuesSuperseded,
             protocol::CounterId::TransitionReprepareRefusals,
         ]

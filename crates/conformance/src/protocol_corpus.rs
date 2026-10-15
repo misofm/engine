@@ -443,6 +443,44 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             diagnostic: None,
         });
     }
+    // Counters 2 and 11 to 14 retired with the automation queue (#1629). A `TELEMETRY_CONFIGURE`
+    // naming one is refused at decode; a `COUNTERS_GET` naming one finds no such counter, as for
+    // any ID the provider does not report. `TRANSITION_REPREPARE_REFUSALS` (17) is the sentinel
+    // the probe frame carries before it is patched.
+    for retired in RETIRED_COUNTER_IDS {
+        let mut configure = counter_command_frame(CommandPayload::TelemetryConfigure(
+            &TelemetryConfiguration {
+                meter_handles: Vec::new(),
+                meter_period_blocks: 0,
+                counter_ids: vec![CounterId::TransitionReprepareRefusals],
+                counter_period_blocks: 3,
+                diagnostics_enabled: false,
+                minimum_diagnostic_severity: DiagnosticSeverity::Info,
+            },
+        ));
+        let sentinel = (CounterId::TransitionReprepareRefusals as u32).to_le_bytes();
+        let at = configure[OUTER_HEADER_BYTES..]
+            .windows(4)
+            .position(|window| window == sentinel)
+            .expect("the probe frame carries its counter ID")
+            + OUTER_HEADER_BYTES;
+        configure[at..at + 4].copy_from_slice(&retired.to_le_bytes());
+        rows.push(RetiredCodeRow {
+            name: format!("retired.counter_{retired}.telemetry_configure"),
+            bytes: configure,
+            status: INVALID_FIELD,
+            diagnostic: DECODE_REFUSAL,
+        });
+        rows.push(RetiredCodeRow {
+            name: format!("retired.counter_{retired}.counters_get"),
+            bytes: counter_command_frame(CommandPayload::CountersGet(&CountersRequest {
+                all: false,
+                ids: vec![retired],
+            })),
+            status: StatusCode::NotFound as u16,
+            diagnostic: DECODE_REFUSAL,
+        });
+    }
     rows.push(RetiredCodeRow {
         name: "control.unknown_optional_track_field_12".to_owned(),
         bytes: upsert_track_with_field(&track, 12, false),
@@ -452,22 +490,40 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
     rows
 }
 
+/// The counter IDs retired with the automation queue (#1629). Their codes are refused or unserved
+/// and never reallocated.
+const RETIRED_COUNTER_IDS: [u32; 5] = [2, 11, 12, 13, 14];
+
+/// One complete command frame, request ID 1: exact revision 7 for the state-changing
+/// `TELEMETRY_CONFIGURE`, any revision for the read.
+fn counter_command_frame(payload: CommandPayload<'_>) -> Vec<u8> {
+    let frame = TypedCommandFrame {
+        request_id: RequestId::new(1).expect("literal request ID"),
+        expected_revision: match payload {
+            CommandPayload::TelemetryConfigure(_) => ExpectedRevision::Exact(SessionRevision(7)),
+            _ => ExpectedRevision::Any,
+        },
+        payload,
+    };
+    let mut bytes = vec![0; 512];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(&frame, &mut bytes)
+        .expect("a counter command frame encodes");
+    bytes.truncate(len);
+    bytes
+}
+
 /// Append the payload `AUTOMATION_ENQUEUE` carried (#1627) to an empty command frame: `count`
 /// (field 1, `U16`), `record_bytes` (field 2, `U16`) and `records` (field 3, `Bytes`), one valid
 /// 32-byte point record. The result is the complete frame the retired command had.
 fn add_former_automation_enqueue_payload(bytes: &mut Vec<u8>) {
-    let record = AutomationRecord {
-        kind: AutomationKind::Point,
-        handle: ParameterHandle(1),
-        start: SampleTime(1),
-        end: SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
-    };
-    let mut record_bytes = [0_u8; AUTOMATION_RECORD_BYTES];
-    record
-        .encode_le(&mut record_bytes)
-        .expect("the former fixture record is valid");
+    // The 32-byte point record: kind 1, three reserved zero bytes, handle 1, start 1, end 1 (two
+    // `u64`), then both values 0.0 (two `f32`).
+    let mut record_bytes = [0_u8; 32];
+    record_bytes[0] = 1;
+    record_bytes[4] = 1;
+    record_bytes[8] = 1;
+    record_bytes[16] = 1;
     let mut field = |id: u16, wire: u8, value: &[u8]| {
         bytes.extend_from_slice(&id.to_le_bytes());
         bytes.extend_from_slice(&[wire, 1]);
@@ -480,7 +536,7 @@ fn add_former_automation_enqueue_payload(bytes: &mut Vec<u8>) {
         bytes.resize(bytes.len().next_multiple_of(8), 0);
     };
     field(1, 2, &1_u16.to_le_bytes());
-    field(2, 2, &(AUTOMATION_RECORD_BYTES as u16).to_le_bytes());
+    field(2, 2, &32_u16.to_le_bytes());
     field(3, 10, &record_bytes);
     let payload_len = u32::try_from(bytes.len() - OUTER_HEADER_BYTES).expect("a short frame");
     bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());

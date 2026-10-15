@@ -49,12 +49,10 @@ pub use model::{
     SessionStore, SessionStoreError, apply_session_edit,
 };
 pub use queue::{
-    AutomationBatchError, AutomationBatchSlot, AutomationEnqueueError, AutomationKind,
-    AutomationRecord, ControlCommandSlot, CounterTelemetryRecord, ParameterHandle,
-    ProtocolQueueConfig, ProtocolQueueError, ProtocolQueueResourceReport, ProtocolQueues,
-    QueueKind, QueueReport, ReliableEnqueueError, ReliableEventReservation,
-    ReliableEventReservations, ReliableHeader, ReliablePayload, ReliableSlot, TelemetryCounters,
-    TelemetryKey, TelemetryRecord,
+    ControlCommandSlot, CounterTelemetryRecord, ProtocolQueueConfig, ProtocolQueueError,
+    ProtocolQueueResourceReport, ProtocolQueues, QueueKind, QueueReport, ReliableEnqueueError,
+    ReliableEventReservation, ReliableEventReservations, ReliableHeader, ReliablePayload,
+    ReliableSlot, TelemetryCounters, TelemetryKey, TelemetryRecord,
 };
 pub use session_wire::{DecodedSessionTransaction, SessionTransactionFrame};
 pub use typed_frame::{
@@ -76,10 +74,8 @@ pub const PROTOCOL_MAJOR_V1: u16 = 1;
 pub const PROTOCOL_MINOR_V1: u16 = 0;
 /// Exact bytes in every BTLV outer header.
 pub const OUTER_HEADER_BYTES: usize = 48;
-/// The maximum number of records in one automation batch slot.
-pub const AUTOMATION_BATCH_RECORDS: usize = 256;
-/// Exact byte width of a transient automation record.
-pub const AUTOMATION_RECORD_BYTES: usize = 32;
+/// The maximum number of records in one meter or counter telemetry page.
+pub const MAXIMUM_TELEMETRY_PAGE_RECORDS: usize = 256;
 #[cfg(any(test, feature = "test-support"))]
 pub use controller::MockProvider;
 pub use controller::{

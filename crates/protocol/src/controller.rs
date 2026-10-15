@@ -934,7 +934,6 @@ impl ControlProvider for MockProvider {
 
 /// A typed control command after BTLV header validation. It deliberately has no PCM/media case.
 #[allow(missing_docs)] // Variant names and fields are the frozen command schema registry.
-#[allow(clippy::large_enum_variant)] // A fixed Copy automation slot must not be heap-indirected.
 pub enum ControlCommand<'a> {
     CapabilitiesGet,
     SessionSnapshotGet {
@@ -1303,13 +1302,13 @@ enum PendingTelemetryEvent {
         revision: SessionRevision,
         observed_sample: SampleTime,
         len: u16,
-        records: [MeterRecord; crate::AUTOMATION_BATCH_RECORDS],
+        records: [MeterRecord; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS],
     },
     Counter {
         revision: SessionRevision,
         observed_sample: SampleTime,
         len: u16,
-        values: [CounterValue; crate::AUTOMATION_BATCH_RECORDS],
+        values: [CounterValue; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS],
     },
 }
 
@@ -2922,7 +2921,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             let revision = first.key.revision;
             let observed_sample = first.observed_sample;
-            let mut records = [EMPTY_METER_RECORD; crate::AUTOMATION_BATCH_RECORDS];
+            let mut records = [EMPTY_METER_RECORD; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS];
             records[0] = MeterRecord {
                 handle: first.key.handle,
                 component: match first.key.component {
@@ -2969,7 +2968,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             let revision = first.key.revision;
             let observed_sample = first.observed_sample;
-            let mut values = [EMPTY_COUNTER_VALUE; crate::AUTOMATION_BATCH_RECORDS];
+            let mut values = [EMPTY_COUNTER_VALUE; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS];
             values[0] = CounterValue {
                 id: first.id,
                 value: first.value,
@@ -3413,7 +3412,6 @@ impl<P: ControlProvider> ProtocolController<P> {
     fn queue_backpressure_outcome(&self, report: QueueReport) -> Outcome {
         let queue_kind = match report.kind {
             crate::QueueKind::ControlCommand => BackpressureQueueKind::ControlCommand,
-            crate::QueueKind::Automation => BackpressureQueueKind::Automation,
             crate::QueueKind::ReliableResponse => BackpressureQueueKind::ReliableResponse,
             crate::QueueKind::ReliableEvent => BackpressureQueueKind::ReliableEvent,
             crate::QueueKind::Telemetry => BackpressureQueueKind::Telemetry,

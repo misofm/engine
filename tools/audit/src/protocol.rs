@@ -259,12 +259,9 @@ fn prepare_egress_corpus() -> EgressCorpus {
     let queues = ProtocolQueues::prepare(ProtocolQueueConfig {
         control_command_slots: NonZeroUsize::new(1).expect("control"),
         control_command_bytes: NonZeroUsize::new(64).expect("bytes"),
-        automation_batch_slots: NonZeroUsize::new(1).expect("automation"),
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(1).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
-        per_block_automation_density: NonZeroUsize::new(256).expect("density"),
-        quantum_frames: NonZeroUsize::new(1).expect("quantum"),
     })
     .expect("prepared queues");
     let mut controller = ProtocolController::new(

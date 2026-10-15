@@ -186,27 +186,17 @@ fn fixed_replay_arena_reports_response_and_reservation_bounds() {
     assert_eq!(cache.retained_bytes(), 0);
 }
 
-fn controller(replay_entries: usize, automation_slots: usize) -> ProtocolController<MockProvider> {
-    controller_at_sample(replay_entries, automation_slots, SampleTime(0))
-}
-
-fn controller_at_sample(
-    replay_entries: usize,
-    automation_slots: usize,
-    current_sample: SampleTime,
-) -> ProtocolController<MockProvider> {
+fn controller(replay_entries: usize) -> ProtocolController<MockProvider> {
     controller_over(
         parse_session_json(EXAMPLE).expect("fixture"),
         replay_entries,
-        automation_slots,
-        current_sample,
+        SampleTime(0),
     )
 }
 
 fn controller_over(
     model: session::SessionModel,
     replay_entries: usize,
-    automation_slots: usize,
     current_sample: SampleTime,
 ) -> ProtocolController<MockProvider> {
     let session = SessionStore::new(
@@ -224,12 +214,9 @@ fn controller_over(
     let queues = ProtocolQueues::prepare(crate::ProtocolQueueConfig {
         control_command_slots: NonZeroUsize::new(1).expect("one"),
         control_command_bytes: NonZeroUsize::new(64).expect("bytes"),
-        automation_batch_slots: NonZeroUsize::new(automation_slots).expect("automation"),
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(1).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
-        per_block_automation_density: NonZeroUsize::new(256).expect("density"),
-        quantum_frames: NonZeroUsize::new(1).expect("quantum"),
     })
     .expect("queues");
     ProtocolController::new(
@@ -283,7 +270,7 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
         let typed_reader_passes = crate::btlv::reader_passes();
         assert!(typed_reader_passes > 0);
 
-        let mut controller = controller(8, 1);
+        let mut controller = controller(8);
         crate::btlv::reset_reader_passes();
         let first = controller
             .process_b1b_btlv(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
@@ -311,7 +298,7 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
         .iter()
         .find(|frame| frame.name == "command.session_transaction_apply")
         .expect("frozen transaction frame");
-    let mut limited = controller(8, 1);
+    let mut limited = controller(8);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
     // `SetTrackConsole`, #1241 the VCA edits and #1553 `SetControl`, and decision 17 (#1561)
@@ -349,12 +336,9 @@ fn egress_controller(
     let queues = ProtocolQueues::prepare(crate::ProtocolQueueConfig {
         control_command_slots: NonZeroUsize::new(1).expect("control"),
         control_command_bytes: NonZeroUsize::new(64).expect("bytes"),
-        automation_batch_slots: NonZeroUsize::new(1).expect("automation"),
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(reliable_event_slots).expect("events"),
         telemetry_slots: NonZeroUsize::new(telemetry_slots).expect("telemetry"),
-        per_block_automation_density: NonZeroUsize::new(256).expect("density"),
-        quantum_frames: NonZeroUsize::new(1).expect("quantum"),
     })
     .expect("queues");
     ProtocolController::new(
@@ -482,22 +466,6 @@ fn capability<'a>(request_id: u64, bytes: &'a [u8]) -> ControllerRequest<'a> {
         canonical_bytes: bytes,
         command: ControlCommand::CapabilitiesGet,
     }
-}
-
-fn batch(request_id: u64, sample: u64) -> crate::AutomationBatchSlot {
-    crate::AutomationBatchSlot::new(
-        SessionRevision(7),
-        id(request_id),
-        &[crate::AutomationRecord {
-            kind: crate::AutomationKind::Point,
-            handle: crate::ParameterHandle(AUTOMATABLE_CONTROL),
-            start: SampleTime(sample),
-            end: SampleTime(sample),
-            start_value: 1.0,
-            end_value: 1.0,
-        }],
-    )
-    .expect("batch")
 }
 
 fn full_command(
@@ -653,7 +621,7 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
 
     let codec = ProtocolCodec::default();
     for (message_id, input) in cases {
-        let response = process_full_command(&mut controller(8, 2), &input);
+        let response = process_full_command(&mut controller(8), &input);
         let mut fields = [0_u16; 1024];
         match codec
             .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
@@ -680,7 +648,7 @@ fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
             position: Some(SampleTime(48)),
         }),
     );
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let first = process_full_command(&mut endpoint, &input);
     let events = |endpoint: &mut ProtocolController<MockProvider>| {
         endpoint
@@ -719,7 +687,7 @@ fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
 #[test]
 fn public_immediate_frame_path_never_builds_a_prepared_vec() {
     PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let input = full_command(
         1,
         ExpectedRevision::Any,
@@ -781,7 +749,7 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::SessionTransactionApply(&first_edits),
     );
-    let mut endpoint = controller(1, 2);
+    let mut endpoint = controller(1);
     TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
     crate::typed_frame::reset_frame_writer_passes();
     let committed = process_full_command(&mut endpoint, &first);
@@ -861,7 +829,7 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         ExpectedRevision::Exact(SessionRevision(6)),
         crate::CommandPayload::SessionTransactionApply(&conflict_edits),
     );
-    let mut conflicted = controller(4, 2);
+    let mut conflicted = controller(4);
     let before_conflict = conflicted.session().canonical_snapshot().to_owned();
     let clones_before_conflict = PROSPECTIVE_REPLAY_CLONES.with(core::cell::Cell::get);
     let direct_conflict = process_full_command(&mut conflicted, &conflict);
@@ -881,7 +849,7 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::SessionTransactionApply(&invalid_edits),
     );
-    let mut invalid_endpoint = controller(4, 2);
+    let mut invalid_endpoint = controller(4);
     let invalid_snapshot = invalid_endpoint.session().canonical_snapshot().to_owned();
     TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
     assert_eq!(
@@ -901,7 +869,7 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         );
     });
 
-    let mut prepared_compat = controller(4, 2);
+    let mut prepared_compat = controller(4);
     let prepared = prepared_compat
         .prepare_command_frame(&conflict, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
         .expect("public owned fallback");
@@ -914,7 +882,7 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         .expect("prepared compatibility bytes");
     assert_eq!(&prepared_bytes[..prepared_len], direct_conflict);
 
-    let mut pressured = controller(4, 2);
+    let mut pressured = controller(4);
     pressured.replay = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(1).expect("entry"),
         bytes: NonZeroUsize::new(64).expect("arena"),
@@ -954,7 +922,7 @@ fn full_frame_ingress_preserves_output_ownership_and_correlates_payload_errors()
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::SessionTransactionApply(&transaction),
     );
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
     RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
     let mut short = [0xa5_u8; 32];
@@ -1090,7 +1058,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         crate::CommandPayload::SessionTransactionApply(&transaction),
     );
 
-    let mut accepted = controller(8, 2);
+    let mut accepted = controller(8);
     let mut accepted_output = [0_u8; 2048];
     let accepted_len = accepted
         .process_command_frame_into(
@@ -1101,7 +1069,7 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         .expect("accepted one-call path");
     let accepted_event = accepted.queues_mut().try_dequeue_event().expect("event");
 
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let before_snapshot = endpoint.session().canonical_snapshot().to_owned();
     let before_event = endpoint
         .queues_mut()
@@ -1180,7 +1148,7 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
     );
 
     // The protocol-only path owns no render plan: the commit changes only the model (#1313 D4).
-    let mut direct = controller(8, 2);
+    let mut direct = controller(8);
     let mut direct_output = [0_u8; 2048];
     let direct_len = direct
         .process_command_frame_into(
@@ -1195,7 +1163,7 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
     );
 
     for path in [EditPath::Live, EditPath::ModelOnly, EditPath::Rebuild] {
-        let mut endpoint = controller(8, 2);
+        let mut endpoint = controller(8);
         let prepared = match endpoint
             .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
             .expect("prepare")
@@ -1279,7 +1247,7 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
 
     let first = transaction(1, 7, "replay-first");
     let second = transaction(2, 8, "replay-second");
-    let mut endpoint = controller(1, 2);
+    let mut endpoint = controller(1);
 
     let token = structural(&mut endpoint, &first);
     assert!(
@@ -1414,7 +1382,7 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
     };
 
     {
-        let mut endpoint = controller(8, 2);
+        let mut endpoint = controller(8);
         let snapshot = endpoint.session().canonical_snapshot().to_owned();
         let events = endpoint
             .queues_mut()
@@ -1494,7 +1462,7 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
 
     // A solo beside a model edit is a model transaction with a monitor write, in order, the later
     // write of a strip replacing the earlier.
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let mixed = [
         solo_edit(&track, true, Some(10)),
         SessionEdit::SetSessionId {
@@ -1527,7 +1495,7 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
     assert_eq!(endpoint.session().revision(), SessionRevision(8));
 
     // The one-call path has no overlay: it refuses the write, as it always did.
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let input = full_command(
         4,
         ExpectedRevision::Exact(SessionRevision(7)),
@@ -1581,8 +1549,8 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::SessionTransactionApply(&first_edits),
     );
-    let mut owner = controller(8, 2);
-    let mut other = controller(8, 2);
+    let mut owner = controller(8);
+    let mut other = controller(8);
 
     let canceled = structural(&mut owner, &first);
     assert!(matches!(
@@ -1666,7 +1634,7 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
 
 #[test]
 fn identical_replay_changed_reuse_eviction_and_expiry_are_deterministic() {
-    let mut controller = controller(1, 1);
+    let mut controller = controller(1);
     let first = controller.process(capability(1, b"first"));
     assert_eq!(first.status, StatusCode::Ok);
     assert_eq!(controller.process(capability(1, b"first")), first);
@@ -1705,7 +1673,7 @@ fn compatibility_response_uses_one_frame_backing_and_cached_header_only_decode()
         );
     }
 
-    let mut controller = controller(2, 1);
+    let mut controller = controller(2);
     let first = controller.process(capability(1, b"single-frame-backing"));
     assert_shared_payload_backing(&first);
     let mut payload = vec![0xa5; first.payload_len()];
@@ -1742,7 +1710,7 @@ fn compatibility_response_uses_one_frame_backing_and_cached_header_only_decode()
 
 #[test]
 fn mutations_require_exact_revision_and_roll_back_on_validation() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let any = ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Any,
@@ -1785,7 +1753,7 @@ fn session_diagnostic_path_segments_preserve_field_index_and_stable_id_variants(
 
 #[test]
 fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     controller.config.maximum_response_diagnostics = 1;
     // A structural upsert can carry a bad value to the final validation; `SET_CONTROL` refuses a
     // non-finite value at its own edit instead.
@@ -1845,7 +1813,7 @@ fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
 
 #[test]
 fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let request = ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -1875,7 +1843,7 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
 /// path, or commits the refused transaction.
 #[test]
 fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let response = controller.process(ControllerRequest {
         request_id: id(1),
         expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
@@ -1926,10 +1894,10 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 4 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 4 + 10 + 1);
     for row in rows {
         let mut endpoint =
-            controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
+            controller_over(conformance::console_session_fixture(), 8, SampleTime(0));
         let snapshot = endpoint.session().canonical_snapshot().to_owned();
         if row.status == StatusCode::UnsupportedMessage as u16 {
             // A message ID that decodes to no message leaves no safe request identity to
@@ -2025,7 +1993,7 @@ fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
         quality: session::EffectQuality::High,
         link_mode: session::LinkMode::Maximum,
     });
-    let mut endpoint = controller_over(fixture, 8, 1, SampleTime(0));
+    let mut endpoint = controller_over(fixture, 8, SampleTime(0));
     let snapshot = endpoint.session().canonical_snapshot().to_owned();
     let edits = [SessionEdit::SetConsole {
         console: console.clone(),
@@ -2212,7 +2180,7 @@ fn every_non_ok_status_has_a_canonical_common_response_payload() {
         if let Some(error) = case.decoder_error {
             assert_eq!(error.status(), case.status, "{} decoder mapping", case.name);
         }
-        let controller = controller(4, 1);
+        let controller = controller(4);
         let request_id = id(u64::try_from(index).expect("case index fits") + 1);
         let response = controller.compatibility_response(
             MessageId::CapabilitiesGet,
@@ -2268,7 +2236,7 @@ fn replay_admission_rejects_before_provider_execution() {
 
 #[test]
 fn decoded_btlv_transaction_reaches_same_atomic_session_store() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let edits = [SessionEdit::SetSessionId {
         session_id: session::StableId::parse("renamed").expect("ID"),
     }];
@@ -2349,7 +2317,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
             sample_rate_hz: rate,
         }];
 
-        let mut typed = controller(4, 1);
+        let mut typed = controller(4);
         let before_revision = typed.session().revision();
         let before_snapshot = typed.session().canonical_snapshot().to_owned();
         let before_model = typed.session().compiled().normalized_model().clone();
@@ -2369,7 +2337,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
             before_events,
         );
 
-        let mut btlv = controller(4, 1);
+        let mut btlv = controller(4);
         let before_revision = btlv.session().revision();
         let before_snapshot = btlv.session().canonical_snapshot().to_owned();
         let before_model = btlv.session().compiled().normalized_model().clone();
@@ -2405,7 +2373,7 @@ fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
 
 #[test]
 fn decoded_track_edit_reaches_same_atomic_session_store() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let edits = [builtin_edit(
         "vocal",
         "fader_db",
@@ -2442,7 +2410,7 @@ fn decoded_track_edit_reaches_same_atomic_session_store() {
 
 #[test]
 fn decoded_route_edit_reaches_same_atomic_session_store() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let edits = [SessionEdit::set_control(
         crate::control_core::row_address(
             crate::control_core::Owner::Route(session::StableId::parse("to-main").expect("ID")),
@@ -2481,7 +2449,7 @@ fn decoded_route_edit_reaches_same_atomic_session_store() {
 
 #[test]
 fn decoded_invalid_automation_rolls_back_after_final_compilation() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let before = controller.session().canonical_snapshot().to_owned();
     let edits = [SessionEdit::SetAutomationSegments {
         automation_id: session::StableId::parse("eq-gain").expect("ID"),
@@ -2570,7 +2538,7 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
         position: Some(SampleTime(9)),
     };
     let set_bytes = set_frame(2, ExpectedRevision::Exact(SessionRevision(7)), set);
-    let mut controller = controller(8, 1);
+    let mut controller = controller(8);
     let get_response = controller
         .process_b1b_btlv(&get_frame, &mut DecodeScratch::new(&mut [0_u16; 0]))
         .expect("typed get");
@@ -2688,19 +2656,14 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
 
 /// #1628 gate 3. Nothing cancels: a transaction that changes the revision reserves and emits
 /// exactly its `SESSION_COMMITTED`, and a `TRANSPORT_SET` that locates exactly its
-/// `TRANSPORT_STATE`, even with a batch in the automation queue (which `AUTOMATION_ENQUEUE`, now
-/// retired, could once have filled). A reliable-event queue of two slots holds each pair of events
-/// only if neither commit also reserves a cancellation.
+/// `TRANSPORT_STATE`. A reliable-event queue of two slots holds each pair of events only if
+/// neither commit also reserves a cancellation.
 ///
 /// Red if a revision change or a locate still reserves or emits an `AUTOMATION_CANCELED` event,
 /// which would spend a reliable slot for nothing and put a retired ID on the wire.
 #[test]
 fn a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events() {
     let mut controller = egress_controller(2, 1);
-    controller
-        .queues_mut()
-        .try_enqueue_automation(SampleTime(0), batch(9, 100))
-        .expect("queued batch");
     let edits = [SessionEdit::SetSessionId {
         session_id: session::StableId::parse("nothing-cancels").expect("ID"),
     }];
@@ -2825,7 +2788,7 @@ fn b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive() {
     codec
         .encode_telemetry_configuration(&configuration, &mut config_payload)
         .expect("config");
-    let mut controller = controller(8, 1);
+    let mut controller = controller(8);
     let first = controller
         .process_b1b_btlv(
             &frame(
@@ -2950,7 +2913,7 @@ fn b3b2_diagnostics_btlv_pages_are_typed_nondestructive_and_expire_old_cursors()
     }
 
     let codec = ProtocolCodec::default();
-    let mut controller = controller(8, 1);
+    let mut controller = controller(8);
     let first_request = DiagnosticsRequest {
         after_sequence: 0,
         limit: 1,
@@ -3142,7 +3105,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
             12,
         ),
     ] {
-        let mut endpoint = controller(8, 1);
+        let mut endpoint = controller(8);
         endpoint.set_provider_features(features);
         let response = endpoint.process(capability(1, b"features"));
         let decoded = codec
@@ -3166,7 +3129,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
         }
         assert_ne!(decoded.flags.0 & (1 << required_bit), 0);
     }
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     endpoint.set_provider_features(ProviderFeatures::NONE);
     let caps = endpoint.process(capability(1, b"none"));
     let decoded = codec
@@ -3200,7 +3163,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
     );
     assert!(endpoint.queues_mut().try_dequeue_event().is_err());
 
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     endpoint.config.maximum_transaction_edits = 0;
     let caps = endpoint.process(capability(1, b"zero-edit-limit"));
     let decoded = codec
@@ -3235,7 +3198,7 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
 
 #[test]
 fn session_commit_reserves_reliable_event_before_replacing_store() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let before_snapshot = controller.session().canonical_snapshot().to_owned();
     controller
         .queues_mut()
@@ -3263,7 +3226,7 @@ fn session_commit_reserves_reliable_event_before_replacing_store() {
 
 #[test]
 fn committed_transaction_emits_typed_zero_header_id_event() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let edits = [SessionEdit::SetSessionId {
         session_id: session::StableId::parse("evented-commit").expect("ID"),
     }];
@@ -3286,7 +3249,7 @@ fn committed_transaction_emits_typed_zero_header_id_event() {
 
 #[test]
 fn snapshot_pagination_has_exact_revision_conflict_and_eof_boundaries() {
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let codec = ProtocolCodec::default();
     let request = |request_id, revision, offset, maximum_bytes| {
         let snapshot = crate::SessionSnapshotRequest {
@@ -3387,7 +3350,7 @@ fn canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pa
         bytes
     }
 
-    let mut controller = controller(4, 1);
+    let mut controller = controller(4);
     let codec = ProtocolCodec::default();
     let mut initial_bytes = Vec::new();
     let mut initial_offset = 0_u64;
@@ -3858,7 +3821,7 @@ fn control_request(
 /// provider.
 #[test]
 fn control_messages_dispatch_through_typed_frames_to_the_provider() {
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     let mut list = |request: &ControlListRequest, request_id: u64| {
         let input = full_command(
             request_id,
@@ -3959,7 +3922,7 @@ fn control_messages_dispatch_through_typed_frames_to_the_provider() {
 /// page is marked as the end of the list, or its cursor skips or repeats a row.
 #[test]
 fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     let row = mock_controls().pop().expect("a control row");
     let count = 200_u32;
     endpoint.provider_mut().controls = (1..=count)
@@ -4054,7 +4017,7 @@ fn a_page_is_trimmed_to_the_response_bound_and_the_list_still_pages_through() {
 /// to one row (which is valid) and answers a corrupt list as if it were a short one.
 #[test]
 fn a_content_invalid_provider_page_is_internal_and_is_not_trimmed() {
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     let row = mock_controls().pop().expect("a control row");
     endpoint.provider_mut().controls = (0..3)
         .map(|_| crate::ControlEntry {
@@ -4086,7 +4049,7 @@ fn a_content_invalid_provider_page_is_internal_and_is_not_trimmed() {
 /// an untyped status that a client cannot tell from an edit conflict.
 #[test]
 fn a_stale_structure_epoch_is_a_revision_conflict_that_names_itself() {
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     for (request_id, stale) in [(1_u64, false), (2, true), (3, true)] {
         let request = control_request(if stale { 2 } else { 0 }, 0, 8, None);
         let payload = if request_id == 3 {
@@ -4136,7 +4099,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     assert_eq!(
         ids(&mut endpoint, 1),
         (vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14], true)
@@ -4187,11 +4150,10 @@ fn a_frame_under_the_retired_automation_id_is_refused_before_any_state_changes()
         row.bytes.len() > crate::OUTER_HEADER_BYTES,
         "a former payload"
     );
-    let mut endpoint = controller(8, 2);
+    let mut endpoint = controller(8);
     let reports = |endpoint: &mut ProtocolController<MockProvider>| {
         [
             crate::QueueKind::ControlCommand,
-            crate::QueueKind::Automation,
             crate::QueueKind::ReliableResponse,
             crate::QueueKind::ReliableEvent,
             crate::QueueKind::Telemetry,
@@ -4264,7 +4226,7 @@ fn response_request(points: u32) -> crate::ResponseGetRequest {
 /// oversized reply is cached or sent, a replayed read runs twice, or a read moves the revision.
 #[test]
 fn response_get_dispatches_refuses_and_replays_through_the_controller() {
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     let revision = endpoint.session().revision();
     let ask = |endpoint: &mut ProtocolController<MockProvider>,
                request_id: u64,
@@ -4357,7 +4319,7 @@ fn response_get_dispatches_refuses_and_replays_through_the_controller() {
 #[test]
 fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
     let codec = ProtocolCodec::default();
-    let mut endpoint = controller(8, 1);
+    let mut endpoint = controller(8);
     let response = endpoint.process(capability(1, b"tie"));
     assert!(codec.decode_capabilities(response.payload(), 23).is_ok());
     // Re-encode the registry with one side of the tie removed.

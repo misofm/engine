@@ -29,12 +29,11 @@ use crate::response::{
 };
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
-/// counters, the canceled-automation count, `live_values_superseded` (#1312 D8) and
-/// `transition_reprepare_refusals` (D6). Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 5] = [
+/// counters, `live_values_superseded` (#1312 D8) and `transition_reprepare_refusals` (D6). Each
+/// reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 4] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
-    CounterId::CanceledAutomation,
     CounterId::LiveValuesSuperseded,
     CounterId::TransitionReprepareRefusals,
 ];
@@ -3208,16 +3207,14 @@ mod tests {
         assert_eq!(counters.observed_sample, SampleTime(256));
         assert_eq!(counters.values[0].value, 7);
         assert_eq!(counters.values[1].value, 9);
-        // Nothing cancels automation any more (#1628): the counter stays 0 until #1629 retires it.
-        assert_eq!(counters.values[2].id, CounterId::CanceledAutomation);
-        assert_eq!(counters.values[2].value, 0);
-        assert_eq!(counters.values[3].id, CounterId::LiveValuesSuperseded);
-        assert_eq!(counters.values[3].value, 13);
+        assert_eq!(counters.values[2].id, CounterId::LiveValuesSuperseded);
+        assert_eq!(counters.values[2].value, 13);
         assert_eq!(
-            counters.values[4].id,
+            counters.values[3].id,
             CounterId::TransitionReprepareRefusals
         );
-        assert_eq!(counters.values[4].value, 0);
+        assert_eq!(counters.values[3].value, 0);
+        assert_eq!(counters.values.len(), 4);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

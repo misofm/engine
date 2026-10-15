@@ -952,13 +952,13 @@ pub struct DiagnosticEvent {
     pub diagnostic: Diagnostic,
 }
 
-/// Frozen registered non-resetting counter IDs.
+/// Frozen registered non-resetting counter IDs. IDs 2 and 11 to 14 are retired (#1629): refused,
+/// never reallocated.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
 #[allow(missing_docs)]
 pub enum CounterId {
     ControlCommandBackpressure = 1,
-    AutomationBackpressure = 2,
     ReliableResponseBackpressure = 3,
     ReliableEventBackpressure = 4,
     TelemetryCoalesced = 5,
@@ -967,10 +967,6 @@ pub enum CounterId {
     ReplayHits = 8,
     RequestIdReuse = 9,
     ReplayExpired = 10,
-    LateAutomation = 11,
-    CanceledAutomation = 12,
-    AutomationTimePast = 13,
-    AutomationOrderReject = 14,
     ValidationFailures = 15,
     LiveValuesSuperseded = 16,
     TransitionReprepareRefusals = 17,
@@ -1095,14 +1091,13 @@ pub struct Diagnostic {
     pub provider_sequence: Option<u64>,
 }
 
-/// Exact queue-kind codes used by typed backpressure payloads.
+/// Exact queue-kind codes used by typed backpressure payloads. Code 2 is retired (#1629): refused,
+/// never reallocated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BackpressureQueueKind {
     /// Reliable copied control command queue.
     ControlCommand = 1,
-    /// Fixed automation batch queue.
-    Automation = 2,
     /// Reliable response queue.
     ReliableResponse = 3,
     /// Reliable event queue.
@@ -1117,7 +1112,6 @@ impl BackpressureQueueKind {
     fn decode(value: u8) -> Result<Self, DecodeError> {
         match value {
             1 => Ok(Self::ControlCommand),
-            2 => Ok(Self::Automation),
             3 => Ok(Self::ReliableResponse),
             4 => Ok(Self::ReliableEvent),
             5 => Ok(Self::Telemetry),
@@ -2170,7 +2164,6 @@ fn decode_meter_record(value: &[u8]) -> Result<MeterRecord, DecodeError> {
 fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
     match value {
         1 => Ok(CounterId::ControlCommandBackpressure),
-        2 => Ok(CounterId::AutomationBackpressure),
         3 => Ok(CounterId::ReliableResponseBackpressure),
         4 => Ok(CounterId::ReliableEventBackpressure),
         5 => Ok(CounterId::TelemetryCoalesced),
@@ -2179,14 +2172,10 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         8 => Ok(CounterId::ReplayHits),
         9 => Ok(CounterId::RequestIdReuse),
         10 => Ok(CounterId::ReplayExpired),
-        11 => Ok(CounterId::LateAutomation),
-        12 => Ok(CounterId::CanceledAutomation),
-        13 => Ok(CounterId::AutomationTimePast),
-        14 => Ok(CounterId::AutomationOrderReject),
         15 => Ok(CounterId::ValidationFailures),
         16 => Ok(CounterId::LiveValuesSuperseded),
         17 => Ok(CounterId::TransitionReprepareRefusals),
-        _ => Err(DecodeError::InvalidTlv),
+        _ => Err(DecodeError::InvalidField),
     }
 }
 
