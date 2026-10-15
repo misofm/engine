@@ -85,3 +85,52 @@ Departures: `crates/capi/tests/empty_boot.rs` joins the realtime policy's unsafe
 binary that calls the C entries does. Otherwise none. Browser part (empty-boot sizes, parity row, qualification leg) stays with lane W;
 the stale remark "A session with no source or track does not prepare" in
 `hosts/host-web/tests/control_parity.rs` (`mono_model`) is theirs to drop.
+
+## Decision record: browser part (batch 13, lane W)
+
+What shipped:
+
+- **Two browser boot-time sizes were fixed at zero** (D2); everything else the spec lists (strip
+  order, meter frame and header, source map, observation tables, staging) already handled zero and
+  needed no change:
+  1. `AudioWorkletEngineHost::meters_attached` (the meter lease's gate) read the plan's strip
+     meters, so an empty plan refused the lease with `RESULT_UNSUPPORTED` while the worklet and the
+     SDK already derive `metersAttached` from the boot option (`liveControlMeterBlocks != 0`):
+     the SDK's preparation rehearsal (`prepareBrowserSessionInWorker`) would have thrown "Preparation
+     meter lease refused" on an empty session. It now reads the configured window.
+  2. The master-window ring was sized from the first strip meter's queue (`master_capacity`), so a
+     session that booted empty kept a zero-length ring for its whole life and the first strip's
+     master peaks were all counted lost. It is `METER_QUEUE_DEPTH` when a window is configured and
+     no strip meter exists.
+- `poll_meters` with no strip meter publishes the master's own windows (a frame of the master's
+  two peaks, header `trackCount` 0), so a page that leases the meters on an empty mixer gets a
+  continuous stream; the first strip's adoption restarts delivery as any non-carried swap does.
+  No allocation: the branch reads the preallocated master ring and writes the preallocated frame.
+- A boot with a designated master strip (`liveControlMasterTrackPlusOne != 0`) over an empty
+  session is still refused (`host.observation.master_track`: the strip does not exist). That is the
+  honest answer for a strip index; a live master designation is successor work (see the report).
+
+Gates:
+
+- Parity row: `hosts/host-web/tests/control_parity.rs`
+  `both_hosts_boot_an_empty_session_and_add_the_first_stem_alike` (four launch rates): empty boot
+  (a console slot declared), identical silence, identical control list / state / snapshot bytes,
+  one structural transaction (source, track, route) with the same verdict on both legs, the stem
+  fed after the swap and heard bit for bit alike. The stale "does not prepare" remark at
+  `mono_model` is dropped.
+- Browser module: `hosts/host-web/tests/empty_boot.rs`
+  `an_empty_session_boots_and_grows_by_a_structural_transaction` (own binary, the render-locked
+  allocator, through the exports): status, boot watermark, control list (session rows only), the
+  master-only meter frame, zero render-locked allocations on the empty plan, across the first
+  strip's swap and while the stem plays; the meter frame grows to the strip and the control list's
+  structure epoch moves.
+- Fixtures: `hosts/host-web/tests/empty_boot_fixture.rs` writes `qualification/empty-session.json`
+  (the live-control session with no source, track or route) and
+  `qualification/empty-boot-frame.json` (the codec's frame that adds them back), byte-compared.
+- Qualification leg (`runEmptyBootQualification`; gates `empty-boot-silence`, `empty-boot-shape`,
+  `empty-boot-meter`, `empty-boot-first-stem`; the render-allocation list gains `empty-boot` and
+  `empty-boot-first-stem`): chromium, firefox, webkit with `--check-matrix --self-test-mutations`.
+  The SDK has no structural-edit builder, so the page sends the codec's frame through the SDK's
+  endpoint (`sendStructuralFrameThroughSdk`, which stamps the allocator's next request ID and the
+  committed revision).
+- Wasm build: boot high-water growth 20,447,232 bytes (before: 20,447,232).
