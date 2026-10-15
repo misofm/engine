@@ -168,8 +168,7 @@ pub fn render_scalar(
             .filter(|(at, _)| *at >= offset as u64 && *at < end as u64)
             .map(|(_, span)| {
                 let mut span = *span;
-                span.start_sample = offset as u64;
-                span.end_sample = offset as u64;
+                span.sample = offset as u64;
                 span
             })
             .collect();
@@ -213,8 +212,7 @@ pub fn render_bank(
             for (at, lane, span) in spans {
                 if *lane == track && *at >= offset as u64 && *at < end as u64 {
                     let mut span = *span;
-                    span.start_sample = offset as u64;
-                    span.end_sample = offset as u64;
+                    span.sample = offset as u64;
                     flat.push(span);
                 }
             }

@@ -420,11 +420,6 @@ scalar_enum!(EffectQuality {Draft=1,Normal=2,High=3});
 pub type Quality = EffectQuality;
 scalar_enum!(LinkMode {DualMono=1,Maximum=2,Average=3});
 scalar_enum!(ResetKind {FullToDefaults=1,DiscontinuityKeepParameters=2});
-// Values 2 (`Step`), 3 (`Linear`) and 4 (`Exponential`) are retired (#1636): no producer stages
-// them and no effect accepts them. `from_raw(2..=4)` is `None`; the values are never reallocated
-// and never renumbered.
-scalar_enum!(AutomationSpanKind {Point=1});
-pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
 scalar_enum!(StepSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
 scalar_enum!(StepUnit {Absolute=1,Cents=2,Ratio=3,Index=4});
@@ -1646,15 +1641,18 @@ impl BankProcessReport {
         }
     }
 }
+/// One value for one parameter channel at one sample: the whole of an effect's automation input.
+///
+/// Every span is a point. The span kinds `Step`, `Linear` and `Exponential` (raw values 2 to 4 of
+/// the retired `AutomationSpanKind`) were retired in #1636 because no producer stages them and no
+/// effect accepts them, and #1686 removed the kind and the end of a span, which a point only
+/// repeats from its start. Those raw values are never reallocated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreparedAutomationSpan {
-    pub kind: AutomationSpanKind,
     pub channel: ParameterChannel,
     pub parameter_index: u32,
-    pub start_sample: u64,
-    pub end_sample: u64,
-    pub start_value: f32,
-    pub end_value: f32,
+    pub sample: u64,
+    pub value: f32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessBlockError {
@@ -1812,25 +1810,14 @@ pub fn valid_runtime_span(
     let Some(p) = descriptor.parameters.get(s.parameter_index as usize) else {
         return false;
     };
-    if !s.start_value.is_finite()
-        || !s.end_value.is_finite()
-        || s.start_sample < first
-        || s.start_sample >= first.saturating_add(frames as u64)
-        || !parameter_value_valid(p, s.start_value)
-        || !parameter_value_valid(p, s.end_value)
-        || (p.channel_policy == ParameterChannelPolicy::Shared
+    s.value.is_finite()
+        && s.sample >= first
+        && s.sample < first.saturating_add(frames as u64)
+        && parameter_value_valid(p, s.value)
+        && !(p.channel_policy == ParameterChannelPolicy::Shared
             && s.channel != ParameterChannel::Both)
-        || (p.channel_policy == ParameterChannelPolicy::PerLane
+        && !(p.channel_policy == ParameterChannelPolicy::PerLane
             && s.channel == ParameterChannel::Both)
-    {
-        return false;
-    }
-    match s.kind {
-        AutomationSpanKind::Point => {
-            s.start_sample == s.end_sample
-                && canonical_bits(s.start_value) == canonical_bits(s.end_value)
-        }
-    }
 }
 
 /// Validate the compiler-owned canonical ordering and non-overlap rules for one delivered block.
@@ -1860,22 +1847,21 @@ pub fn validate_automation_block(
         if !valid_runtime_span(span, metadata.descriptor, first_sample, frames) {
             return Err(ProcessBlockError::Automation);
         }
-        let sort_key = (span.start_sample, span.parameter_index, span.channel);
+        let sort_key = (span.sample, span.parameter_index, span.channel);
         if prior_sort_key.is_some_and(|prior| sort_key < prior) {
             return Err(ProcessBlockError::Automation);
         }
         if let Some(previous) = spans[..span_index].iter().rev().find(|previous| {
             previous.parameter_index == span.parameter_index && previous.channel == span.channel
-        }) && (span.start_sample < previous.end_sample
-            || (span.start_sample == previous.end_sample
-                && canonical_bits(span.start_value) != canonical_bits(previous.end_value)))
+        }) && (span.sample < previous.sample
+            || (span.sample == previous.sample
+                && canonical_bits(span.value) != canonical_bits(previous.value)))
         {
             return Err(ProcessBlockError::Automation);
         }
         let parameter = &metadata.descriptor.parameters[span.parameter_index as usize];
         if parameter.automation_rate == AutomationRate::None
-            || (parameter.automation_rate == AutomationRate::Block
-                && span.start_sample != first_sample)
+            || (parameter.automation_rate == AutomationRate::Block && span.sample != first_sample)
         {
             return Err(ProcessBlockError::Automation);
         }
@@ -3211,25 +3197,16 @@ mod bank_width_tests {
 
 #[cfg(test)]
 mod automation_smoothing_validity_tests {
-    use super::{
-        AutomationRate, AutomationSpanKind, SmoothingRule, parameter_automation_smoothing_valid,
-    };
+    use super::{AutomationRate, SmoothingRule, parameter_automation_smoothing_valid};
 
-    /// Red if a retired automation value parses again (#1636): a descriptor could declare a rate
-    /// the engine never delivers, or a producer could stage a span no effect accepts.
+    /// Red if a retired automation rate parses again (#1636): a descriptor could declare a rate
+    /// the engine never delivers.
     #[test]
     fn retired_automation_values_are_refused() {
         assert_eq!(AutomationRate::from_raw(1), None);
         assert_eq!(AutomationRate::from_raw(2), Some(AutomationRate::Block));
         assert_eq!(AutomationRate::from_raw(3), Some(AutomationRate::None));
         assert_eq!(AutomationRate::from_raw(4), None);
-        assert_eq!(
-            AutomationSpanKind::from_raw(1),
-            Some(AutomationSpanKind::Point)
-        );
-        for raw in 2..=4 {
-            assert_eq!(AutomationSpanKind::from_raw(raw), None, "{raw}");
-        }
     }
 
     #[test]

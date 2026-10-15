@@ -39,18 +39,17 @@ mod state;
 pub mod corpus;
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationSample, ObservationTapId, ParameterAccessError, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
-    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedParameterState, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
+    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
+    ObservationTapId, ParameterAccessError, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedParameterState,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
@@ -419,8 +418,7 @@ fn initial_defaults(
 /// Applies one lane's automation spans to its ramps.
 ///
 /// Validation is unchanged from V1 and deliberately strict: a span must be inside the prepared
-/// automation capacity, a `Point` at exactly `first_sample`, with `start_value` and `end_value`
-/// bit-identical, inside the parameter's domain, addressed to a single channel, in strictly
+/// automation capacity, a span at exactly `first_sample`, inside the parameter's domain, addressed to a single channel, in strictly
 /// increasing `(parameter, channel)` order, and not a duplicate. Anything else is counted in
 /// `invalid_spans` and ignored — never applied partially.
 fn apply_automation<L: Lane>(
@@ -455,11 +453,8 @@ fn apply_automation<L: Lane>(
         };
         let valid = span_index < automation_capacity as usize
             && parameter_index < RAMP_COUNT
-            && span.kind == AutomationSpanKind::Point
-            && span.start_sample == first_sample
-            && span.end_sample == first_sample
-            && span.start_value.to_bits() == span.end_value.to_bits()
-            && parameter_value_valid(&PARAMETER_SPECS[parameter_index], span.start_value)
+            && span.sample == first_sample
+            && parameter_value_valid(&PARAMETER_SPECS[parameter_index], span.value)
             && last_order.is_none_or(|previous| order > previous)
             && pending[channel_index][parameter_index].is_none();
         if !valid {
@@ -467,7 +462,7 @@ fn apply_automation<L: Lane>(
             continue;
         }
         last_order = Some(order);
-        pending[channel_index][parameter_index] = Some(normalize_zero(span.start_value));
+        pending[channel_index][parameter_index] = Some(normalize_zero(span.value));
     }
     for (parameter_index, (left_value, right_value)) in
         pending[0].iter().zip(pending[1].iter()).enumerate()

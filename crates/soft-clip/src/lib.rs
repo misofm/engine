@@ -23,9 +23,9 @@
 //! layout version is rejected with `effect.state.version`.
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
+    LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
     PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
@@ -624,18 +624,15 @@ fn apply_automation<L: Lane>(
         };
         let valid = span_index < automation_capacity as usize
             && parameter < PARAMETER_COUNT
-            && span.kind == AutomationSpanKind::Point
-            && span.start_sample == first_sample
-            && span.end_sample == first_sample
-            && span.start_value.to_bits() == span.end_value.to_bits()
-            && parameter_value_valid(parameter, span.start_value)
+            && span.sample == first_sample
+            && parameter_value_valid(parameter, span.value)
             && prior.is_none_or(|previous| order > previous)
             && pending[channel][parameter].is_none();
         if !valid {
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         }
-        let Some(value) = convert_parameter(parameter, normalize_zero(span.start_value)) else {
+        let Some(value) = convert_parameter(parameter, normalize_zero(span.value)) else {
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };

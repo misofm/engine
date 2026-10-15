@@ -4,10 +4,9 @@
 #![allow(dead_code)]
 
 use effect_contract::{
-    AutomationSpanKind, BypassSwitch, ChannelSymmetryWitness, EffectCellWriter, EffectControlLane,
-    EffectControlRecord, EffectLaneShape, EffectLaneSpec, EffectWriteRefusal,
-    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
-    Staged, effect_control_lane,
+    BypassSwitch, ChannelSymmetryWitness, EffectCellWriter, EffectControlLane, EffectControlRecord,
+    EffectLaneShape, EffectLaneSpec, EffectWriteRefusal, PREPARED_EFFECT_TARGET_WORDS,
+    ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget, Staged, effect_control_lane,
 };
 use engine::realtime::{GatePin, LiveSnapshot, LiveValuesSuperseded, RevisionGate};
 
@@ -16,13 +15,10 @@ pub(crate) const UNBYPASSED: u8 = ChannelSymmetryWitness::UNBYPASSED;
 
 pub(crate) fn idle() -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Both,
         parameter_index: u32::MAX,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: 0.0,
-        end_value: 0.0,
+        sample: 0,
+        value: 0.0,
     }
 }
 
@@ -156,13 +152,7 @@ impl Rig {
     pub(crate) fn staged_spans(&self, staged: Staged) -> Vec<(u32, ParameterChannel, u32)> {
         self.staging[..staged.staged]
             .iter()
-            .map(|span| {
-                (
-                    span.parameter_index,
-                    span.channel,
-                    span.start_value.to_bits(),
-                )
-            })
+            .map(|span| (span.parameter_index, span.channel, span.value.to_bits()))
             .collect()
     }
 }

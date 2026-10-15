@@ -296,13 +296,15 @@ One-pole-99 likewise precomputes `a = exp(ln(0.01)/N)` and `1-a` once, then
 `effect_contract::ParameterSmoother` states the same law for the control plane, and
 `effect-runtime/tests/contract_ramp_identity.rs` proves the two agree bit for bit.
 
-V1 runtime automation is `Point` spans whose `start_sample` equals the block's first sample,
-validated off render by `validate_automation_block`; an effect trusts the slice it is given.
-The `Step`, `Linear` and `Exponential` span kinds (raw values 2 to 4), `automation_segment_value`
-and the `Sample` automation rate (raw value 1) are retired (#1636): no producer stages them and no
-effect accepts them, so `AutomationSpanKind::from_raw` refuses 2 to 4, `AutomationRate::from_raw`
-refuses 1, and the values are never reallocated or renumbered. A parameter is automated at block
-rate or not at all. Malformed render spans are ignored, counted once, and do not
+V1 runtime automation is `PreparedAutomationSpan`s: each names one parameter channel, one `sample`
+(equal to the block's first sample) and one `value`. They are validated off render by
+`validate_automation_block`; an effect trusts the slice it is given. A span has no kind and no
+end. The `Step`, `Linear` and `Exponential` span kinds (raw values 2 to 4 of the retired
+`AutomationSpanKind`), `automation_segment_value` and the `Sample` automation rate (raw value 1) are
+retired (#1636): no producer stages them and no effect accepts them, and #1686 removed the kind
+and the end that only a moving span could use. `AutomationRate::from_raw` refuses 1, and the
+retired values are never reallocated or renumbered. A parameter is automated at block rate or not
+at all. Malformed render spans are ignored, counted once, and do not
 change the last valid target.
 
 Effects may opt into `NativeEffectTargetPreparation` (#807). Their control owner validates
@@ -353,7 +355,7 @@ and is an effect-identity change, never a contract cleanup. Per-lane audio, dela
 envelope, smoother, and dual-mono detector state stays in the corresponding lane section. Only
 shared configuration and an explicitly linked detector may be common. Full reset restores
 prepared defaults; discontinuity reset keeps targets, clears histories and snaps every parameter
-ramp in flight to its target (runtime automation is `Point` spans only, so no span stays active).
+ramp in flight to its target (a runtime automation span names one sample and one value, so no span stays active).
 
 ## Stable diagnostics
 

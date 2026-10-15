@@ -1439,13 +1439,10 @@ impl LiveControlEffect {
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         let spans: Box<[PreparedAutomationSpan]> = vec![
             PreparedAutomationSpan {
-                kind: effect_contract::AutomationSpanKind::Point,
                 channel: effect_contract::ParameterChannel::Both,
                 parameter_index: 0,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 0.0,
-                end_value: 0.0,
+                sample: 0,
+                value: 0.0,
             };
             capacity
         ]

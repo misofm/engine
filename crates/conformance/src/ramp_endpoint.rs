@@ -26,12 +26,11 @@
 //! admitted the factory (issue #1462 D1).
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectId, EffectProcessBlock,
-    InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ParameterChannel,
-    ParameterChannelPolicy, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, StatePayloadOutput,
-    default_initial_values,
+    BankWidth, EffectBankProcessBlock, EffectId, EffectProcessBlock, InitialParameterValue,
+    LinkMode, NativeEffectFactory, NativeEffectRegistry, ParameterChannel, ParameterChannelPolicy,
+    PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedEffect, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort, RegisteredTailBound, StatePayloadOutput, default_initial_values,
 };
 
 use crate::randomized::admit;
@@ -213,13 +212,10 @@ impl Admitted {
         channels
             .iter()
             .map(|&channel| PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel,
                 parameter_index: parameter,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: value,
-                end_value: value,
+                sample: 0,
+                value,
             })
             .collect()
     }

@@ -7,9 +7,7 @@
 
 mod support;
 
-use effect_contract::{
-    AutomationSpanKind, ParameterChannel, PreparedAutomationSpan, ResetKind, StatePayloadInput,
-};
+use effect_contract::{ParameterChannel, PreparedAutomationSpan, ResetKind, StatePayloadInput};
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 
 use compressor::COMPRESSOR_PARAMETERS;
@@ -21,13 +19,10 @@ use support::{
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index: parameter,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: value,
-        end_value: value,
+        sample: 0,
+        value,
     }
 }
 

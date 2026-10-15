@@ -12,8 +12,8 @@
 mod support;
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
-    LinkMode, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 
@@ -105,13 +105,10 @@ fn automation(step: usize, lanes: usize) -> (Vec<PreparedAutomationSpan>, Vec<u3
         for (parameter, value) in [(0, threshold), (3, attack), (4, release)] {
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 spans.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: parameter,
-                    start_sample: first,
-                    end_sample: first,
-                    start_value: value,
-                    end_value: value,
+                    sample: first,
+                    value,
                 });
             }
         }

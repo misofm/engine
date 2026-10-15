@@ -272,7 +272,7 @@ fn one_block_applies_every_live_cell_of_one_transaction() {
             .iter()
             .find(|span| span.parameter_index == parameter_index && span.channel == channel)
             .expect("a span for every record");
-        assert_eq!(span.start_value.to_bits(), value.to_bits());
+        assert_eq!(span.value.to_bits(), value.to_bits());
     }
     assert_eq!(rig.superseded.get(), 0);
     assert_eq!(rig.stage().staged, 0, "and none is left for a later block");

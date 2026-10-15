@@ -91,3 +91,39 @@ no test has to check one.
 ## Dependencies
 
 - #1636 (batch 13b).
+
+## Decision record: #1686 (batch 14a)
+
+**Shipped.** `PreparedAutomationSpan` is `{channel, parameter_index, sample, value}`. `AutomationSpanKind`
+and its alias `AutomationKind` are deleted (nothing else read them; `protocol`'s own `AutomationKind` was
+already gone with #1629). The retired-values note for kinds 2 to 4 now sits in the doc comment of the
+struct, beside the `AutomationRate` note that stays. `valid_runtime_span` is the conjunction of the
+remaining checks (finite value, sample inside the block, value in the domain, channel against the
+channel policy). `validate_automation_block`'s ordering rule compares a span with the previous span's
+`sample` and `value` (same verdict for every valid point). Every effect's span accept rule lost the
+kind/end terms (they were constant true for a representable span). `docs/EFFECT_CONTRACT_V1.md` names
+one sample and one value.
+
+**Departures.** None from the frozen decisions. Tests that only checked a removed field:
+- `delay`: `malformed_automation_is_counted_and_never_applied` lost its "end differs from start" row
+  (count 5 to 4).
+- `soft-clip` `automation_rejects_everything_but_canonical_ordered_points` lost its `ranged` row (3 invalid).
+- `parametric-eq` `malformed_automation_rejects_each_span_without_losing_valid_targets` lost two rows
+  (8 to 6; the EQ counts every raw span).
+- `conformance/tests/effect_contract.rs` span-validation fuzz: modulus 5 to 4; the end-only cases are
+  replaced by one non-finite value case.
+- `effect-contract` `retired_automation_values_are_refused` lost the `AutomationSpanKind` asserts;
+  `live_control` and `rack` lost their kind/end asserts.
+No retained byte row or fixture byte count moved (the estimate reads `size_of::<PreparedAutomationSpan>()`).
+
+**Gates.**
+1. `./target/release/audit capi`: base `pcm_digest` `bf7dcedd1d92621f`, head `bf7dcedd1d92621f`
+   (allocations 0, total_violations 0).
+2. Contract truth table: `crates/effect-contract` unit tests and `crates/conformance/tests/effect_contract.rs`
+   keep non-finite value, sample outside the block, value outside the domain and channel-policy rows;
+   ordering rows unchanged. Randomized conformance run passes.
+3. `cargo test --locked` for effect-contract, effect-compiler, conformance, rack, graph, graph-compiler,
+   the eight native effect crates, capi, host-core (--all-features), host-web (--all-features),
+   console-workload, parameter-metadata, audit: all pass. `check-effect-runtime-policy.sh`,
+   `check-workspace-policy.sh`, `check-effect-runtime-fixtures.sh`, `realtime-policy`: ok.
+   `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo fmt --all --check`: clean.

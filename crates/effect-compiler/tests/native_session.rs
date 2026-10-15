@@ -705,13 +705,10 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
             .expect("a live lane");
         let mut window = vec![
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
                 channel: effect_contract::ParameterChannel::Both,
                 parameter_index: u32::MAX,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 0.0,
-                end_value: 0.0,
+                sample: 0,
+                value: 0.0,
             };
             capacity
         ];

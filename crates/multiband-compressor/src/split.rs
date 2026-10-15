@@ -227,13 +227,10 @@ fn run<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
                     .iter()
                     .filter(|event| event.track == track)
                     .map(|event| PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
                         channel: event.channel,
                         parameter_index: (event.ramp + 1) as u32,
-                        start_sample: (block * frames) as u64,
-                        end_sample: (block * frames) as u64,
-                        start_value: event.value,
-                        end_value: event.value,
+                        sample: (block * frames) as u64,
+                        value: event.value,
                     })
                     .collect();
                 let mut report = ProcessReport::default();
@@ -459,13 +456,10 @@ fn a_settled_bank_meets_the_flat_paths_precondition() {
     // A zero sent to a parameter whose domain contains zero, as `-0.0`: `normalize_zero` is what
     // keeps it off the flat path's excluded value, so send the bit pattern that would break it.
     let spans = [PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,
         parameter_index: (LOW_MAKEUP + 1) as u32,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: -0.0,
-        end_value: -0.0,
+        sample: 0,
+        value: -0.0,
     }];
     instance.apply_automation(0, &spans, 32, 0, &mut report);
     assert_eq!(report.invalid_spans, 0, "-0.0 is inside the makeup domain");
@@ -580,13 +574,10 @@ fn a_window_lands_on_its_target_on_the_exact_sample() {
     );
 
     let spans = [PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,
         parameter_index: (LOW_MAKEUP + 1) as u32,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: TARGET,
-        end_value: TARGET,
+        sample: 0,
+        value: TARGET,
     }];
     let mut report = ProcessReport::default();
     instance.apply_automation(0, &spans, 32, 0, &mut report);

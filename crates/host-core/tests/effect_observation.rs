@@ -10,10 +10,10 @@ use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::MeterTap;
 use effect_contract::{
-    AutomationSpanKind, EffectControlRecord, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort,
+    EffectControlRecord, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
@@ -796,13 +796,10 @@ fn scalar_reference_windows(
             Some((at, value)) if at == block => [ParameterChannel::Left, ParameterChannel::Right]
                 .into_iter()
                 .map(|channel| PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: THRESHOLD_INDEX,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: value,
-                    end_value: value,
+                    sample: first_sample,
+                    value,
                 })
                 .collect(),
             _ => Vec::new(),

@@ -20,9 +20,7 @@
 mod support;
 
 use dsp_reference::{ReferenceCompressorParameters, ReferencePeakCompressor};
-use effect_contract::{
-    AutomationSpanKind, InitialParameterValue, ParameterChannel, PreparedAutomationSpan,
-};
+use effect_contract::{InitialParameterValue, ParameterChannel, PreparedAutomationSpan};
 
 use support::{
     PARAMETER_COUNT, bind_bank, native_bank_width, prepare, render_bank, render_scalar, request,
@@ -160,13 +158,10 @@ fn the_narrowest_soft_knees_do_not_duck_a_sample_at_the_threshold() {
 
 fn knee_point(channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
     PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index: 2,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: value,
-        end_value: value,
+        sample: 0,
+        value,
     }
 }
 

@@ -24,17 +24,17 @@ pub mod kernel;
 
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
-    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
+    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
+    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use effect_runtime::envelope::attack_release_coefficient;
@@ -609,11 +609,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             };
             let valid = span_index < self.automation_capacity as usize
                 && parameter_index < RAMP_COUNT
-                && span.kind == AutomationSpanKind::Point
-                && span.start_sample == first_sample
-                && span.end_sample == first_sample
-                && span.start_value.to_bits() == span.end_value.to_bits()
-                && parameter_value_valid(&GATE_SPECS[parameter_index], span.start_value)
+                && span.sample == first_sample
+                && parameter_value_valid(&GATE_SPECS[parameter_index], span.value)
                 && last_order.is_none_or(|previous| order > previous)
                 && pending[channel][parameter_index].is_none();
             if !valid {
@@ -621,7 +618,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 continue;
             }
             last_order = Some(order);
-            pending[channel][parameter_index] = Some(normalize_zero(span.start_value));
+            pending[channel][parameter_index] = Some(normalize_zero(span.value));
         }
         for (channel, targets) in pending.iter().enumerate() {
             for (index, target) in targets.iter().enumerate() {

@@ -189,24 +189,13 @@ fn a_drain_emits_the_contract_canonical_span_order() {
         "spans must leave the drain in (parameter_index, channel) order"
     );
     for span in &rig.staging[..3] {
-        assert_eq!(span.kind, effect_contract::AutomationSpanKind::Point);
-        assert_eq!(span.start_sample, 0);
-        assert_eq!(span.end_sample, 0);
-        assert_eq!(
-            span.start_value.to_bits(),
-            span.end_value.to_bits(),
-            "a Point span's endpoints are bit-identical, which is what every effect checks"
-        );
+        assert_eq!(span.sample, 0);
     }
     let staged = rig.stage();
     assert_eq!(staged.staged, 0);
     rig.commit(&[left(3, 0.75)]).expect("a cell");
     rig.stage();
-    assert_eq!(
-        rig.staging[0].start_sample,
-        128 * 2,
-        "the second block's sample"
-    );
+    assert_eq!(rig.staging[0].sample, 128 * 2, "the second block's sample");
 }
 
 /// A repeated write collapses last-wins: one span per cell, the newest value, and each replaced
@@ -222,7 +211,7 @@ fn a_repeated_write_collapses_last_wins_and_is_counted() {
     assert_eq!(staged.staged, 2);
     assert_eq!(rig.staging[0].parameter_index, 0);
     assert_eq!(rig.staging[1].parameter_index, 2);
-    assert_eq!(rig.staging[1].start_value, 7.0, "the last write wins");
+    assert_eq!(rig.staging[1].value, 7.0, "the last write wins");
     assert_eq!(rig.superseded.get(), 1);
 }
 
@@ -287,7 +276,7 @@ fn a_predecessor_without_slots_hands_its_unread_write_to_an_installed_successor(
     assert!(successor.lane.carry_from(&predecessor.lane));
     let staged = successor.stage();
     assert_eq!(staged.staged, 1);
-    assert_eq!(successor.staging[0].start_value, 0.25);
+    assert_eq!(successor.staging[0].value, 0.25);
     assert_eq!(successor.superseded.get(), 0);
     assert_eq!(successor.stage().staged, 0, "the slot resolves once");
 }
@@ -415,11 +404,11 @@ fn a_value_above_the_snapshot_waits_and_is_applied_once() {
     // The first block reads under the older snapshot: the first value, and the newer one waits.
     let staged = rig.stage_under(covered);
     assert_eq!(staged.staged, 1);
-    assert_eq!(rig.staging[0].start_value, 1.0);
+    assert_eq!(rig.staging[0].value, 1.0);
     rig.pin.publish(&rig.gate, revision);
     let staged = rig.stage();
     assert_eq!(staged.staged, 1);
-    assert_eq!(rig.staging[0].start_value, 2.0);
+    assert_eq!(rig.staging[0].value, 2.0);
     assert_eq!(rig.stage().staged, 0, "applied once");
     assert_eq!(
         rig.superseded.get(),
